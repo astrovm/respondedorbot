@@ -1,0 +1,25 @@
+{
+  "cases": [
+    {
+      "name": "power law below model",
+      "model": "power_law",
+      "elapsed_days": 5475,
+      "market_price": 50000.0,
+      "expected": { "value": "57869.18", "percentage": "13.60", "valuation": "cheap" }
+    },
+    {
+      "name": "power law above model",
+      "model": "power_law",
+      "elapsed_days": 5475,
+      "market_price": 75000.0,
+      "expected": { "value": "57869.18", "percentage": "29.60", "valuation": "expensive" }
+    },
+    {
+      "name": "rainbow below model",
+      "model": "rainbow",
+      "elapsed_days": 5470,
+      "market_price": 50000.0,
+      "expected": { "value": "97886.11", "percentage": "48.92", "valuation": "cheap" }
+    }
+  ]
+}

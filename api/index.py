@@ -25,6 +25,7 @@ from typing import (
     TYPE_CHECKING,
     Literal,
     Iterator,
+    Protocol,
 )
 import atexit
 import concurrent.futures
@@ -51,6 +52,7 @@ else:
 from api.utils import (
     fmt_num,
 )
+from api.core.rust_bridge import load_rust_bridge
 from api.bot.general_commands import (
     convert_base,
     convert_to_command,
@@ -557,55 +559,95 @@ def handle_transcribe() -> str:
     return tr("media.command_help")
 
 
+class _RustMarketModel(Protocol):
+    def evaluate_market_model(self, model: str, elapsed_days: int, market_price: float) -> str: ...
+
+
+def _load_rust_market_model() -> Optional[_RustMarketModel]:
+    module = load_rust_bridge("RUST_MARKET_MODELS_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustMarketModel, module)
+
+
+def _format_market_model_python(model: str, days_since: int, price: float) -> str:
+    if model == "power_law":
+        value = 1.0117e-17 * (days_since**5.82)
+        result_key = "market.powerlaw.result"
+    elif model == "rainbow":
+        value = 10 ** (2.66167155005961 * log(days_since) - 17.9183761889864)
+        result_key = "market.rainbow.result"
+    else:
+        raise ValueError("unknown market model")
+    percentage = ((price - value) / value) * 100
+    valuation_key = "expensive" if percentage > 0 else "cheap"
+    percentage_txt = tr(
+        f"market.valuation.{valuation_key}",
+        percentage=f"{abs(percentage):.2f}",
+    )
+    return tr(result_key, value=f"{value:.2f}", valuation=percentage_txt)
+
+
+def _format_market_model_rust(raw_result: str, result_key: str) -> str:
+    result = json.loads(raw_result)
+    if not isinstance(result, Mapping):
+        raise ValueError("Rust market model result is not a mapping")
+    valuation = result.get("valuation")
+    if valuation not in {"expensive", "cheap"}:
+        raise ValueError("Rust market model valuation is invalid")
+    percentage_txt = tr(
+        f"market.valuation.{valuation}",
+        percentage=str(result["percentage"]),
+    )
+    return tr(result_key, value=str(result["value"]), valuation=percentage_txt)
+
+
+def _market_model_command(model: str, days_since: int, price: float, result_key: str) -> str:
+    rust = _load_rust_market_model()
+    if rust is not None:
+        try:
+            return _format_market_model_rust(
+                rust.evaluate_market_model(model, days_since, price),
+                result_key,
+            )
+        except Exception as error:
+            _logger.warning(
+                "Rust market model failed; using Python fallback: model=%s error_type=%s",
+                model,
+                type(error).__name__,
+            )
+    return _format_market_model_python(model, days_since, price)
+
+
 def powerlaw() -> str:
     today = datetime.now(UTC)
     since = datetime(day=4, month=1, year=2009).replace(tzinfo=UTC)
     days_since = (today - since).days
 
-    # Giovanni Santostasi Bitcoin Power Law model
-    # Formula: 1.0117e-17 * (days since genesis block)^5.82
-    value = 1.0117e-17 * (days_since**5.82)
-
     price = _price_service.get_btc_price("USD")
     if price is None:
         return tr("market.powerlaw.error")
-
-    percentage = ((price - value) / value) * 100
-    if percentage > 0:
-        percentage_txt = tr("market.valuation.expensive", percentage=f"{percentage:.2f}")
-    else:
-        percentage_txt = tr("market.valuation.cheap", percentage=f"{abs(percentage):.2f}")
-
-    msg = tr(
+    return _market_model_command(
+        "power_law",
+        days_since,
+        price,
         "market.powerlaw.result",
-        value=f"{value:.2f}",
-        valuation=percentage_txt,
     )
-    return msg
 
 
 def rainbow() -> str:
     today = datetime.now(UTC)
     since = datetime(day=9, month=1, year=2009).replace(tzinfo=UTC)
     days_since = (today - since).days
-    value = 10 ** (2.66167155005961 * log(days_since) - 17.9183761889864)
-
     price = _price_service.get_btc_price("USD")
     if price is None:
         return tr("market.rainbow.error")
-
-    percentage = ((price - value) / value) * 100
-    if percentage > 0:
-        percentage_txt = tr("market.valuation.expensive", percentage=f"{percentage:.2f}")
-    else:
-        percentage_txt = tr("market.valuation.cheap", percentage=f"{abs(percentage):.2f}")
-
-    msg = tr(
+    return _market_model_command(
+        "rainbow",
+        days_since,
+        price,
         "market.rainbow.result",
-        value=f"{value:.2f}",
-        valuation=percentage_txt,
     )
-    return msg
 
 
 def _build_tasks_message(

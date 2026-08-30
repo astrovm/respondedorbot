@@ -5,6 +5,7 @@ pub mod command_normalization;
 pub mod command_parsing;
 pub mod credit_units;
 pub mod market_context;
+pub mod market_models;
 pub mod price_queries;
 pub mod random_reply;
 pub mod random_selection;

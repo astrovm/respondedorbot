@@ -18,6 +18,9 @@ use bot_core::market_context::{
     CryptoQuote as MarketCryptoQuote, DollarQuote as MarketDollarQuote, MarketSnapshot,
     format_market_context as format_market_context_core,
 };
+use bot_core::market_models::{
+    MarketModel, Valuation, evaluate_market_model as evaluate_market_model_core,
+};
 use bot_core::price_queries::{
     AmountConversion, PriceQuery, ProviderScope, parse_price_query as parse_price_query_core,
 };
@@ -161,6 +164,13 @@ struct TriggerErrorDto {
     code: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     value: Option<String>,
+}
+
+#[derive(Serialize)]
+struct MarketModelDto {
+    value: String,
+    percentage: String,
+    valuation: &'static str,
 }
 
 impl From<TriggerError> for TriggerErrorDto {
@@ -656,6 +666,28 @@ fn format_market_info(market_json: &str) -> PyResult<String> {
     Ok(format_market_context_core(&snapshot))
 }
 
+/// Evaluate and format one deterministic Bitcoin reference-price model.
+#[pyfunction]
+fn evaluate_market_model(model: &str, elapsed_days: i64, market_price: f64) -> PyResult<String> {
+    let model = match model {
+        "power_law" => MarketModel::PowerLaw,
+        "rainbow" => MarketModel::Rainbow,
+        _ => return Err(PyValueError::new_err("unknown market model")),
+    };
+    let result = evaluate_market_model_core(model, elapsed_days, market_price)
+        .map_err(|_| PyValueError::new_err("elapsed days must be positive"))?;
+    let value = MarketModelDto {
+        value: format!("{:.2}", result.model_value),
+        percentage: format!("{:.2}", result.percentage),
+        valuation: match result.valuation {
+            Valuation::Expensive => "expensive",
+            Valuation::Cheap => "cheap",
+        },
+    };
+    serde_json::to_string(&value)
+        .map_err(|error| PyValueError::new_err(format!("cannot encode market model: {error}")))
+}
+
 /// Decide whether one normalized message should auto-process attached media.
 #[pyfunction]
 fn should_auto_process_media(
@@ -703,6 +735,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(parse_task_trigger, module)?)?;
     module.add_function(wrap_pyfunction!(parse_price_query, module)?)?;
     module.add_function(wrap_pyfunction!(format_market_info, module)?)?;
+    module.add_function(wrap_pyfunction!(evaluate_market_model, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;
     module.add_function(wrap_pyfunction!(evaluate_response_routing, module)?)?;
     Ok(())
