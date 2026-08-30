@@ -1,19 +1,37 @@
 from __future__ import annotations
 
+import json
+import logging
 import re
 from collections.abc import Callable
 from html import unescape
 from logging import Logger
-from typing import Any
+from typing import Any, Protocol, cast
 from xml.etree import ElementTree as ET
 
 import redis
 from requests.exceptions import RequestException
 
+from api.core.rust_bridge import load_rust_bridge
+
 RedisFactory = Callable[[], redis.Redis | None]
 RedisJsonGetter = Callable[[redis.Redis, str], Any]
 RedisJsonSetter = Callable[..., bool]
 RequestGetter = Callable[..., Any]
+
+
+class _RustHackerNews(Protocol):
+    def normalize_hacker_news_item(self, title: str, url: str, description: str) -> str: ...
+
+
+logger = logging.getLogger(__name__)
+
+
+def _load_rust_hacker_news() -> _RustHackerNews | None:
+    module = load_rust_bridge("RUST_HACKER_NEWS_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustHackerNews, module)
 
 
 def get_hacker_news_context(
@@ -101,22 +119,30 @@ def _parse_feed(response_text: str, *, max_items: int) -> list[dict[str, Any]]:
         return []
 
     items: list[dict[str, Any]] = []
+    rust = _load_rust_hacker_news()
     for item_element in channel.findall("item"):
         title = unescape(str(item_element.findtext("title", "") or "")).strip()
         if not title:
             continue
         description = item_element.findtext("description", "") or ""
-        items.append(
-            {
+        url = str(item_element.findtext("link", "") or "").strip()
+        item = None
+        if rust is not None:
+            try:
+                item = json.loads(rust.normalize_hacker_news_item(title, url, description))
+            except Exception:
+                logger.exception("Rust Hacker News item normalization failed; using Python")
+        if item is None:
+            item = {
                 "title": title,
-                "url": str(item_element.findtext("link", "") or "").strip(),
+                "url": url,
                 "points": _extract_int(r"Points:\s*(\d+)", description),
                 "comments": _extract_int(r"# Comments:\s*(\d+)", description),
                 "comments_url": _extract_text(
                     r'Comments URL: <a href="([^"]+)"', description
                 ),
             }
-        )
+        items.append(item)
         if len(items) >= max_items:
             break
     return items

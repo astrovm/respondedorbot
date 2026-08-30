@@ -18,6 +18,10 @@ use bot_core::devo::{
     DevoInput, DevoQuotes, DevoResult, calculate_devo as calculate_devo_core,
     parse_devo_input as parse_devo_input_core,
 };
+use bot_core::hacker_news::{
+    HackerNewsRenderItem, format_items as format_hacker_news_core,
+    normalize_feed_item as normalize_hacker_news_item_core,
+};
 use bot_core::market_context::{
     CryptoQuote as MarketCryptoQuote, DollarQuote as MarketDollarQuote, MarketSnapshot,
     format_market_context as format_market_context_core,
@@ -229,6 +233,24 @@ struct MarketOutcomeInputDto {
 struct RankedOutcomeDto {
     title: String,
     percentage: f64,
+}
+
+#[derive(Serialize)]
+struct HackerNewsItemDto {
+    title: String,
+    url: String,
+    points: Option<i64>,
+    comments: Option<i64>,
+    comments_url: String,
+}
+
+#[derive(Deserialize)]
+struct HackerNewsRenderItemDto {
+    title: String,
+    url: String,
+    points: Option<i64>,
+    comments: Option<i64>,
+    comments_url: String,
 }
 
 #[derive(Deserialize)]
@@ -933,6 +955,50 @@ fn rank_polymarket_outcomes(input_json: &str, limit: usize) -> PyResult<String> 
         .map_err(|error| PyValueError::new_err(format!("cannot encode ranked outcomes: {error}")))
 }
 
+/// Normalize one XML-adapter Hacker News item.
+#[pyfunction]
+fn normalize_hacker_news_item(title: &str, url: &str, description: &str) -> PyResult<String> {
+    let item = normalize_hacker_news_item_core(title, url, description)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?
+        .map(|item| HackerNewsItemDto {
+            title: item.title,
+            url: item.url,
+            points: item.points,
+            comments: item.comments,
+            comments_url: item.comments_url,
+        });
+    serde_json::to_string(&item)
+        .map_err(|error| PyValueError::new_err(format!("cannot encode Hacker News item: {error}")))
+}
+
+/// Format typed Hacker News items after Python localization.
+#[pyfunction]
+fn format_hacker_news_items(
+    input_json: &str,
+    include_discussion: bool,
+    no_data: &str,
+    comments_label: &str,
+) -> PyResult<String> {
+    let inputs: Vec<HackerNewsRenderItemDto> = serde_json::from_str(input_json)
+        .map_err(|error| PyValueError::new_err(format!("invalid Hacker News items: {error}")))?;
+    let items = inputs
+        .into_iter()
+        .map(|item| HackerNewsRenderItem {
+            title: item.title,
+            url: item.url,
+            points: item.points,
+            comments: item.comments,
+            comments_url: item.comments_url,
+        })
+        .collect::<Vec<_>>();
+    Ok(format_hacker_news_core(
+        &items,
+        include_discussion,
+        no_data,
+        comments_label,
+    ))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -1005,6 +1071,8 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(calculate_devo, module)?)?;
     module.add_function(wrap_pyfunction!(evaluate_rulo, module)?)?;
     module.add_function(wrap_pyfunction!(rank_polymarket_outcomes, module)?)?;
+    module.add_function(wrap_pyfunction!(normalize_hacker_news_item, module)?)?;
+    module.add_function(wrap_pyfunction!(format_hacker_news_items, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;

@@ -4,12 +4,35 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, tzinfo
-from typing import Any
+import json
+import logging
+from typing import Any, Protocol, cast
 
 from api.ai.pipeline import base_instructions
+from api.core.rust_bridge import load_rust_bridge
 from api.i18n import tr
 from api.i18n.content import weather_description
 from api.i18n.prompts import prompt
+
+
+class _RustHackerNewsFormatter(Protocol):
+    def format_hacker_news_items(
+        self,
+        input_json: str,
+        include_discussion: bool,
+        no_data: str,
+        comments_label: str,
+    ) -> str: ...
+
+
+logger = logging.getLogger(__name__)
+
+
+def _load_rust_hacker_news_formatter() -> _RustHackerNewsFormatter | None:
+    module = load_rust_bridge("RUST_HACKER_NEWS_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustHackerNewsFormatter, module)
 
 
 def clean_crypto_data(cryptos: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -49,6 +72,50 @@ def get_weather_description(code: int) -> str:
     return weather_description(code) or tr("weather.unusual")
 
 
+def _normalize_hacker_news_items(news: Iterable[object]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for item in news:
+        if not isinstance(item, dict):
+            continue
+        items.append(
+            {
+                "title": str(item.get("title") or f"({tr('news.no_title')})").strip(),
+                "url": str(item.get("url") or "").strip(),
+                "points": item.get("points") if isinstance(item.get("points"), int) else None,
+                "comments": (
+                    item.get("comments") if isinstance(item.get("comments"), int) else None
+                ),
+                "comments_url": str(item.get("comments_url") or "").strip(),
+            }
+        )
+    return items
+
+
+def _format_hacker_news_python(
+    items: list[dict[str, Any]],
+    *,
+    include_discussion: bool,
+    no_data: str,
+    comments_label: str,
+) -> str:
+    lines: list[str] = []
+    for item in items:
+        stats: list[str] = []
+        if item["points"] is not None:
+            stats.append(f"{item['points']} pts")
+        if item["comments"] is not None:
+            stats.append(f"{item['comments']} {comments_label}")
+
+        stats_text = f" ({', '.join(stats)})" if stats else ""
+        entry = f"- {item['title']}{stats_text}"
+        if item["url"]:
+            entry += f" → {item['url']}"
+        if include_discussion and item["comments_url"]:
+            entry += f" (HN: {item['comments_url']})"
+        lines.append(entry)
+    return "\n".join(lines) if lines else f"- {no_data}"
+
+
 def format_hacker_news_info(
     news: Iterable[object] | None,
     include_discussion: bool = True,
@@ -56,30 +123,28 @@ def format_hacker_news_info(
     if not news:
         return f"- {tr('news.no_data')}"
 
-    lines: list[str] = []
-    for item in news:
-        if not isinstance(item, dict):
-            continue
+    items = _normalize_hacker_news_items(news)
 
-        title = str(item.get("title") or f"({tr('news.no_title')})").strip()
-        url = str(item.get("url") or "").strip()
-        stats: list[str] = []
-        if isinstance(item.get("points"), int):
-            stats.append(f"{item['points']} pts")
-        if isinstance(item.get("comments"), int):
-            stats.append(f"{item['comments']} {tr('news.comments')}")
+    no_data = tr("news.no_data")
+    comments_label = tr("news.comments")
+    rust = _load_rust_hacker_news_formatter()
+    if rust is not None:
+        try:
+            return rust.format_hacker_news_items(
+                json.dumps(items, separators=(",", ":")),
+                include_discussion,
+                no_data,
+                comments_label,
+            )
+        except Exception:
+            logger.exception("Rust Hacker News formatting failed; using Python")
 
-        stats_text = f" ({', '.join(stats)})" if stats else ""
-        entry = f"- {title}{stats_text}"
-        if url:
-            entry += f" → {url}"
-        if include_discussion:
-            hn_url = str(item.get("comments_url") or "").strip()
-            if hn_url:
-                entry += f" (HN: {hn_url})"
-        lines.append(entry)
-
-    return "\n".join(lines) if lines else f"- {tr('news.no_data')}"
+    return _format_hacker_news_python(
+        items,
+        include_discussion=include_discussion,
+        no_data=no_data,
+        comments_label=comments_label,
+    )
 
 
 def format_weather_info(weather: dict[str, Any]) -> str:

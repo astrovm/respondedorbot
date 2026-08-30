@@ -170,6 +170,26 @@ def verify_polymarket_ranking(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_hacker_news(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "hacker_news.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["normalize"]:
+        actual = json.loads(
+            bridge.normalize_hacker_news_item(
+                case["title"], case["url"], case["description"]
+            )
+        )
+        assert actual == case["expected"], case["name"]
+    for case in contract["format"]:
+        actual = bridge.format_hacker_news_items(
+            json.dumps(case["items"], separators=(",", ":")),
+            case["include_discussion"],
+            case["no_data"],
+            case["comments_label"],
+        )
+        assert actual == case["expected"], case["name"]
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -235,6 +255,7 @@ def main(arguments: list[str]) -> int:
     verify_rulo(bridge)
     verify_weather_selection(bridge)
     verify_polymarket_ranking(bridge)
+    verify_hacker_news(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

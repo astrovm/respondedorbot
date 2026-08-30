@@ -5,6 +5,7 @@ pub mod command_normalization;
 pub mod command_parsing;
 pub mod credit_units;
 pub mod devo;
+pub mod hacker_news;
 pub mod market_context;
 pub mod market_models;
 pub mod polymarket;
