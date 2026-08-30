@@ -26,6 +26,28 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      - name: Set up Rust toolchain
+        run: rustup show
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check Rust workspace
+        run: cargo check --locked --workspace --all-targets --all-features
+
+      - name: Lint Rust workspace
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test Rust workspace
+        run: cargo test --locked --workspace --all-features
+
+      - name: Check Rust coverage
+        run: |
+          rustup component add llvm-tools-preview
+          cargo install cargo-llvm-cov --version 0.9.0 --locked
+          cargo llvm-cov --locked -p bot-core --all-features --fail-under-lines 95
+          cargo llvm-cov --locked -p bot-adapters --all-features --fail-under-lines 85
+
       - name: Set up uv
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
@@ -34,6 +56,12 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --locked
+
+      - name: Verify Python 3.14 Rust bridge
+        run: |
+          cargo build --locked --release -p python-bridge
+          cp target/release/librespondedorbot_rs.so /tmp/respondedorbot_rs.so
+          uv run --locked python -c "import sys; sys.path.insert(0, '/tmp'); import respondedorbot_rs; assert respondedorbot_rs.migration_protocol_version() == 1"
 
       - name: Lint with ruff
         run: uv run --locked ruff check api/ tests/

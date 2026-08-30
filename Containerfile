@@ -1,5 +1,12 @@
 FROM ghcr.io/astral-sh/uv:0.12.5 AS uv
 
+FROM rust:1.98.0-slim AS rust-builder
+WORKDIR /app
+
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates ./crates
+RUN cargo build --locked --workspace --release
+
 FROM python:3.14-slim AS builder
 WORKDIR /app
 
@@ -20,6 +27,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /app/.venv /app/.venv
 COPY . .
+COPY --from=rust-builder \
+    /app/target/release/librespondedorbot_rs.so \
+    /app/respondedorbot_rs.so
 
 RUN useradd -m -u 1000 botuser && chown -R botuser:botuser /app
 USER botuser
