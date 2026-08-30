@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use thiserror::Error;
 
+use bot_core::telegram_input::{
+    ChatId, MessageContent, MessageId, UserId, extract_message_content, normalize_numeric_id,
+};
+
 use crate::telegram_http::{
     TelegramHttpError, TelegramHttpOutcome, TelegramTransport, TransportFailureKind, request_with,
 };
@@ -22,10 +26,20 @@ pub struct IncomingUpdate {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum IncomingEvent {
-    Message(Map<String, Value>),
+    Message(IncomingMessage),
     CallbackQuery(Map<String, Value>),
     PreCheckoutQuery(Map<String, Value>),
     Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncomingMessage {
+    pub message_id: Option<MessageId>,
+    pub chat_id: Option<ChatId>,
+    pub chat_type: Option<String>,
+    pub sender_id: Option<UserId>,
+    pub sender_language_code: Option<String>,
+    pub content: Option<MessageContent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -99,11 +113,44 @@ fn parse_event(object: &mut Map<String, Value>) -> Result<IncomingEvent, Polling
         .and_then(|value| value.as_object().cloned())
         .ok_or(PollingError::InvalidResponse)?;
     Ok(match *field {
-        "message" => IncomingEvent::Message(payload),
+        "message" => IncomingEvent::Message(parse_message(&payload)),
         "callback_query" => IncomingEvent::CallbackQuery(payload),
         "pre_checkout_query" => IncomingEvent::PreCheckoutQuery(payload),
         _ => IncomingEvent::Unsupported,
     })
+}
+
+fn parse_message(payload: &Map<String, Value>) -> IncomingMessage {
+    let message_id = payload
+        .get("message_id")
+        .and_then(normalize_numeric_id)
+        .map(MessageId);
+    let chat = payload.get("chat").and_then(Value::as_object);
+    let chat_id = chat
+        .and_then(|chat| chat.get("id"))
+        .and_then(normalize_numeric_id)
+        .map(ChatId);
+    let chat_type = chat
+        .and_then(|chat| chat.get("type"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let sender = payload.get("from").and_then(Value::as_object);
+    let sender_id = sender
+        .and_then(|sender| sender.get("id"))
+        .and_then(normalize_numeric_id)
+        .map(UserId);
+    let sender_language_code = sender
+        .and_then(|sender| sender.get("language_code"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    IncomingMessage {
+        message_id,
+        chat_id,
+        chat_type,
+        sender_id,
+        sender_language_code,
+        content: extract_message_content(&Value::Object(payload.clone())).ok(),
+    }
 }
 
 fn parse_update(value: Value) -> Result<IncomingUpdate, PollingError> {
@@ -260,6 +307,20 @@ mod tests {
         };
         assert_eq!(updates.len(), 4);
         assert!(matches!(updates[0].event, IncomingEvent::Message(_)));
+        let IncomingEvent::Message(message) = &updates[0].event else {
+            return;
+        };
+        assert_eq!(
+            message.message_id,
+            Some(bot_core::telegram_input::MessageId(1))
+        );
+        assert_eq!(
+            message
+                .content
+                .as_ref()
+                .map(|content| content.text.as_str()),
+            Some("hola")
+        );
         assert!(matches!(updates[1].event, IncomingEvent::CallbackQuery(_)));
         assert!(matches!(
             updates[2].event,
@@ -267,6 +328,54 @@ mod tests {
         ));
         assert_eq!(updates[3].event, IncomingEvent::Unsupported);
         assert_eq!(next_offset(&updates, None), Some(14));
+    }
+
+    #[test]
+    fn message_envelope_normalizes_identity_locale_and_content_fields() {
+        let actual = parse_response(
+            200,
+            r#"{"ok":true,"result":[
+                {"update_id":20,"message":{
+                    "message_id":"7",
+                    "chat":{"id":"-42","type":"private"},
+                    "from":{"id":"88","language_code":"en-US"},
+                    "caption":"  /convertbase 101, 2, 10  ",
+                    "photo":[{"file_id":"small"},{"file_id":"large"}]
+                }},
+                {"update_id":21,"message":{
+                    "message_id":8,
+                    "chat":{"id":42,"type":"group"},
+                    "from":{"id":89},
+                    "photo":"malformed"
+                }}
+            ]}"#,
+        );
+        let Ok(PollOutcome::Updates(updates)) = actual else {
+            return;
+        };
+        let IncomingEvent::Message(first) = &updates[0].event else {
+            return;
+        };
+        assert_eq!(
+            first.message_id,
+            Some(bot_core::telegram_input::MessageId(7))
+        );
+        assert_eq!(first.chat_id, Some(bot_core::telegram_input::ChatId(-42)));
+        assert_eq!(first.chat_type.as_deref(), Some("private"));
+        assert_eq!(first.sender_id, Some(bot_core::telegram_input::UserId(88)));
+        assert_eq!(first.sender_language_code.as_deref(), Some("en-US"));
+        assert_eq!(
+            first
+                .content
+                .as_ref()
+                .map(|content| (content.text.as_str(), content.photo_file_id.as_deref())),
+            Some(("/convertbase 101, 2, 10", Some("large")))
+        );
+        let IncomingEvent::Message(second) = &updates[1].event else {
+            return;
+        };
+        assert_eq!(second.sender_language_code, None);
+        assert_eq!(second.content, None);
     }
 
     #[test]
