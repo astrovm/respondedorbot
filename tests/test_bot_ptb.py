@@ -304,6 +304,15 @@ class PollingEntrypointTests(unittest.TestCase):
                 "api.tasks.scheduler.backfill_canonical_task_records",
                 return_value={"updated": 0, "unmatched": 0, "invalid": 0},
             ) as mock_backfill_canonical_task_records,
+            patch(
+                "api.tasks.scheduler.rebuild_scheduler_from_canonical_records",
+                return_value={
+                    "rebuilt": 0,
+                    "removed": 0,
+                    "missing_next": 0,
+                    "invalid": 0,
+                },
+            ) as mock_rebuild_scheduler_from_canonical_records,
         ):
             import importlib
             import run_polling
@@ -318,6 +327,7 @@ class PollingEntrypointTests(unittest.TestCase):
         )
         mock_get_scheduler.assert_called_once_with()
         mock_backfill_canonical_task_records.assert_called_once_with()
+        mock_rebuild_scheduler_from_canonical_records.assert_called_once_with()
 
         from api import index
 

@@ -75,6 +75,7 @@ def main() -> int:
         backfill_canonical_task_records,
         get_scheduler,
         init_scheduler,
+        rebuild_scheduler_from_canonical_records,
     )
 
     runtime = index.app_runtime
@@ -103,6 +104,13 @@ def main() -> int:
             print(
                 "Warning: scheduled-task canonical backfill is incomplete: "
                 f"{task_backfill}",
+                file=sys.stderr,
+            )
+        task_rebuild = rebuild_scheduler_from_canonical_records()
+        if task_rebuild["missing_next"] or task_rebuild["invalid"]:
+            print(
+                "Warning: scheduled-task canonical rebuild is incomplete: "
+                f"{task_rebuild}",
                 file=sys.stderr,
             )
     except Exception as error:

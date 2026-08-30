@@ -48,9 +48,10 @@ fields remain permitted during the compatibility period.
 
 Python dual-writes version 1 while it owns APScheduler. It backfills
 `next_run_at` from `job.next_run_time` for every active legacy record. Startup
-must report records that cannot be matched to a valid job; it must not silently
-invent a recurring schedule. Python is then changed to reconstruct APScheduler
-only from canonical records before Rust can become the owner.
+reports records that cannot be matched to a valid job; it does not silently
+invent a recurring schedule. After that backfill, startup rebuilds every Python
+job with the exact canonical `next_run_at` and removes orphaned `task_*` jobs.
+APScheduler is therefore an execution cache rather than the source of truth.
 
 Rust uses these additional Redis keys:
 
@@ -76,6 +77,12 @@ The Rust scheduler preserves APScheduler policy:
 - keep recurring tasks after AI or credit failures, matching the current task
   executor;
 - remove successful one-shot tasks.
+
+The native engine has two explicit modes. Verification mode reads and evaluates
+due tasks without leases, claims, execution, or writes. Authoritative mode must
+renew `task:scheduler:owner`, claims every occurrence before execution or skip,
+repairs stale due-index entries, releases claims for retryable execution, and
+advances state only through the compare-and-update Lua operation.
 
 The ownership switch is atomic at deployment level: stop the Python scheduler,
 validate its final canonical-state sync, then start the Rust scheduler. Shadow

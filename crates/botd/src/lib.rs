@@ -4,3 +4,4 @@ pub mod composition;
 pub mod config;
 pub mod dispatcher;
 pub mod runtime;
+pub mod scheduler;

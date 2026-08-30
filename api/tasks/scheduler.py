@@ -562,6 +562,128 @@ def backfill_canonical_task_records() -> Dict[str, int]:
     return status
 
 
+class _CanonicalTaskMissingNext(ValueError):
+    pass
+
+
+def _utc_datetime(value: Any) -> datetime:
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _canonical_scheduler_trigger(data: Mapping[str, Any], next_run_at: datetime) -> Any:
+    interval_seconds = data.get("interval_seconds")
+    trigger_config_value = data.get("trigger_config")
+    if interval_seconds is not None:
+        parsed = parse_task_trigger(interval_seconds=interval_seconds)
+    elif trigger_config_value is not None:
+        parsed = parse_task_trigger(trigger_config=trigger_config_value)
+    else:
+        parsed = parse_task_trigger(delay_seconds=1)
+    if parsed.trigger is None:
+        raise ValueError("canonical task trigger is invalid")
+    raw_anchor = data.get("schedule_anchor_at") or data.get("next_run_at")
+    return _apscheduler_trigger(
+        parsed.trigger,
+        _coerce_timezone_offset(data.get("timezone_offset")),
+        next_run_at if isinstance(parsed.trigger, DelayTrigger) else None,
+        _utc_datetime(raw_anchor),
+    )
+
+
+def _rebuild_canonical_task_job(
+    redis_client: Any,
+    scheduler: Any,
+    key: str,
+) -> str:
+    data = _decode_task(redis_client.get(key))
+    if data is None or data.get("schema_version") != TASK_SCHEMA_VERSION:
+        raise ValueError("task record is not canonical schema version 1")
+    task_id = str(data.get("id") or "")
+    if not task_id:
+        raise ValueError("canonical task id is missing")
+    raw_next_run = data.get("next_run_at")
+    if not raw_next_run:
+        raise _CanonicalTaskMissingNext("canonical next run is missing")
+    next_run_at = _utc_datetime(raw_next_run)
+    _add_scheduled_job(
+        scheduler,
+        task_id,
+        _canonical_scheduler_trigger(data, next_run_at),
+        next_run_at=next_run_at,
+    )
+    _index_task(redis_client, data)
+    return f"task_{task_id}"
+
+
+def _remove_orphaned_task_jobs(scheduler: Any, expected_jobs: set[str]) -> int:
+    removed = 0
+    for job in scheduler.get_jobs():
+        job_id = str(getattr(job, "id", ""))
+        if job_id.startswith("task_") and job_id not in expected_jobs:
+            scheduler.remove_job(job_id)
+            removed += 1
+    return removed
+
+
+def rebuild_scheduler_from_canonical_records() -> Dict[str, int]:
+    """Make APScheduler an execution cache of canonical task records.
+
+    The language-neutral Redis records remain authoritative. Every valid record
+    receives its stored ``next_run_at`` exactly, and orphaned APScheduler task
+    jobs are removed so a restart cannot resurrect a deleted task.
+    """
+
+    redis_client = _get_redis()
+    scheduler = get_scheduler()
+    status = {
+        "scanned": 0,
+        "rebuilt": 0,
+        "removed": 0,
+        "missing_next": 0,
+        "invalid": 0,
+    }
+    if redis_client is None or scheduler is None:
+        return status
+
+    try:
+        keys = list(redis_client.scan_iter(f"{TASK_REDIS_PREFIX}*"))
+    except Exception as error:
+        logger.error("failed to scan canonical task records: %s", error)
+        return status
+
+    expected_jobs: set[str] = set()
+    for raw_key in keys:
+        key = raw_key if isinstance(raw_key, str) else raw_key.decode("utf-8")
+        status["scanned"] += 1
+        try:
+            expected_jobs.add(_rebuild_canonical_task_job(redis_client, scheduler, key))
+            status["rebuilt"] += 1
+        except _CanonicalTaskMissingNext:
+            status["missing_next"] += 1
+        except Exception as error:
+            status["invalid"] += 1
+            logger.warning("failed to rebuild canonical task %s: %s", key, error)
+
+    try:
+        status["removed"] = _remove_orphaned_task_jobs(scheduler, expected_jobs)
+    except Exception as error:
+        status["invalid"] += 1
+        logger.warning("failed to remove orphaned task jobs: %s", error)
+
+    logger.info(
+        "canonical task rebuild: scanned=%d rebuilt=%d removed=%d missing_next=%d invalid=%d",
+        status["scanned"],
+        status["rebuilt"],
+        status["removed"],
+        status["missing_next"],
+        status["invalid"],
+    )
+    return status
+
+
 def _delete_task(
     redis_key: str,
     task_id: str,
@@ -703,12 +825,16 @@ def _add_scheduled_job(
     scheduler: Any,
     task_id: str,
     scheduler_trigger: Any,
+    *,
+    next_run_at: datetime | None = None,
 ) -> None:
     common = {
         "id": f"task_{task_id}",
         "args": [task_id],
         "replace_existing": True,
     }
+    if next_run_at is not None:
+        common["next_run_time"] = next_run_at
     scheduler.add_job(_fire_task, scheduler_trigger, **common)
 
 

@@ -20,7 +20,7 @@ const CANCEL_TASK_SCRIPT: &str = "local removed = redis.call('DEL', KEYS[1]); re
 pub enum RedisTaskStoreError {
     #[error("Redis task-store operation failed: {0}")]
     Redis(#[from] redis::RedisError),
-    #[error("task-store TTL must be non-negative")]
+    #[error("task-store TTL must be positive")]
     InvalidTtl,
     #[error("task-store limit must be positive")]
     InvalidLimit,
@@ -54,8 +54,7 @@ impl RedisTaskStore {
         ttl_seconds: i64,
         value: &str,
     ) -> Result<bool, RedisTaskStoreError> {
-        let ttl_seconds =
-            u64::try_from(ttl_seconds).map_err(|_| RedisTaskStoreError::InvalidTtl)?;
+        let ttl_seconds = positive_ttl(ttl_seconds)?;
         let mut connection = self.client.get_connection()?;
         redis::cmd("SETEX")
             .arg(key)
@@ -80,8 +79,7 @@ impl RedisTaskStore {
     }
 
     pub fn expire(&self, key: &str, ttl_seconds: i64) -> Result<bool, RedisTaskStoreError> {
-        let ttl_seconds =
-            u64::try_from(ttl_seconds).map_err(|_| RedisTaskStoreError::InvalidTtl)?;
+        let ttl_seconds = positive_ttl(ttl_seconds)?;
         let mut connection = self.client.get_connection()?;
         Ok(redis::cmd("EXPIRE")
             .arg(key)
@@ -161,8 +159,7 @@ impl RedisTaskStore {
         token: &str,
         ttl_seconds: i64,
     ) -> Result<bool, RedisTaskStoreError> {
-        let ttl_seconds =
-            u64::try_from(ttl_seconds).map_err(|_| RedisTaskStoreError::InvalidTtl)?;
+        let ttl_seconds = positive_ttl(ttl_seconds)?;
         let mut connection = self.client.get_connection()?;
         let result: Option<String> = redis::cmd("SET")
             .arg(key)
@@ -180,8 +177,7 @@ impl RedisTaskStore {
         token: &str,
         ttl_seconds: i64,
     ) -> Result<bool, RedisTaskStoreError> {
-        let ttl_seconds =
-            u64::try_from(ttl_seconds).map_err(|_| RedisTaskStoreError::InvalidTtl)?;
+        let ttl_seconds = positive_ttl(ttl_seconds)?;
         let mut connection = self.client.get_connection()?;
         Ok(redis::cmd("EVAL")
             .arg(RENEW_LEASE_SCRIPT)
@@ -215,8 +211,7 @@ impl RedisTaskStore {
         if !next_run_score.is_finite() {
             return Err(RedisTaskStoreError::InvalidScore);
         }
-        let ttl_seconds =
-            u64::try_from(ttl_seconds).map_err(|_| RedisTaskStoreError::InvalidTtl)?;
+        let ttl_seconds = positive_ttl(ttl_seconds)?;
         let data_key = format!("task:data:{task_id}");
         let chat_key = format!("task:chat:{chat_id}");
         let marker_key = format!("{chat_key}:indexed");
@@ -243,8 +238,7 @@ impl RedisTaskStore {
         if !occurrence.next_run_score.is_finite() {
             return Err(RedisTaskStoreError::InvalidScore);
         }
-        let ttl_seconds =
-            u64::try_from(occurrence.ttl_seconds).map_err(|_| RedisTaskStoreError::InvalidTtl)?;
+        let ttl_seconds = positive_ttl(occurrence.ttl_seconds)?;
         let claim_key = task_claim_key(occurrence.task_id, occurrence.execution_id);
         let data_key = format!("task:data:{}", occurrence.task_id);
         let chat_key = format!("task:chat:{}", occurrence.chat_id);
@@ -349,6 +343,26 @@ impl RedisTaskStore {
             ttl_seconds,
         )
     }
+
+    pub fn release_occurrence(
+        &self,
+        task_id: &str,
+        execution_id: &str,
+        claim_token: &str,
+    ) -> Result<bool, RedisTaskStoreError> {
+        self.release_lease(&task_claim_key(task_id, execution_id), claim_token)
+    }
+
+    pub fn remove_due_task_id(&self, task_id: &str) -> Result<bool, RedisTaskStoreError> {
+        Ok(self.zrem(TASK_DUE_INDEX_KEY, &[task_id.to_owned()])? > 0)
+    }
+}
+
+fn positive_ttl(ttl_seconds: i64) -> Result<u64, RedisTaskStoreError> {
+    u64::try_from(ttl_seconds)
+        .ok()
+        .filter(|ttl| *ttl > 0)
+        .ok_or(RedisTaskStoreError::InvalidTtl)
 }
 
 pub struct TaskOccurrenceCompletion<'a> {
@@ -378,7 +392,7 @@ mod tests {
     use crate::redis_connection::{RedisEndpoint, test_support::read_command};
 
     #[test]
-    fn rejects_negative_ttls_before_connecting() -> Result<(), RedisTaskStoreError> {
+    fn rejects_nonpositive_ttls_before_connecting() -> Result<(), RedisTaskStoreError> {
         let store = RedisTaskStore::new(&RedisEndpoint {
             host: "invalid.invalid".to_owned(),
             port: 1,
@@ -389,11 +403,19 @@ mod tests {
             Err(RedisTaskStoreError::InvalidTtl)
         ));
         assert!(matches!(
+            store.setex("task:data:1", 0, "{}"),
+            Err(RedisTaskStoreError::InvalidTtl)
+        ));
+        assert!(matches!(
             store.expire("task:chat:1", -1),
             Err(RedisTaskStoreError::InvalidTtl)
         ));
         assert!(matches!(
             store.acquire_lease("lease", "token", -1),
+            Err(RedisTaskStoreError::InvalidTtl)
+        ));
+        assert!(matches!(
+            store.acquire_lease("lease", "token", 0),
             Err(RedisTaskStoreError::InvalidTtl)
         ));
         assert!(matches!(
@@ -560,6 +582,17 @@ mod tests {
                 (
                     vec![
                         "EVAL",
+                        RELEASE_LEASE_SCRIPT,
+                        "1",
+                        "task:claim:t1:t1:42",
+                        "claim",
+                    ],
+                    ":1\r\n",
+                ),
+                (vec!["ZREM", TASK_DUE_INDEX_KEY, "stale"], ":1\r\n"),
+                (
+                    vec![
+                        "EVAL",
                         CANCEL_TASK_SCRIPT,
                         "3",
                         "task:data:t1",
@@ -598,6 +631,8 @@ mod tests {
             next_run_score: 100.0,
             ttl_seconds: 60,
         })?);
+        assert!(store.release_occurrence("t1", "t1:42", "claim")?);
+        assert!(store.remove_due_task_id("stale")?);
         assert!(store.cancel_task("t1", "c1")?);
         match server.join() {
             Ok(result) => result?,

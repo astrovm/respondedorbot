@@ -16,6 +16,7 @@ from api.tasks.scheduler import (
     get_scheduler_runtime_status,
     get_scheduler,
     list_tasks,
+    rebuild_scheduler_from_canonical_records,
     schedule_task,
     set_task_executor,
     set_redis_client,
@@ -1079,6 +1080,101 @@ class TestCanonicalTaskBackfill:
 
         assert status == {"scanned": 1, "updated": 0, "unmatched": 1, "invalid": 0}
         redis_client.setex.assert_not_called()
+
+
+class TestCanonicalTaskRebuild:
+    @patch("api.tasks.scheduler._add_scheduled_job")
+    @patch("api.tasks.scheduler._apscheduler_trigger", return_value="synthetic-trigger")
+    @patch("api.tasks.scheduler._get_redis")
+    @patch("api.tasks.scheduler.get_scheduler")
+    def test_rebuilds_exact_next_run_and_removes_orphans(
+        self,
+        mock_sched,
+        mock_redis,
+        _mock_trigger,
+        mock_add_job,
+    ):
+        scheduler = MagicMock()
+        orphan = MagicMock()
+        orphan.id = "task_orphan1"
+        unrelated = MagicMock()
+        unrelated.id = "maintenance"
+        scheduler.get_jobs.return_value = [orphan, unrelated]
+        mock_sched.return_value = scheduler
+
+        redis_client = MagicMock()
+        redis_client.scan_iter.return_value = [f"{TASK_REDIS_PREFIX}repeat01"]
+        redis_client.get.return_value = json.dumps(
+            {
+                "schema_version": TASK_SCHEMA_VERSION,
+                "id": "repeat01",
+                "chat_id": "123",
+                "text": "synthetic interval",
+                "user_name": "synthetic-user",
+                "interval_seconds": 3600,
+                "run_date": None,
+                "trigger_config": None,
+                "timezone_offset": -3,
+                "schedule_anchor_at": "2026-08-30T12:00:00Z",
+                "next_run_at": "2026-08-30T13:00:00Z",
+                "last_execution_id": None,
+            }
+        )
+        mock_redis.return_value = redis_client
+
+        status = rebuild_scheduler_from_canonical_records()
+
+        assert status == {
+            "scanned": 1,
+            "rebuilt": 1,
+            "removed": 1,
+            "missing_next": 0,
+            "invalid": 0,
+        }
+        mock_add_job.assert_called_once()
+        assert mock_add_job.call_args.args[1:3] == ("repeat01", "synthetic-trigger")
+        assert mock_add_job.call_args.kwargs["next_run_at"].isoformat() == (
+            "2026-08-30T13:00:00+00:00"
+        )
+        scheduler.remove_job.assert_called_once_with("task_orphan1")
+
+    @patch("api.tasks.scheduler._get_redis")
+    @patch("api.tasks.scheduler.get_scheduler")
+    def test_rejects_unversioned_and_missing_next_run_records(
+        self, mock_sched, mock_redis
+    ):
+        scheduler = MagicMock()
+        scheduler.get_jobs.return_value = []
+        mock_sched.return_value = scheduler
+        redis_client = MagicMock()
+        redis_client.scan_iter.return_value = [
+            f"{TASK_REDIS_PREFIX}legacy01",
+            f"{TASK_REDIS_PREFIX}missing1",
+        ]
+        redis_client.get.side_effect = [
+            json.dumps({"id": "legacy01"}),
+            json.dumps(
+                {
+                    "schema_version": TASK_SCHEMA_VERSION,
+                    "id": "missing1",
+                    "chat_id": "123",
+                    "text": "synthetic task",
+                    "interval_seconds": 600,
+                }
+            ),
+        ]
+        mock_redis.return_value = redis_client
+
+        status = rebuild_scheduler_from_canonical_records()
+
+        assert status == {
+            "scanned": 2,
+            "rebuilt": 0,
+            "removed": 0,
+            "missing_next": 1,
+            "invalid": 1,
+        }
+        scheduler.add_job.assert_not_called()
 
 
 class TestSchedulerRuntimeStatus:
