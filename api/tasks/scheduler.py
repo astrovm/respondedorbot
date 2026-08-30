@@ -8,9 +8,13 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from collections.abc import Hashable, Iterator
 from datetime import datetime, timedelta, timezone, UTC
-from typing import Any, Callable, Dict, List, Mapping, Optional
+from functools import lru_cache
+from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, cast
 
+from api.core.rust_bridge import load_rust_bridge
+from api.core.rust_redis import redis_endpoint_from_env
 from api.core.logging import get_logger
 from api.i18n import current_locale, tr
 from api.bot.general_commands import gen_random
@@ -54,12 +58,112 @@ _ENGLISH_TO_SPANISH_WEEKDAY = {
 }
 
 
+class _RustTaskStore(Protocol):
+    def get(self, key: str) -> str | None: ...
+    def setex(self, key: str, ttl: int, value: str) -> bool: ...
+    def delete(self, key: str) -> int: ...
+    def zadd(self, key: str, member: str, score: float) -> int: ...
+    def expire(self, key: str, ttl: int) -> bool: ...
+    def zrem(self, key: str, members: list[str]) -> int: ...
+    def scan(self, pattern: str) -> str: ...
+    def zrange(self, key: str) -> str: ...
+    def mget(self, keys: list[str]) -> str: ...
+
+
+class _RustTaskStoreModule(Protocol):
+    def RedisTaskStore(
+        self,
+        host: str,
+        port: int,
+        password: str | None,
+    ) -> _RustTaskStore: ...
+
+
+def _load_rust_task_store() -> _RustTaskStoreModule | None:
+    module = load_rust_bridge("RUST_TASK_STORE_IO_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustTaskStoreModule, module)
+
+
+@lru_cache(maxsize=8)
+def _cached_rust_task_store(
+    module: Hashable,
+    host: str,
+    port: int,
+    password: str | None,
+) -> _RustTaskStore:
+    return cast(_RustTaskStoreModule, module).RedisTaskStore(host, port, password)
+
+
+class _RustTaskRedisClient:
+    """Expose the scheduler's narrow Redis subset through the Rust adapter."""
+
+    def __init__(self, store: _RustTaskStore) -> None:
+        self._store = store
+
+    def get(self, key: str) -> str | None:
+        return self._store.get(key)
+
+    def setex(self, key: str, ttl: int, value: str) -> bool:
+        return self._store.setex(key, ttl, value)
+
+    def delete(self, key: str) -> int:
+        return self._store.delete(key)
+
+    def zadd(self, key: str, mapping: Mapping[str, float]) -> int:
+        return sum(
+            self._store.zadd(key, str(member), float(score))
+            for member, score in mapping.items()
+        )
+
+    def expire(self, key: str, ttl: int) -> bool:
+        return self._store.expire(key, ttl)
+
+    def zrem(self, key: str, *members: str) -> int:
+        return self._store.zrem(key, list(members))
+
+    def scan_iter(self, pattern: str) -> Iterator[str]:
+        loaded = json.loads(self._store.scan(pattern))
+        if not isinstance(loaded, list):
+            raise ValueError("Rust task-store scan result must be a list")
+        return iter(str(key) for key in loaded)
+
+    def zrange(self, key: str, start: int, end: int) -> list[str]:
+        if (start, end) != (0, -1):
+            raise ValueError("Rust task-store only supports complete index reads")
+        loaded = json.loads(self._store.zrange(key))
+        if not isinstance(loaded, list):
+            raise ValueError("Rust task-store sorted-set result must be a list")
+        return [str(member) for member in loaded]
+
+    def mget(self, keys: list[str]) -> list[str | None]:
+        loaded = json.loads(self._store.mget(keys))
+        if not isinstance(loaded, list):
+            raise ValueError("Rust task-store multi-get result must be a list")
+        return [None if value is None else str(value) for value in loaded]
+
+
+def _task_redis_client(redis_factory: Callable[[], Any]) -> Any:
+    module = _load_rust_task_store()
+    if module is None:
+        return redis_factory()
+    host, port, password = redis_endpoint_from_env()
+    store = _cached_rust_task_store(
+        cast(Hashable, module),
+        host,
+        port,
+        password,
+    )
+    return _RustTaskRedisClient(store)
+
+
 def init_scheduler(
     redis_factory: Callable[[], Any],
     task_executor_deps: Dict[str, Any],
 ) -> None:
     global _redis_client, _task_executor
-    _redis_client = redis_factory()
+    _redis_client = _task_redis_client(redis_factory)
     _task_executor = build_task_executor(**task_executor_deps)
     status = get_scheduler_runtime_status()
     logger.info(

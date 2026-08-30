@@ -1,0 +1,10 @@
+{
+  "ttl_validation": [
+    { "name": "negative task payload TTL", "ttl": -1 }
+  ],
+  "keys": {
+    "payload": "task:data:t1",
+    "chat_index": "task:chat:c1",
+    "index_marker": "task:chat:c1:indexed"
+  }
+}

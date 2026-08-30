@@ -452,6 +452,18 @@ def verify_redis_maintenance(bridge: ModuleType) -> None:
     assert callable(bridge.run_redis_maintenance)
 
 
+def verify_task_store_io(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "task_store_io.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    store = bridge.RedisTaskStore("invalid.invalid", 1, None)
+    for case in contract["ttl_validation"]:
+        try:
+            store.setex(contract["keys"]["payload"], case["ttl"], "{}")
+        except ValueError:
+            continue
+        raise AssertionError(f"{case['name']} must be rejected")
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -533,6 +545,7 @@ def main(arguments: list[str]) -> int:
     verify_request_cache_io(bridge)
     verify_stale_cache_io(bridge)
     verify_redis_maintenance(bridge)
+    verify_task_store_io(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

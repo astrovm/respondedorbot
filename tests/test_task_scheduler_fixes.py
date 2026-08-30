@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from api.tasks.scheduler import (
     TASK_CHAT_INDEX_PREFIX,
     TASK_REDIS_PREFIX,
@@ -23,6 +25,13 @@ from api.tasks.models import (
     IntervalTrigger,
     ScheduledTaskRequest,
 )
+
+
+@pytest.fixture(autouse=True)
+def _use_python_task_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep legacy scheduler tests on the Python rollback path."""
+
+    monkeypatch.setattr("api.tasks.scheduler._load_rust_task_store", lambda: None)
 
 
 def _configure_legacy_tasks(redis_client, *payloads):

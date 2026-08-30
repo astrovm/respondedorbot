@@ -22,6 +22,7 @@ use bot_adapters::redis_media_cache::{
     media_cache_key as media_cache_key_adapter,
 };
 use bot_adapters::redis_message_state::RedisMessageState as RedisMessageStateAdapter;
+use bot_adapters::redis_task_store::RedisTaskStore as RedisTaskStoreAdapter;
 use bot_core::admin_reports::{
     CreditLogLimit, parse_creditlog_limit as parse_creditlog_limit_core,
     truncate_report as truncate_admin_report_core,
@@ -230,6 +231,76 @@ impl PyRedisJsonCache {
             (false, ttl) => self.cache.set(key, value, ttl),
         })
         .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+}
+
+#[pyclass(name = "RedisTaskStore")]
+struct PyRedisTaskStore {
+    store: RedisTaskStoreAdapter,
+}
+
+#[pymethods]
+impl PyRedisTaskStore {
+    #[new]
+    fn new(host: &str, port: u16, password: Option<&str>) -> PyResult<Self> {
+        let store = RedisTaskStoreAdapter::new(&RedisEndpoint {
+            host: host.to_owned(),
+            port,
+            password: password.map(ToOwned::to_owned),
+        })
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        Ok(Self { store })
+    }
+
+    fn get(&self, py: Python<'_>, key: &str) -> PyResult<Option<String>> {
+        py.detach(|| self.store.get(key))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn setex(&self, py: Python<'_>, key: &str, ttl: i64, value: &str) -> PyResult<bool> {
+        py.detach(|| self.store.setex(key, ttl, value))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn delete(&self, py: Python<'_>, key: &str) -> PyResult<usize> {
+        py.detach(|| self.store.delete(key))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn zadd(&self, py: Python<'_>, key: &str, member: &str, score: f64) -> PyResult<usize> {
+        py.detach(|| self.store.zadd(key, member, score))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn expire(&self, py: Python<'_>, key: &str, ttl: i64) -> PyResult<bool> {
+        py.detach(|| self.store.expire(key, ttl))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn zrem(&self, py: Python<'_>, key: &str, members: Vec<String>) -> PyResult<usize> {
+        py.detach(|| self.store.zrem(key, &members))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn scan(&self, py: Python<'_>, pattern: &str) -> PyResult<String> {
+        let keys = py
+            .detach(|| self.store.scan(pattern))
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        serde_json::to_string(&keys).map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn zrange(&self, py: Python<'_>, key: &str) -> PyResult<String> {
+        let members = py
+            .detach(|| self.store.zrange(key))
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        serde_json::to_string(&members).map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn mget(&self, py: Python<'_>, keys: Vec<String>) -> PyResult<String> {
+        let values = py
+            .detach(|| self.store.mget(&keys))
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        serde_json::to_string(&values).map_err(|error| PyValueError::new_err(error.to_string()))
     }
 }
 
@@ -1752,6 +1823,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyRedisCompactionQueue>()?;
     module.add_class::<PyRedisJsonCache>()?;
     module.add_class::<PyRedisMessageState>()?;
+    module.add_class::<PyRedisTaskStore>()?;
     module.add_function(wrap_pyfunction!(migration_protocol_version, module)?)?;
     module.add_function(wrap_pyfunction!(whole_credits_to_units, module)?)?;
     module.add_function(wrap_pyfunction!(rescale_credit_units, module)?)?;
