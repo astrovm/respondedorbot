@@ -156,6 +156,12 @@ pub struct UnsettledAiOperation {
     pub segments: Vec<Value>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct PurgeResult {
+    pub deleted_rows: u64,
+    pub retention_days: i64,
+}
+
 pub struct BillingRepository {
     database_url: String,
 }
@@ -1166,6 +1172,27 @@ impl BillingRepository {
             .collect()
     }
 
+    pub fn purge_expired_ai_ledger_events(
+        &self,
+        retention_days: i64,
+    ) -> Result<PurgeResult, BillingError> {
+        self.run_transaction(|transaction| {
+            let deleted_rows = transaction.execute(
+                "DELETE FROM credit_ledger WHERE event_type IN ( \
+                    'ai_reserve', 'ai_provider_usage', 'ai_refund', \
+                    'ai_settlement_charge', 'ai_settlement_debt', \
+                    'ai_settlement_result', 'ai_reconciliation_correction', \
+                    'memory_compaction_settlement' \
+                 ) AND created_at < NOW() - ($1::bigint * INTERVAL '1 day')",
+                &[&retention_days],
+            )?;
+            Ok(PurgeResult {
+                deleted_rows,
+                retention_days,
+            })
+        })
+    }
+
     fn ai_operation_is_settled(
         transaction: &mut Transaction<'_>,
         user_id: i64,
@@ -1451,7 +1478,7 @@ mod tests {
     use super::{
         AiChargeResult, AiRefundResult, AiSettlementResult, BalancePairResult, BillingError,
         BillingRepository, BillingScope, ChatAiChargeResult, LegacySettlementResult,
-        OnboardingGrantResult, StarPaymentResult, TransferResult,
+        OnboardingGrantResult, PurgeResult, StarPaymentResult, TransferResult,
     };
 
     #[test]
@@ -2990,6 +3017,33 @@ mod tests {
                 .any(|operation| operation.operation_id == "synthetic-chat-automation")
         );
 
+        client.execute(
+            "INSERT INTO credit_ledger \
+                (event_type, actor_user_id, user_id, chat_id, amount, metadata, created_at) \
+             VALUES \
+                ('ai_reconciliation_correction', $1, $1, NULL, 1, '{}', \
+                    NOW() - INTERVAL '31 days'), \
+                ('ai_reconciliation_correction', $1, $1, NULL, 1, '{}', NOW())",
+            &[&7_000_000_000_040_i64],
+        )?;
+        assert_eq!(
+            repository.purge_expired_ai_ledger_events(30)?,
+            PurgeResult {
+                deleted_rows: 1,
+                retention_days: 30,
+            }
+        );
+        assert_eq!(
+            client
+                .query_one(
+                    "SELECT COUNT(*) FROM credit_ledger WHERE user_id = $1 \
+                     AND event_type = 'ai_reconciliation_correction'",
+                    &[&7_000_000_000_040_i64],
+                )?
+                .get::<_, i64>(0),
+            1
+        );
+
         let synthetic_ids = [
             7_000_000_000_001_i64,
             7_000_000_000_002_i64,
@@ -3030,6 +3084,7 @@ mod tests {
             7_000_000_000_037_i64,
             7_000_000_000_038_i64,
             7_000_000_000_039_i64,
+            7_000_000_000_040_i64,
         ];
         client.execute(
             "DELETE FROM star_payments WHERE user_id = ANY($1)",

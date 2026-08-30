@@ -277,6 +277,14 @@ class _RustBillingReconciliationReads(Protocol):
     ) -> str: ...
 
 
+class _RustBillingMaintenance(Protocol):
+    def billing_purge_expired_ai_ledger_events(
+        self,
+        database_url: str,
+        retention_days: int,
+    ) -> str: ...
+
+
 def _load_rust_billing_reads() -> _RustBillingReads | None:
     module = load_rust_bridge("RUST_BILLING_READ_SHADOW_ENABLED")
     if module is None:
@@ -384,6 +392,13 @@ def _load_rust_billing_reconciliation_reads() -> (
     if module is None:
         return None
     return cast(_RustBillingReconciliationReads, module)
+
+
+def _load_rust_billing_maintenance() -> _RustBillingMaintenance | None:
+    module = load_rust_bridge("RUST_BILLING_MAINTENANCE_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustBillingMaintenance, module)
 
 
 class CreditsDBError(RuntimeError):
@@ -2940,6 +2955,22 @@ def purge_expired_ai_ledger_events(
     """Delete AI ledger events older than the retention window."""
 
     normalized_retention_days = max(1, int(retention_days or 7))
+    rust = _load_rust_billing_maintenance()
+    database_url = get_database_url()
+    if rust is not None and database_url:
+        ensure_schema()
+        try:
+            loaded = json.loads(
+                rust.billing_purge_expired_ai_ledger_events(
+                    database_url,
+                    normalized_retention_days,
+                )
+            )
+            if not isinstance(loaded, Mapping):
+                raise ValueError("Rust billing maintenance result must be an object")
+            return dict(loaded)
+        except Exception as error:
+            raise CreditsDBError("Rust AI ledger maintenance failed") from error
 
     def operation(cur: Any) -> Dict[str, Any]:
         cur.execute(

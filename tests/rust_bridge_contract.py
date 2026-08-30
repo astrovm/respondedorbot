@@ -631,6 +631,17 @@ def verify_billing_reconciliation_reads(bridge: ModuleType) -> None:
         raise AssertionError("Rust AI reconciliation read bridge is unavailable")
 
 
+def verify_billing_maintenance(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "billing_maintenance.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    if contract["retention_days_minimum"] != 1:
+        raise AssertionError("AI ledger minimum retention changed")
+    if "memory_compaction_settlement" not in contract["event_types"]:
+        raise AssertionError("AI ledger retention event allowlist changed")
+    if not callable(bridge.billing_purge_expired_ai_ledger_events):
+        raise AssertionError("Rust AI ledger maintenance bridge is unavailable")
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -694,6 +705,7 @@ def verify_billing_contracts(bridge: ModuleType) -> None:
     verify_billing_audit_writes(bridge)
     verify_billing_audit_reads(bridge)
     verify_billing_reconciliation_reads(bridge)
+    verify_billing_maintenance(bridge)
 
 
 def main(arguments: list[str]) -> int:

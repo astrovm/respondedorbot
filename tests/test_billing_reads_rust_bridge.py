@@ -501,6 +501,23 @@ class _FakeRustBillingReconciliationReads:
             raise ValueError("synthetic reconciliation read failure")
         return json.dumps(self.result)
 
+
+class _FakeRustBillingMaintenance:
+    def __init__(self, result: dict[str, object], *, fail: bool = False) -> None:
+        self.result = result
+        self.fail = fail
+        self.calls: list[tuple[str, int]] = []
+
+    def billing_purge_expired_ai_ledger_events(
+        self,
+        database_url: str,
+        retention_days: int,
+    ) -> str:
+        self.calls.append((database_url, retention_days))
+        if self.fail:
+            raise ValueError("synthetic uncertain maintenance failure")
+        return json.dumps(self.result)
+
 def _patch_python_balance(
     monkeypatch: pytest.MonkeyPatch,
     balance: int,
@@ -1630,3 +1647,45 @@ def test_billing_reconciliation_read_failure_safely_uses_python_fallback(
         assert credits_db.list_unsettled_ai_operations() == []
 
     assert "using Python fallback" in caplog.text
+
+
+def test_billing_maintenance_is_authoritative_and_preserves_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(credits_db, "get_database_url", lambda: "postgresql://db")
+    monkeypatch.setattr(
+        credits_db,
+        "_run_credit_transaction",
+        lambda *_arguments: pytest.fail("Python maintenance delete must not run"),
+    )
+    rust = _FakeRustBillingMaintenance(
+        {"deleted_rows": 4, "retention_days": 7}
+    )
+    monkeypatch.setattr(credits_db, "_load_rust_billing_maintenance", lambda: rust)
+
+    assert credits_db.purge_expired_ai_ledger_events(0) == {
+        "deleted_rows": 4,
+        "retention_days": 7,
+    }
+    assert rust.calls == [("postgresql://db", 7)]
+
+
+def test_billing_maintenance_uncertain_failure_does_not_start_python_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(credits_db, "get_database_url", lambda: "postgresql://db")
+    monkeypatch.setattr(
+        credits_db,
+        "_run_credit_transaction",
+        lambda *_arguments: pytest.fail("uncertain deletes must fail closed"),
+    )
+    monkeypatch.setattr(
+        credits_db,
+        "_load_rust_billing_maintenance",
+        lambda: _FakeRustBillingMaintenance({}, fail=True),
+    )
+
+    with pytest.raises(credits_db.CreditsDBError, match="ledger maintenance"):
+        credits_db.purge_expired_ai_ledger_events()

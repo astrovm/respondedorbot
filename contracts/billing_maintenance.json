@@ -1,0 +1,17 @@
+{
+  "event_types": [
+    "ai_reserve",
+    "ai_provider_usage",
+    "ai_refund",
+    "ai_settlement_charge",
+    "ai_settlement_debt",
+    "ai_settlement_result",
+    "ai_reconciliation_correction",
+    "memory_compaction_settlement"
+  ],
+  "retention_days_minimum": 1,
+  "default_retention_days": 30,
+  "zero_input_retention_days": 7,
+  "transaction_attempts": 3,
+  "uncertain_failure": "fail closed"
+}

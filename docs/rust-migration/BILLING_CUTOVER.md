@@ -26,6 +26,7 @@ must never enter balance mutations.
 | AI settlement audit writer | Rust owns idempotent non-monetary audit insertion | Rust only for settlement result audit writes; Python owns reporting reads | Disable `RUST_BILLING_AUDIT_WRITES_ENABLED` |
 | AI settlement audit reader | Rust reads recent settlement results newest first | Rust with safe Python read fallback; Python owns charge history | Disable `RUST_BILLING_AUDIT_READS_ENABLED` |
 | AI reconciliation reader | Rust reads unsettled holds, activity, and provider segments | Rust with safe Python read fallback; Python owns reconciliation decisions | Disable `RUST_BILLING_RECONCILIATION_READS_ENABLED` |
+| AI ledger maintenance | Rust deletes expired AI ledger event families in one transaction | Rust only for retention purge; Python owns schema migration | Disable `RUST_BILLING_MAINTENANCE_ENABLED` |
 | Rust reads | Rust is authoritative for proven read operations | Python owns non-balance writes | Disable the per-operation Rust read flag |
 | Shadow transaction decisions | Python commits; Rust evaluates the same synthetic transaction inputs without I/O | Python only | Disable the decision shadow flag |
 | Rust writer canary | Rust owns one proven mutation family | Rust for that family; Python for all others | Disable that family's writer flag before another owner starts |
@@ -156,3 +157,7 @@ unsettled-operation snapshot used after interruption or restart. It preserves
 legacy-compaction exclusions, provider call order, activity timestamps, and a
 safe Python fallback because the operation is read-only. Chat-only automation
 rows without a user payer remain outside this user-scoped reconciler.
+
+`RUST_BILLING_MAINTENANCE_ENABLED=1` makes Rust authoritative for AI ledger
+retention. The event allowlist and minimum one-day retention remain compatible,
+and an uncertain failure never starts the Python delete transaction.

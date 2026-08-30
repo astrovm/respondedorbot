@@ -2192,6 +2192,20 @@ fn billing_list_unsettled_ai_operations(
     serde_json::to_string(&results).map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+/// Delete expired AI ledger events inside one retried transaction.
+#[pyfunction]
+fn billing_purge_expired_ai_ledger_events(
+    py: Python<'_>,
+    database_url: &str,
+    retention_days: i64,
+) -> PyResult<String> {
+    let repository = BillingRepository::new(database_url);
+    let result = py
+        .detach(|| repository.purge_expired_ai_ledger_events(retention_days))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serde_json::to_string(&result).map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -2328,6 +2342,10 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_function(wrap_pyfunction!(
         billing_list_unsettled_ai_operations,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        billing_purge_expired_ai_ledger_events,
         module
     )?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
