@@ -104,6 +104,10 @@ use bot_core::polymarket::{MarketOutcome, rank_outcomes as rank_outcomes_core};
 use bot_core::price_queries::{
     AmountConversion, PriceQuery, ProviderScope, parse_price_query as parse_price_query_core,
 };
+use bot_core::provider_chain::{
+    available_provider_indices as provider_chain_select_core,
+    completion_outcome as provider_chain_outcome_core,
+};
 use bot_core::provider_errors::{
     ProviderErrorFacts, classify_provider_error as classify_provider_error_core,
 };
@@ -2728,6 +2732,21 @@ fn tool_select_available(
     ))
 }
 
+#[pyfunction]
+fn provider_chain_select(availability: Vec<bool>) -> Vec<usize> {
+    provider_chain_select_core(&availability)
+}
+
+#[pyfunction]
+fn provider_chain_outcome(
+    available_provider_names: Vec<String>,
+    successful_position: Option<usize>,
+) -> PyResult<(String, bool)> {
+    provider_chain_outcome_core(&available_provider_names, successful_position)
+        .map(|outcome| (outcome.provider_name, outcome.fallback_used))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 fn token_estimate_value(value: &Value) -> TokenEstimateValue {
     match value {
         Value::Null => TokenEstimateValue::Empty,
@@ -3056,6 +3075,8 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(telegram_stream_plan_finalize, module)?)?;
     module.add_function(wrap_pyfunction!(tool_parse_arguments, module)?)?;
     module.add_function(wrap_pyfunction!(tool_select_available, module)?)?;
+    module.add_function(wrap_pyfunction!(provider_chain_select, module)?)?;
+    module.add_function(wrap_pyfunction!(provider_chain_outcome, module)?)?;
     module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;
     module.add_function(wrap_pyfunction!(ai_estimate_text_tokens, module)?)?;
     module.add_function(wrap_pyfunction!(ai_estimate_nested_tokens, module)?)?;

@@ -1,0 +1,58 @@
+{
+  "selection_cases": [
+    {
+      "name": "keeps configured order and skips unavailable providers",
+      "availability": [false, true, true, false],
+      "expected": [1, 2]
+    },
+    {
+      "name": "all providers available",
+      "availability": [true, true, true],
+      "expected": [0, 1, 2]
+    },
+    {
+      "name": "no provider available",
+      "availability": [false, false],
+      "expected": []
+    },
+    {
+      "name": "empty chain",
+      "availability": [],
+      "expected": []
+    }
+  ],
+  "outcome_cases": [
+    {
+      "name": "primary succeeds",
+      "provider_names": ["primary", "fallback"],
+      "successful_position": 0,
+      "expected": ["primary", false]
+    },
+    {
+      "name": "fallback succeeds",
+      "provider_names": ["primary", "fallback"],
+      "successful_position": 1,
+      "expected": ["fallback", true]
+    },
+    {
+      "name": "all attempted providers fail",
+      "provider_names": ["primary", "fallback"],
+      "successful_position": null,
+      "expected": ["fallback", false]
+    },
+    {
+      "name": "empty chain has sentinel provider",
+      "provider_names": [],
+      "successful_position": null,
+      "expected": ["none", false]
+    }
+  ],
+  "invalid_outcomes": [
+    {
+      "name": "successful position is out of range",
+      "provider_names": ["only"],
+      "successful_position": 1,
+      "error": "successful provider position 1 is outside 1 available providers"
+    }
+  ]
+}

@@ -4,11 +4,91 @@ Provides a unified interface for multiple AI backends (OpenRouter, Groq, etc.)
 with support for both completion and streaming modes.
 """
 
+import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterator, List, Optional, Protocol, Tuple, runtime_checkable
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Protocol,
+    Tuple,
+    cast,
+    runtime_checkable,
+)
 
 from api.ai.pricing import AIUsageResult
 from api.billing.authorization import AIAuthorizationDenied
+from api.core.rust_bridge import load_rust_bridge
+
+
+logger = logging.getLogger(__name__)
+
+
+class _RustProviderChainPolicy(Protocol):
+    def provider_chain_select(self, availability: list[bool]) -> list[int]: ...
+
+    def provider_chain_outcome(
+        self,
+        available_provider_names: list[str],
+        successful_position: int | None,
+    ) -> tuple[str, bool]: ...
+
+
+def _load_rust_provider_chain_policy() -> _RustProviderChainPolicy | None:
+    module = load_rust_bridge("RUST_PROVIDER_CHAIN_POLICY_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustProviderChainPolicy, module)
+
+
+def _rust_provider_chain_failed(operation: str) -> None:
+    logger.exception(
+        "Rust provider chain policy failed; using Python fallback: operation=%s",
+        operation,
+    )
+
+
+def _select_available_indices(availability: list[bool]) -> list[int]:
+    rust = _load_rust_provider_chain_policy()
+    if rust is not None:
+        try:
+            indices = rust.provider_chain_select(availability)
+            if (
+                any(type(index) is not int for index in indices)
+                or indices != sorted(set(indices))
+                or any(index < 0 or index >= len(availability) for index in indices)
+                or any(not availability[index] for index in indices)
+            ):
+                raise ValueError("Rust returned invalid provider indices")
+            return indices
+        except Exception:
+            _rust_provider_chain_failed("selection")
+    return [index for index, available in enumerate(availability) if available]
+
+
+def _provider_chain_outcome(
+    available_provider_names: list[str],
+    successful_position: int | None,
+) -> tuple[str, bool]:
+    rust = _load_rust_provider_chain_policy()
+    if rust is not None:
+        try:
+            provider_name, fallback_used = rust.provider_chain_outcome(
+                available_provider_names,
+                successful_position,
+            )
+            return str(provider_name), bool(fallback_used)
+        except Exception:
+            _rust_provider_chain_failed("outcome")
+    if successful_position is not None:
+        return available_provider_names[successful_position], successful_position > 0
+    return (
+        available_provider_names[-1] if available_provider_names else "none",
+        False,
+    )
 
 
 class AIProvider(Protocol):
@@ -70,7 +150,8 @@ class ProviderChain:
 
     @property
     def available_providers(self) -> List[AIProvider]:
-        return [p for p in self._providers if p.is_available()]
+        availability = [provider.is_available() for provider in self._providers]
+        return [self._providers[index] for index in _select_available_indices(availability)]
 
     def has_any_available(self) -> bool:
         return any(p.is_available() for p in self._providers)
@@ -88,7 +169,12 @@ class ProviderChain:
         """Try each provider in order until one returns a result."""
         available = self.available_providers
         if not available:
-            return ProviderResult(result=None, provider_name="none")
+            provider_name, fallback_used = _provider_chain_outcome([], None)
+            return ProviderResult(
+                result=None,
+                provider_name=provider_name,
+                fallback_used=fallback_used,
+            )
 
         for idx, provider in enumerate(available):
             try:
@@ -105,10 +191,14 @@ class ProviderChain:
                     **complete_kwargs,
                 )
                 if result is not None:
+                    provider_name, fallback_used = _provider_chain_outcome(
+                        [item.name for item in available],
+                        idx,
+                    )
                     return ProviderResult(
                         result=result,
-                        provider_name=provider.name,
-                        fallback_used=idx > 0,
+                        provider_name=provider_name,
+                        fallback_used=fallback_used,
                     )
             except AIAuthorizationDenied:
                 raise
@@ -116,9 +206,14 @@ class ProviderChain:
                 print(f"Provider {provider.name} failed: {e}")
                 continue
 
+        provider_name, fallback_used = _provider_chain_outcome(
+            [item.name for item in available],
+            None,
+        )
         return ProviderResult(
             result=None,
-            provider_name=available[-1].name if available else "none",
+            provider_name=provider_name,
+            fallback_used=fallback_used,
         )
 
     def stream(

@@ -991,6 +991,30 @@ def verify_tool_registry_policy(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_provider_chain_policy(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "provider_chain_policy.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["selection_cases"]:
+        actual = bridge.provider_chain_select(case["availability"])
+        assert actual == case["expected"], case["name"]
+    for case in contract["outcome_cases"]:
+        actual = bridge.provider_chain_outcome(
+            case["provider_names"],
+            case["successful_position"],
+        )
+        assert list(actual) == case["expected"], case["name"]
+    for case in contract["invalid_outcomes"]:
+        try:
+            bridge.provider_chain_outcome(
+                case["provider_names"],
+                case["successful_position"],
+            )
+        except ValueError as error:
+            assert str(error) == case["error"], case["name"]
+        else:
+            raise AssertionError(f"expected provider-chain failure for {case['name']}")
+
+
 def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_ai_usage_policy(bridge)
     verify_provider_error_policy(bridge)
@@ -1004,6 +1028,7 @@ def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_ai_response_cleanup(bridge)
     verify_telegram_stream_planning(bridge)
     verify_tool_registry_policy(bridge)
+    verify_provider_chain_policy(bridge)
 
 
 def main(arguments: list[str]) -> int:
