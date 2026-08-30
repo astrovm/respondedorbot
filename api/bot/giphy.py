@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from logging import Logger
 from os import environ
+from typing import Any, Protocol, cast
 import redis
 
 from api.core.config_runtime import ConfigRuntime
+from api.core.rust_bridge import load_rust_bridge
 from api.i18n import tr
 from api.services import http_client
 from api.services.maintenance import GIPHY_STALE_TTL
@@ -35,6 +37,49 @@ PoolGetter = Callable[[str], list[str]]
 GifGetter = Callable[[str], str | None]
 
 
+class _RustGiphyAdapter(Protocol):
+    def giphy_search(self, api_key: str, term: str, offset: int) -> str: ...
+
+
+def _load_rust_giphy_adapter() -> _RustGiphyAdapter | None:
+    module = load_rust_bridge("RUST_GIPHY_ADAPTER_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustGiphyAdapter, module)
+
+
+def _extract_giphy_urls(payload: Any) -> list[str]:
+    urls: list[str] = []
+    for gif in payload.get("data", []):
+        url = gif.get("images", {}).get("original", {}).get("url")
+        if url:
+            urls.append(url)
+    return urls
+
+
+def _rust_giphy_urls(raw_outcome: str, *, category: str, logger: Logger) -> list[str]:
+    outcome = json.loads(raw_outcome)
+    if not isinstance(outcome, Mapping):
+        raise ValueError("Rust Giphy outcome must be an object")
+    status = outcome.get("status")
+    if status == "success":
+        urls = outcome.get("urls")
+        if not isinstance(urls, list) or not all(
+            isinstance(url, str) for url in urls
+        ):
+            raise ValueError("Rust Giphy URLs must be text")
+        return urls
+    if status in {
+        "http_error",
+        "invalid_json",
+        "invalid_payload",
+        "transport_error",
+    }:
+        logger.error("Error fetching Giphy pool for %s: rust_status=%s", category, status)
+        return []
+    raise ValueError(f"invalid Rust Giphy status: {status!r}")
+
+
 def fetch_giphy_pool(category: str, *, logger: Logger) -> list[str]:
     """Fetch a pool of GIF URLs from Giphy for a category."""
     api_key = environ.get("GIPHY_API_KEY")
@@ -43,25 +88,38 @@ def fetch_giphy_pool(category: str, *, logger: Logger) -> list[str]:
 
     terms = GIPHY_GM_TERMS if category == "gm" else GIPHY_GN_TERMS
     urls: list[str] = []
+    rust = _load_rust_giphy_adapter()
 
     for term in terms:
+        offset = random.randint(0, 100)
+        if rust is not None:
+            try:
+                urls.extend(
+                    _rust_giphy_urls(
+                        rust.giphy_search(api_key, term, offset),
+                        category=category,
+                        logger=logger,
+                    )
+                )
+                continue
+            except Exception:
+                logger.exception(
+                    "Rust Giphy adapter failed; using Python fallback for %s",
+                    category,
+                )
         try:
             params = {
                 "api_key": api_key,
                 "q": term,
                 "limit": 25,
-                "offset": random.randint(0, 100),
+                "offset": offset,
                 "rating": "g",
             }
             response = http_client.get(
                 f"{GIPHY_API_URL}/search", params=params, timeout=5
             )
             response.raise_for_status()
-            data = response.json()
-            for gif in data.get("data", []):
-                url = gif.get("images", {}).get("original", {}).get("url")
-                if url:
-                    urls.append(url)
+            urls.extend(_extract_giphy_urls(response.json()))
         except Exception:
             logger.exception("Error fetching Giphy pool for %s", category)
 

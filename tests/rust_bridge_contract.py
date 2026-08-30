@@ -1194,6 +1194,16 @@ def verify_telegram_http_adapter(bridge: ModuleType) -> None:
             raise AssertionError(f"expected download failure for {case['name']}")
 
 
+def verify_giphy_adapter(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "giphy_adapter.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["response_cases"]:
+        actual = json.loads(
+            bridge.giphy_parse_response(case["status_code"], case["body"])
+        )
+        assert actual == case["expected"], case["name"]
+
+
 def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_ai_usage_policy(bridge)
     verify_provider_error_policy(bridge)
@@ -1217,6 +1227,7 @@ def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_firecrawl_adapter(bridge)
     verify_openrouter_generation_adapter(bridge)
     verify_telegram_http_adapter(bridge)
+    verify_giphy_adapter(bridge)
 
 
 def main(arguments: list[str]) -> int:

@@ -13,6 +13,10 @@ use bot_adapters::firecrawl::{
     HttpResponse as FirecrawlHttpResponse, parse_response as firecrawl_parse_response_adapter,
     search as firecrawl_search_adapter,
 };
+use bot_adapters::giphy::{
+    HttpResponse as GiphyHttpResponse, parse_response as giphy_parse_response_adapter,
+    search as giphy_search_adapter,
+};
 use bot_adapters::openrouter_generation::{
     HttpResponse as OpenRouterGenerationHttpResponse, fetch as openrouter_generation_fetch_adapter,
     parse_response as openrouter_generation_parse_response_adapter,
@@ -3005,6 +3009,21 @@ fn telegram_download_file<'py>(
 }
 
 #[pyfunction]
+fn giphy_search(api_key: &str, term: &str, offset: u16) -> PyResult<String> {
+    serde_json::to_string(&giphy_search_adapter(api_key, term, offset))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+fn giphy_parse_response(status_code: u16, body: &str) -> PyResult<String> {
+    serde_json::to_string(&giphy_parse_response_adapter(GiphyHttpResponse {
+        status_code,
+        body: body.to_owned(),
+    }))
+    .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
 fn provider_chain_select(availability: Vec<bool>) -> Vec<usize> {
     provider_chain_select_core(&availability)
 }
@@ -3376,6 +3395,8 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(telegram_http_response, module)?)?;
     module.add_function(wrap_pyfunction!(telegram_multipart_request, module)?)?;
     module.add_function(wrap_pyfunction!(telegram_download_file, module)?)?;
+    module.add_function(wrap_pyfunction!(giphy_search, module)?)?;
+    module.add_function(wrap_pyfunction!(giphy_parse_response, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_select, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_outcome, module)?)?;
     module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;

@@ -1,0 +1,49 @@
+{
+  "response_cases": [
+    {
+      "name": "original GIF URLs are preserved in provider order",
+      "status_code": 200,
+      "body": "{\"data\":[{\"images\":{\"original\":{\"url\":\"https://example.test/a.gif\"}}},{\"images\":{}},{\"images\":{\"original\":{\"url\":\"https://example.test/b.gif\"}}}]}",
+      "expected": {
+        "status": "success",
+        "urls": [
+          "https://example.test/a.gif",
+          "https://example.test/b.gif"
+        ]
+      }
+    },
+    {
+      "name": "HTTP failures retain status",
+      "status_code": 429,
+      "body": "rate limited",
+      "expected": {
+        "status": "http_error",
+        "status_code": 429
+      }
+    },
+    {
+      "name": "invalid JSON is distinct",
+      "status_code": 200,
+      "body": "not-json",
+      "expected": {
+        "status": "invalid_json"
+      }
+    },
+    {
+      "name": "non-object provider payload is rejected",
+      "status_code": 200,
+      "body": "[]",
+      "expected": {
+        "status": "invalid_payload"
+      }
+    },
+    {
+      "name": "non-array data is rejected",
+      "status_code": 200,
+      "body": "{\"data\":{}}",
+      "expected": {
+        "status": "invalid_payload"
+      }
+    }
+  ]
+}
