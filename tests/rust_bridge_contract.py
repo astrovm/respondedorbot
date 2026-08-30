@@ -1015,6 +1015,42 @@ def verify_provider_chain_policy(bridge: ModuleType) -> None:
             raise AssertionError(f"expected provider-chain failure for {case['name']}")
 
 
+def verify_provider_config_policy(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "provider_config_policy.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["credential_cases"]:
+        actual = bridge.provider_groq_api_key(
+            case["account"],
+            case["free_api_key"],
+            case["paid_api_key"],
+        )
+        assert actual == case["expected"], case["name"]
+    for case in contract["openrouter_key_cases"]:
+        actual = bridge.provider_openrouter_api_key(case["value"])
+        assert actual == case["expected"], case["name"]
+    for case in contract["account_cases"]:
+        actual = bridge.provider_configured_groq_accounts(
+            case["account_order"],
+            case["configured"],
+        )
+        assert actual == case["expected"], case["name"]
+    for case in contract["backoff_cases"]:
+        actual = bridge.provider_groq_backoff_key(case["account"], case["scope"])
+        assert actual == case["expected"], case["name"]
+    for case in contract["scope_cases"]:
+        actual = bridge.provider_scope_is_available(case["backoff_active"])
+        assert actual is case["expected"], case["name"]
+    for case in contract["web_search_cases"]:
+        actual = json.loads(
+            bridge.provider_web_search_tool(
+                case["max_results"],
+                case["max_queries"],
+            )
+        )
+        assert actual == case["expected"], case["name"]
+    assert bridge.provider_openrouter_base_url() == contract["openrouter_base_url"]
+
+
 def verify_ai_request_sanitization(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "ai_request_sanitization.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -1048,6 +1084,7 @@ def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_telegram_stream_planning(bridge)
     verify_tool_registry_policy(bridge)
     verify_provider_chain_policy(bridge)
+    verify_provider_config_policy(bridge)
     verify_ai_request_sanitization(bridge)
     verify_tool_execution_policy(bridge)
 

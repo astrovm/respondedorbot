@@ -109,6 +109,13 @@ use bot_core::provider_chain::{
     available_provider_indices as provider_chain_select_core,
     completion_outcome as provider_chain_outcome_core,
 };
+use bot_core::provider_config::{
+    DEFAULT_OPENROUTER_URL, clean_value as provider_clean_value_core,
+    configured_accounts as provider_configured_accounts_core,
+    groq_api_key as provider_groq_api_key_core, groq_backoff_key as provider_groq_backoff_key_core,
+    scope_is_available as provider_scope_is_available_core,
+    web_search_tool as provider_web_search_tool_core,
+};
 use bot_core::provider_errors::{
     ProviderErrorFacts, classify_provider_error as classify_provider_error_core,
 };
@@ -2745,6 +2752,49 @@ fn tool_execution_action(has_function: bool, registered: bool) -> &'static str {
 }
 
 #[pyfunction]
+fn provider_groq_api_key(
+    account: &str,
+    free_api_key: Option<&str>,
+    paid_api_key: Option<&str>,
+) -> Option<String> {
+    provider_groq_api_key_core(account, free_api_key, paid_api_key)
+}
+
+#[pyfunction]
+fn provider_configured_groq_accounts(
+    account_order: Vec<String>,
+    configured: Vec<bool>,
+) -> Vec<String> {
+    provider_configured_accounts_core(&account_order, &configured)
+}
+
+#[pyfunction]
+fn provider_openrouter_api_key(value: Option<&str>) -> Option<String> {
+    provider_clean_value_core(value)
+}
+
+#[pyfunction]
+const fn provider_openrouter_base_url() -> &'static str {
+    DEFAULT_OPENROUTER_URL
+}
+
+#[pyfunction]
+fn provider_groq_backoff_key(account: &str, scope: &str) -> String {
+    provider_groq_backoff_key_core(account, scope)
+}
+
+#[pyfunction]
+fn provider_scope_is_available(backoff_active: Vec<bool>) -> bool {
+    provider_scope_is_available_core(&backoff_active)
+}
+
+#[pyfunction]
+fn provider_web_search_tool(max_results: i64, max_queries: i64) -> PyResult<String> {
+    serde_json::to_string(&provider_web_search_tool_core(max_results, max_queries))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
 fn provider_chain_select(availability: Vec<bool>) -> Vec<usize> {
     provider_chain_select_core(&availability)
 }
@@ -3089,6 +3139,13 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(tool_parse_arguments, module)?)?;
     module.add_function(wrap_pyfunction!(tool_select_available, module)?)?;
     module.add_function(wrap_pyfunction!(tool_execution_action, module)?)?;
+    module.add_function(wrap_pyfunction!(provider_groq_api_key, module)?)?;
+    module.add_function(wrap_pyfunction!(provider_configured_groq_accounts, module)?)?;
+    module.add_function(wrap_pyfunction!(provider_openrouter_api_key, module)?)?;
+    module.add_function(wrap_pyfunction!(provider_openrouter_base_url, module)?)?;
+    module.add_function(wrap_pyfunction!(provider_groq_backoff_key, module)?)?;
+    module.add_function(wrap_pyfunction!(provider_scope_is_available, module)?)?;
+    module.add_function(wrap_pyfunction!(provider_web_search_tool, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_select, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_outcome, module)?)?;
     module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;

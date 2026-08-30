@@ -12,6 +12,7 @@ from api.billing import provider_usage as provider_usage_module
 from api.bot import streaming as bot_streaming_module
 from api.providers import errors as provider_errors_module
 from api.providers import base as provider_base_module
+from api.providers import config as provider_config_module
 from api.providers import runtime as provider_runtime_module
 from api.providers import openrouter as openrouter_module
 from api import index as index_module
@@ -97,6 +98,11 @@ def reset_caches(monkeypatch):
     monkeypatch.setattr(
         provider_base_module,
         "_load_rust_provider_chain_policy",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        provider_config_module,
+        "_load_rust_provider_config_policy",
         lambda: None,
     )
     monkeypatch.setattr(

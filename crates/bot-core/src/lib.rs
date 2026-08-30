@@ -22,6 +22,7 @@ pub mod message_state;
 pub mod polymarket;
 pub mod price_queries;
 pub mod provider_chain;
+pub mod provider_config;
 pub mod provider_errors;
 pub mod provider_retry;
 pub mod provider_runtime_policy;

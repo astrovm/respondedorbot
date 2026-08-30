@@ -107,7 +107,7 @@ class ProviderService:
         )
 
     def get_groq_backoff_key(self, account: str, scope: str) -> str:
-        return f"groq:{account}:{scope}".lower()
+        return provider_config.get_groq_backoff_key(account, scope)
 
     def get_openrouter_api_key(self) -> str | None:
         return provider_config.get_openrouter_api_key(environment=self.environment)
@@ -347,9 +347,11 @@ class ProviderService:
         """
 
         accounts = self.get_groq_accounts()
-        return not accounts or any(
-            not self.is_backoff_active(self.get_groq_backoff_key(account, scope))
-            for account in accounts
+        return provider_config.is_scope_available(
+            [
+                self.is_backoff_active(self.get_groq_backoff_key(account, scope))
+                for account in accounts
+            ]
         )
 
     def has_openrouter_fallback(self) -> bool:
