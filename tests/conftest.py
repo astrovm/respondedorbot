@@ -68,6 +68,11 @@ def reset_caches(monkeypatch):
         "_load_rust_billing_manual_credits",
         lambda: None,
     )
+    monkeypatch.setattr(
+        credits_db_service,
+        "_load_rust_billing_chat_ai_credits",
+        lambda: None,
+    )
     clear_all_cooldowns()
     index_module._chat_config_service.clear_cache()
     monkeypatch.setenv(

@@ -4,7 +4,7 @@ use native_tls::TlsConnector;
 use postgres::{Client, Transaction, error::SqlState};
 use postgres_native_tls::MakeTlsConnector;
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{Map, Value, json};
 use thiserror::Error;
 
 const ONBOARDING_MAX_GRANTS_PER_HOUR: i64 = 4;
@@ -65,6 +65,12 @@ pub struct StarPaymentResult {
 pub struct TransferResult {
     pub transferred: bool,
     pub user_balance: i64,
+    pub chat_balance: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ChatAiChargeResult {
+    pub charged: bool,
     pub chat_balance: i64,
 }
 
@@ -256,6 +262,85 @@ impl BillingRepository {
         })
     }
 
+    pub fn charge_chat_ai_credits(
+        &self,
+        chat_id: i64,
+        amount: i32,
+        event_type: &str,
+        metadata: &Map<String, Value>,
+    ) -> Result<ChatAiChargeResult, BillingError> {
+        self.run_transaction(|transaction| {
+            let chat_balance = Self::balance_for_update(transaction, BillingScope::Chat, chat_id)?;
+            if chat_balance < amount {
+                return Ok(ChatAiChargeResult {
+                    charged: false,
+                    chat_balance: chat_balance.into(),
+                });
+            }
+            let updated_balance = chat_balance
+                .checked_sub(amount)
+                .ok_or(BillingError::BalanceOverflow)?;
+            Self::set_balance(transaction, BillingScope::Chat, chat_id, updated_balance)?;
+            let ledger_amount = amount.checked_neg().ok_or(BillingError::BalanceOverflow)?;
+            let metadata = chat_ai_metadata(metadata);
+            transaction.execute(
+                "INSERT INTO credit_ledger \
+                    (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
+                 VALUES ($1, NULL, NULL, $2, $3, $4)",
+                &[&event_type, &chat_id, &ledger_amount, &metadata],
+            )?;
+            Ok(ChatAiChargeResult {
+                charged: true,
+                chat_balance: updated_balance.into(),
+            })
+        })
+    }
+
+    pub fn refund_chat_ai_credits(
+        &self,
+        chat_id: i64,
+        amount: i32,
+        event_type: &str,
+        metadata: &Map<String, Value>,
+    ) -> Result<i64, BillingError> {
+        self.mutate_chat_ai_balance(chat_id, amount, event_type, metadata)
+    }
+
+    pub fn apply_chat_ai_debt(
+        &self,
+        chat_id: i64,
+        amount: i32,
+        event_type: &str,
+        metadata: &Map<String, Value>,
+    ) -> Result<i64, BillingError> {
+        let balance_delta = amount.checked_neg().ok_or(BillingError::BalanceOverflow)?;
+        self.mutate_chat_ai_balance(chat_id, balance_delta, event_type, metadata)
+    }
+
+    fn mutate_chat_ai_balance(
+        &self,
+        chat_id: i64,
+        balance_delta: i32,
+        event_type: &str,
+        metadata: &Map<String, Value>,
+    ) -> Result<i64, BillingError> {
+        self.run_transaction(|transaction| {
+            let chat_balance = Self::balance_for_update(transaction, BillingScope::Chat, chat_id)?;
+            let updated_balance = chat_balance
+                .checked_add(balance_delta)
+                .ok_or(BillingError::BalanceOverflow)?;
+            Self::set_balance(transaction, BillingScope::Chat, chat_id, updated_balance)?;
+            let metadata = chat_ai_metadata(metadata);
+            transaction.execute(
+                "INSERT INTO credit_ledger \
+                    (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
+                 VALUES ($1, NULL, NULL, $2, $3, $4)",
+                &[&event_type, &chat_id, &balance_delta, &metadata],
+            )?;
+            Ok(updated_balance.into())
+        })
+    }
+
     fn run_transaction<T, F>(&self, operation: F) -> Result<T, BillingError>
     where
         F: for<'transaction> Fn(&mut Transaction<'transaction>) -> Result<T, BillingError>,
@@ -413,15 +498,24 @@ fn is_retryable_transaction_error(error: &BillingError) -> bool {
     })
 }
 
+fn chat_ai_metadata(metadata: &Map<String, Value>) -> Value {
+    let mut merged = metadata.clone();
+    merged
+        .entry("source".to_owned())
+        .or_insert_with(|| Value::String("chat".to_owned()));
+    Value::Object(merged)
+}
+
 #[cfg(test)]
 mod tests {
     use native_tls::TlsConnector;
     use postgres::Client;
     use postgres_native_tls::MakeTlsConnector;
+    use serde_json::json;
 
     use super::{
-        BillingError, BillingRepository, BillingScope, OnboardingGrantResult, StarPaymentResult,
-        TransferResult,
+        BillingError, BillingRepository, BillingScope, ChatAiChargeResult, OnboardingGrantResult,
+        StarPaymentResult, TransferResult,
     };
 
     #[test]
@@ -753,6 +847,117 @@ mod tests {
         concurrent_mint_balances.sort_unstable();
         assert_eq!(concurrent_mint_balances, [500, 1000]);
 
+        client.execute(
+            "INSERT INTO credit_accounts (scope_type, scope_id, balance) \
+             VALUES ('chat', $1, 500) \
+             ON CONFLICT (scope_type, scope_id) DO UPDATE SET balance = EXCLUDED.balance",
+            &[&7_000_000_000_014_i64],
+        )?;
+        let custom_metadata = json!({
+            "operation_id": "synthetic-chat-automation",
+            "source": "automation"
+        });
+        let custom_metadata = custom_metadata
+            .as_object()
+            .ok_or_else(|| std::io::Error::other("synthetic metadata must be an object"))?;
+        assert_eq!(
+            repository.charge_chat_ai_credits(
+                7_000_000_000_014,
+                200,
+                "ai_reserve",
+                custom_metadata,
+            )?,
+            ChatAiChargeResult {
+                charged: true,
+                chat_balance: 300,
+            }
+        );
+        assert_eq!(
+            repository.charge_chat_ai_credits(
+                7_000_000_000_014,
+                400,
+                "ai_reserve",
+                custom_metadata,
+            )?,
+            ChatAiChargeResult {
+                charged: false,
+                chat_balance: 300,
+            }
+        );
+        assert_eq!(
+            repository.refund_chat_ai_credits(
+                7_000_000_000_014,
+                100,
+                "ai_refund",
+                custom_metadata,
+            )?,
+            400
+        );
+        assert_eq!(
+            repository.apply_chat_ai_debt(
+                7_000_000_000_014,
+                650,
+                "ai_settlement_debt",
+                custom_metadata,
+            )?,
+            -250
+        );
+        let chat_ai_evidence = client.query_one(
+            "SELECT COUNT(*), \
+                COUNT(*) FILTER (WHERE metadata->>'source' = 'automation'), \
+                COALESCE(SUM(amount), 0) \
+             FROM credit_ledger WHERE chat_id = $1",
+            &[&7_000_000_000_014_i64],
+        )?;
+        assert_eq!(chat_ai_evidence.get::<_, i64>(0), 3);
+        assert_eq!(chat_ai_evidence.get::<_, i64>(1), 3);
+        assert_eq!(chat_ai_evidence.get::<_, i64>(2), -750);
+
+        client.execute(
+            "INSERT INTO credit_accounts (scope_type, scope_id, balance) \
+             VALUES ('chat', $1, 500) \
+             ON CONFLICT (scope_type, scope_id) DO UPDATE SET balance = EXCLUDED.balance",
+            &[&7_000_000_000_015_i64],
+        )?;
+        let first_database_url = database_url.clone();
+        let second_database_url = database_url.clone();
+        let first = std::thread::spawn(move || {
+            BillingRepository::new(&first_database_url).charge_chat_ai_credits(
+                7_000_000_000_015,
+                300,
+                "ai_reserve",
+                &serde_json::Map::new(),
+            )
+        });
+        let second = std::thread::spawn(move || {
+            BillingRepository::new(&second_database_url).charge_chat_ai_credits(
+                7_000_000_000_015,
+                300,
+                "ai_reserve",
+                &serde_json::Map::new(),
+            )
+        });
+        let concurrent_chat_charge_results = [
+            first
+                .join()
+                .map_err(|_| std::io::Error::other("first chat charge thread panicked"))??,
+            second
+                .join()
+                .map_err(|_| std::io::Error::other("second chat charge thread panicked"))??,
+        ];
+        assert_eq!(
+            concurrent_chat_charge_results
+                .iter()
+                .filter(|result| result.charged)
+                .count(),
+            1
+        );
+        assert!(
+            concurrent_chat_charge_results
+                .iter()
+                .all(|result| result.chat_balance == 200)
+        );
+
         let synthetic_ids = [
             7_000_000_000_001_i64,
             7_000_000_000_002_i64,
@@ -767,6 +972,8 @@ mod tests {
             7_000_000_000_011_i64,
             7_000_000_000_012_i64,
             7_000_000_000_013_i64,
+            7_000_000_000_014_i64,
+            7_000_000_000_015_i64,
         ];
         client.execute(
             "DELETE FROM star_payments WHERE user_id = ANY($1)",
@@ -774,6 +981,10 @@ mod tests {
         )?;
         client.execute(
             "DELETE FROM credit_ledger WHERE user_id = ANY($1)",
+            &[&&synthetic_ids[..]],
+        )?;
+        client.execute(
+            "DELETE FROM credit_ledger WHERE chat_id = ANY($1)",
             &[&&synthetic_ids[..]],
         )?;
         client.execute(

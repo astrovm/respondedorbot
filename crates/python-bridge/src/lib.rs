@@ -1875,6 +1875,60 @@ fn billing_transfer_user_to_chat(
     Ok((result.transferred, result.user_balance, result.chat_balance))
 }
 
+fn billing_metadata(metadata_json: &str) -> PyResult<Map<String, Value>> {
+    serde_json::from_str(metadata_json).map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+/// Reserve credits from a chat-owned automation account.
+#[pyfunction]
+fn billing_charge_chat_ai_credits(
+    py: Python<'_>,
+    database_url: &str,
+    chat_id: i64,
+    amount: i32,
+    event_type: &str,
+    metadata_json: &str,
+) -> PyResult<(bool, i64)> {
+    let metadata = billing_metadata(metadata_json)?;
+    let repository = BillingRepository::new(database_url);
+    let result = py
+        .detach(|| repository.charge_chat_ai_credits(chat_id, amount, event_type, &metadata))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok((result.charged, result.chat_balance))
+}
+
+/// Refund credits to a chat-owned automation account.
+#[pyfunction]
+fn billing_refund_chat_ai_credits(
+    py: Python<'_>,
+    database_url: &str,
+    chat_id: i64,
+    amount: i32,
+    event_type: &str,
+    metadata_json: &str,
+) -> PyResult<i64> {
+    let metadata = billing_metadata(metadata_json)?;
+    let repository = BillingRepository::new(database_url);
+    py.detach(|| repository.refund_chat_ai_credits(chat_id, amount, event_type, &metadata))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+/// Apply debt to a chat-owned automation account.
+#[pyfunction]
+fn billing_apply_chat_ai_debt(
+    py: Python<'_>,
+    database_url: &str,
+    chat_id: i64,
+    amount: i32,
+    event_type: &str,
+    metadata_json: &str,
+) -> PyResult<i64> {
+    let metadata = billing_metadata(metadata_json)?;
+    let repository = BillingRepository::new(database_url);
+    py.detach(|| repository.apply_chat_ai_debt(chat_id, amount, event_type, &metadata))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -1987,6 +2041,9 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(billing_record_star_payment, module)?)?;
     module.add_function(wrap_pyfunction!(billing_mint_user_credits, module)?)?;
     module.add_function(wrap_pyfunction!(billing_transfer_user_to_chat, module)?)?;
+    module.add_function(wrap_pyfunction!(billing_charge_chat_ai_credits, module)?)?;
+    module.add_function(wrap_pyfunction!(billing_refund_chat_ai_credits, module)?)?;
+    module.add_function(wrap_pyfunction!(billing_apply_chat_ai_debt, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;

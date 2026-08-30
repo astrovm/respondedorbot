@@ -125,6 +125,35 @@ class _RustBillingManualCredits(Protocol):
     ) -> tuple[bool, int, int]: ...
 
 
+class _RustBillingChatAiCredits(Protocol):
+    def billing_charge_chat_ai_credits(
+        self,
+        database_url: str,
+        chat_id: int,
+        amount: int,
+        event_type: str,
+        metadata_json: str,
+    ) -> tuple[bool, int]: ...
+
+    def billing_refund_chat_ai_credits(
+        self,
+        database_url: str,
+        chat_id: int,
+        amount: int,
+        event_type: str,
+        metadata_json: str,
+    ) -> int: ...
+
+    def billing_apply_chat_ai_debt(
+        self,
+        database_url: str,
+        chat_id: int,
+        amount: int,
+        event_type: str,
+        metadata_json: str,
+    ) -> int: ...
+
+
 def _load_rust_billing_reads() -> _RustBillingReads | None:
     module = load_rust_bridge("RUST_BILLING_READ_SHADOW_ENABLED")
     if module is None:
@@ -158,6 +187,13 @@ def _load_rust_billing_manual_credits() -> _RustBillingManualCredits | None:
     if module is None:
         return None
     return cast(_RustBillingManualCredits, module)
+
+
+def _load_rust_billing_chat_ai_credits() -> _RustBillingChatAiCredits | None:
+    module = load_rust_bridge("RUST_BILLING_CHAT_AI_CREDITS_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustBillingChatAiCredits, module)
 
 
 class CreditsDBError(RuntimeError):
@@ -1421,6 +1457,27 @@ def charge_chat_ai_credits(
 
     charge_amount = int(amount)
     metadata_dict = dict(metadata or {})
+    normalized_event_type = str(event_type or "ai_reserve")
+    rust = _load_rust_billing_chat_ai_credits()
+    database_url = get_database_url()
+    if rust is not None and database_url:
+        ensure_schema()
+        try:
+            charged, chat_balance = rust.billing_charge_chat_ai_credits(
+                database_url,
+                int(chat_id),
+                charge_amount,
+                normalized_event_type,
+                json.dumps(metadata_dict),
+            )
+            return {
+                "ok": bool(charged),
+                "source": "chat" if charged else None,
+                "chat_balance": int(chat_balance),
+                "chat_balance_credit_units": int(chat_balance),
+            }
+        except Exception as error:
+            raise CreditsDBError("Rust chat AI charge transaction failed") from error
 
     def operation(cur: Any) -> Dict[str, Any]:
         chat_balance = _get_balance_for_update(cur, "chat", chat_id)
@@ -1440,7 +1497,7 @@ def charge_chat_ai_credits(
                     VALUES (%s, %s, %s, %s, %s, %s::jsonb)
                     """,
                 (
-                    str(event_type or "ai_reserve"),
+                    normalized_event_type,
                     None,
                     None,
                     int(chat_id),
@@ -1476,6 +1533,22 @@ def refund_chat_ai_credits(
 
     refund_amount = int(amount)
     metadata_dict = dict(metadata or {})
+    normalized_event_type = str(event_type or "ai_refund")
+    rust = _load_rust_billing_chat_ai_credits()
+    database_url = get_database_url()
+    if rust is not None and database_url:
+        ensure_schema()
+        try:
+            chat_balance = rust.billing_refund_chat_ai_credits(
+                database_url,
+                int(chat_id),
+                refund_amount,
+                normalized_event_type,
+                json.dumps(metadata_dict),
+            )
+            return {"chat_balance": int(chat_balance)}
+        except Exception as error:
+            raise CreditsDBError("Rust chat AI refund transaction failed") from error
 
     def operation(cur: Any) -> Dict[str, int]:
         chat_balance = _get_balance_for_update(cur, "chat", chat_id) + refund_amount
@@ -1493,7 +1566,7 @@ def refund_chat_ai_credits(
                 VALUES (%s, %s, %s, %s, %s, %s::jsonb)
                 """,
             (
-                str(event_type or "ai_refund"),
+                normalized_event_type,
                 None,
                 None,
                 int(chat_id),
@@ -1517,6 +1590,22 @@ def apply_chat_ai_debt(
 
     debt_amount = int(amount)
     metadata_dict = dict(metadata or {})
+    normalized_event_type = str(event_type or "ai_settlement_debt")
+    rust = _load_rust_billing_chat_ai_credits()
+    database_url = get_database_url()
+    if rust is not None and database_url:
+        ensure_schema()
+        try:
+            chat_balance = rust.billing_apply_chat_ai_debt(
+                database_url,
+                int(chat_id),
+                debt_amount,
+                normalized_event_type,
+                json.dumps(metadata_dict),
+            )
+            return {"chat_balance": int(chat_balance)}
+        except Exception as error:
+            raise CreditsDBError("Rust chat AI debt transaction failed") from error
 
     def operation(cur: Any) -> Dict[str, int]:
         chat_balance = _get_balance_for_update(cur, "chat", chat_id) - debt_amount
@@ -1534,7 +1623,7 @@ def apply_chat_ai_debt(
                 VALUES (%s, %s, %s, %s, %s, %s::jsonb)
                 """,
             (
-                str(event_type or "ai_settlement_debt"),
+                normalized_event_type,
                 None,
                 None,
                 int(chat_id),

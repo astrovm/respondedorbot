@@ -517,6 +517,20 @@ def verify_billing_manual_credits(bridge: ModuleType) -> None:
             raise AssertionError(f"Rust manual-credit bridge unavailable: {function_name}")
 
 
+def verify_billing_chat_ai_credits(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "billing_chat_ai_credits.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    if contract["account_scope"] != "chat":
+        raise AssertionError("chat AI billing account scope changed")
+    for function_name in (
+        "billing_charge_chat_ai_credits",
+        "billing_refund_chat_ai_credits",
+        "billing_apply_chat_ai_debt",
+    ):
+        if not callable(getattr(bridge, function_name)):
+            raise AssertionError(f"Rust chat AI bridge unavailable: {function_name}")
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -603,6 +617,7 @@ def main(arguments: list[str]) -> int:
     verify_billing_onboarding(bridge)
     verify_billing_star_payments(bridge)
     verify_billing_manual_credits(bridge)
+    verify_billing_chat_ai_credits(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)
