@@ -46,6 +46,7 @@ Rows not listed under migrated components remain Python-authoritative.
 | Giphy greeting search requests and original GIF URL extraction | `rust-flagged` | `RUST_GIPHY_ADAPTER_ENABLED=0`, missing bridge, bridge error, or invalid bridge result | `contracts/giphy_adapter.json` |
 | Stock query planning, Yahoo quote and symbol parsing, and Finviz mega-cap requests | `rust-flagged` | `RUST_STOCK_MARKET_ENABLED=0`, missing bridge, bridge error, or invalid bridge result | `contracts/stock_market.json` |
 | Typed Telegram message text, poll, media identifier, chat type, user identity, and numeric ID parsing | `rust-flagged` | `RUST_TELEGRAM_INPUT_ENABLED=0`, missing bridge, bridge error, or invalid bridge result | `contracts/telegram_input.json` |
+| Telegram long-poll request construction, supported-update decoding, offset advancement, and retry classification | `shadow` | Python PTB remains the sole production poller until the atomic runtime cutover | Rust adapter tests |
 | Provider rate-limit and Groq account-fallback classification | `rust-flagged` | `RUST_PROVIDER_ERROR_POLICY_ENABLED=0` or missing bridge | `contracts/provider_error_policy.json` |
 | Provider retry-window parsing and rate-limit header precedence | `rust-flagged` | `RUST_PROVIDER_RETRY_POLICY_ENABLED=0`, missing bridge, or bridge error | `contracts/provider_retry_policy.json` |
 | Provider exception, usage, finish-response, and retry-delay policy | `rust-flagged` | `RUST_PROVIDER_RUNTIME_POLICY_ENABLED=0`, missing bridge, or bridge error | `contracts/provider_runtime_policy.json` |
