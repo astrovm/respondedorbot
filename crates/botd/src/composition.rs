@@ -2,6 +2,10 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use bot_adapters::bcra::{
+    BcraTransport, ReqwestBcraTransport, TransportFailureKind as BcraTransportFailureKind,
+    load_bcra,
+};
 use bot_adapters::billing_read::{BillingRepository, ChargeHistoryRow};
 use bot_adapters::chat_config::{ChatConfigRepository, ChatConfigRepositoryError};
 use bot_adapters::coinmarketcap::{
@@ -63,13 +67,14 @@ use num_bigint::{BigInt, BigUint};
 use thiserror::Error;
 
 use crate::dispatcher::{
-    ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BillingBalanceSource,
-    BillingBalances, BillingTransferSink, BitcoinPriceSource, ChargeHistorySource,
-    ChatConfigSource, DollarMarketLoad, DollarMarketSource, DollarQuotesSource, ElectionLoad,
-    ElectionSource, GreetingPoolLoad, GreetingPoolSource, GroupAuthorizationDecision,
-    GroupAuthorizer, MessageStateSink, NativeDispatcher, OilPriceSource, OilQuoteLoad,
-    RandomSource, RuloInputLoad, RuloSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink,
-    StockPriceSource, StockQuotesLoad, WeatherObservationLoad, WeatherSource,
+    ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BcraLoad, BcraSource,
+    BillingBalanceSource, BillingBalances, BillingTransferSink, BitcoinPriceSource,
+    ChargeHistorySource, ChatConfigSource, DollarMarketLoad, DollarMarketSource,
+    DollarQuotesSource, ElectionLoad, ElectionSource, GreetingPoolLoad, GreetingPoolSource,
+    GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink, NativeDispatcher,
+    OilPriceSource, OilQuoteLoad, RandomSource, RuloInputLoad, RuloSource, RuntimeValues,
+    StarPaymentReceipt, StarPaymentSink, StockPriceSource, StockQuotesLoad, WeatherObservationLoad,
+    WeatherSource,
 };
 use crate::runtime::{PollingRuntime, UpdateSource};
 
@@ -134,6 +139,21 @@ struct CriptoYaDollarQuotesSource<T> {
 struct CriptoYaDollarMarketSource<T, C> {
     transport: T,
     cache: C,
+}
+
+struct NativeBcraSource<T, C> {
+    transport: T,
+    cache: C,
+}
+
+impl<T: BcraTransport, C: RequestCache> BcraSource for NativeBcraSource<T, C> {
+    fn load(&mut self, locale: bot_core::locale::Locale, now_unix: i64) -> BcraLoad {
+        let load = load_bcra(&self.transport, &mut self.cache, locale, now_unix);
+        BcraLoad {
+            text: load.text,
+            diagnostics: load.diagnostics,
+        }
+    }
 }
 
 impl<T: DollarTransport, C: DollarCache> DollarMarketSource for CriptoYaDollarMarketSource<T, C> {
@@ -893,6 +913,10 @@ pub enum CompositionError {
     DollarTransport(DollarTransportFailureKind),
     #[error("could not construct dollar-market Redis cache: {0}")]
     DollarCache(RedisJsonCacheError),
+    #[error("could not construct BCRA transport: {0:?}")]
+    BcraTransport(BcraTransportFailureKind),
+    #[error("could not construct BCRA Redis cache: {0}")]
+    BcraCache(RedisJsonCacheError),
     #[error("could not construct Giphy transport: {0:?}")]
     GiphyTransport(GiphyTransportFailureKind),
     #[error("could not construct Giphy Redis cache: {0}")]
@@ -946,6 +970,9 @@ pub fn build_native_runtime(
         ReqwestDollarTransport::new().map_err(CompositionError::DollarTransport)?;
     let dollar_cache =
         RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::DollarCache)?;
+    let bcra_transport = ReqwestBcraTransport::new().map_err(CompositionError::BcraTransport)?;
+    let bcra_cache =
+        RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::BcraCache)?;
     let rulo_transport =
         ReqwestCriptoYaTransport::new().map_err(CompositionError::CriptoYaTransport)?;
     let giphy_transport = ReqwestGiphyTransport::new().map_err(CompositionError::GiphyTransport)?;
@@ -998,6 +1025,10 @@ pub fn build_native_runtime(
     .with_dollar_market_source(Box::new(CriptoYaDollarMarketSource {
         transport: dollar_transport,
         cache: dollar_cache,
+    }))
+    .with_bcra_source(Box::new(NativeBcraSource {
+        transport: bcra_transport,
+        cache: bcra_cache,
     }))
     .with_rulo_source(Box::new(CriptoYaRuloSource {
         transport: rulo_transport,

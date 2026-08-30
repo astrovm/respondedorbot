@@ -1,5 +1,6 @@
 //! External service adapters for respondedorbot.
 
+pub mod bcra;
 pub mod billing_read;
 pub mod billing_schema;
 pub mod chat_config;

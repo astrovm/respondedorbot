@@ -17,6 +17,7 @@ repository = "https://github.com/astrovm/respondedorbot"
 [workspace.dependencies]
 bot-adapters = { path = "crates/bot-adapters" }
 bot-core = { path = "crates/bot-core" }
+calamine = "0.36.1"
 num-bigint = "0.5.1"
 native-tls = "0.2.18"
 postgres = { version = "0.19.14", features = ["with-serde_json-1"] }

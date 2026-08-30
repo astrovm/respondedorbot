@@ -10,6 +10,7 @@ pub mod ai_response_cleanup;
 pub mod ai_settlement;
 pub mod ai_usage;
 pub mod base_conversion;
+pub mod bcra;
 pub mod billing_commands;
 pub mod bitcoin_commands;
 pub mod cache_policy;

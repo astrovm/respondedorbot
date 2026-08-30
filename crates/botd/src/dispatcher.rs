@@ -5,6 +5,7 @@ use bot_core::admin_commands::{
     CreditLogEntry, CreditLogPlan, PrintCreditsContext, PrintCreditsPlan, plan_creditlog_command,
     plan_printcredits_command, printcredits_result_reply, render_creditlog,
 };
+use bot_core::bcra::classify_bcra_command;
 use bot_core::billing_commands::{
     TransferCommandContext, TransferCommandPlan, TransferResult, plan_transfer_command,
     transfer_result_reply,
@@ -203,6 +204,16 @@ pub trait DollarMarketSource {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct BcraLoad {
+    pub text: Option<String>,
+    pub diagnostics: Vec<String>,
+}
+
+pub trait BcraSource {
+    fn load(&mut self, locale: bot_core::locale::Locale, now_unix: i64) -> BcraLoad;
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct RuloInputLoad {
     pub input: RuloInput,
     pub diagnostics: Vec<String>,
@@ -309,6 +320,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     bitcoin_price_source: Option<Box<dyn BitcoinPriceSource>>,
     dollar_quotes_source: Option<Box<dyn DollarQuotesSource>>,
     dollar_market_source: Option<Box<dyn DollarMarketSource>>,
+    bcra_source: Option<Box<dyn BcraSource>>,
     rulo_source: Option<Box<dyn RuloSource>>,
     greeting_pool_source: Option<Box<dyn GreetingPoolSource>>,
     weather_source: Option<Box<dyn WeatherSource>>,
@@ -358,6 +370,7 @@ where
             bitcoin_price_source: None,
             dollar_quotes_source: None,
             dollar_market_source: None,
+            bcra_source: None,
             rulo_source: None,
             greeting_pool_source: None,
             weather_source: None,
@@ -434,6 +447,12 @@ where
     #[must_use]
     pub fn with_dollar_market_source(mut self, source: Box<dyn DollarMarketSource>) -> Self {
         self.dollar_market_source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub fn with_bcra_source(mut self, source: Box<dyn BcraSource>) -> Self {
+        self.bcra_source = Some(source);
         self
     }
 
@@ -1254,6 +1273,24 @@ where
                 CreditLogPlan::NotHandled => StatelessCommandPlan::NotHandled,
                 CreditLogPlan::LegacyRequired => StatelessCommandPlan::LegacyFallbackRequired,
             }
+        } else if classify_bcra_command(&parsed.command) {
+            let Some(source) = self.bcra_source.as_mut() else {
+                return Ok(DispatchOutcome::LegacyRequired);
+            };
+            let load = source.load(locale, timestamp);
+            self.state_diagnostics.extend(load.diagnostics);
+            let text = load.text.unwrap_or_else(|| match locale {
+                bot_core::locale::Locale::Es => {
+                    "No pude obtener las variables del BCRA en este momento, probá más tarde"
+                        .to_owned()
+                }
+                bot_core::locale::Locale::En => {
+                    "I could not load the BCRA variables right now".to_owned()
+                }
+            });
+            let mut message = SendMessage::new(chat_id, &text);
+            message.reply_to_message_id = Some(message_id);
+            StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if classify_dollar_command(&parsed.command) {
             match plan_dollar_command(&parsed.message_text) {
                 DollarCommandPlan::InvalidTimeframe => {
@@ -1631,14 +1668,14 @@ mod tests {
     use serde_json::{Map, json};
 
     use super::{
-        ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BillingBalanceSource,
-        BillingBalances, BillingTransferSink, BitcoinPriceSource, ChargeHistoryPage,
-        ChargeHistorySource, ChatConfigSource, DispatchError, DispatchOutcome, DollarMarketLoad,
-        DollarMarketSource, DollarQuotesSource, ElectionLoad, ElectionSource, GreetingPoolLoad,
-        GreetingPoolSource, GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink,
-        NativeDispatcher, OilPriceSource, OilQuoteLoad, RandomSource, RuloInputLoad, RuloSource,
-        RuntimeValues, StarPaymentReceipt, StarPaymentSink, StockPriceSource, StockQuotesLoad,
-        TransferResult, WeatherObservationLoad, WeatherSource,
+        ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BcraLoad, BcraSource,
+        BillingBalanceSource, BillingBalances, BillingTransferSink, BitcoinPriceSource,
+        ChargeHistoryPage, ChargeHistorySource, ChatConfigSource, DispatchError, DispatchOutcome,
+        DollarMarketLoad, DollarMarketSource, DollarQuotesSource, ElectionLoad, ElectionSource,
+        GreetingPoolLoad, GreetingPoolSource, GroupAuthorizationDecision, GroupAuthorizer,
+        MessageStateSink, NativeDispatcher, OilPriceSource, OilQuoteLoad, RandomSource,
+        RuloInputLoad, RuloSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink,
+        StockPriceSource, StockQuotesLoad, TransferResult, WeatherObservationLoad, WeatherSource,
     };
     use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup};
     use bot_core::devo::DevoQuotes;
@@ -1985,6 +2022,18 @@ mod tests {
     struct DollarMarket {
         result: DollarMarketLoad,
         calls: Rc<RefCell<Vec<(i64, bot_core::locale::Locale, i64)>>>,
+    }
+
+    struct BcraVariables {
+        result: BcraLoad,
+        calls: Rc<RefCell<Vec<(bot_core::locale::Locale, i64)>>>,
+    }
+
+    impl BcraSource for BcraVariables {
+        fn load(&mut self, locale: bot_core::locale::Locale, now_unix: i64) -> BcraLoad {
+            self.calls.borrow_mut().push((locale, now_unix));
+            self.result.clone()
+        }
     }
 
     impl DollarMarketSource for DollarMarket {
@@ -2378,6 +2427,96 @@ mod tests {
         );
         assert_eq!(dispatcher.state.incoming.len(), 2);
         assert_eq!(dispatcher.state.outgoing.len(), 2);
+    }
+
+    #[test]
+    fn bcra_commands_localize_load_failures_diagnostics_state_and_legacy_boundary() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_bcra_source(Box::new(BcraVariables {
+            result: BcraLoad {
+                text: Some("synthetic BCRA variables".to_owned()),
+                diagnostics: vec!["synthetic stale source".to_owned()],
+            },
+            calls: Rc::clone(&calls),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(update("/variables", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            calls.borrow().as_slice(),
+            &[(bot_core::locale::Locale::En, 1_672_531_200)]
+        );
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
+            return;
+        };
+        assert_eq!(message.text, "synthetic BCRA variables");
+        assert_eq!(dispatcher.state_diagnostics(), &["synthetic stale source"]);
+        assert_eq!(dispatcher.state.incoming.len(), 1);
+        assert_eq!(dispatcher.state.outgoing.len(), 1);
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut failed = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_bcra_source(Box::new(BcraVariables {
+            result: BcraLoad {
+                text: None,
+                diagnostics: Vec::new(),
+            },
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            failed.dispatch(update("/bcra", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
+            return;
+        };
+        assert!(message.text.contains("No pude obtener las variables"));
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut missing = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            missing.dispatch(update("/bcra", None)),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
     }
 
     #[test]
