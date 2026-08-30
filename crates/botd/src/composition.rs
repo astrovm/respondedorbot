@@ -9,8 +9,10 @@ use bot_adapters::bcra::{
 use bot_adapters::billing_read::{BillingRepository, ChargeHistoryRow};
 use bot_adapters::chat_config::{ChatConfigRepository, ChatConfigRepositoryError};
 use bot_adapters::coinmarketcap::{
-    BitcoinPriceOutcome, CoinMarketCapTransport, ReqwestCoinMarketCapTransport,
+    BitcoinPriceOutcome, CoinMarketCapMarketTransport, CoinMarketCapTransport, MarketRequest,
+    MarketRequestKind, ReqwestCoinMarketCapTransport,
     TransportFailureKind as CoinMarketCapTransportFailureKind, fetch_bitcoin_price,
+    load_market_assets,
 };
 use bot_adapters::criptoya::{
     CriptoYaTransport, DollarQuotesOutcome, ExchangeQuotesOutcome, ExchangeSide,
@@ -59,6 +61,10 @@ use bot_core::command_state::{
     BOT_MESSAGE_METADATA_TTL_SECONDS, CHAT_HISTORY_WRITE_LIMIT, CHAT_STATE_TTL_SECONDS,
     IncomingCommandWritePlan, OutgoingCommandWritePlan,
 };
+use bot_core::market_prices::{
+    CryptoAsset, CryptoMarketProvider, MarketPriceCommand, UnifiedStockProvider,
+    execute_market_price_command,
+};
 use bot_core::stocks::{StockQuery, StockQuote, plan_stock_query};
 use bot_core::telegram_actions::TelegramAction;
 use bot_core::telegram_commands::command_publication_actions;
@@ -71,10 +77,10 @@ use crate::dispatcher::{
     BillingBalanceSource, BillingBalances, BillingTransferSink, BitcoinPriceSource,
     ChargeHistorySource, ChatConfigSource, DollarMarketLoad, DollarMarketSource,
     DollarQuotesSource, ElectionLoad, ElectionSource, GreetingPoolLoad, GreetingPoolSource,
-    GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink, NativeDispatcher,
-    OilPriceSource, OilQuoteLoad, RandomSource, RuloInputLoad, RuloSource, RuntimeValues,
-    StarPaymentReceipt, StarPaymentSink, StockPriceSource, StockQuotesLoad, WeatherObservationLoad,
-    WeatherSource,
+    GroupAuthorizationDecision, GroupAuthorizer, MarketPriceLoad, MarketPriceSource,
+    MessageStateSink, NativeDispatcher, OilPriceSource, OilQuoteLoad, RandomSource, RuloInputLoad,
+    RuloSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink, StockPriceSource,
+    StockQuotesLoad, WeatherObservationLoad, WeatherSource,
 };
 use crate::runtime::{PollingRuntime, UpdateSource};
 
@@ -128,6 +134,123 @@ impl<T: CoinMarketCapTransport> BitcoinPriceSource for CoinMarketCapBitcoinPrice
             BitcoinPriceOutcome::TransportError(kind) => {
                 Err(format!("CoinMarketCap transport failed: {kind:?}"))
             }
+        }
+    }
+}
+
+struct CachedCoinMarketCap<'a, T, C> {
+    transport: &'a T,
+    cache: &'a mut C,
+    api_key: &'a str,
+    now_unix: i64,
+    diagnostics: Vec<String>,
+}
+
+impl<T: CoinMarketCapMarketTransport, C: RequestCache> CryptoMarketProvider
+    for CachedCoinMarketCap<'_, T, C>
+{
+    fn listings(&mut self, currency: &str) -> Result<Vec<CryptoAsset>, String> {
+        self.load(currency, MarketRequestKind::Listings)
+    }
+
+    fn quotes(
+        &mut self,
+        identifiers: &[String],
+        currency: &str,
+        by_slug: bool,
+    ) -> Result<Vec<CryptoAsset>, String> {
+        self.load(
+            currency,
+            MarketRequestKind::Quotes {
+                identifiers: identifiers.to_vec(),
+                by_slug,
+            },
+        )
+    }
+}
+
+impl<T: CoinMarketCapMarketTransport, C: RequestCache> CachedCoinMarketCap<'_, T, C> {
+    fn load(
+        &mut self,
+        currency: &str,
+        kind: MarketRequestKind,
+    ) -> Result<Vec<CryptoAsset>, String> {
+        let load = load_market_assets(
+            self.transport,
+            self.cache,
+            &MarketRequest {
+                api_key: self.api_key.to_owned(),
+                currency: currency.to_owned(),
+                kind,
+            },
+            self.now_unix,
+        );
+        self.diagnostics.extend(load.diagnostics);
+        load.assets
+            .ok_or_else(|| "provider returned no usable market data".to_owned())
+    }
+}
+
+struct UnifiedStocks<'a, T, F, C> {
+    source: &'a mut YahooStockPriceSource<T, F, C>,
+    now_unix: i64,
+    diagnostics: Vec<String>,
+}
+
+impl<T, F, C> UnifiedStockProvider for UnifiedStocks<'_, T, F, C>
+where
+    T: YahooFinanceTransport,
+    F: FinvizTransport,
+    C: RequestCache + StockPoolCache,
+{
+    fn lookup(&mut self, query: &str) -> Result<Option<Vec<(String, Option<StockQuote>)>>, String> {
+        let load = self.source.load(query, self.now_unix);
+        self.diagnostics.extend(load.diagnostics);
+        Ok(load.quotes)
+    }
+}
+
+struct NativeMarketPriceSource<T, C, Y, F, S> {
+    transport: T,
+    cache: C,
+    api_key: String,
+    stocks: YahooStockPriceSource<Y, F, S>,
+}
+
+impl<T, C, Y, F, S> MarketPriceSource for NativeMarketPriceSource<T, C, Y, F, S>
+where
+    T: CoinMarketCapMarketTransport,
+    C: RequestCache,
+    Y: YahooFinanceTransport,
+    F: FinvizTransport,
+    S: RequestCache + StockPoolCache,
+{
+    fn load(
+        &mut self,
+        query: &str,
+        command: MarketPriceCommand,
+        locale: bot_core::locale::Locale,
+        now_unix: i64,
+    ) -> MarketPriceLoad {
+        let mut crypto = CachedCoinMarketCap {
+            transport: &self.transport,
+            cache: &mut self.cache,
+            api_key: &self.api_key,
+            now_unix,
+            diagnostics: Vec::new(),
+        };
+        let mut stocks = UnifiedStocks {
+            source: &mut self.stocks,
+            now_unix,
+            diagnostics: Vec::new(),
+        };
+        let mut execution =
+            execute_market_price_command(query, command, locale, &mut crypto, &mut stocks);
+        execution.diagnostics.extend(crypto.diagnostics);
+        execution.diagnostics.extend(stocks.diagnostics);
+        MarketPriceLoad {
+            text: execution.text,
+            diagnostics: execution.diagnostics,
         }
     }
 }
@@ -907,6 +1030,8 @@ pub enum CompositionError {
     AdminTransport(TransportFailureKind),
     #[error("could not construct CoinMarketCap transport: {0:?}")]
     CoinMarketCapTransport(CoinMarketCapTransportFailureKind),
+    #[error("could not construct CoinMarketCap Redis cache: {0}")]
+    CoinMarketCapCache(RedisJsonCacheError),
     #[error("could not construct CriptoYa transport: {0:?}")]
     CriptoYaTransport(CriptoYaTransportFailureKind),
     #[error("could not construct dollar-market transport: {0:?}")]
@@ -1059,10 +1184,31 @@ pub fn build_native_runtime(
     {
         let transport = ReqwestCoinMarketCapTransport::new()
             .map_err(CompositionError::CoinMarketCapTransport)?;
-        dispatcher.with_bitcoin_price_source(Box::new(CoinMarketCapBitcoinPriceSource {
-            transport,
-            api_key,
-        }))
+        let market_transport = ReqwestCoinMarketCapTransport::new()
+            .map_err(CompositionError::CoinMarketCapTransport)?;
+        let market_cache = RedisJsonCache::new(options.redis_endpoint)
+            .map_err(CompositionError::CoinMarketCapCache)?;
+        let market_yahoo_transport =
+            ReqwestYahooFinanceTransport::new().map_err(CompositionError::StockYahooTransport)?;
+        let market_finviz_transport =
+            ReqwestFinvizTransport::new().map_err(CompositionError::FinvizTransport)?;
+        let market_stock_cache =
+            RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::StockCache)?;
+        dispatcher
+            .with_bitcoin_price_source(Box::new(CoinMarketCapBitcoinPriceSource {
+                transport,
+                api_key: api_key.clone(),
+            }))
+            .with_market_price_source(Box::new(NativeMarketPriceSource {
+                transport: market_transport,
+                cache: market_cache,
+                api_key,
+                stocks: YahooStockPriceSource {
+                    yahoo_transport: market_yahoo_transport,
+                    finviz_transport: market_finviz_transport,
+                    cache: market_stock_cache,
+                },
+            }))
     } else {
         dispatcher
     };
@@ -1873,6 +2019,18 @@ mod tests {
             long_poll_timeout: Duration::from_secs(30),
             admin_user_id: Some(99),
             coinmarketcap_key: None,
+            giphy_api_key: None,
+        });
+        assert!(result.is_ok());
+        let result = build_native_runtime(NativeRuntimeOptions {
+            token: "synthetic-token",
+            database_url: "postgresql://synthetic.invalid/database",
+            bot_name: "@synthetic_bot",
+            instance_name: Some("synthetic-instance".to_owned()),
+            redis_endpoint: &endpoint,
+            long_poll_timeout: Duration::from_secs(30),
+            admin_user_id: Some(99),
+            coinmarketcap_key: Some("synthetic-cmc-key".to_owned()),
             giphy_api_key: None,
         });
         assert!(result.is_ok());

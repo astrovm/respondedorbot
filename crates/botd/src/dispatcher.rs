@@ -39,6 +39,7 @@ use bot_core::dollar::{
 use bot_core::greeting_commands::{GreetingCategory, classify_greeting_command, greeting_fallback};
 use bot_core::language_command::{LanguageCommandPlan, plan_language_command};
 use bot_core::locale::resolve_locale;
+use bot_core::market_prices::{MarketPriceCommand, classify_market_price_command};
 use bot_core::polymarket::{ElectionEvent, classify_election_command, render_elections};
 use bot_core::random_selection::{RandomSelection, parse_random_selection};
 use bot_core::rulo::{RuloInput, evaluate_rulo, render_rulo};
@@ -264,6 +265,22 @@ pub trait StockPriceSource {
     fn load(&mut self, query: &str, now_unix: i64) -> StockQuotesLoad;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarketPriceLoad {
+    pub text: String,
+    pub diagnostics: Vec<String>,
+}
+
+pub trait MarketPriceSource {
+    fn load(
+        &mut self,
+        query: &str,
+        command: MarketPriceCommand,
+        locale: bot_core::locale::Locale,
+        now_unix: i64,
+    ) -> MarketPriceLoad;
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ElectionLoad {
     pub events: Vec<ElectionEvent>,
@@ -326,6 +343,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     weather_source: Option<Box<dyn WeatherSource>>,
     oil_price_source: Option<Box<dyn OilPriceSource>>,
     stock_price_source: Option<Box<dyn StockPriceSource>>,
+    market_price_source: Option<Box<dyn MarketPriceSource>>,
     election_source: Option<Box<dyn ElectionSource>>,
     last_outcome: Option<DispatchOutcome>,
     state_diagnostics: Vec<String>,
@@ -376,6 +394,7 @@ where
             weather_source: None,
             oil_price_source: None,
             stock_price_source: None,
+            market_price_source: None,
             election_source: None,
             last_outcome: None,
             state_diagnostics: Vec::new(),
@@ -483,6 +502,12 @@ where
     #[must_use]
     pub fn with_stock_price_source(mut self, source: Box<dyn StockPriceSource>) -> Self {
         self.stock_price_source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub fn with_market_price_source(mut self, source: Box<dyn MarketPriceSource>) -> Self {
+        self.market_price_source = Some(source);
         self
     }
 
@@ -1328,6 +1353,15 @@ where
             message.parse_mode = Some(ParseMode::Html);
             message.disable_web_page_preview = true;
             StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+        } else if let Some(command) = classify_market_price_command(&parsed.command) {
+            let Some(source) = self.market_price_source.as_mut() else {
+                return Ok(DispatchOutcome::LegacyRequired);
+            };
+            let load = source.load(&parsed.message_text, command, locale, timestamp);
+            self.state_diagnostics.extend(load.diagnostics);
+            let mut message = SendMessage::new(chat_id, &load.text);
+            message.reply_to_message_id = Some(message_id);
+            StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if classify_stock_command(&parsed.command) {
             let Some(source) = self.stock_price_source.as_mut() else {
                 return Ok(DispatchOutcome::LegacyRequired);
@@ -1673,9 +1707,10 @@ mod tests {
         ChargeHistoryPage, ChargeHistorySource, ChatConfigSource, DispatchError, DispatchOutcome,
         DollarMarketLoad, DollarMarketSource, DollarQuotesSource, ElectionLoad, ElectionSource,
         GreetingPoolLoad, GreetingPoolSource, GroupAuthorizationDecision, GroupAuthorizer,
-        MessageStateSink, NativeDispatcher, OilPriceSource, OilQuoteLoad, RandomSource,
-        RuloInputLoad, RuloSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink,
-        StockPriceSource, StockQuotesLoad, TransferResult, WeatherObservationLoad, WeatherSource,
+        MarketPriceLoad, MarketPriceSource, MessageStateSink, NativeDispatcher, OilPriceSource,
+        OilQuoteLoad, RandomSource, RuloInputLoad, RuloSource, RuntimeValues, StarPaymentReceipt,
+        StarPaymentSink, StockPriceSource, StockQuotesLoad, TransferResult, WeatherObservationLoad,
+        WeatherSource,
     };
     use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup};
     use bot_core::devo::DevoQuotes;
@@ -2094,6 +2129,37 @@ mod tests {
     struct StockQuotes {
         result: StockQuotesLoad,
         calls: Rc<RefCell<Vec<(String, i64)>>>,
+    }
+
+    type MarketPriceCalls = Rc<
+        RefCell<
+            Vec<(
+                String,
+                bot_core::market_prices::MarketPriceCommand,
+                bot_core::locale::Locale,
+                i64,
+            )>,
+        >,
+    >;
+
+    struct MarketPrices {
+        result: MarketPriceLoad,
+        calls: MarketPriceCalls,
+    }
+
+    impl MarketPriceSource for MarketPrices {
+        fn load(
+            &mut self,
+            query: &str,
+            command: bot_core::market_prices::MarketPriceCommand,
+            locale: bot_core::locale::Locale,
+            now_unix: i64,
+        ) -> MarketPriceLoad {
+            self.calls
+                .borrow_mut()
+                .push((query.to_owned(), command, locale, now_unix));
+            self.result.clone()
+        }
     }
 
     impl StockPriceSource for StockQuotes {
@@ -2889,6 +2955,76 @@ mod tests {
         assert_eq!(dispatcher.state.incoming.len(), 1);
         assert_eq!(dispatcher.state.outgoing.len(), 1);
         assert_eq!(dispatcher.state_diagnostics(), &["synthetic stale search"]);
+    }
+
+    #[test]
+    fn market_price_aliases_use_native_source_locale_diagnostics_and_state() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_market_price_source(Box::new(MarketPrices {
+            result: MarketPriceLoad {
+                text: "BTC: 50000 USD (+2.5% 24h)".to_owned(),
+                diagnostics: vec!["synthetic stale CMC cache".to_owned()],
+            },
+            calls: Rc::clone(&calls),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(update("/bresios btc", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            calls.borrow().as_slice(),
+            &[(
+                "btc".to_owned(),
+                bot_core::market_prices::MarketPriceCommand::Unified,
+                bot_core::locale::Locale::En,
+                1_672_531_200,
+            )]
+        );
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
+            return;
+        };
+        assert_eq!(message.text, "BTC: 50000 USD (+2.5% 24h)");
+        assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
+        assert_eq!(dispatcher.state.incoming.len(), 1);
+        assert_eq!(dispatcher.state.outgoing.len(), 1);
+        assert_eq!(
+            dispatcher.state_diagnostics(),
+            &["synthetic stale CMC cache"]
+        );
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut missing = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            missing.dispatch(update("/crypto btc", None)),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
     }
 
     #[test]

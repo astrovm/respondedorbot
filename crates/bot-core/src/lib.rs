@@ -33,6 +33,7 @@ pub mod links;
 pub mod locale;
 pub mod market_context;
 pub mod market_models;
+pub mod market_prices;
 pub mod message_state;
 pub mod polymarket;
 pub mod price_queries;
