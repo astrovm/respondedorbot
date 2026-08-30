@@ -123,6 +123,17 @@ def verify_satoshi(bridge: ModuleType) -> None:
             raise AssertionError(f"expected satoshi failure for {case['name']}")
 
 
+def verify_devo(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "devo.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["parse"]:
+        actual = bridge.parse_devo_input(case["input"])
+        assert actual == (case["expected_kind"], case["fee"], case["purchase"]), case
+    for case in contract["calculate"]:
+        actual = json.loads(bridge.calculate_devo(*case["input"]))
+        assert actual == case["expected"], case["name"]
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -184,6 +195,7 @@ def main(arguments: list[str]) -> int:
     verify_market_context(bridge)
     verify_market_models(bridge)
     verify_satoshi(bridge)
+    verify_devo(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

@@ -1,0 +1,38 @@
+{
+  "parse": [
+    { "input": "0.5", "expected_kind": "valid", "fee": 0.005, "purchase": 0.0 },
+    { "input": "0.5, 100", "expected_kind": "valid", "fee": 0.005, "purchase": 100.0 },
+    { "input": "0.5, 100, ignored", "expected_kind": "valid", "fee": 0.005, "purchase": 100.0 },
+    { "input": "invalid", "expected_kind": "usage", "fee": 0.0, "purchase": 0.0 },
+    { "input": "nan", "expected_kind": "input_error", "fee": 0.0, "purchase": 0.0 },
+    { "input": "101", "expected_kind": "input_error", "fee": 0.0, "purchase": 0.0 },
+    { "input": "-1,-2", "expected_kind": "input_error", "fee": 0.0, "purchase": 0.0 }
+  ],
+  "calculate": [
+    {
+      "name": "summary",
+      "input": [0.005, 0.0, 100.0, 150.0, 200.0, 190.0],
+      "expected": { "profit": "62.68", "fee": "0.5", "official": "100", "usdt": "195", "card": "150" }
+    },
+    {
+      "name": "purchase projection",
+      "input": [0.005, 100.0, 100.0, 150.0, 200.0, 190.0],
+      "expected": {
+        "profit": "62.68",
+        "fee": "0.5",
+        "official": "100",
+        "usdt": "195",
+        "card": "150",
+        "purchase": {
+          "usd": "100",
+          "ars": "15000",
+          "usdt": "76.92",
+          "profit_ars": "9402.5",
+          "profit_usdt": "48.22",
+          "total_ars": "24402.5",
+          "total_usdt": "125.14"
+        }
+      }
+    }
+  ]
+}

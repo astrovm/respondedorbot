@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import logging
 import re
 from collections.abc import Callable, Mapping
 from logging import Logger
@@ -28,10 +30,25 @@ RatesFormatter = Callable[
 CachedRequest = Callable[..., dict[str, Any] | None]
 RuloBuilder = Callable[..., str]
 PriceGetter = Callable[[str], float | None]
+logger = logging.getLogger(__name__)
 
 
 class _RustSatoshiFormatter(Protocol):
     def format_satoshi_quote(self, price_usd: float, price_ars: float) -> str: ...
+
+
+class _RustDevoCalculator(Protocol):
+    def parse_devo_input(self, message_text: str) -> tuple[str, float, float]: ...
+
+    def calculate_devo(
+        self,
+        fee: float,
+        purchase: float,
+        official: float,
+        card: float,
+        usdt_ask: float,
+        usdt_bid: float,
+    ) -> str: ...
 
 
 def _load_rust_satoshi_formatter() -> _RustSatoshiFormatter | None:
@@ -39,6 +56,13 @@ def _load_rust_satoshi_formatter() -> _RustSatoshiFormatter | None:
     if module is None:
         return None
     return cast(_RustSatoshiFormatter, module)
+
+
+def _load_rust_devo_calculator() -> _RustDevoCalculator | None:
+    module = load_rust_bridge("RUST_DEVO_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustDevoCalculator, module)
 
 
 def format_dollar_rates(
@@ -139,55 +163,139 @@ def build_dollar_rates_text(
     return format_rates(sorted_rates, hours_ago, band_limits)
 
 
+def _parse_devo_python(msg_text: str) -> tuple[str, float, float]:
+    purchase = 0.0
+    if "," in msg_text:
+        numbers = msg_text.replace(" ", "").split(",")
+        fee = float(numbers[0]) / 100
+        if len(numbers) > 1:
+            purchase = float(numbers[1])
+    else:
+        fee = float(msg_text) / 100
+    if fee != fee or fee > 1 or purchase != purchase or purchase < 0:
+        return "input_error", 0.0, 0.0
+    return "valid", fee, purchase
+
+
+def _calculate_devo_python(
+    fee: float,
+    purchase: float,
+    official: float,
+    card: float,
+    usdt_ask: float,
+    usdt_bid: float,
+) -> dict[str, Any]:
+    usdt = (usdt_ask + usdt_bid) / 2
+    profit = -(fee * usdt + official - usdt) / card
+    result: dict[str, Any] = {
+        "profit": fmt_num(profit * 100, 2),
+        "fee": fmt_num(fee * 100, 2),
+        "official": fmt_num(official, 2),
+        "usdt": fmt_num(usdt, 2),
+        "card": fmt_num(card, 2),
+    }
+    if purchase > 0:
+        purchase_ars = purchase * card
+        purchase_usdt = purchase_ars / usdt
+        profit_ars = purchase_ars * profit
+        profit_usdt = profit_ars / usdt
+        result["purchase"] = {
+            "usd": fmt_num(purchase, 2),
+            "ars": fmt_num(purchase_ars, 2),
+            "usdt": fmt_num(purchase_usdt, 2),
+            "profit_ars": fmt_num(profit_ars, 2),
+            "profit_usdt": fmt_num(profit_usdt, 2),
+            "total_ars": fmt_num(purchase_ars + profit_ars, 2),
+            "total_usdt": fmt_num(purchase_usdt + profit_usdt, 2),
+        }
+    return result
+
+
+def _render_devo(result: Mapping[str, Any]) -> str:
+    message = tr(
+        "market.dollar.devo_summary",
+        profit=result["profit"],
+        fee=result["fee"],
+        official=result["official"],
+        usdt=result["usdt"],
+        card=result["card"],
+    )
+    purchase = result.get("purchase")
+    if isinstance(purchase, Mapping):
+        return tr(
+            "market.dollar.devo_purchase",
+            usd=purchase["usd"],
+            ars=purchase["ars"],
+            usdt=purchase["usdt"],
+            profit_ars=purchase["profit_ars"],
+            profit_usdt=purchase["profit_usdt"],
+            total_ars=purchase["total_ars"],
+            total_usdt=purchase["total_usdt"],
+            summary=message,
+        )
+    return message
+
+
+def _parse_devo(rust: _RustDevoCalculator | None, msg_text: str) -> tuple[str, float, float]:
+    if rust is None:
+        return _parse_devo_python(msg_text)
+    try:
+        return rust.parse_devo_input(msg_text)
+    except Exception as error:
+        logger.warning(
+            "Rust devo parser failed; using Python fallback: error_type=%s",
+            type(error).__name__,
+        )
+        return _parse_devo_python(msg_text)
+
+
+def _calculate_devo(
+    rust: _RustDevoCalculator | None,
+    fee: float,
+    purchase: float,
+    official: float,
+    card: float,
+    usdt_ask: float,
+    usdt_bid: float,
+) -> Mapping[str, Any]:
+    if rust is None:
+        return _calculate_devo_python(fee, purchase, official, card, usdt_ask, usdt_bid)
+    try:
+        result = json.loads(
+            rust.calculate_devo(fee, purchase, official, card, usdt_ask, usdt_bid)
+        )
+        if not isinstance(result, Mapping):
+            raise ValueError("Rust devo result is not a mapping")
+        return result
+    except Exception as error:
+        logger.warning(
+            "Rust devo calculation failed; using Python fallback: error_type=%s",
+            type(error).__name__,
+        )
+        return _calculate_devo_python(fee, purchase, official, card, usdt_ask, usdt_bid)
+
+
 def get_devo(msg_text: str, *, fetch_dollars: DollarFetcher) -> str:
     try:
-        fee = 0.0
-        purchase = 0.0
-        if "," in msg_text:
-            numbers = msg_text.replace(" ", "").split(",")
-            fee = float(numbers[0]) / 100
-            if len(numbers) > 1:
-                purchase = float(numbers[1])
-        else:
-            fee = float(msg_text) / 100
-
-        if fee != fee or fee > 1 or purchase != purchase or purchase < 0:
+        rust = _load_rust_devo_calculator()
+        kind, fee, purchase = _parse_devo(rust, msg_text)
+        if kind == "usage":
+            return tr("market.dollar.devo_usage")
+        if kind == "input_error":
             return tr("market.dollar.input_error")
+        if kind != "valid":
+            raise ValueError("unknown devo parse result")
+
         dollars = fetch_dollars()
         if not dollars or "data" not in dollars:
             return tr("market.dollar.load_error")
-
         data = dollars["data"]
-        usdt = (float(data["cripto"]["usdt"]["ask"]) + float(data["cripto"]["usdt"]["bid"])) / 2
         official = float(data["oficial"]["price"])
         card = float(data["tarjeta"]["price"])
-        profit = -(fee * usdt + official - usdt) / card
-        message = tr(
-            "market.dollar.devo_summary",
-            profit=fmt_num(profit * 100, 2),
-            fee=fmt_num(fee * 100, 2),
-            official=fmt_num(official, 2),
-            usdt=fmt_num(usdt, 2),
-            card=fmt_num(card, 2),
-        )
-
-        if purchase > 0:
-            purchase_ars = purchase * card
-            purchase_usdt = purchase_ars / usdt
-            profit_ars = purchase_ars * profit
-            profit_usdt = profit_ars / usdt
-            message = tr(
-                "market.dollar.devo_purchase",
-                usd=fmt_num(purchase, 2),
-                ars=fmt_num(purchase_ars, 2),
-                usdt=fmt_num(purchase_usdt, 2),
-                profit_ars=fmt_num(profit_ars, 2),
-                profit_usdt=fmt_num(profit_usdt, 2),
-                total_ars=fmt_num(purchase_ars + profit_ars, 2),
-                total_usdt=fmt_num(purchase_usdt + profit_usdt, 2),
-                summary=message,
-            )
-        return message
+        usdt_ask = float(data["cripto"]["usdt"]["ask"])
+        usdt_bid = float(data["cripto"]["usdt"]["bid"])
+        result = _calculate_devo(rust, fee, purchase, official, card, usdt_ask, usdt_bid)
+        return _render_devo(result)
     except ValueError:
         return tr("market.dollar.devo_usage")
 

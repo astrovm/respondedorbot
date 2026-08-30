@@ -14,6 +14,10 @@ use bot_core::credit_units::{
     rescale_credit_units as rescale_credit_units_core,
     whole_credits_to_units as whole_credits_to_units_core,
 };
+use bot_core::devo::{
+    DevoInput, DevoQuotes, DevoResult, calculate_devo as calculate_devo_core,
+    parse_devo_input as parse_devo_input_core,
+};
 use bot_core::market_context::{
     CryptoQuote as MarketCryptoQuote, DollarQuote as MarketDollarQuote, MarketSnapshot,
     format_market_context as format_market_context_core,
@@ -172,6 +176,49 @@ struct MarketModelDto {
     value: String,
     percentage: String,
     valuation: &'static str,
+}
+
+#[derive(Serialize)]
+struct DevoResultDto {
+    profit: String,
+    fee: String,
+    official: String,
+    usdt: String,
+    card: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    purchase: Option<DevoPurchaseDto>,
+}
+
+#[derive(Serialize)]
+struct DevoPurchaseDto {
+    usd: String,
+    ars: String,
+    usdt: String,
+    profit_ars: String,
+    profit_usdt: String,
+    total_ars: String,
+    total_usdt: String,
+}
+
+impl From<DevoResult> for DevoResultDto {
+    fn from(value: DevoResult) -> Self {
+        Self {
+            profit: value.profit,
+            fee: value.fee,
+            official: value.official,
+            usdt: value.usdt,
+            card: value.card,
+            purchase: value.purchase.map(|purchase| DevoPurchaseDto {
+                usd: purchase.usd,
+                ars: purchase.ars,
+                usdt: purchase.usdt,
+                profit_ars: purchase.profit_ars,
+                profit_usdt: purchase.profit_usdt,
+                total_ars: purchase.total_ars,
+                total_usdt: purchase.total_usdt,
+            }),
+        }
+    }
 }
 
 impl From<TriggerError> for TriggerErrorDto {
@@ -696,6 +743,43 @@ fn format_satoshi_quote(price_usd: f64, price_ars: f64) -> PyResult<String> {
         .map_err(|_| PyValueError::new_err("Bitcoin prices must be finite and nonzero"))
 }
 
+/// Parse `/devo` input while preserving Python float compatibility.
+#[pyfunction]
+fn parse_devo_input(message_text: &str) -> PyResult<(String, f64, f64)> {
+    let result = parse_devo_input_core(message_text)
+        .map_err(|_| PyValueError::new_err("Unicode input requires the legacy parser"))?;
+    Ok(match result {
+        DevoInput::Valid { fee, purchase } => ("valid".to_owned(), fee, purchase),
+        DevoInput::Usage => ("usage".to_owned(), 0.0, 0.0),
+        DevoInput::InputError => ("input_error".to_owned(), 0.0, 0.0),
+    })
+}
+
+/// Calculate `/devo` output values from normalized provider quotes.
+#[pyfunction]
+fn calculate_devo(
+    fee: f64,
+    purchase: f64,
+    official: f64,
+    card: f64,
+    usdt_ask: f64,
+    usdt_bid: f64,
+) -> PyResult<String> {
+    let result = calculate_devo_core(
+        fee,
+        purchase,
+        DevoQuotes {
+            official,
+            card,
+            usdt_ask,
+            usdt_bid,
+        },
+    )
+    .map_err(|_| PyValueError::new_err("Devo quotes would divide by zero"))?;
+    serde_json::to_string(&DevoResultDto::from(result))
+        .map_err(|error| PyValueError::new_err(format!("cannot encode devo result: {error}")))
+}
+
 /// Decide whether one normalized message should auto-process attached media.
 #[pyfunction]
 fn should_auto_process_media(
@@ -745,6 +829,8 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(format_market_info, module)?)?;
     module.add_function(wrap_pyfunction!(evaluate_market_model, module)?)?;
     module.add_function(wrap_pyfunction!(format_satoshi_quote, module)?)?;
+    module.add_function(wrap_pyfunction!(parse_devo_input, module)?)?;
+    module.add_function(wrap_pyfunction!(calculate_devo, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;
     module.add_function(wrap_pyfunction!(evaluate_response_routing, module)?)?;
     Ok(())
