@@ -32,6 +32,7 @@ use bot_core::devo::{
     DevoCommandPlan, DevoQuotes, DevoReply, calculate_devo, plan_devo_command, render_devo_reply,
     render_devo_result,
 };
+use bot_core::greeting_commands::{GreetingCategory, classify_greeting_command, greeting_fallback};
 use bot_core::language_command::{LanguageCommandPlan, plan_language_command};
 use bot_core::locale::resolve_locale;
 use bot_core::random_selection::{RandomSelection, parse_random_selection};
@@ -73,6 +74,10 @@ pub trait ActionSink {
     }
 
     fn try_invoice(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
+        self.execute(action).map(|_receipt| true)
+    }
+
+    fn try_animation(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
         self.execute(action).map(|_receipt| true)
     }
 }
@@ -180,6 +185,16 @@ pub trait RuloSource {
     fn rulo_input(&mut self) -> Result<RuloInputLoad, String>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GreetingPoolLoad {
+    pub urls: Vec<String>,
+    pub diagnostics: Vec<String>,
+}
+
+pub trait GreetingPoolSource {
+    fn pool(&mut self, category: GreetingCategory) -> GreetingPoolLoad;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchOutcome {
     Handled,
@@ -225,6 +240,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     bitcoin_price_source: Option<Box<dyn BitcoinPriceSource>>,
     dollar_quotes_source: Option<Box<dyn DollarQuotesSource>>,
     rulo_source: Option<Box<dyn RuloSource>>,
+    greeting_pool_source: Option<Box<dyn GreetingPoolSource>>,
     last_outcome: Option<DispatchOutcome>,
     state_diagnostics: Vec<String>,
 }
@@ -268,6 +284,7 @@ where
             bitcoin_price_source: None,
             dollar_quotes_source: None,
             rulo_source: None,
+            greeting_pool_source: None,
             last_outcome: None,
             state_diagnostics: Vec::new(),
         }
@@ -338,6 +355,12 @@ where
     #[must_use]
     pub fn with_rulo_source(mut self, source: Box<dyn RuloSource>) -> Self {
         self.rulo_source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub fn with_greeting_pool_source(mut self, source: Box<dyn GreetingPoolSource>) -> Self {
+        self.greeting_pool_source = Some(source);
         self
     }
 
@@ -1122,6 +1145,37 @@ where
                 CreditLogPlan::NotHandled => StatelessCommandPlan::NotHandled,
                 CreditLogPlan::LegacyRequired => StatelessCommandPlan::LegacyFallbackRequired,
             }
+        } else if let Some(category) = classify_greeting_command(&parsed.command) {
+            let Some(source) = self.greeting_pool_source.as_mut() else {
+                return Ok(DispatchOutcome::LegacyRequired);
+            };
+            let load = source.pool(category);
+            self.state_diagnostics.extend(load.diagnostics);
+            if load.urls.is_empty() {
+                let mut message = SendMessage::new(chat_id, greeting_fallback(category, locale));
+                message.reply_to_message_id = Some(message_id);
+                StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+            } else {
+                let index = self
+                    .random
+                    .choice_index(load.urls.len())
+                    .map_err(DispatchError::Random)?;
+                let Some(animation) = load.urls.get(index) else {
+                    return Ok(DispatchOutcome::LegacyRequired);
+                };
+                if animation.starts_with("http") {
+                    StatelessCommandPlan::Action(TelegramAction::SendAnimation {
+                        chat_id,
+                        animation: animation.clone(),
+                        reply_to_message_id: Some(message_id),
+                        caption: None,
+                    })
+                } else {
+                    let mut message = SendMessage::new(chat_id, animation);
+                    message.reply_to_message_id = Some(message_id);
+                    StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+                }
+            }
         } else if parsed.command == "/rulo" {
             let Some(source) = self.rulo_source.as_mut() else {
                 return Ok(DispatchOutcome::LegacyRequired);
@@ -1283,10 +1337,17 @@ where
                     TelegramAction::SendMessage(message) => Some(message.text.clone()),
                     _ => None,
                 };
-                let receipt = self
-                    .actions
-                    .execute(action)
-                    .map_err(DispatchError::Action)?;
+                let receipt = if matches!(&action, TelegramAction::SendAnimation { .. }) {
+                    let _sent = self
+                        .actions
+                        .try_animation(action)
+                        .map_err(DispatchError::Action)?;
+                    ActionReceipt { message_id: None }
+                } else {
+                    self.actions
+                        .execute(action)
+                        .map_err(DispatchError::Action)?
+                };
                 if let Some(response_text) = response_text {
                     let outgoing = prepare_outgoing_command_state(OutgoingCommandState {
                         chat_id,
@@ -1392,12 +1453,13 @@ mod tests {
         ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BillingBalanceSource,
         BillingBalances, BillingTransferSink, BitcoinPriceSource, ChargeHistoryPage,
         ChargeHistorySource, ChatConfigSource, DispatchError, DispatchOutcome, DollarQuotesSource,
-        GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink, NativeDispatcher,
-        RandomSource, RuloInputLoad, RuloSource, RuntimeValues, StarPaymentReceipt,
-        StarPaymentSink, TransferResult,
+        GreetingPoolLoad, GreetingPoolSource, GroupAuthorizationDecision, GroupAuthorizer,
+        MessageStateSink, NativeDispatcher, RandomSource, RuloInputLoad, RuloSource, RuntimeValues,
+        StarPaymentReceipt, StarPaymentSink, TransferResult,
     };
     use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup};
     use bot_core::devo::DevoQuotes;
+    use bot_core::greeting_commands::GreetingCategory;
     use bot_core::rulo::{ExchangeQuote, RuloInput};
 
     struct Config {
@@ -1746,6 +1808,18 @@ mod tests {
         }
     }
 
+    struct GreetingPools {
+        result: GreetingPoolLoad,
+        calls: Rc<RefCell<Vec<GreetingCategory>>>,
+    }
+
+    impl GreetingPoolSource for GreetingPools {
+        fn pool(&mut self, category: GreetingCategory) -> GreetingPoolLoad {
+            self.calls.borrow_mut().push(category);
+            self.result.clone()
+        }
+    }
+
     type ChargeHistoryCalls = Rc<RefCell<Vec<(i64, usize, Option<i64>, String)>>>;
 
     struct ChargeHistories {
@@ -2051,6 +2125,181 @@ mod tests {
         );
         assert_eq!(dispatcher.state.incoming.len(), 2);
         assert_eq!(dispatcher.state.outgoing.len(), 2);
+    }
+
+    #[test]
+    fn greeting_commands_choose_animation_and_fall_back_to_localized_text() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_greeting_pool_source(Box::new(GreetingPools {
+            result: GreetingPoolLoad {
+                urls: vec![
+                    "https://example.test/first.gif".to_owned(),
+                    "https://example.test/second.gif".to_owned(),
+                ],
+                diagnostics: vec!["synthetic stale pool".to_owned()],
+            },
+            calls: Rc::clone(&calls),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(update("/gm", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(calls.borrow().as_slice(), &[GreetingCategory::Morning]);
+        assert_eq!(
+            dispatcher.actions.0,
+            vec![TelegramAction::SendAnimation {
+                chat_id: ChatId(-42),
+                animation: "https://example.test/second.gif".to_owned(),
+                reply_to_message_id: Some(MessageId(7)),
+                caption: None,
+            }]
+        );
+        assert_eq!(dispatcher.state.incoming.len(), 1);
+        assert!(dispatcher.state.outgoing.is_empty());
+        assert_eq!(dispatcher.state_diagnostics(), &["synthetic stale pool"]);
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut fallback = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_greeting_pool_source(Box::new(GreetingPools {
+            result: GreetingPoolLoad {
+                urls: Vec::new(),
+                diagnostics: Vec::new(),
+            },
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            fallback.dispatch(update("/gn", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        let Some(TelegramAction::SendMessage(message)) = fallback.actions.0.first() else {
+            return;
+        };
+        assert_eq!(message.text, "buenas noches boludo");
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut non_http = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            Samples {
+                choice_index: 0,
+                integer: BigInt::from(0_u8),
+            },
+            authorization(),
+            "@mybot",
+        )
+        .with_greeting_pool_source(Box::new(GreetingPools {
+            result: GreetingPoolLoad {
+                urls: vec!["cached greeting".to_owned()],
+                diagnostics: Vec::new(),
+            },
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            non_http.dispatch(update("/gm", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        let Some(TelegramAction::SendMessage(message)) = non_http.actions.0.first() else {
+            return;
+        };
+        assert_eq!(message.text, "cached greeting");
+        assert_eq!(non_http.state.outgoing.len(), 1);
+    }
+
+    #[test]
+    fn greeting_animation_delivery_failure_is_silent_and_missing_source_stays_legacy() {
+        struct DroppingAnimations;
+
+        impl ActionSink for DroppingAnimations {
+            type Error = Infallible;
+
+            fn execute(&mut self, _action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
+                Ok(ActionReceipt { message_id: None })
+            }
+
+            fn try_animation(&mut self, _action: TelegramAction) -> Result<bool, Self::Error> {
+                Ok(false)
+            }
+        }
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            DroppingAnimations,
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_greeting_pool_source(Box::new(GreetingPools {
+            result: GreetingPoolLoad {
+                urls: vec![
+                    "https://example.test/first.gif".to_owned(),
+                    "https://example.test/greeting.gif".to_owned(),
+                ],
+                diagnostics: Vec::new(),
+            },
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(update("/gm", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(dispatcher.state.incoming.len(), 1);
+        assert!(dispatcher.state.outgoing.is_empty());
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut missing = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            missing.dispatch(update("/gn", None)),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
     }
 
     #[test]

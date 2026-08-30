@@ -9,6 +9,7 @@ pub mod criptoya;
 pub mod finviz;
 pub mod firecrawl;
 pub mod giphy;
+pub mod giphy_pool;
 pub mod openrouter_generation;
 pub mod redis_chat_admin;
 pub mod redis_compaction_queue;

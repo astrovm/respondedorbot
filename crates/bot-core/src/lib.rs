@@ -23,6 +23,7 @@ pub mod config_callbacks;
 pub mod config_command;
 pub mod credit_units;
 pub mod devo;
+pub mod greeting_commands;
 pub mod hacker_news;
 pub mod help_catalog;
 pub mod language_command;

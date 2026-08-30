@@ -52,6 +52,12 @@ pub enum TelegramAction {
         language_code: Option<String>,
     },
     SendMessage(SendMessage),
+    SendAnimation {
+        chat_id: ChatId,
+        animation: String,
+        reply_to_message_id: Option<MessageId>,
+        caption: Option<String>,
+    },
     SendInvoice {
         chat_id: ChatId,
         title: String,
@@ -207,6 +213,24 @@ mod tests {
                     label: "50 credits".to_owned(),
                     amount: 25,
                 }],
+            }
+        );
+    }
+
+    #[test]
+    fn animation_action_keeps_media_and_reply_identity() {
+        assert_eq!(
+            TelegramAction::SendAnimation {
+                chat_id: ChatId(42),
+                animation: "https://example.test/greeting.gif".to_owned(),
+                reply_to_message_id: Some(crate::telegram_input::MessageId(7)),
+                caption: None,
+            },
+            TelegramAction::SendAnimation {
+                chat_id: ChatId(42),
+                animation: "https://example.test/greeting.gif".to_owned(),
+                reply_to_message_id: Some(crate::telegram_input::MessageId(7)),
+                caption: None,
             }
         );
     }

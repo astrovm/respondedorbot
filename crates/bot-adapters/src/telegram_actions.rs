@@ -128,6 +128,29 @@ fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
                 Some(Value::Object(payload)),
             )
         }
+        TelegramAction::SendAnimation {
+            chat_id,
+            animation,
+            reply_to_message_id,
+            caption,
+        } => {
+            let mut payload = Map::from_iter([
+                ("chat_id".to_owned(), json!(chat_id.0)),
+                ("animation".to_owned(), json!(animation)),
+            ]);
+            insert_optional(
+                &mut payload,
+                "reply_to_message_id",
+                reply_to_message_id.map(|value| value.0),
+            )?;
+            insert_optional(&mut payload, "caption", caption)?;
+            (
+                "sendAnimation",
+                Method::POST,
+                None,
+                Some(Value::Object(payload)),
+            )
+        }
         TelegramAction::SendInvoice {
             chat_id,
             title,
@@ -445,6 +468,37 @@ mod tests {
                 "provider_token":"",
                 "currency":"XTR",
                 "prices":[{"label":"50.00 AI credits","amount":25}],
+            }))
+        );
+    }
+
+    #[test]
+    fn send_animation_preserves_url_reply_and_optional_caption() {
+        let transport = transport(r#"{"ok":true,"result":{"message_id":10}}"#);
+        assert_eq!(
+            execute_with(
+                &transport,
+                "synthetic-token",
+                TelegramAction::SendAnimation {
+                    chat_id: ChatId(42),
+                    animation: "https://example.test/greeting.gif".to_owned(),
+                    reply_to_message_id: Some(MessageId(7)),
+                    caption: Some("hello".to_owned()),
+                },
+            ),
+            Ok(ActionOutcome::Completed {
+                message_id: Some(10)
+            })
+        );
+        let request = &transport.requests.borrow()[0];
+        assert_eq!(request.endpoint, "sendAnimation");
+        assert_eq!(
+            request.json_payload,
+            Some(serde_json::json!({
+                "chat_id":42,
+                "animation":"https://example.test/greeting.gif",
+                "reply_to_message_id":7,
+                "caption":"hello",
             }))
         );
     }

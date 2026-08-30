@@ -14,8 +14,13 @@ use bot_adapters::criptoya::{
     TransportFailureKind as CriptoYaTransportFailureKind, fetch_dollar_quotes,
     fetch_exchange_quotes, fetch_rulo_market,
 };
+use bot_adapters::giphy::{
+    GiphyTransport, ReqwestGiphyTransport, TransportFailureKind as GiphyTransportFailureKind,
+};
+use bot_adapters::giphy_pool::{GiphyPoolCache, load_giphy_pool};
 use bot_adapters::redis_chat_admin::{cache_chat_admin, get_cached_chat_admin};
 use bot_adapters::redis_connection::RedisEndpoint;
+use bot_adapters::redis_json_cache::{RedisJsonCache, RedisJsonCacheError};
 use bot_adapters::redis_message_state::{RedisMessageState, RedisMessageStateError};
 use bot_adapters::telegram_actions::{ActionError, ActionOutcome, execute_with};
 use bot_adapters::telegram_chat_admin::lookup_chat_admin_with;
@@ -38,9 +43,9 @@ use thiserror::Error;
 use crate::dispatcher::{
     ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BillingBalanceSource,
     BillingBalances, BillingTransferSink, BitcoinPriceSource, ChargeHistorySource,
-    ChatConfigSource, DollarQuotesSource, GroupAuthorizationDecision, GroupAuthorizer,
-    MessageStateSink, NativeDispatcher, RandomSource, RuloInputLoad, RuloSource, RuntimeValues,
-    StarPaymentReceipt, StarPaymentSink,
+    ChatConfigSource, DollarQuotesSource, GreetingPoolLoad, GreetingPoolSource,
+    GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink, NativeDispatcher, RandomSource,
+    RuloInputLoad, RuloSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink,
 };
 use crate::runtime::{PollingRuntime, UpdateSource};
 
@@ -161,6 +166,31 @@ impl<T: CriptoYaTransport> RuloSource for CriptoYaRuloSource<T> {
             failure => diagnostics.push(exchange_failure("USDT/ARS", failure)),
         }
         Ok(RuloInputLoad { input, diagnostics })
+    }
+}
+
+struct GiphyGreetingPoolSource<T, C> {
+    transport: T,
+    cache: C,
+    api_key: Option<String>,
+}
+
+impl<T: GiphyTransport, C: GiphyPoolCache> GreetingPoolSource for GiphyGreetingPoolSource<T, C> {
+    fn pool(
+        &mut self,
+        category: bot_core::greeting_commands::GreetingCategory,
+    ) -> GreetingPoolLoad {
+        let load = load_giphy_pool(
+            &self.transport,
+            &mut self.cache,
+            self.api_key.as_deref(),
+            category,
+            || rand::random_range(0..=100_u16),
+        );
+        GreetingPoolLoad {
+            urls: load.urls,
+            diagnostics: load.diagnostics,
+        }
     }
 }
 
@@ -578,6 +608,13 @@ impl<Transport: TelegramTransport> ActionSink for TelegramActionSink<Transport> 
             ActionOutcome::Completed { .. }
         ))
     }
+
+    fn try_animation(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
+        Ok(matches!(
+            execute_with(&self.transport, &self.token, action)?,
+            ActionOutcome::Completed { .. }
+        ))
+    }
 }
 
 pub fn publish_telegram_commands<Actions: ActionSink>(
@@ -613,6 +650,10 @@ pub enum CompositionError {
     CoinMarketCapTransport(CoinMarketCapTransportFailureKind),
     #[error("could not construct CriptoYa transport: {0:?}")]
     CriptoYaTransport(CriptoYaTransportFailureKind),
+    #[error("could not construct Giphy transport: {0:?}")]
+    GiphyTransport(GiphyTransportFailureKind),
+    #[error("could not construct Giphy Redis cache: {0}")]
+    GiphyCache(RedisJsonCacheError),
     #[error("could not construct Redis command state: {0}")]
     RedisState(#[from] RedisMessageStateError),
 }
@@ -626,6 +667,7 @@ pub struct NativeRuntimeOptions<'a> {
     pub long_poll_timeout: Duration,
     pub admin_user_id: Option<i64>,
     pub coinmarketcap_key: Option<String>,
+    pub giphy_api_key: Option<String>,
 }
 
 pub fn build_native_runtime(
@@ -641,6 +683,9 @@ pub fn build_native_runtime(
         ReqwestCriptoYaTransport::new().map_err(CompositionError::CriptoYaTransport)?;
     let rulo_transport =
         ReqwestCriptoYaTransport::new().map_err(CompositionError::CriptoYaTransport)?;
+    let giphy_transport = ReqwestGiphyTransport::new().map_err(CompositionError::GiphyTransport)?;
+    let giphy_cache =
+        RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::GiphyCache)?;
     let source =
         TelegramUpdateSource::new(polling_transport, options.token, options.long_poll_timeout);
     let config = ChatConfigRepository::new(options.database_url);
@@ -669,6 +714,11 @@ pub fn build_native_runtime(
     }))
     .with_rulo_source(Box::new(CriptoYaRuloSource {
         transport: rulo_transport,
+    }))
+    .with_greeting_pool_source(Box::new(GiphyGreetingPoolSource {
+        transport: giphy_transport,
+        cache: giphy_cache,
+        api_key: options.giphy_api_key,
     }));
     let dispatcher = if let Some(api_key) = options.coinmarketcap_key.filter(|key| !key.is_empty())
     {
@@ -1346,6 +1396,7 @@ mod tests {
             long_poll_timeout: Duration::from_secs(30),
             admin_user_id: Some(99),
             coinmarketcap_key: None,
+            giphy_api_key: None,
         });
         assert!(result.is_ok());
     }
