@@ -1677,6 +1677,56 @@ mod tests {
     }
 
     #[test]
+    fn dispatches_ascii_command_conversion_and_keeps_preprocessing_on_legacy() {
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            dispatcher.dispatch(update("/command hello! world", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            dispatcher.dispatch(update("/comando", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            dispatcher.dispatch(update("/command もうすぐです", Some("es"))),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
+        let texts = dispatcher
+            .actions
+            .0
+            .iter()
+            .filter_map(|action| match action {
+                TelegramAction::SendMessage(message) => Some(message.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            texts,
+            vec![
+                "/HELLO_SIGNODEEXCLAMACION_WORLD",
+                "send the text you want to convert"
+            ]
+        );
+        assert_eq!(dispatcher.state.incoming.len(), 2);
+        assert_eq!(dispatcher.state.outgoing.len(), 2);
+    }
+
+    #[test]
     fn dispatches_private_language_reads_and_persisted_updates() {
         let config = Config {
             value: Ok(ChatConfig::default()),

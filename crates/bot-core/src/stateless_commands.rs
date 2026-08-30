@@ -1,6 +1,7 @@
 //! Native plans for commands that require no external state.
 
 use crate::base_conversion::{BaseConversion, convert_base};
+use crate::command_normalization::normalize_command_text;
 use crate::command_parsing::parse_command;
 use crate::help_catalog::render_help_text;
 use crate::locale::Locale;
@@ -83,6 +84,32 @@ pub fn plan_stateless_command(
     let parsed = parse_command(message_text, bot_name);
     if parsed.command == "/help" {
         let mut message = SendMessage::new(chat_id, render_help_text(locale));
+        message.reply_to_message_id = Some(message_id);
+        return StatelessCommandPlan::Action(TelegramAction::SendMessage(message));
+    }
+    if matches!(parsed.command.as_str(), "/comando" | "/command") {
+        if parsed.message_text.is_empty() {
+            let text = match locale {
+                Locale::Es => "y que queres que convierta boludo? mandate texto",
+                Locale::En => "send the text you want to convert",
+            };
+            let mut message = SendMessage::new(chat_id, text);
+            message.reply_to_message_id = Some(message_id);
+            return StatelessCommandPlan::Action(TelegramAction::SendMessage(message));
+        }
+        // The legacy adapter first expands emoji with locale-specific names and
+        // romanizes Japanese text. Keep non-ASCII input on that path until those
+        // preprocessing contracts have native implementations.
+        if !parsed.message_text.is_ascii() {
+            return StatelessCommandPlan::LegacyFallbackRequired;
+        }
+        let text = normalize_command_text(&parsed.message_text).unwrap_or_else(|| match locale {
+            Locale::Es => {
+                "no me mandes giladas boludo, tiene que tener letras o numeros".to_owned()
+            }
+            Locale::En => "the command must contain letters or numbers".to_owned(),
+        });
+        let mut message = SendMessage::new(chat_id, &text);
         message.reply_to_message_id = Some(message_id);
         return StatelessCommandPlan::Action(TelegramAction::SendMessage(message));
     }
@@ -193,6 +220,53 @@ mod tests {
         assert!(english.is_some_and(|text| {
             text.starts_with("what I can do:") && text.contains("/weather London")
         }));
+    }
+
+    #[test]
+    fn plans_ascii_command_conversion_aliases_and_localized_guards() {
+        assert_eq!(
+            message_text(plan_stateless_command(
+                ChatId(1),
+                MessageId(2),
+                "/command@bot hello! world? or... bye.",
+                "@bot",
+                Locale::En,
+            )),
+            Some(
+                "/HELLO_SIGNODEEXCLAMACION_WORLD_SIGNODEPREGUNTA_OR_PUNTOSSUSPENSIVOS_BYE_PUNTO"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            message_text(plan_stateless_command(
+                ChatId(1),
+                MessageId(2),
+                "/comando",
+                "@bot",
+                Locale::Es,
+            )),
+            Some("y que queres que convierta boludo? mandate texto".to_owned())
+        );
+        assert_eq!(
+            message_text(plan_stateless_command(
+                ChatId(1),
+                MessageId(2),
+                "/command 💥",
+                "@bot",
+                Locale::En,
+            )),
+            None
+        );
+        assert_eq!(
+            message_text(plan_stateless_command(
+                ChatId(1),
+                MessageId(2),
+                "/command --",
+                "@bot",
+                Locale::En,
+            )),
+            Some("the command must contain letters or numbers".to_owned())
+        );
     }
 
     #[test]
