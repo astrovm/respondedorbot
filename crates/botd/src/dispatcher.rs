@@ -3,7 +3,10 @@
 use bot_adapters::telegram_polling::{IncomingEvent, IncomingMessage, IncomingUpdate};
 use bot_core::chat_config::ChatConfig;
 use bot_core::locale::resolve_locale;
-use bot_core::stateless_commands::{StatelessCommandPlan, plan_stateless_command};
+use bot_core::stateless_commands::{
+    StatelessCommandPlan, StatelessRuntimeContext, plan_runtime_stateless_command,
+    plan_stateless_command,
+};
 use bot_core::telegram_actions::TelegramAction;
 use thiserror::Error;
 
@@ -21,6 +24,12 @@ pub trait ActionSink {
     fn execute(&mut self, action: TelegramAction) -> Result<(), Self::Error>;
 }
 
+pub trait RuntimeValues {
+    fn unix_timestamp(&mut self) -> i64;
+
+    fn instance_name(&self) -> Option<&str>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchOutcome {
     Handled,
@@ -36,23 +45,26 @@ pub enum DispatchError<ConfigError, ActionError> {
     Action(ActionError),
 }
 
-pub struct NativeDispatcher<Config, Actions> {
+pub struct NativeDispatcher<Config, Actions, Values> {
     config: Config,
     actions: Actions,
+    runtime_values: Values,
     bot_name: String,
     last_outcome: Option<DispatchOutcome>,
 }
 
-impl<Config, Actions> NativeDispatcher<Config, Actions>
+impl<Config, Actions, Values> NativeDispatcher<Config, Actions, Values>
 where
     Config: ChatConfigSource,
     Actions: ActionSink,
+    Values: RuntimeValues,
 {
     #[must_use]
-    pub fn new(config: Config, actions: Actions, bot_name: &str) -> Self {
+    pub fn new(config: Config, actions: Actions, runtime_values: Values, bot_name: &str) -> Self {
         Self {
             config,
             actions,
+            runtime_values,
             bot_name: bot_name.to_owned(),
             last_outcome: None,
         }
@@ -84,7 +96,30 @@ where
             message.sender_language_code.as_deref(),
             message.chat_type.as_deref().unwrap_or_default(),
         );
-        match plan_stateless_command(chat_id, message_id, &content.text, &self.bot_name, locale) {
+        let plan = match plan_stateless_command(
+            chat_id,
+            message_id,
+            &content.text,
+            &self.bot_name,
+            locale,
+        ) {
+            StatelessCommandPlan::NotHandled => {
+                let unix_timestamp = self.runtime_values.unix_timestamp();
+                plan_runtime_stateless_command(
+                    chat_id,
+                    message_id,
+                    &content.text,
+                    &self.bot_name,
+                    locale,
+                    StatelessRuntimeContext {
+                        unix_timestamp,
+                        instance_name: self.runtime_values.instance_name(),
+                    },
+                )
+            }
+            plan => plan,
+        };
+        match plan {
             StatelessCommandPlan::Action(action) => {
                 self.actions
                     .execute(action)
@@ -112,10 +147,11 @@ where
     }
 }
 
-impl<Config, Actions> UpdateHandler for NativeDispatcher<Config, Actions>
+impl<Config, Actions, Values> UpdateHandler for NativeDispatcher<Config, Actions, Values>
 where
     Config: ChatConfigSource,
     Actions: ActionSink,
+    Values: RuntimeValues,
 {
     type Error = DispatchError<Config::Error, Actions::Error>;
 
@@ -133,7 +169,10 @@ mod tests {
     use bot_core::telegram_actions::TelegramAction;
     use bot_core::telegram_input::{ChatId, MessageContent, MessageId, UserId};
 
-    use super::{ActionSink, ChatConfigSource, DispatchError, DispatchOutcome, NativeDispatcher};
+    use super::{
+        ActionSink, ChatConfigSource, DispatchError, DispatchOutcome, NativeDispatcher,
+        RuntimeValues,
+    };
 
     struct Config {
         value: Result<ChatConfig, &'static str>,
@@ -158,6 +197,28 @@ mod tests {
         fn execute(&mut self, action: TelegramAction) -> Result<(), Self::Error> {
             self.0.push(action);
             Ok(())
+        }
+    }
+
+    struct Values {
+        unix_timestamp: i64,
+        instance_name: Option<String>,
+    }
+
+    impl RuntimeValues for Values {
+        fn unix_timestamp(&mut self) -> i64 {
+            self.unix_timestamp
+        }
+
+        fn instance_name(&self) -> Option<&str> {
+            self.instance_name.as_deref()
+        }
+    }
+
+    fn values() -> Values {
+        Values {
+            unix_timestamp: 1_672_531_200,
+            instance_name: Some("synthetic-instance".to_owned()),
         }
     }
 
@@ -188,7 +249,7 @@ mod tests {
             }),
             chat_ids: Vec::new(),
         };
-        let mut dispatcher = NativeDispatcher::new(config, Actions::default(), "@mybot");
+        let mut dispatcher = NativeDispatcher::new(config, Actions::default(), values(), "@mybot");
         assert_eq!(
             dispatcher.dispatch(update("/convertbase 101, 2, 10", Some("es"))),
             Ok(DispatchOutcome::Handled)
@@ -208,7 +269,7 @@ mod tests {
             value: Ok(ChatConfig::default()),
             chat_ids: Vec::new(),
         };
-        let mut dispatcher = NativeDispatcher::new(config, Actions::default(), "@mybot");
+        let mut dispatcher = NativeDispatcher::new(config, Actions::default(), values(), "@mybot");
         assert_eq!(
             dispatcher.dispatch(update("/other", None)),
             Ok(DispatchOutcome::LegacyRequired)
@@ -241,7 +302,7 @@ mod tests {
             value: Ok(ChatConfig::default()),
             chat_ids: Vec::new(),
         };
-        let mut dispatcher = NativeDispatcher::new(config, Actions::default(), "@mybot");
+        let mut dispatcher = NativeDispatcher::new(config, Actions::default(), values(), "@mybot");
         assert_eq!(
             dispatcher.dispatch(IncomingUpdate {
                 update_id: 101,
@@ -259,7 +320,7 @@ mod tests {
             value: Err("synthetic config failure"),
             chat_ids: Vec::new(),
         };
-        let mut dispatcher = NativeDispatcher::new(config, Actions::default(), "@mybot");
+        let mut dispatcher = NativeDispatcher::new(config, Actions::default(), values(), "@mybot");
         assert!(matches!(
             dispatcher.dispatch(update("/convertbase 1,2,10", None)),
             Err(DispatchError::Config("synthetic config failure"))
@@ -276,10 +337,43 @@ mod tests {
             value: Ok(ChatConfig::default()),
             chat_ids: Vec::new(),
         };
-        let mut dispatcher = NativeDispatcher::new(config, FailingActions, "@mybot");
+        let mut dispatcher = NativeDispatcher::new(config, FailingActions, values(), "@mybot");
         assert!(matches!(
             dispatcher.dispatch(update("/convertbase 1,2,10", None)),
             Err(DispatchError::Action("synthetic action failure"))
         ));
+    }
+
+    #[test]
+    fn dispatches_time_and_instance_from_injected_runtime_values() {
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(config, Actions::default(), values(), "@mybot");
+        assert_eq!(
+            dispatcher.dispatch(update("/time", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            dispatcher.dispatch(update("/instance", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        let texts = dispatcher
+            .actions
+            .0
+            .iter()
+            .filter_map(|action| match action {
+                TelegramAction::SendMessage(message) => Some(message.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            texts,
+            vec!["1672531200", "I am running on synthetic-instance"]
+        );
     }
 }

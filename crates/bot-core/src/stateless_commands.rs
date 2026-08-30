@@ -13,6 +13,12 @@ pub enum StatelessCommandPlan {
     Action(TelegramAction),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatelessRuntimeContext<'a> {
+    pub unix_timestamp: i64,
+    pub instance_name: Option<&'a str>,
+}
+
 fn render_base_conversion(result: &BaseConversion, locale: Locale) -> String {
     match (locale, result) {
         (
@@ -85,9 +91,41 @@ pub fn plan_stateless_command(
     StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
 }
 
+#[must_use]
+pub fn plan_runtime_stateless_command(
+    chat_id: ChatId,
+    message_id: MessageId,
+    message_text: &str,
+    bot_name: &str,
+    locale: Locale,
+    context: StatelessRuntimeContext<'_>,
+) -> StatelessCommandPlan {
+    let parsed = parse_command(message_text, bot_name);
+    let text = match parsed.command.as_str() {
+        "/time" => context.unix_timestamp.to_string(),
+        "/instance" => match locale {
+            Locale::Es => format!(
+                "estoy corriendo en {} boludo",
+                context.instance_name.unwrap_or("None")
+            ),
+            Locale::En => format!(
+                "I am running on {}",
+                context.instance_name.unwrap_or("None")
+            ),
+        },
+        _ => return StatelessCommandPlan::NotHandled,
+    };
+    let mut message = SendMessage::new(chat_id, &text);
+    message.reply_to_message_id = Some(message_id);
+    StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{StatelessCommandPlan, plan_stateless_command};
+    use super::{
+        StatelessCommandPlan, StatelessRuntimeContext, plan_runtime_stateless_command,
+        plan_stateless_command,
+    };
     use crate::locale::Locale;
     use crate::telegram_actions::TelegramAction;
     use crate::telegram_input::{ChatId, MessageId};
@@ -189,5 +227,69 @@ mod tests {
         };
         assert_eq!(message.chat_id, ChatId(-10042));
         assert_eq!(message.reply_to_message_id, Some(MessageId(77)));
+    }
+
+    #[test]
+    fn plans_time_and_localized_instance_without_reading_global_state() {
+        assert_eq!(
+            message_text(plan_runtime_stateless_command(
+                ChatId(1),
+                MessageId(2),
+                "/time",
+                "@bot",
+                Locale::Es,
+                StatelessRuntimeContext {
+                    unix_timestamp: 1_672_531_200,
+                    instance_name: Some("synthetic"),
+                },
+            )),
+            Some("1672531200".to_owned())
+        );
+        assert_eq!(
+            message_text(plan_runtime_stateless_command(
+                ChatId(1),
+                MessageId(2),
+                "/instance@bot",
+                "@bot",
+                Locale::En,
+                StatelessRuntimeContext {
+                    unix_timestamp: 0,
+                    instance_name: Some("test instance"),
+                },
+            )),
+            Some("I am running on test instance".to_owned())
+        );
+        assert_eq!(
+            message_text(plan_runtime_stateless_command(
+                ChatId(1),
+                MessageId(2),
+                "/instance",
+                "@bot",
+                Locale::Es,
+                StatelessRuntimeContext {
+                    unix_timestamp: 0,
+                    instance_name: None,
+                },
+            )),
+            Some("estoy corriendo en None boludo".to_owned())
+        );
+    }
+
+    #[test]
+    fn runtime_planner_ignores_other_commands() {
+        assert_eq!(
+            plan_runtime_stateless_command(
+                ChatId(1),
+                MessageId(2),
+                "/convertbase 1,2,10",
+                "@bot",
+                Locale::Es,
+                StatelessRuntimeContext {
+                    unix_timestamp: 0,
+                    instance_name: None,
+                },
+            ),
+            StatelessCommandPlan::NotHandled
+        );
     }
 }

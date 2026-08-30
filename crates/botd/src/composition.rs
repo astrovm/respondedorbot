@@ -1,6 +1,6 @@
 //! Concrete adapter composition for the native Telegram runtime.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bot_adapters::chat_config::{ChatConfigRepository, ChatConfigRepositoryError};
 use bot_adapters::telegram_actions::{ActionError, ActionOutcome, execute_with};
@@ -12,7 +12,7 @@ use bot_core::chat_config::ChatConfig;
 use bot_core::telegram_actions::TelegramAction;
 use thiserror::Error;
 
-use crate::dispatcher::{ActionSink, ChatConfigSource, NativeDispatcher};
+use crate::dispatcher::{ActionSink, ChatConfigSource, NativeDispatcher, RuntimeValues};
 use crate::runtime::{PollingRuntime, UpdateSource};
 
 impl ChatConfigSource for ChatConfigRepository {
@@ -66,6 +66,29 @@ pub struct TelegramActionSink<Transport> {
     token: String,
 }
 
+pub struct SystemRuntimeValues {
+    instance_name: Option<String>,
+}
+
+impl SystemRuntimeValues {
+    #[must_use]
+    pub const fn new(instance_name: Option<String>) -> Self {
+        Self { instance_name }
+    }
+}
+
+impl RuntimeValues for SystemRuntimeValues {
+    fn unix_timestamp(&mut self) -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs().min(i64::MAX as u64) as i64)
+    }
+
+    fn instance_name(&self) -> Option<&str> {
+        self.instance_name.as_deref()
+    }
+}
+
 impl<Transport> TelegramActionSink<Transport> {
     #[must_use]
     pub fn new(transport: Transport, token: &str) -> Self {
@@ -103,7 +126,11 @@ impl<Transport: TelegramTransport> ActionSink for TelegramActionSink<Transport> 
 
 pub type ConcreteNativeRuntime = PollingRuntime<
     TelegramUpdateSource<ReqwestTelegramTransport>,
-    NativeDispatcher<ChatConfigRepository, TelegramActionSink<ReqwestTelegramTransport>>,
+    NativeDispatcher<
+        ChatConfigRepository,
+        TelegramActionSink<ReqwestTelegramTransport>,
+        SystemRuntimeValues,
+    >,
 >;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -118,6 +145,7 @@ pub fn build_native_runtime(
     token: &str,
     database_url: &str,
     bot_name: &str,
+    instance_name: Option<String>,
     long_poll_timeout: Duration,
 ) -> Result<ConcreteNativeRuntime, CompositionError> {
     let polling_transport =
@@ -129,14 +157,19 @@ pub fn build_native_runtime(
     let actions = TelegramActionSink::new(action_transport, token);
     Ok(PollingRuntime::new(
         source,
-        NativeDispatcher::new(config, actions, bot_name),
+        NativeDispatcher::new(
+            config,
+            actions,
+            SystemRuntimeValues::new(instance_name),
+            bot_name,
+        ),
     ))
 }
 
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use bot_adapters::telegram_http::{
         HttpResponse, TelegramRequest, TelegramTransport, TransportFailureKind,
@@ -145,10 +178,12 @@ mod tests {
     use bot_core::telegram_actions::{SendMessage, TelegramAction};
     use bot_core::telegram_input::ChatId;
 
-    use crate::dispatcher::ActionSink;
+    use crate::dispatcher::{ActionSink, RuntimeValues};
     use crate::runtime::UpdateSource;
 
-    use super::{TelegramActionSink, TelegramActionSinkError, TelegramUpdateSource};
+    use super::{
+        SystemRuntimeValues, TelegramActionSink, TelegramActionSinkError, TelegramUpdateSource,
+    };
 
     struct Transport {
         response: RefCell<Option<Result<HttpResponse, TransportFailureKind>>>,
@@ -272,5 +307,20 @@ mod tests {
                 TransportFailureKind::Connection
             ))
         );
+    }
+
+    #[test]
+    fn system_runtime_values_preserve_instance_and_current_epoch_seconds() {
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs());
+        let mut values = SystemRuntimeValues::new(Some("synthetic".to_owned()));
+        let actual = values.unix_timestamp();
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs());
+        assert!(actual >= before as i64);
+        assert!(actual <= after as i64);
+        assert_eq!(values.instance_name(), Some("synthetic"));
     }
 }
