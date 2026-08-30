@@ -16,6 +16,15 @@ class RustTelegramPayments(Protocol):
         pack_xtr_amount: int | None,
     ) -> str: ...
 
+    def telegram_evaluate_successful_payment(
+        self,
+        message_json: str,
+        billing_available: bool,
+        pack_id: str | None,
+        pack_xtr_amount: int | None,
+        pack_credits_awarded: int | None,
+    ) -> str: ...
+
 
 def load_rust_telegram_payments() -> RustTelegramPayments | None:
     module = load_rust_bridge("RUST_TELEGRAM_PAYMENTS_ENABLED")

@@ -210,6 +210,7 @@ use bot_core::telegram_input::{
 };
 use bot_core::telegram_payments::{
     BillingPackTerms, evaluate_pre_checkout as evaluate_telegram_pre_checkout_core,
+    evaluate_successful_payment as evaluate_telegram_successful_payment_core,
 };
 use bot_core::telegram_streaming::{
     plan_feed as telegram_stream_plan_feed_core,
@@ -3127,12 +3128,41 @@ fn telegram_evaluate_pre_checkout(
     let query = serde_json::from_str(query_json)
         .map_err(|error| PyValueError::new_err(format!("invalid JSON value: {error}")))?;
     let pack = match (pack_id, pack_xtr_amount) {
-        (Some(id), Some(xtr_amount)) => Some(BillingPackTerms { id, xtr_amount }),
+        (Some(id), Some(xtr_amount)) => Some(BillingPackTerms {
+            id,
+            xtr_amount,
+            credits_awarded: 0,
+        }),
         (None, None) => None,
         _ => return Err(PyValueError::new_err("incomplete billing pack terms")),
     };
     let decision = evaluate_telegram_pre_checkout_core(&query, billing_available, pack.as_ref())
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serde_json::to_string(&decision).map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+fn telegram_evaluate_successful_payment(
+    message_json: &str,
+    billing_available: bool,
+    pack_id: Option<String>,
+    pack_xtr_amount: Option<i64>,
+    pack_credits_awarded: Option<i64>,
+) -> PyResult<String> {
+    let message = serde_json::from_str(message_json)
+        .map_err(|error| PyValueError::new_err(format!("invalid JSON value: {error}")))?;
+    let pack = match (pack_id, pack_xtr_amount, pack_credits_awarded) {
+        (Some(id), Some(xtr_amount), Some(credits_awarded)) => Some(BillingPackTerms {
+            id,
+            xtr_amount,
+            credits_awarded,
+        }),
+        (None, None, None) => None,
+        _ => return Err(PyValueError::new_err("incomplete billing pack terms")),
+    };
+    let decision =
+        evaluate_telegram_successful_payment_core(&message, billing_available, pack.as_ref())
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
     serde_json::to_string(&decision).map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
@@ -3522,6 +3552,10 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(telegram_format_user_identity, module)?)?;
     module.add_function(wrap_pyfunction!(telegram_parse_callback_context, module)?)?;
     module.add_function(wrap_pyfunction!(telegram_evaluate_pre_checkout, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        telegram_evaluate_successful_payment,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(provider_chain_select, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_outcome, module)?)?;
     module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;

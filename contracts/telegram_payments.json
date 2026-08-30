@@ -45,5 +45,60 @@
       "pack_xtr_amount": 25,
       "expected": {"kind": "invalid_payment", "query_id": "checkout-4"}
     }
+  ],
+  "successful_payment": [
+    {
+      "name": "valid_payment_produces_typed_record",
+      "message": {
+        "chat": {"id": 100},
+        "from": {"id": 42},
+        "successful_payment": {
+          "currency": "XTR",
+          "invoice_payload": "topup:p50:42:en",
+          "telegram_payment_charge_id": "charge-1",
+          "total_amount": 25
+        }
+      },
+      "billing_available": true,
+      "pack_id": "p50",
+      "pack_xtr_amount": 25,
+      "pack_credits_awarded": 5000,
+      "expected": {
+        "kind": "record",
+        "chat_id": "100",
+        "user_id": 42,
+        "charge_id": "charge-1",
+        "pack_id": "p50",
+        "xtr_amount": 25,
+        "credits_awarded": 5000,
+        "payload": "topup:p50:42:en"
+      }
+    },
+    {
+      "name": "invalid_payment_preserves_audit_fields",
+      "message": {
+        "chat": {"id": 100},
+        "from": {"id": 42},
+        "successful_payment": {
+          "currency": "USD",
+          "invoice_payload": "topup:p50:99",
+          "telegram_payment_charge_id": "",
+          "total_amount": "bad"
+        }
+      },
+      "billing_available": true,
+      "pack_id": "p50",
+      "pack_xtr_amount": 25,
+      "pack_credits_awarded": 5000,
+      "expected": {
+        "kind": "invalid_payment",
+        "chat_id": "100",
+        "user_id": 42,
+        "currency": "USD",
+        "payload": "topup:p50:99",
+        "total_amount": -1,
+        "charge_id": ""
+      }
+    }
   ]
 }

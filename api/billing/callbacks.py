@@ -381,6 +381,144 @@ def handle_pre_checkout_query(
     answer_query(str(query_id), ok=True)
 
 
+def _report_invalid_successful_payment(
+    values: Mapping[str, Any],
+    *,
+    send_message: Callable[[str, str], Any],
+    admin_report: Callable[..., None],
+) -> None:
+    chat_id = str(values["chat_id"])
+    send_message(chat_id, tr("payment.invalid_received"))
+    admin_report(
+        "Invalid successful payment payload",
+        None,
+        {
+            "chat_id": chat_id,
+            "user_id": int(values["user_id"]),
+            "currency": str(values["currency"]),
+            "payload": str(values["payload"]),
+            "total_amount": int(values["total_amount"]),
+            "charge_id": str(values["charge_id"]),
+        },
+    )
+
+
+def _record_validated_payment(
+    values: Mapping[str, Any],
+    *,
+    record_payment: Callable[..., dict[str, Any]],
+    admin_report: Callable[..., None],
+    send_message: Callable[[str, str], Any],
+    format_credits: Callable[[int], str],
+) -> None:
+    chat_id = str(values["chat_id"])
+    user_id = int(values["user_id"])
+    charge_id = str(values["charge_id"])
+    credits_awarded = int(values["credits_awarded"])
+    try:
+        result = record_payment(
+            telegram_payment_charge_id=charge_id,
+            user_id=user_id,
+            pack_id=str(values["pack_id"]),
+            xtr_amount=int(values["xtr_amount"]),
+            credits_awarded=credits_awarded,
+            payload=str(values["payload"]),
+        )
+    except Exception as error:
+        admin_report(
+            "falló persistencia de pago exitoso",
+            error,
+            {"chat_id": chat_id, "user_id": user_id, "charge_id": charge_id},
+        )
+        send_message(chat_id, tr("payment.credit_error"))
+        return
+    balance = int(result.get("user_balance", 0))
+    if result.get("inserted"):
+        send_message(
+            chat_id,
+            tr(
+                "payment.success",
+                credits=format_credits(credits_awarded),
+                balance=format_credits(balance),
+            ),
+        )
+    else:
+        send_message(
+            chat_id,
+            tr("payment.duplicate", balance=format_credits(balance)),
+        )
+
+
+def _evaluate_rust_successful_payment(
+    message: Mapping[str, Any],
+    *,
+    is_available: bool,
+    parse_payload: Callable[[str], tuple[str | None, int | None]],
+    get_pack: Callable[[str], AIBillingPack | None],
+) -> Mapping[str, Any] | None:
+    rust = load_rust_telegram_payments()
+    if rust is None:
+        return None
+    try:
+        pack: AIBillingPack | None = None
+        if is_available:
+            payment = message.get("successful_payment") or {}
+            payload = str(payment.get("invoice_payload") or "")
+            pack_id, _payload_user_id = parse_payload(payload)
+            pack = get_pack(pack_id or "")
+        result = json.loads(
+            rust.telegram_evaluate_successful_payment(
+                json.dumps(message, separators=(",", ":")),
+                is_available,
+                str(pack["id"]) if pack else None,
+                int(pack["xtr"]) if pack else None,
+                int(pack["credits"]) if pack else None,
+            )
+        )
+        if not isinstance(result, Mapping) or result.get("kind") not in {
+            "ignore",
+            "billing_unavailable",
+            "invalid_payment",
+            "record",
+        }:
+            raise ValueError("Rust successful-payment result is invalid")
+        return result
+    except Exception:
+        logger.exception("Rust successful-payment validation failed; using Python fallback")
+        return None
+
+
+def _apply_rust_successful_payment(
+    result: Mapping[str, Any] | None,
+    *,
+    unavailable_message: Callable[[], str],
+    send_message: Callable[[str, str], Any],
+    record_payment: Callable[..., dict[str, Any]],
+    admin_report: Callable[..., None],
+    format_credits: Callable[[int], str],
+) -> bool:
+    if result is None:
+        return False
+    kind = result["kind"]
+    if kind == "billing_unavailable":
+        send_message(str(result["chat_id"]), unavailable_message())
+    elif kind == "invalid_payment":
+        _report_invalid_successful_payment(
+            result,
+            send_message=send_message,
+            admin_report=admin_report,
+        )
+    elif kind == "record":
+        _record_validated_payment(
+            result,
+            record_payment=record_payment,
+            admin_report=admin_report,
+            send_message=send_message,
+            format_credits=format_credits,
+        )
+    return True
+
+
 def handle_successful_payment(
     message: dict[str, Any],
     *,
@@ -398,7 +536,24 @@ def handle_successful_payment(
     if chat_id_raw is None:
         return "ok"
     chat_id = str(chat_id_raw)
-    if not billing_available():
+    is_available = billing_available()
+    rust_result = _evaluate_rust_successful_payment(
+        message,
+        is_available=is_available,
+        parse_payload=parse_payload,
+        get_pack=get_pack,
+    )
+    if _apply_rust_successful_payment(
+        rust_result,
+        unavailable_message=unavailable_message,
+        send_message=send_message,
+        record_payment=record_payment,
+        admin_report=admin_report,
+        format_credits=format_credits,
+    ):
+        return "ok"
+
+    if not is_available:
         send_message(chat_id, unavailable_message())
         return "ok"
 
@@ -441,40 +596,19 @@ def handle_successful_payment(
         )
         return "ok"
 
-    try:
-        result = record_payment(
-            telegram_payment_charge_id=charge_id,
-            user_id=user_id,
-            pack_id=str(pack["id"]),
-            xtr_amount=int(pack["xtr"]),
-            credits_awarded=int(pack["credits"]),
-            payload=payload,
-        )
-    except Exception as error:
-        admin_report(
-            "falló persistencia de pago exitoso",
-            error,
-            {"chat_id": chat_id, "user_id": user_id, "charge_id": charge_id},
-        )
-        send_message(
-            chat_id,
-            tr("payment.credit_error"),
-        )
-        return "ok"
-
-    balance = int(result.get("user_balance", 0))
-    if result.get("inserted"):
-        send_message(
-            chat_id,
-            tr(
-                "payment.success",
-                credits=format_credits(pack["credits"]),
-                balance=format_credits(balance),
-            ),
-        )
-    else:
-        send_message(
-            chat_id,
-            tr("payment.duplicate", balance=format_credits(balance)),
-        )
+    _record_validated_payment(
+        {
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "charge_id": charge_id,
+            "pack_id": pack["id"],
+            "xtr_amount": pack["xtr"],
+            "credits_awarded": pack["credits"],
+            "payload": payload,
+        },
+        record_payment=record_payment,
+        admin_report=admin_report,
+        send_message=send_message,
+        format_credits=format_credits,
+    )
     return "ok"

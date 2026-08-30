@@ -1284,6 +1284,17 @@ def verify_telegram_payments(bridge: ModuleType) -> None:
             )
         )
         assert actual == case["expected"], case["name"]
+    for case in contract["successful_payment"]:
+        actual = json.loads(
+            bridge.telegram_evaluate_successful_payment(
+                json.dumps(case["message"], separators=(",", ":")),
+                case["billing_available"],
+                case["pack_id"],
+                case["pack_xtr_amount"],
+                case["pack_credits_awarded"],
+            )
+        )
+        assert actual == case["expected"], case["name"]
 
 
 def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
