@@ -19,6 +19,7 @@ from api.billing.reconciliation import (
     mark_ai_operation_inactive,
 )
 from api.core.rust_bridge import load_rust_bridge
+from api.core.rust_redis import redis_endpoint_from_env
 from api.i18n import current_locale, normalize_locale, use_locale
 from api.memory.compaction import CompactionPlan
 
@@ -57,6 +58,31 @@ class _RustCompactionJobs(Protocol):
     def normalize_compaction_job(self, payload: str) -> str: ...
 
 
+class _RustCompactionQueue(Protocol):
+    def job_exists(self, chat_id: str) -> bool: ...
+    def insert_job(self, chat_id: str, payload: str) -> bool: ...
+    def list_jobs(self) -> str: ...
+    def replace_job(self, chat_id: str, payload: str) -> None: ...
+    def delete_job(self, chat_id: str) -> bool: ...
+    def acquire_lock(self, chat_id: str, token: str, ttl_seconds: int) -> bool: ...
+    def release_lock(self, chat_id: str, token: str) -> bool: ...
+    def quarantine_job(
+        self,
+        chat_id: str,
+        dead_job_id: str,
+        dead_payload: str,
+    ) -> bool: ...
+
+
+class _RustCompactionQueueModule(Protocol):
+    def RedisCompactionQueue(
+        self,
+        host: str,
+        port: int,
+        password: str | None,
+    ) -> _RustCompactionQueue: ...
+
+
 def _load_rust_compaction_policy() -> _RustCompactionPolicy | None:
     module = load_rust_bridge("RUST_COMPACTION_POLICY_ENABLED")
     if module is None:
@@ -69,6 +95,13 @@ def _load_rust_compaction_jobs() -> _RustCompactionJobs | None:
     if module is None:
         return None
     return cast(_RustCompactionJobs, module)
+
+
+def _load_rust_compaction_queue() -> _RustCompactionQueueModule | None:
+    module = load_rust_bridge("RUST_COMPACTION_QUEUE_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustCompactionQueueModule, module)
 
 
 def _normalize_compaction_job_payload(
@@ -249,6 +282,16 @@ class DurableCompactionQueue:
         self._list_provider_usage = list_provider_usage
         self._logger = logger
         self._admin_report = admin_report
+        rust_module = _load_rust_compaction_queue()
+        if rust_module is None:
+            self._rust_queue: _RustCompactionQueue | None = None
+        else:
+            host, port, password = redis_endpoint_from_env()
+            self._rust_queue = rust_module.RedisCompactionQueue(
+                host,
+                port,
+                password,
+            )
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -256,8 +299,8 @@ class DurableCompactionQueue:
         """Reserve the payer's credits and persist one job per chat."""
 
         try:
-            client = self._redis_factory()
-            if client.hexists(_JOBS_KEY, plan.chat_id):
+            client = self._redis_factory() if self._rust_queue is None else None
+            if self._job_exists(client, plan.chat_id):
                 return False
         except Exception as error:
             self._logger.warning("compaction: Redis unavailable before reserve: %s", error)
@@ -291,12 +334,10 @@ class DurableCompactionQueue:
             locale=current_locale(),
         )
         try:
-            stored = bool(
-                client.hsetnx(
-                    _JOBS_KEY,
-                    plan.chat_id,
-                    json.dumps(asdict(job), ensure_ascii=False),
-                )
+            stored = self._insert_job(
+                client,
+                plan.chat_id,
+                json.dumps(asdict(job), ensure_ascii=False),
             )
         except Exception as error:
             self._logger.warning("compaction: failed to persist job: %s", error)
@@ -335,8 +376,8 @@ class DurableCompactionQueue:
             self._thread.join(timeout=5)
 
     def run_pending_once(self) -> int:
-        client = self._redis_factory()
-        raw_jobs = client.hgetall(_JOBS_KEY) or {}
+        client = self._redis_factory() if self._rust_queue is None else None
+        raw_jobs = self._list_jobs(client)
         processed = 0
         for raw_chat_id, raw_payload in raw_jobs.items():
             chat_id = self._text(raw_chat_id)
@@ -359,32 +400,93 @@ class DurableCompactionQueue:
             except TypeError, ValueError:
                 self._logger.exception("compaction: incompatible job chat_id=%s", chat_id)
                 if self._settle_invalid_job(decoded, chat_id=chat_id):
-                    client.hdel(_JOBS_KEY, chat_id)
+                    self._delete_job(client, chat_id)
                 continue
             if not _compaction_job_is_due(job.next_attempt_at, time.time()):
                 continue
             token = uuid4().hex
-            if not client.set(f"{_LOCK_PREFIX}{chat_id}", token, nx=True, ex=_LOCK_TTL_SECONDS):
+            if not self._acquire_lock(client, chat_id, token):
                 continue
+            processing_client = (
+                self._redis_factory() if client is None else client
+            )
             with _active_operation(_reservation_operation_id(job.reservation)):
                 try:
-                    self._process(client, job)
-                    client.hdel(_JOBS_KEY, chat_id)
+                    self._process(processing_client, job)
+                    self._delete_job(processing_client, chat_id)
                     processed += 1
                 except Exception as error:
-                    self._retry_or_refund(client, job, error)
+                    self._retry_or_refund(processing_client, job, error)
                 finally:
-                    lock_key = f"{_LOCK_PREFIX}{chat_id}"
-                    if self._text(client.get(lock_key)) == token:
-                        client.delete(lock_key)
+                    self._release_lock(processing_client, chat_id, token)
         return processed
+
+    def _job_exists(self, client: Any, chat_id: str) -> bool:
+        if self._rust_queue is not None:
+            return bool(self._rust_queue.job_exists(chat_id))
+        return bool(client.hexists(_JOBS_KEY, chat_id))
+
+    def _insert_job(self, client: Any, chat_id: str, payload: str) -> bool:
+        if self._rust_queue is not None:
+            return bool(self._rust_queue.insert_job(chat_id, payload))
+        return bool(client.hsetnx(_JOBS_KEY, chat_id, payload))
+
+    def _list_jobs(self, client: Any) -> Mapping[Any, Any]:
+        if self._rust_queue is None:
+            return cast(Mapping[Any, Any], client.hgetall(_JOBS_KEY) or {})
+        decoded = json.loads(self._rust_queue.list_jobs())
+        if not isinstance(decoded, list):
+            raise TypeError("Rust compaction queue returned a non-list payload")
+        jobs: dict[str, str] = {}
+        for item in decoded:
+            if not isinstance(item, Mapping):
+                raise TypeError("Rust compaction queue returned an invalid job")
+            jobs[str(item["chat_id"])] = str(item["payload"])
+        return jobs
+
+    def _replace_job(self, client: Any, chat_id: str, payload: str) -> None:
+        if self._rust_queue is not None:
+            self._rust_queue.replace_job(chat_id, payload)
+            return
+        client.hset(_JOBS_KEY, chat_id, payload)
+
+    def _delete_job(self, client: Any, chat_id: str) -> bool:
+        if self._rust_queue is not None:
+            return bool(self._rust_queue.delete_job(chat_id))
+        return bool(client.hdel(_JOBS_KEY, chat_id))
+
+    def _acquire_lock(self, client: Any, chat_id: str, token: str) -> bool:
+        if self._rust_queue is not None:
+            return bool(
+                self._rust_queue.acquire_lock(
+                    chat_id,
+                    token,
+                    _LOCK_TTL_SECONDS,
+                )
+            )
+        return bool(
+            client.set(
+                f"{_LOCK_PREFIX}{chat_id}",
+                token,
+                nx=True,
+                ex=_LOCK_TTL_SECONDS,
+            )
+        )
+
+    def _release_lock(self, client: Any, chat_id: str, token: str) -> bool:
+        if self._rust_queue is not None:
+            return bool(self._rust_queue.release_lock(chat_id, token))
+        lock_key = f"{_LOCK_PREFIX}{chat_id}"
+        if self._text(client.get(lock_key)) != token:
+            return False
+        return bool(client.delete(lock_key))
 
     def _process(self, client: Any, job: CompactionJob) -> None:
         current_summary = self._get_summary(client, job.chat_id)
         current_marker = self._get_marker(client, job.chat_id) if current_summary else None
         if self._restore_provider_result(job):
-            client.hset(
-                _JOBS_KEY,
+            self._replace_job(
+                client,
                 job.chat_id,
                 json.dumps(asdict(job), ensure_ascii=False),
             )
@@ -420,8 +522,8 @@ class DurableCompactionQueue:
             job.result_cost_usd_micros = cost
             job.result_billing_segment = billing_segment
             self._persist_provider_usage(job)
-            client.hset(
-                _JOBS_KEY,
+            self._replace_job(
+                client,
                 job.chat_id,
                 json.dumps(asdict(job), ensure_ascii=False),
             )
@@ -466,11 +568,11 @@ class DurableCompactionQueue:
                 actual_credit_units=transition["actual_credit_units"],
                 reason="memory_compaction_failed",
             )
-            client.hdel(_JOBS_KEY, job.chat_id)
+            self._delete_job(client, job.chat_id)
             return
         job.next_attempt_at = float(transition["next_attempt_at"])
-        client.hset(
-            _JOBS_KEY,
+        self._replace_job(
+            client,
             job.chat_id,
             json.dumps(asdict(job), ensure_ascii=False),
         )
@@ -653,8 +755,15 @@ class DurableCompactionQueue:
             ensure_ascii=False,
         )
         try:
-            client.hset(_DEAD_JOBS_KEY, dead_job_id, dead_payload)
-            client.hdel(_JOBS_KEY, chat_id)
+            if self._rust_queue is not None:
+                self._rust_queue.quarantine_job(
+                    chat_id,
+                    dead_job_id,
+                    dead_payload,
+                )
+            else:
+                client.hset(_DEAD_JOBS_KEY, dead_job_id, dead_payload)
+                client.hdel(_JOBS_KEY, chat_id)
         except Exception as error:
             self._logger.warning(
                 "compaction: failed to quarantine job chat_id=%s error=%s",

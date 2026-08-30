@@ -25,6 +25,10 @@ impl RedisStringCommands for redis::Connection {
 }
 
 pub(crate) fn connect(endpoint: &RedisEndpoint) -> redis::RedisResult<redis::Connection> {
+    client(endpoint)?.get_connection()
+}
+
+pub(crate) fn client(endpoint: &RedisEndpoint) -> redis::RedisResult<redis::Client> {
     let mut settings = RedisConnectionInfo::default().set_skip_set_lib_name();
     if let Some(password) = endpoint
         .password
@@ -36,7 +40,7 @@ pub(crate) fn connect(endpoint: &RedisEndpoint) -> redis::RedisResult<redis::Con
     let info = (endpoint.host.clone(), endpoint.port)
         .into_connection_info()?
         .set_redis_settings(settings);
-    redis::Client::open(info)?.get_connection()
+    redis::Client::open(info)
 }
 
 #[cfg(test)]

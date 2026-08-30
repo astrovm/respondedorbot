@@ -11,6 +11,7 @@ use bot_adapters::redis_chat_admin::{
     chat_admin_cache_key as chat_admin_cache_key_adapter,
     get_cached_chat_admin as get_cached_chat_admin_adapter,
 };
+use bot_adapters::redis_compaction_queue::RedisCompactionQueue as RedisCompactionQueueAdapter;
 use bot_adapters::redis_connection::RedisEndpoint;
 use bot_adapters::redis_media_cache::{
     cache_media as cache_media_adapter, get_cached_media as get_cached_media_adapter,
@@ -99,6 +100,82 @@ use bot_core::weather::{
     select_forecast_hour as select_forecast_hour_core,
     select_location_candidate as select_location_candidate_core,
 };
+
+#[pyclass(name = "RedisCompactionQueue")]
+struct PyRedisCompactionQueue {
+    queue: RedisCompactionQueueAdapter,
+}
+
+#[pymethods]
+impl PyRedisCompactionQueue {
+    #[new]
+    fn new(host: &str, port: u16, password: Option<&str>) -> PyResult<Self> {
+        let queue = RedisCompactionQueueAdapter::new(&RedisEndpoint {
+            host: host.to_owned(),
+            port,
+            password: password.map(ToOwned::to_owned),
+        })
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        Ok(Self { queue })
+    }
+
+    fn job_exists(&self, py: Python<'_>, chat_id: &str) -> PyResult<bool> {
+        py.detach(|| self.queue.job_exists(chat_id))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn insert_job(&self, py: Python<'_>, chat_id: &str, payload: &str) -> PyResult<bool> {
+        py.detach(|| self.queue.insert_job(chat_id, payload))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn list_jobs(&self, py: Python<'_>) -> PyResult<String> {
+        let jobs = py
+            .detach(|| self.queue.list_jobs())
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        serde_json::to_string(&jobs).map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn replace_job(&self, py: Python<'_>, chat_id: &str, payload: &str) -> PyResult<()> {
+        py.detach(|| self.queue.replace_job(chat_id, payload))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn delete_job(&self, py: Python<'_>, chat_id: &str) -> PyResult<bool> {
+        py.detach(|| self.queue.delete_job(chat_id))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn acquire_lock(
+        &self,
+        py: Python<'_>,
+        chat_id: &str,
+        token: &str,
+        ttl_seconds: i64,
+    ) -> PyResult<bool> {
+        py.detach(|| self.queue.acquire_lock(chat_id, token, ttl_seconds))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn release_lock(&self, py: Python<'_>, chat_id: &str, token: &str) -> PyResult<bool> {
+        py.detach(|| self.queue.release_lock(chat_id, token))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn quarantine_job(
+        &self,
+        py: Python<'_>,
+        chat_id: &str,
+        dead_job_id: &str,
+        dead_payload: &str,
+    ) -> PyResult<bool> {
+        py.detach(|| {
+            self.queue
+                .quarantine_job(chat_id, dead_job_id, dead_payload)
+        })
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -1329,22 +1406,20 @@ fn normalize_compaction_job(payload: &str) -> PyResult<String> {
 
 #[pyfunction]
 fn redis_media_cache_get(
+    py: Python<'_>,
     host: &str,
     port: u16,
     password: Option<&str>,
     prefix: &str,
     file_id: &str,
 ) -> PyResult<Option<String>> {
-    get_cached_media_adapter(
-        &RedisEndpoint {
-            host: host.to_owned(),
-            port,
-            password: password.map(ToOwned::to_owned),
-        },
-        prefix,
-        file_id,
-    )
-    .map_err(|error| PyValueError::new_err(error.to_string()))
+    let endpoint = RedisEndpoint {
+        host: host.to_owned(),
+        port,
+        password: password.map(ToOwned::to_owned),
+    };
+    py.detach(|| get_cached_media_adapter(&endpoint, prefix, file_id))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
 #[pyfunction]
@@ -1355,6 +1430,7 @@ fn redis_media_cache_key(prefix: &str, file_id: &str) -> String {
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 fn redis_media_cache_set(
+    py: Python<'_>,
     host: &str,
     port: u16,
     password: Option<&str>,
@@ -1363,38 +1439,31 @@ fn redis_media_cache_set(
     text: &str,
     ttl_seconds: i64,
 ) -> PyResult<()> {
-    cache_media_adapter(
-        &RedisEndpoint {
-            host: host.to_owned(),
-            port,
-            password: password.map(ToOwned::to_owned),
-        },
-        prefix,
-        file_id,
-        text,
-        ttl_seconds,
-    )
-    .map_err(|error| PyValueError::new_err(error.to_string()))
+    let endpoint = RedisEndpoint {
+        host: host.to_owned(),
+        port,
+        password: password.map(ToOwned::to_owned),
+    };
+    py.detach(|| cache_media_adapter(&endpoint, prefix, file_id, text, ttl_seconds))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
 #[pyfunction]
 fn redis_chat_admin_get(
+    py: Python<'_>,
     host: &str,
     port: u16,
     password: Option<&str>,
     chat_id: &str,
     user_id: &str,
 ) -> PyResult<Option<bool>> {
-    get_cached_chat_admin_adapter(
-        &RedisEndpoint {
-            host: host.to_owned(),
-            port,
-            password: password.map(ToOwned::to_owned),
-        },
-        chat_id,
-        user_id,
-    )
-    .map_err(|error| PyValueError::new_err(error.to_string()))
+    let endpoint = RedisEndpoint {
+        host: host.to_owned(),
+        port,
+        password: password.map(ToOwned::to_owned),
+    };
+    py.detach(|| get_cached_chat_admin_adapter(&endpoint, chat_id, user_id))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
 #[pyfunction]
@@ -1405,6 +1474,7 @@ fn redis_chat_admin_key(chat_id: &str, user_id: &str) -> String {
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 fn redis_chat_admin_set(
+    py: Python<'_>,
     host: &str,
     port: u16,
     password: Option<&str>,
@@ -1413,18 +1483,13 @@ fn redis_chat_admin_set(
     is_admin: bool,
     ttl_seconds: i64,
 ) -> PyResult<()> {
-    cache_chat_admin_adapter(
-        &RedisEndpoint {
-            host: host.to_owned(),
-            port,
-            password: password.map(ToOwned::to_owned),
-        },
-        chat_id,
-        user_id,
-        is_admin,
-        ttl_seconds,
-    )
-    .map_err(|error| PyValueError::new_err(error.to_string()))
+    let endpoint = RedisEndpoint {
+        host: host.to_owned(),
+        port,
+        password: password.map(ToOwned::to_owned),
+    };
+    py.detach(|| cache_chat_admin_adapter(&endpoint, chat_id, user_id, is_admin, ttl_seconds))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
 /// Select one geocoding result from adapter-normalized qualifier keys.
@@ -1480,6 +1545,7 @@ fn evaluate_response_routing(input_json: &str) -> PyResult<&'static str> {
 /// Register the temporary `respondedorbot_rs` Python module.
 #[pymodule]
 fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<PyRedisCompactionQueue>()?;
     module.add_function(wrap_pyfunction!(migration_protocol_version, module)?)?;
     module.add_function(wrap_pyfunction!(whole_credits_to_units, module)?)?;
     module.add_function(wrap_pyfunction!(rescale_credit_units, module)?)?;

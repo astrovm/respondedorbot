@@ -357,6 +357,18 @@ def verify_compaction_jobs(bridge: ModuleType) -> None:
         raise AssertionError("future compaction-job version must be rejected")
 
 
+def verify_compaction_queue(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "compaction_queue.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    queue = bridge.RedisCompactionQueue("localhost", 6379, None)
+    for case in contract["lock_ttl_validation"]:
+        try:
+            queue.acquire_lock("synthetic-chat", "synthetic-token", case["ttl"])
+        except ValueError:
+            continue
+        raise AssertionError(f"{case['name']} must be rejected")
+
+
 def verify_media_cache(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_cache.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -446,6 +458,7 @@ def main(arguments: list[str]) -> int:
     verify_message_state(bridge)
     verify_compaction_policy(bridge)
     verify_compaction_jobs(bridge)
+    verify_compaction_queue(bridge)
     verify_media_cache(bridge)
     verify_chat_admin_cache(bridge)
     verify_media_routing(bridge)

@@ -4,6 +4,16 @@ from dataclasses import asdict
 from tests.support import *
 
 
+@pytest.fixture(autouse=True)
+def _use_python_compaction_queue(monkeypatch):
+    """Keep legacy queue tests scoped to the Python Redis implementation."""
+
+    monkeypatch.setattr(
+        "api.memory.background._load_rust_compaction_queue",
+        lambda: None,
+    )
+
+
 class _FakeRedis:
     def __init__(self):
         self.hashes = {}
