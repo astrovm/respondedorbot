@@ -202,6 +202,21 @@ def verify_config_callbacks(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_link_parsing(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "link_parsing.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["utf16"]:
+        actual = bridge.slice_telegram_utf16(
+            case["text"], case["offset"], case["length"]
+        )
+        assert actual == case["expected"], case["name"]
+    for case in contract["trim"]:
+        assert bridge.trim_detected_url(case["input"]) == case["expected"], case["name"]
+    for case in contract["unique"]:
+        actual = bridge.select_unique_urls(case["candidates"], case["max_links"])
+        assert actual == case["expected"], case["name"]
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -269,6 +284,7 @@ def main(arguments: list[str]) -> int:
     verify_polymarket_ranking(bridge)
     verify_hacker_news(bridge)
     verify_config_callbacks(bridge)
+    verify_link_parsing(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

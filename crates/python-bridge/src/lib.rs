@@ -26,6 +26,10 @@ use bot_core::hacker_news::{
     HackerNewsRenderItem, format_items as format_hacker_news_core,
     normalize_feed_item as normalize_hacker_news_item_core,
 };
+use bot_core::links::{
+    select_unique_urls as select_unique_urls_core, trim_detected_url as trim_detected_url_core,
+    utf16_slice as utf16_slice_core,
+};
 use bot_core::market_context::{
     CryptoQuote as MarketCryptoQuote, DollarQuote as MarketDollarQuote, MarketSnapshot,
     format_market_context as format_market_context_core,
@@ -1071,6 +1075,24 @@ fn evaluate_config_callback(input_json: &str) -> PyResult<String> {
         .map_err(|error| PyValueError::new_err(format!("cannot encode config callback: {error}")))
 }
 
+/// Slice message text using Telegram UTF-16 entity offsets.
+#[pyfunction]
+fn slice_telegram_utf16(text: &str, offset: i64, length: i64) -> String {
+    utf16_slice_core(text, offset, length)
+}
+
+/// Remove punctuation captured after a detected URL.
+#[pyfunction]
+fn trim_detected_url(raw_url: &str) -> String {
+    trim_detected_url_core(raw_url)
+}
+
+/// Deduplicate detected URLs and apply the configured per-message limit.
+#[pyfunction]
+fn select_unique_urls(candidates: Vec<String>, max_links: usize) -> Vec<String> {
+    select_unique_urls_core(&candidates, max_links)
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -1146,6 +1168,9 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(normalize_hacker_news_item, module)?)?;
     module.add_function(wrap_pyfunction!(format_hacker_news_items, module)?)?;
     module.add_function(wrap_pyfunction!(evaluate_config_callback, module)?)?;
+    module.add_function(wrap_pyfunction!(slice_telegram_utf16, module)?)?;
+    module.add_function(wrap_pyfunction!(trim_detected_url, module)?)?;
+    module.add_function(wrap_pyfunction!(select_unique_urls, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;

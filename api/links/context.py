@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable, Mapping, Sequence
 from logging import Logger
-from typing import Any
+from typing import Any, Protocol, cast
+
+from api.core.rust_bridge import load_rust_bridge
 
 UrlNormalizer = Callable[[str], str | None]
 MetadataFetcher = Callable[[str], dict[str, Any]]
@@ -15,9 +18,25 @@ VideoIdExtractor = Callable[[str], str | None]
 TranscriptFetcher = Callable[[str], str]
 
 
-def utf16_slice(text: str, offset: int, length: int) -> str:
-    if not text or length <= 0:
-        return ""
+class _RustLinkParsing(Protocol):
+    def slice_telegram_utf16(self, text: str, offset: int, length: int) -> str: ...
+
+    def trim_detected_url(self, raw_url: str) -> str: ...
+
+    def select_unique_urls(self, candidates: list[str], max_links: int) -> list[str]: ...
+
+
+logger = logging.getLogger(__name__)
+
+
+def _load_rust_link_parsing() -> _RustLinkParsing | None:
+    module = load_rust_bridge("RUST_LINK_PARSING_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustLinkParsing, module)
+
+
+def _utf16_slice_python(text: str, offset: int, length: int) -> str:
     encoded = text.encode("utf-16-le")
     start = max(0, int(offset)) * 2
     end = max(start, start + max(0, int(length)) * 2)
@@ -27,12 +46,33 @@ def utf16_slice(text: str, offset: int, length: int) -> str:
         return ""
 
 
+def utf16_slice(text: str, offset: int, length: int) -> str:
+    if not text or length <= 0:
+        return ""
+    rust = _load_rust_link_parsing()
+    if rust is not None:
+        try:
+            return rust.slice_telegram_utf16(text, offset, length)
+        except Exception:
+            logger.exception("Rust UTF-16 entity slicing failed; using Python")
+    return _utf16_slice_python(text, offset, length)
+
+
 def normalize_detected_url(
     raw_url: str,
     *,
     normalize_url: UrlNormalizer,
 ) -> str | None:
-    candidate = str(raw_url or "").strip().rstrip(".,;:!?)\"]}'")
+    candidate = str(raw_url or "")
+    rust = _load_rust_link_parsing()
+    if rust is not None:
+        try:
+            candidate = rust.trim_detected_url(candidate)
+        except Exception:
+            logger.exception("Rust detected-URL trimming failed; using Python")
+            candidate = candidate.strip().rstrip(".,;:!?)\"]}'")
+    else:
+        candidate = candidate.strip().rstrip(".,;:!?)\"]}'")
     return normalize_url(candidate) if candidate else None
 
 
@@ -89,6 +129,13 @@ def extract_message_urls(
             normalized = normalize_url(match.group(1))
             if normalized:
                 candidates.append(normalized)
+
+    rust = _load_rust_link_parsing()
+    if rust is not None:
+        try:
+            return rust.select_unique_urls(candidates, max_links)
+        except Exception:
+            logger.exception("Rust detected-URL selection failed; using Python")
 
     unique_urls: list[str] = []
     seen: set[str] = set()

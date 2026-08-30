@@ -7,6 +7,7 @@ pub mod config_callbacks;
 pub mod credit_units;
 pub mod devo;
 pub mod hacker_news;
+pub mod links;
 pub mod market_context;
 pub mod market_models;
 pub mod polymarket;
