@@ -22,9 +22,10 @@ use bot_core::telegram_actions::{SendMessage, TelegramAction};
 use bot_core::telegram_callbacks::{CallbackContextOutcome, CallbackRoute, parse_callback_context};
 use bot_core::telegram_input::{ChatId, MessageId, is_group_chat_type};
 use bot_core::telegram_payments::{
-    StarPaymentRecord, SuccessfulPaymentDecision, TopupCallbackPlan,
-    evaluate_default_successful_payment, invoice_payload_locale, payment_record, plan_pre_checkout,
-    plan_topup_callback, plan_topup_command, successful_payment_reply,
+    BalanceCommandContext, BalanceCommandPlan, StarPaymentRecord, SuccessfulPaymentDecision,
+    TopupCallbackPlan, balance_reply, evaluate_default_successful_payment, invoice_payload_locale,
+    payment_record, plan_balance_command, plan_pre_checkout, plan_topup_callback,
+    plan_topup_command, successful_payment_reply,
 };
 use num_bigint::BigInt;
 use serde_json::{Map, Value};
@@ -101,6 +102,17 @@ pub trait StarPaymentSink {
     fn record(&mut self, payment: &StarPaymentRecord) -> Result<StarPaymentReceipt, String>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BillingBalances {
+    pub user_balance: i64,
+    pub chat_balance: Option<i64>,
+    pub diagnostics: Vec<String>,
+}
+
+pub trait BillingBalanceSource {
+    fn load(&mut self, user_id: i64, chat_id: Option<i64>) -> Result<BillingBalances, String>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchOutcome {
     Handled,
@@ -137,6 +149,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     bot_name: String,
     billing_available: bool,
     payment_sink: Option<Box<dyn StarPaymentSink>>,
+    balance_source: Option<Box<dyn BillingBalanceSource>>,
     last_outcome: Option<DispatchOutcome>,
     state_diagnostics: Vec<String>,
 }
@@ -171,6 +184,7 @@ where
             bot_name: bot_name.to_owned(),
             billing_available: true,
             payment_sink: None,
+            balance_source: None,
             last_outcome: None,
             state_diagnostics: Vec::new(),
         }
@@ -187,6 +201,12 @@ where
     #[must_use]
     pub fn with_payment_sink(mut self, sink: Box<dyn StarPaymentSink>) -> Self {
         self.payment_sink = Some(sink);
+        self
+    }
+
+    #[must_use]
+    pub fn with_balance_source(mut self, source: Box<dyn BillingBalanceSource>) -> Self {
+        self.balance_source = Some(source);
         self
     }
 
@@ -508,7 +528,7 @@ where
         if message.has_reply {
             return Ok(DispatchOutcome::LegacyRequired);
         }
-        let (Some(chat_id), Some(message_id), Some(_sender_id), Some(content)) = (
+        let (Some(chat_id), Some(message_id), Some(sender_id), Some(content)) = (
             message.chat_id,
             message.message_id,
             message.sender_id,
@@ -516,6 +536,7 @@ where
         ) else {
             return Ok(DispatchOutcome::LegacyRequired);
         };
+        self.state_diagnostics.clear();
         let config = self
             .config
             .get(&chat_id.0.to_string())
@@ -536,7 +557,7 @@ where
         if is_group && is_settings_command {
             let authorization = self
                 .authorization
-                .authorize(&chat_id.0.to_string(), &_sender_id.0.to_string());
+                .authorize(&chat_id.0.to_string(), &sender_id.0.to_string());
             self.state_diagnostics.clear();
             self.state_diagnostics.extend(authorization.diagnostics);
             if !authorization.is_admin {
@@ -544,7 +565,7 @@ where
                     "Unauthorized config attempt chat_id={} chat_type={} user_id={} username={} action=command:{}",
                     chat_id.0,
                     message.chat_type.as_deref().unwrap_or_default(),
-                    _sender_id.0,
+                    sender_id.0,
                     message.sender_username.as_deref().unwrap_or_default(),
                     parsed.command,
                 ));
@@ -603,6 +624,56 @@ where
             self.billing_available,
         ) {
             StatelessCommandPlan::Action(action)
+        } else if parsed.command == "/balance" {
+            match plan_balance_command(
+                &content.text,
+                &self.bot_name,
+                BalanceCommandContext {
+                    chat_id,
+                    message_id,
+                    user_id: Some(sender_id.0),
+                    locale,
+                    is_group,
+                    billing_available: self.billing_available,
+                },
+            ) {
+                BalanceCommandPlan::Reply(action) => StatelessCommandPlan::Action(action),
+                BalanceCommandPlan::Load {
+                    user_id,
+                    chat_id,
+                    is_group,
+                } => {
+                    let Some(source) = self.balance_source.as_mut() else {
+                        return Ok(DispatchOutcome::LegacyRequired);
+                    };
+                    self.state_diagnostics.clear();
+                    let balances = source.load(user_id, is_group.then_some(chat_id.0));
+                    let text = match balances {
+                        Ok(balances) => {
+                            self.state_diagnostics.extend(balances.diagnostics);
+                            balance_reply(balances.user_balance, balances.chat_balance, locale)
+                        }
+                        Err(error) => {
+                            self.state_diagnostics.push(format!(
+                                "balance load chat_id={} user_id={user_id}: {error}",
+                                chat_id.0
+                            ));
+                            match locale {
+                                bot_core::locale::Locale::Es => {
+                                    "se trabó leyendo tu saldo, probá de nuevo".to_owned()
+                                }
+                                bot_core::locale::Locale::En => {
+                                    "I could not load your balance, try again".to_owned()
+                                }
+                            }
+                        }
+                    };
+                    let mut message = SendMessage::new(chat_id, &text);
+                    message.reply_to_message_id = Some(message_id);
+                    StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+                }
+                BalanceCommandPlan::NotHandled => StatelessCommandPlan::NotHandled,
+            }
         } else if parsed.command == "/random" {
             match parse_random_selection(&parsed.message_text) {
                 Err(_) => StatelessCommandPlan::LegacyFallbackRequired,
@@ -665,12 +736,11 @@ where
                         .set(&chat_id.0.to_string(), &updated_config)
                         .map_err(DispatchError::Config)?;
                 }
-                self.state_diagnostics.clear();
                 let command = parsed.command;
                 let incoming = prepare_incoming_command_state(IncomingCommandState {
                     chat_id,
                     message_id,
-                    user_id: _sender_id,
+                    user_id: sender_id,
                     first_name: message.sender_first_name.as_deref(),
                     username: message.sender_username.as_deref(),
                     text: &content.text,
@@ -798,9 +868,10 @@ mod tests {
     use serde_json::{Map, json};
 
     use super::{
-        ActionReceipt, ActionSink, ChatConfigSource, DispatchError, DispatchOutcome,
-        GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink, NativeDispatcher,
-        RandomSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink,
+        ActionReceipt, ActionSink, BillingBalanceSource, BillingBalances, ChatConfigSource,
+        DispatchError, DispatchOutcome, GroupAuthorizationDecision, GroupAuthorizer,
+        MessageStateSink, NativeDispatcher, RandomSource, RuntimeValues, StarPaymentReceipt,
+        StarPaymentSink,
     };
 
     struct Config {
@@ -1040,6 +1111,20 @@ mod tests {
     impl StarPaymentSink for Payments {
         fn record(&mut self, payment: &StarPaymentRecord) -> Result<StarPaymentReceipt, String> {
             self.records.borrow_mut().push(payment.clone());
+            self.result.clone()
+        }
+    }
+
+    type BalanceCalls = Rc<RefCell<Vec<(i64, Option<i64>)>>>;
+
+    struct Balances {
+        result: Result<BillingBalances, String>,
+        calls: BalanceCalls,
+    }
+
+    impl BillingBalanceSource for Balances {
+        fn load(&mut self, user_id: i64, chat_id: Option<i64>) -> Result<BillingBalances, String> {
+            self.calls.borrow_mut().push((user_id, chat_id));
             self.result.clone()
         }
     }
@@ -2007,6 +2092,139 @@ mod tests {
             ] if invalid == "that credit pack is invalid"
                 && unavailable == "el cobro de ia no está andando, avisale al admin"
         ));
+    }
+
+    #[test]
+    fn balance_command_loads_private_and_group_accounts_with_diagnostics() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut private = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_balance_source(Box::new(Balances {
+            result: Ok(BillingBalances {
+                user_balance: 4_200,
+                chat_balance: None,
+                diagnostics: vec!["synthetic onboarding diagnostic".to_owned()],
+            }),
+            calls: Rc::clone(&calls),
+        }));
+        assert_eq!(
+            private.dispatch(update("/balance", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(calls.borrow().as_slice(), [(88, None)]);
+        let Some(TelegramAction::SendMessage(message)) = private.actions.0.first() else {
+            return;
+        };
+        assert_eq!(
+            message.text,
+            "tenés 42.00 créditos ia\nsi querés cargar más mandale /topup"
+        );
+        assert_eq!(
+            private.state_diagnostics(),
+            ["synthetic onboarding diagnostic"]
+        );
+
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut group = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_balance_source(Box::new(Balances {
+            result: Ok(BillingBalances {
+                user_balance: 3_000,
+                chat_balance: Some(12_000),
+                diagnostics: Vec::new(),
+            }),
+            calls: Rc::clone(&calls),
+        }));
+        let mut group_update = update("/balance", Some("es"));
+        if let IncomingEvent::Message(message) = &mut group_update.event {
+            message.chat_type = Some("group".to_owned());
+        }
+        assert_eq!(group.dispatch(group_update), Ok(DispatchOutcome::Handled));
+        assert_eq!(calls.borrow().as_slice(), [(88, None), (88, Some(-42))]);
+        let Some(TelegramAction::SendMessage(message)) = group.actions.0.first() else {
+            return;
+        };
+        assert!(
+            message
+                .text
+                .starts_with("AI balances:\n- yours: 30.00\n- group: 120.00")
+        );
+    }
+
+    #[test]
+    fn balance_load_failure_is_localized_and_missing_native_source_stays_legacy_owned() {
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut failed = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_balance_source(Box::new(Balances {
+            result: Err("synthetic database failure".to_owned()),
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            failed.dispatch(update("/balance", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
+            return;
+        };
+        assert_eq!(message.text, "I could not load your balance, try again");
+        assert!(failed.state_diagnostics()[0].contains("synthetic database failure"));
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut shadow = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            shadow.dispatch(update("/balance", Some("es"))),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
+        assert!(shadow.actions.0.is_empty());
     }
 
     #[test]

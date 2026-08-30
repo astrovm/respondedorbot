@@ -132,6 +132,94 @@ pub fn plan_topup_command(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BalanceCommandPlan {
+    NotHandled,
+    Reply(TelegramAction),
+    Load {
+        user_id: i64,
+        chat_id: ChatId,
+        is_group: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BalanceCommandContext {
+    pub chat_id: ChatId,
+    pub message_id: MessageId,
+    pub user_id: Option<i64>,
+    pub locale: Locale,
+    pub is_group: bool,
+    pub billing_available: bool,
+}
+
+fn reply(chat_id: ChatId, message_id: MessageId, text: &str) -> TelegramAction {
+    let mut message = SendMessage::new(chat_id, text);
+    message.reply_to_message_id = Some(message_id);
+    TelegramAction::SendMessage(message)
+}
+
+#[must_use]
+pub fn plan_balance_command(
+    message_text: &str,
+    bot_name: &str,
+    context: BalanceCommandContext,
+) -> BalanceCommandPlan {
+    if parse_command(message_text, bot_name).command != "/balance" {
+        return BalanceCommandPlan::NotHandled;
+    }
+    if !context.billing_available {
+        return BalanceCommandPlan::Reply(reply(
+            context.chat_id,
+            context.message_id,
+            match context.locale {
+                Locale::Es => "el cobro de ia no está andando, avisale al admin",
+                Locale::En => "AI billing is unavailable, please tell the admin",
+            },
+        ));
+    }
+    let Some(user_id) = context.user_id else {
+        return BalanceCommandPlan::Reply(reply(
+            context.chat_id,
+            context.message_id,
+            match context.locale {
+                Locale::Es => "no te pude leer bien el usuario para ver los saldos",
+                Locale::En => "I could not identify the user or chat to load the balances",
+            },
+        ));
+    };
+    BalanceCommandPlan::Load {
+        user_id,
+        chat_id: context.chat_id,
+        is_group: context.is_group,
+    }
+}
+
+#[must_use]
+pub fn balance_reply(user_balance: i64, chat_balance: Option<i64>, locale: Locale) -> String {
+    let user = format_credit_units(CreditUnits::new(user_balance));
+    match (chat_balance, locale) {
+        (None, Locale::Es) => {
+            format!("tenés {user} créditos ia\nsi querés cargar más mandale /topup")
+        }
+        (None, Locale::En) => {
+            format!("you have {user} AI credits\nuse /topup if you want to add more")
+        }
+        (Some(chat), Locale::Es) => {
+            let chat = format_credit_units(CreditUnits::new(chat));
+            format!(
+                "saldos ia, maestro:\n- lo tuyo: {user}\n- lo del grupo: {chat}\nsi no alcanza lo tuyo, manoteo del grupo\nsi querés cargar más: /topup por privado\nsi querés pasarle al grupo: /transfer <monto>"
+            )
+        }
+        (Some(chat), Locale::En) => {
+            let chat = format_credit_units(CreditUnits::new(chat));
+            format!(
+                "AI balances:\n- yours: {user}\n- group: {chat}\nI use the group balance when yours runs out\nuse /topup in private to add more\nuse /transfer <amount> to move credits to the group"
+            )
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TopupCallbackPlan {
     Answer(Option<TelegramAction>),
     Invoice(Box<TopupInvoicePlan>),
@@ -573,10 +661,11 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        BillingPackTerms, PaymentValidationError, PreCheckoutDecision, StarPaymentRecord,
-        SuccessfulPaymentDecision, TopupCallbackPlan, default_billing_pack,
-        evaluate_default_successful_payment, evaluate_pre_checkout, evaluate_successful_payment,
-        invoice_payload_locale, parse_topup_payload, payment_record, plan_pre_checkout,
+        BalanceCommandContext, BalanceCommandPlan, BillingPackTerms, PaymentValidationError,
+        PreCheckoutDecision, StarPaymentRecord, SuccessfulPaymentDecision, TopupCallbackPlan,
+        balance_reply, default_billing_pack, evaluate_default_successful_payment,
+        evaluate_pre_checkout, evaluate_successful_payment, invoice_payload_locale,
+        parse_topup_payload, payment_record, plan_balance_command, plan_pre_checkout,
         plan_topup_callback, plan_topup_command, successful_payment_reply,
     };
     use crate::locale::Locale;
@@ -685,6 +774,97 @@ mod tests {
                 true,
             ),
             None
+        );
+    }
+
+    #[test]
+    fn balance_command_plans_external_loads_and_early_replies() {
+        assert_eq!(
+            plan_balance_command(
+                "/balance@mybot",
+                "@mybot",
+                BalanceCommandContext {
+                    chat_id: ChatId(-42),
+                    message_id: MessageId(7),
+                    user_id: Some(88),
+                    locale: Locale::En,
+                    is_group: true,
+                    billing_available: true,
+                },
+            ),
+            BalanceCommandPlan::Load {
+                user_id: 88,
+                chat_id: ChatId(-42),
+                is_group: true,
+            }
+        );
+        assert_eq!(
+            plan_balance_command(
+                "/other",
+                "@mybot",
+                BalanceCommandContext {
+                    chat_id: ChatId(42),
+                    message_id: MessageId(7),
+                    user_id: Some(88),
+                    locale: Locale::Es,
+                    is_group: false,
+                    billing_available: true,
+                },
+            ),
+            BalanceCommandPlan::NotHandled
+        );
+        for (user_id, available, locale, expected) in [
+            (
+                Some(88),
+                false,
+                Locale::En,
+                "AI billing is unavailable, please tell the admin",
+            ),
+            (
+                None,
+                true,
+                Locale::Es,
+                "no te pude leer bien el usuario para ver los saldos",
+            ),
+        ] {
+            let BalanceCommandPlan::Reply(TelegramAction::SendMessage(message)) =
+                plan_balance_command(
+                    "/balance",
+                    "@mybot",
+                    BalanceCommandContext {
+                        chat_id: ChatId(42),
+                        message_id: MessageId(7),
+                        user_id,
+                        locale,
+                        is_group: false,
+                        billing_available: available,
+                    },
+                )
+            else {
+                return;
+            };
+            assert_eq!(message.text, expected);
+            assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
+        }
+    }
+
+    #[test]
+    fn balance_replies_match_private_and_group_credit_formatting() {
+        assert_eq!(
+            balance_reply(4_200, None, Locale::Es),
+            "tenés 42.00 créditos ia\nsi querés cargar más mandale /topup"
+        );
+        assert_eq!(
+            balance_reply(4_200, None, Locale::En),
+            "you have 42.00 AI credits\nuse /topup if you want to add more"
+        );
+        assert_eq!(
+            balance_reply(3_000, Some(12_000), Locale::Es),
+            "saldos ia, maestro:\n- lo tuyo: 30.00\n- lo del grupo: 120.00\nsi no alcanza lo tuyo, manoteo del grupo\nsi querés cargar más: /topup por privado\nsi querés pasarle al grupo: /transfer <monto>"
+        );
+        assert_eq!(
+            balance_reply(3_000, Some(12_000), Locale::En),
+            "AI balances:\n- yours: 30.00\n- group: 120.00\nI use the group balance when yours runs out\nuse /topup in private to add more\nuse /transfer <amount> to move credits to the group"
         );
     }
 

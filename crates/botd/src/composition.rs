@@ -25,9 +25,9 @@ use num_bigint::{BigInt, BigUint};
 use thiserror::Error;
 
 use crate::dispatcher::{
-    ActionReceipt, ActionSink, ChatConfigSource, GroupAuthorizationDecision, GroupAuthorizer,
-    MessageStateSink, NativeDispatcher, RandomSource, RuntimeValues, StarPaymentReceipt,
-    StarPaymentSink,
+    ActionReceipt, ActionSink, BillingBalanceSource, BillingBalances, ChatConfigSource,
+    GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink, NativeDispatcher, RandomSource,
+    RuntimeValues, StarPaymentReceipt, StarPaymentSink,
 };
 use crate::runtime::{PollingRuntime, UpdateSource};
 
@@ -63,6 +63,29 @@ impl StarPaymentSink for BillingRepository {
             user_balance: result.user_balance,
         })
         .map_err(|error| error.to_string())
+    }
+}
+
+impl BillingBalanceSource for BillingRepository {
+    fn load(&mut self, user_id: i64, chat_id: Option<i64>) -> Result<BillingBalances, String> {
+        let mut diagnostics = Vec::new();
+        if let Err(error) = self.grant_onboarding_if_needed(user_id, 300) {
+            diagnostics.push(format!(
+                "billing onboarding grant user_id={user_id}: {error}"
+            ));
+        }
+        let user_balance = self
+            .get_balance("user", user_id)
+            .map_err(|error| error.to_string())?;
+        let chat_balance = chat_id
+            .map(|chat_id| self.get_balance("chat", chat_id))
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        Ok(BillingBalances {
+            user_balance,
+            chat_balance,
+            diagnostics,
+        })
     }
 }
 
@@ -402,7 +425,8 @@ pub fn build_native_runtime(
             authorization,
             bot_name,
         )
-        .with_payment_sink(Box::new(BillingRepository::new(database_url))),
+        .with_payment_sink(Box::new(BillingRepository::new(database_url)))
+        .with_balance_source(Box::new(BillingRepository::new(database_url))),
     ))
 }
 
