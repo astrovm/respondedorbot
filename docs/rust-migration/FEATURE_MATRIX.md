@@ -34,6 +34,7 @@ Rows not listed under migrated components remain Python-authoritative.
 | Provider retry-window parsing and rate-limit header precedence | `rust-flagged` | `RUST_PROVIDER_RETRY_POLICY_ENABLED=0`, missing bridge, or bridge error | `contracts/provider_retry_policy.json` |
 | Provider exception, usage, finish-response, and retry-delay policy | `rust-flagged` | `RUST_PROVIDER_RUNTIME_POLICY_ENABLED=0`, missing bridge, or bridge error | `contracts/provider_runtime_policy.json` |
 | Provider pseudo web-fetch tool-call parsing and authorization | `rust-flagged` | `RUST_PROVIDER_TOOL_POLICY_ENABLED=0`, missing bridge, or bridge error | `contracts/provider_tool_policy.json` |
+| Provider web-search limits, accounting, source extraction, and grounding | `rust-flagged` | `RUST_PROVIDER_WEB_SEARCH_POLICY_ENABLED=0`, missing bridge, or bridge error | `contracts/provider_web_search_policy.json` |
 | Bitcoin power-law and rainbow model calculations | `rust-flagged` | `RUST_MARKET_MODELS_ENABLED=0` or missing bridge | `contracts/market_models.json` |
 | Satoshi quote calculation and formatting | `rust-flagged` | `RUST_SATOSHI_ENABLED=0` or missing bridge | `contracts/satoshi.json` |
 | Devo arbitrage parsing and calculation | `rust-flagged` | `RUST_DEVO_ENABLED=0` or missing bridge | `contracts/devo.json` |

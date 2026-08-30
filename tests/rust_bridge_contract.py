@@ -814,6 +814,40 @@ def verify_provider_tool_policy(bridge: ModuleType) -> None:
         assert (list(actual) if actual is not None else None) == case["expected"], case["name"]
 
 
+def verify_provider_web_search_policy(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "provider_web_search_policy.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["limit_cases"]:
+        value_json = json.dumps(case["value"]) if "value" in case else None
+        assert bridge.provider_web_search_max_uses(value_json) == case["expected"], case["name"]
+    for case in contract["round_cases"]:
+        value_json = json.dumps(case["server_value"]) if "server_value" in case else None
+        actual = bridge.provider_web_search_round_metrics(
+            value_json,
+            case["tool_names"],
+            case["annotation_types"],
+        )
+        assert list(actual) == case["expected"], case["name"]
+    for case in contract["budget_cases"]:
+        actual = bridge.provider_web_search_remaining_budget(
+            case["remaining"],
+            case["request_count"],
+        )
+        assert actual == case["expected"], case
+    for case in contract["source_cases"]:
+        actual = bridge.provider_web_search_source_urls(
+            json.dumps(case["messages"], ensure_ascii=False)
+        )
+        assert actual == case["expected"], case["name"]
+    for case in contract["outcome_cases"]:
+        actual = bridge.provider_web_search_outcome_is_grounded(
+            case["source_count"],
+            case["citation_count"],
+            case["text"],
+        )
+        assert actual is case["expected"], case
+
+
 def verify_ai_reserve_estimates(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "ai_reserve_estimates.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -930,6 +964,7 @@ def main(arguments: list[str]) -> int:
     verify_provider_retry_policy(bridge)
     verify_provider_runtime_policy(bridge)
     verify_provider_tool_policy(bridge)
+    verify_provider_web_search_policy(bridge)
     verify_ai_reserve_estimates(bridge)
     verify_ai_pricing(bridge)
     verify_media_routing(bridge)

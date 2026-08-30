@@ -118,6 +118,13 @@ use bot_core::provider_runtime_policy::{
     retry_wait_seconds as provider_retry_wait_seconds_core,
 };
 use bot_core::provider_tools::parse_pseudo_web_fetch as parse_pseudo_web_fetch_core;
+use bot_core::provider_web_search::{
+    nonnegative_limit as provider_web_search_max_uses_core,
+    outcome_is_grounded as provider_web_search_outcome_is_grounded_core,
+    remaining_budget as provider_web_search_remaining_budget_core,
+    round_metrics as provider_web_search_round_metrics_core,
+    source_urls as provider_web_search_source_urls_core,
+};
 use bot_core::random_reply::{
     RandomAnswer, RandomSuffix, evaluate_random_reply as evaluate_random_reply_core,
 };
@@ -2491,6 +2498,66 @@ fn parse_pseudo_web_fetch(
     .map(|call| (call.id, call.name, call.url))
 }
 
+fn optional_json_value(value_json: Option<&str>) -> PyResult<Option<Value>> {
+    value_json
+        .map(|value| {
+            serde_json::from_str(value)
+                .map_err(|error| PyValueError::new_err(format!("invalid JSON value: {error}")))
+        })
+        .transpose()
+}
+
+#[pyfunction]
+fn provider_web_search_max_uses(value_json: Option<&str>) -> PyResult<u64> {
+    let value = optional_json_value(value_json)?;
+    Ok(provider_web_search_max_uses_core(value.as_ref()))
+}
+
+#[pyfunction]
+fn provider_web_search_round_metrics(
+    server_request_value_json: Option<&str>,
+    tool_names: Vec<String>,
+    annotation_types: Vec<String>,
+) -> PyResult<(Option<i64>, usize, Option<bool>, usize)> {
+    let server_request_value = optional_json_value(server_request_value_json)?;
+    let metrics = provider_web_search_round_metrics_core(
+        server_request_value.as_ref(),
+        &tool_names,
+        &annotation_types,
+    );
+    Ok((
+        metrics.metadata_request_count,
+        metrics.citation_count,
+        metrics.grounded,
+        metrics.request_count,
+    ))
+}
+
+#[pyfunction]
+fn provider_web_search_remaining_budget(
+    remaining: Option<usize>,
+    request_count: usize,
+) -> Option<usize> {
+    provider_web_search_remaining_budget_core(remaining, request_count)
+}
+
+#[pyfunction]
+fn provider_web_search_source_urls(messages_json: &str) -> PyResult<Vec<String>> {
+    let messages: Value = serde_json::from_str(messages_json).map_err(|error| {
+        PyValueError::new_err(format!("invalid provider messages JSON: {error}"))
+    })?;
+    provider_web_search_source_urls_core(&messages).map_err(PyValueError::new_err)
+}
+
+#[pyfunction]
+fn provider_web_search_outcome_is_grounded(
+    source_count: usize,
+    citation_count: usize,
+    text: &str,
+) -> bool {
+    provider_web_search_outcome_is_grounded_core(source_count, citation_count, text)
+}
+
 fn token_estimate_value(value: &Value) -> TokenEstimateValue {
     match value {
         Value::Null => TokenEstimateValue::Empty,
@@ -2793,6 +2860,17 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_function(wrap_pyfunction!(provider_retry_wait_seconds, module)?)?;
     module.add_function(wrap_pyfunction!(parse_pseudo_web_fetch, module)?)?;
+    module.add_function(wrap_pyfunction!(provider_web_search_max_uses, module)?)?;
+    module.add_function(wrap_pyfunction!(provider_web_search_round_metrics, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        provider_web_search_remaining_budget,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(provider_web_search_source_urls, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        provider_web_search_outcome_is_grounded,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;
     module.add_function(wrap_pyfunction!(ai_estimate_text_tokens, module)?)?;
     module.add_function(wrap_pyfunction!(ai_estimate_nested_tokens, module)?)?;

@@ -85,6 +85,32 @@ class _RustProviderToolPolicy(Protocol):
     ) -> tuple[str, str, str] | None: ...
 
 
+class _RustProviderWebSearchPolicy(Protocol):
+    def provider_web_search_max_uses(self, value_json: str | None) -> int: ...
+
+    def provider_web_search_round_metrics(
+        self,
+        server_request_value_json: str | None,
+        tool_names: list[str],
+        annotation_types: list[str],
+    ) -> tuple[int | None, int, bool | None, int]: ...
+
+    def provider_web_search_remaining_budget(
+        self,
+        remaining: int | None,
+        request_count: int,
+    ) -> int | None: ...
+
+    def provider_web_search_source_urls(self, messages_json: str) -> list[str]: ...
+
+    def provider_web_search_outcome_is_grounded(
+        self,
+        source_count: int,
+        citation_count: int,
+        text: str,
+    ) -> bool: ...
+
+
 def _load_rust_provider_runtime_policy() -> _RustProviderRuntimePolicy | None:
     module = load_rust_bridge("RUST_PROVIDER_RUNTIME_POLICY_ENABLED")
     if module is None:
@@ -99,9 +125,23 @@ def _load_rust_provider_tool_policy() -> _RustProviderToolPolicy | None:
     return cast(_RustProviderToolPolicy, module)
 
 
+def _load_rust_provider_web_search_policy() -> _RustProviderWebSearchPolicy | None:
+    module = load_rust_bridge("RUST_PROVIDER_WEB_SEARCH_POLICY_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustProviderWebSearchPolicy, module)
+
+
 def _rust_runtime_policy_failed(operation: str) -> None:
     logger.exception(
         "Rust provider runtime policy failed; using Python fallback: operation=%s",
+        operation,
+    )
+
+
+def _rust_web_search_policy_failed(operation: str) -> None:
+    logger.exception(
+        "Rust provider web-search policy failed; using Python fallback: operation=%s",
         operation,
     )
 
@@ -1016,6 +1056,33 @@ class ProviderRuntime:
         usage_map = self._deps.extract_usage_map(response) or {}
         server_tool_use = ensure_mapping(usage_map.get("server_tool_use")) or {}
         web_search_requests = server_tool_use.get("web_search_requests")
+        tool_names, annotation_types = self._web_search_round_facts(message)
+        rust = _load_rust_provider_web_search_policy()
+        if rust is not None:
+            try:
+                request_count, citation_count, grounded, _round_count = (
+                    rust.provider_web_search_round_metrics(
+                        (
+                            json.dumps(
+                                web_search_requests,
+                                ensure_ascii=False,
+                                default=str,
+                            )
+                            if web_search_requests is not None
+                            else None
+                        ),
+                        tool_names,
+                        annotation_types,
+                    )
+                )
+                metadata["web_search_citation_count"] = citation_count
+                if request_count is not None:
+                    metadata["web_search_requests"] = request_count
+                if grounded is not None:
+                    metadata["web_search_grounded"] = grounded
+                return metadata
+            except Exception:
+                _rust_web_search_policy_failed("round_metadata")
         if web_search_requests is not None:
             try:
                 metadata["web_search_requests"] = int(web_search_requests)
@@ -1024,18 +1091,7 @@ class ProviderRuntime:
         direct_search_requests = self._direct_web_search_request_count(message)
         if direct_search_requests:
             metadata["web_search_requests"] = direct_search_requests
-        annotations = getattr(message, "annotations", None) or []
-        citation_count = sum(
-            1
-            for annotation in annotations
-            if (
-                getattr(annotation, "type", None) == "url_citation"
-                or (
-                    isinstance(annotation, Mapping)
-                    and str(annotation.get("type") or "") == "url_citation"
-                )
-            )
-        )
+        citation_count = annotation_types.count("url_citation")
         metadata["web_search_citation_count"] = citation_count
         if "web_search_requests" not in metadata and citation_count:
             metadata["web_search_requests"] = 1
@@ -1044,10 +1100,40 @@ class ProviderRuntime:
         return metadata
 
     @staticmethod
+    def _web_search_round_facts(message: Any) -> tuple[list[str], list[str]]:
+        tool_names = [
+            str(getattr(getattr(tool_call, "function", None), "name", "") or "")
+            for tool_call in getattr(message, "tool_calls", None) or []
+        ]
+        annotations = getattr(message, "annotations", None) or []
+        annotation_types = [
+            (
+                str(annotation.get("type") or "")
+                if isinstance(annotation, Mapping)
+                else str(getattr(annotation, "type", "") or "")
+            )
+            for annotation in annotations
+        ]
+        return tool_names, annotation_types
+
+    @staticmethod
     def _web_search_max_uses(tool: Mapping[str, Any]) -> int:
         parameters = ensure_mapping(tool.get("parameters")) or {}
+        raw_max_uses = parameters.get("max_uses")
+        rust = _load_rust_provider_web_search_policy()
+        if rust is not None:
+            try:
+                return int(
+                    rust.provider_web_search_max_uses(
+                        json.dumps(raw_max_uses, ensure_ascii=False, default=str)
+                        if raw_max_uses is not None
+                        else None
+                    )
+                )
+            except Exception:
+                _rust_web_search_policy_failed("configured_limit")
         try:
-            return max(0, int(parameters.get("max_uses") or 0))
+            return max(0, int(raw_max_uses or 0))
         except TypeError, ValueError:
             return 0
 
@@ -1097,10 +1183,33 @@ class ProviderRuntime:
     def _web_search_request_count(self, response: Any, message: Any = None) -> int:
         usage_map = self._deps.extract_usage_map(response) or {}
         server_tool_use = ensure_mapping(usage_map.get("server_tool_use")) or {}
+        raw_request_count = server_tool_use.get("web_search_requests")
+        tool_names, annotation_types = self._web_search_round_facts(message)
+        rust = _load_rust_provider_web_search_policy()
+        if rust is not None:
+            try:
+                _metadata_count, _citation_count, _grounded, request_count = (
+                    rust.provider_web_search_round_metrics(
+                        (
+                            json.dumps(
+                                raw_request_count,
+                                ensure_ascii=False,
+                                default=str,
+                            )
+                            if raw_request_count is not None
+                            else None
+                        ),
+                        tool_names,
+                        annotation_types,
+                    )
+                )
+                return int(request_count)
+            except Exception:
+                _rust_web_search_policy_failed("request_count")
         try:
             request_count = max(
                 0,
-                int(server_tool_use.get("web_search_requests") or 0),
+                int(raw_request_count or 0),
             )
         except TypeError, ValueError:
             request_count = 0
@@ -1153,6 +1262,16 @@ class ProviderRuntime:
         cls,
         current_messages: List[Dict[str, Any]],
     ) -> list[str]:
+        rust = _load_rust_provider_web_search_policy()
+        if rust is not None:
+            try:
+                return list(
+                    rust.provider_web_search_source_urls(
+                        json.dumps(current_messages, ensure_ascii=False, default=str)
+                    )
+                )
+            except Exception:
+                _rust_web_search_policy_failed("source_urls")
         web_search_call_ids = cls._web_search_call_ids(current_messages)
         source_urls: list[str] = []
         for item in current_messages:
@@ -1187,15 +1306,24 @@ class ProviderRuntime:
         source_urls = self._web_search_source_urls(current_messages)
         metadata["web_search_source_count"] = len(source_urls)
         clean_text = text.strip()
-        if source_urls and clean_text:
-            metadata["web_search_grounded"] = True
+        grounded = bool(
+            (source_urls or metadata.get("web_search_citation_count")) and clean_text
+        )
+        rust = _load_rust_provider_web_search_policy()
+        if rust is not None:
+            try:
+                grounded = bool(
+                    rust.provider_web_search_outcome_is_grounded(
+                        len(source_urls),
+                        int(metadata.get("web_search_citation_count") or 0),
+                        text,
+                    )
+                )
+            except Exception:
+                _rust_web_search_policy_failed("grounding_outcome")
+        metadata["web_search_grounded"] = grounded
+        if grounded:
             return
-
-        if metadata.get("web_search_citation_count") and clean_text:
-            metadata["web_search_grounded"] = True
-            return
-
-        metadata["web_search_grounded"] = False
         warning_context = dict(tool_context or {})
         warning_context.update(
             {
@@ -1218,10 +1346,17 @@ class ProviderRuntime:
     ) -> Optional[int]:
         if remaining is None:
             return None
-        return max(
-            0,
-            remaining - self._web_search_request_count(response, message),
-        )
+        request_count = self._web_search_request_count(response, message)
+        rust = _load_rust_provider_web_search_policy()
+        if rust is not None:
+            try:
+                return rust.provider_web_search_remaining_budget(
+                    remaining,
+                    request_count,
+                )
+            except Exception:
+                _rust_web_search_policy_failed("remaining_budget")
+        return max(0, remaining - request_count)
 
     @classmethod
     def _apply_web_search_limits(

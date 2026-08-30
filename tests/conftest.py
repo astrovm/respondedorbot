@@ -78,6 +78,11 @@ def reset_caches(monkeypatch):
         lambda: None,
     )
     monkeypatch.setattr(
+        provider_runtime_module,
+        "_load_rust_provider_web_search_policy",
+        lambda: None,
+    )
+    monkeypatch.setattr(
         provider_errors_module,
         "_load_rust_provider_retry_policy",
         lambda: None,
