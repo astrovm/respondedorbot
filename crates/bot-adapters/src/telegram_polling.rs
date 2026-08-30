@@ -38,7 +38,10 @@ pub struct IncomingMessage {
     pub chat_id: Option<ChatId>,
     pub chat_type: Option<String>,
     pub sender_id: Option<UserId>,
+    pub sender_first_name: Option<String>,
+    pub sender_username: Option<String>,
     pub sender_language_code: Option<String>,
+    pub has_reply: bool,
     pub content: Option<MessageContent>,
 }
 
@@ -143,12 +146,23 @@ fn parse_message(payload: &Map<String, Value>) -> IncomingMessage {
         .and_then(|sender| sender.get("language_code"))
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
+    let sender_first_name = sender
+        .and_then(|sender| sender.get("first_name"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let sender_username = sender
+        .and_then(|sender| sender.get("username"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
     IncomingMessage {
         message_id,
         chat_id,
         chat_type,
         sender_id,
+        sender_first_name,
+        sender_username,
         sender_language_code,
+        has_reply: payload.contains_key("reply_to_message"),
         content: extract_message_content(&Value::Object(payload.clone())).ok(),
     }
 }
@@ -338,7 +352,8 @@ mod tests {
                 {"update_id":20,"message":{
                     "message_id":"7",
                     "chat":{"id":"-42","type":"private"},
-                    "from":{"id":"88","language_code":"en-US"},
+                    "from":{"id":"88","first_name":"Synthetic","username":"tester","language_code":"en-US"},
+                    "reply_to_message":{"message_id":6},
                     "caption":"  /convertbase 101, 2, 10  ",
                     "photo":[{"file_id":"small"},{"file_id":"large"}]
                 }},
@@ -363,6 +378,9 @@ mod tests {
         assert_eq!(first.chat_id, Some(bot_core::telegram_input::ChatId(-42)));
         assert_eq!(first.chat_type.as_deref(), Some("private"));
         assert_eq!(first.sender_id, Some(bot_core::telegram_input::UserId(88)));
+        assert_eq!(first.sender_first_name.as_deref(), Some("Synthetic"));
+        assert_eq!(first.sender_username.as_deref(), Some("tester"));
+        assert!(first.has_reply);
         assert_eq!(first.sender_language_code.as_deref(), Some("en-US"));
         assert_eq!(
             first
@@ -375,6 +393,7 @@ mod tests {
             return;
         };
         assert_eq!(second.sender_language_code, None);
+        assert!(!second.has_reply);
         assert_eq!(second.content, None);
     }
 

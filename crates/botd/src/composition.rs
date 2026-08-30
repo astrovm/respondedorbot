@@ -3,16 +3,24 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bot_adapters::chat_config::{ChatConfigRepository, ChatConfigRepositoryError};
+use bot_adapters::redis_connection::RedisEndpoint;
+use bot_adapters::redis_message_state::{RedisMessageState, RedisMessageStateError};
 use bot_adapters::telegram_actions::{ActionError, ActionOutcome, execute_with};
 use bot_adapters::telegram_http::{
     ReqwestTelegramTransport, TelegramTransport, TransportFailureKind,
 };
 use bot_adapters::telegram_polling::{PollOutcome, PollingError, poll_once_with};
 use bot_core::chat_config::ChatConfig;
+use bot_core::command_state::{
+    BOT_MESSAGE_METADATA_TTL_SECONDS, CHAT_HISTORY_WRITE_LIMIT, CHAT_STATE_TTL_SECONDS,
+    IncomingCommandWritePlan, OutgoingCommandWritePlan,
+};
 use bot_core::telegram_actions::TelegramAction;
 use thiserror::Error;
 
-use crate::dispatcher::{ActionSink, ChatConfigSource, NativeDispatcher, RuntimeValues};
+use crate::dispatcher::{
+    ActionReceipt, ActionSink, ChatConfigSource, MessageStateSink, NativeDispatcher, RuntimeValues,
+};
 use crate::runtime::{PollingRuntime, UpdateSource};
 
 impl ChatConfigSource for ChatConfigRepository {
@@ -89,6 +97,53 @@ impl RuntimeValues for SystemRuntimeValues {
     }
 }
 
+pub struct RedisCommandState {
+    state: RedisMessageState,
+}
+
+impl RedisCommandState {
+    pub fn new(endpoint: &RedisEndpoint) -> Result<Self, RedisMessageStateError> {
+        RedisMessageState::new(endpoint).map(|state| Self { state })
+    }
+}
+
+impl MessageStateSink for RedisCommandState {
+    type Error = RedisMessageStateError;
+
+    fn record_incoming(&mut self, plan: &IncomingCommandWritePlan) -> Result<(), Self::Error> {
+        let _stored = self.state.save_message(
+            &plan.message,
+            CHAT_STATE_TTL_SECONDS,
+            CHAT_HISTORY_WRITE_LIMIT,
+        )?;
+        if let Some(member) = &plan.member {
+            self.state.save_chat_member(
+                &member.key,
+                &member.user_id,
+                &member.payload,
+                CHAT_STATE_TTL_SECONDS,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn record_outgoing(&mut self, plan: &OutgoingCommandWritePlan) -> Result<(), Self::Error> {
+        let _stored = self.state.save_message(
+            &plan.message,
+            CHAT_STATE_TTL_SECONDS,
+            CHAT_HISTORY_WRITE_LIMIT,
+        )?;
+        if let Some(metadata) = &plan.metadata {
+            self.state.set_value(
+                &metadata.key,
+                &metadata.payload,
+                BOT_MESSAGE_METADATA_TTL_SECONDS,
+            )?;
+        }
+        Ok(())
+    }
+}
+
 impl<Transport> TelegramActionSink<Transport> {
     #[must_use]
     pub fn new(transport: Transport, token: &str) -> Self {
@@ -102,9 +157,11 @@ impl<Transport> TelegramActionSink<Transport> {
 impl<Transport: TelegramTransport> ActionSink for TelegramActionSink<Transport> {
     type Error = TelegramActionSinkError;
 
-    fn execute(&mut self, action: TelegramAction) -> Result<(), Self::Error> {
+    fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
         match execute_with(&self.transport, &self.token, action)? {
-            ActionOutcome::Completed { .. } => Ok(()),
+            ActionOutcome::Completed { message_id } => Ok(ActionReceipt {
+                message_id: message_id.map(bot_core::telegram_input::MessageId),
+            }),
             ActionOutcome::RateLimited {
                 retry_after_seconds,
             } => Err(TelegramActionSinkError::RateLimited {
@@ -129,16 +186,19 @@ pub type ConcreteNativeRuntime = PollingRuntime<
     NativeDispatcher<
         ChatConfigRepository,
         TelegramActionSink<ReqwestTelegramTransport>,
+        RedisCommandState,
         SystemRuntimeValues,
     >,
 >;
 
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[derive(Debug, Error)]
 pub enum CompositionError {
     #[error("could not construct Telegram polling transport: {0:?}")]
     PollingTransport(TransportFailureKind),
     #[error("could not construct Telegram action transport: {0:?}")]
     ActionTransport(TransportFailureKind),
+    #[error("could not construct Redis command state: {0}")]
+    RedisState(#[from] RedisMessageStateError),
 }
 
 pub fn build_native_runtime(
@@ -146,6 +206,7 @@ pub fn build_native_runtime(
     database_url: &str,
     bot_name: &str,
     instance_name: Option<String>,
+    redis_endpoint: &RedisEndpoint,
     long_poll_timeout: Duration,
 ) -> Result<ConcreteNativeRuntime, CompositionError> {
     let polling_transport =
@@ -155,11 +216,13 @@ pub fn build_native_runtime(
     let source = TelegramUpdateSource::new(polling_transport, token, long_poll_timeout);
     let config = ChatConfigRepository::new(database_url);
     let actions = TelegramActionSink::new(action_transport, token);
+    let state = RedisCommandState::new(redis_endpoint)?;
     Ok(PollingRuntime::new(
         source,
         NativeDispatcher::new(
             config,
             actions,
+            state,
             SystemRuntimeValues::new(instance_name),
             bot_name,
         ),
@@ -169,20 +232,32 @@ pub fn build_native_runtime(
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    use bot_adapters::redis_connection::RedisEndpoint;
     use bot_adapters::telegram_http::{
         HttpResponse, TelegramRequest, TelegramTransport, TransportFailureKind,
     };
     use bot_adapters::telegram_polling::{PollFailure, PollOutcome};
     use bot_core::telegram_actions::{SendMessage, TelegramAction};
     use bot_core::telegram_input::ChatId;
+    use bot_core::{
+        command_state::{
+            IncomingCommandState, OutgoingCommandState, prepare_incoming_command_state,
+            prepare_outgoing_command_state,
+        },
+        telegram_input::{MessageId, UserId},
+    };
 
-    use crate::dispatcher::{ActionSink, RuntimeValues};
+    use crate::dispatcher::{ActionReceipt, ActionSink, MessageStateSink, RuntimeValues};
     use crate::runtime::UpdateSource;
 
     use super::{
-        SystemRuntimeValues, TelegramActionSink, TelegramActionSinkError, TelegramUpdateSource,
+        RedisCommandState, SystemRuntimeValues, TelegramActionSink, TelegramActionSinkError,
+        TelegramUpdateSource, build_native_runtime,
     };
 
     struct Transport {
@@ -208,6 +283,30 @@ mod tests {
             }))),
             requests: RefCell::new(Vec::new()),
         }
+    }
+
+    fn read_command(reader: &mut BufReader<TcpStream>) -> std::io::Result<Vec<String>> {
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        let count = line
+            .trim_end()
+            .strip_prefix('*')
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        let mut values = Vec::with_capacity(count);
+        for _ in 0..count {
+            line.clear();
+            reader.read_line(&mut line)?;
+            let length = line
+                .trim_end()
+                .strip_prefix('$')
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0);
+            let mut bytes = vec![0_u8; length + 2];
+            std::io::Read::read_exact(reader, &mut bytes)?;
+            values.push(String::from_utf8_lossy(&bytes[..length]).into_owned());
+        }
+        Ok(values)
     }
 
     #[test]
@@ -255,7 +354,9 @@ mod tests {
                 ChatId(1),
                 "hello"
             ))),
-            Ok(())
+            Ok(ActionReceipt {
+                message_id: Some(bot_core::telegram_input::MessageId(9))
+            })
         );
 
         let mut sink = TelegramActionSink::new(
@@ -322,5 +423,114 @@ mod tests {
         assert!(actual >= before as i64);
         assert!(actual <= after as i64);
         assert_eq!(values.instance_name(), Some("synthetic"));
+    }
+
+    #[test]
+    fn redis_command_state_writes_history_member_and_metadata_contracts()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        let server = thread::spawn(
+            move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                let (index, _) = listener.accept()?;
+                let mut reader = BufReader::new(index);
+                assert_eq!(
+                    read_command(&mut reader)?.first().map(String::as_str),
+                    Some("FT.CREATE")
+                );
+                reader.get_mut().write_all(b"-Index already exists\r\n")?;
+
+                let (incoming, _) = listener.accept()?;
+                let mut reader = BufReader::new(incoming);
+                let command = read_command(&mut reader)?;
+                assert_eq!(command.first().map(String::as_str), Some("EVAL"));
+                assert!(command.iter().any(|value| value == "chat_history:-42"));
+                reader.get_mut().write_all(b":1\r\n")?;
+
+                let (member, _) = listener.accept()?;
+                let mut reader = BufReader::new(member);
+                assert_eq!(read_command(&mut reader)?, ["MULTI"]);
+                reader.get_mut().write_all(b"+OK\r\n")?;
+                assert_eq!(
+                    read_command(&mut reader)?.first().map(String::as_str),
+                    Some("HSET")
+                );
+                reader.get_mut().write_all(b"+QUEUED\r\n")?;
+                assert_eq!(
+                    read_command(&mut reader)?.first().map(String::as_str),
+                    Some("EXPIRE")
+                );
+                reader.get_mut().write_all(b"+QUEUED\r\n")?;
+                assert_eq!(read_command(&mut reader)?, ["EXEC"]);
+                reader.get_mut().write_all(b"*2\r\n:1\r\n:1\r\n")?;
+
+                let (outgoing, _) = listener.accept()?;
+                let mut reader = BufReader::new(outgoing);
+                let command = read_command(&mut reader)?;
+                assert_eq!(command.first().map(String::as_str), Some("EVAL"));
+                assert!(command.iter().any(|value| value == "bot_99"));
+                reader.get_mut().write_all(b":1\r\n")?;
+
+                let (metadata, _) = listener.accept()?;
+                let mut reader = BufReader::new(metadata);
+                let command = read_command(&mut reader)?;
+                assert_eq!(command.first().map(String::as_str), Some("SETEX"));
+                assert_eq!(
+                    command.get(1).map(String::as_str),
+                    Some("bot_message_meta:-42:99")
+                );
+                reader.get_mut().write_all(b"+OK\r\n")?;
+                Ok(())
+            },
+        );
+
+        let mut state = RedisCommandState::new(&RedisEndpoint {
+            host: "127.0.0.1".to_owned(),
+            port,
+            password: None,
+        })?;
+        let incoming = prepare_incoming_command_state(IncomingCommandState {
+            chat_id: ChatId(-42),
+            message_id: MessageId(7),
+            user_id: UserId(88),
+            first_name: Some("Synthetic"),
+            username: Some("tester"),
+            text: "/time",
+            is_group: true,
+            timestamp: 1_672_531_200,
+        })?;
+        state.record_incoming(&incoming)?;
+        let outgoing = prepare_outgoing_command_state(OutgoingCommandState {
+            chat_id: ChatId(-42),
+            incoming_message_id: MessageId(7),
+            sent_message_id: Some(MessageId(99)),
+            text: "1672531200",
+            command: "/time",
+            timestamp: 1_672_531_200,
+        })?;
+        state.record_outgoing(&outgoing)?;
+
+        match server.join() {
+            Ok(result) => result?,
+            Err(_) => return Err("synthetic Redis server panicked".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn concrete_runtime_composes_without_contacting_external_services() {
+        let result = build_native_runtime(
+            "synthetic-token",
+            "postgresql://synthetic.invalid/database",
+            "@synthetic_bot",
+            Some("synthetic-instance".to_owned()),
+            &RedisEndpoint {
+                host: "127.0.0.1".to_owned(),
+                port: 1,
+                password: None,
+            },
+            Duration::from_secs(30),
+        );
+        assert!(result.is_ok());
     }
 }

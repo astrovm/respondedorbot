@@ -13,6 +13,7 @@ pub mod cache_policy;
 pub mod chat_config;
 pub mod command_normalization;
 pub mod command_parsing;
+pub mod command_state;
 pub mod compaction_policy;
 pub mod config_callbacks;
 pub mod credit_units;
