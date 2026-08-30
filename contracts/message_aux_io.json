@@ -1,0 +1,5 @@
+{
+  "ttl_validation": [
+    { "name": "negative TTL", "ttl": -1 }
+  ]
+}

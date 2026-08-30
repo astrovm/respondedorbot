@@ -26,6 +26,7 @@ from typing import (
 import redis
 
 from api.core.rust_bridge import load_rust_bridge
+from api.core.rust_redis import redis_endpoint_from_env
 from api.i18n import tr
 
 from api.bot.chat_context import format_user_identity
@@ -87,11 +88,56 @@ class _RustMessageState(Protocol):
     ) -> str: ...
 
 
+class _RustMessageStateIo(Protocol):
+    def get_value(self, key: str) -> str | None: ...
+    def set_value(self, key: str, value: str, ttl_seconds: int) -> None: ...
+    def save_compaction_result(
+        self,
+        summary_key: str,
+        marker_key: str,
+        summary: str,
+        marker: str,
+        ttl_seconds: int,
+    ) -> None: ...
+    def save_chat_member(
+        self,
+        key: str,
+        user_id: str,
+        payload: str,
+        ttl_seconds: int,
+    ) -> None: ...
+    def get_chat_members(self, key: str) -> str: ...
+
+
+class _RustMessageStateIoModule(Protocol):
+    def RedisMessageState(
+        self,
+        host: str,
+        port: int,
+        password: str | None,
+    ) -> _RustMessageStateIo: ...
+
+
 def _load_rust_message_state() -> _RustMessageState | None:
     module = load_rust_bridge("RUST_MESSAGE_STATE_ENABLED")
     if module is None:
         return None
     return cast(_RustMessageState, module)
+
+
+def _load_rust_message_state_io() -> _RustMessageStateIoModule | None:
+    module = load_rust_bridge("RUST_MESSAGE_AUX_IO_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustMessageStateIoModule, module)
+
+
+def _rust_message_state_io() -> _RustMessageStateIo | None:
+    module = _load_rust_message_state_io()
+    if module is None:
+        return None
+    host, port, password = redis_endpoint_from_env()
+    return module.RedisMessageState(host, port, password)
 
 _SAVE_MESSAGE_SCRIPT = """
 local legacy_type = redis.call('TYPE', KEYS[3]).ok
@@ -296,34 +342,62 @@ def _parse_search_result_row(key: Any, fields: Any) -> Dict[str, Any]:
 
 
 def get_chat_summary(redis_client: redis.Redis, chat_id: str) -> Optional[str]:
+    rust = _rust_message_state_io()
+    if rust is not None:
+        return rust.get_value(_summary_key(chat_id))
     return _decode_redis_text(redis_client.get(_summary_key(chat_id)))
 
 
 def save_chat_summary(redis_client: redis.Redis, chat_id: str, summary: str) -> None:
+    rust = _rust_message_state_io()
+    if rust is not None:
+        rust.set_value(_summary_key(chat_id), summary, CHAT_SUMMARY_TTL)
+        return
     redis_client.setex(_summary_key(chat_id), CHAT_SUMMARY_TTL, summary)
 
 
 def get_user_chat_summary(redis_client: redis.Redis, chat_id: str) -> Optional[str]:
+    rust = _rust_message_state_io()
+    if rust is not None:
+        return rust.get_value(_user_summary_key(chat_id))
     return _decode_redis_text(redis_client.get(_user_summary_key(chat_id)))
 
 
 def save_user_chat_summary(redis_client: redis.Redis, chat_id: str, summary: str) -> None:
+    rust = _rust_message_state_io()
+    if rust is not None:
+        rust.set_value(_user_summary_key(chat_id), summary, CHAT_SUMMARY_TTL)
+        return
     redis_client.setex(_user_summary_key(chat_id), CHAT_SUMMARY_TTL, summary)
 
 
 def get_user_chat_compacted_until(redis_client: redis.Redis, chat_id: str) -> Optional[str]:
+    rust = _rust_message_state_io()
+    if rust is not None:
+        return rust.get_value(_user_compacted_until_key(chat_id))
     return _decode_redis_text(redis_client.get(_user_compacted_until_key(chat_id)))
 
 
 def save_user_chat_compacted_until(redis_client: redis.Redis, chat_id: str, marker: str) -> None:
+    rust = _rust_message_state_io()
+    if rust is not None:
+        rust.set_value(_user_compacted_until_key(chat_id), marker, CHAT_SUMMARY_TTL)
+        return
     redis_client.setex(_user_compacted_until_key(chat_id), CHAT_SUMMARY_TTL, marker)
 
 
 def get_chat_compacted_until(redis_client: redis.Redis, chat_id: str) -> Optional[str]:
+    rust = _rust_message_state_io()
+    if rust is not None:
+        return rust.get_value(_compacted_until_key(chat_id))
     return _decode_redis_text(redis_client.get(_compacted_until_key(chat_id)))
 
 
 def save_chat_compacted_until(redis_client: redis.Redis, chat_id: str, marker: str) -> None:
+    rust = _rust_message_state_io()
+    if rust is not None:
+        rust.set_value(_compacted_until_key(chat_id), marker, CHAT_SUMMARY_TTL)
+        return
     redis_client.setex(_compacted_until_key(chat_id), CHAT_SUMMARY_TTL, marker)
 
 
@@ -335,6 +409,16 @@ def save_chat_compaction_result(
 ) -> None:
     """Save a summary and its marker in one Redis transaction."""
 
+    rust = _rust_message_state_io()
+    if rust is not None:
+        rust.save_compaction_result(
+            _summary_key(chat_id),
+            _compacted_until_key(chat_id),
+            summary,
+            marker,
+            CHAT_SUMMARY_TTL,
+        )
+        return
     pipeline = redis_client.pipeline(transaction=True)
     pipeline.setex(_summary_key(chat_id), CHAT_SUMMARY_TTL, summary)
     pipeline.setex(_compacted_until_key(chat_id), CHAT_SUMMARY_TTL, marker)
@@ -702,11 +786,13 @@ def save_bot_message_metadata(
     """Persist lightweight metadata about a sent bot message."""
 
     try:
-        redis_client.setex(
-            bot_message_meta_key(chat_id, message_id),
-            ttl,
-            json.dumps(dict(metadata)),
-        )
+        key = bot_message_meta_key(chat_id, message_id)
+        payload = json.dumps(dict(metadata))
+        rust = _rust_message_state_io()
+        if rust is not None:
+            rust.set_value(key, payload, ttl)
+        else:
+            redis_client.setex(key, ttl, payload)
     except Exception as error:
         admin_reporter(
             "Error saving bot message metadata",
@@ -726,8 +812,13 @@ def get_bot_message_metadata(
     """Load persisted bot message metadata when available."""
 
     try:
-        raw_value = redis_client.get(bot_message_meta_key(chat_id, message_id))
-        serialized = decode_redis_value(raw_value)
+        key = bot_message_meta_key(chat_id, message_id)
+        rust = _rust_message_state_io()
+        serialized = (
+            rust.get_value(key)
+            if rust is not None
+            else decode_redis_value(redis_client.get(key))
+        )
         if serialized:
             try:
                 loaded = json.loads(serialized)
@@ -832,8 +923,12 @@ def save_chat_member(
         last_seen = int(time.time())
         data = _prepare_chat_member_payload(first_name, username, last_seen)
         key = _chat_members_key(chat_id)
-        redis_client.hset(key, user_id, data)
-        redis_client.expire(key, CHAT_STATE_TTL)
+        rust = _rust_message_state_io()
+        if rust is not None:
+            rust.save_chat_member(key, user_id, data, CHAT_STATE_TTL)
+        else:
+            redis_client.hset(key, user_id, data)
+            redis_client.expire(key, CHAT_STATE_TTL)
     except Exception:
         pass
 
@@ -845,7 +940,17 @@ def get_chat_members(
     """Return known members for a chat (users who have sent messages)."""
 
     try:
-        raw = cast(Dict[Any, Any], redis_client.hgetall(_chat_members_key(chat_id)))
+        key = _chat_members_key(chat_id)
+        rust = _rust_message_state_io()
+        if rust is not None:
+            entries = json.loads(rust.get_chat_members(key))
+            raw = {
+                str(entry["user_id"]): str(entry["payload"])
+                for entry in entries
+                if isinstance(entry, Mapping)
+            }
+        else:
+            raw = cast(Dict[Any, Any], redis_client.hgetall(key))
         if not raw:
             return []
         members: List[Dict[str, Any]] = []

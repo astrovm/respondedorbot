@@ -5,6 +5,7 @@ pub mod redis_chat_admin;
 pub mod redis_compaction_queue;
 pub mod redis_connection;
 pub mod redis_media_cache;
+pub mod redis_message_state;
 
 /// Return the core protocol version used by this adapter build.
 #[must_use]

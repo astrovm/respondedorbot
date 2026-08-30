@@ -9,6 +9,10 @@ def _use_python_chat_admin_cache(monkeypatch):
         "api.bot.chat_settings._load_rust_chat_admin_cache",
         lambda: None,
     )
+    monkeypatch.setattr(
+        "api.memory.state._load_rust_message_state_io",
+        lambda: None,
+    )
 
 
 def test_decode_redis_value_variants():

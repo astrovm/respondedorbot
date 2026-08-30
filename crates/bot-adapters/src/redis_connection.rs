@@ -47,14 +47,19 @@ pub(crate) fn client(endpoint: &RedisEndpoint) -> redis::RedisResult<redis::Clie
 pub(crate) mod test_support {
     use std::{
         error::Error,
-        io::{BufRead, BufReader, Read},
+        io::{BufRead, BufReader},
         net::TcpStream,
     };
 
     pub(crate) fn read_command(
         stream: &mut TcpStream,
     ) -> Result<Vec<String>, Box<dyn Error + Send + Sync>> {
-        let mut reader = BufReader::new(stream);
+        read_command_from(&mut BufReader::new(stream))
+    }
+
+    pub(crate) fn read_command_from<R: BufRead>(
+        reader: &mut R,
+    ) -> Result<Vec<String>, Box<dyn Error + Send + Sync>> {
         let mut line = String::new();
         reader.read_line(&mut line)?;
         let count = line

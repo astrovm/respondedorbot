@@ -1,6 +1,16 @@
 from tests.support import *
 
 
+@pytest.fixture(autouse=True)
+def _use_python_message_aux_io(monkeypatch):
+    """Keep legacy auxiliary-state tests on the Python Redis implementation."""
+
+    monkeypatch.setattr(
+        "api.memory.state._load_rust_message_state_io",
+        lambda: None,
+    )
+
+
 def test_format_user_message():
     # Test with username
     msg = {"from": {"first_name": "John", "username": "john123"}}

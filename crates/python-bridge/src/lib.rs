@@ -17,6 +17,7 @@ use bot_adapters::redis_media_cache::{
     cache_media as cache_media_adapter, get_cached_media as get_cached_media_adapter,
     media_cache_key as media_cache_key_adapter,
 };
+use bot_adapters::redis_message_state::RedisMessageState as RedisMessageStateAdapter;
 use bot_core::admin_reports::{
     CreditLogLimit, parse_creditlog_limit as parse_creditlog_limit_core,
     truncate_report as truncate_admin_report_core,
@@ -174,6 +175,74 @@ impl PyRedisCompactionQueue {
                 .quarantine_job(chat_id, dead_job_id, dead_payload)
         })
         .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+}
+
+#[pyclass(name = "RedisMessageState")]
+struct PyRedisMessageState {
+    state: RedisMessageStateAdapter,
+}
+
+#[pymethods]
+impl PyRedisMessageState {
+    #[new]
+    fn new(host: &str, port: u16, password: Option<&str>) -> PyResult<Self> {
+        let state = RedisMessageStateAdapter::new(&RedisEndpoint {
+            host: host.to_owned(),
+            port,
+            password: password.map(ToOwned::to_owned),
+        })
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        Ok(Self { state })
+    }
+
+    fn get_value(&self, py: Python<'_>, key: &str) -> PyResult<Option<String>> {
+        py.detach(|| self.state.get_value(key))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn set_value(&self, py: Python<'_>, key: &str, value: &str, ttl_seconds: i64) -> PyResult<()> {
+        py.detach(|| self.state.set_value(key, value, ttl_seconds))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn save_compaction_result(
+        &self,
+        py: Python<'_>,
+        summary_key: &str,
+        marker_key: &str,
+        summary: &str,
+        marker: &str,
+        ttl_seconds: i64,
+    ) -> PyResult<()> {
+        py.detach(|| {
+            self.state
+                .save_compaction_result(summary_key, marker_key, summary, marker, ttl_seconds)
+        })
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn save_chat_member(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        user_id: &str,
+        payload: &str,
+        ttl_seconds: i64,
+    ) -> PyResult<()> {
+        py.detach(|| {
+            self.state
+                .save_chat_member(key, user_id, payload, ttl_seconds)
+        })
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn get_chat_members(&self, py: Python<'_>, key: &str) -> PyResult<String> {
+        let members = py
+            .detach(|| self.state.get_chat_members(key))
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        serde_json::to_string(&members).map_err(|error| PyValueError::new_err(error.to_string()))
     }
 }
 
@@ -1546,6 +1615,7 @@ fn evaluate_response_routing(input_json: &str) -> PyResult<&'static str> {
 #[pymodule]
 fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyRedisCompactionQueue>()?;
+    module.add_class::<PyRedisMessageState>()?;
     module.add_function(wrap_pyfunction!(migration_protocol_version, module)?)?;
     module.add_function(wrap_pyfunction!(whole_credits_to_units, module)?)?;
     module.add_function(wrap_pyfunction!(rescale_credit_units, module)?)?;
