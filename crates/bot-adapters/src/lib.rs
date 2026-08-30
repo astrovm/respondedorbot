@@ -2,6 +2,7 @@
 
 pub mod billing_read;
 pub mod billing_schema;
+pub mod chat_config;
 pub mod compaction_job;
 pub mod finviz;
 pub mod firecrawl;

@@ -8,6 +8,7 @@ use serde_json::{Map, Value};
 
 use bot_adapters::billing_read::BillingRepository;
 use bot_adapters::billing_schema::BillingSchemaRepository;
+use bot_adapters::chat_config::ChatConfigRepository;
 use bot_adapters::compaction_job::normalize_compaction_job as normalize_compaction_job_adapter;
 use bot_adapters::finviz::{
     fetch as finviz_fetch_adapter, parse_symbols as finviz_parse_symbols_adapter,
@@ -85,6 +86,7 @@ use bot_core::cache_policy::{
     last_success_ttl as last_success_ttl_core, request_cache_history_key as cache_history_key_core,
     request_cache_key as cache_key_core, request_cache_ttl as cache_ttl_core,
 };
+use bot_core::chat_config::ChatConfig;
 use bot_core::command_normalization::normalize_command_text as normalize_command_text_core;
 use bot_core::command_parsing::parse_command as parse_command_core;
 use bot_core::compaction_policy::{
@@ -1912,6 +1914,43 @@ fn billing_ensure_schema(py: Python<'_>, database_url: &str) -> PyResult<String>
     serde_json::to_string(&result).map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+/// Create the additive chat-configuration schema used by both runtimes.
+#[pyfunction]
+fn chat_config_ensure_schema(py: Python<'_>, database_url: &str) -> PyResult<()> {
+    let repository = ChatConfigRepository::new(database_url);
+    py.detach(|| repository.ensure_schema())
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+/// Read and normalize one existing chat configuration without writing defaults.
+#[pyfunction]
+fn chat_config_get(py: Python<'_>, database_url: &str, chat_id: &str) -> PyResult<String> {
+    let repository = ChatConfigRepository::new(database_url);
+    let config = py
+        .detach(|| repository.get(chat_id))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serde_json::to_string(&config).map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+/// Upsert one complete typed chat configuration.
+#[pyfunction]
+fn chat_config_set(
+    py: Python<'_>,
+    database_url: &str,
+    chat_id: &str,
+    config_json: &str,
+) -> PyResult<String> {
+    let value: Value = serde_json::from_str(config_json)
+        .map_err(|error| PyValueError::new_err(format!("invalid chat config JSON: {error}")))?;
+    let config =
+        ChatConfig::from_json(&value).map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let repository = ChatConfigRepository::new(database_url);
+    let stored = py
+        .detach(|| repository.set(chat_id, &config))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serde_json::to_string(&stored).map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Read one billing balance without creating accounts or writing ledger state.
 #[pyfunction]
 fn billing_read_balance(
@@ -3472,6 +3511,9 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(redis_chat_admin_set, module)?)?;
     module.add_function(wrap_pyfunction!(run_redis_maintenance, module)?)?;
     module.add_function(wrap_pyfunction!(billing_ensure_schema, module)?)?;
+    module.add_function(wrap_pyfunction!(chat_config_ensure_schema, module)?)?;
+    module.add_function(wrap_pyfunction!(chat_config_get, module)?)?;
+    module.add_function(wrap_pyfunction!(chat_config_set, module)?)?;
     module.add_function(wrap_pyfunction!(billing_read_balance, module)?)?;
     module.add_function(wrap_pyfunction!(billing_get_or_create_balance, module)?)?;
     module.add_function(wrap_pyfunction!(billing_grant_onboarding, module)?)?;

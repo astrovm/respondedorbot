@@ -52,6 +52,7 @@ Rows not listed under migrated components remain Python-authoritative.
 | Native process configuration, polling offset ownership, ordered dispatch, and retry lifecycle | `shadow` | `botd` refuses to poll until the native dispatcher is complete; Python PTB remains authoritative | `botd` unit tests |
 | Typed outbound send, edit, delete, typing, callback-answer, and pre-checkout-answer actions | `shadow` | Python Telegram gateway remains authoritative until native dispatcher cutover | Rust core and adapter tests |
 | Native localized `/convertbase` command-to-action vertical slice | `shadow` | Python command dispatcher remains authoritative until native message-state and locale storage are connected | Rust core tests |
+| PostgreSQL chat-configuration schema, typed reads, and typed upserts | `rust-flagged` | `RUST_CHAT_CONFIG_IO_ENABLED=0`, missing bridge, or bridge error | Rust core, adapter integration, and Python service tests |
 | Provider rate-limit and Groq account-fallback classification | `rust-flagged` | `RUST_PROVIDER_ERROR_POLICY_ENABLED=0` or missing bridge | `contracts/provider_error_policy.json` |
 | Provider retry-window parsing and rate-limit header precedence | `rust-flagged` | `RUST_PROVIDER_RETRY_POLICY_ENABLED=0`, missing bridge, or bridge error | `contracts/provider_retry_policy.json` |
 | Provider exception, usage, finish-response, and retry-delay policy | `rust-flagged` | `RUST_PROVIDER_RUNTIME_POLICY_ENABLED=0`, missing bridge, or bridge error | `contracts/provider_runtime_policy.json` |
