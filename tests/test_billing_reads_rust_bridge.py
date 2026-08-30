@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+import json
 import logging
 
 import pytest
@@ -88,6 +89,28 @@ class _FakeRustOnboarding:
         self.calls.append((database_url, user_id, credits))
         if self.fail:
             raise ValueError("synthetic uncertain onboarding failure")
+        return self.result
+
+
+class _FakeRustStarPayments:
+    def __init__(
+        self,
+        result: tuple[bool, int],
+        *,
+        fail: bool = False,
+    ) -> None:
+        self.result = result
+        self.fail = fail
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def billing_record_star_payment(
+        self,
+        database_url: str,
+        payment_json: str,
+    ) -> tuple[bool, int]:
+        self.calls.append((database_url, json.loads(payment_json)))
+        if self.fail:
+            raise ValueError("synthetic uncertain Stars payment failure")
         return self.result
 
 
@@ -225,3 +248,72 @@ def test_billing_onboarding_uncertain_failure_does_not_start_python_writer(
 
     with pytest.raises(credits_db.CreditsDBError, match="onboarding grant"):
         credits_db.grant_onboarding_if_needed(42, 300)
+
+
+def test_billing_star_payment_is_authoritative_and_preserves_result_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(
+        credits_db,
+        "get_database_url",
+        lambda: "postgresql://synthetic.invalid/db?sslmode=require",
+    )
+    monkeypatch.setattr(
+        credits_db,
+        "_run_credit_transaction",
+        lambda *_arguments: pytest.fail("Python Stars writer must not run"),
+    )
+    rust = _FakeRustStarPayments((True, 500))
+    monkeypatch.setattr(
+        credits_db,
+        "_load_rust_billing_star_payments",
+        lambda: rust,
+    )
+
+    assert credits_db.record_star_payment(
+        "synthetic-charge",
+        42,
+        "small",
+        100,
+        500,
+        "synthetic-payload",
+    ) == {"inserted": True, "user_balance": 500}
+    assert rust.calls == [
+        (
+            "postgresql://synthetic.invalid/db?sslmode=require",
+            {
+                "charge_id": "synthetic-charge",
+                "user_id": 42,
+                "pack_id": "small",
+                "xtr_amount": 100,
+                "credits_awarded": 500,
+                "payload": "synthetic-payload",
+            },
+        )
+    ]
+
+
+def test_billing_star_payment_uncertain_failure_does_not_start_python_writer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(
+        credits_db,
+        "get_database_url",
+        lambda: "postgresql://synthetic.invalid/db?sslmode=require",
+    )
+    monkeypatch.setattr(
+        credits_db,
+        "_run_credit_transaction",
+        lambda *_arguments: pytest.fail("uncertain writes must fail closed"),
+    )
+    rust = _FakeRustStarPayments((False, 0), fail=True)
+    monkeypatch.setattr(
+        credits_db,
+        "_load_rust_billing_star_payments",
+        lambda: rust,
+    )
+
+    with pytest.raises(credits_db.CreditsDBError, match="Stars payment"):
+        credits_db.record_star_payment("synthetic-charge", 42, "small", 100, 500)

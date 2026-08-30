@@ -1,7 +1,7 @@
 //! Read-only PostgreSQL billing access used before billing writer cutover.
 
 use native_tls::TlsConnector;
-use postgres::{Client, error::SqlState};
+use postgres::{Client, Transaction, error::SqlState};
 use postgres_native_tls::MakeTlsConnector;
 use serde::Serialize;
 use serde_json::json;
@@ -55,6 +55,12 @@ pub struct OnboardingGrantResult {
     pub balance: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct StarPaymentResult {
+    pub inserted: bool,
+    pub user_balance: i64,
+}
+
 pub struct BillingRepository {
     database_url: String,
 }
@@ -103,8 +109,92 @@ impl BillingRepository {
         user_id: i64,
         credits: i32,
     ) -> Result<OnboardingGrantResult, BillingError> {
+        self.run_transaction(|transaction| {
+            Self::apply_onboarding_grant(transaction, user_id, credits)
+        })
+    }
+
+    pub fn record_star_payment(
+        &self,
+        charge_id: &str,
+        user_id: i64,
+        pack_id: &str,
+        xtr_amount: i32,
+        credits_awarded: i32,
+        payload: Option<&str>,
+    ) -> Result<StarPaymentResult, BillingError> {
+        self.run_transaction(|transaction| {
+            let inserted = transaction
+                .query_opt(
+                    "INSERT INTO star_payments (\
+                        telegram_payment_charge_id, user_id, pack_id, xtr_amount, \
+                        credits_awarded, payload\
+                     ) VALUES ($1, $2, $3, $4, $5, $6) \
+                     ON CONFLICT (telegram_payment_charge_id) DO NOTHING \
+                     RETURNING telegram_payment_charge_id",
+                    &[
+                        &charge_id,
+                        &user_id,
+                        &pack_id,
+                        &xtr_amount,
+                        &credits_awarded,
+                        &payload,
+                    ],
+                )?
+                .is_some();
+            transaction.execute(
+                "INSERT INTO credit_accounts (scope_type, scope_id, balance) VALUES ('user', $1, 0) \
+                 ON CONFLICT (scope_type, scope_id) DO NOTHING",
+                &[&user_id],
+            )?;
+            let mut user_balance = transaction
+                .query_one(
+                    "SELECT balance FROM credit_accounts \
+                     WHERE scope_type = 'user' AND scope_id = $1 FOR UPDATE",
+                    &[&user_id],
+                )?
+                .get::<_, i32>(0);
+            if inserted {
+                user_balance = user_balance
+                    .checked_add(credits_awarded)
+                    .ok_or(BillingError::BalanceOverflow)?;
+                transaction.execute(
+                    "UPDATE credit_accounts SET balance = $1, updated_at = NOW() \
+                     WHERE scope_type = 'user' AND scope_id = $2",
+                    &[&user_balance, &user_id],
+                )?;
+                let metadata = json!({
+                    "pack_id": pack_id,
+                    "xtr_amount": xtr_amount,
+                    "charge_id": charge_id,
+                });
+                transaction.execute(
+                    "INSERT INTO credit_ledger \
+                        (event_type, actor_user_id, user_id, amount, metadata) \
+                     VALUES ('topup', $1, $1, $2, $3)",
+                    &[&user_id, &credits_awarded, &metadata],
+                )?;
+            }
+            Ok(StarPaymentResult {
+                inserted,
+                user_balance: user_balance.into(),
+            })
+        })
+    }
+
+    fn run_transaction<T, F>(&self, operation: F) -> Result<T, BillingError>
+    where
+        F: for<'transaction> Fn(&mut Transaction<'transaction>) -> Result<T, BillingError>,
+    {
         for attempt in 0..CREDIT_TRANSACTION_MAX_ATTEMPTS {
-            match self.try_grant_onboarding(user_id, credits) {
+            let result = (|| {
+                let mut client = self.connect()?;
+                let mut transaction = client.transaction()?;
+                let result = operation(&mut transaction)?;
+                transaction.commit()?;
+                Ok(result)
+            })();
+            match result {
                 Ok(result) => return Ok(result),
                 Err(error)
                     if attempt + 1 < CREDIT_TRANSACTION_MAX_ATTEMPTS
@@ -118,13 +208,11 @@ impl BillingRepository {
         Err(BillingError::TransactionRetriesExhausted)
     }
 
-    fn try_grant_onboarding(
-        &self,
+    fn apply_onboarding_grant(
+        transaction: &mut Transaction<'_>,
         user_id: i64,
         credits: i32,
     ) -> Result<OnboardingGrantResult, BillingError> {
-        let mut client = self.connect()?;
-        let mut transaction = client.transaction()?;
         transaction.query_one(
             "SELECT pg_advisory_xact_lock($1)",
             &[&ONBOARDING_GRANTS_ADVISORY_LOCK_KEY],
@@ -148,7 +236,6 @@ impl BillingRepository {
             )?
             .is_some()
         {
-            transaction.commit()?;
             return Ok(OnboardingGrantResult {
                 granted: false,
                 balance: balance.into(),
@@ -180,7 +267,6 @@ impl BillingRepository {
                  VALUES ('onboarding_denied_overflow', $1, $1, 0, $2)",
                 &[&user_id, &metadata],
             )?;
-            transaction.commit()?;
             return Ok(OnboardingGrantResult {
                 granted: false,
                 balance: balance.into(),
@@ -211,7 +297,6 @@ impl BillingRepository {
                 &[&user_id, &credits, &metadata],
             )?;
         }
-        transaction.commit()?;
         Ok(OnboardingGrantResult {
             granted,
             balance: balance.into(),
@@ -242,7 +327,9 @@ mod tests {
     use postgres::Client;
     use postgres_native_tls::MakeTlsConnector;
 
-    use super::{BillingError, BillingRepository, BillingScope, OnboardingGrantResult};
+    use super::{
+        BillingError, BillingRepository, BillingScope, OnboardingGrantResult, StarPaymentResult,
+    };
 
     #[test]
     fn validates_the_persistent_scope_contract_before_connecting() {
@@ -279,6 +366,15 @@ mod tests {
                 user_id BIGINT PRIMARY KEY, \
                 credits INTEGER NOT NULL, \
                 granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\
+            ); \
+            CREATE TABLE IF NOT EXISTS star_payments (\
+                telegram_payment_charge_id TEXT PRIMARY KEY, \
+                user_id BIGINT NOT NULL, \
+                pack_id TEXT NOT NULL, \
+                xtr_amount INTEGER NOT NULL, \
+                credits_awarded INTEGER NOT NULL, \
+                payload TEXT, \
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\
             ); \
             CREATE TABLE IF NOT EXISTS credit_ledger (\
                 id BIGSERIAL PRIMARY KEY, \
@@ -381,6 +477,90 @@ mod tests {
         assert_eq!(event_counts.get::<_, i64>(0), 2);
         assert_eq!(event_counts.get::<_, i64>(1), 1);
 
+        assert_eq!(
+            repository.record_star_payment(
+                "synthetic-charge-1",
+                7_000_000_000_008,
+                "small",
+                100,
+                500,
+                Some("synthetic-payload"),
+            )?,
+            StarPaymentResult {
+                inserted: true,
+                user_balance: 500,
+            }
+        );
+        assert_eq!(
+            repository.record_star_payment(
+                "synthetic-charge-1",
+                7_000_000_000_008,
+                "small",
+                100,
+                500,
+                Some("synthetic-payload"),
+            )?,
+            StarPaymentResult {
+                inserted: false,
+                user_balance: 500,
+            }
+        );
+        let first_database_url = database_url.clone();
+        let second_database_url = database_url.clone();
+        let first = std::thread::spawn(move || {
+            BillingRepository::new(&first_database_url).record_star_payment(
+                "synthetic-charge-2",
+                7_000_000_000_008,
+                "small",
+                100,
+                500,
+                None,
+            )
+        });
+        let second = std::thread::spawn(move || {
+            BillingRepository::new(&second_database_url).record_star_payment(
+                "synthetic-charge-2",
+                7_000_000_000_008,
+                "small",
+                100,
+                500,
+                None,
+            )
+        });
+        let concurrent_payment_results = [
+            first
+                .join()
+                .map_err(|_| std::io::Error::other("first Stars payment thread panicked"))??,
+            second
+                .join()
+                .map_err(|_| std::io::Error::other("second Stars payment thread panicked"))??,
+        ];
+        assert_eq!(
+            concurrent_payment_results
+                .iter()
+                .filter(|result| result.inserted)
+                .count(),
+            1
+        );
+        assert!(
+            concurrent_payment_results
+                .iter()
+                .all(|result| result.user_balance == 1000)
+        );
+        let topup_evidence = client.query_one(
+            "SELECT COUNT(*), \
+                COUNT(*) FILTER (\
+                    WHERE metadata->>'pack_id' = 'small' \
+                      AND metadata->>'xtr_amount' = '100' \
+                      AND metadata ? 'charge_id'\
+                ) \
+             FROM credit_ledger \
+             WHERE user_id = $1 AND event_type = 'topup'",
+            &[&7_000_000_000_008_i64],
+        )?;
+        assert_eq!(topup_evidence.get::<_, i64>(0), 2);
+        assert_eq!(topup_evidence.get::<_, i64>(1), 2);
+
         let synthetic_ids = [
             7_000_000_000_001_i64,
             7_000_000_000_002_i64,
@@ -389,7 +569,12 @@ mod tests {
             7_000_000_000_005_i64,
             7_000_000_000_006_i64,
             7_000_000_000_007_i64,
+            7_000_000_000_008_i64,
         ];
+        client.execute(
+            "DELETE FROM star_payments WHERE user_id = ANY($1)",
+            &[&&synthetic_ids[..]],
+        )?;
         client.execute(
             "DELETE FROM credit_ledger WHERE user_id = ANY($1)",
             &[&&synthetic_ids[..]],

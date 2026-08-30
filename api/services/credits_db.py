@@ -99,6 +99,14 @@ class _RustBillingOnboarding(Protocol):
     ) -> tuple[bool, int]: ...
 
 
+class _RustBillingStarPayments(Protocol):
+    def billing_record_star_payment(
+        self,
+        database_url: str,
+        payment_json: str,
+    ) -> tuple[bool, int]: ...
+
+
 def _load_rust_billing_reads() -> _RustBillingReads | None:
     module = load_rust_bridge("RUST_BILLING_READ_SHADOW_ENABLED")
     if module is None:
@@ -118,6 +126,13 @@ def _load_rust_billing_onboarding() -> _RustBillingOnboarding | None:
     if module is None:
         return None
     return cast(_RustBillingOnboarding, module)
+
+
+def _load_rust_billing_star_payments() -> _RustBillingStarPayments | None:
+    module = load_rust_bridge("RUST_BILLING_STAR_PAYMENTS_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustBillingStarPayments, module)
 
 
 class CreditsDBError(RuntimeError):
@@ -2339,6 +2354,31 @@ def record_star_payment(
     payload: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Persist successful payment and credit the user idempotently."""
+
+    rust = _load_rust_billing_star_payments()
+    database_url = get_database_url()
+    if rust is not None and database_url:
+        ensure_schema()
+        try:
+            inserted, user_balance = rust.billing_record_star_payment(
+                database_url,
+                json.dumps(
+                    {
+                        "charge_id": str(telegram_payment_charge_id),
+                        "user_id": int(user_id),
+                        "pack_id": str(pack_id),
+                        "xtr_amount": int(xtr_amount),
+                        "credits_awarded": int(credits_awarded),
+                        "payload": str(payload) if payload else None,
+                    }
+                ),
+            )
+            return {
+                "inserted": bool(inserted),
+                "user_balance": int(user_balance),
+            }
+        except Exception as error:
+            raise CreditsDBError("Rust Stars payment transaction failed") from error
 
     def operation(cur: Any) -> Dict[str, Any]:
         cur.execute(

@@ -14,6 +14,7 @@ must never enter balance mutations.
 | Balance shadow | Python is authoritative; Rust compares `get_balance` with a read-only `SELECT` | Python only | Disable `RUST_BILLING_READ_SHADOW_ENABLED` |
 | Current balance I/O | Rust reads balances and creates missing zero-balance accounts | Rust only for the idempotent account insert; Python owns all other writes | Disable `RUST_BILLING_BALANCE_IO_ENABLED` |
 | Current onboarding writer | Rust owns idempotent onboarding grants, overflow decisions, balance updates, and their ledger rows | Rust only for onboarding; Python owns all other mutations | Disable `RUST_BILLING_ONBOARDING_ENABLED` |
+| Current Stars writer | Rust owns payment insertion, duplicate handling, user balance updates, and top-up ledger rows | Rust only for Stars payments; Python owns all other mutations | Disable `RUST_BILLING_STAR_PAYMENTS_ENABLED` |
 | Rust reads | Rust is authoritative for proven read operations | Python owns non-balance writes | Disable the per-operation Rust read flag |
 | Shadow transaction decisions | Python commits; Rust evaluates the same synthetic transaction inputs without I/O | Python only | Disable the decision shadow flag |
 | Rust writer canary | Rust owns one proven mutation family | Rust for that family; Python for all others | Disable that family's writer flag before another owner starts |
@@ -81,3 +82,8 @@ returned.
 writer. It preserves the advisory lock, account row lock, hourly/daily limits,
 three-attempt concurrency retry, grant idempotency, and ledger metadata. An
 uncertain failure is returned to the caller and never retried through Python.
+
+`RUST_BILLING_STAR_PAYMENTS_ENABLED=1` makes Rust the only Telegram Stars
+payment writer. The Telegram charge ID remains the idempotency key. Duplicate
+deliveries return the locked current balance without awarding credits or adding
+another ledger row. Uncertain failures do not start the Python writer.

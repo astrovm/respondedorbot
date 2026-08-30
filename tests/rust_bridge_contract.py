@@ -495,6 +495,15 @@ def verify_billing_onboarding(bridge: ModuleType) -> None:
         raise AssertionError("Rust onboarding bridge is unavailable")
 
 
+def verify_billing_star_payments(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "billing_star_payments.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    if contract["idempotency_key"] != "telegram_payment_charge_id":
+        raise AssertionError("Stars payment idempotency must remain charge-scoped")
+    if not callable(bridge.billing_record_star_payment):
+        raise AssertionError("Rust Stars payment bridge is unavailable")
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -579,6 +588,7 @@ def main(arguments: list[str]) -> int:
     verify_task_store_io(bridge)
     verify_billing_reads(bridge)
     verify_billing_onboarding(bridge)
+    verify_billing_star_payments(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

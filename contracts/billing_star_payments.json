@@ -1,0 +1,8 @@
+{
+  "idempotency_key": "telegram_payment_charge_id",
+  "account_scope": "user",
+  "ledger_event": "topup",
+  "ledger_metadata": ["pack_id", "xtr_amount", "charge_id"],
+  "duplicate_behavior": "return current balance without another award",
+  "transaction_attempts": 3
+}

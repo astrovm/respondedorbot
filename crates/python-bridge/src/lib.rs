@@ -108,6 +108,17 @@ use bot_core::weather::{
     select_location_candidate as select_location_candidate_core,
 };
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StarPaymentInputDto {
+    charge_id: String,
+    user_id: i64,
+    pack_id: String,
+    xtr_amount: i32,
+    credits_awarded: i32,
+    payload: Option<String>,
+}
+
 #[pyclass(name = "RedisCompactionQueue")]
 struct PyRedisCompactionQueue {
     queue: RedisCompactionQueueAdapter,
@@ -1809,6 +1820,31 @@ fn billing_grant_onboarding(
     Ok((result.granted, result.balance))
 }
 
+/// Record one idempotent Telegram Stars payment transaction.
+#[pyfunction]
+fn billing_record_star_payment(
+    py: Python<'_>,
+    database_url: &str,
+    payment_json: &str,
+) -> PyResult<(bool, i64)> {
+    let payment: StarPaymentInputDto = serde_json::from_str(payment_json)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let repository = BillingRepository::new(database_url);
+    let result = py
+        .detach(|| {
+            repository.record_star_payment(
+                &payment.charge_id,
+                payment.user_id,
+                &payment.pack_id,
+                payment.xtr_amount,
+                payment.credits_awarded,
+                payment.payload.as_deref(),
+            )
+        })
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok((result.inserted, result.user_balance))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -1918,6 +1954,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(billing_read_balance, module)?)?;
     module.add_function(wrap_pyfunction!(billing_get_or_create_balance, module)?)?;
     module.add_function(wrap_pyfunction!(billing_grant_onboarding, module)?)?;
+    module.add_function(wrap_pyfunction!(billing_record_star_payment, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;

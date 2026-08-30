@@ -53,6 +53,7 @@ Rows not listed under migrated components remain Python-authoritative.
 | PostgreSQL billing balance read parity | `shadow` | `RUST_BILLING_READ_SHADOW_ENABLED=0` or missing bridge | `contracts/billing_reads.json` |
 | PostgreSQL billing balance account I/O | `rust-flagged` | `RUST_BILLING_BALANCE_IO_ENABLED=0` or missing bridge | `contracts/billing_reads.json` |
 | PostgreSQL idempotent onboarding grants and overflow ledger | `rust-flagged` | `RUST_BILLING_ONBOARDING_ENABLED=0` or missing bridge | `contracts/billing_onboarding.json` |
+| PostgreSQL idempotent Telegram Stars payments, balances, and ledger | `rust-flagged` | `RUST_BILLING_STAR_PAYMENTS_ENABLED=0` or missing bridge | `contracts/billing_star_payments.json` |
 | Automatic media-routing decision | `rust-flagged` | `RUST_MEDIA_ROUTING_ENABLED=0` or missing bridge | `contracts/media_routing.json` |
 | General response-routing state machine | `rust-flagged` | `RUST_RESPONSE_ROUTING_ENABLED=0` or missing bridge | `contracts/response_routing.json` |
 | Base-conversion command | `rust-flagged` | `RUST_BASE_CONVERSION_ENABLED=0` or missing bridge | `contracts/base_conversion.json` |
