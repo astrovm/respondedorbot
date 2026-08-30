@@ -37,6 +37,7 @@ pub mod random_selection;
 pub mod routing;
 pub mod rulo;
 pub mod satoshi;
+pub mod stocks;
 pub mod task_triggers;
 pub mod telegram_streaming;
 pub mod tool_execution;

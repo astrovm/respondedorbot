@@ -1204,6 +1204,30 @@ def verify_giphy_adapter(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_stock_market(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "stock_market.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["quote_cases"]:
+        actual = json.loads(
+            bridge.stock_parse_yahoo_quote(
+                json.dumps(case["response"], separators=(",", ":")),
+                case["fallback_symbol"],
+            )
+        )
+        assert actual == case["expected"], case["name"]
+    for case in contract["symbol_cases"]:
+        actual = bridge.stock_select_yahoo_symbol(
+            json.dumps(case["response"], separators=(",", ":"))
+        )
+        assert actual == case["expected"], case["name"]
+    for case in contract["query_cases"]:
+        actual = json.loads(bridge.stock_query_plan(case["message"]))
+        assert actual == case["expected"], case["name"]
+    for case in contract["finviz_cases"]:
+        actual = bridge.finviz_parse_symbols(case["html"])
+        assert actual == case["expected"], case["name"]
+
+
 def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_ai_usage_policy(bridge)
     verify_provider_error_policy(bridge)
@@ -1228,6 +1252,7 @@ def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_openrouter_generation_adapter(bridge)
     verify_telegram_http_adapter(bridge)
     verify_giphy_adapter(bridge)
+    verify_stock_market(bridge)
 
 
 def main(arguments: list[str]) -> int:

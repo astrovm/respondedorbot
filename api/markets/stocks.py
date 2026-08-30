@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol, cast
 
 import redis
 from requests.exceptions import RequestException
 
 from api.cache.service import CacheService
 from api.core.config_runtime import ConfigRuntime
+from api.core.logging import get_logger
+from api.core.rust_bridge import load_rust_bridge
 from api.i18n import tr
 from api.services import http_client
 from api.services.redis_helpers import redis_get_json, redis_set_json
@@ -28,6 +31,7 @@ HttpGetter = Callable[..., Any]
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 YAHOO_SEARCH_URL = "https://query1.finance.yahoo.com/v1/finance/search"
 FINVIZ_SCREENER_URL = "https://finviz.com/screener.ashx"
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +42,164 @@ class StockQuote:
     currency: str
     exchange: str
     variation: float
+
+
+@dataclass(frozen=True, slots=True)
+class _StockQuery:
+    original: str
+    normalized: str
+    is_symbol: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _StockQueryPlan:
+    raw_query: str
+    queries: list[_StockQuery]
+    full_query_fallback: bool
+    needs_top_stocks: bool
+
+
+class _RustStockAdapter(Protocol):
+    def stock_parse_yahoo_quote(
+        self, response_json: str, fallback_symbol: str
+    ) -> str: ...
+
+    def stock_select_yahoo_symbol(self, response_json: str) -> str | None: ...
+
+    def stock_query_plan(self, message: str) -> str: ...
+
+    def finviz_fetch(self) -> str: ...
+
+
+def _load_rust_stock_adapter() -> _RustStockAdapter | None:
+    module = load_rust_bridge("RUST_STOCK_MARKET_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustStockAdapter, module)
+
+
+def _stock_quote_from_mapping(value: Any) -> StockQuote | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError("Rust stock quote must be an object")
+    text_fields = ("symbol", "name", "currency", "exchange")
+    if not all(isinstance(value.get(field), str) for field in text_fields):
+        raise ValueError("Rust stock quote text fields are invalid")
+    price = value.get("price")
+    variation = value.get("variation")
+    if not isinstance(price, (int, float)) or isinstance(price, bool):
+        raise ValueError("Rust stock price must be numeric")
+    if not isinstance(variation, (int, float)) or isinstance(variation, bool):
+        raise ValueError("Rust stock variation must be numeric")
+    return StockQuote(
+        symbol=cast(str, value["symbol"]),
+        name=cast(str, value["name"]),
+        price=float(price),
+        currency=cast(str, value["currency"]),
+        exchange=cast(str, value["exchange"]),
+        variation=float(variation),
+    )
+
+
+def _python_stock_query_plan(message: str) -> _StockQueryPlan:
+    raw_query = str(message or "").strip()
+    full_query_fallback = False
+    if "," in raw_query:
+        originals = [part.strip() for part in raw_query.split(",") if part.strip()]
+    else:
+        originals = [part for part in raw_query.split() if part]
+        full_query_fallback = len(originals) > 1
+    queries = []
+    for original in originals[:20]:
+        normalized = original.upper().lstrip("$")
+        queries.append(
+            _StockQuery(
+                original=original,
+                normalized=normalized,
+                is_symbol=re.fullmatch(r"[A-Z0-9.\^=\-]{1,30}", normalized)
+                is not None,
+            )
+        )
+    return _StockQueryPlan(
+        raw_query=raw_query,
+        queries=queries,
+        full_query_fallback=full_query_fallback,
+        needs_top_stocks=not queries,
+    )
+
+
+def _rust_stock_query_plan(raw_plan: str) -> _StockQueryPlan:
+    plan = json.loads(raw_plan)
+    if not isinstance(plan, Mapping):
+        raise ValueError("Rust stock query plan must be an object")
+    raw_query = plan.get("raw_query")
+    raw_queries = plan.get("queries")
+    full_query_fallback = plan.get("full_query_fallback")
+    needs_top_stocks = plan.get("needs_top_stocks")
+    if not isinstance(raw_query, str) or not isinstance(raw_queries, list):
+        raise ValueError("Rust stock query plan fields are invalid")
+    if not isinstance(full_query_fallback, bool) or not isinstance(
+        needs_top_stocks, bool
+    ):
+        raise ValueError("Rust stock query plan flags are invalid")
+    queries: list[_StockQuery] = []
+    for raw_query_item in raw_queries:
+        if not isinstance(raw_query_item, Mapping):
+            raise ValueError("Rust stock query must be an object")
+        original = raw_query_item.get("original")
+        normalized = raw_query_item.get("normalized")
+        is_symbol = raw_query_item.get("is_symbol")
+        if not isinstance(original, str) or not isinstance(normalized, str):
+            raise ValueError("Rust stock query text is invalid")
+        if not isinstance(is_symbol, bool):
+            raise ValueError("Rust stock query classification is invalid")
+        queries.append(_StockQuery(original, normalized, is_symbol))
+    return _StockQueryPlan(
+        raw_query,
+        queries,
+        full_query_fallback,
+        needs_top_stocks,
+    )
+
+
+def _stock_query_plan(message: str) -> _StockQueryPlan:
+    rust = _load_rust_stock_adapter()
+    if rust is not None:
+        try:
+            return _rust_stock_query_plan(rust.stock_query_plan(message))
+        except Exception:
+            logger.exception("Rust stock query planning failed; using Python fallback")
+    return _python_stock_query_plan(message)
+
+
+def _parse_finviz_symbols(html: str) -> list[str]:
+    seen_companies: set[str] = set()
+    result: list[str] = []
+    pattern = r'data-boxover-ticker="([A-Z.]+)"\s+data-boxover-company="([^"]+)"'
+    for match in re.finditer(pattern, html):
+        symbol, company = match.group(1), match.group(2)
+        if company not in seen_companies and len(result) < 10:
+            seen_companies.add(company)
+            result.append(symbol)
+    return result
+
+
+def _rust_finviz_symbols(rust: _RustStockAdapter) -> list[str]:
+    outcome = json.loads(rust.finviz_fetch())
+    if not isinstance(outcome, Mapping):
+        raise ValueError("Rust Finviz outcome must be an object")
+    status = outcome.get("status")
+    if status == "success":
+        symbols = outcome.get("symbols")
+        if not isinstance(symbols, list) or not all(
+            isinstance(symbol, str) for symbol in symbols
+        ):
+            raise ValueError("Rust Finviz symbols must be text")
+        return symbols
+    if status in {"http_error", "transport_error"}:
+        return []
+    raise ValueError(f"invalid Rust Finviz status: {status!r}")
 
 
 def fetch_yahoo_stock_quote(
@@ -55,6 +217,23 @@ def fetch_yahoo_stock_quote(
         )
         if not response or "data" not in response:
             return None
+        rust = _load_rust_stock_adapter()
+        if rust is not None:
+            try:
+                return _stock_quote_from_mapping(
+                    json.loads(
+                        rust.stock_parse_yahoo_quote(
+                            json.dumps(
+                                response,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                            symbol,
+                        )
+                    )
+                )
+            except Exception:
+                logger.exception("Rust Yahoo quote parser failed; using Python fallback")
         results = response["data"].get("chart", {}).get("result") or []
         if not results:
             return None
@@ -113,6 +292,25 @@ def search_yahoo_symbol(
                 {"User-Agent": "Mozilla/5.0"},
                 cache_ttl,
             )
+            rust = _load_rust_stock_adapter()
+            if rust is not None and response is not None:
+                try:
+                    resolved = rust.stock_select_yahoo_symbol(
+                        json.dumps(
+                            response,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                    )
+                    if resolved is not None and not isinstance(resolved, str):
+                        raise ValueError("Rust Yahoo symbol must be text")
+                    if resolved:
+                        return resolved
+                    continue
+                except Exception:
+                    logger.exception(
+                        "Rust Yahoo symbol parser failed; using Python fallback"
+                    )
             quotes = response.get("data", {}).get("quotes", []) if response else []
             for quote in quotes:
                 if quote.get("quoteType") in {
@@ -143,6 +341,16 @@ def fetch_top_stocks_by_market_cap(
         if isinstance(cached, list):
             return [str(symbol) for symbol in cached]
 
+    rust = _load_rust_stock_adapter()
+    if rust is not None:
+        try:
+            symbols = _rust_finviz_symbols(rust)
+            if redis_client and symbols:
+                redis_set_json(redis_client, cache_key, symbols, ttl=cache_ttl)
+            return symbols
+        except Exception:
+            logger.exception("Rust Finviz adapter failed; using Python fallback")
+
     try:
         response = http_get(
             FINVIZ_SCREENER_URL,
@@ -151,14 +359,7 @@ def fetch_top_stocks_by_market_cap(
             timeout=10,
         )
         response.raise_for_status()
-        seen_companies: set[str] = set()
-        result: list[str] = []
-        pattern = r'data-boxover-ticker="([A-Z.]+)"\s+data-boxover-company="([^"]+)"'
-        for match in re.finditer(pattern, response.text):
-            symbol, company = match.group(1), match.group(2)
-            if company not in seen_companies and len(result) < 10:
-                seen_companies.add(company)
-                result.append(symbol)
+        result = _parse_finviz_symbols(response.text)
         if redis_client and result:
             redis_set_json(redis_client, cache_key, result, ttl=cache_ttl)
         return result
@@ -224,23 +425,25 @@ def lookup_stock_quotes(
 ) -> list[tuple[str, StockQuote | None]] | None:
     """Resolve stock-like queries without applying user-facing formatting."""
 
-    raw_query = str(msg_text or "").strip()
-    full_query_fallback = False
-    if "," in raw_query:
-        queries = [part.strip() for part in raw_query.split(",") if part.strip()]
-    else:
-        parts = [part for part in raw_query.split() if part]
-        queries = parts
-        full_query_fallback = len(queries) > 1
-    if not queries:
-        queries = fetch_top_stocks()
-        if not queries:
+    plan = _stock_query_plan(str(msg_text or ""))
+    queries = plan.queries
+    if plan.needs_top_stocks:
+        top_stocks = fetch_top_stocks()
+        if not top_stocks:
             return None
+        queries = [
+            _StockQuery(
+                original=symbol,
+                normalized=symbol.upper().lstrip("$"),
+                is_symbol=True,
+            )
+            for symbol in top_stocks[:20]
+        ]
 
     return _lookup_stock_quotes(
-        raw_query,
-        queries[:20],
-        full_query_fallback=full_query_fallback,
+        plan.raw_query,
+        queries,
+        full_query_fallback=plan.full_query_fallback,
         fetch_quote=fetch_quote,
         resolve_symbol=resolve_symbol,
     )
@@ -248,7 +451,7 @@ def lookup_stock_quotes(
 
 def _lookup_stock_quotes(
     raw_query: str,
-    queries: list[str],
+    queries: list[_StockQuery],
     *,
     full_query_fallback: bool,
     fetch_quote: StockQuoteFetcher,
@@ -256,10 +459,8 @@ def _lookup_stock_quotes(
 ) -> list[tuple[str, StockQuote | None]]:
     quotes: list[tuple[str, StockQuote | None]] = []
     for query in queries:
-        normalized = query.upper().lstrip("$")
-        is_symbol = re.fullmatch(r"[A-Z0-9.\^=\-]{1,30}", normalized) is not None
-        quote = fetch_quote(normalized) if is_symbol else None
-        quotes.append((query, quote))
+        quote = fetch_quote(query.normalized) if query.is_symbol else None
+        quotes.append((query.original, quote))
 
     direct_quotes = [quote for _, quote in quotes if quote]
     if not full_query_fallback or len(direct_quotes) == len(quotes):

@@ -9,6 +9,9 @@ use serde_json::{Map, Value};
 use bot_adapters::billing_read::BillingRepository;
 use bot_adapters::billing_schema::BillingSchemaRepository;
 use bot_adapters::compaction_job::normalize_compaction_job as normalize_compaction_job_adapter;
+use bot_adapters::finviz::{
+    fetch as finviz_fetch_adapter, parse_symbols as finviz_parse_symbols_adapter,
+};
 use bot_adapters::firecrawl::{
     HttpResponse as FirecrawlHttpResponse, parse_response as firecrawl_parse_response_adapter,
     search as firecrawl_search_adapter,
@@ -189,6 +192,10 @@ use bot_core::rulo::{
     ExchangeQuote, RuloDetail, RuloEvaluation, RuloInput, evaluate_rulo as evaluate_rulo_core,
 };
 use bot_core::satoshi::format_satoshi_quote as format_satoshi_quote_core;
+use bot_core::stocks::{
+    parse_yahoo_quote as parse_yahoo_stock_quote_core, plan_stock_query as plan_stock_query_core,
+    select_yahoo_symbol as select_yahoo_stock_symbol_core,
+};
 use bot_core::task_triggers::{
     IntegerInput, TaskTrigger, TaskTriggerInput, TriggerConfigInput, TriggerError,
     parse_task_trigger as parse_task_trigger_core,
@@ -3024,6 +3031,38 @@ fn giphy_parse_response(status_code: u16, body: &str) -> PyResult<String> {
 }
 
 #[pyfunction]
+fn stock_parse_yahoo_quote(response_json: &str, fallback_symbol: &str) -> PyResult<String> {
+    let response = serde_json::from_str(response_json)
+        .map_err(|error| PyValueError::new_err(format!("invalid JSON value: {error}")))?;
+    serde_json::to_string(&parse_yahoo_stock_quote_core(&response, fallback_symbol))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+fn stock_select_yahoo_symbol(response_json: &str) -> PyResult<Option<String>> {
+    let response = serde_json::from_str(response_json)
+        .map_err(|error| PyValueError::new_err(format!("invalid JSON value: {error}")))?;
+    Ok(select_yahoo_stock_symbol_core(&response))
+}
+
+#[pyfunction]
+fn stock_query_plan(message: &str) -> PyResult<String> {
+    serde_json::to_string(&plan_stock_query_core(message))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+fn finviz_fetch() -> PyResult<String> {
+    serde_json::to_string(&finviz_fetch_adapter())
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+fn finviz_parse_symbols(html: &str) -> Vec<String> {
+    finviz_parse_symbols_adapter(html)
+}
+
+#[pyfunction]
 fn provider_chain_select(availability: Vec<bool>) -> Vec<usize> {
     provider_chain_select_core(&availability)
 }
@@ -3397,6 +3436,11 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(telegram_download_file, module)?)?;
     module.add_function(wrap_pyfunction!(giphy_search, module)?)?;
     module.add_function(wrap_pyfunction!(giphy_parse_response, module)?)?;
+    module.add_function(wrap_pyfunction!(stock_parse_yahoo_quote, module)?)?;
+    module.add_function(wrap_pyfunction!(stock_select_yahoo_symbol, module)?)?;
+    module.add_function(wrap_pyfunction!(stock_query_plan, module)?)?;
+    module.add_function(wrap_pyfunction!(finviz_fetch, module)?)?;
+    module.add_function(wrap_pyfunction!(finviz_parse_symbols, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_select, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_outcome, module)?)?;
     module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;

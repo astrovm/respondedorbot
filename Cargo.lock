@@ -85,6 +85,7 @@ dependencies = [
  "postgres",
  "postgres-native-tls",
  "redis",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
