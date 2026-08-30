@@ -157,6 +157,19 @@ def verify_weather_selection(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_polymarket_ranking(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "polymarket_ranking.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["cases"]:
+        actual = json.loads(
+            bridge.rank_polymarket_outcomes(
+                json.dumps(case["input"], separators=(",", ":")),
+                case["limit"],
+            )
+        )
+        assert actual == case["expected"], case["name"]
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -221,6 +234,7 @@ def main(arguments: list[str]) -> int:
     verify_devo(bridge)
     verify_rulo(bridge)
     verify_weather_selection(bridge)
+    verify_polymarket_ranking(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

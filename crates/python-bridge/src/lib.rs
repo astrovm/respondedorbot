@@ -25,6 +25,7 @@ use bot_core::market_context::{
 use bot_core::market_models::{
     MarketModel, Valuation, evaluate_market_model as evaluate_market_model_core,
 };
+use bot_core::polymarket::{MarketOutcome, rank_outcomes as rank_outcomes_core};
 use bot_core::price_queries::{
     AmountConversion, PriceQuery, ProviderScope, parse_price_query as parse_price_query_core,
 };
@@ -215,6 +216,19 @@ struct RuloInputDto {
     usd_to_usdt: Vec<ExchangeQuoteDto>,
     usdt_to_ars: Vec<ExchangeQuoteDto>,
     usd_amount: f64,
+}
+
+#[derive(Deserialize)]
+struct MarketOutcomeInputDto {
+    title: String,
+    cached_probability: f64,
+    live_probability: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct RankedOutcomeDto {
+    title: String,
+    percentage: f64,
 }
 
 #[derive(Deserialize)]
@@ -895,6 +909,30 @@ fn evaluate_rulo(input_json: &str) -> PyResult<String> {
         .map_err(|error| PyValueError::new_err(format!("cannot encode rulo result: {error}")))
 }
 
+/// Reconcile and rank adapter-provided Polymarket outcomes.
+#[pyfunction]
+fn rank_polymarket_outcomes(input_json: &str, limit: usize) -> PyResult<String> {
+    let inputs: Vec<MarketOutcomeInputDto> = serde_json::from_str(input_json)
+        .map_err(|error| PyValueError::new_err(format!("invalid Polymarket outcomes: {error}")))?;
+    let outcomes = inputs
+        .into_iter()
+        .map(|input| MarketOutcome {
+            title: input.title,
+            cached_probability: input.cached_probability,
+            live_probability: input.live_probability,
+        })
+        .collect::<Vec<_>>();
+    let ranked = rank_outcomes_core(&outcomes, limit)
+        .into_iter()
+        .map(|outcome| RankedOutcomeDto {
+            title: outcome.title,
+            percentage: outcome.percentage,
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string(&ranked)
+        .map_err(|error| PyValueError::new_err(format!("cannot encode ranked outcomes: {error}")))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -966,6 +1004,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(parse_devo_input, module)?)?;
     module.add_function(wrap_pyfunction!(calculate_devo, module)?)?;
     module.add_function(wrap_pyfunction!(evaluate_rulo, module)?)?;
+    module.add_function(wrap_pyfunction!(rank_polymarket_outcomes, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;

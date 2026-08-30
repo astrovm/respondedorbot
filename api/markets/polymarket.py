@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from html import escape
-from typing import Any
+from typing import Any, Protocol, cast
 
 import pycountry
 
 from api.cache.service import CacheService
+from api.core.rust_bridge import load_rust_bridge
 from api.i18n import tr
 from api.services import http_client
 from api.utils import fmt_num
@@ -48,6 +50,20 @@ CachedRequest = Callable[..., dict[str, Any] | None]
 LivePriceFetcher = Callable[[str], tuple[float, int | None] | None]
 LivePricesFetcher = Callable[[Sequence[str]], dict[str, float]]
 EventFetcher = Callable[[str], tuple[dict[str, Any], int | None] | None]
+
+
+class _RustPolymarketRanker(Protocol):
+    def rank_polymarket_outcomes(self, input_json: str, limit: int) -> str: ...
+
+
+logger = logging.getLogger(__name__)
+
+
+def _load_rust_polymarket_ranker() -> _RustPolymarketRanker | None:
+    module = load_rust_bridge("RUST_POLYMARKET_RANKING_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustPolymarketRanker, module)
 
 
 @dataclass(frozen=True)
@@ -120,14 +136,50 @@ def _top_outcomes(
     limit: int,
     fetch_live: LivePriceFetcher | None = None,
 ) -> list[tuple[str, float]]:
-    outcomes: list[tuple[str, float]] = []
+    resolved: list[dict[str, Any]] = []
     for quote in quotes:
-        probability = quote.probability
+        live_probability = None
         if fetch_live and quote.token_id:
             live = fetch_live(quote.token_id)
             if live:
-                probability = max(0.0, min(live[0], 1.0))
-        outcomes.append((quote.title, probability * 100))
+                live_probability = live[0]
+        resolved.append(
+            {
+                "title": quote.title,
+                "cached_probability": quote.probability,
+                "live_probability": live_probability,
+            }
+        )
+
+    rust = _load_rust_polymarket_ranker()
+    if rust is not None:
+        try:
+            ranked = json.loads(
+                rust.rank_polymarket_outcomes(
+                    json.dumps(resolved, separators=(",", ":")),
+                    limit,
+                )
+            )
+            return [(str(item["title"]), float(item["percentage"])) for item in ranked]
+        except Exception:
+            logger.exception("Rust Polymarket ranking failed; using Python")
+
+    outcomes = [
+        (
+            str(item["title"]),
+            max(
+                0.0,
+                min(
+                    item["live_probability"]
+                    if item["live_probability"] is not None
+                    else item["cached_probability"],
+                    1.0,
+                ),
+            )
+            * 100,
+        )
+        for item in resolved
+    ]
     outcomes.sort(key=lambda item: item[1], reverse=True)
     return outcomes[:limit]
 

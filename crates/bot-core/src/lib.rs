@@ -7,6 +7,7 @@ pub mod credit_units;
 pub mod devo;
 pub mod market_context;
 pub mod market_models;
+pub mod polymarket;
 pub mod price_queries;
 pub mod random_reply;
 pub mod random_selection;
