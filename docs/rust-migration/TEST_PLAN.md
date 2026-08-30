@@ -124,11 +124,16 @@ Pull-request integration tests will use disposable services:
 - Temporary directories for workspace and media files.
 
 All state is created from synthetic fixtures and discarded after the run.
+The CI checks job currently provides PostgreSQL 17 to Rust tests through
+`TEST_POSTGRES_URL`; migrated billing transactions therefore contribute real
+database execution to the adapter coverage gate.
 
 ## Coverage and mutation gates
 
-- `bot-core`: at least 95% line and 90% branch coverage.
-- Adapters: at least 85% branch coverage.
+- `bot-core`: enforce at least 95% line coverage and target 90% branch coverage.
+- Adapters: enforce at least 85% line coverage.
+- Enforce branch thresholds when the stable Rust coverage toolchain exposes
+  branch counters; the current report does not.
 - No reduction from the established Rust baseline without explanation.
 - Routing, billing, and scheduling state-transition matrices must be complete.
 - Mutation testing must cover critical pure rules before their Python versions

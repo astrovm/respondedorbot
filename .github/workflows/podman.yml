@@ -21,6 +21,21 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: respondedorbot_test
+          POSTGRES_PASSWORD: synthetic-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d respondedorbot_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_POSTGRES_URL: postgresql://postgres:synthetic-password@127.0.0.1:5432/respondedorbot_test?sslmode=disable
 
     steps:
       - name: Checkout repository

@@ -137,8 +137,10 @@ Rust must match the documented observable behavior before it becomes authoritati
 
 ### Coverage policy
 
-- `bot-core`: target at least 95% line coverage and 90% branch coverage.
-- Adapters: target at least 85% branch coverage.
+- `bot-core`: enforce at least 95% line coverage and target 90% branch coverage.
+- Adapters: enforce at least 85% line coverage.
+- Add branch-coverage enforcement when the stable Rust coverage toolchain reports
+  branches; current `cargo llvm-cov` output exposes no branch counters.
 - Routing, billing, and scheduling: test every documented state transition.
 - Coverage must not decrease without an explicit explanation.
 - Coverage percentages do not replace assertions, failure tests, concurrency

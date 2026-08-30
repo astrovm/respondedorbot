@@ -90,6 +90,15 @@ class _RustBillingBalanceIo(Protocol):
     ) -> int: ...
 
 
+class _RustBillingOnboarding(Protocol):
+    def billing_grant_onboarding(
+        self,
+        database_url: str,
+        user_id: int,
+        credits: int,
+    ) -> tuple[bool, int]: ...
+
+
 def _load_rust_billing_reads() -> _RustBillingReads | None:
     module = load_rust_bridge("RUST_BILLING_READ_SHADOW_ENABLED")
     if module is None:
@@ -102,6 +111,13 @@ def _load_rust_billing_balance_io() -> _RustBillingBalanceIo | None:
     if module is None:
         return None
     return cast(_RustBillingBalanceIo, module)
+
+
+def _load_rust_billing_onboarding() -> _RustBillingOnboarding | None:
+    module = load_rust_bridge("RUST_BILLING_ONBOARDING_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustBillingOnboarding, module)
 
 
 class CreditsDBError(RuntimeError):
@@ -696,6 +712,20 @@ def get_balance(scope_type: ScopeType, scope_id: int) -> int:
 
 def grant_onboarding_if_needed(user_id: int, credits: int) -> Tuple[bool, int]:
     """Grant onboarding credits once and return (granted, user_balance)."""
+
+    rust = _load_rust_billing_onboarding()
+    database_url = get_database_url()
+    if rust is not None and database_url:
+        ensure_schema()
+        try:
+            granted, balance = rust.billing_grant_onboarding(
+                database_url,
+                int(user_id),
+                int(credits),
+            )
+            return bool(granted), int(balance)
+        except Exception as error:
+            raise CreditsDBError("Rust onboarding grant transaction failed") from error
 
     def operation(cur: Any) -> Tuple[bool, int]:
         cur.execute(

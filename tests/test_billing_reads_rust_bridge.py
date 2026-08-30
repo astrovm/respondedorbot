@@ -68,6 +68,29 @@ class _FakeRustBillingReads:
         return self.billing_read_balance(database_url, scope_type, scope_id)
 
 
+class _FakeRustOnboarding:
+    def __init__(
+        self,
+        result: tuple[bool, int],
+        *,
+        fail: bool = False,
+    ) -> None:
+        self.result = result
+        self.fail = fail
+        self.calls: list[tuple[str, int, int]] = []
+
+    def billing_grant_onboarding(
+        self,
+        database_url: str,
+        user_id: int,
+        credits: int,
+    ) -> tuple[bool, int]:
+        self.calls.append((database_url, user_id, credits))
+        if self.fail:
+            raise ValueError("synthetic uncertain onboarding failure")
+        return self.result
+
+
 def _patch_python_balance(
     monkeypatch: pytest.MonkeyPatch,
     balance: int,
@@ -158,3 +181,47 @@ def test_billing_balance_io_failure_uses_idempotent_python_fallback(
         assert credits_db.get_balance("user", 7) == 1234
 
     assert "Rust billing balance I/O failed; using Python fallback" in caplog.text
+
+
+def test_billing_onboarding_is_authoritative_without_python_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(
+        credits_db,
+        "get_database_url",
+        lambda: "postgresql://synthetic.invalid/db?sslmode=require",
+    )
+    monkeypatch.setattr(
+        credits_db,
+        "_run_credit_transaction",
+        lambda *_arguments: pytest.fail("Python onboarding writer must not run"),
+    )
+    rust = _FakeRustOnboarding((True, 300))
+    monkeypatch.setattr(credits_db, "_load_rust_billing_onboarding", lambda: rust)
+
+    assert credits_db.grant_onboarding_if_needed(42, 300) == (True, 300)
+    assert rust.calls == [
+        ("postgresql://synthetic.invalid/db?sslmode=require", 42, 300)
+    ]
+
+
+def test_billing_onboarding_uncertain_failure_does_not_start_python_writer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(
+        credits_db,
+        "get_database_url",
+        lambda: "postgresql://synthetic.invalid/db?sslmode=require",
+    )
+    monkeypatch.setattr(
+        credits_db,
+        "_run_credit_transaction",
+        lambda *_arguments: pytest.fail("uncertain writes must fail closed"),
+    )
+    rust = _FakeRustOnboarding((False, 0), fail=True)
+    monkeypatch.setattr(credits_db, "_load_rust_billing_onboarding", lambda: rust)
+
+    with pytest.raises(credits_db.CreditsDBError, match="onboarding grant"):
+        credits_db.grant_onboarding_if_needed(42, 300)

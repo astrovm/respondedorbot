@@ -13,6 +13,7 @@ must never enter balance mutations.
 | --- | --- | --- | --- |
 | Balance shadow | Python is authoritative; Rust compares `get_balance` with a read-only `SELECT` | Python only | Disable `RUST_BILLING_READ_SHADOW_ENABLED` |
 | Current balance I/O | Rust reads balances and creates missing zero-balance accounts | Rust only for the idempotent account insert; Python owns all other writes | Disable `RUST_BILLING_BALANCE_IO_ENABLED` |
+| Current onboarding writer | Rust owns idempotent onboarding grants, overflow decisions, balance updates, and their ledger rows | Rust only for onboarding; Python owns all other mutations | Disable `RUST_BILLING_ONBOARDING_ENABLED` |
 | Rust reads | Rust is authoritative for proven read operations | Python owns non-balance writes | Disable the per-operation Rust read flag |
 | Shadow transaction decisions | Python commits; Rust evaluates the same synthetic transaction inputs without I/O | Python only | Disable the decision shadow flag |
 | Rust writer canary | Rust owns one proven mutation family | Rust for that family; Python for all others | Disable that family's writer flag before another owner starts |
@@ -75,3 +76,8 @@ When authoritative balance I/O is disabled,
 `RUST_BILLING_READ_SHADOW_ENABLED=1` compares Python's result with Rust's
 read-only query. A mismatch or Rust failure is logged, but Python's result is
 returned.
+
+`RUST_BILLING_ONBOARDING_ENABLED=1` makes Rust the only onboarding transaction
+writer. It preserves the advisory lock, account row lock, hourly/daily limits,
+three-attempt concurrency retry, grant idempotency, and ledger metadata. An
+uncertain failure is returned to the caller and never retried through Python.

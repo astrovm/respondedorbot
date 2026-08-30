@@ -486,6 +486,15 @@ def verify_billing_reads(bridge: ModuleType) -> None:
             )
 
 
+def verify_billing_onboarding(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "billing_onboarding.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    if contract["idempotency_key"] != "user_id":
+        raise AssertionError("onboarding idempotency must remain user-scoped")
+    if not callable(bridge.billing_grant_onboarding):
+        raise AssertionError("Rust onboarding bridge is unavailable")
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -569,6 +578,7 @@ def main(arguments: list[str]) -> int:
     verify_redis_maintenance(bridge)
     verify_task_store_io(bridge)
     verify_billing_reads(bridge)
+    verify_billing_onboarding(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

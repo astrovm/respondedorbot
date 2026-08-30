@@ -1,0 +1,10 @@
+{
+  "advisory_lock_key": 48610001,
+  "hourly_limit": 4,
+  "daily_limit": 16,
+  "transaction_attempts": 3,
+  "idempotency_key": "user_id",
+  "grant_event": "onboarding_grant",
+  "overflow_event": "onboarding_denied_overflow",
+  "account_scope": "user"
+}
