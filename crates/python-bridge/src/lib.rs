@@ -10,6 +10,11 @@ use bot_core::admin_reports::{
     truncate_report as truncate_admin_report_core,
 };
 use bot_core::base_conversion::{BaseConversion, convert_base as convert_base_core};
+use bot_core::cache_policy::{
+    CacheDecision, evaluate_cache as evaluate_cache_core,
+    last_success_ttl as last_success_ttl_core, request_cache_history_key as cache_history_key_core,
+    request_cache_key as cache_key_core, request_cache_ttl as cache_ttl_core,
+};
 use bot_core::command_normalization::normalize_command_text as normalize_command_text_core;
 use bot_core::command_parsing::parse_command as parse_command_core;
 use bot_core::config_callbacks::{
@@ -1115,6 +1120,41 @@ fn truncate_admin_report(text: &str, max_length: usize, truncated_label: &str) -
     truncate_admin_report_core(text, max_length, truncated_label)
 }
 
+/// Evaluate one stale-while-refresh cache entry.
+#[pyfunction]
+fn evaluate_cache_policy(
+    cached_timestamp: Option<i64>,
+    now: i64,
+    ttl: i64,
+    stale_grace: i64,
+) -> &'static str {
+    match evaluate_cache_core(cached_timestamp, now, ttl, stale_grace) {
+        CacheDecision::Fresh => "fresh",
+        CacheDecision::ServeStale => "stale",
+        CacheDecision::RefreshInline => "refresh_inline",
+    }
+}
+
+#[pyfunction]
+fn request_cache_key(request_hash: &str) -> String {
+    cache_key_core(request_hash)
+}
+
+#[pyfunction]
+fn request_cache_history_key(hour_key: &str, request_hash: &str) -> String {
+    cache_history_key_core(hour_key, request_hash)
+}
+
+#[pyfunction]
+fn request_cache_ttl(expiration_time: i64) -> i64 {
+    cache_ttl_core(expiration_time)
+}
+
+#[pyfunction]
+fn last_success_ttl(ttl: i64, stale_grace: i64) -> i64 {
+    last_success_ttl_core(ttl, stale_grace)
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -1195,6 +1235,11 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(select_unique_urls, module)?)?;
     module.add_function(wrap_pyfunction!(parse_creditlog_limit, module)?)?;
     module.add_function(wrap_pyfunction!(truncate_admin_report, module)?)?;
+    module.add_function(wrap_pyfunction!(evaluate_cache_policy, module)?)?;
+    module.add_function(wrap_pyfunction!(request_cache_key, module)?)?;
+    module.add_function(wrap_pyfunction!(request_cache_history_key, module)?)?;
+    module.add_function(wrap_pyfunction!(request_cache_ttl, module)?)?;
+    module.add_function(wrap_pyfunction!(last_success_ttl, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;

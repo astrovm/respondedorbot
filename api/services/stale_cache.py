@@ -6,11 +6,45 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Callable, Literal, Optional, Protocol, cast
+
+from api.core.rust_bridge import load_rust_bridge
 
 logger = logging.getLogger(__name__)
 
 CacheStatus = Literal["fresh", "stale", "miss"]
+
+
+class _RustCachePolicy(Protocol):
+    def evaluate_cache_policy(
+        self,
+        cached_timestamp: int | None,
+        now: int,
+        ttl: int,
+        stale_grace: int,
+    ) -> str: ...
+
+
+def _load_rust_cache_policy() -> _RustCachePolicy | None:
+    module = load_rust_bridge("RUST_CACHE_POLICY_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustCachePolicy, module)
+
+
+def _cache_decision(timestamp: int, now: int, ttl: int, stale_grace: int) -> str:
+    rust = _load_rust_cache_policy()
+    if rust is not None:
+        try:
+            return rust.evaluate_cache_policy(timestamp, now, ttl, stale_grace)
+        except Exception:
+            logger.exception("Rust stale-cache policy failed; using Python")
+    age = now - timestamp
+    if age <= ttl:
+        return "fresh"
+    if age <= ttl + stale_grace:
+        return "stale"
+    return "refresh_inline"
 
 
 @dataclass(frozen=True)
@@ -37,11 +71,16 @@ class StaleCache:
         cached = self._load(key)
         now = self._now()
         if cached is not None:
-            age = now - int(cached.get("timestamp", 0))
+            decision = _cache_decision(
+                int(cached.get("timestamp", 0)),
+                now,
+                ttl,
+                stale_grace,
+            )
             value = cached.get("value")
-            if age <= ttl:
+            if decision == "fresh":
                 return StaleCacheResult(value=value, status="fresh")
-            if age <= ttl + stale_grace:
+            if decision == "stale":
                 # Serve stale immediately; one lock holder refreshes in background.
                 if self._acquire_lock(lock_key, ttl):
                     schedule_refresh(

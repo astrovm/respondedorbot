@@ -229,6 +229,30 @@ def verify_admin_reports(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_cache_policy(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "cache_policy.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["decisions"]:
+        actual = bridge.evaluate_cache_policy(
+            case["timestamp"], case["now"], case["ttl"], case["stale_grace"]
+        )
+        assert actual == case["expected"], case["name"]
+    for case in contract["keys"]:
+        if case["kind"] == "request":
+            actual = bridge.request_cache_key(case["request_hash"])
+        else:
+            actual = bridge.request_cache_history_key(
+                case["hour_key"], case["request_hash"]
+            )
+        assert actual == case["expected"], case["name"]
+    for case in contract["ttls"]:
+        if case["kind"] == "request":
+            actual = bridge.request_cache_ttl(case["ttl"])
+        else:
+            actual = bridge.last_success_ttl(case["ttl"], case["stale_grace"])
+        assert actual == case["expected"], case["name"]
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -298,6 +322,7 @@ def main(arguments: list[str]) -> int:
     verify_config_callbacks(bridge)
     verify_link_parsing(bridge)
     verify_admin_reports(bridge)
+    verify_cache_policy(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

@@ -2,6 +2,7 @@
 
 pub mod admin_reports;
 pub mod base_conversion;
+pub mod cache_policy;
 pub mod command_normalization;
 pub mod command_parsing;
 pub mod config_callbacks;

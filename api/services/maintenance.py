@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, Dict, Iterable, Mapping, Optional, cast
+from typing import Any, Dict, Iterable, Mapping, Optional, Protocol, cast
 
 import redis
 
 from api.core.config import config_redis
+from api.core.rust_bridge import load_rust_bridge
 from api.services import credits_db
 
 CHAT_STATE_TTL = 30 * 24 * 60 * 60
@@ -29,19 +30,60 @@ _LEGACY_REQUEST_CACHE_HISTORY_KEY_RE = re.compile(
 )
 
 
+class _RustCachePolicy(Protocol):
+    def request_cache_key(self, request_hash: str) -> str: ...
+
+    def request_cache_history_key(self, hour_key: str, request_hash: str) -> str: ...
+
+    def request_cache_ttl(self, expiration_time: int) -> int: ...
+
+    def last_success_ttl(self, ttl: int, stale_grace: int) -> int: ...
+
+
+def _load_rust_cache_policy() -> _RustCachePolicy | None:
+    module = load_rust_bridge("RUST_CACHE_POLICY_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustCachePolicy, module)
+
+
 def request_cache_key(request_hash: str) -> str:
+    rust = _load_rust_cache_policy()
+    if rust is not None:
+        try:
+            return rust.request_cache_key(request_hash)
+        except Exception:
+            pass
     return f"request_cache:{request_hash}"
 
 
 def request_cache_history_key(hour_key: str, request_hash: str) -> str:
+    rust = _load_rust_cache_policy()
+    if rust is not None:
+        try:
+            return rust.request_cache_history_key(hour_key, request_hash)
+        except Exception:
+            pass
     return f"request_cache_history:{hour_key}:{request_hash}"
 
 
 def request_cache_ttl(expiration_time: int) -> int:
+    rust = _load_rust_cache_policy()
+    if rust is not None:
+        try:
+            return int(rust.request_cache_ttl(int(expiration_time or 0)))
+        except Exception:
+            pass
     return max(REQUEST_CACHE_MIN_TTL, int(expiration_time or 0))
 
 
 def last_success_ttl(ttl: int, stale_grace: int) -> int:
+    rust = _load_rust_cache_policy()
+    if rust is not None:
+        try:
+            return int(rust.last_success_ttl(int(ttl or 0), int(stale_grace or 0)))
+        except Exception:
+            pass
     return int(ttl or 0) + int(stale_grace or 0)
 
 
