@@ -19,6 +19,7 @@ pub mod config_callbacks;
 pub mod credit_units;
 pub mod devo;
 pub mod hacker_news;
+pub mod help_catalog;
 pub mod links;
 pub mod locale;
 pub mod market_context;

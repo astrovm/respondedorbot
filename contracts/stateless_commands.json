@@ -30,6 +30,34 @@
       }
     },
     {
+      "name": "spanish_help_catalog",
+      "chat_id": 42,
+      "message_id": 81,
+      "message_text": "/help",
+      "bot_name": "@mybot",
+      "locale": "es",
+      "expected_text_sha256": "8142f4f7ca74095b51ac20bc381031920425b3c48ccafa16d389612a8366bd0a",
+      "expected": {
+        "kind": "send_message",
+        "chat_id": 42,
+        "reply_to_message_id": 81
+      }
+    },
+    {
+      "name": "english_help_catalog",
+      "chat_id": 42,
+      "message_id": 82,
+      "message_text": "/help@mybot",
+      "bot_name": "@mybot",
+      "locale": "en",
+      "expected_text_sha256": "f4747244b2449fba1e58c330b148402801993b09be73f07f7a747314a3b20496",
+      "expected": {
+        "kind": "send_message",
+        "chat_id": 42,
+        "reply_to_message_id": 82
+      }
+    },
+    {
       "name": "unknown_command",
       "chat_id": 42,
       "message_id": 9,

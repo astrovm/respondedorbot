@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import sys
@@ -1310,6 +1311,13 @@ def verify_stateless_commands(bridge: ModuleType) -> None:
                 case["locale"],
             )
         )
+        expected_text_sha256 = case.get("expected_text_sha256")
+        if expected_text_sha256:
+            actual_text = actual.pop("text", None)
+            assert isinstance(actual_text, str), case["name"]
+            assert hashlib.sha256(actual_text.encode()).hexdigest() == expected_text_sha256, case[
+                "name"
+            ]
         assert actual == case["expected"], case["name"]
 
 

@@ -644,6 +644,36 @@ mod tests {
     }
 
     #[test]
+    fn dispatches_help_with_persisted_locale_and_command_state() {
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            "@mybot",
+        );
+        assert_eq!(
+            dispatcher.dispatch(update("/help", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
+            return;
+        };
+        assert!(message.text.starts_with("what I can do:"));
+        assert!(message.text.contains("/summary focus on crypto"));
+        assert_eq!(dispatcher.state.incoming.len(), 1);
+        assert_eq!(dispatcher.state.outgoing.len(), 1);
+    }
+
+    #[test]
     fn dispatches_random_choices_ranges_and_localized_validation() {
         let config = Config {
             value: Ok(ChatConfig {

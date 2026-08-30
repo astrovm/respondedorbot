@@ -2,6 +2,7 @@
 
 use crate::base_conversion::{BaseConversion, convert_base};
 use crate::command_parsing::parse_command;
+use crate::help_catalog::render_help_text;
 use crate::locale::Locale;
 use crate::telegram_actions::{SendMessage, TelegramAction};
 use crate::telegram_input::{ChatId, MessageId};
@@ -80,6 +81,11 @@ pub fn plan_stateless_command(
     locale: Locale,
 ) -> StatelessCommandPlan {
     let parsed = parse_command(message_text, bot_name);
+    if parsed.command == "/help" {
+        let mut message = SendMessage::new(chat_id, render_help_text(locale));
+        message.reply_to_message_id = Some(message_id);
+        return StatelessCommandPlan::Action(TelegramAction::SendMessage(message));
+    }
     if parsed.command != "/convertbase" {
         return StatelessCommandPlan::NotHandled;
     }
@@ -163,6 +169,30 @@ mod tests {
             )),
             Some("101 in base 2 is 5 in base 10".to_owned())
         );
+    }
+
+    #[test]
+    fn plans_complete_localized_help_replies() {
+        let spanish = message_text(plan_stateless_command(
+            ChatId(1),
+            MessageId(2),
+            "/help",
+            "@bot",
+            Locale::Es,
+        ));
+        assert!(spanish.is_some_and(|text| {
+            text.starts_with("esto es lo que sé hacer, boludo:") && text.contains("/transfer")
+        }));
+        let english = message_text(plan_stateless_command(
+            ChatId(1),
+            MessageId(2),
+            "/help@bot",
+            "@bot",
+            Locale::En,
+        ));
+        assert!(english.is_some_and(|text| {
+            text.starts_with("what I can do:") && text.contains("/weather London")
+        }));
     }
 
     #[test]
