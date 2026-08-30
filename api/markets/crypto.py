@@ -9,10 +9,10 @@ from api.i18n import tr
 from api.markets.price_commands import (
     AmountConversionRequest,
     SUPPORTED_PRICE_SYMBOLS,
+    UnsupportedPriceTimeframe,
     expand_price_tokens,
     find_coin_by_symbol_or_name,
-    parse_amount_conversion,
-    parse_conversion_only,
+    parse_price_query,
     price_query_parameter,
 )
 from api.markets.stocks import StockQuote
@@ -53,32 +53,27 @@ def get_prices(
     fetch_quotes: QuoteFetcher,
     lookup_stocks: StockLookup | None = None,
 ) -> str | None:
-    msg_text, timeframe = _parse_timeframe(msg_text, change_fields)
-    timeframe_error = _unsupported_timeframe_error(
-        msg_text,
-        timeframe=timeframe,
-        change_fields=change_fields,
-    )
-    if timeframe_error:
-        return timeframe_error
-
-    conversion_request = parse_amount_conversion(msg_text)
-    if conversion_request:
+    query = parse_price_query(msg_text, list(change_fields))
+    if isinstance(query, UnsupportedPriceTimeframe):
+        return tr(
+            "market.timeframe_invalid",
+            timeframe=query.timeframe,
+            valid=", ".join(change_fields),
+        )
+    if isinstance(query, AmountConversionRequest):
         return _convert_amount(
-            conversion_request,
+            query,
             fetch_prices=fetch_prices,
         )
-
-    conversion_requested = _has_conversion_modifier(msg_text)
-    msg_text, convert_to, convert_parameter = parse_conversion_only(msg_text)
-    if convert_to not in SUPPORTED_PRICE_SYMBOLS:
-        return tr("market.crypto.unsupported_currency", symbol=convert_to)
+    if query.target_symbol not in SUPPORTED_PRICE_SYMBOLS:
+        return tr("market.crypto.unsupported_currency", symbol=query.target_symbol)
     return _get_asset_prices(
-        msg_text,
-        convert_to=convert_to,
-        convert_parameter=convert_parameter,
-        timeframe=timeframe,
-        conversion_requested=conversion_requested,
+        query.query,
+        convert_to=query.target_symbol,
+        convert_parameter=query.target_parameter,
+        timeframe=query.timeframe,
+        conversion_requested=query.conversion_requested,
+        provider_scope=query.provider_scope,
         change_fields=change_fields,
         fetch_prices=fetch_prices,
         fetch_quotes=fetch_quotes,
@@ -93,12 +88,12 @@ def _get_asset_prices(
     convert_parameter: str,
     timeframe: str | None,
     conversion_requested: bool,
+    provider_scope: str | None,
     change_fields: Mapping[str, str],
     fetch_prices: PriceListFetcher,
     fetch_quotes: QuoteFetcher,
     lookup_stocks: StockLookup | None,
 ) -> str:
-    provider_scope, msg_text = _parse_provider_scope(msg_text)
     if provider_scope == "stock":
         return (
             _stock_modifier_error(msg_text)
@@ -177,20 +172,6 @@ def _format_market_result(
     if result.unresolved:
         formatted_parts.append(tr("market.crypto.missing", symbols=", ".join(result.unresolved)))
     return "\n".join(formatted_parts)
-
-
-def _parse_provider_scope(msg_text: str) -> tuple[str | None, str]:
-    match = re.match(r"^\s*(crypto|stock)\s*:\s*(.*?)\s*$", msg_text, re.IGNORECASE)
-    if not match:
-        return None, msg_text
-    return match.group(1).lower(), match.group(2)
-
-
-def _has_conversion_modifier(msg_text: str) -> bool:
-    return (
-        re.search(r"(?:^|\s)(?:in|to|a|en)\s+\$?[a-zA-Z0-9]+\s*$", msg_text, re.IGNORECASE)
-        is not None
-    )
 
 
 def _stock_modifiers_unsupported(timeframe: str | None, conversion_requested: bool) -> bool:
@@ -283,21 +264,6 @@ def _format_stock_quotes(quotes: list[StockQuote]) -> str:
             f"{quote.symbol}: {quote.price:.2f} {quote.currency} ({sign}{quote.variation:.2f}% 24h)"
         )
     return "\n".join(lines)
-
-
-def _unsupported_timeframe_error(
-    msg_text: str,
-    *,
-    timeframe: str | None,
-    change_fields: Mapping[str, str],
-) -> str | None:
-    if timeframe is not None or not msg_text.strip():
-        return None
-    last_token = msg_text.strip().rsplit(None, 1)[-1].lower()
-    if not re.fullmatch(r"\d+[hd]", last_token):
-        return None
-    valid = ", ".join(change_fields)
-    return tr("market.timeframe_invalid", timeframe=last_token, valid=valid)
 
 
 def _price_data(
@@ -418,15 +384,6 @@ def _format_price_rows(
             f"({percentage}% {display.timeframe_label})"
         )
     return "\n".join(lines)
-
-
-def _parse_timeframe(msg_text: str, valid: Mapping[str, str]) -> tuple[str, str | None]:
-    parts = msg_text.strip().rsplit(None, 1)
-    if parts and parts[-1].lower() in valid:
-        timeframe = parts[-1].lower()
-        remaining = parts[0].strip() if len(parts) > 1 else ""
-        return remaining, timeframe
-    return msg_text.strip(), None
 
 
 def _select_listed_coins(

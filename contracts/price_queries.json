@@ -1,0 +1,196 @@
+{
+  "valid_timeframes": ["1h", "24h", "7d", "30d"],
+  "cases": [
+    {
+      "name": "default query",
+      "input": "",
+      "expected": {
+        "kind": "assets",
+        "query": "",
+        "timeframe": null,
+        "target_symbol": "USD",
+        "target_parameter": "USD",
+        "conversion_requested": false,
+        "provider_scope": null
+      }
+    },
+    {
+      "name": "asset list",
+      "input": " btc, eth ",
+      "expected": {
+        "kind": "assets",
+        "query": "btc, eth",
+        "timeframe": null,
+        "target_symbol": "USD",
+        "target_parameter": "USD",
+        "conversion_requested": false,
+        "provider_scope": null
+      }
+    },
+    {
+      "name": "amount conversion",
+      "input": "2000 usdt in hkd",
+      "expected": {
+        "kind": "amount_conversion",
+        "amount": 2000.0,
+        "source_symbol": "USDT",
+        "target_symbol": "HKD",
+        "target_parameter": "HKD"
+      }
+    },
+    {
+      "name": "comma amount and cashtags",
+      "input": " 2,5 $btc EN $sats ",
+      "expected": {
+        "kind": "amount_conversion",
+        "amount": 2.5,
+        "source_symbol": "BTC",
+        "target_symbol": "SATS",
+        "target_parameter": "BTC"
+      }
+    },
+    {
+      "name": "malformed amount stays an asset query",
+      "input": "2. btc in usd",
+      "expected": {
+        "kind": "assets",
+        "query": "2. btc",
+        "timeframe": null,
+        "target_symbol": "USD",
+        "target_parameter": "USD",
+        "conversion_requested": true,
+        "provider_scope": null
+      }
+    },
+    {
+      "name": "conversion only",
+      "input": "in eur",
+      "expected": {
+        "kind": "assets",
+        "query": "",
+        "timeframe": null,
+        "target_symbol": "EUR",
+        "target_parameter": "EUR",
+        "conversion_requested": true,
+        "provider_scope": null
+      }
+    },
+    {
+      "name": "satoshi conversion target",
+      "input": "btc to sats",
+      "expected": {
+        "kind": "assets",
+        "query": "btc",
+        "timeframe": null,
+        "target_symbol": "SATS",
+        "target_parameter": "BTC",
+        "conversion_requested": true,
+        "provider_scope": null
+      }
+    },
+    {
+      "name": "stock provider scope",
+      "input": " stock : Mercado Libre ",
+      "expected": {
+        "kind": "assets",
+        "query": "Mercado Libre",
+        "timeframe": null,
+        "target_symbol": "USD",
+        "target_parameter": "USD",
+        "conversion_requested": false,
+        "provider_scope": "stock"
+      }
+    },
+    {
+      "name": "crypto provider scope",
+      "input": "CRYPTO:meta",
+      "expected": {
+        "kind": "assets",
+        "query": "meta",
+        "timeframe": null,
+        "target_symbol": "USD",
+        "target_parameter": "USD",
+        "conversion_requested": false,
+        "provider_scope": "crypto"
+      }
+    },
+    {
+      "name": "valid timeframe",
+      "input": "BTC 7D",
+      "expected": {
+        "kind": "assets",
+        "query": "BTC",
+        "timeframe": "7d",
+        "target_symbol": "USD",
+        "target_parameter": "USD",
+        "conversion_requested": false,
+        "provider_scope": null
+      }
+    },
+    {
+      "name": "amount conversion with timeframe",
+      "input": "2 btc to eur 24h",
+      "expected": {
+        "kind": "amount_conversion",
+        "amount": 2.0,
+        "source_symbol": "BTC",
+        "target_symbol": "EUR",
+        "target_parameter": "EUR"
+      }
+    },
+    {
+      "name": "unsupported hour timeframe",
+      "input": "btc 2h",
+      "expected": { "kind": "unsupported_timeframe", "timeframe": "2h" }
+    },
+    {
+      "name": "unsupported day timeframe",
+      "input": "eth 365D",
+      "expected": { "kind": "unsupported_timeframe", "timeframe": "365d" }
+    },
+    {
+      "name": "ordinary suffix is not a timeframe",
+      "input": "Mercado Libre",
+      "expected": {
+        "kind": "assets",
+        "query": "Mercado Libre",
+        "timeframe": null,
+        "target_symbol": "USD",
+        "target_parameter": "USD",
+        "conversion_requested": false,
+        "provider_scope": null
+      }
+    },
+    {
+      "name": "unicode suffix is not a timeframe",
+      "input": "btc 2é",
+      "expected": {
+        "kind": "assets",
+        "query": "btc 2é",
+        "timeframe": null,
+        "target_symbol": "USD",
+        "target_parameter": "USD",
+        "conversion_requested": false,
+        "provider_scope": null
+      }
+    },
+    {
+      "name": "unicode decimal timeframe is recognized",
+      "input": "btc ٢h",
+      "expected": { "kind": "unsupported_timeframe", "timeframe": "٢h" }
+    },
+    {
+      "name": "stock conversion modifier",
+      "input": "stock:NVDA a EUR",
+      "expected": {
+        "kind": "assets",
+        "query": "NVDA",
+        "timeframe": null,
+        "target_symbol": "EUR",
+        "target_parameter": "EUR",
+        "conversion_requested": true,
+        "provider_scope": "stock"
+      }
+    }
+  ]
+}

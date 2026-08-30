@@ -15,7 +15,7 @@ Status values used during implementation:
 - `rust`: Rust is authoritative and the Python fallback has completed burn-in.
 - `removed`: the Python implementation and bridge entry are gone.
 
-All features currently have status `python`.
+Rows not listed under migrated components remain Python-authoritative.
 
 ## Migrated components
 
@@ -24,6 +24,7 @@ All features currently have status `python`.
 | Credit-unit parsing, scaling, and formatting | `rust-flagged` | `RUST_CREDIT_UNITS_ENABLED=0` or missing bridge | `contracts/credit_units.json` |
 | Command parsing | `rust-flagged` | `RUST_COMMAND_PARSING_ENABLED=0` or missing bridge | `contracts/command_parsing.json` |
 | Scheduled-task trigger parsing | `rust-flagged` | `RUST_TASK_TRIGGERS_ENABLED=0` or missing bridge | `contracts/task_triggers.json` |
+| Unified price-query parsing | `rust-flagged` | `RUST_PRICE_QUERY_PARSING_ENABLED=0` or missing bridge | `contracts/price_queries.json` |
 
 ## Commands and user-visible features
 

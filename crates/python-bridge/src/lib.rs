@@ -11,6 +11,9 @@ use bot_core::credit_units::{
     rescale_credit_units as rescale_credit_units_core,
     whole_credits_to_units as whole_credits_to_units_core,
 };
+use bot_core::price_queries::{
+    AmountConversion, PriceQuery, ProviderScope, parse_price_query as parse_price_query_core,
+};
 use bot_core::task_triggers::{
     IntegerInput, TaskTrigger, TaskTriggerInput, TriggerConfigInput, TriggerError,
     parse_task_trigger as parse_task_trigger_core,
@@ -172,6 +175,80 @@ struct TaskTriggerResultDto {
     error: Option<TriggerErrorDto>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ProviderScopeDto {
+    Crypto,
+    Stock,
+}
+
+impl From<ProviderScope> for ProviderScopeDto {
+    fn from(value: ProviderScope) -> Self {
+        match value {
+            ProviderScope::Crypto => Self::Crypto,
+            ProviderScope::Stock => Self::Stock,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum PriceQueryDto {
+    UnsupportedTimeframe {
+        timeframe: String,
+    },
+    AmountConversion {
+        amount: f64,
+        source_symbol: String,
+        target_symbol: String,
+        target_parameter: String,
+    },
+    Assets {
+        query: String,
+        timeframe: Option<String>,
+        target_symbol: String,
+        target_parameter: String,
+        conversion_requested: bool,
+        provider_scope: Option<ProviderScopeDto>,
+    },
+}
+
+impl From<PriceQuery> for PriceQueryDto {
+    fn from(value: PriceQuery) -> Self {
+        match value {
+            PriceQuery::UnsupportedTimeframe { timeframe } => {
+                Self::UnsupportedTimeframe { timeframe }
+            }
+            PriceQuery::AmountConversion(AmountConversion {
+                amount,
+                source_symbol,
+                target_symbol,
+                target_parameter,
+            }) => Self::AmountConversion {
+                amount,
+                source_symbol,
+                target_symbol,
+                target_parameter,
+            },
+            PriceQuery::Assets {
+                query,
+                timeframe,
+                target_symbol,
+                target_parameter,
+                conversion_requested,
+                provider_scope,
+            } => Self::Assets {
+                query,
+                timeframe,
+                target_symbol,
+                target_parameter,
+                conversion_requested,
+                provider_scope: provider_scope.map(Into::into),
+            },
+        }
+    }
+}
+
 /// Return the compatibility protocol version shared with Python.
 #[pyfunction]
 fn migration_protocol_version() -> u16 {
@@ -233,6 +310,18 @@ fn parse_task_trigger(input_json: &str) -> PyResult<String> {
     })
 }
 
+/// Parse a unified market-price query into a typed request.
+#[pyfunction]
+fn parse_price_query(message_text: &str, valid_timeframes_json: &str) -> PyResult<String> {
+    let valid_timeframes: Vec<String> = serde_json::from_str(valid_timeframes_json)
+        .map_err(|error| PyValueError::new_err(format!("invalid timeframes: {error}")))?;
+    serde_json::to_string(&PriceQueryDto::from(parse_price_query_core(
+        message_text,
+        &valid_timeframes,
+    )))
+    .map_err(|error| PyValueError::new_err(format!("cannot encode price query: {error}")))
+}
+
 /// Register the temporary `respondedorbot_rs` Python module.
 #[pymodule]
 fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -243,5 +332,6 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(format_credit_units, module)?)?;
     module.add_function(wrap_pyfunction!(parse_command, module)?)?;
     module.add_function(wrap_pyfunction!(parse_task_trigger, module)?)?;
+    module.add_function(wrap_pyfunction!(parse_price_query, module)?)?;
     Ok(())
 }
