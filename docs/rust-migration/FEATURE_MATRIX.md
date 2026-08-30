@@ -40,6 +40,7 @@ Rows not listed under migrated components remain Python-authoritative.
 | Redis cache keys, TTLs, and stale-while-refresh decision | `rust-flagged` | `RUST_CACHE_POLICY_ENABLED=0` or missing bridge | `contracts/cache_policy.json` |
 | Redis conversation-message keys, versioned writes/member records, and search ranking | `rust-flagged` | `RUST_MESSAGE_STATE_ENABLED=0` or missing bridge | `contracts/message_state.json` |
 | Durable memory-compaction due, recovery, obsolescence, and retry transitions | `rust-flagged` | `RUST_COMPACTION_POLICY_ENABLED=0` or missing bridge | `contracts/compaction_policy.json` |
+| Versioned durable memory-compaction Redis job payload | `rust-flagged` | `RUST_COMPACTION_JOBS_ENABLED=0` or missing bridge | `contracts/compaction_jobs.json` |
 | Automatic media-routing decision | `rust-flagged` | `RUST_MEDIA_ROUTING_ENABLED=0` or missing bridge | `contracts/media_routing.json` |
 | General response-routing state machine | `rust-flagged` | `RUST_RESPONSE_ROUTING_ENABLED=0` or missing bridge | `contracts/response_routing.json` |
 | Base-conversion command | `rust-flagged` | `RUST_BASE_CONVERSION_ENABLED=0` or missing bridge | `contracts/base_conversion.json` |

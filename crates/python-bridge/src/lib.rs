@@ -5,6 +5,7 @@ use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use bot_adapters::compaction_job::normalize_compaction_job as normalize_compaction_job_adapter;
 use bot_core::admin_reports::{
     CreditLogLimit, parse_creditlog_limit as parse_creditlog_limit_core,
     truncate_report as truncate_admin_report_core,
@@ -1310,6 +1311,12 @@ fn compaction_retry_transition(
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+#[pyfunction]
+fn normalize_compaction_job(payload: &str) -> PyResult<String> {
+    normalize_compaction_job_adapter(payload)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -1404,6 +1411,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(evaluate_compaction_policy, module)?)?;
     module.add_function(wrap_pyfunction!(compaction_job_is_due, module)?)?;
     module.add_function(wrap_pyfunction!(compaction_retry_transition, module)?)?;
+    module.add_function(wrap_pyfunction!(normalize_compaction_job, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;

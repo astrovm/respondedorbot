@@ -1,5 +1,7 @@
 //! External service adapters for respondedorbot.
 
+pub mod compaction_job;
+
 /// Return the core protocol version used by this adapter build.
 #[must_use]
 pub const fn migration_protocol_version() -> u16 {

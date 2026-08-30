@@ -337,6 +337,26 @@ def verify_compaction_policy(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_compaction_jobs(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "compaction_jobs.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    legacy = contract["legacy"]
+    normalized = json.loads(
+        bridge.normalize_compaction_job(json.dumps(legacy, separators=(",", ":")))
+    )
+    for key, value in legacy.items():
+        assert normalized[key] == value, key
+    for key, value in contract["expected_defaults"].items():
+        assert normalized[key] == value, key
+    future = {**legacy, "schema_version": contract["unsupported_version"]}
+    try:
+        bridge.normalize_compaction_job(json.dumps(future, separators=(",", ":")))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("future compaction-job version must be rejected")
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -409,6 +429,7 @@ def main(arguments: list[str]) -> int:
     verify_cache_policy(bridge)
     verify_message_state(bridge)
     verify_compaction_policy(bridge)
+    verify_compaction_jobs(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

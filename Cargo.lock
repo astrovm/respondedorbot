@@ -43,6 +43,9 @@ name = "bot-adapters"
 version = "0.1.0"
 dependencies = [
  "bot-core",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -285,6 +288,7 @@ dependencies = [
 name = "python-bridge"
 version = "0.1.0"
 dependencies = [
+ "bot-adapters",
  "bot-core",
  "pyo3",
  "serde",

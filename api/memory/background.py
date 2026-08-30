@@ -29,6 +29,7 @@ _LOCK_PREFIX = "memory:compaction:lock:"
 _LOCK_TTL_SECONDS = 60 * 60
 _POLL_SECONDS = 2.0
 _MAX_ATTEMPTS = 3
+_COMPACTION_JOB_SCHEMA_VERSION = 1
 
 
 class _RustCompactionPolicy(Protocol):
@@ -52,11 +53,42 @@ class _RustCompactionPolicy(Protocol):
     ) -> str: ...
 
 
+class _RustCompactionJobs(Protocol):
+    def normalize_compaction_job(self, payload: str) -> str: ...
+
+
 def _load_rust_compaction_policy() -> _RustCompactionPolicy | None:
     module = load_rust_bridge("RUST_COMPACTION_POLICY_ENABLED")
     if module is None:
         return None
     return cast(_RustCompactionPolicy, module)
+
+
+def _load_rust_compaction_jobs() -> _RustCompactionJobs | None:
+    module = load_rust_bridge("RUST_COMPACTION_JOBS_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustCompactionJobs, module)
+
+
+def _normalize_compaction_job_payload(
+    payload: str,
+    decoded: Any,
+) -> dict[str, Any]:
+    rust = _load_rust_compaction_jobs()
+    if rust is not None:
+        try:
+            normalized = json.loads(rust.normalize_compaction_job(payload))
+            if isinstance(normalized, dict):
+                decoded = normalized
+        except Exception:
+            pass
+    if not isinstance(decoded, dict):
+        raise TypeError("compaction job must be an object")
+    version = int(decoded.get("schema_version", _COMPACTION_JOB_SCHEMA_VERSION))
+    if version != _COMPACTION_JOB_SCHEMA_VERSION:
+        raise ValueError(f"unsupported compaction job schema version {version}")
+    return cast(dict[str, Any], decoded)
 
 
 def _compaction_job_is_due(next_attempt_at: float, now: float) -> bool:
@@ -182,6 +214,7 @@ class CompactionJob:
     result_summary: str | None = None
     result_cost_usd_micros: int = 0
     result_billing_segment: dict[str, Any] | None = None
+    schema_version: int = _COMPACTION_JOB_SCHEMA_VERSION
 
 
 class DurableCompactionQueue:
@@ -321,7 +354,8 @@ class DurableCompactionQueue:
                 )
                 continue
             try:
-                job = CompactionJob(**decoded)
+                normalized = _normalize_compaction_job_payload(payload, decoded)
+                job = CompactionJob(**normalized)
             except TypeError, ValueError:
                 self._logger.exception("compaction: incompatible job chat_id=%s", chat_id)
                 if self._settle_invalid_job(decoded, chat_id=chat_id):
