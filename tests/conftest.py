@@ -14,6 +14,7 @@ from api.providers import errors as provider_errors_module
 from api.providers import base as provider_base_module
 from api.providers import config as provider_config_module
 from api.providers import runtime as provider_runtime_module
+from api.providers import support as provider_support_module
 from api.providers import openrouter as openrouter_module
 from api import index as index_module
 from api.providers.backoff import clear_all_cooldowns
@@ -103,6 +104,11 @@ def reset_caches(monkeypatch):
     monkeypatch.setattr(
         provider_config_module,
         "_load_rust_provider_config_policy",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        provider_support_module,
+        "_load_rust_provider_usage_normalization",
         lambda: None,
     )
     monkeypatch.setattr(

@@ -3,12 +3,76 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from logging import Logger
-from typing import Any
+from typing import Any, Protocol, cast
 
 from api.ai.pricing import AIUsageResult
 from api.billing.authorization import AI_SEGMENT_RECORDER_KEY
+from api.core.rust_bridge import load_rust_bridge
+
+
+_logger = logging.getLogger(__name__)
+
+
+class _RustProviderUsageNormalization(Protocol):
+    def provider_normalize_usage(
+        self,
+        requested_model: str,
+        response_model: str | None,
+        upstream_provider: str | None,
+        service_tier: str | None,
+        source: str | None,
+    ) -> tuple[str, str | None, str | None, str | None, str]: ...
+
+
+def _load_rust_provider_usage_normalization() -> (
+    _RustProviderUsageNormalization | None
+):
+    module = load_rust_bridge("RUST_PROVIDER_USAGE_NORMALIZATION_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustProviderUsageNormalization, module)
+
+
+def _optional_text(value: Any) -> str | None:
+    return str(value) if value else None
+
+
+def _normalize_provider_usage(
+    requested_model: str,
+    response_model: str | None,
+    upstream_provider: str | None,
+    service_tier: str | None,
+    source: str | None,
+) -> tuple[str, str | None, str | None, str | None, str]:
+    rust = _load_rust_provider_usage_normalization()
+    if rust is not None:
+        try:
+            normalized = rust.provider_normalize_usage(
+                requested_model,
+                response_model,
+                upstream_provider,
+                service_tier,
+                source,
+            )
+            if len(normalized) != 5 or not normalized[0] or not normalized[4]:
+                raise ValueError("invalid Rust provider usage normalization")
+            return normalized
+        except Exception:
+            _logger.exception(
+                "Rust provider usage normalization failed; using Python fallback"
+            )
+
+    resolved_model = response_model or requested_model
+    return (
+        resolved_model,
+        requested_model if resolved_model != requested_model else None,
+        upstream_provider,
+        service_tier,
+        source or "unknown",
+    )
 
 
 def invoke_provider(
@@ -145,26 +209,39 @@ def build_usage_result(
     extract_usage: Callable[[Any], dict[str, Any] | None],
 ) -> AIUsageResult:
     normalized_metadata = dict(metadata or {})
-    response_model = (
+    response_model_value = (
         response.get("model") if isinstance(response, Mapping) else getattr(response, "model", None)
     )
-    resolved_model = str(response_model or model)
-    if resolved_model != model:
-        normalized_metadata.setdefault("requested_model", model)
-    response_provider = (
+    response_provider_value = (
         response.get("provider")
         if isinstance(response, Mapping)
         else getattr(response, "provider", None)
     )
-    if response_provider:
-        normalized_metadata.setdefault("upstream_provider", str(response_provider))
-    response_service_tier = (
+    response_service_tier_value = (
         response.get("service_tier")
         if isinstance(response, Mapping)
         else getattr(response, "service_tier", None)
     )
-    if response_service_tier:
-        normalized_metadata.setdefault("service_tier", str(response_service_tier))
+    metadata_source = normalized_metadata.get("provider")
+    (
+        resolved_model,
+        requested_model_metadata,
+        response_provider,
+        response_service_tier,
+        source,
+    ) = _normalize_provider_usage(
+        model,
+        _optional_text(response_model_value),
+        _optional_text(response_provider_value),
+        _optional_text(response_service_tier_value),
+        _optional_text(metadata_source),
+    )
+    if requested_model_metadata is not None:
+        normalized_metadata.setdefault("requested_model", requested_model_metadata)
+    if response_provider is not None:
+        normalized_metadata.setdefault("upstream_provider", response_provider)
+    if response_service_tier is not None:
+        normalized_metadata.setdefault("service_tier", response_service_tier)
     return AIUsageResult(
         kind=kind,
         text=text,
@@ -172,6 +249,6 @@ def build_usage_result(
         usage=extract_usage(response),
         audio_seconds=audio_seconds,
         cached=cached,
-        source=str(normalized_metadata.get("provider") or "unknown"),
+        source=source,
         metadata=normalized_metadata,
     )

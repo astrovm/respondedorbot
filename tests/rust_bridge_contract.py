@@ -1051,6 +1051,18 @@ def verify_provider_config_policy(bridge: ModuleType) -> None:
     assert bridge.provider_openrouter_base_url() == contract["openrouter_base_url"]
 
 
+def verify_provider_usage_normalization(bridge: ModuleType) -> None:
+    path = (
+        Path(__file__).parents[1]
+        / "contracts"
+        / "provider_usage_normalization.json"
+    )
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["cases"]:
+        actual = bridge.provider_normalize_usage(*case["input"])
+        assert list(actual) == case["expected"], case["name"]
+
+
 def verify_ai_request_sanitization(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "ai_request_sanitization.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -1085,6 +1097,7 @@ def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_tool_registry_policy(bridge)
     verify_provider_chain_policy(bridge)
     verify_provider_config_policy(bridge)
+    verify_provider_usage_normalization(bridge)
     verify_ai_request_sanitization(bridge)
     verify_tool_execution_policy(bridge)
 

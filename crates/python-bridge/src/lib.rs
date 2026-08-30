@@ -137,6 +137,9 @@ use bot_core::provider_stream_policy::{
     could_be_pseudo_tool_call as provider_stream_could_be_pseudo_tool_call_core,
 };
 use bot_core::provider_tools::parse_pseudo_web_fetch as parse_pseudo_web_fetch_core;
+use bot_core::provider_usage::{
+    ProviderUsageFacts, normalize_provider_usage as normalize_provider_usage_core,
+};
 use bot_core::provider_web_search::{
     nonnegative_limit as provider_web_search_max_uses_core,
     outcome_is_grounded as provider_web_search_outcome_is_grounded_core,
@@ -2795,6 +2798,36 @@ fn provider_web_search_tool(max_results: i64, max_queries: i64) -> PyResult<Stri
 }
 
 #[pyfunction]
+fn provider_normalize_usage(
+    requested_model: &str,
+    response_model: Option<&str>,
+    upstream_provider: Option<&str>,
+    service_tier: Option<&str>,
+    source: Option<&str>,
+) -> (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+) {
+    let normalized = normalize_provider_usage_core(ProviderUsageFacts {
+        requested_model,
+        response_model,
+        upstream_provider,
+        service_tier,
+        source,
+    });
+    (
+        normalized.model,
+        normalized.requested_model_metadata,
+        normalized.upstream_provider,
+        normalized.service_tier,
+        normalized.source,
+    )
+}
+
+#[pyfunction]
 fn provider_chain_select(availability: Vec<bool>) -> Vec<usize> {
     provider_chain_select_core(&availability)
 }
@@ -3146,6 +3179,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(provider_groq_backoff_key, module)?)?;
     module.add_function(wrap_pyfunction!(provider_scope_is_available, module)?)?;
     module.add_function(wrap_pyfunction!(provider_web_search_tool, module)?)?;
+    module.add_function(wrap_pyfunction!(provider_normalize_usage, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_select, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_outcome, module)?)?;
     module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;

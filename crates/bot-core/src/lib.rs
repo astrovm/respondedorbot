@@ -28,6 +28,7 @@ pub mod provider_retry;
 pub mod provider_runtime_policy;
 pub mod provider_stream_policy;
 pub mod provider_tools;
+pub mod provider_usage;
 pub mod provider_web_search;
 pub mod random_reply;
 pub mod random_selection;
