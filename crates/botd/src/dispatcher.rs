@@ -21,6 +21,7 @@ use bot_core::stateless_commands::{
 use bot_core::telegram_actions::{SendMessage, TelegramAction};
 use bot_core::telegram_callbacks::{CallbackContextOutcome, CallbackRoute, parse_callback_context};
 use bot_core::telegram_input::{ChatId, MessageId, is_group_chat_type};
+use bot_core::telegram_payments::plan_pre_checkout;
 use num_bigint::BigInt;
 use serde_json::{Map, Value};
 use thiserror::Error;
@@ -116,6 +117,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     random: Random,
     authorization: Authorization,
     bot_name: String,
+    billing_available: bool,
     last_outcome: Option<DispatchOutcome>,
     state_diagnostics: Vec<String>,
 }
@@ -148,9 +150,17 @@ where
             random,
             authorization,
             bot_name: bot_name.to_owned(),
+            billing_available: true,
             last_outcome: None,
             state_diagnostics: Vec::new(),
         }
+    }
+
+    /// Override billing availability for startup/readiness and deterministic tests.
+    #[must_use]
+    pub const fn with_billing_available(mut self, available: bool) -> Self {
+        self.billing_available = available;
+        self
     }
 
     #[must_use]
@@ -533,9 +543,26 @@ where
         let outcome = match update.event {
             IncomingEvent::Message(message) => self.dispatch_message(&message)?,
             IncomingEvent::CallbackQuery(callback) => self.dispatch_callback(&callback)?,
-            IncomingEvent::PreCheckoutQuery(_) | IncomingEvent::Unsupported => {
-                DispatchOutcome::Unsupported
+            IncomingEvent::PreCheckoutQuery(query) => {
+                let language_code = query
+                    .get("from")
+                    .and_then(Value::as_object)
+                    .and_then(|user| user.get("language_code"))
+                    .and_then(Value::as_str);
+                let locale = resolve_locale(None, language_code, "private");
+                match plan_pre_checkout(&Value::Object(query), self.billing_available, locale) {
+                    Ok(Some(action)) => {
+                        let _receipt = self
+                            .actions
+                            .execute(action)
+                            .map_err(DispatchError::Action)?;
+                        DispatchOutcome::Handled
+                    }
+                    Ok(None) => DispatchOutcome::Handled,
+                    Err(_) => DispatchOutcome::LegacyRequired,
+                }
             }
+            IncomingEvent::Unsupported => DispatchOutcome::Unsupported,
         };
         self.last_outcome = Some(outcome);
         Ok(outcome)
@@ -749,6 +776,33 @@ mod tests {
         IncomingUpdate {
             update_id: 100,
             event: IncomingEvent::CallbackQuery(callback),
+        }
+    }
+
+    fn pre_checkout_update(
+        query_id: Option<&str>,
+        pack_id: &str,
+        user_id: serde_json::Value,
+        language: Option<&str>,
+    ) -> IncomingUpdate {
+        let mut query = Map::from_iter([
+            (
+                "from".to_owned(),
+                json!({"id":user_id,"language_code":language}),
+            ),
+            (
+                "invoice_payload".to_owned(),
+                json!(format!("topup:{pack_id}:42:en")),
+            ),
+            ("currency".to_owned(), json!("XTR")),
+            ("total_amount".to_owned(), json!(25)),
+        ]);
+        if let Some(query_id) = query_id {
+            query.insert("id".to_owned(), json!(query_id));
+        }
+        IncomingUpdate {
+            update_id: 101,
+            event: IncomingEvent::PreCheckoutQuery(query),
         }
     }
 
@@ -1445,6 +1499,129 @@ mod tests {
             Ok(DispatchOutcome::LegacyRequired)
         );
         assert!(dispatcher.config.chat_ids.is_empty());
+        assert!(dispatcher.actions.0.is_empty());
+    }
+
+    #[test]
+    fn pre_checkout_dispatches_valid_and_localized_fail_closed_answers() {
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            dispatcher.dispatch(pre_checkout_update(
+                Some("checkout-valid"),
+                "p50",
+                json!(42),
+                Some("en"),
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            dispatcher.dispatch(pre_checkout_update(
+                Some("checkout-invalid"),
+                "missing",
+                json!(42),
+                Some("es"),
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            dispatcher.actions.0,
+            vec![
+                TelegramAction::AnswerPreCheckout {
+                    query_id: "checkout-valid".to_owned(),
+                    ok: true,
+                    error_message: None,
+                },
+                TelegramAction::AnswerPreCheckout {
+                    query_id: "checkout-invalid".to_owned(),
+                    ok: false,
+                    error_message: Some("ese pago vino raro y no te lo pude validar".to_owned()),
+                },
+            ]
+        );
+        assert!(dispatcher.config.chat_ids.is_empty());
+        assert!(dispatcher.state.incoming.is_empty());
+    }
+
+    #[test]
+    fn pre_checkout_respects_billing_readiness_and_ignores_missing_query_ids() {
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_billing_available(false);
+        assert_eq!(
+            dispatcher.dispatch(pre_checkout_update(
+                Some("checkout-unavailable"),
+                "p50",
+                json!(42),
+                Some("en"),
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            dispatcher.dispatch(pre_checkout_update(None, "p50", json!(42), Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            dispatcher.actions.0,
+            vec![TelegramAction::AnswerPreCheckout {
+                query_id: "checkout-unavailable".to_owned(),
+                ok: false,
+                error_message: Some("AI billing is unavailable, please tell the admin".to_owned()),
+            }]
+        );
+    }
+
+    #[test]
+    fn malformed_pre_checkout_sender_remains_legacy_owned_during_shadowing() {
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        let query = Map::from_iter([
+            ("id".to_owned(), json!("checkout-malformed")),
+            ("from".to_owned(), json!("invalid sender")),
+            ("invoice_payload".to_owned(), json!("topup:p50:42:en")),
+            ("currency".to_owned(), json!("XTR")),
+            ("total_amount".to_owned(), json!(25)),
+        ]);
+        assert_eq!(
+            dispatcher.dispatch(IncomingUpdate {
+                update_id: 101,
+                event: IncomingEvent::PreCheckoutQuery(query),
+            }),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
         assert!(dispatcher.actions.0.is_empty());
     }
 

@@ -4,13 +4,37 @@ use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::locale::Locale;
+use crate::telegram_actions::TelegramAction;
 use crate::telegram_input::{python_string, python_truthy};
+
+const DEFAULT_BILLING_PACKS: [(&str, i64, i64); 6] = [
+    ("p50", 25, 5_000),
+    ("p100", 50, 10_000),
+    ("p250", 125, 25_000),
+    ("p500", 250, 50_000),
+    ("p1000", 500, 100_000),
+    ("p2500", 1_250, 250_000),
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BillingPackTerms {
     pub id: String,
     pub xtr_amount: i64,
     pub credits_awarded: i64,
+}
+
+/// Return one production Telegram Stars pack using stored hundredth-credit units.
+#[must_use]
+pub fn default_billing_pack(pack_id: &str) -> Option<BillingPackTerms> {
+    DEFAULT_BILLING_PACKS
+        .iter()
+        .find(|(id, _, _)| *id == pack_id)
+        .map(|(id, xtr_amount, credits_awarded)| BillingPackTerms {
+            id: (*id).to_owned(),
+            xtr_amount: *xtr_amount,
+            credits_awarded: *credits_awarded,
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -135,6 +159,60 @@ pub fn evaluate_pre_checkout(
     })
 }
 
+/// Validate and localize one native pre-checkout answer without performing I/O.
+pub fn plan_pre_checkout(
+    query: &Value,
+    billing_available: bool,
+    locale: Locale,
+) -> Result<Option<TelegramAction>, PaymentValidationError> {
+    let payload = query
+        .as_object()
+        .and_then(|query| query.get("invoice_payload"))
+        .map_or_else(String::new, python_string);
+    let pack = parse_topup_payload(&payload)
+        .0
+        .as_deref()
+        .and_then(default_billing_pack);
+    let decision = evaluate_pre_checkout(query, billing_available, pack.as_ref())?;
+    let action = match decision {
+        PreCheckoutDecision::Ignore => None,
+        PreCheckoutDecision::Approve { query_id } => Some(TelegramAction::AnswerPreCheckout {
+            query_id,
+            ok: true,
+            error_message: None,
+        }),
+        PreCheckoutDecision::BillingUnavailable { query_id } => {
+            Some(TelegramAction::AnswerPreCheckout {
+                query_id,
+                ok: false,
+                error_message: Some(match locale {
+                    Locale::Es => "el cobro de ia no está andando, avisale al admin".to_owned(),
+                    Locale::En => "AI billing is unavailable, please tell the admin".to_owned(),
+                }),
+            })
+        }
+        PreCheckoutDecision::InvalidUser { query_id } => Some(TelegramAction::AnswerPreCheckout {
+            query_id,
+            ok: false,
+            error_message: Some(match locale {
+                Locale::Es => "tu usuario vino medio roto para cobrar".to_owned(),
+                Locale::En => "I could not identify your user for this payment".to_owned(),
+            }),
+        }),
+        PreCheckoutDecision::InvalidPayment { query_id } => {
+            Some(TelegramAction::AnswerPreCheckout {
+                query_id,
+                ok: false,
+                error_message: Some(match locale {
+                    Locale::Es => "ese pago vino raro y no te lo pude validar".to_owned(),
+                    Locale::En => "I could not validate this payment".to_owned(),
+                }),
+            })
+        }
+    };
+    Ok(action)
+}
+
 fn object_or_empty<'a>(
     value: Option<&'a Value>,
     empty: &'a serde_json::Map<String, Value>,
@@ -211,14 +289,87 @@ mod tests {
 
     use super::{
         BillingPackTerms, PaymentValidationError, PreCheckoutDecision, SuccessfulPaymentDecision,
-        evaluate_pre_checkout, evaluate_successful_payment, parse_topup_payload,
+        default_billing_pack, evaluate_pre_checkout, evaluate_successful_payment,
+        parse_topup_payload, plan_pre_checkout,
     };
+    use crate::locale::Locale;
+    use crate::telegram_actions::TelegramAction;
 
     fn pack() -> BillingPackTerms {
         BillingPackTerms {
             id: "p50".to_owned(),
             xtr_amount: 25,
             credits_awarded: 5_000,
+        }
+    }
+
+    #[test]
+    fn production_pack_catalog_matches_the_python_credit_scale() {
+        assert_eq!(default_billing_pack("p50"), Some(pack()));
+        assert_eq!(
+            default_billing_pack("p2500"),
+            Some(BillingPackTerms {
+                id: "p2500".to_owned(),
+                xtr_amount: 1_250,
+                credits_awarded: 250_000,
+            })
+        );
+        assert_eq!(default_billing_pack("missing"), None);
+    }
+
+    #[test]
+    fn native_pre_checkout_planner_localizes_every_answer_kind() {
+        let valid = json!({
+            "id":"checkout-1",
+            "from":{"id":42},
+            "invoice_payload":"topup:p50:42:en",
+            "currency":"XTR",
+            "total_amount":25
+        });
+        assert_eq!(
+            plan_pre_checkout(&valid, true, Locale::En),
+            Ok(Some(TelegramAction::AnswerPreCheckout {
+                query_id: "checkout-1".to_owned(),
+                ok: true,
+                error_message: None,
+            }))
+        );
+        assert_eq!(plan_pre_checkout(&json!({}), true, Locale::Es), Ok(None));
+
+        for (query, available, locale, expected) in [
+            (
+                json!({"id":"checkout-2"}),
+                false,
+                Locale::Es,
+                "el cobro de ia no está andando, avisale al admin",
+            ),
+            (
+                json!({"id":"checkout-3"}),
+                true,
+                Locale::En,
+                "I could not identify your user for this payment",
+            ),
+            (
+                json!({
+                    "id":"checkout-4",
+                    "from":{"id":42},
+                    "invoice_payload":"topup:missing:42",
+                    "currency":"XTR",
+                    "total_amount":25
+                }),
+                true,
+                Locale::Es,
+                "ese pago vino raro y no te lo pude validar",
+            ),
+        ] {
+            assert_eq!(
+                plan_pre_checkout(&query, available, locale),
+                Ok(Some(TelegramAction::AnswerPreCheckout {
+                    query_id: query["id"].as_str().unwrap_or_default().to_owned(),
+                    ok: false,
+                    error_message: Some(expected.to_owned()),
+                }))
+            );
         }
     }
 
