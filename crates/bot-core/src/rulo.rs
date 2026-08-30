@@ -1,5 +1,7 @@
 //! Arbitrage route selection and calculations for the `/rulo` command.
 
+use crate::locale::Locale;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExchangeQuote {
     pub exchange: String,
@@ -220,9 +222,80 @@ pub fn evaluate_rulo(input: &RuloInput) -> RuloEvaluation {
     })
 }
 
+#[must_use]
+pub fn render_rulo(evaluation: &RuloEvaluation, locale: Locale) -> String {
+    let RuloEvaluation::Routes(plan) = evaluation else {
+        return match locale {
+            Locale::Es => "No pude conseguir el oficial para armar el rulo".to_owned(),
+            Locale::En => {
+                "I could not load the official rate for the arbitrage calculation".to_owned()
+            }
+        };
+    };
+    if plan.routes.is_empty() {
+        return match locale {
+            Locale::Es => "No encontré ningún rulo potable".to_owned(),
+            Locale::En => "I could not find a viable arbitrage route".to_owned(),
+        };
+    }
+    let mut lines = match locale {
+        Locale::Es => vec![
+            format!(
+                "Rulos desde Oficial (precio oficial: {} ARS/USD)",
+                plan.official
+            ),
+            format!(
+                "Inversión base: {} USD → {} ARS",
+                plan.base_usd, plan.base_ars
+            ),
+            String::new(),
+        ],
+        Locale::En => vec![
+            format!(
+                "Arbitrage from the official rate (official rate: {} ARS/USD)",
+                plan.official
+            ),
+            format!(
+                "Base investment: {} USD → {} ARS",
+                plan.base_usd, plan.base_ars
+            ),
+            String::new(),
+        ],
+    };
+    for route in &plan.routes {
+        lines.push(format!("- {}", route.label));
+        lines.push(match locale {
+            Locale::Es => format!("  • Precio venta: {} ARS/USD", route.sell_price),
+            Locale::En => format!("  • Sell price: {} ARS/USD", route.sell_price),
+        });
+        lines.push(match locale {
+            Locale::Es => format!(
+                "  • Diferencia vs oficial: {} ARS ({}%)",
+                route.difference, route.percentage
+            ),
+            Locale::En => format!(
+                "  • Difference from official: {} ARS ({}%)",
+                route.difference, route.percentage
+            ),
+        });
+        for detail in &route.details {
+            lines.push(match (detail, locale) {
+                (RuloDetail::Steps(text), Locale::Es) => format!("  • Tramos: {text}"),
+                (RuloDetail::Steps(text), Locale::En) => format!("  • Steps: {text}"),
+                (RuloDetail::Result(text), Locale::Es) => format!("  • Resultado: {text}"),
+                (RuloDetail::Result(text), Locale::En) => format!("  • Result: {text}"),
+                (RuloDetail::Profit(text), Locale::Es) => format!("  • Ganancia: {text} ARS"),
+                (RuloDetail::Profit(text), Locale::En) => format!("  • Profit: {text} ARS"),
+            });
+        }
+    }
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ExchangeQuote, RuloEvaluation, RuloInput, evaluate_rulo};
+    use super::{ExchangeQuote, RuloEvaluation, RuloInput, evaluate_rulo, render_rulo};
+    use crate::locale::Locale;
 
     fn complete_input() -> RuloInput {
         RuloInput {
@@ -281,6 +354,34 @@ mod tests {
                 base_ars: "1.440.000".to_owned(),
                 routes: Vec::new(),
             })
+        );
+    }
+
+    #[test]
+    fn renders_exact_bilingual_routes_and_guard_messages() {
+        let evaluation = evaluate_rulo(&complete_input());
+        let spanish = render_rulo(&evaluation, Locale::Es);
+        assert!(spanish.starts_with("Rulos desde Oficial (precio oficial: 1.440 ARS/USD)"));
+        assert!(spanish.contains("  • Ganancia: +19.730 ARS"));
+        assert!(spanish.contains("  • Tramos: USD→USDT BUENBIT, USDT→ARS BUENBIT"));
+        let english = render_rulo(&evaluation, Locale::En);
+        assert!(
+            english.starts_with("Arbitrage from the official rate (official rate: 1.440 ARS/USD)")
+        );
+        assert!(english.contains("  • Profit: -10.000 ARS"));
+
+        assert_eq!(
+            render_rulo(&RuloEvaluation::OfficialError, Locale::Es),
+            "No pude conseguir el oficial para armar el rulo"
+        );
+        let mut input = complete_input();
+        input.mep = None;
+        input.blue = None;
+        input.usd_to_usdt.clear();
+        input.usdt_to_ars.clear();
+        assert_eq!(
+            render_rulo(&evaluate_rulo(&input), Locale::En),
+            "I could not find a viable arbitrage route"
         );
     }
 }

@@ -35,6 +35,7 @@ use bot_core::devo::{
 use bot_core::language_command::{LanguageCommandPlan, plan_language_command};
 use bot_core::locale::resolve_locale;
 use bot_core::random_selection::{RandomSelection, parse_random_selection};
+use bot_core::rulo::{RuloInput, evaluate_rulo, render_rulo};
 use bot_core::stateless_commands::{
     StatelessCommandPlan, StatelessRuntimeContext, plan_runtime_stateless_command,
     plan_stateless_command,
@@ -169,6 +170,16 @@ pub trait DollarQuotesSource {
     fn devo_quotes(&mut self) -> Result<Option<DevoQuotes>, String>;
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuloInputLoad {
+    pub input: RuloInput,
+    pub diagnostics: Vec<String>,
+}
+
+pub trait RuloSource {
+    fn rulo_input(&mut self) -> Result<RuloInputLoad, String>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchOutcome {
     Handled,
@@ -213,6 +224,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     admin_creditlog_source: Option<Box<dyn AdminCreditLogSource>>,
     bitcoin_price_source: Option<Box<dyn BitcoinPriceSource>>,
     dollar_quotes_source: Option<Box<dyn DollarQuotesSource>>,
+    rulo_source: Option<Box<dyn RuloSource>>,
     last_outcome: Option<DispatchOutcome>,
     state_diagnostics: Vec<String>,
 }
@@ -255,6 +267,7 @@ where
             admin_creditlog_source: None,
             bitcoin_price_source: None,
             dollar_quotes_source: None,
+            rulo_source: None,
             last_outcome: None,
             state_diagnostics: Vec::new(),
         }
@@ -319,6 +332,12 @@ where
     #[must_use]
     pub fn with_dollar_quotes_source(mut self, source: Box<dyn DollarQuotesSource>) -> Self {
         self.dollar_quotes_source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub fn with_rulo_source(mut self, source: Box<dyn RuloSource>) -> Self {
+        self.rulo_source = Some(source);
         self
     }
 
@@ -1103,6 +1122,26 @@ where
                 CreditLogPlan::NotHandled => StatelessCommandPlan::NotHandled,
                 CreditLogPlan::LegacyRequired => StatelessCommandPlan::LegacyFallbackRequired,
             }
+        } else if parsed.command == "/rulo" {
+            let Some(source) = self.rulo_source.as_mut() else {
+                return Ok(DispatchOutcome::LegacyRequired);
+            };
+            let text = match source.rulo_input() {
+                Ok(load) => {
+                    self.state_diagnostics.extend(load.diagnostics);
+                    render_rulo(&evaluate_rulo(&load.input), locale)
+                }
+                Err(error) => {
+                    self.state_diagnostics.push(format!(
+                        "rulo quotes chat_id={} user_id={}: {error}",
+                        chat_id.0, sender_id.0
+                    ));
+                    render_devo_reply(DevoReply::LoadError, locale)
+                }
+            };
+            let mut message = SendMessage::new(chat_id, &text);
+            message.reply_to_message_id = Some(message_id);
+            StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if parsed.command == "/devo" {
             let text = match plan_devo_command(&parsed.message_text) {
                 Err(_) => return Ok(DispatchOutcome::LegacyRequired),
@@ -1354,10 +1393,12 @@ mod tests {
         BillingBalances, BillingTransferSink, BitcoinPriceSource, ChargeHistoryPage,
         ChargeHistorySource, ChatConfigSource, DispatchError, DispatchOutcome, DollarQuotesSource,
         GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink, NativeDispatcher,
-        RandomSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink, TransferResult,
+        RandomSource, RuloInputLoad, RuloSource, RuntimeValues, StarPaymentReceipt,
+        StarPaymentSink, TransferResult,
     };
     use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup};
     use bot_core::devo::DevoQuotes;
+    use bot_core::rulo::{ExchangeQuote, RuloInput};
 
     struct Config {
         value: Result<ChatConfig, &'static str>,
@@ -1693,6 +1734,18 @@ mod tests {
         }
     }
 
+    struct RuloInputs {
+        result: Result<RuloInputLoad, String>,
+        calls: Rc<RefCell<usize>>,
+    }
+
+    impl RuloSource for RuloInputs {
+        fn rulo_input(&mut self) -> Result<RuloInputLoad, String> {
+            *self.calls.borrow_mut() += 1;
+            self.result.clone()
+        }
+    }
+
     type ChargeHistoryCalls = Rc<RefCell<Vec<(i64, usize, Option<i64>, String)>>>;
 
     struct ChargeHistories {
@@ -1998,6 +2051,120 @@ mod tests {
         );
         assert_eq!(dispatcher.state.incoming.len(), 2);
         assert_eq!(dispatcher.state.outgoing.len(), 2);
+    }
+
+    #[test]
+    fn rulo_renders_all_routes_and_records_nonfatal_exchange_diagnostics() {
+        let calls = Rc::new(RefCell::new(0));
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_rulo_source(Box::new(RuloInputs {
+            result: Ok(RuloInputLoad {
+                input: RuloInput {
+                    official: Some(1440.0),
+                    mep: Some(1459.73),
+                    blue: Some(1430.0),
+                    usd_to_usdt: vec![ExchangeQuote {
+                        exchange: "buenbit".to_owned(),
+                        price: Some(1.031),
+                    }],
+                    usdt_to_ars: vec![ExchangeQuote {
+                        exchange: "buenbit".to_owned(),
+                        price: Some(1458.44),
+                    }],
+                    usd_amount: 1000.0,
+                },
+                diagnostics: vec!["synthetic stale USD book".to_owned()],
+            }),
+            calls: Rc::clone(&calls),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(update("/rulo", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(*calls.borrow(), 1);
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
+            return;
+        };
+        assert!(
+            message
+                .text
+                .starts_with("Rulos desde Oficial (precio oficial: 1.440 ARS/USD)")
+        );
+        assert!(message.text.contains("  • Ganancia: +19.730 ARS"));
+        assert!(
+            message
+                .text
+                .contains("  • Tramos: USD→USDT BUENBIT, USDT→ARS BUENBIT")
+        );
+        assert_eq!(
+            dispatcher.state_diagnostics(),
+            &["synthetic stale USD book".to_owned()]
+        );
+        assert_eq!(dispatcher.state.incoming.len(), 1);
+        assert_eq!(dispatcher.state.outgoing.len(), 1);
+    }
+
+    #[test]
+    fn rulo_primary_failure_and_missing_source_are_safe() {
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut failed = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_rulo_source(Box::new(RuloInputs {
+            result: Err("synthetic primary failure".to_owned()),
+            calls: Rc::new(RefCell::new(0)),
+        }));
+        assert_eq!(
+            failed.dispatch(update("/rulo ignored", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
+            return;
+        };
+        assert_eq!(message.text, "I could not load dollar rates");
+        assert!(failed.state_diagnostics()[0].contains("synthetic primary failure"));
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut missing = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            missing.dispatch(update("/rulo", None)),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
     }
 
     #[test]

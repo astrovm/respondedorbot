@@ -9,8 +9,10 @@ use bot_adapters::coinmarketcap::{
     TransportFailureKind as CoinMarketCapTransportFailureKind, fetch_bitcoin_price,
 };
 use bot_adapters::criptoya::{
-    CriptoYaTransport, DollarQuotesOutcome, ReqwestCriptoYaTransport,
+    CriptoYaTransport, DollarQuotesOutcome, ExchangeQuotesOutcome, ExchangeSide,
+    ReqwestCriptoYaTransport, RuloMarketOutcome,
     TransportFailureKind as CriptoYaTransportFailureKind, fetch_dollar_quotes,
+    fetch_exchange_quotes, fetch_rulo_market,
 };
 use bot_adapters::redis_chat_admin::{cache_chat_admin, get_cached_chat_admin};
 use bot_adapters::redis_connection::RedisEndpoint;
@@ -37,8 +39,8 @@ use crate::dispatcher::{
     ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BillingBalanceSource,
     BillingBalances, BillingTransferSink, BitcoinPriceSource, ChargeHistorySource,
     ChatConfigSource, DollarQuotesSource, GroupAuthorizationDecision, GroupAuthorizer,
-    MessageStateSink, NativeDispatcher, RandomSource, RuntimeValues, StarPaymentReceipt,
-    StarPaymentSink,
+    MessageStateSink, NativeDispatcher, RandomSource, RuloInputLoad, RuloSource, RuntimeValues,
+    StarPaymentReceipt, StarPaymentSink,
 };
 use crate::runtime::{PollingRuntime, UpdateSource};
 
@@ -113,6 +115,52 @@ impl<T: CriptoYaTransport> DollarQuotesSource for CriptoYaDollarQuotesSource<T> 
                 Err(format!("CriptoYa transport failed: {kind:?}"))
             }
         }
+    }
+}
+
+struct CriptoYaRuloSource<T> {
+    transport: T,
+}
+
+fn exchange_failure(label: &str, outcome: ExchangeQuotesOutcome) -> String {
+    match outcome {
+        ExchangeQuotesOutcome::Quotes(_) => format!("{label} unexpectedly succeeded"),
+        ExchangeQuotesOutcome::InvalidJson => format!("CriptoYa {label} returned invalid JSON"),
+        ExchangeQuotesOutcome::HttpError { status_code } => {
+            format!("CriptoYa {label} returned HTTP {status_code}")
+        }
+        ExchangeQuotesOutcome::TransportError(kind) => {
+            format!("CriptoYa {label} transport failed: {kind:?}")
+        }
+    }
+}
+
+impl<T: CriptoYaTransport> RuloSource for CriptoYaRuloSource<T> {
+    fn rulo_input(&mut self) -> Result<RuloInputLoad, String> {
+        let mut input = match fetch_rulo_market(&self.transport) {
+            RuloMarketOutcome::Input(input) => input,
+            RuloMarketOutcome::InvalidJson => {
+                return Err("CriptoYa dollar market returned invalid JSON".to_owned());
+            }
+            RuloMarketOutcome::HttpError { status_code } => {
+                return Err(format!(
+                    "CriptoYa dollar market returned HTTP {status_code}"
+                ));
+            }
+            RuloMarketOutcome::TransportError(kind) => {
+                return Err(format!("CriptoYa dollar market transport failed: {kind:?}"));
+            }
+        };
+        let mut diagnostics = Vec::new();
+        match fetch_exchange_quotes(&self.transport, "USD", ExchangeSide::Ask) {
+            ExchangeQuotesOutcome::Quotes(quotes) => input.usd_to_usdt = quotes,
+            failure => diagnostics.push(exchange_failure("USDT/USD", failure)),
+        }
+        match fetch_exchange_quotes(&self.transport, "ARS", ExchangeSide::Bid) {
+            ExchangeQuotesOutcome::Quotes(quotes) => input.usdt_to_ars = quotes,
+            failure => diagnostics.push(exchange_failure("USDT/ARS", failure)),
+        }
+        Ok(RuloInputLoad { input, diagnostics })
     }
 }
 
@@ -591,6 +639,8 @@ pub fn build_native_runtime(
         ReqwestTelegramTransport::new().map_err(CompositionError::AdminTransport)?;
     let criptoya_transport =
         ReqwestCriptoYaTransport::new().map_err(CompositionError::CriptoYaTransport)?;
+    let rulo_transport =
+        ReqwestCriptoYaTransport::new().map_err(CompositionError::CriptoYaTransport)?;
     let source =
         TelegramUpdateSource::new(polling_transport, options.token, options.long_poll_timeout);
     let config = ChatConfigRepository::new(options.database_url);
@@ -616,6 +666,9 @@ pub fn build_native_runtime(
     .with_admin_creditlog_source(Box::new(BillingRepository::new(options.database_url)))
     .with_dollar_quotes_source(Box::new(CriptoYaDollarQuotesSource {
         transport: criptoya_transport,
+    }))
+    .with_rulo_source(Box::new(CriptoYaRuloSource {
+        transport: rulo_transport,
     }));
     let dispatcher = if let Some(api_key) = options.coinmarketcap_key.filter(|key| !key.is_empty())
     {
@@ -640,6 +693,10 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use bot_adapters::billing_read::{BillingRepository, ChargeHistoryRow};
+    use bot_adapters::criptoya::{
+        CriptoYaRequest, CriptoYaTransport, HttpResponse as CriptoYaHttpResponse,
+        TransportFailureKind as CriptoYaFailure,
+    };
     use bot_adapters::redis_connection::RedisEndpoint;
     use bot_adapters::telegram_http::{
         HttpResponse, TelegramRequest, TelegramTransport, TransportFailureKind,
@@ -666,14 +723,31 @@ mod tests {
     use super::build_charge_history_page;
 
     use super::{
-        NativeRuntimeOptions, RedisCommandState, SystemRandomError, SystemRandomSource,
-        SystemRuntimeValues, TelegramActionSink, TelegramActionSinkError, TelegramGroupAuthorizer,
-        TelegramUpdateSource, build_native_runtime, publish_telegram_commands,
+        CriptoYaRuloSource, NativeRuntimeOptions, RedisCommandState, SystemRandomError,
+        SystemRandomSource, SystemRuntimeValues, TelegramActionSink, TelegramActionSinkError,
+        TelegramGroupAuthorizer, TelegramUpdateSource, build_native_runtime,
+        publish_telegram_commands,
     };
+    use crate::dispatcher::RuloSource;
 
     struct Transport {
         response: RefCell<Option<Result<HttpResponse, TransportFailureKind>>>,
         requests: RefCell<Vec<TelegramRequest>>,
+    }
+
+    struct CriptoTransport {
+        results: RefCell<Vec<Result<CriptoYaHttpResponse, CriptoYaFailure>>>,
+        requests: RefCell<Vec<CriptoYaRequest>>,
+    }
+
+    impl CriptoYaTransport for CriptoTransport {
+        fn get(&self, request: &CriptoYaRequest) -> Result<CriptoYaHttpResponse, CriptoYaFailure> {
+            self.requests.borrow_mut().push(request.clone());
+            if self.results.borrow().is_empty() {
+                return Err(CriptoYaFailure::Request);
+            }
+            self.results.borrow_mut().remove(0)
+        }
     }
 
     impl TelegramTransport for Transport {
@@ -1211,6 +1285,49 @@ mod tests {
             Err(_) => return Err("synthetic Redis server panicked".into()),
         }
         Ok(())
+    }
+
+    #[test]
+    fn rulo_source_keeps_exchange_failures_nonfatal_and_primary_failures_explicit() {
+        let transport = CriptoTransport {
+            results: RefCell::new(vec![
+                Ok(CriptoYaHttpResponse {
+                    status_code: 200,
+                    body: r#"{"oficial":{"price":1440},"blue":{"bid":1430}}"#.to_owned(),
+                }),
+                Ok(CriptoYaHttpResponse {
+                    status_code: 200,
+                    body: "bad".to_owned(),
+                }),
+                Ok(CriptoYaHttpResponse {
+                    status_code: 200,
+                    body: r#"{"buenbit":{"totalBid":1458.44}}"#.to_owned(),
+                }),
+            ]),
+            requests: RefCell::new(Vec::new()),
+        };
+        let mut source = CriptoYaRuloSource { transport };
+        let load = source.rulo_input().unwrap_or_else(|_| unreachable!());
+        assert_eq!(load.input.official, Some(1440.0));
+        assert!(load.input.usd_to_usdt.is_empty());
+        assert_eq!(load.input.usdt_to_ars[0].exchange, "buenbit");
+        assert_eq!(load.diagnostics.len(), 1);
+        assert!(load.diagnostics[0].contains("USDT/USD"));
+        assert_eq!(source.transport.requests.borrow().len(), 3);
+
+        let transport = CriptoTransport {
+            results: RefCell::new(vec![Ok(CriptoYaHttpResponse {
+                status_code: 503,
+                body: String::new(),
+            })]),
+            requests: RefCell::new(Vec::new()),
+        };
+        let mut source = CriptoYaRuloSource { transport };
+        assert!(
+            source
+                .rulo_input()
+                .is_err_and(|error| error.contains("HTTP 503"))
+        );
     }
 
     #[test]
