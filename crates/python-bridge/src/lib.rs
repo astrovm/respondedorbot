@@ -29,6 +29,11 @@ use bot_core::admin_reports::{
     CreditLogLimit, parse_creditlog_limit as parse_creditlog_limit_core,
     truncate_report as truncate_admin_report_core,
 };
+use bot_core::ai_usage::{
+    ProviderSegmentIdentity, ProviderUsageStatus,
+    needs_reconciliation as provider_usage_needs_reconciliation_core,
+    provider_segment_id as provider_segment_id_core,
+};
 use bot_core::base_conversion::{BaseConversion, convert_base as convert_base_core};
 use bot_core::cache_policy::{
     CacheDecision, evaluate_cache as evaluate_cache_core,
@@ -2234,6 +2239,123 @@ fn billing_list_user_ai_charge_rows(
     serde_json::to_string(&rows).map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+fn python_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64().is_some_and(|number| number != 0.0),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(value) => !value.is_empty(),
+        Value::Object(value) => !value.is_empty(),
+    }
+}
+
+fn python_scalar_string(value: &Value) -> PyResult<String> {
+    match value {
+        Value::Null => Ok("None".to_owned()),
+        Value::Bool(true) => Ok("True".to_owned()),
+        Value::Bool(false) => Ok("False".to_owned()),
+        Value::Number(value) => Ok(value.to_string()),
+        Value::String(value) => Ok(value.clone()),
+        Value::Array(_) | Value::Object(_) => Err(PyValueError::new_err(
+            "provider identity fields must be scalar values",
+        )),
+    }
+}
+
+fn scalar_field_with_default(
+    object: &Map<String, Value>,
+    name: &str,
+    default: &str,
+) -> PyResult<String> {
+    object
+        .get(name)
+        .map_or_else(|| Ok(default.to_owned()), python_scalar_string)
+}
+
+fn truthy_scalar_field(object: &Map<String, Value>, name: &str) -> PyResult<Option<String>> {
+    let Some(value) = object.get(name).filter(|value| python_truthy(value)) else {
+        return Ok(None);
+    };
+    python_scalar_string(value).map(Some)
+}
+
+fn scalar_field_or_default(
+    object: &Map<String, Value>,
+    name: &str,
+    default: &str,
+) -> PyResult<String> {
+    truthy_scalar_field(object, name).map(|value| value.unwrap_or_else(|| default.to_owned()))
+}
+
+/// Return the Python-compatible durable identity for one provider call.
+#[pyfunction]
+fn provider_segment_id(segment_json: &str) -> PyResult<String> {
+    let segment: Value = serde_json::from_str(segment_json)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let object = segment
+        .as_object()
+        .ok_or_else(|| PyValueError::new_err("provider segment must be an object"))?;
+    let empty_metadata = Map::new();
+    let metadata = object
+        .get("metadata")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty_metadata);
+    let source_with_default = scalar_field_with_default(object, "source", "provider")?;
+    let source_or_provider = scalar_field_or_default(object, "source", "provider")?;
+    let kind_or_unknown = scalar_field_or_default(object, "kind", "unknown")?;
+    let model_or_unknown = scalar_field_or_default(object, "model", "unknown")?;
+    let provider_generation_id = truthy_scalar_field(metadata, "provider_generation_id")?;
+    let provider_request_id = truthy_scalar_field(metadata, "provider_request_id")?;
+    let tool_rounds = truthy_scalar_field(metadata, "tool_rounds")?;
+    let identity = ProviderSegmentIdentity {
+        source_with_default: &source_with_default,
+        source_or_provider: &source_or_provider,
+        kind_or_unknown: &kind_or_unknown,
+        model_or_unknown: &model_or_unknown,
+        provider_generation_id: provider_generation_id.as_deref(),
+        provider_request_id: provider_request_id.as_deref(),
+        tool_rounds: tool_rounds.as_deref(),
+    };
+    Ok(provider_segment_id_core(&identity, segment_json))
+}
+
+fn positive_python_number(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::Bool(value)) => *value,
+        Some(Value::Number(value)) => value.as_f64().is_some_and(|number| number > 0.0),
+        Some(Value::String(value)) => value.parse::<f64>().is_ok_and(|number| number > 0.0),
+        _ => false,
+    }
+}
+
+/// Decide whether one durable provider segment still needs usage reconciliation.
+#[pyfunction]
+fn provider_usage_needs_reconciliation(segment_json: &str) -> PyResult<bool> {
+    let segment: Value = serde_json::from_str(segment_json)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let object = segment
+        .as_object()
+        .ok_or_else(|| PyValueError::new_err("provider segment must be an object"))?;
+    let metadata = object.get("metadata").and_then(Value::as_object);
+    let usage = object.get("usage").and_then(Value::as_object);
+    Ok(provider_usage_needs_reconciliation_core(
+        ProviderUsageStatus {
+            source: object
+                .get("source")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            stream_interrupted: metadata
+                .and_then(|value| value.get("stream_interrupted"))
+                .is_some_and(python_truthy),
+            provider_usage_pending: metadata
+                .and_then(|value| value.get("provider_usage_pending"))
+                .is_some_and(python_truthy),
+            cost_is_positive: positive_python_number(usage.and_then(|value| value.get("cost"))),
+        },
+    ))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -2378,6 +2500,11 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module
     )?)?;
     module.add_function(wrap_pyfunction!(billing_list_user_ai_charge_rows, module)?)?;
+    module.add_function(wrap_pyfunction!(provider_segment_id, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        provider_usage_needs_reconciliation,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;

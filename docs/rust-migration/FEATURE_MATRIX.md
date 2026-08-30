@@ -27,6 +27,7 @@ Rows not listed under migrated components remain Python-authoritative.
 | Scheduled-task trigger parsing | `rust-flagged` | `RUST_TASK_TRIGGERS_ENABLED=0` or missing bridge | `contracts/task_triggers.json` |
 | Unified price-query parsing | `rust-flagged` | `RUST_PRICE_QUERY_PARSING_ENABLED=0` or missing bridge | `contracts/price_queries.json` |
 | AI market-context normalization and formatting | `rust-flagged` | `RUST_MARKET_CONTEXT_ENABLED=0` or missing bridge | `contracts/market_context.json` |
+| Durable provider segment identity and unresolved-usage policy | `rust-flagged` | `RUST_AI_USAGE_POLICY_ENABLED=0` or missing bridge | `contracts/ai_usage_policy.json` |
 | Bitcoin power-law and rainbow model calculations | `rust-flagged` | `RUST_MARKET_MODELS_ENABLED=0` or missing bridge | `contracts/market_models.json` |
 | Satoshi quote calculation and formatting | `rust-flagged` | `RUST_SATOSHI_ENABLED=0` or missing bridge | `contracts/satoshi.json` |
 | Devo arbitrage parsing and calculation | `rust-flagged` | `RUST_DEVO_ENABLED=0` or missing bridge | `contracts/devo.json` |

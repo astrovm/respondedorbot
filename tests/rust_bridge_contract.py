@@ -732,6 +732,28 @@ def verify_billing_contracts(bridge: ModuleType) -> None:
     verify_billing_charge_history(bridge)
 
 
+def verify_ai_usage_policy(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "ai_usage_policy.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["identity_cases"]:
+        canonical = json.dumps(
+            case["segment"],
+            sort_keys=True,
+            ensure_ascii=True,
+            default=str,
+        )
+        assert bridge.provider_segment_id(canonical) == case["expected"], case["name"]
+    for case in contract["reconciliation_cases"]:
+        canonical = json.dumps(
+            case["segment"],
+            sort_keys=True,
+            ensure_ascii=True,
+            default=str,
+        )
+        actual = bridge.provider_usage_needs_reconciliation(canonical)
+        assert actual is case["expected"], case["name"]
+
+
 def main(arguments: list[str]) -> int:
     if len(arguments) != 2:
         raise SystemExit("usage: rust_bridge_contract.py PATH_TO_EXTENSION")
@@ -767,6 +789,7 @@ def main(arguments: list[str]) -> int:
     verify_redis_maintenance(bridge)
     verify_task_store_io(bridge)
     verify_billing_contracts(bridge)
+    verify_ai_usage_policy(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

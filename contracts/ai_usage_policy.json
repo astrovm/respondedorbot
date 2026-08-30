@@ -1,0 +1,90 @@
+{
+  "identity_precedence": [
+    "metadata.provider_generation_id",
+    "metadata.provider_request_id",
+    "tool-round tuple",
+    "SHA-256 of Python canonical JSON"
+  ],
+  "identity_cases": [
+    {
+      "name": "generation identity",
+      "segment": {
+        "source": "openrouter",
+        "kind": "chat",
+        "model": "test/model",
+        "metadata": {
+          "provider_generation_id": "generation-1",
+          "provider_request_id": "request-1"
+        }
+      },
+      "expected": "openrouter:generation-1"
+    },
+    {
+      "name": "request identity",
+      "segment": {
+        "source": "openrouter",
+        "metadata": {"provider_request_id": "request-1"}
+      },
+      "expected": "openrouter:request-1"
+    },
+    {
+      "name": "tool round identity",
+      "segment": {
+        "source": "openrouter",
+        "kind": "chat",
+        "model": "test/model",
+        "metadata": {"tool_rounds": 2}
+      },
+      "expected": "openrouter:chat:test/model:2"
+    },
+    {
+      "name": "canonical hash identity",
+      "segment": {
+        "source": "openrouter",
+        "kind": "chat",
+        "model": "m",
+        "metadata": {},
+        "usage": {"cost": 0.1}
+      },
+      "expected": "9720f6f861361d9e0abf8de652c4438e8872c5b593d0fda29dbcaf678b5240ad"
+    }
+  ],
+  "reconciliation_cases": [
+    {
+      "name": "interrupted cost missing",
+      "segment": {
+        "source": "openrouter",
+        "metadata": {"stream_interrupted": true},
+        "usage": {}
+      },
+      "expected": true
+    },
+    {
+      "name": "pending string cost missing",
+      "segment": {
+        "source": "openrouter",
+        "metadata": {"provider_usage_pending": 1},
+        "usage": {"cost": "0"}
+      },
+      "expected": true
+    },
+    {
+      "name": "final positive cost",
+      "segment": {
+        "source": "openrouter",
+        "metadata": {"stream_interrupted": true},
+        "usage": {"cost": "0.001"}
+      },
+      "expected": false
+    },
+    {
+      "name": "non OpenRouter provider",
+      "segment": {
+        "source": "groq",
+        "metadata": {"stream_interrupted": true},
+        "usage": {}
+      },
+      "expected": false
+    }
+  ]
+}

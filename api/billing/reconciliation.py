@@ -11,6 +11,7 @@ from typing import Any
 import requests
 
 from api.ai.pricing import calculate_billing_for_segments
+from api.billing.provider_usage import provider_usage_needs_reconciliation
 from api.core.logging import get_logger
 
 
@@ -72,20 +73,7 @@ def _positive_number(value: Any) -> bool:
 
 
 def _needs_reconciliation(segment: Mapping[str, Any]) -> bool:
-    metadata = segment.get("metadata")
-    usage = segment.get("usage")
-    return bool(
-        segment.get("source") == "openrouter"
-        and isinstance(metadata, Mapping)
-        and (
-            metadata.get("stream_interrupted")
-            or metadata.get("provider_usage_pending")
-        )
-        and not (
-            isinstance(usage, Mapping)
-            and _positive_number(usage.get("cost"))
-        )
-    )
+    return provider_usage_needs_reconciliation(segment)
 
 
 def has_unresolved_provider_usage(segments: list[Mapping[str, Any]]) -> bool:
