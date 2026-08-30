@@ -8,6 +8,10 @@ use bot_adapters::coinmarketcap::{
     BitcoinPriceOutcome, CoinMarketCapTransport, ReqwestCoinMarketCapTransport,
     TransportFailureKind as CoinMarketCapTransportFailureKind, fetch_bitcoin_price,
 };
+use bot_adapters::criptoya::{
+    CriptoYaTransport, DollarQuotesOutcome, ReqwestCriptoYaTransport,
+    TransportFailureKind as CriptoYaTransportFailureKind, fetch_dollar_quotes,
+};
 use bot_adapters::redis_chat_admin::{cache_chat_admin, get_cached_chat_admin};
 use bot_adapters::redis_connection::RedisEndpoint;
 use bot_adapters::redis_message_state::{RedisMessageState, RedisMessageStateError};
@@ -32,8 +36,9 @@ use thiserror::Error;
 use crate::dispatcher::{
     ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BillingBalanceSource,
     BillingBalances, BillingTransferSink, BitcoinPriceSource, ChargeHistorySource,
-    ChatConfigSource, GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink,
-    NativeDispatcher, RandomSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink,
+    ChatConfigSource, DollarQuotesSource, GroupAuthorizationDecision, GroupAuthorizer,
+    MessageStateSink, NativeDispatcher, RandomSource, RuntimeValues, StarPaymentReceipt,
+    StarPaymentSink,
 };
 use crate::runtime::{PollingRuntime, UpdateSource};
 
@@ -86,6 +91,26 @@ impl<T: CoinMarketCapTransport> BitcoinPriceSource for CoinMarketCapBitcoinPrice
             }
             BitcoinPriceOutcome::TransportError(kind) => {
                 Err(format!("CoinMarketCap transport failed: {kind:?}"))
+            }
+        }
+    }
+}
+
+struct CriptoYaDollarQuotesSource<T> {
+    transport: T,
+}
+
+impl<T: CriptoYaTransport> DollarQuotesSource for CriptoYaDollarQuotesSource<T> {
+    fn devo_quotes(&mut self) -> Result<Option<bot_core::devo::DevoQuotes>, String> {
+        match fetch_dollar_quotes(&self.transport) {
+            DollarQuotesOutcome::Quotes(quotes) => Ok(Some(quotes)),
+            DollarQuotesOutcome::Missing => Ok(None),
+            DollarQuotesOutcome::HttpError { status_code } => {
+                Err(format!("CriptoYa returned HTTP {status_code}"))
+            }
+            DollarQuotesOutcome::InvalidJson => Err("CriptoYa returned invalid JSON".to_owned()),
+            DollarQuotesOutcome::TransportError(kind) => {
+                Err(format!("CriptoYa transport failed: {kind:?}"))
             }
         }
     }
@@ -538,6 +563,8 @@ pub enum CompositionError {
     AdminTransport(TransportFailureKind),
     #[error("could not construct CoinMarketCap transport: {0:?}")]
     CoinMarketCapTransport(CoinMarketCapTransportFailureKind),
+    #[error("could not construct CriptoYa transport: {0:?}")]
+    CriptoYaTransport(CriptoYaTransportFailureKind),
     #[error("could not construct Redis command state: {0}")]
     RedisState(#[from] RedisMessageStateError),
 }
@@ -562,6 +589,8 @@ pub fn build_native_runtime(
         ReqwestTelegramTransport::new().map_err(CompositionError::ActionTransport)?;
     let admin_transport =
         ReqwestTelegramTransport::new().map_err(CompositionError::AdminTransport)?;
+    let criptoya_transport =
+        ReqwestCriptoYaTransport::new().map_err(CompositionError::CriptoYaTransport)?;
     let source =
         TelegramUpdateSource::new(polling_transport, options.token, options.long_poll_timeout);
     let config = ChatConfigRepository::new(options.database_url);
@@ -584,7 +613,10 @@ pub fn build_native_runtime(
     .with_charge_history_source(Box::new(BillingRepository::new(options.database_url)))
     .with_admin_user_id(options.admin_user_id)
     .with_admin_credit_sink(Box::new(BillingRepository::new(options.database_url)))
-    .with_admin_creditlog_source(Box::new(BillingRepository::new(options.database_url)));
+    .with_admin_creditlog_source(Box::new(BillingRepository::new(options.database_url)))
+    .with_dollar_quotes_source(Box::new(CriptoYaDollarQuotesSource {
+        transport: criptoya_transport,
+    }));
     let dispatcher = if let Some(api_key) = options.coinmarketcap_key.filter(|key| !key.is_empty())
     {
         let transport = ReqwestCoinMarketCapTransport::new()

@@ -28,6 +28,10 @@ use bot_core::config_callbacks::{
     ConfigCallbackDiagnostic, ConfigCallbackOutcome, plan_config_callback,
 };
 use bot_core::config_command::{plan_config_command, render_config};
+use bot_core::devo::{
+    DevoCommandPlan, DevoQuotes, DevoReply, calculate_devo, plan_devo_command, render_devo_reply,
+    render_devo_result,
+};
 use bot_core::language_command::{LanguageCommandPlan, plan_language_command};
 use bot_core::locale::resolve_locale;
 use bot_core::random_selection::{RandomSelection, parse_random_selection};
@@ -161,6 +165,10 @@ pub trait BitcoinPriceSource {
     fn price(&mut self, currency: &str) -> Result<Option<f64>, String>;
 }
 
+pub trait DollarQuotesSource {
+    fn devo_quotes(&mut self) -> Result<Option<DevoQuotes>, String>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchOutcome {
     Handled,
@@ -204,6 +212,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     admin_credit_sink: Option<Box<dyn AdminCreditSink>>,
     admin_creditlog_source: Option<Box<dyn AdminCreditLogSource>>,
     bitcoin_price_source: Option<Box<dyn BitcoinPriceSource>>,
+    dollar_quotes_source: Option<Box<dyn DollarQuotesSource>>,
     last_outcome: Option<DispatchOutcome>,
     state_diagnostics: Vec<String>,
 }
@@ -245,6 +254,7 @@ where
             admin_credit_sink: None,
             admin_creditlog_source: None,
             bitcoin_price_source: None,
+            dollar_quotes_source: None,
             last_outcome: None,
             state_diagnostics: Vec::new(),
         }
@@ -303,6 +313,12 @@ where
     #[must_use]
     pub fn with_bitcoin_price_source(mut self, source: Box<dyn BitcoinPriceSource>) -> Self {
         self.bitcoin_price_source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub fn with_dollar_quotes_source(mut self, source: Box<dyn DollarQuotesSource>) -> Self {
+        self.dollar_quotes_source = Some(source);
         self
     }
 
@@ -1087,6 +1103,30 @@ where
                 CreditLogPlan::NotHandled => StatelessCommandPlan::NotHandled,
                 CreditLogPlan::LegacyRequired => StatelessCommandPlan::LegacyFallbackRequired,
             }
+        } else if parsed.command == "/devo" {
+            let text = match plan_devo_command(&parsed.message_text) {
+                Err(_) => return Ok(DispatchOutcome::LegacyRequired),
+                Ok(DevoCommandPlan::Reply(reply)) => render_devo_reply(reply, locale),
+                Ok(DevoCommandPlan::Load { fee, purchase }) => {
+                    let Some(source) = self.dollar_quotes_source.as_mut() else {
+                        return Ok(DispatchOutcome::LegacyRequired);
+                    };
+                    let quotes = source.devo_quotes().unwrap_or_else(|error| {
+                        self.state_diagnostics.push(format!(
+                            "devo quotes chat_id={} user_id={}: {error}",
+                            chat_id.0, sender_id.0
+                        ));
+                        None
+                    });
+                    match quotes.and_then(|quotes| calculate_devo(fee, purchase, quotes).ok()) {
+                        Some(result) => render_devo_result(&result, locale),
+                        None => render_devo_reply(DevoReply::LoadError, locale),
+                    }
+                }
+            };
+            let mut message = SendMessage::new(chat_id, &text);
+            message.reply_to_message_id = Some(message_id);
+            StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if let Some(bitcoin_command) = classify_bitcoin_command(&parsed.command) {
             let Some(source) = self.bitcoin_price_source.as_mut() else {
                 return Ok(DispatchOutcome::LegacyRequired);
@@ -1312,11 +1352,12 @@ mod tests {
     use super::{
         ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BillingBalanceSource,
         BillingBalances, BillingTransferSink, BitcoinPriceSource, ChargeHistoryPage,
-        ChargeHistorySource, ChatConfigSource, DispatchError, DispatchOutcome,
+        ChargeHistorySource, ChatConfigSource, DispatchError, DispatchOutcome, DollarQuotesSource,
         GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink, NativeDispatcher,
         RandomSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink, TransferResult,
     };
     use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup};
+    use bot_core::devo::DevoQuotes;
 
     struct Config {
         value: Result<ChatConfig, &'static str>,
@@ -1640,6 +1681,18 @@ mod tests {
         }
     }
 
+    struct DollarQuotes {
+        result: Result<Option<DevoQuotes>, String>,
+        calls: Rc<RefCell<usize>>,
+    }
+
+    impl DollarQuotesSource for DollarQuotes {
+        fn devo_quotes(&mut self) -> Result<Option<DevoQuotes>, String> {
+            *self.calls.borrow_mut() += 1;
+            self.result.clone()
+        }
+    }
+
     type ChargeHistoryCalls = Rc<RefCell<Vec<(i64, usize, Option<i64>, String)>>>;
 
     struct ChargeHistories {
@@ -1945,6 +1998,122 @@ mod tests {
         );
         assert_eq!(dispatcher.state.incoming.len(), 2);
         assert_eq!(dispatcher.state.outgoing.len(), 2);
+    }
+
+    #[test]
+    fn devo_loads_quotes_renders_projection_and_records_command_state() {
+        let calls = Rc::new(RefCell::new(0));
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_dollar_quotes_source(Box::new(DollarQuotes {
+            result: Ok(Some(DevoQuotes {
+                official: 100.0,
+                card: 150.0,
+                usdt_ask: 200.0,
+                usdt_bid: 190.0,
+            })),
+            calls: Rc::clone(&calls),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(update("/devo 0.5, 100", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(*calls.borrow(), 1);
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
+            return;
+        };
+        assert_eq!(
+            message.text,
+            "100 USD card = 15000 ARS = 76.92 USDT\nProfit: 9402.5 ARS / 48.22 USDT\nTotal: 24402.5 ARS / 125.14 USDT\n\nprofit: 62.68%\n\nfee: 0.5%\nofficial: 100\nusdt: 195\ncard: 150"
+        );
+        assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
+        assert_eq!(dispatcher.state.incoming.len(), 1);
+        assert_eq!(dispatcher.state.outgoing.len(), 1);
+    }
+
+    #[test]
+    fn devo_preserves_guards_safe_failures_and_legacy_boundary() {
+        let calls = Rc::new(RefCell::new(0));
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_dollar_quotes_source(Box::new(DollarQuotes {
+            result: Err("synthetic upstream failure".to_owned()),
+            calls: Rc::clone(&calls),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(update("/devo nan", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(*calls.borrow(), 0);
+        assert_eq!(
+            dispatcher.dispatch(update("/devo 0.5", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(*calls.borrow(), 1);
+        assert!(dispatcher.state_diagnostics()[0].contains("synthetic upstream failure"));
+        let texts = dispatcher
+            .actions
+            .0
+            .iter()
+            .filter_map(|action| match action {
+                TelegramAction::SendMessage(message) => Some(message.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            texts,
+            vec![
+                "mandá bien los datos: fee entre 0 y 100 y monto de compra positivo",
+                "no pude traer cotizaciones del dólar boludo"
+            ]
+        );
+        assert_eq!(
+            dispatcher.dispatch(update("/devo ０.５", None)),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut missing = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            missing.dispatch(update("/devo 0.5", None)),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
     }
 
     #[test]

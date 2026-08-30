@@ -1,5 +1,7 @@
 //! Input parsing and quote calculations for the `/devo` command.
 
+use crate::locale::Locale;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DevoInput {
     Valid { fee: f64, purchase: f64 },
@@ -41,6 +43,19 @@ pub struct DevoPurchase {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidDevoQuotes;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DevoCommandPlan {
+    Reply(DevoReply),
+    Load { fee: f64, purchase: f64 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DevoReply {
+    Usage,
+    InputError,
+    LoadError,
+}
 
 fn parse_python_float(input: &str) -> Option<f64> {
     let input = input.trim();
@@ -121,9 +136,84 @@ pub fn calculate_devo(
     })
 }
 
+pub fn plan_devo_command(input: &str) -> Result<DevoCommandPlan, UnsupportedUnicodeInput> {
+    Ok(match parse_devo_input(input)? {
+        DevoInput::Valid { fee, purchase } => DevoCommandPlan::Load { fee, purchase },
+        DevoInput::Usage => DevoCommandPlan::Reply(DevoReply::Usage),
+        DevoInput::InputError => DevoCommandPlan::Reply(DevoReply::InputError),
+    })
+}
+
+#[must_use]
+pub fn render_devo_reply(reply: DevoReply, locale: Locale) -> String {
+    match (reply, locale) {
+        (DevoReply::Usage, Locale::Es) => {
+            "uso: /devo <fee_porcentaje>[, <monto_compra>]".to_owned()
+        }
+        (DevoReply::Usage, Locale::En) => {
+            "usage: /devo <fee_percentage>[, <purchase_amount>]".to_owned()
+        }
+        (DevoReply::InputError, Locale::Es) => {
+            "mandá bien los datos: fee entre 0 y 100 y monto de compra positivo".to_owned()
+        }
+        (DevoReply::InputError, Locale::En) => {
+            "send valid data: a fee from 0 to 100 and a positive purchase amount".to_owned()
+        }
+        (DevoReply::LoadError, Locale::Es) => {
+            "no pude traer cotizaciones del dólar boludo".to_owned()
+        }
+        (DevoReply::LoadError, Locale::En) => "I could not load dollar rates".to_owned(),
+    }
+}
+
+#[must_use]
+pub fn render_devo_result(result: &DevoResult, locale: Locale) -> String {
+    let summary = match locale {
+        Locale::Es => format!(
+            "ganancia: {}%\n\ncomisión: {}%\noficial: {}\nusdt: {}\ntarjeta: {}",
+            result.profit, result.fee, result.official, result.usdt, result.card
+        ),
+        Locale::En => format!(
+            "profit: {}%\n\nfee: {}%\nofficial: {}\nusdt: {}\ncard: {}",
+            result.profit, result.fee, result.official, result.usdt, result.card
+        ),
+    };
+    let Some(purchase) = &result.purchase else {
+        return summary;
+    };
+    match locale {
+        Locale::Es => format!(
+            "{} USD Tarjeta = {} ARS = {} USDT\nGanarias {} ARS / {} USDT\nTotal: {} ARS / {} USDT\n\n{}",
+            purchase.usd,
+            purchase.ars,
+            purchase.usdt,
+            purchase.profit_ars,
+            purchase.profit_usdt,
+            purchase.total_ars,
+            purchase.total_usdt,
+            summary
+        ),
+        Locale::En => format!(
+            "{} USD card = {} ARS = {} USDT\nProfit: {} ARS / {} USDT\nTotal: {} ARS / {} USDT\n\n{}",
+            purchase.usd,
+            purchase.ars,
+            purchase.usdt,
+            purchase.profit_ars,
+            purchase.profit_usdt,
+            purchase.total_ars,
+            purchase.total_usdt,
+            summary
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DevoInput, DevoQuotes, calculate_devo, parse_devo_input};
+    use super::{
+        DevoCommandPlan, DevoInput, DevoQuotes, DevoReply, calculate_devo, parse_devo_input,
+        plan_devo_command, render_devo_reply, render_devo_result,
+    };
+    use crate::locale::Locale;
 
     #[test]
     fn preserves_legacy_input_priority_and_validation() {
@@ -179,6 +269,68 @@ mod tests {
                 }
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn plans_and_localizes_command_guards() {
+        assert_eq!(
+            plan_devo_command("0.5, 100"),
+            Ok(DevoCommandPlan::Load {
+                fee: 0.005,
+                purchase: 100.0
+            })
+        );
+        assert_eq!(
+            plan_devo_command("invalid"),
+            Ok(DevoCommandPlan::Reply(DevoReply::Usage))
+        );
+        assert_eq!(
+            plan_devo_command("nan"),
+            Ok(DevoCommandPlan::Reply(DevoReply::InputError))
+        );
+        assert!(plan_devo_command("０.５").is_err());
+        assert_eq!(
+            render_devo_reply(DevoReply::LoadError, Locale::Es),
+            "no pude traer cotizaciones del dólar boludo"
+        );
+        assert_eq!(
+            render_devo_reply(DevoReply::InputError, Locale::En),
+            "send valid data: a fee from 0 to 100 and a positive purchase amount"
+        );
+    }
+
+    #[test]
+    fn renders_exact_bilingual_summary_and_purchase_text() {
+        let summary = calculate_devo(
+            0.005,
+            0.0,
+            DevoQuotes {
+                official: 100.0,
+                card: 150.0,
+                usdt_ask: 200.0,
+                usdt_bid: 190.0,
+            },
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            render_devo_result(&summary, Locale::Es),
+            "ganancia: 62.68%\n\ncomisión: 0.5%\noficial: 100\nusdt: 195\ntarjeta: 150"
+        );
+        let purchase = calculate_devo(
+            0.005,
+            100.0,
+            DevoQuotes {
+                official: 100.0,
+                card: 150.0,
+                usdt_ask: 200.0,
+                usdt_bid: 190.0,
+            },
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            render_devo_result(&purchase, Locale::En),
+            "100 USD card = 15000 ARS = 76.92 USDT\nProfit: 9402.5 ARS / 48.22 USDT\nTotal: 24402.5 ARS / 125.14 USDT\n\nprofit: 62.68%\n\nfee: 0.5%\nofficial: 100\nusdt: 195\ncard: 150"
         );
     }
 }

@@ -5,6 +5,7 @@ pub mod billing_schema;
 pub mod chat_config;
 pub mod coinmarketcap;
 pub mod compaction_job;
+pub mod criptoya;
 pub mod finviz;
 pub mod firecrawl;
 pub mod giphy;
