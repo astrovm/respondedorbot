@@ -27,11 +27,36 @@ class _RustProviderErrorPolicy(Protocol):
     ) -> tuple[bool, bool]: ...
 
 
+class _RustProviderRetryPolicy(Protocol):
+    def parse_provider_retry_window(
+        self,
+        value: str | None,
+        now_unix_seconds: float,
+    ) -> int | None: ...
+
+    def select_provider_backoff_seconds(
+        self,
+        retry_after: str | None,
+        reset_requests: str | None,
+        reset_tokens: str | None,
+        reset: str | None,
+        fallback_seconds: int | None,
+        now_unix_seconds: float,
+    ) -> int | None: ...
+
+
 def _load_rust_provider_error_policy() -> _RustProviderErrorPolicy | None:
     module = load_rust_bridge("RUST_PROVIDER_ERROR_POLICY_ENABLED")
     if module is None:
         return None
     return cast(_RustProviderErrorPolicy, module)
+
+
+def _load_rust_provider_retry_policy() -> _RustProviderRetryPolicy | None:
+    module = load_rust_bridge("RUST_PROVIDER_RETRY_POLICY_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustProviderRetryPolicy, module)
 
 
 def _integer_status(value: object) -> int | None:
@@ -76,6 +101,16 @@ def extract_error_headers(error: Exception) -> dict[str, str]:
 
 
 def parse_retry_window_seconds(value: str | None) -> int | None:
+    rust = _load_rust_provider_retry_policy()
+    if rust is not None:
+        try:
+            return rust.parse_provider_retry_window(
+                value,
+                datetime.now(UTC).timestamp(),
+            )
+        except Exception:
+            logger.exception("Rust provider retry policy failed; using Python fallback")
+
     raw_value = str(value or "").strip()
     if not raw_value:
         return None
@@ -112,6 +147,19 @@ def extract_rate_limit_backoff_seconds(
     fallback_seconds: int | None = None,
 ) -> int | None:
     headers = extract_error_headers(error)
+    rust = _load_rust_provider_retry_policy()
+    if rust is not None:
+        try:
+            return rust.select_provider_backoff_seconds(
+                headers.get("retry-after"),
+                headers.get("x-ratelimit-reset-requests"),
+                headers.get("x-ratelimit-reset-tokens"),
+                headers.get("x-ratelimit-reset"),
+                fallback_seconds,
+                datetime.now(UTC).timestamp(),
+            )
+        except Exception:
+            logger.exception("Rust provider retry policy failed; using Python fallback")
     for name in (
         "retry-after",
         "x-ratelimit-reset-requests",

@@ -767,6 +767,24 @@ def verify_provider_error_policy(bridge: ModuleType) -> None:
         assert list(actual) == case["expected"], case["name"]
 
 
+def verify_provider_retry_policy(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "provider_retry_policy.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["parse_cases"]:
+        actual = bridge.parse_provider_retry_window(
+            case["value"],
+            case["now_unix_seconds"],
+        )
+        assert actual == case["expected"], case["name"]
+    for case in contract["selection_cases"]:
+        actual = bridge.select_provider_backoff_seconds(
+            *case["headers"],
+            case["fallback_seconds"],
+            case["now_unix_seconds"],
+        )
+        assert actual == case["expected"], case["name"]
+
+
 def verify_ai_reserve_estimates(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "ai_reserve_estimates.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -880,6 +898,7 @@ def main(arguments: list[str]) -> int:
     verify_billing_contracts(bridge)
     verify_ai_usage_policy(bridge)
     verify_provider_error_policy(bridge)
+    verify_provider_retry_policy(bridge)
     verify_ai_reserve_estimates(bridge)
     verify_ai_pricing(bridge)
     verify_media_routing(bridge)

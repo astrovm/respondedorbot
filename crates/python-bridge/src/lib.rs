@@ -106,6 +106,10 @@ use bot_core::price_queries::{
 use bot_core::provider_errors::{
     ProviderErrorFacts, classify_provider_error as classify_provider_error_core,
 };
+use bot_core::provider_retry::{
+    parse_retry_window_seconds as parse_provider_retry_window_seconds_core,
+    select_rate_limit_backoff_seconds as select_provider_backoff_seconds_core,
+};
 use bot_core::random_reply::{
     RandomAnswer, RandomSuffix, evaluate_random_reply as evaluate_random_reply_core,
 };
@@ -2389,6 +2393,28 @@ fn classify_provider_error(
     (policy.rate_limited, policy.try_next_groq_account)
 }
 
+#[pyfunction]
+fn parse_provider_retry_window(value: Option<&str>, now_unix_seconds: f64) -> Option<i64> {
+    parse_provider_retry_window_seconds_core(value, now_unix_seconds)
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn select_provider_backoff_seconds(
+    retry_after: Option<&str>,
+    reset_requests: Option<&str>,
+    reset_tokens: Option<&str>,
+    reset: Option<&str>,
+    fallback_seconds: Option<i64>,
+    now_unix_seconds: f64,
+) -> Option<i64> {
+    select_provider_backoff_seconds_core(
+        [retry_after, reset_requests, reset_tokens, reset],
+        fallback_seconds,
+        now_unix_seconds,
+    )
+}
+
 fn token_estimate_value(value: &Value) -> TokenEstimateValue {
     match value {
         Value::Null => TokenEstimateValue::Empty,
@@ -2678,6 +2704,8 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module
     )?)?;
     module.add_function(wrap_pyfunction!(classify_provider_error, module)?)?;
+    module.add_function(wrap_pyfunction!(parse_provider_retry_window, module)?)?;
+    module.add_function(wrap_pyfunction!(select_provider_backoff_seconds, module)?)?;
     module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;
     module.add_function(wrap_pyfunction!(ai_estimate_text_tokens, module)?)?;
     module.add_function(wrap_pyfunction!(ai_estimate_nested_tokens, module)?)?;

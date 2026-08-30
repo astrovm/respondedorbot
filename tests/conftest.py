@@ -67,6 +67,11 @@ def reset_caches(monkeypatch):
         lambda: None,
     )
     monkeypatch.setattr(
+        provider_errors_module,
+        "_load_rust_provider_retry_policy",
+        lambda: None,
+    )
+    monkeypatch.setattr(
         credits_db_service,
         "_load_rust_billing_schema",
         lambda: None,

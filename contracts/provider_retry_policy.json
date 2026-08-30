@@ -1,0 +1,45 @@
+{
+  "parse_cases": [
+    {"name": "missing", "value": null, "now_unix_seconds": 0, "expected": null},
+    {"name": "negative_clamps", "value": "-1", "now_unix_seconds": 0, "expected": 0},
+    {"name": "numeric_truncates", "value": "1.9", "now_unix_seconds": 0, "expected": 1},
+    {"name": "milliseconds", "value": "1500ms", "now_unix_seconds": 0, "expected": 1},
+    {"name": "minutes", "value": "2.5m", "now_unix_seconds": 0, "expected": 150},
+    {"name": "hours", "value": "1h", "now_unix_seconds": 0, "expected": 3600},
+    {"name": "imf_http_date", "value": "Sun, 06 Nov 1994 08:49:39 GMT", "now_unix_seconds": 784111777.75, "expected": 1},
+    {"name": "rfc850_http_date", "value": "Sunday, 06-Nov-94 08:49:39 GMT", "now_unix_seconds": 784111777.75, "expected": 1},
+    {"name": "asctime_http_date", "value": "Sun Nov  6 08:49:39 1994", "now_unix_seconds": 784111777.75, "expected": 1},
+    {"name": "expired_http_date", "value": "Sun, 06 Nov 1994 08:49:36 GMT", "now_unix_seconds": 784111777.75, "expected": 0},
+    {"name": "invalid", "value": "later", "now_unix_seconds": 0, "expected": null}
+  ],
+  "selection_cases": [
+    {
+      "name": "retry_after_wins",
+      "headers": ["1m", "2m", "3m", "4m"],
+      "fallback_seconds": 300,
+      "now_unix_seconds": 0,
+      "expected": 60
+    },
+    {
+      "name": "first_parseable_reset_wins",
+      "headers": ["invalid", "2m", "3m", "4m"],
+      "fallback_seconds": 300,
+      "now_unix_seconds": 0,
+      "expected": 120
+    },
+    {
+      "name": "fallback_when_headers_invalid",
+      "headers": ["invalid", null, null, null],
+      "fallback_seconds": 300,
+      "now_unix_seconds": 0,
+      "expected": 300
+    },
+    {
+      "name": "missing_without_fallback",
+      "headers": [null, null, null, null],
+      "fallback_seconds": null,
+      "now_unix_seconds": 0,
+      "expected": null
+    }
+  ]
+}
