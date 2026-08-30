@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime
 from os import environ
 from threading import Lock
 from typing import (
@@ -260,6 +261,14 @@ class _RustBillingAuditWrites(Protocol):
     ) -> bool: ...
 
 
+class _RustBillingAuditReads(Protocol):
+    def billing_list_recent_ai_settlement_results(
+        self,
+        database_url: str,
+        limit: int,
+    ) -> str: ...
+
+
 def _load_rust_billing_reads() -> _RustBillingReads | None:
     module = load_rust_bridge("RUST_BILLING_READ_SHADOW_ENABLED")
     if module is None:
@@ -351,6 +360,13 @@ def _load_rust_billing_audit_writes() -> _RustBillingAuditWrites | None:
     if module is None:
         return None
     return cast(_RustBillingAuditWrites, module)
+
+
+def _load_rust_billing_audit_reads() -> _RustBillingAuditReads | None:
+    module = load_rust_bridge("RUST_BILLING_AUDIT_READS_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustBillingAuditReads, module)
 
 
 class CreditsDBError(RuntimeError):
@@ -2541,6 +2557,32 @@ def list_recent_ai_settlement_results(limit: int = 10) -> List[Dict[str, Any]]:
 
     ensure_schema()
     normalized_limit = max(1, min(int(limit or 10), 50))
+    rust = _load_rust_billing_audit_reads()
+    database_url = get_database_url()
+    if rust is not None and database_url:
+        try:
+            loaded = json.loads(
+                rust.billing_list_recent_ai_settlement_results(
+                    database_url,
+                    normalized_limit,
+                )
+            )
+            if not isinstance(loaded, list):
+                raise ValueError("Rust AI settlement audit results must be an array")
+            results: List[Dict[str, Any]] = []
+            for item in loaded:
+                if not isinstance(item, Mapping):
+                    raise ValueError("Rust AI settlement audit row must be an object")
+                result = dict(item)
+                created_at = result.get("created_at")
+                if isinstance(created_at, str):
+                    result["created_at"] = datetime.fromisoformat(created_at)
+                results.append(result)
+            return results
+        except Exception:
+            logger.exception(
+                "Rust AI settlement audit read failed; using Python fallback"
+            )
 
     with connect() as conn, conn.cursor() as cur:
         cur.execute(

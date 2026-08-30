@@ -24,6 +24,7 @@ must never enter balance mutations.
 | Current AI settlement writer | Rust owns exact-once operation settlement, refunds, and settlement debt | Rust only for current operation settlement; Python owns legacy usage-tag settlement | Disable `RUST_BILLING_AI_SETTLEMENTS_ENABLED` |
 | Legacy AI settlement writer | Rust owns exact-once memory-compaction settlement by usage tag | Rust only for legacy usage-tag settlement; Python owns audit and reporting paths | Disable `RUST_BILLING_LEGACY_SETTLEMENTS_ENABLED` |
 | AI settlement audit writer | Rust owns idempotent non-monetary audit insertion | Rust only for settlement result audit writes; Python owns reporting reads | Disable `RUST_BILLING_AUDIT_WRITES_ENABLED` |
+| AI settlement audit reader | Rust reads recent settlement results newest first | Rust with safe Python read fallback; Python owns charge history | Disable `RUST_BILLING_AUDIT_READS_ENABLED` |
 | Rust reads | Rust is authoritative for proven read operations | Python owns non-balance writes | Disable the per-operation Rust read flag |
 | Shadow transaction decisions | Python commits; Rust evaluates the same synthetic transaction inputs without I/O | Python only | Disable the decision shadow flag |
 | Rust writer canary | Rust owns one proven mutation family | Rust for that family; Python for all others | Disable that family's writer flag before another owner starts |
@@ -144,3 +145,7 @@ retries.
 `RUST_BILLING_AUDIT_WRITES_ENABLED=1` makes Rust authoritative for non-monetary
 AI settlement result records. The partial unique settlement index remains the
 restart-safe idempotency boundary, and uncertain failures never start Python.
+
+`RUST_BILLING_AUDIT_READS_ENABLED=1` makes Rust authoritative for the recent
+settlement audit list used by administrators. A Rust read failure may safely use
+the Python query because neither path changes financial state.

@@ -131,6 +131,18 @@ pub struct LegacySettlementResult {
     pub chat_balance: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LedgerEntry {
+    pub id: i64,
+    pub event_type: String,
+    pub actor_user_id: Option<i64>,
+    pub user_id: Option<i64>,
+    pub chat_id: Option<i64>,
+    pub amount: i32,
+    pub metadata: Value,
+    pub created_at: String,
+}
+
 pub struct BillingRepository {
     database_url: String,
 }
@@ -1024,6 +1036,35 @@ impl BillingRepository {
                 ],
             )? > 0)
         })
+    }
+
+    pub fn list_recent_ai_settlement_results(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<LedgerEntry>, BillingError> {
+        let mut client = self.connect()?;
+        client
+            .query(
+                "SELECT id, event_type, actor_user_id, user_id, chat_id, amount, \
+                    metadata, created_at::text FROM credit_ledger \
+                 WHERE event_type = 'ai_settlement_result' \
+                 ORDER BY created_at DESC, id DESC LIMIT $1",
+                &[&limit],
+            )?
+            .into_iter()
+            .map(|row| {
+                Ok(LedgerEntry {
+                    id: row.try_get(0)?,
+                    event_type: row.try_get(1)?,
+                    actor_user_id: row.try_get(2)?,
+                    user_id: row.try_get(3)?,
+                    chat_id: row.try_get(4)?,
+                    amount: row.try_get(5)?,
+                    metadata: row.try_get(6)?,
+                    created_at: row.try_get(7)?,
+                })
+            })
+            .collect()
     }
 
     fn ai_operation_is_settled(
@@ -2766,6 +2807,16 @@ mod tests {
         assert_eq!(audit_evidence.get::<_, i64>(0), 1);
         assert_eq!(audit_evidence.get::<_, i64>(1), 0);
         assert_eq!(audit_evidence.get::<_, Option<i64>>(2), Some(99));
+        let recent_audit_results = repository.list_recent_ai_settlement_results(1)?;
+        assert_eq!(recent_audit_results.len(), 1);
+        assert_eq!(recent_audit_results[0].user_id, Some(7_000_000_000_037));
+        assert_eq!(recent_audit_results[0].actor_user_id, Some(99));
+        assert_eq!(recent_audit_results[0].amount, 0);
+        assert_eq!(
+            recent_audit_results[0].metadata["settlement_id"],
+            serde_json::Value::String("synthetic-audit-result".to_owned())
+        );
+        assert!(!recent_audit_results[0].created_at.is_empty());
 
         let synthetic_ids = [
             7_000_000_000_001_i64,

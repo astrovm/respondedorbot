@@ -605,6 +605,17 @@ def verify_billing_audit_writes(bridge: ModuleType) -> None:
         raise AssertionError("Rust AI settlement audit bridge is unavailable")
 
 
+def verify_billing_audit_reads(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "billing_audit_reads.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    if contract["ordering"] != ["created_at descending", "id descending"]:
+        raise AssertionError("AI settlement audit ordering changed")
+    if contract["limit"]["maximum"] != 50:
+        raise AssertionError("AI settlement audit limit changed")
+    if not callable(bridge.billing_list_recent_ai_settlement_results):
+        raise AssertionError("Rust AI settlement audit read bridge is unavailable")
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -653,6 +664,22 @@ def verify_random_reply(bridge: ModuleType) -> None:
         assert list(actual) == case["expected"], case
 
 
+def verify_billing_contracts(bridge: ModuleType) -> None:
+    verify_billing_reads(bridge)
+    verify_billing_onboarding(bridge)
+    verify_billing_star_payments(bridge)
+    verify_billing_manual_credits(bridge)
+    verify_billing_chat_ai_credits(bridge)
+    verify_billing_ai_debt(bridge)
+    verify_billing_ai_refunds(bridge)
+    verify_billing_ai_charges(bridge)
+    verify_billing_provider_usage(bridge)
+    verify_billing_ai_settlements(bridge)
+    verify_billing_legacy_settlements(bridge)
+    verify_billing_audit_writes(bridge)
+    verify_billing_audit_reads(bridge)
+
+
 def main(arguments: list[str]) -> int:
     if len(arguments) != 2:
         raise SystemExit("usage: rust_bridge_contract.py PATH_TO_EXTENSION")
@@ -687,18 +714,7 @@ def main(arguments: list[str]) -> int:
     verify_stale_cache_io(bridge)
     verify_redis_maintenance(bridge)
     verify_task_store_io(bridge)
-    verify_billing_reads(bridge)
-    verify_billing_onboarding(bridge)
-    verify_billing_star_payments(bridge)
-    verify_billing_manual_credits(bridge)
-    verify_billing_chat_ai_credits(bridge)
-    verify_billing_ai_debt(bridge)
-    verify_billing_ai_refunds(bridge)
-    verify_billing_ai_charges(bridge)
-    verify_billing_provider_usage(bridge)
-    verify_billing_ai_settlements(bridge)
-    verify_billing_legacy_settlements(bridge)
-    verify_billing_audit_writes(bridge)
+    verify_billing_contracts(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)
