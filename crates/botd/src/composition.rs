@@ -330,6 +330,13 @@ impl<Transport: TelegramTransport> ActionSink for TelegramActionSink<Transport> 
             ActionOutcome::Completed { .. }
         ))
     }
+
+    fn try_invoice(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
+        Ok(matches!(
+            execute_with(&self.transport, &self.token, action)?,
+            ActionOutcome::Completed { .. }
+        ))
+    }
 }
 
 pub fn publish_telegram_commands<Actions: ActionSink>(
@@ -413,7 +420,7 @@ mod tests {
         HttpResponse, TelegramRequest, TelegramTransport, TransportFailureKind,
     };
     use bot_adapters::telegram_polling::{PollFailure, PollOutcome};
-    use bot_core::telegram_actions::{SendMessage, TelegramAction};
+    use bot_core::telegram_actions::{LabeledPrice, SendMessage, TelegramAction};
     use bot_core::telegram_input::ChatId;
     use bot_core::telegram_payments::StarPaymentRecord;
     use bot_core::{
@@ -644,6 +651,32 @@ mod tests {
             }),
             Ok(true)
         );
+    }
+
+    #[test]
+    fn optional_invoice_reports_delivery_success_for_callback_feedback() {
+        let invoice = || TelegramAction::SendInvoice {
+            chat_id: ChatId(1),
+            title: "50.00 AI credit pack".to_owned(),
+            description: "Add credits".to_owned(),
+            payload: "topup:p50:42:en".to_owned(),
+            currency: "XTR".to_owned(),
+            prices: vec![LabeledPrice {
+                label: "50.00 AI credits".to_owned(),
+                amount: 25,
+            }],
+        };
+        let mut failed = TelegramActionSink::new(
+            transport(400, r#"{"ok":false,"description":"invoice rejected"}"#),
+            "token",
+        );
+        assert_eq!(failed.try_invoice(invoice()), Ok(false));
+
+        let mut delivered = TelegramActionSink::new(
+            transport(200, r#"{"ok":true,"result":{"message_id":3}}"#),
+            "token",
+        );
+        assert_eq!(delivered.try_invoice(invoice()), Ok(true));
     }
 
     #[test]

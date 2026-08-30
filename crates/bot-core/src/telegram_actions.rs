@@ -39,6 +39,12 @@ pub struct SendMessage {
     pub reply_markup: Option<InlineKeyboardMarkup>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LabeledPrice {
+    pub label: String,
+    pub amount: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TelegramAction {
     SetCommands {
@@ -46,6 +52,14 @@ pub enum TelegramAction {
         language_code: Option<String>,
     },
     SendMessage(SendMessage),
+    SendInvoice {
+        chat_id: ChatId,
+        title: String,
+        description: String,
+        payload: String,
+        currency: String,
+        prices: Vec<LabeledPrice>,
+    },
     SendTyping {
         chat_id: ChatId,
     },
@@ -107,8 +121,8 @@ impl SendMessage {
 #[cfg(test)]
 mod tests {
     use super::{
-        InlineKeyboardButton, InlineKeyboardMarkup, MAX_TELEGRAM_TEXT_LENGTH, SendMessage,
-        truncate_text,
+        InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, MAX_TELEGRAM_TEXT_LENGTH,
+        SendMessage, TelegramAction, truncate_text,
     };
     use crate::telegram_input::ChatId;
 
@@ -166,6 +180,34 @@ mod tests {
             serde_json::json!({
                 "inline_keyboard":[[{"text":"Open","url":"https://example.test"}]]
             })
+        );
+    }
+
+    #[test]
+    fn invoice_action_keeps_typed_prices_and_identity() {
+        assert_eq!(
+            TelegramAction::SendInvoice {
+                chat_id: ChatId(42),
+                title: "50 credit pack".to_owned(),
+                description: "Add credits".to_owned(),
+                payload: "topup:p50:42:en".to_owned(),
+                currency: "XTR".to_owned(),
+                prices: vec![LabeledPrice {
+                    label: "50 credits".to_owned(),
+                    amount: 25,
+                }],
+            },
+            TelegramAction::SendInvoice {
+                chat_id: ChatId(42),
+                title: "50 credit pack".to_owned(),
+                description: "Add credits".to_owned(),
+                payload: "topup:p50:42:en".to_owned(),
+                currency: "XTR".to_owned(),
+                prices: vec![LabeledPrice {
+                    label: "50 credits".to_owned(),
+                    amount: 25,
+                }],
+            }
         );
     }
 }

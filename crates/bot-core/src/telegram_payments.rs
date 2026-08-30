@@ -4,10 +4,13 @@ use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::command_parsing::parse_command;
 use crate::credit_units::{CreditUnits, format_credit_units};
 use crate::locale::Locale;
-use crate::telegram_actions::TelegramAction;
-use crate::telegram_input::{python_string, python_truthy};
+use crate::telegram_actions::{
+    InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, SendMessage, TelegramAction,
+};
+use crate::telegram_input::{ChatId, MessageId, python_string, python_truthy};
 
 const DEFAULT_BILLING_PACKS: [(&str, i64, i64); 6] = [
     ("p50", 25, 5_000),
@@ -46,6 +49,208 @@ pub fn default_billing_pack(pack_id: &str) -> Option<BillingPackTerms> {
             xtr_amount: *xtr_amount,
             credits_awarded: *credits_awarded,
         })
+}
+
+#[must_use]
+pub fn invoice_payload_locale(payload: &str) -> Option<&str> {
+    let mut parts = payload.split(':');
+    (parts.next() == Some("topup"))
+        .then(|| {
+            let _pack_id = parts.next()?;
+            let _user_id = parts.next()?;
+            parts.next()
+        })
+        .flatten()
+}
+
+fn topup_keyboard(locale: Locale) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup {
+        inline_keyboard: DEFAULT_BILLING_PACKS
+            .iter()
+            .map(|(id, xtr_amount, credits_awarded)| {
+                let credits = format_credit_units(CreditUnits::new(*credits_awarded));
+                vec![InlineKeyboardButton {
+                    text: match locale {
+                        Locale::Es => format!("{credits} créditos - {xtr_amount} ⭐"),
+                        Locale::En => format!("{credits} credits - {xtr_amount} ⭐"),
+                    },
+                    url: None,
+                    callback_data: Some(format!("topup:{id}")),
+                }]
+            })
+            .collect(),
+    }
+}
+
+#[must_use]
+pub fn plan_topup_command(
+    chat_id: ChatId,
+    message_id: MessageId,
+    message_text: &str,
+    bot_name: &str,
+    locale: Locale,
+    chat_type: &str,
+    billing_available: bool,
+) -> Option<TelegramAction> {
+    if parse_command(message_text, bot_name).command != "/topup" {
+        return None;
+    }
+    let (text, keyboard) = if !billing_available {
+        (
+            match locale {
+                Locale::Es => "el cobro de ia no está andando, avisale al admin",
+                Locale::En => "AI billing is unavailable, please tell the admin",
+            }
+            .to_owned(),
+            None,
+        )
+    } else if chat_type != "private" {
+        let username = bot_name.trim().trim_start_matches('@');
+        (
+            match (locale, username.is_empty()) {
+                (Locale::Es, false) => format!("la recarga va por privado, abrime en @{username}"),
+                (Locale::En, false) => format!("top-ups are private, open @{username}"),
+                (Locale::Es, true) => "la recarga va por privado, abrime en dm".to_owned(),
+                (Locale::En, true) => "top-ups are private, open a DM with me".to_owned(),
+            },
+            None,
+        )
+    } else {
+        (
+            match locale {
+                Locale::Es => "elegí cuánto querés cargar:",
+                Locale::En => "choose how much you want to add:",
+            }
+            .to_owned(),
+            Some(topup_keyboard(locale)),
+        )
+    };
+    let mut message = SendMessage::new(chat_id, &text);
+    message.reply_to_message_id = Some(message_id);
+    message.reply_markup = keyboard;
+    Some(TelegramAction::SendMessage(message))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TopupCallbackPlan {
+    Answer(Option<TelegramAction>),
+    Invoice(Box<TopupInvoicePlan>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopupInvoicePlan {
+    pub invoice: TelegramAction,
+    pub success_answer: Option<TelegramAction>,
+    pub failure_answer: Option<TelegramAction>,
+}
+
+fn callback_answer(
+    callback_id: Option<&str>,
+    text: Option<String>,
+    show_alert: bool,
+) -> Option<TelegramAction> {
+    callback_id.map(|callback_id| TelegramAction::AnswerCallback {
+        callback_id: callback_id.to_owned(),
+        text,
+        show_alert,
+    })
+}
+
+fn invoice_action(
+    chat_id: ChatId,
+    user_id: i64,
+    pack: &BillingPackTerms,
+    locale: Locale,
+) -> TelegramAction {
+    let credits = format_credit_units(CreditUnits::new(pack.credits_awarded));
+    let (title, description, label) = match locale {
+        Locale::Es => (
+            format!("Pack IA {credits} créditos"),
+            format!("Recarga de {credits} créditos para mensajes IA"),
+            format!("{credits} créditos IA"),
+        ),
+        Locale::En => (
+            format!("{credits} AI credit pack"),
+            format!("Add {credits} credits for AI messages"),
+            format!("{credits} AI credits"),
+        ),
+    };
+    TelegramAction::SendInvoice {
+        chat_id,
+        title,
+        description,
+        payload: format!("topup:{}:{user_id}:{}", pack.id, locale.code()),
+        currency: "XTR".to_owned(),
+        prices: vec![LabeledPrice {
+            label,
+            amount: pack.xtr_amount,
+        }],
+    }
+}
+
+#[must_use]
+pub fn plan_topup_callback(
+    callback_id: Option<&str>,
+    data: &str,
+    chat_id: ChatId,
+    chat_type: &str,
+    user_id: Option<i64>,
+    billing_available: bool,
+    locale: Locale,
+) -> TopupCallbackPlan {
+    let alert = |text: &str| {
+        TopupCallbackPlan::Answer(callback_answer(callback_id, Some(text.to_owned()), true))
+    };
+    if !billing_available {
+        return alert(match locale {
+            Locale::Es => "el cobro de ia no está andando, avisale al admin",
+            Locale::En => "AI billing is unavailable, please tell the admin",
+        });
+    }
+    if chat_type != "private" {
+        return alert(match locale {
+            Locale::Es => "cargá por privado, maestro",
+            Locale::En => "open this in a private chat",
+        });
+    }
+    let pack = data
+        .split_once(':')
+        .filter(|(prefix, _)| *prefix == "topup")
+        .and_then(|(_, pack_id)| default_billing_pack(pack_id));
+    let Some(pack) = pack else {
+        return alert(match locale {
+            Locale::Es => "ese pack es fruta, elegí otro",
+            Locale::En => "that credit pack is invalid",
+        });
+    };
+    let Some(user_id) = user_id else {
+        return TopupCallbackPlan::Answer(callback_answer(callback_id, None, false));
+    };
+    TopupCallbackPlan::Invoice(Box::new(TopupInvoicePlan {
+        invoice: invoice_action(chat_id, user_id, &pack, locale),
+        success_answer: callback_answer(
+            callback_id,
+            Some(
+                match locale {
+                    Locale::Es => "listo, te dejé la factura",
+                    Locale::En => "invoice ready",
+                }
+                .to_owned(),
+            ),
+            false,
+        ),
+        failure_answer: callback_answer(
+            callback_id,
+            Some(
+                match locale {
+                    Locale::Es => "no pude armar la factura, probá de nuevo",
+                    Locale::En => "I could not create the invoice, try again",
+                }
+                .to_owned(),
+            ),
+            true,
+        ),
+    }))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -369,12 +574,14 @@ mod tests {
 
     use super::{
         BillingPackTerms, PaymentValidationError, PreCheckoutDecision, StarPaymentRecord,
-        SuccessfulPaymentDecision, default_billing_pack, evaluate_default_successful_payment,
-        evaluate_pre_checkout, evaluate_successful_payment, parse_topup_payload, payment_record,
-        plan_pre_checkout, successful_payment_reply,
+        SuccessfulPaymentDecision, TopupCallbackPlan, default_billing_pack,
+        evaluate_default_successful_payment, evaluate_pre_checkout, evaluate_successful_payment,
+        invoice_payload_locale, parse_topup_payload, payment_record, plan_pre_checkout,
+        plan_topup_callback, plan_topup_command, successful_payment_reply,
     };
     use crate::locale::Locale;
-    use crate::telegram_actions::TelegramAction;
+    use crate::telegram_actions::{LabeledPrice, TelegramAction};
+    use crate::telegram_input::{ChatId, MessageId};
 
     fn pack() -> BillingPackTerms {
         BillingPackTerms {
@@ -396,6 +603,188 @@ mod tests {
             })
         );
         assert_eq!(default_billing_pack("missing"), None);
+        assert_eq!(invoice_payload_locale("topup:p50:42:en"), Some("en"));
+        assert_eq!(invoice_payload_locale("topup:p50"), None);
+        assert_eq!(invoice_payload_locale("other:p50:42:en"), None);
+    }
+
+    #[test]
+    fn topup_command_plans_private_catalog_group_redirect_and_unavailable_reply() {
+        let private = plan_topup_command(
+            ChatId(42),
+            MessageId(7),
+            "/topup@mybot",
+            "@mybot",
+            Locale::En,
+            "private",
+            true,
+        );
+        let Some(TelegramAction::SendMessage(private)) = private else {
+            return;
+        };
+        assert_eq!(private.text, "choose how much you want to add:");
+        assert_eq!(private.reply_to_message_id, Some(MessageId(7)));
+        let keyboard =
+            private
+                .reply_markup
+                .unwrap_or(crate::telegram_actions::InlineKeyboardMarkup {
+                    inline_keyboard: Vec::new(),
+                });
+        assert_eq!(keyboard.inline_keyboard.len(), 6);
+        assert_eq!(
+            keyboard.inline_keyboard[0][0].callback_data.as_deref(),
+            Some("topup:p50")
+        );
+        assert_eq!(keyboard.inline_keyboard[0][0].text, "50.00 credits - 25 ⭐");
+
+        for (chat_type, available, bot_name, locale, expected) in [
+            (
+                "group",
+                true,
+                "@mybot",
+                Locale::Es,
+                "la recarga va por privado, abrime en @mybot",
+            ),
+            (
+                "group",
+                true,
+                "",
+                Locale::En,
+                "top-ups are private, open a DM with me",
+            ),
+            (
+                "private",
+                false,
+                "@mybot",
+                Locale::En,
+                "AI billing is unavailable, please tell the admin",
+            ),
+        ] {
+            let Some(TelegramAction::SendMessage(message)) = plan_topup_command(
+                ChatId(42),
+                MessageId(7),
+                "/topup",
+                bot_name,
+                locale,
+                chat_type,
+                available,
+            ) else {
+                return;
+            };
+            assert_eq!(message.text, expected);
+            assert!(message.reply_markup.is_none());
+        }
+        assert_eq!(
+            plan_topup_command(
+                ChatId(42),
+                MessageId(7),
+                "/balance",
+                "@mybot",
+                Locale::Es,
+                "private",
+                true,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn topup_callback_plans_invoice_and_all_guard_answers() {
+        let plan = plan_topup_callback(
+            Some("callback-1"),
+            "topup:p50",
+            ChatId(42),
+            "private",
+            Some(42),
+            true,
+            Locale::En,
+        );
+        assert_eq!(
+            plan,
+            TopupCallbackPlan::Invoice(Box::new(super::TopupInvoicePlan {
+                invoice: TelegramAction::SendInvoice {
+                    chat_id: ChatId(42),
+                    title: "50.00 AI credit pack".to_owned(),
+                    description: "Add 50.00 credits for AI messages".to_owned(),
+                    payload: "topup:p50:42:en".to_owned(),
+                    currency: "XTR".to_owned(),
+                    prices: vec![LabeledPrice {
+                        label: "50.00 AI credits".to_owned(),
+                        amount: 25,
+                    }],
+                },
+                success_answer: Some(TelegramAction::AnswerCallback {
+                    callback_id: "callback-1".to_owned(),
+                    text: Some("invoice ready".to_owned()),
+                    show_alert: false,
+                }),
+                failure_answer: Some(TelegramAction::AnswerCallback {
+                    callback_id: "callback-1".to_owned(),
+                    text: Some("I could not create the invoice, try again".to_owned()),
+                    show_alert: true,
+                }),
+            }))
+        );
+
+        for (data, chat_type, user_id, available, locale, expected, alert) in [
+            (
+                "topup:p50",
+                "private",
+                Some(42),
+                false,
+                Locale::Es,
+                Some("el cobro de ia no está andando, avisale al admin"),
+                true,
+            ),
+            (
+                "topup:p50",
+                "group",
+                Some(42),
+                true,
+                Locale::En,
+                Some("open this in a private chat"),
+                true,
+            ),
+            (
+                "topup:missing",
+                "private",
+                Some(42),
+                true,
+                Locale::Es,
+                Some("ese pack es fruta, elegí otro"),
+                true,
+            ),
+            ("topup:p50", "private", None, true, Locale::En, None, false),
+        ] {
+            assert_eq!(
+                plan_topup_callback(
+                    Some("callback-2"),
+                    data,
+                    ChatId(42),
+                    chat_type,
+                    user_id,
+                    available,
+                    locale,
+                ),
+                TopupCallbackPlan::Answer(Some(TelegramAction::AnswerCallback {
+                    callback_id: "callback-2".to_owned(),
+                    text: expected.map(ToOwned::to_owned),
+                    show_alert: alert,
+                }))
+            );
+        }
+        assert_eq!(
+            plan_topup_callback(
+                None,
+                "topup:p50",
+                ChatId(42),
+                "private",
+                None,
+                true,
+                Locale::En,
+            ),
+            TopupCallbackPlan::Answer(None)
+        );
     }
 
     #[test]

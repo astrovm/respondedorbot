@@ -22,8 +22,9 @@ use bot_core::telegram_actions::{SendMessage, TelegramAction};
 use bot_core::telegram_callbacks::{CallbackContextOutcome, CallbackRoute, parse_callback_context};
 use bot_core::telegram_input::{ChatId, MessageId, is_group_chat_type};
 use bot_core::telegram_payments::{
-    StarPaymentRecord, SuccessfulPaymentDecision, evaluate_default_successful_payment,
-    payment_record, plan_pre_checkout, successful_payment_reply,
+    StarPaymentRecord, SuccessfulPaymentDecision, TopupCallbackPlan,
+    evaluate_default_successful_payment, invoice_payload_locale, payment_record, plan_pre_checkout,
+    plan_topup_callback, plan_topup_command, successful_payment_reply,
 };
 use num_bigint::BigInt;
 use serde_json::{Map, Value};
@@ -45,6 +46,10 @@ pub trait ActionSink {
     fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error>;
 
     fn try_edit(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
+        self.execute(action).map(|_receipt| true)
+    }
+
+    fn try_invoice(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
         self.execute(action).map(|_receipt| true)
     }
 }
@@ -324,6 +329,53 @@ where
         let Ok(CallbackContextOutcome::Context { context }) = parsed else {
             return Ok(DispatchOutcome::LegacyRequired);
         };
+        if context.route == CallbackRoute::Topup {
+            let Ok(chat_id) = context.chat_id.parse::<i64>() else {
+                return Ok(DispatchOutcome::LegacyRequired);
+            };
+            let locale = resolve_locale(
+                None,
+                context.user_language_code.as_deref(),
+                &context.chat_type,
+            );
+            return match plan_topup_callback(
+                context.callback_id.as_deref(),
+                &context.data,
+                ChatId(chat_id),
+                &context.chat_type,
+                context.user_id,
+                self.billing_available,
+                locale,
+            ) {
+                TopupCallbackPlan::Answer(action) => {
+                    if let Some(action) = action {
+                        let _receipt = self
+                            .actions
+                            .execute(action)
+                            .map_err(DispatchError::Action)?;
+                    }
+                    Ok(DispatchOutcome::Handled)
+                }
+                TopupCallbackPlan::Invoice(plan) => {
+                    let sent = self
+                        .actions
+                        .try_invoice(plan.invoice)
+                        .map_err(DispatchError::Action)?;
+                    let answer = if sent {
+                        plan.success_answer
+                    } else {
+                        plan.failure_answer
+                    };
+                    if let Some(answer) = answer {
+                        let _receipt = self
+                            .actions
+                            .execute(answer)
+                            .map_err(DispatchError::Action)?;
+                    }
+                    Ok(DispatchOutcome::Handled)
+                }
+            };
+        }
         if context.route != CallbackRoute::Config {
             return Ok(DispatchOutcome::LegacyRequired);
         }
@@ -541,6 +593,16 @@ where
             is_group,
         ) {
             StatelessCommandPlan::Action(action)
+        } else if let Some(action) = plan_topup_command(
+            chat_id,
+            message_id,
+            &content.text,
+            &self.bot_name,
+            locale,
+            message.chat_type.as_deref().unwrap_or_default(),
+            self.billing_available,
+        ) {
+            StatelessCommandPlan::Action(action)
         } else if parsed.command == "/random" {
             match parse_random_selection(&parsed.message_text) {
                 Err(_) => StatelessCommandPlan::LegacyFallbackRequired,
@@ -679,7 +741,11 @@ where
                     .and_then(Value::as_object)
                     .and_then(|user| user.get("language_code"))
                     .and_then(Value::as_str);
-                let locale = resolve_locale(None, language_code, "private");
+                let payload_locale = query
+                    .get("invoice_payload")
+                    .and_then(Value::as_str)
+                    .and_then(invoice_payload_locale);
+                let locale = resolve_locale(payload_locale, language_code, "private");
                 match plan_pre_checkout(&Value::Object(query), self.billing_available, locale) {
                     Ok(Some(action)) => {
                         let _receipt = self
@@ -1718,7 +1784,7 @@ mod tests {
                 TelegramAction::AnswerPreCheckout {
                     query_id: "checkout-invalid".to_owned(),
                     ok: false,
-                    error_message: Some("ese pago vino raro y no te lo pude validar".to_owned()),
+                    error_message: Some("I could not validate this payment".to_owned()),
                 },
             ]
         );
@@ -1795,6 +1861,152 @@ mod tests {
             Ok(DispatchOutcome::LegacyRequired)
         );
         assert!(dispatcher.actions.0.is_empty());
+    }
+
+    #[test]
+    fn topup_command_and_callback_complete_the_native_invoice_flow() {
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            dispatcher.dispatch(update("/topup", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let Some(TelegramAction::SendMessage(command)) = dispatcher.actions.0.first() else {
+            return;
+        };
+        assert_eq!(command.text, "choose how much you want to add:");
+        assert_eq!(
+            command
+                .reply_markup
+                .as_ref()
+                .map(|markup| markup.inline_keyboard.len()),
+            Some(6)
+        );
+        assert_eq!(dispatcher.state.incoming.len(), 1);
+        assert_eq!(dispatcher.state.outgoing.len(), 1);
+
+        assert_eq!(
+            dispatcher.dispatch(callback_update("topup:p50", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [
+                TelegramAction::SendMessage(_),
+                TelegramAction::SendInvoice { payload, .. },
+                TelegramAction::AnswerCallback {
+                    text: Some(text),
+                    show_alert: false,
+                    ..
+                }
+            ] if payload == "topup:p50:88:en" && text == "invoice ready"
+        ));
+    }
+
+    #[test]
+    fn topup_invoice_failure_answers_with_an_alert_without_retrying_the_charge() {
+        #[derive(Default)]
+        struct InvoiceFailure(Vec<TelegramAction>);
+
+        impl ActionSink for InvoiceFailure {
+            type Error = Infallible;
+
+            fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
+                self.0.push(action);
+                Ok(ActionReceipt { message_id: None })
+            }
+
+            fn try_invoice(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
+                self.0.push(action);
+                Ok(false)
+            }
+        }
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            InvoiceFailure::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            dispatcher.dispatch(callback_update("topup:p50", "private", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [
+                TelegramAction::SendInvoice { .. },
+                TelegramAction::AnswerCallback {
+                    text: Some(text),
+                    show_alert: true,
+                    ..
+                }
+            ] if text == "no pude armar la factura, probá de nuevo"
+        ));
+    }
+
+    #[test]
+    fn topup_guards_are_native_and_do_not_load_chat_configuration() {
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            dispatcher.dispatch(callback_update("topup:missing", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        dispatcher.billing_available = false;
+        assert_eq!(
+            dispatcher.dispatch(callback_update("topup:p50", "private", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(dispatcher.config.chat_ids.is_empty());
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [
+                TelegramAction::AnswerCallback {
+                    text: Some(invalid),
+                    show_alert: true,
+                    ..
+                },
+                TelegramAction::AnswerCallback {
+                    text: Some(unavailable),
+                    show_alert: true,
+                    ..
+                }
+            ] if invalid == "that credit pack is invalid"
+                && unavailable == "el cobro de ia no está andando, avisale al admin"
+        ));
     }
 
     #[test]

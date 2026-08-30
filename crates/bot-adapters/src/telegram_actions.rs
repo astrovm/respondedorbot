@@ -128,6 +128,27 @@ fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
                 Some(Value::Object(payload)),
             )
         }
+        TelegramAction::SendInvoice {
+            chat_id,
+            title,
+            description,
+            payload,
+            currency,
+            prices,
+        } => (
+            "sendInvoice",
+            Method::POST,
+            None,
+            Some(json!({
+                "chat_id":chat_id.0,
+                "title":title,
+                "description":description,
+                "payload":payload,
+                "provider_token":"",
+                "currency":currency,
+                "prices":prices,
+            })),
+        ),
         TelegramAction::SendTyping { chat_id } => (
             "sendChatAction",
             Method::GET,
@@ -272,7 +293,8 @@ mod tests {
     use std::cell::RefCell;
 
     use bot_core::telegram_actions::{
-        InlineKeyboardButton, InlineKeyboardMarkup, ParseMode, SendMessage, TelegramAction,
+        InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, ParseMode, SendMessage,
+        TelegramAction,
     };
     use bot_core::telegram_input::{ChatId, MessageId};
     use bot_core::{locale::Locale, telegram_commands::telegram_commands};
@@ -384,6 +406,45 @@ mod tests {
             commands.is_some_and(|commands| commands.iter().any(|command| {
                 command.get("command") == Some(&serde_json::json!("help"))
                     && command.get("description") == Some(&serde_json::json!("show all commands"))
+            }))
+        );
+    }
+
+    #[test]
+    fn send_invoice_preserves_stars_payload_and_empty_provider_token() {
+        let transport = transport(r#"{"ok":true,"result":{"message_id":9}}"#);
+        assert_eq!(
+            execute_with(
+                &transport,
+                "synthetic-token",
+                TelegramAction::SendInvoice {
+                    chat_id: ChatId(42),
+                    title: "50.00 AI credit pack".to_owned(),
+                    description: "Add 50.00 credits for AI messages".to_owned(),
+                    payload: "topup:p50:42:en".to_owned(),
+                    currency: "XTR".to_owned(),
+                    prices: vec![LabeledPrice {
+                        label: "50.00 AI credits".to_owned(),
+                        amount: 25,
+                    }],
+                },
+            ),
+            Ok(ActionOutcome::Completed {
+                message_id: Some(9)
+            })
+        );
+        let request = &transport.requests.borrow()[0];
+        assert_eq!(request.endpoint, "sendInvoice");
+        assert_eq!(
+            request.json_payload,
+            Some(serde_json::json!({
+                "chat_id":42,
+                "title":"50.00 AI credit pack",
+                "description":"Add 50.00 credits for AI messages",
+                "payload":"topup:p50:42:en",
+                "provider_token":"",
+                "currency":"XTR",
+                "prices":[{"label":"50.00 AI credits","amount":25}],
             }))
         );
     }
