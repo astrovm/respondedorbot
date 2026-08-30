@@ -87,6 +87,21 @@ fn insert_optional<T: serde::Serialize>(
 
 fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
     let (endpoint, method, params, json_payload) = match action {
+        TelegramAction::SetCommands {
+            commands,
+            language_code,
+        } => {
+            let commands =
+                serde_json::to_string(&commands).map_err(|_| ActionError::InvalidAction)?;
+            let mut payload = Map::from_iter([("commands".to_owned(), json!(commands))]);
+            insert_optional(&mut payload, "language_code", language_code)?;
+            (
+                "setMyCommands",
+                Method::POST,
+                None,
+                Some(Value::Object(payload)),
+            )
+        }
         TelegramAction::SendMessage(message) => {
             let mut payload = Map::from_iter([
                 ("chat_id".to_owned(), json!(message.chat_id.0)),
@@ -260,6 +275,7 @@ mod tests {
         InlineKeyboardButton, InlineKeyboardMarkup, ParseMode, SendMessage, TelegramAction,
     };
     use bot_core::telegram_input::{ChatId, MessageId};
+    use bot_core::{locale::Locale, telegram_commands::telegram_commands};
 
     use super::{ActionOutcome, execute_with};
     use crate::telegram_http::{
@@ -329,6 +345,45 @@ mod tests {
                 "parse_mode":"HTML",
                 "disable_web_page_preview":true,
                 "reply_markup":{"inline_keyboard":[[{"text":"Open","url":"https://example.test"}]]}
+            }))
+        );
+    }
+
+    #[test]
+    fn set_commands_preserves_legacy_serialized_menu_payload() {
+        let transport = transport(r#"{"ok":true,"result":true}"#);
+        assert_eq!(
+            execute_with(
+                &transport,
+                "synthetic-token",
+                TelegramAction::SetCommands {
+                    commands: telegram_commands(Locale::En),
+                    language_code: Some("en".to_owned()),
+                },
+            ),
+            Ok(ActionOutcome::Completed { message_id: None })
+        );
+        let requests = transport.requests.borrow();
+        assert_eq!(requests[0].endpoint, "setMyCommands");
+        let payload = requests[0]
+            .json_payload
+            .as_ref()
+            .and_then(serde_json::Value::as_object);
+        assert_eq!(
+            payload
+                .and_then(|value| value.get("language_code"))
+                .and_then(serde_json::Value::as_str),
+            Some("en")
+        );
+        let commands = payload
+            .and_then(|value| value.get("commands"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| serde_json::from_str::<Vec<serde_json::Value>>(value).ok());
+        assert_eq!(commands.as_ref().map(Vec::len), Some(68));
+        assert!(
+            commands.is_some_and(|commands| commands.iter().any(|command| {
+                command.get("command") == Some(&serde_json::json!("help"))
+                    && command.get("description") == Some(&serde_json::json!("show all commands"))
             }))
         );
     }

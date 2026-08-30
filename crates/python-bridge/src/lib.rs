@@ -207,6 +207,7 @@ use bot_core::task_triggers::{
     parse_task_trigger as parse_task_trigger_core,
 };
 use bot_core::telegram_callbacks::parse_callback_context as parse_telegram_callback_context_core;
+use bot_core::telegram_commands::telegram_commands as telegram_commands_core;
 use bot_core::telegram_input::{
     extract_message_content as extract_telegram_message_content_core,
     extract_user_id as extract_telegram_user_id_core,
@@ -3194,6 +3195,17 @@ fn plan_native_stateless_command(
 }
 
 #[pyfunction]
+fn telegram_command_menu(locale: &str) -> PyResult<String> {
+    let locale = match locale {
+        "es" => Locale::Es,
+        "en" => Locale::En,
+        _ => return Err(PyValueError::new_err("unsupported locale")),
+    };
+    serde_json::to_string(&telegram_commands_core(locale))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
 fn telegram_parse_callback_context(callback_json: &str) -> PyResult<String> {
     let callback = serde_json::from_str(callback_json)
         .map_err(|error| PyValueError::new_err(format!("invalid JSON value: {error}")))?;
@@ -3638,6 +3650,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(telegram_extract_user_id, module)?)?;
     module.add_function(wrap_pyfunction!(telegram_format_user_identity, module)?)?;
     module.add_function(wrap_pyfunction!(plan_native_stateless_command, module)?)?;
+    module.add_function(wrap_pyfunction!(telegram_command_menu, module)?)?;
     module.add_function(wrap_pyfunction!(telegram_parse_callback_context, module)?)?;
     module.add_function(wrap_pyfunction!(telegram_evaluate_pre_checkout, module)?)?;
     module.add_function(wrap_pyfunction!(

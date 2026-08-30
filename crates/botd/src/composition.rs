@@ -16,6 +16,7 @@ use bot_core::command_state::{
     IncomingCommandWritePlan, OutgoingCommandWritePlan,
 };
 use bot_core::telegram_actions::TelegramAction;
+use bot_core::telegram_commands::command_publication_actions;
 use num_bigint::{BigInt, BigUint};
 use thiserror::Error;
 
@@ -238,6 +239,15 @@ impl<Transport: TelegramTransport> ActionSink for TelegramActionSink<Transport> 
     }
 }
 
+pub fn publish_telegram_commands<Actions: ActionSink>(
+    actions: &mut Actions,
+) -> Result<(), Actions::Error> {
+    for action in command_publication_actions() {
+        let _receipt = actions.execute(action)?;
+    }
+    Ok(())
+}
+
 pub type ConcreteNativeRuntime = PollingRuntime<
     TelegramUpdateSource<ReqwestTelegramTransport>,
     NativeDispatcher<
@@ -320,6 +330,7 @@ mod tests {
     use super::{
         RedisCommandState, SystemRandomError, SystemRandomSource, SystemRuntimeValues,
         TelegramActionSink, TelegramActionSinkError, TelegramUpdateSource, build_native_runtime,
+        publish_telegram_commands,
     };
 
     struct Transport {
@@ -470,6 +481,34 @@ mod tests {
                 TransportFailureKind::Connection
             ))
         );
+    }
+
+    #[test]
+    fn command_publication_executes_default_spanish_and_english_in_order() {
+        #[derive(Default)]
+        struct Published(Vec<TelegramAction>);
+
+        impl ActionSink for Published {
+            type Error = std::convert::Infallible;
+
+            fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
+                self.0.push(action);
+                Ok(ActionReceipt { message_id: None })
+            }
+        }
+
+        let mut published = Published::default();
+        assert_eq!(publish_telegram_commands(&mut published), Ok(()));
+        let languages = published
+            .0
+            .iter()
+            .filter_map(|action| match action {
+                TelegramAction::SetCommands { language_code, .. } => language_code.as_deref(),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(languages, ["es", "en"]);
+        assert_eq!(published.0.len(), 3);
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 use serde::Serialize;
 
+use crate::telegram_commands::TelegramCommand;
 use crate::telegram_input::{ChatId, MessageId};
 
 pub const MAX_TELEGRAM_TEXT_LENGTH: usize = 4096;
@@ -40,6 +41,10 @@ pub struct SendMessage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TelegramAction {
+    SetCommands {
+        commands: Vec<TelegramCommand>,
+        language_code: Option<String>,
+    },
     SendMessage(SendMessage),
     SendTyping {
         chat_id: ChatId,

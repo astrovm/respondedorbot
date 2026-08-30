@@ -46,6 +46,7 @@ pub mod stocks;
 pub mod task_triggers;
 pub mod telegram_actions;
 pub mod telegram_callbacks;
+pub mod telegram_commands;
 pub mod telegram_input;
 pub mod telegram_payments;
 pub mod telegram_streaming;

@@ -1321,6 +1321,16 @@ def verify_stateless_commands(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_telegram_commands(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "telegram_commands.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["menus"]:
+        encoded = bridge.telegram_command_menu(case["locale"])
+        menu = json.loads(encoded)
+        assert len(menu) == case["count"], case["locale"]
+        assert hashlib.sha256(encoded.encode()).hexdigest() == case["sha256"], case["locale"]
+
+
 def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_ai_usage_policy(bridge)
     verify_provider_error_policy(bridge)
@@ -1387,6 +1397,7 @@ def main(arguments: list[str]) -> int:
     verify_task_store_io(bridge)
     verify_billing_contracts(bridge)
     verify_stateless_commands(bridge)
+    verify_telegram_commands(bridge)
     verify_ai_orchestration_contracts(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
