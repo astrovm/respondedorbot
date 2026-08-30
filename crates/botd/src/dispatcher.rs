@@ -9,6 +9,10 @@ use bot_core::billing_commands::{
     TransferCommandContext, TransferCommandPlan, TransferResult, plan_transfer_command,
     transfer_result_reply,
 };
+use bot_core::bitcoin_commands::{
+    BitcoinCommand, bitcoin_price_error, classify_bitcoin_command, render_market_model,
+    render_satoshi,
+};
 use bot_core::charge_history::{
     ChargeHistoryCallbackPlan, ChargeHistoryPage, ChargesCommandContext, ChargesCommandPlan,
     charge_callback_answer, plan_charge_history_callback, plan_charges_command,
@@ -153,6 +157,10 @@ pub trait AdminCreditLogSource {
     fn load(&mut self, limit: usize) -> Result<Vec<CreditLogEntry>, String>;
 }
 
+pub trait BitcoinPriceSource {
+    fn price(&mut self, currency: &str) -> Result<Option<f64>, String>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchOutcome {
     Handled,
@@ -195,6 +203,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     admin_user_id: Option<i64>,
     admin_credit_sink: Option<Box<dyn AdminCreditSink>>,
     admin_creditlog_source: Option<Box<dyn AdminCreditLogSource>>,
+    bitcoin_price_source: Option<Box<dyn BitcoinPriceSource>>,
     last_outcome: Option<DispatchOutcome>,
     state_diagnostics: Vec<String>,
 }
@@ -235,6 +244,7 @@ where
             admin_user_id: None,
             admin_credit_sink: None,
             admin_creditlog_source: None,
+            bitcoin_price_source: None,
             last_outcome: None,
             state_diagnostics: Vec::new(),
         }
@@ -287,6 +297,12 @@ where
     #[must_use]
     pub fn with_admin_creditlog_source(mut self, source: Box<dyn AdminCreditLogSource>) -> Self {
         self.admin_creditlog_source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub fn with_bitcoin_price_source(mut self, source: Box<dyn BitcoinPriceSource>) -> Self {
+        self.bitcoin_price_source = Some(source);
         self
     }
 
@@ -1071,6 +1087,35 @@ where
                 CreditLogPlan::NotHandled => StatelessCommandPlan::NotHandled,
                 CreditLogPlan::LegacyRequired => StatelessCommandPlan::LegacyFallbackRequired,
             }
+        } else if let Some(bitcoin_command) = classify_bitcoin_command(&parsed.command) {
+            let Some(source) = self.bitcoin_price_source.as_mut() else {
+                return Ok(DispatchOutcome::LegacyRequired);
+            };
+            let mut price = |source: &mut Box<dyn BitcoinPriceSource>, currency: &str| {
+                source.price(currency).unwrap_or_else(|error| {
+                    self.state_diagnostics.push(format!(
+                        "bitcoin price chat_id={} command={} currency={currency}: {error}",
+                        chat_id.0, parsed.command
+                    ));
+                    None
+                })
+            };
+            let text = match bitcoin_command {
+                BitcoinCommand::Satoshi => match price(source, "USD") {
+                    None => bitcoin_price_error(bitcoin_command, "USD", locale),
+                    Some(price_usd) => match price(source, "ARS") {
+                        None => bitcoin_price_error(bitcoin_command, "ARS", locale),
+                        Some(price_ars) => render_satoshi(price_usd, price_ars, locale),
+                    },
+                },
+                BitcoinCommand::PowerLaw | BitcoinCommand::Rainbow => match price(source, "USD") {
+                    Some(price) => render_market_model(bitcoin_command, timestamp, price, locale),
+                    None => bitcoin_price_error(bitcoin_command, "USD", locale),
+                },
+            };
+            let mut message = SendMessage::new(chat_id, &text);
+            message.reply_to_message_id = Some(message_id);
+            StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if parsed.command == "/random" {
             match parse_random_selection(&parsed.message_text) {
                 Err(_) => StatelessCommandPlan::LegacyFallbackRequired,
@@ -1266,10 +1311,10 @@ mod tests {
 
     use super::{
         ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BillingBalanceSource,
-        BillingBalances, BillingTransferSink, ChargeHistoryPage, ChargeHistorySource,
-        ChatConfigSource, DispatchError, DispatchOutcome, GroupAuthorizationDecision,
-        GroupAuthorizer, MessageStateSink, NativeDispatcher, RandomSource, RuntimeValues,
-        StarPaymentReceipt, StarPaymentSink, TransferResult,
+        BillingBalances, BillingTransferSink, BitcoinPriceSource, ChargeHistoryPage,
+        ChargeHistorySource, ChatConfigSource, DispatchError, DispatchOutcome,
+        GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink, NativeDispatcher,
+        RandomSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink, TransferResult,
     };
     use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup};
 
@@ -1578,6 +1623,23 @@ mod tests {
         }
     }
 
+    type BitcoinPriceCalls = Rc<RefCell<Vec<String>>>;
+
+    struct BitcoinPrices {
+        results: Vec<Result<Option<f64>, String>>,
+        calls: BitcoinPriceCalls,
+    }
+
+    impl BitcoinPriceSource for BitcoinPrices {
+        fn price(&mut self, currency: &str) -> Result<Option<f64>, String> {
+            self.calls.borrow_mut().push(currency.to_owned());
+            if self.results.is_empty() {
+                return Err("no synthetic price".to_owned());
+            }
+            self.results.remove(0)
+        }
+    }
+
     type ChargeHistoryCalls = Rc<RefCell<Vec<(i64, usize, Option<i64>, String)>>>;
 
     struct ChargeHistories {
@@ -1883,6 +1945,128 @@ mod tests {
         );
         assert_eq!(dispatcher.state.incoming.len(), 2);
         assert_eq!(dispatcher.state.outgoing.len(), 2);
+    }
+
+    #[test]
+    fn dispatches_bitcoin_quote_and_reference_model_commands() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_bitcoin_price_source(Box::new(BitcoinPrices {
+            results: vec![
+                Ok(Some(50_000.0)),
+                Ok(Some(10_000_000.0)),
+                Ok(Some(50_000.0)),
+                Ok(Some(50_000.0)),
+            ],
+            calls: Rc::clone(&calls),
+        }));
+        for command in ["/sats", "/powerlaw", "/rainbow"] {
+            assert_eq!(
+                dispatcher.dispatch(update(command, Some("es"))),
+                Ok(DispatchOutcome::Handled)
+            );
+        }
+        assert_eq!(calls.borrow().as_slice(), &["USD", "ARS", "USD", "USD"]);
+        let texts = dispatcher
+            .actions
+            .0
+            .iter()
+            .filter_map(|action| match action {
+                TelegramAction::SendMessage(message) => Some(message.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            texts[0],
+            "1 satoshi = $0.00050000 USD\n1 satoshi = $0.1000 ARS\n\n$1 USD = 2,000 sats\n$1 ARS = 10.000 sats"
+        );
+        assert!(texts[1].starts_with("power law estimates BTC at "));
+        assert!(texts[2].starts_with("rainbow chart estimates BTC at "));
+        assert_eq!(dispatcher.state.incoming.len(), 3);
+        assert_eq!(dispatcher.state.outgoing.len(), 3);
+    }
+
+    #[test]
+    fn bitcoin_price_failures_are_localized_diagnostic_and_legacy_safe() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_bitcoin_price_source(Box::new(BitcoinPrices {
+            results: vec![
+                Err("synthetic USD failure".to_owned()),
+                Ok(Some(50_000.0)),
+                Ok(None),
+            ],
+            calls: Rc::clone(&calls),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(update("/powerlaw", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(dispatcher.state_diagnostics()[0].contains("synthetic USD failure"));
+        assert_eq!(
+            dispatcher.dispatch(update("/satoshi", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        let texts = dispatcher
+            .actions
+            .0
+            .iter()
+            .filter_map(|action| match action {
+                TelegramAction::SendMessage(message) => Some(message.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            texts,
+            vec![
+                "no pude traer el precio de BTC para calcular power law",
+                "no pude traer el precio de BTC en ARS"
+            ]
+        );
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut missing = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            missing.dispatch(update("/sat", None)),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
     }
 
     #[test]

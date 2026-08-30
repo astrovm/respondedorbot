@@ -4,6 +4,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bot_adapters::billing_read::{BillingRepository, ChargeHistoryRow};
 use bot_adapters::chat_config::{ChatConfigRepository, ChatConfigRepositoryError};
+use bot_adapters::coinmarketcap::{
+    BitcoinPriceOutcome, CoinMarketCapTransport, ReqwestCoinMarketCapTransport,
+    TransportFailureKind as CoinMarketCapTransportFailureKind, fetch_bitcoin_price,
+};
 use bot_adapters::redis_chat_admin::{cache_chat_admin, get_cached_chat_admin};
 use bot_adapters::redis_connection::RedisEndpoint;
 use bot_adapters::redis_message_state::{RedisMessageState, RedisMessageStateError};
@@ -27,9 +31,9 @@ use thiserror::Error;
 
 use crate::dispatcher::{
     ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BillingBalanceSource,
-    BillingBalances, BillingTransferSink, ChargeHistorySource, ChatConfigSource,
-    GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink, NativeDispatcher, RandomSource,
-    RuntimeValues, StarPaymentReceipt, StarPaymentSink,
+    BillingBalances, BillingTransferSink, BitcoinPriceSource, ChargeHistorySource,
+    ChatConfigSource, GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink,
+    NativeDispatcher, RandomSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink,
 };
 use crate::runtime::{PollingRuntime, UpdateSource};
 
@@ -61,6 +65,29 @@ impl AdminCreditLogSource for BillingRepository {
                     .collect()
             })
             .map_err(|error| error.to_string())
+    }
+}
+
+struct CoinMarketCapBitcoinPriceSource<T> {
+    transport: T,
+    api_key: String,
+}
+
+impl<T: CoinMarketCapTransport> BitcoinPriceSource for CoinMarketCapBitcoinPriceSource<T> {
+    fn price(&mut self, currency: &str) -> Result<Option<f64>, String> {
+        match fetch_bitcoin_price(&self.transport, &self.api_key, currency) {
+            BitcoinPriceOutcome::Price(price) => Ok(Some(price)),
+            BitcoinPriceOutcome::Missing => Ok(None),
+            BitcoinPriceOutcome::HttpError { status_code } => {
+                Err(format!("CoinMarketCap returned HTTP {status_code}"))
+            }
+            BitcoinPriceOutcome::InvalidJson => {
+                Err("CoinMarketCap returned invalid JSON".to_owned())
+            }
+            BitcoinPriceOutcome::TransportError(kind) => {
+                Err(format!("CoinMarketCap transport failed: {kind:?}"))
+            }
+        }
     }
 }
 
@@ -509,18 +536,25 @@ pub enum CompositionError {
     ActionTransport(TransportFailureKind),
     #[error("could not construct Telegram chat-admin transport: {0:?}")]
     AdminTransport(TransportFailureKind),
+    #[error("could not construct CoinMarketCap transport: {0:?}")]
+    CoinMarketCapTransport(CoinMarketCapTransportFailureKind),
     #[error("could not construct Redis command state: {0}")]
     RedisState(#[from] RedisMessageStateError),
 }
 
+pub struct NativeRuntimeOptions<'a> {
+    pub token: &'a str,
+    pub database_url: &'a str,
+    pub bot_name: &'a str,
+    pub instance_name: Option<String>,
+    pub redis_endpoint: &'a RedisEndpoint,
+    pub long_poll_timeout: Duration,
+    pub admin_user_id: Option<i64>,
+    pub coinmarketcap_key: Option<String>,
+}
+
 pub fn build_native_runtime(
-    token: &str,
-    database_url: &str,
-    bot_name: &str,
-    instance_name: Option<String>,
-    redis_endpoint: &RedisEndpoint,
-    long_poll_timeout: Duration,
-    admin_user_id: Option<i64>,
+    options: NativeRuntimeOptions<'_>,
 ) -> Result<ConcreteNativeRuntime, CompositionError> {
     let polling_transport =
         ReqwestTelegramTransport::new().map_err(CompositionError::PollingTransport)?;
@@ -528,30 +562,41 @@ pub fn build_native_runtime(
         ReqwestTelegramTransport::new().map_err(CompositionError::ActionTransport)?;
     let admin_transport =
         ReqwestTelegramTransport::new().map_err(CompositionError::AdminTransport)?;
-    let source = TelegramUpdateSource::new(polling_transport, token, long_poll_timeout);
-    let config = ChatConfigRepository::new(database_url);
-    let actions = TelegramActionSink::new(action_transport, token);
-    let state = RedisCommandState::new(redis_endpoint)?;
-    let authorization = TelegramGroupAuthorizer::new(admin_transport, token, redis_endpoint);
-    Ok(PollingRuntime::new(
-        source,
-        NativeDispatcher::new(
-            config,
-            actions,
-            state,
-            SystemRuntimeValues::new(instance_name),
-            SystemRandomSource,
-            authorization,
-            bot_name,
-        )
-        .with_payment_sink(Box::new(BillingRepository::new(database_url)))
-        .with_balance_source(Box::new(BillingRepository::new(database_url)))
-        .with_transfer_sink(Box::new(BillingRepository::new(database_url)))
-        .with_charge_history_source(Box::new(BillingRepository::new(database_url)))
-        .with_admin_user_id(admin_user_id)
-        .with_admin_credit_sink(Box::new(BillingRepository::new(database_url)))
-        .with_admin_creditlog_source(Box::new(BillingRepository::new(database_url))),
-    ))
+    let source =
+        TelegramUpdateSource::new(polling_transport, options.token, options.long_poll_timeout);
+    let config = ChatConfigRepository::new(options.database_url);
+    let actions = TelegramActionSink::new(action_transport, options.token);
+    let state = RedisCommandState::new(options.redis_endpoint)?;
+    let authorization =
+        TelegramGroupAuthorizer::new(admin_transport, options.token, options.redis_endpoint);
+    let dispatcher = NativeDispatcher::new(
+        config,
+        actions,
+        state,
+        SystemRuntimeValues::new(options.instance_name),
+        SystemRandomSource,
+        authorization,
+        options.bot_name,
+    )
+    .with_payment_sink(Box::new(BillingRepository::new(options.database_url)))
+    .with_balance_source(Box::new(BillingRepository::new(options.database_url)))
+    .with_transfer_sink(Box::new(BillingRepository::new(options.database_url)))
+    .with_charge_history_source(Box::new(BillingRepository::new(options.database_url)))
+    .with_admin_user_id(options.admin_user_id)
+    .with_admin_credit_sink(Box::new(BillingRepository::new(options.database_url)))
+    .with_admin_creditlog_source(Box::new(BillingRepository::new(options.database_url)));
+    let dispatcher = if let Some(api_key) = options.coinmarketcap_key.filter(|key| !key.is_empty())
+    {
+        let transport = ReqwestCoinMarketCapTransport::new()
+            .map_err(CompositionError::CoinMarketCapTransport)?;
+        dispatcher.with_bitcoin_price_source(Box::new(CoinMarketCapBitcoinPriceSource {
+            transport,
+            api_key,
+        }))
+    } else {
+        dispatcher
+    };
+    Ok(PollingRuntime::new(source, dispatcher))
 }
 
 #[cfg(test)]
@@ -589,9 +634,9 @@ mod tests {
     use super::build_charge_history_page;
 
     use super::{
-        RedisCommandState, SystemRandomError, SystemRandomSource, SystemRuntimeValues,
-        TelegramActionSink, TelegramActionSinkError, TelegramGroupAuthorizer, TelegramUpdateSource,
-        build_native_runtime, publish_telegram_commands,
+        NativeRuntimeOptions, RedisCommandState, SystemRandomError, SystemRandomSource,
+        SystemRuntimeValues, TelegramActionSink, TelegramActionSinkError, TelegramGroupAuthorizer,
+        TelegramUpdateSource, build_native_runtime, publish_telegram_commands,
     };
 
     struct Transport {
@@ -1138,19 +1183,21 @@ mod tests {
 
     #[test]
     fn concrete_runtime_composes_without_contacting_external_services() {
-        let result = build_native_runtime(
-            "synthetic-token",
-            "postgresql://synthetic.invalid/database",
-            "@synthetic_bot",
-            Some("synthetic-instance".to_owned()),
-            &RedisEndpoint {
-                host: "127.0.0.1".to_owned(),
-                port: 1,
-                password: None,
-            },
-            Duration::from_secs(30),
-            Some(99),
-        );
+        let endpoint = RedisEndpoint {
+            host: "127.0.0.1".to_owned(),
+            port: 1,
+            password: None,
+        };
+        let result = build_native_runtime(NativeRuntimeOptions {
+            token: "synthetic-token",
+            database_url: "postgresql://synthetic.invalid/database",
+            bot_name: "@synthetic_bot",
+            instance_name: Some("synthetic-instance".to_owned()),
+            redis_endpoint: &endpoint,
+            long_poll_timeout: Duration::from_secs(30),
+            admin_user_id: Some(99),
+            coinmarketcap_key: None,
+        });
         assert!(result.is_ok());
     }
 }

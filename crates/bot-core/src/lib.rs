@@ -11,6 +11,7 @@ pub mod ai_settlement;
 pub mod ai_usage;
 pub mod base_conversion;
 pub mod billing_commands;
+pub mod bitcoin_commands;
 pub mod cache_policy;
 pub mod charge_history;
 pub mod chat_config;
