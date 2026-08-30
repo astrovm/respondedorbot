@@ -30,7 +30,7 @@ pub enum TelegramInputError {
     InvalidPoll,
 }
 
-fn python_truthy(value: &Value) -> bool {
+pub(crate) fn python_truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
         Value::Bool(value) => *value,
@@ -41,7 +41,7 @@ fn python_truthy(value: &Value) -> bool {
     }
 }
 
-fn python_string(value: &Value) -> String {
+pub(crate) fn python_string(value: &Value) -> String {
     match value {
         Value::Null => "None".to_owned(),
         Value::Bool(true) => "True".to_owned(),

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
 from api.core.rust_bridge import load_rust_bridge
+from api.core.rust_telegram_callbacks import load_rust_telegram_callbacks
 from api.i18n import resolve_locale, tr, use_locale
 
 
@@ -419,6 +420,53 @@ def _callback_context(
     callback_query: dict[str, Any],
     deps: CallbackQueryDeps,
 ) -> CallbackContext | None:
+    rust = load_rust_telegram_callbacks()
+    if rust is not None:
+        try:
+            result = json.loads(
+                rust.telegram_parse_callback_context(
+                    json.dumps(callback_query, separators=(",", ":"))
+                )
+            )
+            if not isinstance(result, Mapping):
+                raise ValueError("Rust callback parser result is not an object")
+            if result.get("kind") == "guard":
+                deps.guard_callback(callback_query.get("id"), True)
+                return None
+            context = result.get("context")
+            if result.get("kind") != "context" or not isinstance(context, Mapping):
+                raise ValueError("Rust callback parser returned an unknown outcome")
+            callback_id = context.get("callback_id")
+            data = context.get("data")
+            chat_id = context.get("chat_id")
+            chat_type = context.get("chat_type")
+            message_id = context.get("message_id")
+            route = context.get("route")
+            if (
+                (callback_id is not None and not isinstance(callback_id, str))
+                or not isinstance(data, str)
+                or not isinstance(chat_id, str)
+                or not isinstance(chat_type, str)
+                or not isinstance(message_id, int)
+                or isinstance(message_id, bool)
+                or route
+                not in {"topup", "charges", "task", "signal", "config", "unknown"}
+            ):
+                raise ValueError("Rust callback parser returned invalid fields")
+            user = callback_query.get("from") or {}
+            if not isinstance(user, dict):
+                raise ValueError("Telegram callback sender is not an object")
+            return CallbackContext(
+                callback_id=callback_id,
+                data=data,
+                chat_id=chat_id,
+                chat_type=chat_type,
+                message_id=message_id,
+                user=user,
+            )
+        except Exception:
+            logger.exception("Rust callback parsing failed; using Python fallback")
+
     callback_data = callback_query.get("data")
     callback_id = callback_query.get("id")
     message = callback_query.get("message") or {}

@@ -1259,6 +1259,18 @@ def verify_telegram_input(bridge: ModuleType) -> None:
         )
 
 
+def verify_telegram_callbacks(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "telegram_callbacks.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["scenarios"]:
+        actual = json.loads(
+            bridge.telegram_parse_callback_context(
+                json.dumps(case["input"], separators=(",", ":"))
+            )
+        )
+        assert actual == case["expected"], case["name"]
+
+
 def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_ai_usage_policy(bridge)
     verify_provider_error_policy(bridge)
@@ -1285,6 +1297,7 @@ def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_giphy_adapter(bridge)
     verify_stock_market(bridge)
     verify_telegram_input(bridge)
+    verify_telegram_callbacks(bridge)
 
 
 def main(arguments: list[str]) -> int:
