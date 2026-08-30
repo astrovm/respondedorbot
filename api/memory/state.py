@@ -17,6 +17,7 @@ from typing import (
     List,
     Mapping,
     Optional,
+    Protocol,
     Set,
     Union,
     cast,
@@ -24,6 +25,7 @@ from typing import (
 
 import redis
 
+from api.core.rust_bridge import load_rust_bridge
 from api.i18n import tr
 
 from api.bot.chat_context import format_user_identity
@@ -41,6 +43,28 @@ CHAT_SUMMARY_TTL = CHAT_STATE_TTL
 CHAT_SEARCH_INDEX = "idx:chat_messages"
 
 _SEARCH_INDEX_READY = False
+
+
+class _RustMessageState(Protocol):
+    def prepare_message_write(
+        self,
+        chat_id: str,
+        message_id: str,
+        text: str,
+        timestamp: int,
+        role: str | None,
+        user_id: str | None,
+        username: str | None,
+        reply_to_message_id: str | None,
+        mentions_bot: bool,
+    ) -> str: ...
+
+
+def _load_rust_message_state() -> _RustMessageState | None:
+    module = load_rust_bridge("RUST_MESSAGE_STATE_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustMessageState, module)
 
 _SAVE_MESSAGE_SCRIPT = """
 local legacy_type = redis.call('TYPE', KEYS[3]).ok
@@ -300,6 +324,68 @@ def fetch_chat_messages_for_compaction(
         return []
 
 
+def _prepare_message_write(
+    chat_id: str,
+    message_id: str,
+    text: str,
+    timestamp: int,
+    role: Optional[str],
+    user_id: Optional[str],
+    username: Optional[str],
+    reply_to_message_id: Optional[str],
+    mentions_bot: bool,
+) -> Dict[str, Any]:
+    rust = _load_rust_message_state()
+    if rust is not None:
+        try:
+            prepared = json.loads(
+                rust.prepare_message_write(
+                    chat_id,
+                    message_id,
+                    text,
+                    timestamp,
+                    role,
+                    user_id,
+                    username,
+                    reply_to_message_id,
+                    mentions_bot,
+                )
+            )
+            if isinstance(prepared, dict):
+                return cast(Dict[str, Any], prepared)
+        except Exception:
+            pass
+
+    effective_role = role or ("assistant" if message_id.startswith("bot_") else "user")
+    truncated_text = truncate_text(text)
+    return {
+        "keys": {
+            "history": f"chat_history:{chat_id}",
+            "order": f"chat_message_order:{chat_id}",
+            "legacy_ids": f"chat_message_ids:{chat_id}",
+            "sequence": f"chat_message_sequence:{chat_id}",
+            "search_document": _search_doc_key(chat_id, message_id),
+        },
+        "message_id": message_id,
+        "history_entry": json.dumps(
+            {
+                "id": message_id,
+                "text": truncated_text,
+                "timestamp": timestamp,
+                "role": effective_role,
+            }
+        ),
+        "chat_id": chat_id,
+        "role": effective_role,
+        "user_id": str(user_id or ""),
+        "username": str(username or ""),
+        "text": truncated_text,
+        "timestamp": timestamp,
+        "reply_to_message_id": str(reply_to_message_id or ""),
+        "mentions_bot": "1" if mentions_bot else "0",
+    }
+
+
 def save_message_to_redis(
     chat_id: str,
     message_id: str,
@@ -316,22 +402,19 @@ def save_message_to_redis(
     """Atomically persist one message in recent and searchable history."""
 
     try:
-        chat_history_key = f"chat_history:{chat_id}"
-        message_order_key = f"chat_message_order:{chat_id}"
-        legacy_message_ids_key = f"chat_message_ids:{chat_id}"
-        sequence_key = f"chat_message_sequence:{chat_id}"
-        search_doc_key = _search_doc_key(chat_id, message_id)
-        effective_role = role or ("assistant" if str(message_id).startswith("bot_") else "user")
         timestamp = int(time.time())
-        truncated_text = truncate_text(text)
-        history_entry = json.dumps(
-            {
-                "id": message_id,
-                "text": truncated_text,
-                "timestamp": timestamp,
-                "role": effective_role,
-            }
+        plan = _prepare_message_write(
+            chat_id,
+            message_id,
+            text,
+            timestamp,
+            role,
+            user_id,
+            username,
+            reply_to_message_id,
+            mentions_bot,
         )
+        keys = cast(Mapping[str, str], plan["keys"])
 
         try:
             _ensure_search_index(redis_client)
@@ -340,23 +423,23 @@ def save_message_to_redis(
         redis_client.eval(
             _SAVE_MESSAGE_SCRIPT,
             5,
-            chat_history_key,
-            message_order_key,
-            legacy_message_ids_key,
-            sequence_key,
-            search_doc_key,
-            message_id,
-            history_entry,
+            keys["history"],
+            keys["order"],
+            keys["legacy_ids"],
+            keys["sequence"],
+            keys["search_document"],
+            plan["message_id"],
+            plan["history_entry"],
             CHAT_STATE_TTL,
             CHAT_HISTORY_MAX_MESSAGES * 2,
-            chat_id,
-            effective_role,
-            str(user_id or ""),
-            str(username or ""),
-            truncated_text,
-            timestamp,
-            str(reply_to_message_id or ""),
-            "1" if mentions_bot else "0",
+            plan["chat_id"],
+            plan["role"],
+            plan["user_id"],
+            plan["username"],
+            plan["text"],
+            plan["timestamp"],
+            plan["reply_to_message_id"],
+            plan["mentions_bot"],
         )
 
     except Exception as error:

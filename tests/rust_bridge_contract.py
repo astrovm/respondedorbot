@@ -253,6 +253,31 @@ def verify_cache_policy(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_message_state(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "message_state.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["writes"]:
+        request = case["input"]
+        actual = json.loads(
+            bridge.prepare_message_write(
+                request["chat_id"],
+                request["message_id"],
+                request["text"],
+                request["timestamp"],
+                request["role"],
+                request["user_id"],
+                request["username"],
+                request["reply_to_message_id"],
+                request["mentions_bot"],
+            )
+        )
+        actual["history_entry"] = json.loads(actual["history_entry"])
+        if "expected" in case:
+            assert actual == case["expected"], case["name"]
+        else:
+            assert actual["role"] == case["expected_role"], case["name"]
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -323,6 +348,7 @@ def main(arguments: list[str]) -> int:
     verify_link_parsing(bridge)
     verify_admin_reports(bridge)
     verify_cache_policy(bridge)
+    verify_message_state(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

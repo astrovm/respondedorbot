@@ -1,0 +1,58 @@
+{
+  "writes": [
+    {
+      "name": "versioned user message",
+      "input": {
+        "chat_id": "-1001",
+        "message_id": "42",
+        "text": "hello",
+        "timestamp": 1788000000,
+        "role": null,
+        "user_id": "7",
+        "username": "astro",
+        "reply_to_message_id": "41",
+        "mentions_bot": true
+      },
+      "expected": {
+        "keys": {
+          "history": "chat_history:-1001",
+          "order": "chat_message_order:-1001",
+          "legacy_ids": "chat_message_ids:-1001",
+          "sequence": "chat_message_sequence:-1001",
+          "search_document": "chatmsg:-1001:42"
+        },
+        "message_id": "42",
+        "history_entry": {
+          "schema_version": 1,
+          "id": "42",
+          "text": "hello",
+          "timestamp": 1788000000,
+          "role": "user"
+        },
+        "chat_id": "-1001",
+        "role": "user",
+        "user_id": "7",
+        "username": "astro",
+        "text": "hello",
+        "timestamp": 1788000000,
+        "reply_to_message_id": "41",
+        "mentions_bot": "1"
+      }
+    },
+    {
+      "name": "default bot message",
+      "input": {
+        "chat_id": "1",
+        "message_id": "bot_9",
+        "text": "response",
+        "timestamp": 1788000001,
+        "role": "",
+        "user_id": null,
+        "username": null,
+        "reply_to_message_id": null,
+        "mentions_bot": false
+      },
+      "expected_role": "assistant"
+    }
+  ]
+}

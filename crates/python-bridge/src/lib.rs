@@ -46,6 +46,7 @@ use bot_core::market_context::{
 use bot_core::market_models::{
     MarketModel, Valuation, evaluate_market_model as evaluate_market_model_core,
 };
+use bot_core::message_state::prepare_message_write as prepare_message_write_core;
 use bot_core::polymarket::{MarketOutcome, rank_outcomes as rank_outcomes_core};
 use bot_core::price_queries::{
     AmountConversion, PriceQuery, ProviderScope, parse_price_query as parse_price_query_core,
@@ -1155,6 +1156,35 @@ fn last_success_ttl(ttl: i64, stale_grace: i64) -> i64 {
     last_success_ttl_core(ttl, stale_grace)
 }
 
+/// Prepare a versioned message entry and all keys for the existing atomic Redis write.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn prepare_message_write(
+    chat_id: &str,
+    message_id: &str,
+    text: &str,
+    timestamp: i64,
+    role: Option<&str>,
+    user_id: Option<&str>,
+    username: Option<&str>,
+    reply_to_message_id: Option<&str>,
+    mentions_bot: bool,
+) -> PyResult<String> {
+    let plan = prepare_message_write_core(
+        chat_id,
+        message_id,
+        text,
+        timestamp,
+        role,
+        user_id,
+        username,
+        reply_to_message_id,
+        mentions_bot,
+    )
+    .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serde_json::to_string(&plan).map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -1240,6 +1270,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(request_cache_history_key, module)?)?;
     module.add_function(wrap_pyfunction!(request_cache_ttl, module)?)?;
     module.add_function(wrap_pyfunction!(last_success_ttl, module)?)?;
+    module.add_function(wrap_pyfunction!(prepare_message_write, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;
