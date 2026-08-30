@@ -190,6 +190,18 @@ def verify_hacker_news(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_config_callbacks(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "config_callbacks.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["cases"]:
+        actual = json.loads(
+            bridge.evaluate_config_callback(
+                json.dumps(case["input"], separators=(",", ":"))
+            )
+        )
+        assert actual == case["expected"], case["name"]
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -256,6 +268,7 @@ def main(arguments: list[str]) -> int:
     verify_weather_selection(bridge)
     verify_polymarket_ranking(bridge)
     verify_hacker_news(bridge)
+    verify_config_callbacks(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

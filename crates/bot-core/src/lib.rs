@@ -3,6 +3,7 @@
 pub mod base_conversion;
 pub mod command_normalization;
 pub mod command_parsing;
+pub mod config_callbacks;
 pub mod credit_units;
 pub mod devo;
 pub mod hacker_news;

@@ -34,6 +34,7 @@ Rows not listed under migrated components remain Python-authoritative.
 | Weather location and forecast-row selection | `rust-flagged` | `RUST_WEATHER_SELECTION_ENABLED=0` or missing bridge | `contracts/weather_selection.json` |
 | Polymarket live-price reconciliation and ranking | `rust-flagged` | `RUST_POLYMARKET_RANKING_ENABLED=0` or missing bridge | `contracts/polymarket_ranking.json` |
 | Hacker News item normalization and formatting | `rust-flagged` | `RUST_HACKER_NEWS_ENABLED=0` or missing bridge | `contracts/hacker_news.json` |
+| Chat-configuration callback transitions | `rust-flagged` | `RUST_CONFIG_CALLBACKS_ENABLED=0` or missing bridge | `contracts/config_callbacks.json` |
 | Automatic media-routing decision | `rust-flagged` | `RUST_MEDIA_ROUTING_ENABLED=0` or missing bridge | `contracts/media_routing.json` |
 | General response-routing state machine | `rust-flagged` | `RUST_RESPONSE_ROUTING_ENABLED=0` or missing bridge | `contracts/response_routing.json` |
 | Base-conversion command | `rust-flagged` | `RUST_BASE_CONVERSION_ENABLED=0` or missing bridge | `contracts/base_conversion.json` |

@@ -2,11 +2,28 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol, cast
 
+from api.core.rust_bridge import load_rust_bridge
 from api.i18n import resolve_locale, tr, use_locale
+
+
+class _RustConfigCallbacks(Protocol):
+    def evaluate_config_callback(self, input_json: str) -> str: ...
+
+
+logger = logging.getLogger(__name__)
+
+
+def _load_rust_config_callbacks() -> _RustConfigCallbacks | None:
+    module = load_rust_bridge("RUST_CONFIG_CALLBACKS_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustConfigCallbacks, module)
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +240,126 @@ def _update_creditless_limit(
     )
 
 
+def _numeric_callback_value(value: str) -> int | None:
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _rust_callback_input(
+    config: Mapping[str, Any],
+    action: str,
+    value: str,
+    *,
+    context: ConfigUpdateContext,
+) -> dict[str, Any] | None:
+    toggle_fields = {
+        "random": "ai_random_replies",
+        "followups": "ai_command_followups",
+        "linkfixfollowups": "ignore_link_fix_followups",
+    }
+    current_toggle = None
+    if field := toggle_fields.get(action):
+        current_toggle = context.deps.coerce_bool(config.get(field), default=True)
+
+    current_creditless = None
+    if action == "creditless":
+        try:
+            current_creditless = int(
+                config.get(
+                    "creditless_user_hourly_limit",
+                    config.get("creditless_user_daily_limit", 5),
+                )
+            )
+        except TypeError, ValueError:
+            return None
+        if value == "increase" and current_creditless >= 2**63 - 1:
+            return None
+
+    return {
+        "action": action,
+        "value": value,
+        "current_toggle": current_toggle,
+        "current_creditless_limit": current_creditless,
+        "numeric_value": _numeric_callback_value(value),
+        "timezone_min": context.deps.timezone_offset_min,
+        "timezone_max": context.deps.timezone_offset_max,
+    }
+
+
+def _apply_rust_config_evaluation(
+    config: dict[str, Any],
+    evaluation: Mapping[str, Any],
+    value: str,
+    *,
+    context: ConfigUpdateContext,
+) -> tuple[dict[str, Any], bool] | None:
+    kind = evaluation["kind"]
+    if kind == "no_change":
+        return config, False
+    if kind == "guard_current":
+        context.deps.guard_callback(context.callback_id, True)
+        return config, True
+    if kind in {"invalid_timezone", "invalid_creditless_limit"}:
+        message = (
+            "Invalid timezone callback value"
+            if kind == "invalid_timezone"
+            else "Invalid creditless callback value"
+        )
+        context.deps.log_event(
+            message,
+            {"chat_id": context.chat_id, "value": value},
+        )
+        return config, False
+
+    fields = {
+        "set_language": "language",
+        "set_link_mode": "link_mode",
+        "set_timezone": "timezone_offset",
+        "set_creditless_limit": "creditless_user_hourly_limit",
+    }
+    field = evaluation.get("field") if kind == "set_toggle" else fields.get(kind)
+    if not isinstance(field, str) or "value" not in evaluation:
+        logger.error("Rust config callback returned an invalid update kind: %s", kind)
+        return None
+    return (
+        context.deps.set_chat_config(
+            context.chat_id,
+            **{field: evaluation["value"]},
+        ),
+        False,
+    )
+
+
+def _update_callback_config_rust(
+    config: dict[str, Any],
+    action: str,
+    value: str,
+    *,
+    context: ConfigUpdateContext,
+) -> tuple[dict[str, Any], bool] | None:
+    rust = _load_rust_config_callbacks()
+    if rust is None:
+        return None
+    input_data = _rust_callback_input(config, action, value, context=context)
+    if input_data is None:
+        return None
+    try:
+        evaluation = json.loads(
+            rust.evaluate_config_callback(json.dumps(input_data, separators=(",", ":")))
+        )
+    except Exception:
+        logger.exception("Rust config callback evaluation failed; using Python")
+        return None
+    return _apply_rust_config_evaluation(
+        config,
+        evaluation,
+        value,
+        context=context,
+    )
+
+
 def update_callback_config(
     config: dict[str, Any],
     action: str,
@@ -230,6 +367,15 @@ def update_callback_config(
     *,
     context: ConfigUpdateContext,
 ) -> tuple[dict[str, Any], bool]:
+    rust_result = _update_callback_config_rust(
+        config,
+        action,
+        value,
+        context=context,
+    )
+    if rust_result is not None:
+        return rust_result
+
     toggle_fields = {
         "random": "ai_random_replies",
         "followups": "ai_command_followups",

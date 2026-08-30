@@ -8,6 +8,10 @@ use serde_json::{Map, Value};
 use bot_core::base_conversion::{BaseConversion, convert_base as convert_base_core};
 use bot_core::command_normalization::normalize_command_text as normalize_command_text_core;
 use bot_core::command_parsing::parse_command as parse_command_core;
+use bot_core::config_callbacks::{
+    ConfigCallbackEvaluation, ConfigCallbackInput, ToggleField,
+    evaluate_config_callback as evaluate_config_callback_core,
+};
 use bot_core::credit_units::{
     CreditUnits, format_credit_units as format_credit_units_core,
     parse_credit_units as parse_credit_units_core,
@@ -251,6 +255,56 @@ struct HackerNewsRenderItemDto {
     points: Option<i64>,
     comments: Option<i64>,
     comments_url: String,
+}
+
+#[derive(Deserialize)]
+struct ConfigCallbackInputDto {
+    action: String,
+    value: String,
+    current_toggle: Option<bool>,
+    current_creditless_limit: Option<i64>,
+    numeric_value: Option<i64>,
+    timezone_min: i64,
+    timezone_max: i64,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ConfigCallbackEvaluationDto {
+    NoChange,
+    GuardCurrent,
+    InvalidTimezone,
+    InvalidCreditlessLimit,
+    SetLanguage { value: String },
+    SetLinkMode { value: String },
+    SetToggle { field: &'static str, value: bool },
+    SetTimezone { value: i64 },
+    SetCreditlessLimit { value: i64 },
+}
+
+impl From<ConfigCallbackEvaluation> for ConfigCallbackEvaluationDto {
+    fn from(value: ConfigCallbackEvaluation) -> Self {
+        match value {
+            ConfigCallbackEvaluation::NoChange => Self::NoChange,
+            ConfigCallbackEvaluation::GuardCurrent => Self::GuardCurrent,
+            ConfigCallbackEvaluation::InvalidTimezone => Self::InvalidTimezone,
+            ConfigCallbackEvaluation::InvalidCreditlessLimit => Self::InvalidCreditlessLimit,
+            ConfigCallbackEvaluation::SetLanguage(value) => Self::SetLanguage { value },
+            ConfigCallbackEvaluation::SetLinkMode(value) => Self::SetLinkMode { value },
+            ConfigCallbackEvaluation::SetToggle { field, value } => Self::SetToggle {
+                field: match field {
+                    ToggleField::RandomReplies => "ai_random_replies",
+                    ToggleField::CommandFollowups => "ai_command_followups",
+                    ToggleField::IgnoreLinkFixFollowups => "ignore_link_fix_followups",
+                },
+                value,
+            },
+            ConfigCallbackEvaluation::SetTimezone(value) => Self::SetTimezone { value },
+            ConfigCallbackEvaluation::SetCreditlessLimit(value) => {
+                Self::SetCreditlessLimit { value }
+            }
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -999,6 +1053,24 @@ fn format_hacker_news_items(
     ))
 }
 
+/// Evaluate one typed chat-configuration callback transition.
+#[pyfunction]
+fn evaluate_config_callback(input_json: &str) -> PyResult<String> {
+    let input: ConfigCallbackInputDto = serde_json::from_str(input_json)
+        .map_err(|error| PyValueError::new_err(format!("invalid config callback: {error}")))?;
+    let evaluation = evaluate_config_callback_core(&ConfigCallbackInput {
+        action: input.action,
+        value: input.value,
+        current_toggle: input.current_toggle,
+        current_creditless_limit: input.current_creditless_limit,
+        numeric_value: input.numeric_value,
+        timezone_min: input.timezone_min,
+        timezone_max: input.timezone_max,
+    });
+    serde_json::to_string(&ConfigCallbackEvaluationDto::from(evaluation))
+        .map_err(|error| PyValueError::new_err(format!("cannot encode config callback: {error}")))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -1073,6 +1145,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(rank_polymarket_outcomes, module)?)?;
     module.add_function(wrap_pyfunction!(normalize_hacker_news_item, module)?)?;
     module.add_function(wrap_pyfunction!(format_hacker_news_items, module)?)?;
+    module.add_function(wrap_pyfunction!(evaluate_config_callback, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;
