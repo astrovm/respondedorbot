@@ -7,17 +7,39 @@ import re
 import time
 from dataclasses import dataclass
 from os import environ
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Tuple, cast
 
 import requests
 from urllib.parse import urlparse
 
 from api.i18n import tr
+from api.core.logging import get_logger
+from api.core.rust_bridge import load_rust_bridge
 from api.links.agent_tools import normalize_http_url
 from api.services import http_client
 
 
 _MAX_TELEGRAM_TEXT_LENGTH = 4096
+logger = get_logger(__name__)
+
+
+class _RustTelegramHttpAdapter(Protocol):
+    def telegram_http_request(
+        self,
+        token: str,
+        endpoint: str,
+        method: str,
+        params_json: str | None,
+        json_payload_json: str | None,
+        timeout_seconds: int,
+    ) -> str: ...
+
+
+def _load_rust_telegram_http_adapter() -> _RustTelegramHttpAdapter | None:
+    module = load_rust_bridge("RUST_TELEGRAM_HTTP_ADAPTER_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustTelegramHttpAdapter, module)
 
 
 @dataclass(frozen=True)
@@ -132,6 +154,101 @@ def _parse_telegram_payload(
     return payload, description
 
 
+def _parse_telegram_body(
+    endpoint: str,
+    body: str,
+    *,
+    log_errors: bool,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    try:
+        raw_payload = json.loads(body)
+    except ValueError as error:
+        if log_errors:
+            print(f"Telegram request to {endpoint} returned invalid JSON: {error}")
+        return None, str(error)
+    if not isinstance(raw_payload, Mapping):
+        if log_errors:
+            print(f"Telegram request to {endpoint} returned unexpected payload type")
+        return None, "unexpected response"
+    payload = dict(raw_payload)
+    if payload.get("ok"):
+        return payload, None
+    description = str(payload.get("description") or "telegram request failed")
+    if log_errors:
+        print(f"Telegram request to {endpoint} returned ok=false: {description}")
+    return payload, description
+
+
+def _rust_telegram_http_error(
+    endpoint: str,
+    status_code: int,
+    body: str,
+    *,
+    log_errors: bool,
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    try:
+        raw_payload = json.loads(body)
+    except ValueError:
+        raw_payload = None
+    payload = dict(raw_payload) if isinstance(raw_payload, Mapping) else None
+    description = str(
+        (payload or {}).get("description") or f"Telegram HTTP {status_code}"
+    )
+    if log_errors and "message is not modified" not in description.lower():
+        safe_body = _redact_telegram_tokens(body)
+        response_body = f" response={safe_body[:500]!r}" if safe_body else ""
+        print(
+            f"Telegram request to {endpoint} failed: "
+            f"{_redact_telegram_tokens(description)}{response_body}"
+        )
+    return payload, description
+
+
+def _rust_telegram_result(
+    raw_result: str,
+    endpoint: str,
+    *,
+    log_errors: bool,
+    expect_json: bool,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    outcome = json.loads(raw_result)
+    if not isinstance(outcome, Mapping):
+        raise ValueError("Rust Telegram HTTP outcome must be an object")
+    status = outcome.get("status")
+    if status == "transport_error":
+        descriptions = {
+            "timeout": "Telegram request timed out",
+            "connection": "Telegram connection failed",
+            "request": "Telegram request failed",
+            "response_too_large": "Telegram response too large",
+        }
+        kind = outcome.get("kind")
+        if kind not in descriptions:
+            raise ValueError(f"invalid Rust Telegram transport error: {kind!r}")
+        description = descriptions[cast(str, kind)]
+        if log_errors:
+            print(f"Telegram request to {endpoint} failed: {description}")
+        return None, description
+    if status != "response":
+        raise ValueError(f"invalid Rust Telegram HTTP status: {status!r}")
+    status_code = outcome.get("status_code")
+    body = outcome.get("body")
+    if not isinstance(status_code, int) or isinstance(status_code, bool):
+        raise ValueError("Rust Telegram status code must be an integer")
+    if not isinstance(body, str):
+        raise ValueError("Rust Telegram body must be text")
+    if status_code >= 400:
+        return _rust_telegram_http_error(
+            endpoint,
+            status_code,
+            body,
+            log_errors=log_errors,
+        )
+    if not expect_json:
+        return {}, None
+    return _parse_telegram_body(endpoint, body, log_errors=log_errors)
+
+
 def telegram_request(
     endpoint: str,
     *,
@@ -163,6 +280,41 @@ def telegram_request(
         files=files,
         timeout=timeout,
     )
+    rust = (
+        _load_rust_telegram_http_adapter()
+        if files is None and data_payload is None
+        else None
+    )
+    if rust is not None:
+        try:
+            raw_result = rust.telegram_http_request(
+                str(resolved_token),
+                endpoint,
+                method,
+                (
+                    json.dumps(params, ensure_ascii=False, separators=(",", ":"))
+                    if params is not None
+                    else None
+                ),
+                (
+                    json.dumps(
+                        json_payload,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                    if json_payload is not None
+                    else None
+                ),
+                timeout,
+            )
+            return _rust_telegram_result(
+                raw_result,
+                endpoint,
+                log_errors=log_errors,
+                expect_json=expect_json,
+            )
+        except Exception:
+            logger.exception("Rust Telegram HTTP adapter failed; using Python fallback")
     try:
         response = _send_telegram_request(url, request)
         response.raise_for_status()

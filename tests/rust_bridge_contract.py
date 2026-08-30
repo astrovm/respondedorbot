@@ -1153,6 +1153,20 @@ def verify_openrouter_generation_adapter(bridge: ModuleType) -> None:
             raise AssertionError(f"expected generation failure for {case['name']}")
 
 
+def verify_telegram_http_adapter(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "telegram_http_adapter.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["cases"]:
+        actual = json.loads(
+            bridge.telegram_http_response(case["status_code"], case["body"])
+        )
+        assert actual == {
+            "status": "response",
+            "status_code": case["status_code"],
+            "body": case["body"],
+        }, case["name"]
+
+
 def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_ai_usage_policy(bridge)
     verify_provider_error_policy(bridge)
@@ -1175,6 +1189,7 @@ def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_tool_execution_policy(bridge)
     verify_firecrawl_adapter(bridge)
     verify_openrouter_generation_adapter(bridge)
+    verify_telegram_http_adapter(bridge)
 
 
 def main(arguments: list[str]) -> int:

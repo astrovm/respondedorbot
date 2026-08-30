@@ -12,6 +12,7 @@ from api.ai import service as ai_service_module
 from api.billing import provider_usage as provider_usage_module
 from api.billing import reconciliation as billing_reconciliation_module
 from api.bot import streaming as bot_streaming_module
+from api.bot import telegram as bot_telegram_module
 from api.providers import errors as provider_errors_module
 from api.providers import base as provider_base_module
 from api.providers import config as provider_config_module
@@ -54,6 +55,25 @@ def cleanup_test_artifacts():
             os.remove("test_api_key")
     except Exception:
         pass
+
+
+@pytest.fixture(autouse=True)
+def disable_rust_http_adapters(monkeypatch):
+    monkeypatch.setattr(
+        web_search_module,
+        "_load_rust_firecrawl_adapter",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        billing_reconciliation_module,
+        "_load_rust_openrouter_generation_adapter",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        bot_telegram_module,
+        "_load_rust_telegram_http_adapter",
+        lambda: None,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -105,18 +125,8 @@ def reset_caches(monkeypatch):
         lambda: None,
     )
     monkeypatch.setattr(
-        web_search_module,
-        "_load_rust_firecrawl_adapter",
-        lambda: None,
-    )
-    monkeypatch.setattr(
         provider_usage_module,
         "_load_rust_ai_usage_policy",
-        lambda: None,
-    )
-    monkeypatch.setattr(
-        billing_reconciliation_module,
-        "_load_rust_openrouter_generation_adapter",
         lambda: None,
     )
     monkeypatch.setattr(

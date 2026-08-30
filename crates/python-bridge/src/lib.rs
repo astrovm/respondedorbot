@@ -33,6 +33,9 @@ use bot_adapters::redis_media_cache::{
 };
 use bot_adapters::redis_message_state::RedisMessageState as RedisMessageStateAdapter;
 use bot_adapters::redis_task_store::RedisTaskStore as RedisTaskStoreAdapter;
+use bot_adapters::telegram_http::{
+    request as telegram_http_request_adapter, response_outcome as telegram_response_outcome_adapter,
+};
 use bot_core::admin_reports::{
     CreditLogLimit, parse_creditlog_limit as parse_creditlog_limit_core,
     truncate_report as truncate_admin_report_core,
@@ -2924,6 +2927,36 @@ fn openrouter_generation_parse_response(status_code: u16, body: &str) -> PyResul
 }
 
 #[pyfunction]
+fn telegram_http_request(
+    token: &str,
+    endpoint: &str,
+    method: &str,
+    params_json: Option<&str>,
+    json_payload_json: Option<&str>,
+    timeout_seconds: u64,
+) -> PyResult<String> {
+    let outcome = telegram_http_request_adapter(
+        token,
+        endpoint,
+        method,
+        optional_json_value(params_json)?,
+        optional_json_value(json_payload_json)?,
+        timeout_seconds,
+    )
+    .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serde_json::to_string(&outcome).map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+fn telegram_http_response(status_code: u16, body: &str) -> PyResult<String> {
+    serde_json::to_string(&telegram_response_outcome_adapter(
+        status_code,
+        body.to_owned(),
+    ))
+    .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
 fn provider_chain_select(availability: Vec<bool>) -> Vec<usize> {
     provider_chain_select_core(&availability)
 }
@@ -3291,6 +3324,8 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
         openrouter_generation_parse_response,
         module
     )?)?;
+    module.add_function(wrap_pyfunction!(telegram_http_request, module)?)?;
+    module.add_function(wrap_pyfunction!(telegram_http_response, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_select, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_outcome, module)?)?;
     module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;
