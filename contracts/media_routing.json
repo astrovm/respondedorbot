@@ -1,0 +1,85 @@
+{
+  "cases": [
+    {
+      "name": "private chat",
+      "chat_type": "private",
+      "known_command": false,
+      "message_text": "",
+      "bot_username": null,
+      "reply_username": null,
+      "expected": true
+    },
+    {
+      "name": "known command in group",
+      "chat_type": "group",
+      "known_command": true,
+      "message_text": "/ask",
+      "bot_username": null,
+      "reply_username": null,
+      "expected": true
+    },
+    {
+      "name": "ordinary group message",
+      "chat_type": "group",
+      "known_command": false,
+      "message_text": "hola",
+      "bot_username": "testbot",
+      "reply_username": null,
+      "expected": false
+    },
+    {
+      "name": "case insensitive mention",
+      "chat_type": "supergroup",
+      "known_command": false,
+      "message_text": "hola @TESTBOT",
+      "bot_username": "testbot",
+      "reply_username": null,
+      "expected": true
+    },
+    {
+      "name": "trimmed bot username",
+      "chat_type": "group",
+      "known_command": false,
+      "message_text": "@testbot mirá",
+      "bot_username": " testbot ",
+      "reply_username": null,
+      "expected": true
+    },
+    {
+      "name": "reply to bot",
+      "chat_type": "group",
+      "known_command": false,
+      "message_text": "hola",
+      "bot_username": "testbot",
+      "reply_username": "testbot",
+      "expected": true
+    },
+    {
+      "name": "reply username remains case sensitive",
+      "chat_type": "group",
+      "known_command": false,
+      "message_text": "hola",
+      "bot_username": "testbot",
+      "reply_username": "TestBot",
+      "expected": false
+    },
+    {
+      "name": "blank bot username",
+      "chat_type": "group",
+      "known_command": false,
+      "message_text": "@testbot",
+      "bot_username": "   ",
+      "reply_username": "testbot",
+      "expected": false
+    },
+    {
+      "name": "legacy substring mention",
+      "chat_type": "group",
+      "known_command": false,
+      "message_text": "hola @testbot2",
+      "bot_username": "testbot",
+      "reply_username": null,
+      "expected": true
+    }
+  ]
+}

@@ -19,6 +19,9 @@ use bot_core::market_context::{
 use bot_core::price_queries::{
     AmountConversion, PriceQuery, ProviderScope, parse_price_query as parse_price_query_core,
 };
+use bot_core::routing::{
+    MediaRoutingInput, should_auto_process_media as should_auto_process_media_core,
+};
 use bot_core::task_triggers::{
     IntegerInput, TaskTrigger, TaskTriggerInput, TriggerConfigInput, TriggerError,
     parse_task_trigger as parse_task_trigger_core,
@@ -502,6 +505,24 @@ fn format_market_info(market_json: &str) -> PyResult<String> {
     Ok(format_market_context_core(&snapshot))
 }
 
+/// Decide whether one normalized message should auto-process attached media.
+#[pyfunction]
+fn should_auto_process_media(
+    chat_type: &str,
+    known_command: bool,
+    message_text: &str,
+    bot_username: Option<&str>,
+    reply_username: Option<&str>,
+) -> bool {
+    should_auto_process_media_core(&MediaRoutingInput {
+        chat_type: chat_type.to_owned(),
+        known_command,
+        message_text: message_text.to_owned(),
+        bot_username: bot_username.map(str::to_owned),
+        reply_username: reply_username.map(str::to_owned),
+    })
+}
+
 /// Register the temporary `respondedorbot_rs` Python module.
 #[pymodule]
 fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -514,5 +535,6 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(parse_task_trigger, module)?)?;
     module.add_function(wrap_pyfunction!(parse_price_query, module)?)?;
     module.add_function(wrap_pyfunction!(format_market_info, module)?)?;
+    module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;
     Ok(())
 }

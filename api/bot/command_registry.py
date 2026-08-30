@@ -29,6 +29,24 @@ def _load_rust_command_parser() -> Optional[_RustCommandParser]:
     return cast(_RustCommandParser, module)
 
 
+class _RustMediaRouter(Protocol):
+    def should_auto_process_media(
+        self,
+        chat_type: str,
+        known_command: bool,
+        message_text: str,
+        bot_username: Optional[str],
+        reply_username: Optional[str],
+    ) -> bool: ...
+
+
+def _load_rust_media_router() -> Optional[_RustMediaRouter]:
+    module = load_rust_bridge("RUST_MEDIA_ROUTING_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustMediaRouter, module)
+
+
 @dataclass(frozen=True)
 class CommandDefinition:
     aliases: Tuple[str, ...]
@@ -257,7 +275,7 @@ def should_gordo_respond(
     )
 
 
-def should_auto_process_media(
+def _should_auto_process_media_python(
     commands: Mapping[str, CommandTuple],
     command: str,
     message_text: str,
@@ -286,6 +304,45 @@ def should_auto_process_media(
     is_reply_to_bot = str((reply_from or {}).get("username", "")) == bot_username
 
     return is_mention or is_reply_to_bot
+
+
+def should_auto_process_media(
+    commands: Mapping[str, CommandTuple],
+    command: str,
+    message_text: str,
+    message: Mapping[str, Any],
+) -> bool:
+    """Return whether incoming media should be auto transcribed/described."""
+
+    rust = _load_rust_media_router()
+    if rust is not None:
+        try:
+            chat = message.get("chat") or {}
+            chat_type = str(chat.get("type", ""))
+            bot_username = str(environ.get("TELEGRAM_USERNAME") or "").strip()
+            reply = message.get("reply_to_message") or {}
+            reply_from = reply.get("from") if isinstance(reply, Mapping) else {}
+            reply_username = str((reply_from or {}).get("username", ""))
+            return bool(
+                rust.should_auto_process_media(
+                    chat_type,
+                    command in commands,
+                    message_text or "",
+                    bot_username or None,
+                    reply_username or None,
+                )
+            )
+        except Exception as error:
+            logger.warning(
+                "Rust media routing failed; using Python fallback: error_type=%s",
+                type(error).__name__,
+            )
+    return _should_auto_process_media_python(
+        commands,
+        command,
+        message_text,
+        message,
+    )
 
 
 __all__ = [

@@ -89,6 +89,20 @@ def verify_market_context(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_media_routing(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["cases"]:
+        actual = bridge.should_auto_process_media(
+            case["chat_type"],
+            case["known_command"],
+            case["message_text"],
+            case["bot_username"],
+            case["reply_username"],
+        )
+        assert actual is case["expected"], case["name"]
+
+
 def main(arguments: list[str]) -> int:
     if len(arguments) != 2:
         raise SystemExit("usage: rust_bridge_contract.py PATH_TO_EXTENSION")
@@ -99,6 +113,7 @@ def main(arguments: list[str]) -> int:
     verify_task_triggers(bridge)
     verify_price_queries(bridge)
     verify_market_context(bridge)
+    verify_media_routing(bridge)
     return 0
 
 
