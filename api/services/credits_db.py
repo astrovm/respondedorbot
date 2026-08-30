@@ -167,6 +167,21 @@ class _RustBillingAiDebt(Protocol):
     ) -> tuple[int, int]: ...
 
 
+class _RustBillingAiRefunds(Protocol):
+    def billing_refund_ai_charge(
+        self,
+        database_url: str,
+        user_id: int,
+        chat_id: int | None,
+        amount: int,
+        source: str,
+        event_type: str,
+        metadata_json: str,
+        idempotency_key: str | None,
+        operation_id: str,
+    ) -> tuple[bool, str | None, int, int]: ...
+
+
 def _load_rust_billing_reads() -> _RustBillingReads | None:
     module = load_rust_bridge("RUST_BILLING_READ_SHADOW_ENABLED")
     if module is None:
@@ -214,6 +229,13 @@ def _load_rust_billing_ai_debt() -> _RustBillingAiDebt | None:
     if module is None:
         return None
     return cast(_RustBillingAiDebt, module)
+
+
+def _load_rust_billing_ai_refunds() -> _RustBillingAiRefunds | None:
+    module = load_rust_bridge("RUST_BILLING_AI_REFUNDS_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustBillingAiRefunds, module)
 
 
 class CreditsDBError(RuntimeError):
@@ -1673,6 +1695,36 @@ def refund_ai_charge(
     normalized_key = str(idempotency_key or "").strip() or None
     if normalized_key:
         metadata_dict["idempotency_key"] = normalized_key
+    normalized_event_type = str(event_type or "ai_refund")
+    operation_id = str(metadata_dict.get("operation_id") or "").strip()
+    rust = _load_rust_billing_ai_refunds()
+    database_url = get_database_url()
+    if rust is not None and database_url:
+        ensure_schema()
+        try:
+            applied, reason, user_balance, chat_balance = (
+                rust.billing_refund_ai_charge(
+                    database_url,
+                    int(user_id),
+                    int(chat_id) if chat_id is not None else None,
+                    refund_amount,
+                    str(source),
+                    normalized_event_type,
+                    json.dumps(metadata_dict),
+                    normalized_key,
+                    operation_id,
+                )
+            )
+            result: Dict[str, Any] = {
+                "applied": bool(applied),
+                "user_balance": int(user_balance),
+                "chat_balance": int(chat_balance),
+            }
+            if reason is not None:
+                result["reason"] = str(reason)
+            return result
+        except Exception as error:
+            raise CreditsDBError("Rust AI refund transaction failed") from error
 
     def operation(cur: Any) -> Dict[str, Any]:
         user_balance, chat_balance = _get_user_and_chat_balances_for_update(
@@ -1688,7 +1740,7 @@ def refund_ai_charge(
                   AND metadata->>'idempotency_key' = %s
                 LIMIT 1
                 """,
-                (int(user_id), str(event_type or "ai_refund"), normalized_key),
+                (int(user_id), normalized_event_type, normalized_key),
             )
             if cur.fetchone() is not None:
                 return {
@@ -1697,7 +1749,6 @@ def refund_ai_charge(
                     "chat_balance": int(chat_balance),
                 }
 
-        operation_id = str(metadata_dict.get("operation_id") or "").strip()
         if _ai_operation_is_settled(cur, user_id, operation_id):
             return {
                 "applied": False,
@@ -1722,7 +1773,7 @@ def refund_ai_charge(
                     VALUES (%s, %s, %s, %s, %s, %s::jsonb)
                     """,
                 (
-                    str(event_type or "ai_refund"),
+                    normalized_event_type,
                     int(user_id),
                     int(user_id),
                     int(chat_id),
@@ -1751,7 +1802,7 @@ def refund_ai_charge(
                 VALUES (%s, %s, %s, %s, %s, %s::jsonb)
                 """,
             (
-                str(event_type or "ai_refund"),
+                normalized_event_type,
                 int(user_id),
                 int(user_id),
                 int(chat_id) if chat_id is not None else None,

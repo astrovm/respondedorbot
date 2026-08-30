@@ -1952,6 +1952,45 @@ fn billing_apply_ai_debt(
     Ok((result.user_balance, result.chat_balance))
 }
 
+/// Refund one AI charge with optional replay and settlement protection.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn billing_refund_ai_charge(
+    py: Python<'_>,
+    database_url: &str,
+    user_id: i64,
+    chat_id: Option<i64>,
+    amount: i32,
+    source: &str,
+    event_type: &str,
+    metadata_json: &str,
+    idempotency_key: Option<&str>,
+    operation_id: &str,
+) -> PyResult<(bool, Option<String>, i64, i64)> {
+    let metadata = billing_metadata(metadata_json)?;
+    let repository = BillingRepository::new(database_url);
+    let result = py
+        .detach(|| {
+            repository.refund_ai_charge(
+                user_id,
+                chat_id,
+                amount,
+                source,
+                event_type,
+                &metadata,
+                idempotency_key,
+                operation_id,
+            )
+        })
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok((
+        result.applied,
+        result.reason,
+        result.user_balance,
+        result.chat_balance,
+    ))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -2068,6 +2107,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(billing_refund_chat_ai_credits, module)?)?;
     module.add_function(wrap_pyfunction!(billing_apply_chat_ai_debt, module)?)?;
     module.add_function(wrap_pyfunction!(billing_apply_ai_debt, module)?)?;
+    module.add_function(wrap_pyfunction!(billing_refund_ai_charge, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;
