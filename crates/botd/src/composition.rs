@@ -26,10 +26,10 @@ use num_bigint::{BigInt, BigUint};
 use thiserror::Error;
 
 use crate::dispatcher::{
-    ActionReceipt, ActionSink, AdminCreditSink, BillingBalanceSource, BillingBalances,
-    BillingTransferSink, ChargeHistorySource, ChatConfigSource, GroupAuthorizationDecision,
-    GroupAuthorizer, MessageStateSink, NativeDispatcher, RandomSource, RuntimeValues,
-    StarPaymentReceipt, StarPaymentSink,
+    ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BillingBalanceSource,
+    BillingBalances, BillingTransferSink, ChargeHistorySource, ChatConfigSource,
+    GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink, NativeDispatcher, RandomSource,
+    RuntimeValues, StarPaymentReceipt, StarPaymentSink,
 };
 use crate::runtime::{PollingRuntime, UpdateSource};
 
@@ -38,6 +38,28 @@ impl AdminCreditSink for BillingRepository {
         let amount = i32::try_from(amount)
             .map_err(|_| "admin credit amount exceeds the persistent range".to_owned())?;
         self.mint_user_credits(user_id, amount, Some(user_id))
+            .map_err(|error| error.to_string())
+    }
+}
+
+impl AdminCreditLogSource for BillingRepository {
+    fn load(
+        &mut self,
+        limit: usize,
+    ) -> Result<Vec<bot_core::admin_commands::CreditLogEntry>, String> {
+        let limit = i64::try_from(limit).map_err(|_| "creditlog limit is too large".to_owned())?;
+        self.list_recent_ai_settlement_results(limit)
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .map(|entry| bot_core::admin_commands::CreditLogEntry {
+                        user_id: entry.user_id,
+                        chat_id: entry.chat_id,
+                        metadata: entry.metadata,
+                        created_at: entry.created_at,
+                    })
+                    .collect()
+            })
             .map_err(|error| error.to_string())
     }
 }
@@ -527,7 +549,8 @@ pub fn build_native_runtime(
         .with_transfer_sink(Box::new(BillingRepository::new(database_url)))
         .with_charge_history_source(Box::new(BillingRepository::new(database_url)))
         .with_admin_user_id(admin_user_id)
-        .with_admin_credit_sink(Box::new(BillingRepository::new(database_url))),
+        .with_admin_credit_sink(Box::new(BillingRepository::new(database_url)))
+        .with_admin_creditlog_source(Box::new(BillingRepository::new(database_url))),
     ))
 }
 

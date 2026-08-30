@@ -358,6 +358,20 @@ fn pricing(provider: &str, model: &str) -> Option<TokenPricing> {
     }
 }
 
+/// Return the local input and cached-input rates used by admin cache reports.
+#[must_use]
+pub fn model_cache_input_rates(model: &str) -> Option<(i64, i64)> {
+    let pricing = pricing("", model)?;
+    let input = i64::try_from(pricing.input_per_million).ok()?;
+    let cached = i64::try_from(
+        pricing
+            .cached_input_per_million
+            .unwrap_or(pricing.input_per_million),
+    )
+    .ok()?;
+    Some((input, cached))
+}
+
 fn model_cost(
     model: &str,
     usage: &Map<String, Value>,

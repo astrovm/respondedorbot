@@ -2,7 +2,8 @@
 
 use bot_adapters::telegram_polling::{IncomingEvent, IncomingMessage, IncomingUpdate};
 use bot_core::admin_commands::{
-    PrintCreditsContext, PrintCreditsPlan, plan_printcredits_command, printcredits_result_reply,
+    CreditLogEntry, CreditLogPlan, PrintCreditsContext, PrintCreditsPlan, plan_creditlog_command,
+    plan_printcredits_command, printcredits_result_reply, render_creditlog,
 };
 use bot_core::billing_commands::{
     TransferCommandContext, TransferCommandPlan, TransferResult, plan_transfer_command,
@@ -148,6 +149,10 @@ pub trait AdminCreditSink {
     fn mint(&mut self, user_id: i64, amount: i64) -> Result<i64, String>;
 }
 
+pub trait AdminCreditLogSource {
+    fn load(&mut self, limit: usize) -> Result<Vec<CreditLogEntry>, String>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchOutcome {
     Handled,
@@ -189,6 +194,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     charge_history_source: Option<Box<dyn ChargeHistorySource>>,
     admin_user_id: Option<i64>,
     admin_credit_sink: Option<Box<dyn AdminCreditSink>>,
+    admin_creditlog_source: Option<Box<dyn AdminCreditLogSource>>,
     last_outcome: Option<DispatchOutcome>,
     state_diagnostics: Vec<String>,
 }
@@ -228,6 +234,7 @@ where
             charge_history_source: None,
             admin_user_id: None,
             admin_credit_sink: None,
+            admin_creditlog_source: None,
             last_outcome: None,
             state_diagnostics: Vec::new(),
         }
@@ -274,6 +281,12 @@ where
     #[must_use]
     pub fn with_admin_credit_sink(mut self, sink: Box<dyn AdminCreditSink>) -> Self {
         self.admin_credit_sink = Some(sink);
+        self
+    }
+
+    #[must_use]
+    pub fn with_admin_creditlog_source(mut self, source: Box<dyn AdminCreditLogSource>) -> Self {
+        self.admin_creditlog_source = Some(source);
         self
     }
 
@@ -1008,6 +1021,56 @@ where
                 }
                 PrintCreditsPlan::NotHandled => StatelessCommandPlan::NotHandled,
             }
+        } else if parsed.command == "/creditlog" {
+            match plan_creditlog_command(
+                &content.text,
+                &self.bot_name,
+                PrintCreditsContext {
+                    chat_id,
+                    message_id,
+                    user_id: sender_id.0,
+                    admin_user_id: self.admin_user_id,
+                    billing_available: self.billing_available,
+                    locale,
+                },
+            ) {
+                CreditLogPlan::Reply(action) => StatelessCommandPlan::Action(action),
+                CreditLogPlan::Load { limit } => {
+                    let Some(source) = self.admin_creditlog_source.as_mut() else {
+                        return Ok(DispatchOutcome::LegacyRequired);
+                    };
+                    let text = match source.load(limit) {
+                        Ok(entries) if entries.is_empty() => match locale {
+                            bot_core::locale::Locale::Es => {
+                                "no hay liquidaciones IA recientes".to_owned()
+                            }
+                            bot_core::locale::Locale::En => {
+                                "there are no recent AI settlements".to_owned()
+                            }
+                        },
+                        Ok(entries) => render_creditlog(&entries, locale),
+                        Err(error) => {
+                            self.state_diagnostics.push(format!(
+                                "admin creditlog chat_id={} user_id={} limit={limit}: {error}",
+                                chat_id.0, sender_id.0
+                            ));
+                            match locale {
+                                bot_core::locale::Locale::Es => {
+                                    "se trabó leyendo el creditlog, probá de nuevo".to_owned()
+                                }
+                                bot_core::locale::Locale::En => {
+                                    "I could not load the credit log, try again".to_owned()
+                                }
+                            }
+                        }
+                    };
+                    let mut message = SendMessage::new(chat_id, &text);
+                    message.reply_to_message_id = Some(message_id);
+                    StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+                }
+                CreditLogPlan::NotHandled => StatelessCommandPlan::NotHandled,
+                CreditLogPlan::LegacyRequired => StatelessCommandPlan::LegacyFallbackRequired,
+            }
         } else if parsed.command == "/random" {
             match parse_random_selection(&parsed.message_text) {
                 Err(_) => StatelessCommandPlan::LegacyFallbackRequired,
@@ -1202,11 +1265,11 @@ mod tests {
     use serde_json::{Map, json};
 
     use super::{
-        ActionReceipt, ActionSink, AdminCreditSink, BillingBalanceSource, BillingBalances,
-        BillingTransferSink, ChargeHistoryPage, ChargeHistorySource, ChatConfigSource,
-        DispatchError, DispatchOutcome, GroupAuthorizationDecision, GroupAuthorizer,
-        MessageStateSink, NativeDispatcher, RandomSource, RuntimeValues, StarPaymentReceipt,
-        StarPaymentSink, TransferResult,
+        ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BillingBalanceSource,
+        BillingBalances, BillingTransferSink, ChargeHistoryPage, ChargeHistorySource,
+        ChatConfigSource, DispatchError, DispatchOutcome, GroupAuthorizationDecision,
+        GroupAuthorizer, MessageStateSink, NativeDispatcher, RandomSource, RuntimeValues,
+        StarPaymentReceipt, StarPaymentSink, TransferResult,
     };
     use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup};
 
@@ -1494,6 +1557,23 @@ mod tests {
     impl AdminCreditSink for AdminCredits {
         fn mint(&mut self, user_id: i64, amount: i64) -> Result<i64, String> {
             self.calls.borrow_mut().push((user_id, amount));
+            self.result.clone()
+        }
+    }
+
+    type AdminCreditLogCalls = Rc<RefCell<Vec<usize>>>;
+
+    struct AdminCreditLogs {
+        result: Result<Vec<bot_core::admin_commands::CreditLogEntry>, String>,
+        calls: AdminCreditLogCalls,
+    }
+
+    impl AdminCreditLogSource for AdminCreditLogs {
+        fn load(
+            &mut self,
+            limit: usize,
+        ) -> Result<Vec<bot_core::admin_commands::CreditLogEntry>, String> {
+            self.calls.borrow_mut().push(limit);
             self.result.clone()
         }
     }
@@ -1925,6 +2005,128 @@ mod tests {
         .with_admin_user_id(Some(88));
         assert_eq!(
             missing.dispatch(update("/printcredits 1", None)),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
+    }
+
+    #[test]
+    fn creditlog_loads_formats_and_records_admin_command_state() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_admin_user_id(Some(88))
+        .with_admin_creditlog_source(Box::new(AdminCreditLogs {
+            result: Ok(vec![bot_core::admin_commands::CreditLogEntry {
+                user_id: Some(88),
+                chat_id: Some(-42),
+                metadata: json!({
+                    "command":"/ask",
+                    "reserved_credit_units_total":200,
+                    "settled_credit_units":100,
+                    "refunded_credit_units":100,
+                    "billing_segments":[{"kind":"chat"}],
+                    "model_breakdown":[{"model":"m1","usd_micros":5}],
+                    "tool_breakdown":[{"tool":"web","usd_micros":7,"count":2}]
+                }),
+                created_at: "2026-03-11T17:35:10+00:00".to_owned(),
+            }]),
+            calls: Rc::clone(&calls),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(update("/creditlog 2", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(calls.borrow().as_slice(), &[2]);
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
+            return;
+        };
+        assert!(message.text.starts_with("latest AI settlements:"));
+        assert!(
+            message
+                .text
+                .contains("reserved=2.00 charged=1.00 refund=1.00")
+        );
+        assert!(message.text.contains("requests: chat=1"));
+        assert!(message.text.contains("models: m1=5"));
+        assert!(message.text.contains("tools: web=7 (2x)"));
+        assert_eq!(dispatcher.state.incoming.len(), 1);
+        assert_eq!(dispatcher.state.outgoing.len(), 1);
+    }
+
+    #[test]
+    fn creditlog_handles_empty_failure_legacy_and_missing_source_paths() {
+        for (result, expected) in [
+            (
+                Ok(Vec::new()),
+                "no hay liquidaciones IA recientes".to_owned(),
+            ),
+            (
+                Err("synthetic read failure".to_owned()),
+                "se trabó leyendo el creditlog, probá de nuevo".to_owned(),
+            ),
+        ] {
+            let config = Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            };
+            let mut dispatcher = NativeDispatcher::new(
+                config,
+                Actions::default(),
+                State::default(),
+                values(),
+                random(),
+                authorization(),
+                "@mybot",
+            )
+            .with_admin_user_id(Some(88))
+            .with_admin_creditlog_source(Box::new(AdminCreditLogs {
+                result,
+                calls: Rc::new(RefCell::new(Vec::new())),
+            }));
+            assert_eq!(
+                dispatcher.dispatch(update("/creditlog", None)),
+                Ok(DispatchOutcome::Handled)
+            );
+            let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
+                return;
+            };
+            assert_eq!(message.text, expected);
+        }
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut missing = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_admin_user_id(Some(88));
+        assert_eq!(
+            missing.dispatch(update("/creditlog", None)),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
+        assert_eq!(
+            missing.dispatch(update("/creditlog ２", None)),
             Ok(DispatchOutcome::LegacyRequired)
         );
     }
