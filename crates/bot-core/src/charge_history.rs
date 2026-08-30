@@ -34,6 +34,34 @@ pub enum ChargesCommandPlan {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChargeHistoryDirection {
+    Older,
+    Newer,
+}
+
+impl ChargeHistoryDirection {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Older => "older",
+            Self::Newer => "newer",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChargeHistoryCallbackPlan {
+    Answer(Option<TelegramAction>),
+    Load {
+        owner_id: i64,
+        limit: usize,
+        direction: ChargeHistoryDirection,
+        cursor_id: i64,
+        timezone_minutes: i64,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChargeHistoryEntry {
     pub id: i64,
@@ -126,6 +154,89 @@ const fn charges_usage(locale: Locale) -> &'static str {
         Locale::Es => "mandalo bien: /charges [cantidad]",
         Locale::En => "usage: /charges [count]",
     }
+}
+
+fn callback_answer(
+    callback_id: Option<&str>,
+    text: &str,
+    show_alert: bool,
+) -> ChargeHistoryCallbackPlan {
+    ChargeHistoryCallbackPlan::Answer(callback_id.map(|callback_id| {
+        TelegramAction::AnswerCallback {
+            callback_id: callback_id.to_owned(),
+            text: Some(text.to_owned()),
+            show_alert,
+        }
+    }))
+}
+
+#[must_use]
+pub fn plan_charge_history_callback(
+    callback_id: Option<&str>,
+    data: &str,
+    requester_id: Option<i64>,
+    locale: Locale,
+) -> ChargeHistoryCallbackPlan {
+    let parts = data.split(':').collect::<Vec<_>>();
+    let parsed = (|| {
+        let ["chg", owner, limit, direction, cursor, timezone] = parts.as_slice() else {
+            return None;
+        };
+        let owner_id = owner.parse::<i64>().ok()?;
+        let limit = limit.parse::<usize>().ok()?;
+        let direction = match *direction {
+            "n" => ChargeHistoryDirection::Newer,
+            "o" => ChargeHistoryDirection::Older,
+            _ => return None,
+        };
+        let cursor_id = cursor.parse::<i64>().ok()?;
+        let timezone_minutes = timezone.parse::<i64>().ok()?;
+        (1..=20)
+            .contains(&limit)
+            .then_some(())
+            .filter(|_| cursor_id > 0 && (-840..=840).contains(&timezone_minutes))?;
+        Some((owner_id, limit, direction, cursor_id, timezone_minutes))
+    })();
+    let Some((owner_id, limit, direction, cursor_id, timezone_minutes)) = parsed else {
+        return callback_answer(
+            callback_id,
+            match locale {
+                Locale::Es => "botón vencido",
+                Locale::En => "this button expired",
+            },
+            true,
+        );
+    };
+    if requester_id != Some(owner_id) {
+        return callback_answer(
+            callback_id,
+            match locale {
+                Locale::Es => "este historial no es tuyo",
+                Locale::En => "this history is not yours",
+            },
+            true,
+        );
+    }
+    ChargeHistoryCallbackPlan::Load {
+        owner_id,
+        limit,
+        direction,
+        cursor_id,
+        timezone_minutes,
+    }
+}
+
+#[must_use]
+pub fn charge_callback_answer(
+    callback_id: Option<&str>,
+    text: Option<&str>,
+    show_alert: bool,
+) -> Option<TelegramAction> {
+    callback_id.map(|callback_id| TelegramAction::AnswerCallback {
+        callback_id: callback_id.to_owned(),
+        text: text.map(str::to_owned),
+        show_alert,
+    })
 }
 
 fn object(value: &Value) -> Option<&Map<String, Value>> {
@@ -621,8 +732,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ChargeHistoryEntry, ChargeHistoryGroup, ChargeHistoryPage, ChargesCommandContext,
-        ChargesCommandPlan, plan_charges_command, render_charge_history_page,
+        ChargeHistoryCallbackPlan, ChargeHistoryDirection, ChargeHistoryEntry, ChargeHistoryGroup,
+        ChargeHistoryPage, ChargesCommandContext, ChargesCommandPlan, plan_charge_history_callback,
+        plan_charges_command, render_charge_history_page,
     };
     use crate::locale::Locale;
     use crate::telegram_actions::TelegramAction;
@@ -778,6 +890,47 @@ mod tests {
         assert_eq!(
             render_charge_history_page(&empty, 55, 10, 0, Locale::En),
             ("you have no recent AI expenses".to_owned(), None)
+        );
+    }
+
+    #[test]
+    fn callback_plan_validates_bounds_direction_and_owner() {
+        assert_eq!(
+            plan_charge_history_callback(Some("cb-1"), "chg:55:2:o:29:-180", Some(55), Locale::Es,),
+            ChargeHistoryCallbackPlan::Load {
+                owner_id: 55,
+                limit: 2,
+                direction: ChargeHistoryDirection::Older,
+                cursor_id: 29,
+                timezone_minutes: -180,
+            }
+        );
+        assert!(matches!(
+            plan_charge_history_callback(Some("cb-1"), "chg:55:20:n:30:840", Some(55), Locale::En,),
+            ChargeHistoryCallbackPlan::Load {
+                direction: ChargeHistoryDirection::Newer,
+                ..
+            }
+        ));
+        for (data, requester, expected) in [
+            ("chg:55:0:o:29:-180", Some(55), "this button expired"),
+            ("chg:55:2:x:29:-180", Some(55), "this button expired"),
+            ("chg:55:2:o:29:-180", Some(99), "this history is not yours"),
+        ] {
+            let ChargeHistoryCallbackPlan::Answer(Some(TelegramAction::AnswerCallback {
+                text,
+                show_alert,
+                ..
+            })) = plan_charge_history_callback(Some("cb"), data, requester, Locale::En)
+            else {
+                return;
+            };
+            assert_eq!(text.as_deref(), Some(expected));
+            assert!(show_alert);
+        }
+        assert_eq!(
+            plan_charge_history_callback(None, "broken", None, Locale::Es),
+            ChargeHistoryCallbackPlan::Answer(None)
         );
     }
 }

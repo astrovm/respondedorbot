@@ -6,7 +6,8 @@ use bot_core::billing_commands::{
     transfer_result_reply,
 };
 use bot_core::charge_history::{
-    ChargeHistoryPage, ChargesCommandContext, ChargesCommandPlan, plan_charges_command,
+    ChargeHistoryCallbackPlan, ChargeHistoryPage, ChargesCommandContext, ChargesCommandPlan,
+    charge_callback_answer, plan_charge_history_callback, plan_charges_command,
     render_charge_history_page,
 };
 use bot_core::chat_config::ChatConfig;
@@ -438,6 +439,135 @@ where
                     Ok(DispatchOutcome::Handled)
                 }
             };
+        }
+        if context.route == CallbackRoute::Charges {
+            let Ok(chat_id_value) = context.chat_id.parse::<i64>() else {
+                return Ok(DispatchOutcome::LegacyRequired);
+            };
+            let config = self
+                .config
+                .get(&context.chat_id)
+                .map_err(DispatchError::Config)?;
+            let locale = resolve_locale(
+                Some(&config.language),
+                context.user_language_code.as_deref(),
+                &context.chat_type,
+            );
+            let load = match plan_charge_history_callback(
+                context.callback_id.as_deref(),
+                &context.data,
+                context.user_id,
+                locale,
+            ) {
+                ChargeHistoryCallbackPlan::Answer(action) => {
+                    if let Some(action) = action {
+                        let _receipt = self
+                            .actions
+                            .execute(action)
+                            .map_err(DispatchError::Action)?;
+                    }
+                    return Ok(DispatchOutcome::Handled);
+                }
+                ChargeHistoryCallbackPlan::Load {
+                    owner_id,
+                    limit,
+                    direction,
+                    cursor_id,
+                    timezone_minutes,
+                } => (owner_id, limit, direction, cursor_id, timezone_minutes),
+            };
+            let (owner_id, limit, direction, cursor_id, timezone_minutes) = load;
+            let Some(source) = self.charge_history_source.as_mut() else {
+                return Ok(DispatchOutcome::LegacyRequired);
+            };
+            let page = match source.load(owner_id, limit, Some(cursor_id), direction.as_str()) {
+                Ok(page) => page,
+                Err(error) => {
+                    self.state_diagnostics.push(format!(
+                        "charge history pagination chat_id={} user_id={owner_id} cursor_id={cursor_id} direction={}: {error}",
+                        context.chat_id,
+                        direction.as_str()
+                    ));
+                    if let Some(action) = charge_callback_answer(
+                        context.callback_id.as_deref(),
+                        Some(match locale {
+                            bot_core::locale::Locale::Es => "se trabó leyendo tus gastos",
+                            bot_core::locale::Locale::En => "I could not load your expenses",
+                        }),
+                        true,
+                    ) {
+                        let _receipt = self
+                            .actions
+                            .execute(action)
+                            .map_err(DispatchError::Action)?;
+                    }
+                    return Ok(DispatchOutcome::Handled);
+                }
+            };
+            if page.groups.is_empty() {
+                if let Some(action) = charge_callback_answer(
+                    context.callback_id.as_deref(),
+                    Some(match locale {
+                        bot_core::locale::Locale::Es => "no hay más gastos",
+                        bot_core::locale::Locale::En => "there are no more expenses",
+                    }),
+                    false,
+                ) {
+                    let _receipt = self
+                        .actions
+                        .execute(action)
+                        .map_err(DispatchError::Action)?;
+                }
+                return Ok(DispatchOutcome::Handled);
+            }
+            let (text, keyboard) =
+                render_charge_history_page(&page, owner_id, limit, timezone_minutes, locale);
+            let edited = match self.actions.try_edit(TelegramAction::EditMessage {
+                chat_id: ChatId(chat_id_value),
+                message_id: MessageId(context.message_id),
+                text,
+                reply_markup: Some(keyboard.unwrap_or(
+                    bot_core::telegram_actions::InlineKeyboardMarkup {
+                        inline_keyboard: Vec::new(),
+                    },
+                )),
+            }) {
+                Ok(edited) => edited,
+                Err(_error) => {
+                    self.state_diagnostics.push(format!(
+                        "charge history edit failed chat_id={} message_id={}",
+                        context.chat_id, context.message_id
+                    ));
+                    if let Some(action) = charge_callback_answer(
+                        context.callback_id.as_deref(),
+                        Some(match locale {
+                            bot_core::locale::Locale::Es => "se trabó leyendo tus gastos",
+                            bot_core::locale::Locale::En => "I could not load your expenses",
+                        }),
+                        true,
+                    ) {
+                        let _receipt = self
+                            .actions
+                            .execute(action)
+                            .map_err(DispatchError::Action)?;
+                    }
+                    return Ok(DispatchOutcome::Handled);
+                }
+            };
+            if let Some(action) = charge_callback_answer(
+                context.callback_id.as_deref(),
+                (!edited).then_some(match locale {
+                    bot_core::locale::Locale::Es => "no pude actualizar el historial",
+                    bot_core::locale::Locale::En => "I could not update the history",
+                }),
+                !edited,
+            ) {
+                let _receipt = self
+                    .actions
+                    .execute(action)
+                    .map_err(DispatchError::Action)?;
+            }
+            return Ok(DispatchOutcome::Handled);
         }
         if context.route != CallbackRoute::Config {
             return Ok(DispatchOutcome::LegacyRequired);
@@ -2005,6 +2135,181 @@ mod tests {
         );
         assert!(dispatcher.config.chat_ids.is_empty());
         assert!(dispatcher.actions.0.is_empty());
+    }
+
+    #[test]
+    fn charge_history_callback_loads_edits_and_acknowledges_owned_pages() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_charge_history_source(Box::new(ChargeHistories {
+            result: Ok(ChargeHistoryPage {
+                groups: vec![ChargeHistoryGroup {
+                    cursor_id: 20,
+                    created_at: "2026-08-26T17:00:00+00:00".to_owned(),
+                    entries: vec![ChargeHistoryEntry {
+                        id: 20,
+                        event_type: "ai_settlement_result".to_owned(),
+                        metadata: json!({"charged_credit_units_total":4}),
+                    }],
+                }],
+                has_newer: true,
+                has_older: false,
+                newer_cursor: Some(20),
+                older_cursor: Some(20),
+            }),
+            calls: Rc::clone(&calls),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(callback_update("chg:88:2:o:29:-180", "private", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [(88, 2, Some(29), "older".to_owned())]
+        );
+        let Some(TelegramAction::EditMessage {
+            text, reply_markup, ..
+        }) = dispatcher.actions.0.first()
+        else {
+            return;
+        };
+        assert_eq!(text, "Gastos IA\n\n26/08 14:00 · respuesta · 0.04 cr");
+        assert_eq!(
+            reply_markup
+                .as_ref()
+                .and_then(|keyboard| keyboard.inline_keyboard[0][0].callback_data.as_deref()),
+            Some("chg:88:2:n:20:-180")
+        );
+        assert!(matches!(
+            dispatcher.actions.0.get(1),
+            Some(TelegramAction::AnswerCallback {
+                text: None,
+                show_alert: false,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn charge_history_callback_handles_guards_empty_pages_and_load_failures() {
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut guards = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            guards.dispatch(callback_update("chg:bad", "private", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            guards.dispatch(callback_update("chg:55:2:o:29:-180", "private", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        for (action, expected) in guards
+            .actions
+            .0
+            .iter()
+            .zip(["this button expired", "this history is not yours"])
+        {
+            let TelegramAction::AnswerCallback {
+                text, show_alert, ..
+            } = action
+            else {
+                return;
+            };
+            assert_eq!(text.as_deref(), Some(expected));
+            assert!(*show_alert);
+        }
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut empty = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_charge_history_source(Box::new(ChargeHistories {
+            result: Ok(ChargeHistoryPage {
+                groups: Vec::new(),
+                has_newer: false,
+                has_older: false,
+                newer_cursor: None,
+                older_cursor: None,
+            }),
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            empty.dispatch(callback_update("chg:88:2:n:30:-180", "private", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            empty.actions.0.first(),
+            Some(TelegramAction::AnswerCallback {
+                text: Some(text),
+                show_alert: false,
+                ..
+            }) if text == "no hay más gastos"
+        ));
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut failed = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_charge_history_source(Box::new(ChargeHistories {
+            result: Err("synthetic callback read failure".to_owned()),
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            failed.dispatch(callback_update("chg:88:2:o:29:-180", "private", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            failed.actions.0.first(),
+            Some(TelegramAction::AnswerCallback {
+                text: Some(text),
+                show_alert: true,
+                ..
+            }) if text == "se trabó leyendo tus gastos"
+        ));
+        assert!(failed.state_diagnostics()[0].contains("synthetic callback read failure"));
     }
 
     #[test]
