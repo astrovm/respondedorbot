@@ -3,6 +3,7 @@
 use bot_core::cache_policy::request_cache_ttl;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::redis_json_cache::{RedisJsonCache, RedisJsonCacheError};
 
@@ -42,6 +43,48 @@ pub struct CachedJsonLoad {
 struct CachedResponse {
     timestamp: i64,
     data: Value,
+}
+
+#[must_use]
+pub fn python_json_string(value: &str) -> String {
+    let mut encoded = String::from("\"");
+    for character in value.chars() {
+        match character {
+            '"' => encoded.push_str("\\\""),
+            '\\' => encoded.push_str("\\\\"),
+            '\u{08}' => encoded.push_str("\\b"),
+            '\u{0c}' => encoded.push_str("\\f"),
+            '\n' => encoded.push_str("\\n"),
+            '\r' => encoded.push_str("\\r"),
+            '\t' => encoded.push_str("\\t"),
+            character if character <= '\u{1f}' => {
+                encoded.push_str(&format!("\\u{:04x}", u32::from(character)));
+            }
+            character if character.is_ascii() => encoded.push(character),
+            character => {
+                let codepoint = u32::from(character);
+                if codepoint <= 0xffff {
+                    encoded.push_str(&format!("\\u{codepoint:04x}"));
+                } else {
+                    let adjusted = codepoint - 0x1_0000;
+                    let high = 0xd800 + (adjusted >> 10);
+                    let low = 0xdc00 + (adjusted & 0x3ff);
+                    encoded.push_str(&format!("\\u{high:04x}\\u{low:04x}"));
+                }
+            }
+        }
+    }
+    encoded.push('"');
+    encoded
+}
+
+#[must_use]
+pub fn python_request_cache_key(arguments: &str) -> String {
+    let hash = Sha256::digest(arguments.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    bot_core::cache_policy::request_cache_key(&hash)
 }
 
 pub fn load_cached_json<C, Fetch, Retry>(
@@ -144,7 +187,10 @@ where
 mod tests {
     use std::collections::VecDeque;
 
-    use super::{JsonHttpResponse, RequestCache, load_cached_json};
+    use super::{
+        JsonHttpResponse, RequestCache, load_cached_json, python_json_string,
+        python_request_cache_key,
+    };
 
     #[derive(Default)]
     struct Cache {
@@ -321,5 +367,17 @@ mod tests {
         assert!(load.data.is_none());
         assert!(!fetched);
         assert!(load.diagnostics[0].contains("invalid request cache"));
+    }
+
+    #[test]
+    fn python_string_and_hash_helpers_preserve_ascii_unicode_and_surrogates() {
+        assert_eq!(
+            python_json_string("quote \" slash \\ newline\n Córdoba 😀"),
+            r#""quote \" slash \\ newline\n C\u00f3rdoba \ud83d\ude00""#
+        );
+        assert_eq!(
+            python_request_cache_key("synthetic"),
+            "request_cache:b3cc0475bb78a5026098858e9889acf666d31062d513d303314eca31d36e72f2"
+        );
     }
 }

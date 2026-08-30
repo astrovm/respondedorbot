@@ -14,6 +14,9 @@ use bot_adapters::criptoya::{
     TransportFailureKind as CriptoYaTransportFailureKind, fetch_dollar_quotes,
     fetch_exchange_quotes, fetch_rulo_market,
 };
+use bot_adapters::finviz::{
+    FinvizTransport, ReqwestFinvizTransport, TransportFailureKind as FinvizTransportFailureKind,
+};
 use bot_adapters::giphy::{
     GiphyTransport, ReqwestGiphyTransport, TransportFailureKind as GiphyTransportFailureKind,
 };
@@ -23,6 +26,7 @@ use bot_adapters::redis_connection::RedisEndpoint;
 use bot_adapters::redis_json_cache::{RedisJsonCache, RedisJsonCacheError};
 use bot_adapters::redis_message_state::{RedisMessageState, RedisMessageStateError};
 use bot_adapters::request_cache::RequestCache;
+use bot_adapters::stock_pool::{StockPoolCache, load_stock_pool};
 use bot_adapters::telegram_actions::{ActionError, ActionOutcome, execute_with};
 use bot_adapters::telegram_chat_admin::lookup_chat_admin_with;
 use bot_adapters::telegram_http::{
@@ -35,7 +39,7 @@ use bot_adapters::weather::{
 };
 use bot_adapters::yahoo_finance::{
     ReqwestYahooFinanceTransport, TransportFailureKind as YahooTransportFailureKind,
-    YahooFinanceTransport, load_quote as load_yahoo_quote,
+    YahooFinanceTransport, load_quote as load_yahoo_quote, load_symbol as load_yahoo_symbol,
 };
 use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup, ChargeHistoryPage};
 use bot_core::chat_config::ChatConfig;
@@ -43,6 +47,7 @@ use bot_core::command_state::{
     BOT_MESSAGE_METADATA_TTL_SECONDS, CHAT_HISTORY_WRITE_LIMIT, CHAT_STATE_TTL_SECONDS,
     IncomingCommandWritePlan, OutgoingCommandWritePlan,
 };
+use bot_core::stocks::{StockQuery, StockQuote, plan_stock_query};
 use bot_core::telegram_actions::TelegramAction;
 use bot_core::telegram_commands::command_publication_actions;
 use bot_core::telegram_payments::StarPaymentRecord;
@@ -55,7 +60,8 @@ use crate::dispatcher::{
     ChatConfigSource, DollarQuotesSource, GreetingPoolLoad, GreetingPoolSource,
     GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink, NativeDispatcher,
     OilPriceSource, OilQuoteLoad, RandomSource, RuloInputLoad, RuloSource, RuntimeValues,
-    StarPaymentReceipt, StarPaymentSink, WeatherObservationLoad, WeatherSource,
+    StarPaymentReceipt, StarPaymentSink, StockPriceSource, StockQuotesLoad, WeatherObservationLoad,
+    WeatherSource,
 };
 use crate::runtime::{PollingRuntime, UpdateSource};
 
@@ -233,6 +239,145 @@ impl<T: YahooFinanceTransport, C: RequestCache> OilPriceSource for YahooOilPrice
         OilQuoteLoad {
             brent: brent.quote,
             wti: wti.quote,
+            diagnostics,
+        }
+    }
+}
+
+struct YahooStockPriceSource<T, F, C> {
+    yahoo_transport: T,
+    finviz_transport: F,
+    cache: C,
+}
+
+impl<T, F, C> YahooStockPriceSource<T, F, C>
+where
+    T: YahooFinanceTransport,
+    F: FinvizTransport,
+    C: RequestCache + StockPoolCache,
+{
+    fn quote(
+        &mut self,
+        symbol: &str,
+        now_unix: i64,
+        diagnostics: &mut Vec<String>,
+    ) -> Option<StockQuote> {
+        let load = load_yahoo_quote(&self.yahoo_transport, &mut self.cache, symbol, now_unix);
+        diagnostics.extend(load.diagnostics);
+        load.quote
+    }
+
+    fn resolve(
+        &mut self,
+        query: &str,
+        now_unix: i64,
+        diagnostics: &mut Vec<String>,
+    ) -> Option<String> {
+        let load = load_yahoo_symbol(&self.yahoo_transport, &mut self.cache, query, now_unix);
+        diagnostics.extend(load.diagnostics);
+        load.symbol
+    }
+
+    fn resolve_missing(
+        &mut self,
+        quotes: Vec<(String, Option<StockQuote>)>,
+        now_unix: i64,
+        diagnostics: &mut Vec<String>,
+    ) -> Vec<(String, Option<StockQuote>)> {
+        quotes
+            .into_iter()
+            .map(|(query, quote)| {
+                let quote = quote.or_else(|| {
+                    let symbol = self.resolve(&query, now_unix, diagnostics)?;
+                    self.quote(&symbol, now_unix, diagnostics)
+                });
+                (query, quote)
+            })
+            .collect()
+    }
+}
+
+impl<T, F, C> StockPriceSource for YahooStockPriceSource<T, F, C>
+where
+    T: YahooFinanceTransport,
+    F: FinvizTransport,
+    C: RequestCache + StockPoolCache,
+{
+    fn load(&mut self, query: &str, now_unix: i64) -> StockQuotesLoad {
+        let plan = plan_stock_query(query);
+        let mut diagnostics = Vec::new();
+        let queries = if plan.needs_top_stocks {
+            let pool = load_stock_pool(&self.finviz_transport, &mut self.cache);
+            diagnostics.extend(pool.diagnostics);
+            if pool.symbols.is_empty() {
+                return StockQuotesLoad {
+                    quotes: None,
+                    diagnostics,
+                };
+            }
+            pool.symbols
+                .into_iter()
+                .take(20)
+                .map(|symbol| StockQuery {
+                    original: symbol.clone(),
+                    normalized: symbol.to_uppercase().trim_start_matches('$').to_owned(),
+                    is_symbol: true,
+                })
+                .collect::<Vec<_>>()
+        } else {
+            plan.queries
+        };
+
+        let mut quotes = Vec::with_capacity(queries.len());
+        for item in queries {
+            let quote = item
+                .is_symbol
+                .then(|| self.quote(&item.normalized, now_unix, &mut diagnostics))
+                .flatten();
+            quotes.push((item.original, quote));
+        }
+        let direct_quotes = quotes
+            .iter()
+            .filter_map(|(_, quote)| quote.clone())
+            .collect::<Vec<_>>();
+        if !plan.full_query_fallback || direct_quotes.len() == quotes.len() {
+            return StockQuotesLoad {
+                quotes: Some(self.resolve_missing(quotes, now_unix, &mut diagnostics)),
+                diagnostics,
+            };
+        }
+
+        let resolved = self.resolve(&plan.raw_query, now_unix, &mut diagnostics);
+        let mut full_quote = resolved.as_ref().and_then(|symbol| {
+            direct_quotes
+                .iter()
+                .find(|quote| quote.symbol.eq_ignore_ascii_case(symbol))
+                .cloned()
+        });
+        if full_quote.is_none()
+            && let Some(symbol) = resolved
+        {
+            full_quote = self.quote(&symbol, now_unix, &mut diagnostics);
+        }
+        if let Some(full_quote) = full_quote
+            && (direct_quotes.is_empty()
+                || !direct_quotes
+                    .iter()
+                    .any(|quote| quote.symbol.eq_ignore_ascii_case(&full_quote.symbol)))
+        {
+            return StockQuotesLoad {
+                quotes: Some(vec![(plan.raw_query, Some(full_quote))]),
+                diagnostics,
+            };
+        }
+        if direct_quotes.is_empty() {
+            return StockQuotesLoad {
+                quotes: Some(vec![(plan.raw_query, None)]),
+                diagnostics,
+            };
+        }
+        StockQuotesLoad {
+            quotes: Some(self.resolve_missing(quotes, now_unix, &mut diagnostics)),
             diagnostics,
         }
     }
@@ -706,6 +851,12 @@ pub enum CompositionError {
     YahooTransport(YahooTransportFailureKind),
     #[error("could not construct Yahoo Finance Redis cache: {0}")]
     YahooCache(RedisJsonCacheError),
+    #[error("could not construct stock Yahoo Finance transport: {0:?}")]
+    StockYahooTransport(YahooTransportFailureKind),
+    #[error("could not construct Finviz transport: {0:?}")]
+    FinvizTransport(FinvizTransportFailureKind),
+    #[error("could not construct stock Redis cache: {0}")]
+    StockCache(RedisJsonCacheError),
     #[error("could not construct Redis command state: {0}")]
     RedisState(#[from] RedisMessageStateError),
 }
@@ -746,6 +897,12 @@ pub fn build_native_runtime(
         ReqwestYahooFinanceTransport::new().map_err(CompositionError::YahooTransport)?;
     let yahoo_cache =
         RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::YahooCache)?;
+    let stock_yahoo_transport =
+        ReqwestYahooFinanceTransport::new().map_err(CompositionError::StockYahooTransport)?;
+    let finviz_transport =
+        ReqwestFinvizTransport::new().map_err(CompositionError::FinvizTransport)?;
+    let stock_cache =
+        RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::StockCache)?;
     let source =
         TelegramUpdateSource::new(polling_transport, options.token, options.long_poll_timeout);
     let config = ChatConfigRepository::new(options.database_url);
@@ -787,6 +944,11 @@ pub fn build_native_runtime(
     .with_oil_price_source(Box::new(YahooOilPriceSource {
         transport: yahoo_transport,
         cache: yahoo_cache,
+    }))
+    .with_stock_price_source(Box::new(YahooStockPriceSource {
+        yahoo_transport: stock_yahoo_transport,
+        finviz_transport,
+        cache: stock_cache,
     }));
     let dispatcher = if let Some(api_key) = options.coinmarketcap_key.filter(|key| !key.is_empty())
     {
@@ -815,8 +977,12 @@ mod tests {
         CriptoYaRequest, CriptoYaTransport, HttpResponse as CriptoYaHttpResponse,
         TransportFailureKind as CriptoYaFailure,
     };
+    use bot_adapters::finviz::{
+        FinvizTransport, HttpResponse as FinvizHttpResponse, TransportFailureKind as FinvizFailure,
+    };
     use bot_adapters::redis_connection::RedisEndpoint;
     use bot_adapters::request_cache::RequestCache;
+    use bot_adapters::stock_pool::StockPoolCache;
     use bot_adapters::telegram_http::{
         HttpResponse, TelegramRequest, TelegramTransport, TransportFailureKind,
     };
@@ -827,7 +993,7 @@ mod tests {
     };
     use bot_adapters::yahoo_finance::{
         HttpResponse as YahooHttpResponse, TransportFailureKind as YahooFailure, YahooChartRequest,
-        YahooFinanceTransport,
+        YahooFinanceTransport, YahooSearchRequest,
     };
     use bot_core::telegram_actions::{LabeledPrice, SendMessage, TelegramAction};
     use bot_core::telegram_input::ChatId;
@@ -843,7 +1009,8 @@ mod tests {
 
     use crate::dispatcher::{
         ActionReceipt, ActionSink, BillingTransferSink, GroupAuthorizer, MessageStateSink,
-        OilPriceSource, RandomSource, RuntimeValues, StarPaymentSink, WeatherSource,
+        OilPriceSource, RandomSource, RuntimeValues, StarPaymentSink, StockPriceSource,
+        WeatherSource,
     };
     use crate::runtime::UpdateSource;
 
@@ -853,7 +1020,8 @@ mod tests {
         CriptoYaRuloSource, NativeRuntimeOptions, OpenMeteoWeatherSource, RedisCommandState,
         SystemRandomError, SystemRandomSource, SystemRuntimeValues, TelegramActionSink,
         TelegramActionSinkError, TelegramGroupAuthorizer, TelegramUpdateSource,
-        YahooOilPriceSource, build_native_runtime, publish_telegram_commands,
+        YahooOilPriceSource, YahooStockPriceSource, build_native_runtime,
+        publish_telegram_commands,
     };
     use crate::dispatcher::RuloSource;
 
@@ -876,6 +1044,44 @@ mod tests {
         requests: RefCell<Vec<YahooChartRequest>>,
     }
 
+    struct StockYahooTransportStub {
+        chart_responses: RefCell<Vec<Result<YahooHttpResponse, YahooFailure>>>,
+        search_responses: RefCell<Vec<Result<YahooHttpResponse, YahooFailure>>>,
+        charts: RefCell<Vec<YahooChartRequest>>,
+        searches: RefCell<Vec<YahooSearchRequest>>,
+    }
+
+    impl YahooFinanceTransport for StockYahooTransportStub {
+        fn chart(&self, request: &YahooChartRequest) -> Result<YahooHttpResponse, YahooFailure> {
+            self.charts.borrow_mut().push(request.clone());
+            if self.chart_responses.borrow().is_empty() {
+                return Err(YahooFailure::Request);
+            }
+            self.chart_responses.borrow_mut().remove(0)
+        }
+
+        fn search(&self, request: &YahooSearchRequest) -> Result<YahooHttpResponse, YahooFailure> {
+            self.searches.borrow_mut().push(request.clone());
+            if self.search_responses.borrow().is_empty() {
+                return Err(YahooFailure::Request);
+            }
+            self.search_responses.borrow_mut().remove(0)
+        }
+    }
+
+    struct FinvizTransportStub {
+        response: RefCell<Option<Result<FinvizHttpResponse, FinvizFailure>>>,
+    }
+
+    impl FinvizTransport for FinvizTransportStub {
+        fn fetch(&self) -> Result<FinvizHttpResponse, FinvizFailure> {
+            self.response
+                .borrow_mut()
+                .take()
+                .unwrap_or(Err(FinvizFailure::Request))
+        }
+    }
+
     impl YahooFinanceTransport for YahooTransportStub {
         fn chart(&self, request: &YahooChartRequest) -> Result<YahooHttpResponse, YahooFailure> {
             self.requests.borrow_mut().push(request.clone());
@@ -883,6 +1089,10 @@ mod tests {
                 return Err(YahooFailure::Request);
             }
             self.responses.borrow_mut().remove(0)
+        }
+
+        fn search(&self, _request: &YahooSearchRequest) -> Result<YahooHttpResponse, YahooFailure> {
+            Err(YahooFailure::Request)
         }
     }
 
@@ -899,6 +1109,18 @@ mod tests {
     struct WeatherCacheStub;
 
     impl RequestCache for WeatherCacheStub {
+        type Error = std::convert::Infallible;
+
+        fn get(&mut self, _key: &str) -> Result<Option<String>, Self::Error> {
+            Ok(None)
+        }
+
+        fn set(&mut self, _key: &str, _value: &str, _ttl_seconds: i64) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    impl StockPoolCache for WeatherCacheStub {
         type Error = std::convert::Infallible;
 
         fn get(&mut self, _key: &str) -> Result<Option<String>, Self::Error> {
@@ -1571,5 +1793,94 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["BZ=F", "CL=F"]
         );
+    }
+
+    #[test]
+    fn stock_source_resolves_a_multiword_company_as_one_quote() {
+        let empty_chart = || {
+            Ok(YahooHttpResponse {
+                status_code: 200,
+                body: r#"{"chart":{"result":[]}}"#.to_owned(),
+            })
+        };
+        let apple_chart = Ok(YahooHttpResponse {
+            status_code: 200,
+            body: r#"{"chart":{"result":[{"meta":{"symbol":"AAPL","regularMarketPrice":205.5,"chartPreviousClose":200,"currency":"USD"}}]}}"#.to_owned(),
+        });
+        let transport = StockYahooTransportStub {
+            chart_responses: RefCell::new(vec![empty_chart(), empty_chart(), apple_chart]),
+            search_responses: RefCell::new(vec![Ok(YahooHttpResponse {
+                status_code: 200,
+                body: r#"{"quotes":[{"quoteType":"EQUITY","symbol":"AAPL"}]}"#.to_owned(),
+            })]),
+            charts: RefCell::default(),
+            searches: RefCell::default(),
+        };
+        let mut source = YahooStockPriceSource {
+            yahoo_transport: transport,
+            finviz_transport: FinvizTransportStub {
+                response: RefCell::new(None),
+            },
+            cache: WeatherCacheStub,
+        };
+        let load = source.load("Apple Inc", 100);
+        let quotes = load.quotes.unwrap_or_default();
+        assert_eq!(quotes.len(), 1);
+        assert_eq!(quotes[0].0, "Apple Inc");
+        assert_eq!(
+            quotes[0].1.as_ref().map(|quote| quote.symbol.as_str()),
+            Some("AAPL")
+        );
+        assert_eq!(
+            source
+                .yahoo_transport
+                .charts
+                .borrow()
+                .iter()
+                .map(|request| request.symbol.as_str())
+                .collect::<Vec<_>>(),
+            ["APPLE", "INC", "AAPL"]
+        );
+        assert_eq!(
+            source.yahoo_transport.searches.borrow()[0].query,
+            "Apple Inc"
+        );
+    }
+
+    #[test]
+    fn stock_source_uses_finviz_pool_for_an_empty_query() {
+        let chart = |symbol: &str, price: f64| {
+            Ok(YahooHttpResponse {
+                status_code: 200,
+                body: format!(
+                    r#"{{"chart":{{"result":[{{"meta":{{"symbol":"{symbol}","regularMarketPrice":{price},"chartPreviousClose":100,"currency":"USD"}}}}]}}}}"#
+                ),
+            })
+        };
+        let transport = StockYahooTransportStub {
+            chart_responses: RefCell::new(vec![chart("AAPL", 205.5), chart("MSFT", 150.0)]),
+            search_responses: RefCell::default(),
+            charts: RefCell::default(),
+            searches: RefCell::default(),
+        };
+        let mut source = YahooStockPriceSource {
+            yahoo_transport: transport,
+            finviz_transport: FinvizTransportStub {
+                response: RefCell::new(Some(Ok(FinvizHttpResponse {
+                    status_code: 200,
+                    body: concat!(
+                        r#"data-boxover-ticker="AAPL" data-boxover-company="Apple" "#,
+                        r#"data-boxover-ticker="MSFT" data-boxover-company="Microsoft""#
+                    )
+                    .to_owned(),
+                }))),
+            },
+            cache: WeatherCacheStub,
+        };
+        let load = source.load("", 100);
+        let quotes = load.quotes.unwrap_or_default();
+        assert_eq!(quotes.len(), 2);
+        assert!(quotes.iter().all(|(_, quote)| quote.is_some()));
+        assert!(source.yahoo_transport.searches.borrow().is_empty());
     }
 }

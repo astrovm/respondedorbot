@@ -3,16 +3,16 @@
 use std::thread;
 use std::time::Duration;
 
-use bot_core::cache_policy::request_cache_key;
 use bot_core::weather::{
     DEFAULT_WEATHER_LOCATION, WeatherObservation, search_key, select_forecast_hour,
     select_location_candidate,
 };
 use reqwest::blocking::Client;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
-use crate::request_cache::{JsonHttpResponse, RequestCache, load_cached_json};
+use crate::request_cache::{
+    JsonHttpResponse, RequestCache, load_cached_json, python_json_string, python_request_cache_key,
+};
 
 const GEOCODING_URL: &str = "https://geocoding-api.open-meteo.com/v1/search";
 const FORECAST_URL: &str = "https://api.open-meteo.com/v1/forecast";
@@ -112,43 +112,11 @@ pub struct WeatherLoad {
     pub diagnostics: Vec<String>,
 }
 
-fn python_string(value: &str) -> String {
-    let mut encoded = String::from("\"");
-    for character in value.chars() {
-        match character {
-            '"' => encoded.push_str("\\\""),
-            '\\' => encoded.push_str("\\\\"),
-            '\u{08}' => encoded.push_str("\\b"),
-            '\u{0c}' => encoded.push_str("\\f"),
-            '\n' => encoded.push_str("\\n"),
-            '\r' => encoded.push_str("\\r"),
-            '\t' => encoded.push_str("\\t"),
-            character if character <= '\u{1f}' => {
-                encoded.push_str(&format!("\\u{:04x}", u32::from(character)));
-            }
-            character if character.is_ascii() => encoded.push(character),
-            character => {
-                let codepoint = u32::from(character);
-                if codepoint <= 0xffff {
-                    encoded.push_str(&format!("\\u{codepoint:04x}"));
-                } else {
-                    let adjusted = codepoint - 0x1_0000;
-                    let high = 0xd800 + (adjusted >> 10);
-                    let low = 0xdc00 + (adjusted & 0x3ff);
-                    encoded.push_str(&format!("\\u{high:04x}\\u{low:04x}"));
-                }
-            }
-        }
-    }
-    encoded.push('"');
-    encoded
-}
-
 fn python_cache_arguments(request: &WeatherRequest) -> String {
     match request {
         WeatherRequest::Geocode { name } => format!(
             "{{\"api_url\": \"{GEOCODING_URL}\", \"headers\": null, \"parameters\": {{\"count\": 10, \"format\": \"json\", \"language\": \"es\", \"name\": {}}}}}",
-            python_string(name)
+            python_json_string(name)
         ),
         WeatherRequest::Forecast {
             latitude,
@@ -160,12 +128,7 @@ fn python_cache_arguments(request: &WeatherRequest) -> String {
 }
 
 fn compatible_cache_key(request: &WeatherRequest) -> String {
-    let hash = Sha256::digest(python_cache_arguments(request).as_bytes());
-    let encoded = hash
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    request_cache_key(&encoded)
+    python_request_cache_key(&python_cache_arguments(request))
 }
 
 fn cached_request<T: WeatherTransport, C: RequestCache>(

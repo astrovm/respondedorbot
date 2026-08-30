@@ -41,7 +41,10 @@ use bot_core::stateless_commands::{
     StatelessCommandPlan, StatelessRuntimeContext, plan_runtime_stateless_command,
     plan_stateless_command,
 };
-use bot_core::stocks::{StockQuote, classify_oil_command, render_oil_quotes};
+use bot_core::stocks::{
+    StockQuote, classify_oil_command, classify_stock_command, render_oil_quotes,
+    render_stock_quotes,
+};
 use bot_core::telegram_actions::{SendMessage, TelegramAction};
 use bot_core::telegram_callbacks::{CallbackContextOutcome, CallbackRoute, parse_callback_context};
 use bot_core::telegram_input::{ChatId, MessageId, is_group_chat_type};
@@ -221,6 +224,16 @@ pub trait OilPriceSource {
     fn load(&mut self, now_unix: i64) -> OilQuoteLoad;
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct StockQuotesLoad {
+    pub quotes: Option<Vec<(String, Option<StockQuote>)>>,
+    pub diagnostics: Vec<String>,
+}
+
+pub trait StockPriceSource {
+    fn load(&mut self, query: &str, now_unix: i64) -> StockQuotesLoad;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchOutcome {
     Handled,
@@ -269,6 +282,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     greeting_pool_source: Option<Box<dyn GreetingPoolSource>>,
     weather_source: Option<Box<dyn WeatherSource>>,
     oil_price_source: Option<Box<dyn OilPriceSource>>,
+    stock_price_source: Option<Box<dyn StockPriceSource>>,
     last_outcome: Option<DispatchOutcome>,
     state_diagnostics: Vec<String>,
 }
@@ -315,6 +329,7 @@ where
             greeting_pool_source: None,
             weather_source: None,
             oil_price_source: None,
+            stock_price_source: None,
             last_outcome: None,
             state_diagnostics: Vec::new(),
         }
@@ -403,6 +418,12 @@ where
     #[must_use]
     pub fn with_oil_price_source(mut self, source: Box<dyn OilPriceSource>) -> Self {
         self.oil_price_source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub fn with_stock_price_source(mut self, source: Box<dyn StockPriceSource>) -> Self {
+        self.stock_price_source = Some(source);
         self
     }
 
@@ -1187,6 +1208,16 @@ where
                 CreditLogPlan::NotHandled => StatelessCommandPlan::NotHandled,
                 CreditLogPlan::LegacyRequired => StatelessCommandPlan::LegacyFallbackRequired,
             }
+        } else if classify_stock_command(&parsed.command) {
+            let Some(source) = self.stock_price_source.as_mut() else {
+                return Ok(DispatchOutcome::LegacyRequired);
+            };
+            let load = source.load(&parsed.message_text, timestamp);
+            self.state_diagnostics.extend(load.diagnostics);
+            let text = render_stock_quotes(load.quotes.as_deref(), locale);
+            let mut message = SendMessage::new(chat_id, &text);
+            message.reply_to_message_id = Some(message_id);
+            StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if classify_oil_command(&parsed.command) {
             let Some(source) = self.oil_price_source.as_mut() else {
                 return Ok(DispatchOutcome::LegacyRequired);
@@ -1522,7 +1553,7 @@ mod tests {
         GreetingPoolLoad, GreetingPoolSource, GroupAuthorizationDecision, GroupAuthorizer,
         MessageStateSink, NativeDispatcher, OilPriceSource, OilQuoteLoad, RandomSource,
         RuloInputLoad, RuloSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink,
-        TransferResult, WeatherObservationLoad, WeatherSource,
+        StockPriceSource, StockQuotesLoad, TransferResult, WeatherObservationLoad, WeatherSource,
     };
     use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup};
     use bot_core::devo::DevoQuotes;
@@ -1904,6 +1935,18 @@ mod tests {
     impl OilPriceSource for OilQuotes {
         fn load(&mut self, now_unix: i64) -> OilQuoteLoad {
             self.calls.borrow_mut().push(now_unix);
+            self.result.clone()
+        }
+    }
+
+    struct StockQuotes {
+        result: StockQuotesLoad,
+        calls: Rc<RefCell<Vec<(String, i64)>>>,
+    }
+
+    impl StockPriceSource for StockQuotes {
+        fn load(&mut self, query: &str, now_unix: i64) -> StockQuotesLoad {
+            self.calls.borrow_mut().push((query.to_owned(), now_unix));
             self.result.clone()
         }
     }
@@ -2306,6 +2349,119 @@ mod tests {
             return;
         };
         assert_eq!(message.text, "no se pudo obtener el clima de Buenos Aires");
+    }
+
+    #[test]
+    fn stock_commands_pass_query_render_quotes_and_record_command_state() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let quote = StockQuote {
+            symbol: "AAPL".to_owned(),
+            name: "Apple".to_owned(),
+            price: 205.5,
+            currency: "USD".to_owned(),
+            exchange: "NMS".to_owned(),
+            variation: 1.25,
+        };
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_stock_price_source(Box::new(StockQuotes {
+            result: StockQuotesLoad {
+                quotes: Some(vec![
+                    ("Apple Inc".to_owned(), Some(quote)),
+                    ("Unknown".to_owned(), None),
+                ]),
+                diagnostics: vec!["synthetic stale search".to_owned()],
+            },
+            calls: Rc::clone(&calls),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(update("/stocks Apple Inc", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            calls.borrow().as_slice(),
+            &[("Apple Inc".to_owned(), 1_672_531_200)]
+        );
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
+            return;
+        };
+        assert_eq!(
+            message.text,
+            "AAPL: 205.50 USD (+1.25% 24h)\nUnknown: not found"
+        );
+        assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
+        assert_eq!(dispatcher.state.incoming.len(), 1);
+        assert_eq!(dispatcher.state.outgoing.len(), 1);
+        assert_eq!(dispatcher.state_diagnostics(), &["synthetic stale search"]);
+    }
+
+    #[test]
+    fn stock_top_failure_is_localized_and_missing_source_stays_legacy() {
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut failed = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_stock_price_source(Box::new(StockQuotes {
+            result: StockQuotesLoad {
+                quotes: None,
+                diagnostics: vec!["synthetic Finviz failure".to_owned()],
+            },
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            failed.dispatch(update("/acciones", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
+            return;
+        };
+        assert_eq!(
+            message.text,
+            "no pude traer el top de acciones, probá de nuevo"
+        );
+        assert!(failed.state_diagnostics()[0].contains("Finviz failure"));
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut missing = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            missing.dispatch(update("/stocks AAPL", None)),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
+        assert!(missing.actions.0.is_empty());
     }
 
     #[test]

@@ -40,6 +40,48 @@ pub fn classify_oil_command(command: &str) -> bool {
     matches!(command, "/petroleo" | "/oil")
 }
 
+#[must_use]
+pub fn classify_stock_command(command: &str) -> bool {
+    matches!(command, "/acciones" | "/stocks")
+}
+
+#[must_use]
+pub fn render_stock_quotes(
+    quotes: Option<&[(String, Option<StockQuote>)]>,
+    locale: Locale,
+) -> String {
+    let Some(quotes) = quotes else {
+        return match locale {
+            Locale::Es => "no pude traer el top de acciones, probá de nuevo".to_owned(),
+            Locale::En => "I could not load the top stocks, try again".to_owned(),
+        };
+    };
+    let lines = quotes
+        .iter()
+        .map(|(query, quote)| match quote {
+            Some(quote) => {
+                let sign = if quote.variation >= 0.0 { "+" } else { "" };
+                format!(
+                    "{}: {:.2} {} ({sign}{:.2}% 24h)",
+                    quote.symbol, quote.price, quote.currency, quote.variation
+                )
+            }
+            None => match locale {
+                Locale::Es => format!("{query}: no se pudo encontrar"),
+                Locale::En => format!("{query}: not found"),
+            },
+        })
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        match locale {
+            Locale::Es => "no se pudo obtener ninguna cotización".to_owned(),
+            Locale::En => "I could not load any quote".to_owned(),
+        }
+    } else {
+        lines.join("\n")
+    }
+}
+
 fn trimmed_decimal(value: f64) -> String {
     let formatted = format!("{value:.2}");
     formatted
@@ -235,8 +277,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        StockQuery, StockQueryPlan, classify_oil_command, parse_yahoo_quote, plan_stock_query,
-        render_oil_quotes, select_yahoo_symbol,
+        StockQuery, StockQueryPlan, classify_oil_command, classify_stock_command,
+        parse_yahoo_quote, plan_stock_query, render_oil_quotes, render_stock_quotes,
+        select_yahoo_symbol,
     };
     use crate::locale::Locale;
 
@@ -388,6 +431,45 @@ mod tests {
         assert_eq!(
             render_oil_quotes(None, None, Locale::En),
             "I could not load the oil price"
+        );
+    }
+
+    #[test]
+    fn stock_commands_render_quotes_missing_entries_and_localized_failures() {
+        assert!(classify_stock_command("/acciones"));
+        assert!(classify_stock_command("/stocks"));
+        assert!(!classify_stock_command("/stock"));
+        let quote = super::StockQuote {
+            symbol: "EXM".to_owned(),
+            name: "Example".to_owned(),
+            price: 12.5,
+            currency: "USD".to_owned(),
+            exchange: "Synthetic".to_owned(),
+            variation: -1.25,
+        };
+        let entries = vec![
+            ("EXM".to_owned(), Some(quote)),
+            ("Missing Corp".to_owned(), None),
+        ];
+        assert_eq!(
+            render_stock_quotes(Some(&entries), Locale::Es),
+            "EXM: 12.50 USD (-1.25% 24h)\nMissing Corp: no se pudo encontrar"
+        );
+        assert_eq!(
+            render_stock_quotes(Some(&[("Unknown".to_owned(), None)]), Locale::En),
+            "Unknown: not found"
+        );
+        assert_eq!(
+            render_stock_quotes(None, Locale::Es),
+            "no pude traer el top de acciones, probá de nuevo"
+        );
+        assert_eq!(
+            render_stock_quotes(None, Locale::En),
+            "I could not load the top stocks, try again"
+        );
+        assert_eq!(
+            render_stock_quotes(Some(&[]), Locale::En),
+            "I could not load any quote"
         );
     }
 }
