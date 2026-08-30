@@ -1,0 +1,16 @@
+{
+  "event_types": [
+    "ai_settlement_result",
+    "memory_compaction_settlement",
+    "ai_reserve",
+    "ai_refund",
+    "ai_settlement_charge",
+    "ai_settlement_debt"
+  ],
+  "group_key": ["origin_chat_id or settlement chat or chat_id", "message_id or ledger id"],
+  "pending_source": "latest unfinalized settlement_id reserve",
+  "directions": ["older", "newer"],
+  "limit": {"minimum": 1, "maximum": 20, "default": 10},
+  "timestamp_type": "timezone-aware Python datetime",
+  "failure_behavior": "safe Python read fallback"
+}

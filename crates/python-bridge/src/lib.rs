@@ -2206,6 +2206,23 @@ fn billing_purge_expired_ai_ledger_events(
     serde_json::to_string(&result).map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+/// Return one raw page of user AI charge-history rows.
+#[pyfunction]
+fn billing_list_user_ai_charge_rows(
+    py: Python<'_>,
+    database_url: &str,
+    user_id: i64,
+    cursor_id: Option<i64>,
+    direction: &str,
+    group_limit: i64,
+) -> PyResult<String> {
+    let repository = BillingRepository::new(database_url);
+    let rows = py
+        .detach(|| repository.list_user_ai_charge_rows(user_id, cursor_id, direction, group_limit))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serde_json::to_string(&rows).map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -2348,6 +2365,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
         billing_purge_expired_ai_ledger_events,
         module
     )?)?;
+    module.add_function(wrap_pyfunction!(billing_list_user_ai_charge_rows, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;

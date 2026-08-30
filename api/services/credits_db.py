@@ -285,6 +285,17 @@ class _RustBillingMaintenance(Protocol):
     ) -> str: ...
 
 
+class _RustBillingChargeHistory(Protocol):
+    def billing_list_user_ai_charge_rows(
+        self,
+        database_url: str,
+        user_id: int,
+        cursor_id: int | None,
+        direction: str,
+        group_limit: int,
+    ) -> str: ...
+
+
 def _load_rust_billing_reads() -> _RustBillingReads | None:
     module = load_rust_bridge("RUST_BILLING_READ_SHADOW_ENABLED")
     if module is None:
@@ -399,6 +410,13 @@ def _load_rust_billing_maintenance() -> _RustBillingMaintenance | None:
     if module is None:
         return None
     return cast(_RustBillingMaintenance, module)
+
+
+def _load_rust_billing_charge_history() -> _RustBillingChargeHistory | None:
+    module = load_rust_bridge("RUST_BILLING_CHARGE_HISTORY_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustBillingChargeHistory, module)
 
 
 class CreditsDBError(RuntimeError):
@@ -2683,10 +2701,59 @@ def list_user_ai_charge_page(
     normalized_direction: Literal["older", "newer"] = (
         "newer" if direction == "newer" else "older"
     )
+    rows: Sequence[Any] | None = None
+    rust = _load_rust_billing_charge_history()
+    database_url = get_database_url()
+    if rust is not None and database_url:
+        try:
+            loaded = json.loads(
+                rust.billing_list_user_ai_charge_rows(
+                    database_url,
+                    int(user_id),
+                    normalized_cursor_id,
+                    normalized_direction,
+                    normalized_limit + 1,
+                )
+            )
+            if not isinstance(loaded, list):
+                raise ValueError("Rust AI charge history rows must be an array")
+            rust_rows: List[Tuple[Any, ...]] = []
+            for item in loaded:
+                if not isinstance(item, Mapping):
+                    raise ValueError("Rust AI charge history row must be an object")
+                created_at = item.get("created_at")
+                group_created_at = item.get("group_created_at")
+                rust_rows.append(
+                    (
+                        item.get("id"),
+                        item.get("event_type"),
+                        item.get("actor_user_id"),
+                        item.get("user_id"),
+                        item.get("chat_id"),
+                        item.get("amount"),
+                        item.get("metadata"),
+                        (
+                            datetime.fromisoformat(created_at)
+                            if isinstance(created_at, str)
+                            else created_at
+                        ),
+                        item.get("group_key"),
+                        item.get("group_cursor"),
+                        (
+                            datetime.fromisoformat(group_created_at)
+                            if isinstance(group_created_at, str)
+                            else group_created_at
+                        ),
+                    )
+                )
+            rows = rust_rows
+        except Exception:
+            logger.exception("Rust AI charge history read failed; using Python fallback")
 
-    with connect() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
+    if rows is None:
+        with connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
                 WITH user_ledger AS (
                     SELECT *
                     FROM credit_ledger
@@ -2902,21 +2969,21 @@ def list_user_ai_charge_page(
                     CASE WHEN %s = 'older' THEN page.group_cursor END DESC,
                     operation.id DESC
                 """,
-            (
-                int(user_id),
-                normalized_cursor_id,
-                normalized_direction,
-                normalized_cursor_id,
-                normalized_direction,
-                normalized_cursor_id,
-                normalized_direction,
-                normalized_direction,
-                normalized_limit + 1,
-                normalized_direction,
-                normalized_direction,
-            ),
-        )
-        rows = cur.fetchall() or []
+                (
+                    int(user_id),
+                    normalized_cursor_id,
+                    normalized_direction,
+                    normalized_cursor_id,
+                    normalized_direction,
+                    normalized_cursor_id,
+                    normalized_direction,
+                    normalized_direction,
+                    normalized_limit + 1,
+                    normalized_direction,
+                    normalized_direction,
+                ),
+            )
+            rows = cur.fetchall() or []
 
     grouped: Dict[str, Dict[str, Any]] = {}
     group_order: List[str] = []

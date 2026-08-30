@@ -642,6 +642,17 @@ def verify_billing_maintenance(bridge: ModuleType) -> None:
         raise AssertionError("Rust AI ledger maintenance bridge is unavailable")
 
 
+def verify_billing_charge_history(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "billing_charge_history.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    if contract["directions"] != ["older", "newer"]:
+        raise AssertionError("AI charge-history directions changed")
+    if contract["limit"] != {"minimum": 1, "maximum": 20, "default": 10}:
+        raise AssertionError("AI charge-history pagination limits changed")
+    if not callable(bridge.billing_list_user_ai_charge_rows):
+        raise AssertionError("Rust AI charge-history bridge is unavailable")
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -706,6 +717,7 @@ def verify_billing_contracts(bridge: ModuleType) -> None:
     verify_billing_audit_reads(bridge)
     verify_billing_reconciliation_reads(bridge)
     verify_billing_maintenance(bridge)
+    verify_billing_charge_history(bridge)
 
 
 def main(arguments: list[str]) -> int:

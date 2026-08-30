@@ -518,6 +518,29 @@ class _FakeRustBillingMaintenance:
             raise ValueError("synthetic uncertain maintenance failure")
         return json.dumps(self.result)
 
+
+class _FakeRustBillingChargeHistory:
+    def __init__(self, result: list[dict[str, object]], *, fail: bool = False) -> None:
+        self.result = result
+        self.fail = fail
+        self.calls: list[tuple[str, int, int | None, str, int]] = []
+
+    def billing_list_user_ai_charge_rows(
+        self,
+        database_url: str,
+        user_id: int,
+        cursor_id: int | None,
+        direction: str,
+        group_limit: int,
+    ) -> str:
+        self.calls.append(
+            (database_url, user_id, cursor_id, direction, group_limit)
+        )
+        if self.fail:
+            raise ValueError("synthetic charge history failure")
+        return json.dumps(self.result)
+
+
 def _patch_python_balance(
     monkeypatch: pytest.MonkeyPatch,
     balance: int,
@@ -1689,3 +1712,126 @@ def test_billing_maintenance_uncertain_failure_does_not_start_python_delete(
 
     with pytest.raises(credits_db.CreditsDBError, match="ledger maintenance"):
         credits_db.purge_expired_ai_ledger_events()
+
+
+def test_billing_charge_history_is_authoritative_and_restores_datetimes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(credits_db, "get_database_url", lambda: "postgresql://db")
+    monkeypatch.setattr(
+        credits_db,
+        "connect",
+        lambda: pytest.fail("Python charge-history query must not run"),
+    )
+    rust = _FakeRustBillingChargeHistory(
+        [
+            {
+                "id": 7,
+                "event_type": "ai_settlement_result",
+                "actor_user_id": 42,
+                "user_id": 42,
+                "chat_id": 202,
+                "amount": 0,
+                "metadata": {"charged_credit_units_total": 123},
+                "created_at": "2026-08-30 12:35:56+00:00",
+                "group_key": "202:99",
+                "group_cursor": 7,
+                "group_created_at": "2026-08-30 12:34:56+00:00",
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        credits_db,
+        "_load_rust_billing_charge_history",
+        lambda: rust,
+    )
+
+    page = credits_db.list_user_ai_charge_page(
+        42,
+        limit=100,
+        cursor_id=100,
+        direction="invalid",  # type: ignore[arg-type]
+    )
+
+    assert page == {
+        "groups": [
+            {
+                "cursor_id": 7,
+                "created_at": datetime(2026, 8, 30, 12, 34, 56, tzinfo=UTC),
+                "entries": [
+                    {
+                        "id": 7,
+                        "event_type": "ai_settlement_result",
+                        "actor_user_id": 42,
+                        "user_id": 42,
+                        "chat_id": 202,
+                        "amount": 0,
+                        "metadata": {"charged_credit_units_total": 123},
+                        "created_at": datetime(
+                            2026,
+                            8,
+                            30,
+                            12,
+                            35,
+                            56,
+                            tzinfo=UTC,
+                        ),
+                    }
+                ],
+            }
+        ],
+        "has_newer": True,
+        "has_older": False,
+        "newer_cursor": 7,
+        "older_cursor": 7,
+    }
+    assert rust.calls == [("postgresql://db", 42, 100, "older", 21)]
+
+
+def test_billing_charge_history_failure_safely_uses_python_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class Cursor:
+        def __enter__(self) -> Cursor:
+            return self
+
+        def __exit__(self, *_arguments: object) -> None:
+            return None
+
+        def execute(self, *_arguments: object) -> None:
+            return None
+
+        def fetchall(self) -> list[tuple[object, ...]]:
+            return []
+
+    class Connection:
+        def __enter__(self) -> Connection:
+            return self
+
+        def __exit__(self, *_arguments: object) -> None:
+            return None
+
+        def cursor(self) -> Cursor:
+            return Cursor()
+
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(credits_db, "get_database_url", lambda: "postgresql://db")
+    monkeypatch.setattr(credits_db, "connect", lambda: Connection())
+    monkeypatch.setattr(
+        credits_db,
+        "_load_rust_billing_charge_history",
+        lambda: _FakeRustBillingChargeHistory([], fail=True),
+    )
+
+    with caplog.at_level(logging.ERROR, logger=credits_db.__name__):
+        assert credits_db.list_user_ai_charge_page(42) == {
+            "groups": [],
+            "has_newer": False,
+            "has_older": False,
+            "newer_cursor": None,
+            "older_cursor": None,
+        }
+
+    assert "using Python fallback" in caplog.text

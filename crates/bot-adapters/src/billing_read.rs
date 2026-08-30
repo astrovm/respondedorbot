@@ -162,6 +162,21 @@ pub struct PurgeResult {
     pub retention_days: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChargeHistoryRow {
+    pub id: i64,
+    pub event_type: String,
+    pub actor_user_id: Option<i64>,
+    pub user_id: Option<i64>,
+    pub chat_id: Option<i64>,
+    pub amount: i64,
+    pub metadata: Value,
+    pub created_at: String,
+    pub group_key: String,
+    pub group_cursor: i64,
+    pub group_created_at: String,
+}
+
 pub struct BillingRepository {
     database_url: String,
 }
@@ -1193,6 +1208,157 @@ impl BillingRepository {
         })
     }
 
+    pub fn list_user_ai_charge_rows(
+        &self,
+        user_id: i64,
+        cursor_id: Option<i64>,
+        direction: &str,
+        group_limit: i64,
+    ) -> Result<Vec<ChargeHistoryRow>, BillingError> {
+        let mut client = self.connect()?;
+        client
+            .query(
+                "WITH user_ledger AS ( \
+                    SELECT * FROM credit_ledger WHERE user_id = $1 \
+                      AND event_type IN ( \
+                        'ai_settlement_result', 'memory_compaction_settlement', \
+                        'ai_reserve', 'ai_refund', 'ai_settlement_charge', \
+                        'ai_settlement_debt' \
+                      ) \
+                ), finalized_ids AS ( \
+                    SELECT metadata->>'settlement_id' AS settlement_id \
+                    FROM user_ledger \
+                    WHERE event_type IN ( \
+                        'ai_settlement_result', 'memory_compaction_settlement' \
+                    ) AND metadata ? 'settlement_id' \
+                    UNION \
+                    SELECT settlement_id.value FROM user_ledger \
+                    CROSS JOIN LATERAL jsonb_array_elements_text( \
+                        CASE WHEN jsonb_typeof(metadata->'settlement_ids') = 'array' \
+                            THEN metadata->'settlement_ids' ELSE '[]'::jsonb END \
+                    ) AS settlement_id(value) \
+                    WHERE event_type = 'ai_settlement_result' \
+                ), finalized_operations AS ( \
+                    SELECT id, event_type, actor_user_id, user_id, chat_id, \
+                        amount, metadata, created_at \
+                    FROM user_ledger \
+                    WHERE event_type IN ( \
+                        'ai_settlement_result', 'memory_compaction_settlement' \
+                    ) AND NOT ( \
+                        event_type = 'ai_settlement_result' AND EXISTS ( \
+                            SELECT 1 FROM user_ledger AS legacy \
+                            WHERE legacy.event_type = 'memory_compaction_settlement' \
+                              AND legacy.metadata->>'usage_tag' \
+                                  = user_ledger.metadata->>'usage_tag' \
+                        ) \
+                    ) \
+                ), pending_reservations AS ( \
+                    SELECT DISTINCT ON (metadata->>'settlement_id') \
+                        id, event_type, actor_user_id, user_id, chat_id, amount, \
+                        metadata, created_at \
+                    FROM user_ledger AS reserve \
+                    WHERE event_type = 'ai_reserve' \
+                      AND metadata ? 'settlement_id' \
+                      AND NOT EXISTS ( \
+                        SELECT 1 FROM finalized_ids \
+                        WHERE finalized_ids.settlement_id \
+                            = reserve.metadata->>'settlement_id' \
+                      ) \
+                    ORDER BY metadata->>'settlement_id', id DESC \
+                ), pending_operations AS ( \
+                    SELECT reserve.id, reserve.event_type, reserve.actor_user_id, \
+                        reserve.user_id, reserve.chat_id, \
+                        -GREATEST(0, -totals.net_amount) AS amount, \
+                        reserve.metadata || jsonb_build_object( \
+                            'charged_credit_units_total', \
+                                GREATEST(0, -totals.net_amount), \
+                            'billing_pending', TRUE, \
+                            'payer_scope', CASE \
+                                WHEN totals.user_paid > 0 AND totals.chat_paid > 0 \
+                                    THEN 'mixed' \
+                                WHEN totals.chat_paid > 0 THEN 'chat' ELSE 'user' END, \
+                            'payer_breakdown', jsonb_build_array( \
+                                jsonb_build_object( \
+                                    'scope', 'user', 'credit_units', totals.user_paid), \
+                                jsonb_build_object( \
+                                    'scope', 'chat', 'credit_units', totals.chat_paid) \
+                            ) \
+                        ) AS metadata, reserve.created_at \
+                    FROM pending_reservations AS reserve \
+                    CROSS JOIN LATERAL ( \
+                        SELECT COALESCE(SUM(mutation.amount), 0) AS net_amount, \
+                            GREATEST(0, COALESCE(SUM(-mutation.amount) FILTER ( \
+                                WHERE mutation.metadata->>'source' = 'user'), 0)) \
+                                AS user_paid, \
+                            GREATEST(0, COALESCE(SUM(-mutation.amount) FILTER ( \
+                                WHERE mutation.metadata->>'source' = 'chat'), 0)) \
+                                AS chat_paid \
+                        FROM user_ledger AS mutation \
+                        WHERE mutation.event_type IN ( \
+                            'ai_reserve', 'ai_refund', 'ai_settlement_charge', \
+                            'ai_settlement_debt' \
+                        ) AND mutation.metadata->>'settlement_id' \
+                            = reserve.metadata->>'settlement_id' \
+                    ) AS totals \
+                ), operations AS ( \
+                    SELECT * FROM finalized_operations \
+                    UNION ALL SELECT * FROM pending_operations \
+                ), grouped_operations AS ( \
+                    SELECT operations.*, CONCAT( \
+                        COALESCE( \
+                            NULLIF(metadata->>'origin_chat_id', ''), \
+                            NULLIF(SPLIT_PART(metadata->>'settlement_id', ':', 2), ''), \
+                            chat_id::text, '' \
+                        ), ':', COALESCE( \
+                            NULLIF(metadata->>'message_id', ''), 'ledger:' || id::text \
+                        ) \
+                    ) AS group_key FROM operations \
+                ), charge_groups AS ( \
+                    SELECT group_key, MIN(id) AS group_cursor, \
+                        MIN(created_at) AS group_created_at \
+                    FROM grouped_operations GROUP BY group_key \
+                ), page_groups AS ( \
+                    SELECT group_key, group_cursor, group_created_at \
+                    FROM charge_groups \
+                    WHERE $2::bigint IS NULL \
+                       OR ($3::text = 'older' AND group_cursor < $2) \
+                       OR ($3::text = 'newer' AND group_cursor > $2) \
+                    ORDER BY \
+                        CASE WHEN $3::text = 'newer' THEN group_cursor END ASC, \
+                        CASE WHEN $3::text = 'older' THEN group_cursor END DESC \
+                    LIMIT $4 \
+                ) \
+                SELECT operation.id, operation.event_type, \
+                    operation.actor_user_id, operation.user_id, operation.chat_id, \
+                    operation.amount, operation.metadata, operation.created_at::text, \
+                    page.group_key, page.group_cursor, page.group_created_at::text \
+                FROM page_groups AS page \
+                JOIN grouped_operations AS operation USING (group_key) \
+                ORDER BY \
+                    CASE WHEN $3::text = 'newer' THEN page.group_cursor END ASC, \
+                    CASE WHEN $3::text = 'older' THEN page.group_cursor END DESC, \
+                    operation.id DESC",
+                &[&user_id, &cursor_id, &direction, &group_limit],
+            )?
+            .into_iter()
+            .map(|row| {
+                Ok(ChargeHistoryRow {
+                    id: row.try_get(0)?,
+                    event_type: row.try_get(1)?,
+                    actor_user_id: row.try_get(2)?,
+                    user_id: row.try_get(3)?,
+                    chat_id: row.try_get(4)?,
+                    amount: row.try_get(5)?,
+                    metadata: row.try_get(6)?,
+                    created_at: row.try_get(7)?,
+                    group_key: row.try_get(8)?,
+                    group_cursor: row.try_get(9)?,
+                    group_created_at: row.try_get(10)?,
+                })
+            })
+            .collect()
+    }
+
     fn ai_operation_is_settled(
         transaction: &mut Transaction<'_>,
         user_id: i64,
@@ -1473,7 +1639,7 @@ mod tests {
     use native_tls::TlsConnector;
     use postgres::Client;
     use postgres_native_tls::MakeTlsConnector;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::{
         AiChargeResult, AiRefundResult, AiSettlementResult, BalancePairResult, BillingError,
@@ -3044,6 +3210,62 @@ mod tests {
             1
         );
 
+        let charge_history_metadata = serde_json::Map::from_iter([
+            (
+                "settlement_id".to_owned(),
+                Value::String("synthetic:202:99:ai_response_base".to_owned()),
+            ),
+            ("origin_chat_id".to_owned(), Value::String("202".to_owned())),
+            ("message_id".to_owned(), Value::String("99".to_owned())),
+            (
+                "charged_credit_units_total".to_owned(),
+                Value::Number(123.into()),
+            ),
+        ]);
+        assert!(repository.record_ai_settlement_result(
+            7_000_000_000_041,
+            Some(202),
+            7_000_000_000_041,
+            "ai_settlement_result",
+            &charge_history_metadata,
+        )?);
+        let finalized_charge_rows =
+            repository.list_user_ai_charge_rows(7_000_000_000_041, None, "older", 21)?;
+        assert_eq!(finalized_charge_rows.len(), 1);
+        assert_eq!(finalized_charge_rows[0].group_key, "202:99");
+        assert_eq!(
+            finalized_charge_rows[0].metadata["charged_credit_units_total"],
+            123
+        );
+        assert!(!finalized_charge_rows[0].created_at.is_empty());
+        assert!(!finalized_charge_rows[0].group_created_at.is_empty());
+
+        client.execute(
+            "INSERT INTO credit_ledger \
+                (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
+             VALUES ('ai_reserve', $1, $1, 303, -50, $2)",
+            &[
+                &7_000_000_000_042_i64,
+                &json!({
+                    "settlement_id": "synthetic:303:100:ai_response_base",
+                    "origin_chat_id": "303",
+                    "message_id": "100",
+                    "source": "user"
+                }),
+            ],
+        )?;
+        let pending_charge_rows =
+            repository.list_user_ai_charge_rows(7_000_000_000_042, None, "older", 21)?;
+        assert_eq!(pending_charge_rows.len(), 1);
+        assert_eq!(pending_charge_rows[0].event_type, "ai_reserve");
+        assert_eq!(pending_charge_rows[0].group_key, "303:100");
+        assert_eq!(pending_charge_rows[0].amount, -50);
+        assert_eq!(pending_charge_rows[0].metadata["billing_pending"], true);
+        assert_eq!(
+            pending_charge_rows[0].metadata["charged_credit_units_total"],
+            50
+        );
+
         let synthetic_ids = [
             7_000_000_000_001_i64,
             7_000_000_000_002_i64,
@@ -3085,6 +3307,8 @@ mod tests {
             7_000_000_000_038_i64,
             7_000_000_000_039_i64,
             7_000_000_000_040_i64,
+            7_000_000_000_041_i64,
+            7_000_000_000_042_i64,
         ];
         client.execute(
             "DELETE FROM star_payments WHERE user_id = ANY($1)",
