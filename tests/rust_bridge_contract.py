@@ -958,6 +958,20 @@ def verify_ai_response_cleanup(bridge: ModuleType) -> None:
         assert list(actual) == case["expected"], case["name"]
 
 
+def verify_telegram_stream_planning(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "telegram_stream_planning.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["should_edit_cases"]:
+        actual = bridge.telegram_stream_should_edit(*case["facts"])
+        assert actual is case["expected"], case["name"]
+    for case in contract["feed_cases"]:
+        actual = bridge.telegram_stream_plan_feed(*case["facts"])
+        assert list(actual) == case["expected"], case["name"]
+    for case in contract["finalize_cases"]:
+        actual = bridge.telegram_stream_plan_finalize(*case["facts"])
+        assert list(actual) == case["expected"], case["name"]
+
+
 def main(arguments: list[str]) -> int:
     if len(arguments) != 2:
         raise SystemExit("usage: rust_bridge_contract.py PATH_TO_EXTENSION")
@@ -1003,6 +1017,7 @@ def main(arguments: list[str]) -> int:
     verify_ai_reserve_estimates(bridge)
     verify_ai_pricing(bridge)
     verify_ai_response_cleanup(bridge)
+    verify_telegram_stream_planning(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

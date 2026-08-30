@@ -3,10 +3,65 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
+import logging
 import time
-from typing import Callable, Iterator, Optional, Tuple
+from typing import Callable, Iterator, Optional, Protocol, Tuple, cast
 
 from api.billing.authorization import AIAuthorizationDenied
+from api.core.rust_bridge import load_rust_bridge
+
+
+logger = logging.getLogger(__name__)
+
+
+class _RustTelegramStreamPlanning(Protocol):
+    def telegram_stream_should_edit(
+        self,
+        done: bool,
+        has_message_id: bool,
+        now_seconds: float,
+        last_edit_seconds: float,
+        buffer_chars: int,
+        sent_chars: int,
+        min_edit_interval_seconds: float,
+        min_chars_between_edits: int,
+    ) -> bool: ...
+
+    def telegram_stream_plan_feed(
+        self,
+        done: bool,
+        has_message_id: bool,
+        send_attempted: bool,
+        buffer: str,
+        sent_text: str,
+        token: str,
+        now_seconds: float,
+        last_edit_seconds: float,
+        min_edit_interval_seconds: float,
+        min_chars_between_edits: int,
+    ) -> tuple[str, str]: ...
+
+    def telegram_stream_plan_finalize(
+        self,
+        buffer: str,
+        sent_text: str,
+        has_message_id: bool,
+        final_text: str | None,
+    ) -> tuple[str, str]: ...
+
+
+def _load_rust_telegram_stream_planning() -> _RustTelegramStreamPlanning | None:
+    module = load_rust_bridge("RUST_TELEGRAM_STREAM_PLANNING_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustTelegramStreamPlanning, module)
+
+
+def _rust_stream_planning_failed(operation: str) -> None:
+    logger.exception(
+        "Rust Telegram stream planning failed; using Python fallback: operation=%s",
+        operation,
+    )
 
 SendMessageFn = Callable[[str, str, Optional[str]], Optional[int]]
 EditMessageFn = Callable[[str, str, str], None]
@@ -69,9 +124,97 @@ class TelegramMessageStreamer:
         if self._done or not self._message_id:
             return False
         now = time.time()
+        rust = _load_rust_telegram_stream_planning()
+        if rust is not None:
+            try:
+                return bool(
+                    rust.telegram_stream_should_edit(
+                        self._done,
+                        bool(self._message_id),
+                        now,
+                        self._last_edit_time,
+                        len(self._buffer),
+                        len(self._sent_text),
+                        self._min_interval,
+                        self._min_chars,
+                    )
+                )
+            except Exception:
+                _rust_stream_planning_failed("should_edit")
+        return self._python_should_edit(now)
+
+    def _python_should_edit(self, now: float) -> bool:
         elapsed = now - self._last_edit_time
         new_chars = len(self._buffer) - len(self._sent_text)
         return elapsed >= self._min_interval and new_chars >= self._min_chars
+
+    @staticmethod
+    def _checked_plan(plan: tuple[str, str]) -> tuple[str, str]:
+        text, action = plan
+        if action not in {"none", "send", "edit"}:
+            raise ValueError(f"invalid Telegram stream action: {action}")
+        return str(text), action
+
+    def _plan_feed(self, token: str, now: float) -> tuple[str, str]:
+        rust = _load_rust_telegram_stream_planning()
+        if rust is not None:
+            try:
+                return self._checked_plan(
+                    rust.telegram_stream_plan_feed(
+                        self._done,
+                        bool(self._message_id),
+                        self._send_attempted,
+                        self._buffer,
+                        self._sent_text,
+                        token,
+                        now,
+                        self._last_edit_time,
+                        self._min_interval,
+                        self._min_chars,
+                    )
+                )
+            except Exception:
+                _rust_stream_planning_failed("feed")
+
+        if self._done:
+            return self._buffer, "none"
+        buffer = self._buffer + token
+        if not self._message_id and not self._send_attempted:
+            action = "send"
+        elif self._message_id and self._python_should_edit_for_buffer(buffer, now):
+            action = "edit"
+        else:
+            action = "none"
+        return buffer, action
+
+    def _python_should_edit_for_buffer(self, buffer: str, now: float) -> bool:
+        elapsed = now - self._last_edit_time
+        new_chars = len(buffer) - len(self._sent_text)
+        return elapsed >= self._min_interval and new_chars >= self._min_chars
+
+    def _plan_finalize(self, final_text: Optional[str]) -> tuple[str, str]:
+        rust = _load_rust_telegram_stream_planning()
+        if rust is not None:
+            try:
+                return self._checked_plan(
+                    rust.telegram_stream_plan_finalize(
+                        self._buffer,
+                        self._sent_text,
+                        bool(self._message_id),
+                        final_text,
+                    )
+                )
+            except Exception:
+                _rust_stream_planning_failed("finalize")
+
+        text = final_text if final_text is not None else self._buffer
+        if not self._message_id:
+            action = "send"
+        elif text != self._sent_text:
+            action = "edit"
+        else:
+            action = "none"
+        return text, action
 
     def _do_edit(self) -> None:
         if not self._message_id:
@@ -86,8 +229,9 @@ class TelegramMessageStreamer:
     def feed(self, token: str) -> None:
         if self._done:
             return
-        self._buffer += token
-        if not self._message_id and not self._send_attempted:
+        now = time.time() if self._message_id else self._last_edit_time
+        self._buffer, action = self._plan_feed(token, now)
+        if action == "send":
             self._send_attempted = True
             message_id = self._send_message(
                 self._chat_id, self._buffer, self._reply_to_message_id
@@ -95,20 +239,20 @@ class TelegramMessageStreamer:
             self._message_id = str(message_id) if message_id is not None else None
             self._last_edit_time = time.time()
             self._sent_text = self._buffer
-        elif self._should_edit():
+        elif action == "edit":
             self._do_edit()
 
     def finalize(self, final_text: Optional[str] = None) -> str:
         self._done = True
-        text = final_text if final_text is not None else self._buffer
-        if not self._message_id:
+        text, action = self._plan_finalize(final_text)
+        if action == "send":
             if not self._send_attempted:
                 self._send_attempted = True
             message_id = self._send_message(
                 self._chat_id, text, self._reply_to_message_id
             )
             self._message_id = str(message_id) if message_id is not None else None
-        elif text != self._sent_text:
+        elif action == "edit" and self._message_id:
             try:
                 self._edit_message(self._chat_id, text, self._message_id)
             except Exception as e:

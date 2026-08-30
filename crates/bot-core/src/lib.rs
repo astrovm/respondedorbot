@@ -32,6 +32,7 @@ pub mod routing;
 pub mod rulo;
 pub mod satoshi;
 pub mod task_triggers;
+pub mod telegram_streaming;
 pub mod weather;
 
 /// Version of the temporary Python/Rust compatibility protocol.

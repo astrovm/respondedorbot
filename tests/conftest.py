@@ -8,6 +8,7 @@ from api.core import config as config_module
 from api.ai import pricing as ai_pricing_module
 from api.ai import pipeline as ai_pipeline_module
 from api.billing import provider_usage as provider_usage_module
+from api.bot import streaming as bot_streaming_module
 from api.providers import errors as provider_errors_module
 from api.providers import runtime as provider_runtime_module
 from api.providers import openrouter as openrouter_module
@@ -62,6 +63,11 @@ def reset_caches(monkeypatch):
     monkeypatch.setattr(
         ai_pipeline_module,
         "_load_rust_ai_response_cleanup",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        bot_streaming_module,
+        "_load_rust_telegram_stream_planning",
         lambda: None,
     )
     monkeypatch.setattr(

@@ -31,6 +31,7 @@ Rows not listed under migrated components remain Python-authoritative.
 | AI token and preflight credit reserve estimates | `rust-flagged` | `RUST_AI_RESERVE_ESTIMATES_ENABLED=0`, missing bridge, or bridge error | `contracts/ai_reserve_estimates.json` |
 | Exact AI provider, model, transcription, cache, and tool pricing | `rust-flagged` | `RUST_AI_PRICING_ENABLED=0`, missing bridge, or bridge error | `contracts/ai_pricing.json` |
 | AI response persona, context, identity, duplicate, and Markdown cleanup | `rust-flagged` | `RUST_AI_RESPONSE_CLEANUP_ENABLED=0`, missing bridge, or bridge error | `contracts/ai_response_cleanup.json` |
+| Telegram streamed response send, edit, and finalize planning | `rust-flagged` | `RUST_TELEGRAM_STREAM_PLANNING_ENABLED=0`, missing bridge, or bridge error | `contracts/telegram_stream_planning.json` |
 | Provider rate-limit and Groq account-fallback classification | `rust-flagged` | `RUST_PROVIDER_ERROR_POLICY_ENABLED=0` or missing bridge | `contracts/provider_error_policy.json` |
 | Provider retry-window parsing and rate-limit header precedence | `rust-flagged` | `RUST_PROVIDER_RETRY_POLICY_ENABLED=0`, missing bridge, or bridge error | `contracts/provider_retry_policy.json` |
 | Provider exception, usage, finish-response, and retry-delay policy | `rust-flagged` | `RUST_PROVIDER_RUNTIME_POLICY_ENABLED=0`, missing bridge, or bridge error | `contracts/provider_runtime_policy.json` |

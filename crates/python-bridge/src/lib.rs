@@ -151,6 +151,11 @@ use bot_core::task_triggers::{
     IntegerInput, TaskTrigger, TaskTriggerInput, TriggerConfigInput, TriggerError,
     parse_task_trigger as parse_task_trigger_core,
 };
+use bot_core::telegram_streaming::{
+    plan_feed as telegram_stream_plan_feed_core,
+    plan_finalize as telegram_stream_plan_finalize_core,
+    should_edit as telegram_stream_should_edit_core,
+};
 use bot_core::weather::{
     select_forecast_hour as select_forecast_hour_core,
     select_location_candidate as select_location_candidate_core,
@@ -2632,6 +2637,70 @@ fn ai_cleanup_response(
     ))
 }
 
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn telegram_stream_should_edit(
+    done: bool,
+    has_message_id: bool,
+    now_seconds: f64,
+    last_edit_seconds: f64,
+    buffer_chars: usize,
+    sent_chars: usize,
+    min_edit_interval_seconds: f64,
+    min_chars_between_edits: usize,
+) -> bool {
+    telegram_stream_should_edit_core(
+        done,
+        has_message_id,
+        now_seconds,
+        last_edit_seconds,
+        buffer_chars,
+        sent_chars,
+        min_edit_interval_seconds,
+        min_chars_between_edits,
+    )
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn telegram_stream_plan_feed(
+    done: bool,
+    has_message_id: bool,
+    send_attempted: bool,
+    buffer: &str,
+    sent_text: &str,
+    token: &str,
+    now_seconds: f64,
+    last_edit_seconds: f64,
+    min_edit_interval_seconds: f64,
+    min_chars_between_edits: usize,
+) -> (String, String) {
+    let plan = telegram_stream_plan_feed_core(
+        done,
+        has_message_id,
+        send_attempted,
+        buffer,
+        sent_text,
+        token,
+        now_seconds,
+        last_edit_seconds,
+        min_edit_interval_seconds,
+        min_chars_between_edits,
+    );
+    (plan.buffer, plan.action.as_str().to_owned())
+}
+
+#[pyfunction]
+fn telegram_stream_plan_finalize(
+    buffer: &str,
+    sent_text: &str,
+    has_message_id: bool,
+    final_text: Option<&str>,
+) -> (String, String) {
+    let plan = telegram_stream_plan_finalize_core(buffer, sent_text, has_message_id, final_text);
+    (plan.text, plan.action.as_str().to_owned())
+}
+
 fn token_estimate_value(value: &Value) -> TokenEstimateValue {
     match value {
         Value::Null => TokenEstimateValue::Empty,
@@ -2955,6 +3024,9 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module
     )?)?;
     module.add_function(wrap_pyfunction!(ai_cleanup_response, module)?)?;
+    module.add_function(wrap_pyfunction!(telegram_stream_should_edit, module)?)?;
+    module.add_function(wrap_pyfunction!(telegram_stream_plan_feed, module)?)?;
+    module.add_function(wrap_pyfunction!(telegram_stream_plan_finalize, module)?)?;
     module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;
     module.add_function(wrap_pyfunction!(ai_estimate_text_tokens, module)?)?;
     module.add_function(wrap_pyfunction!(ai_estimate_nested_tokens, module)?)?;
