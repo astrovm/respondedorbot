@@ -8,12 +8,14 @@ use bot_core::command_state::{
     prepare_incoming_command_state, prepare_outgoing_command_state,
 };
 use bot_core::locale::resolve_locale;
+use bot_core::random_selection::{RandomSelection, parse_random_selection};
 use bot_core::stateless_commands::{
     StatelessCommandPlan, StatelessRuntimeContext, plan_runtime_stateless_command,
     plan_stateless_command,
 };
-use bot_core::telegram_actions::TelegramAction;
+use bot_core::telegram_actions::{SendMessage, TelegramAction};
 use bot_core::telegram_input::{MessageId, is_group_chat_type};
+use num_bigint::BigInt;
 use thiserror::Error;
 
 use crate::runtime::UpdateHandler;
@@ -49,6 +51,14 @@ pub trait RuntimeValues {
     fn instance_name(&self) -> Option<&str>;
 }
 
+pub trait RandomSource {
+    type Error;
+
+    fn choice_index(&mut self, upper_exclusive: usize) -> Result<usize, Self::Error>;
+
+    fn inclusive_integer(&mut self, start: &BigInt, end: &BigInt) -> Result<BigInt, Self::Error>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchOutcome {
     Handled,
@@ -57,29 +67,43 @@ pub enum DispatchOutcome {
 }
 
 #[derive(Debug, PartialEq, Eq, Error)]
-pub enum DispatchError<ConfigError, ActionError> {
+pub enum DispatchError<ConfigError, ActionError, RandomError> {
     #[error("could not load chat configuration")]
     Config(ConfigError),
     #[error("could not execute Telegram action")]
     Action(ActionError),
+    #[error("could not obtain a random value")]
+    Random(RandomError),
 }
 
-pub struct NativeDispatcher<Config, Actions, State, Values> {
+type NativeDispatchResult<Config, Actions, Random> = Result<
+    DispatchOutcome,
+    DispatchError<
+        <Config as ChatConfigSource>::Error,
+        <Actions as ActionSink>::Error,
+        <Random as RandomSource>::Error,
+    >,
+>;
+
+pub struct NativeDispatcher<Config, Actions, State, Values, Random> {
     config: Config,
     actions: Actions,
     state: State,
     runtime_values: Values,
+    random: Random,
     bot_name: String,
     last_outcome: Option<DispatchOutcome>,
     state_diagnostics: Vec<String>,
 }
 
-impl<Config, Actions, State, Values> NativeDispatcher<Config, Actions, State, Values>
+impl<Config, Actions, State, Values, Random>
+    NativeDispatcher<Config, Actions, State, Values, Random>
 where
     Config: ChatConfigSource,
     Actions: ActionSink,
     State: MessageStateSink,
     Values: RuntimeValues,
+    Random: RandomSource,
 {
     #[must_use]
     pub fn new(
@@ -87,6 +111,7 @@ where
         actions: Actions,
         state: State,
         runtime_values: Values,
+        random: Random,
         bot_name: &str,
     ) -> Self {
         Self {
@@ -94,6 +119,7 @@ where
             actions,
             state,
             runtime_values,
+            random,
             bot_name: bot_name.to_owned(),
             last_outcome: None,
             state_diagnostics: Vec::new(),
@@ -113,7 +139,7 @@ where
     fn dispatch_message(
         &mut self,
         message: &IncomingMessage,
-    ) -> Result<DispatchOutcome, DispatchError<Config::Error, Actions::Error>> {
+    ) -> NativeDispatchResult<Config, Actions, Random> {
         if message.has_reply {
             return Ok(DispatchOutcome::LegacyRequired);
         }
@@ -135,30 +161,66 @@ where
             message.chat_type.as_deref().unwrap_or_default(),
         );
         let timestamp = self.runtime_values.unix_timestamp();
-        let plan = match plan_stateless_command(
-            chat_id,
-            message_id,
-            &content.text,
-            &self.bot_name,
-            locale,
-        ) {
-            StatelessCommandPlan::NotHandled => plan_runtime_stateless_command(
-                chat_id,
-                message_id,
-                &content.text,
-                &self.bot_name,
-                locale,
-                StatelessRuntimeContext {
-                    unix_timestamp: timestamp,
-                    instance_name: self.runtime_values.instance_name(),
-                },
-            ),
-            plan => plan,
+        let parsed = parse_command(&content.text, &self.bot_name);
+        let plan = if parsed.command == "/random" {
+            match parse_random_selection(&parsed.message_text) {
+                Err(_) => StatelessCommandPlan::LegacyFallbackRequired,
+                Ok(RandomSelection::Invalid) => {
+                    let text = match locale {
+                        bot_core::locale::Locale::Es => {
+                            "mandate algo como 'pizza, carne, sushi' o '1-10' boludo, no me hagas laburar al pedo"
+                        }
+                        bot_core::locale::Locale::En => {
+                            "send options like 'pizza, steak, sushi' or a range like '1-10'"
+                        }
+                    };
+                    let mut message = SendMessage::new(chat_id, text);
+                    message.reply_to_message_id = Some(message_id);
+                    StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+                }
+                Ok(RandomSelection::Choices { values }) => {
+                    let index = self
+                        .random
+                        .choice_index(values.len())
+                        .map_err(DispatchError::Random)?;
+                    let Some(text) = values.get(index) else {
+                        return Ok(DispatchOutcome::LegacyRequired);
+                    };
+                    let mut message = SendMessage::new(chat_id, text);
+                    message.reply_to_message_id = Some(message_id);
+                    StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+                }
+                Ok(RandomSelection::InclusiveRange { start, end }) => {
+                    let value = self
+                        .random
+                        .inclusive_integer(&start, &end)
+                        .map_err(DispatchError::Random)?;
+                    let mut message = SendMessage::new(chat_id, &value.to_string());
+                    message.reply_to_message_id = Some(message_id);
+                    StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+                }
+            }
+        } else {
+            match plan_stateless_command(chat_id, message_id, &content.text, &self.bot_name, locale)
+            {
+                StatelessCommandPlan::NotHandled => plan_runtime_stateless_command(
+                    chat_id,
+                    message_id,
+                    &content.text,
+                    &self.bot_name,
+                    locale,
+                    StatelessRuntimeContext {
+                        unix_timestamp: timestamp,
+                        instance_name: self.runtime_values.instance_name(),
+                    },
+                ),
+                plan => plan,
+            }
         };
         match plan {
             StatelessCommandPlan::Action(action) => {
                 self.state_diagnostics.clear();
-                let command = parse_command(&content.text, &self.bot_name).command;
+                let command = parsed.command;
                 let incoming = prepare_incoming_command_state(IncomingCommandState {
                     chat_id,
                     message_id,
@@ -220,7 +282,7 @@ where
     pub fn dispatch(
         &mut self,
         update: IncomingUpdate,
-    ) -> Result<DispatchOutcome, DispatchError<Config::Error, Actions::Error>> {
+    ) -> NativeDispatchResult<Config, Actions, Random> {
         let outcome = match update.event {
             IncomingEvent::Message(message) => self.dispatch_message(&message)?,
             IncomingEvent::CallbackQuery(_)
@@ -232,15 +294,16 @@ where
     }
 }
 
-impl<Config, Actions, State, Values> UpdateHandler
-    for NativeDispatcher<Config, Actions, State, Values>
+impl<Config, Actions, State, Values, Random> UpdateHandler
+    for NativeDispatcher<Config, Actions, State, Values, Random>
 where
     Config: ChatConfigSource,
     Actions: ActionSink,
     State: MessageStateSink,
     Values: RuntimeValues,
+    Random: RandomSource,
 {
-    type Error = DispatchError<Config::Error, Actions::Error>;
+    type Error = DispatchError<Config::Error, Actions::Error, Random::Error>;
 
     fn handle(&mut self, update: IncomingUpdate) -> Result<(), Self::Error> {
         self.dispatch(update).map(|_outcome| ())
@@ -256,10 +319,11 @@ mod tests {
     use bot_core::command_state::{IncomingCommandWritePlan, OutgoingCommandWritePlan};
     use bot_core::telegram_actions::TelegramAction;
     use bot_core::telegram_input::{ChatId, MessageContent, MessageId, UserId};
+    use num_bigint::BigInt;
 
     use super::{
         ActionReceipt, ActionSink, ChatConfigSource, DispatchError, DispatchOutcome,
-        MessageStateSink, NativeDispatcher, RuntimeValues,
+        MessageStateSink, NativeDispatcher, RandomSource, RuntimeValues,
     };
 
     struct Config {
@@ -332,6 +396,34 @@ mod tests {
         }
     }
 
+    struct Samples {
+        choice_index: usize,
+        integer: BigInt,
+    }
+
+    impl RandomSource for Samples {
+        type Error = Infallible;
+
+        fn choice_index(&mut self, _upper_exclusive: usize) -> Result<usize, Self::Error> {
+            Ok(self.choice_index)
+        }
+
+        fn inclusive_integer(
+            &mut self,
+            _start: &BigInt,
+            _end: &BigInt,
+        ) -> Result<BigInt, Self::Error> {
+            Ok(self.integer.clone())
+        }
+    }
+
+    fn random() -> Samples {
+        Samples {
+            choice_index: 1,
+            integer: BigInt::from(2_u8),
+        }
+    }
+
     fn update(text: &str, language: Option<&str>) -> IncomingUpdate {
         IncomingUpdate {
             update_id: 99,
@@ -367,6 +459,7 @@ mod tests {
             Actions::default(),
             State::default(),
             values(),
+            random(),
             "@mybot",
         );
         assert_eq!(
@@ -397,6 +490,7 @@ mod tests {
             Actions::default(),
             State::default(),
             values(),
+            random(),
             "@mybot",
         );
         assert_eq!(
@@ -405,6 +499,10 @@ mod tests {
         );
         assert_eq!(
             dispatcher.dispatch(update("/convertbase １２, 10, 2", None)),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
+        assert_eq!(
+            dispatcher.dispatch(update("/random １-３", None)),
             Ok(DispatchOutcome::LegacyRequired)
         );
         let mut replied = update("/time", None);
@@ -447,6 +545,7 @@ mod tests {
             Actions::default(),
             State::default(),
             values(),
+            random(),
             "@mybot",
         );
         assert_eq!(
@@ -471,6 +570,7 @@ mod tests {
             Actions::default(),
             State::default(),
             values(),
+            random(),
             "@mybot",
         );
         assert!(matches!(
@@ -489,8 +589,14 @@ mod tests {
             value: Ok(ChatConfig::default()),
             chat_ids: Vec::new(),
         };
-        let mut dispatcher =
-            NativeDispatcher::new(config, FailingActions, State::default(), values(), "@mybot");
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            FailingActions,
+            State::default(),
+            values(),
+            random(),
+            "@mybot",
+        );
         assert!(matches!(
             dispatcher.dispatch(update("/convertbase 1,2,10", None)),
             Err(DispatchError::Action("synthetic action failure"))
@@ -511,6 +617,7 @@ mod tests {
             Actions::default(),
             State::default(),
             values(),
+            random(),
             "@mybot",
         );
         assert_eq!(
@@ -537,6 +644,99 @@ mod tests {
     }
 
     #[test]
+    fn dispatches_random_choices_ranges_and_localized_validation() {
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            "@mybot",
+        );
+        assert_eq!(
+            dispatcher.dispatch(update("/random alpha, beta", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        dispatcher.random.integer =
+            BigInt::from(100_u8) * BigInt::from(10_u8).pow(18) + BigInt::from(2_u8);
+        assert_eq!(
+            dispatcher.dispatch(update(
+                "/random 100000000000000000000-100000000000000000002",
+                None,
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            dispatcher.dispatch(update("/random invalid", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        let texts = dispatcher
+            .actions
+            .0
+            .iter()
+            .filter_map(|action| match action {
+                TelegramAction::SendMessage(message) => Some(message.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            texts,
+            [
+                "beta",
+                "100000000000000000002",
+                "send options like 'pizza, steak, sushi' or a range like '1-10'",
+            ]
+        );
+        assert_eq!(dispatcher.state.incoming.len(), 3);
+        assert_eq!(dispatcher.state.outgoing.len(), 3);
+    }
+
+    #[test]
+    fn random_source_errors_are_not_acknowledged() {
+        struct FailingRandom;
+        impl RandomSource for FailingRandom {
+            type Error = &'static str;
+
+            fn choice_index(&mut self, _upper_exclusive: usize) -> Result<usize, Self::Error> {
+                Err("synthetic random failure")
+            }
+
+            fn inclusive_integer(
+                &mut self,
+                _start: &BigInt,
+                _end: &BigInt,
+            ) -> Result<BigInt, Self::Error> {
+                Err("synthetic random failure")
+            }
+        }
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            FailingRandom,
+            "@mybot",
+        );
+        assert!(matches!(
+            dispatcher.dispatch(update("/random alpha, beta", None)),
+            Err(DispatchError::Random("synthetic random failure"))
+        ));
+        assert!(dispatcher.actions.0.is_empty());
+        assert!(dispatcher.state.incoming.is_empty());
+    }
+
+    #[test]
     fn state_failures_are_diagnostic_and_do_not_duplicate_or_block_delivery() {
         struct FailingState;
         impl MessageStateSink for FailingState {
@@ -560,8 +760,14 @@ mod tests {
             value: Ok(ChatConfig::default()),
             chat_ids: Vec::new(),
         };
-        let mut dispatcher =
-            NativeDispatcher::new(config, Actions::default(), FailingState, values(), "@mybot");
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            FailingState,
+            values(),
+            random(),
+            "@mybot",
+        );
         assert_eq!(
             dispatcher.dispatch(update("/time", None)),
             Ok(DispatchOutcome::Handled)

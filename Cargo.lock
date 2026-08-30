@@ -112,6 +112,8 @@ version = "0.1.0"
 dependencies = [
  "bot-adapters",
  "bot-core",
+ "num-bigint",
+ "rand 0.10.2",
  "serde_json",
  "thiserror",
 ]

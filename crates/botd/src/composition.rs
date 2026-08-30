@@ -16,10 +16,12 @@ use bot_core::command_state::{
     IncomingCommandWritePlan, OutgoingCommandWritePlan,
 };
 use bot_core::telegram_actions::TelegramAction;
+use num_bigint::{BigInt, BigUint};
 use thiserror::Error;
 
 use crate::dispatcher::{
-    ActionReceipt, ActionSink, ChatConfigSource, MessageStateSink, NativeDispatcher, RuntimeValues,
+    ActionReceipt, ActionSink, ChatConfigSource, MessageStateSink, NativeDispatcher, RandomSource,
+    RuntimeValues,
 };
 use crate::runtime::{PollingRuntime, UpdateSource};
 
@@ -94,6 +96,61 @@ impl RuntimeValues for SystemRuntimeValues {
 
     fn instance_name(&self) -> Option<&str> {
         self.instance_name.as_deref()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum SystemRandomError {
+    #[error("random range must contain at least one value")]
+    EmptyRange,
+    #[error("random range is too large for this platform")]
+    RangeTooLarge,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemRandomSource;
+
+fn random_biguint_below(upper_exclusive: &BigUint) -> Result<BigUint, SystemRandomError> {
+    if upper_exclusive == &BigUint::from(0_u8) {
+        return Err(SystemRandomError::EmptyRange);
+    }
+    let bit_count = upper_exclusive.bits();
+    let byte_count =
+        usize::try_from(bit_count.div_ceil(8)).map_err(|_| SystemRandomError::RangeTooLarge)?;
+    let retained_bits = bit_count % 8;
+    loop {
+        let mut bytes = vec![0_u8; byte_count];
+        rand::fill(&mut bytes);
+        if retained_bits != 0 {
+            let mask = (1_u8 << retained_bits) - 1;
+            if let Some(last) = bytes.last_mut() {
+                *last &= mask;
+            }
+        }
+        let candidate = BigUint::from_bytes_le(&bytes);
+        if &candidate < upper_exclusive {
+            return Ok(candidate);
+        }
+    }
+}
+
+impl RandomSource for SystemRandomSource {
+    type Error = SystemRandomError;
+
+    fn choice_index(&mut self, upper_exclusive: usize) -> Result<usize, Self::Error> {
+        if upper_exclusive == 0 {
+            return Err(SystemRandomError::EmptyRange);
+        }
+        Ok(rand::random_range(0..upper_exclusive))
+    }
+
+    fn inclusive_integer(&mut self, start: &BigInt, end: &BigInt) -> Result<BigInt, Self::Error> {
+        let width = end - start + BigInt::from(1_u8);
+        let Some(upper_exclusive) = width.to_biguint() else {
+            return Err(SystemRandomError::EmptyRange);
+        };
+        let offset = random_biguint_below(&upper_exclusive)?;
+        Ok(start + BigInt::from(offset))
     }
 }
 
@@ -188,6 +245,7 @@ pub type ConcreteNativeRuntime = PollingRuntime<
         TelegramActionSink<ReqwestTelegramTransport>,
         RedisCommandState,
         SystemRuntimeValues,
+        SystemRandomSource,
     >,
 >;
 
@@ -224,6 +282,7 @@ pub fn build_native_runtime(
             actions,
             state,
             SystemRuntimeValues::new(instance_name),
+            SystemRandomSource,
             bot_name,
         ),
     ))
@@ -251,13 +310,16 @@ mod tests {
         },
         telegram_input::{MessageId, UserId},
     };
+    use num_bigint::BigInt;
 
-    use crate::dispatcher::{ActionReceipt, ActionSink, MessageStateSink, RuntimeValues};
+    use crate::dispatcher::{
+        ActionReceipt, ActionSink, MessageStateSink, RandomSource, RuntimeValues,
+    };
     use crate::runtime::UpdateSource;
 
     use super::{
-        RedisCommandState, SystemRuntimeValues, TelegramActionSink, TelegramActionSinkError,
-        TelegramUpdateSource, build_native_runtime,
+        RedisCommandState, SystemRandomError, SystemRandomSource, SystemRuntimeValues,
+        TelegramActionSink, TelegramActionSinkError, TelegramUpdateSource, build_native_runtime,
     };
 
     struct Transport {
@@ -423,6 +485,30 @@ mod tests {
         assert!(actual >= before as i64);
         assert!(actual <= after as i64);
         assert_eq!(values.instance_name(), Some("synthetic"));
+    }
+
+    #[test]
+    fn system_random_source_samples_choices_and_arbitrary_precision_ranges() {
+        let mut random = SystemRandomSource;
+        for _ in 0..32 {
+            let index = random.choice_index(3);
+            assert!(index.is_ok_and(|value| value < 3));
+        }
+        assert_eq!(random.choice_index(0), Err(SystemRandomError::EmptyRange));
+
+        let start = BigInt::parse_bytes(b"100000000000000000000", 10);
+        let end = BigInt::parse_bytes(b"100000000000000000002", 10);
+        let (Some(start), Some(end)) = (start, end) else {
+            return;
+        };
+        for _ in 0..32 {
+            let sampled = random.inclusive_integer(&start, &end);
+            assert!(sampled.is_ok_and(|value| value >= start && value <= end));
+        }
+        assert_eq!(
+            random.inclusive_integer(&BigInt::from(2_u8), &BigInt::from(1_u8)),
+            Err(SystemRandomError::EmptyRange)
+        );
     }
 
     #[test]
