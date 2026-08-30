@@ -1,0 +1,213 @@
+{
+  "cases": [
+    {
+      "name": "link replacement followup is ignored before config",
+      "input": {
+        "known_command": false,
+        "command_starts_with_slash": false,
+        "message_text": "hola",
+        "is_private": false,
+        "is_mention": false,
+        "is_reply": true,
+        "reply_text": "https://fxtwitter.com/example/status/1",
+        "ignore_link_fix_followups": true,
+        "is_non_ai_command_followup": false,
+        "ai_command_followups": true,
+        "random_replies_enabled": true,
+        "trigger_words": null,
+        "random_sample": null
+      },
+      "expected": "ignore"
+    },
+    {
+      "name": "disabled non ai command followup is ignored",
+      "input": {
+        "known_command": false,
+        "command_starts_with_slash": false,
+        "message_text": "seguí",
+        "is_private": false,
+        "is_mention": false,
+        "is_reply": true,
+        "reply_text": "resultado",
+        "ignore_link_fix_followups": false,
+        "is_non_ai_command_followup": true,
+        "ai_command_followups": false,
+        "random_replies_enabled": true,
+        "trigger_words": null,
+        "random_sample": null
+      },
+      "expected": "ignore"
+    },
+    {
+      "name": "ordinary route needs trigger config",
+      "input": {
+        "known_command": false,
+        "command_starts_with_slash": false,
+        "message_text": "hola",
+        "is_private": false,
+        "is_mention": false,
+        "is_reply": false,
+        "reply_text": "",
+        "ignore_link_fix_followups": true,
+        "is_non_ai_command_followup": false,
+        "ai_command_followups": true,
+        "random_replies_enabled": true,
+        "trigger_words": null,
+        "random_sample": null
+      },
+      "expected": "needs_trigger_words"
+    },
+    {
+      "name": "ordinary group message is ignored",
+      "input": {
+        "known_command": false,
+        "command_starts_with_slash": false,
+        "message_text": "hola",
+        "is_private": false,
+        "is_mention": false,
+        "is_reply": false,
+        "reply_text": "",
+        "ignore_link_fix_followups": true,
+        "is_non_ai_command_followup": false,
+        "ai_command_followups": true,
+        "random_replies_enabled": true,
+        "trigger_words": ["bot", "assistant"],
+        "random_sample": null
+      },
+      "expected": "ignore"
+    },
+    {
+      "name": "private message responds after config",
+      "input": {
+        "known_command": false,
+        "command_starts_with_slash": false,
+        "message_text": "hola",
+        "is_private": true,
+        "is_mention": false,
+        "is_reply": false,
+        "reply_text": "",
+        "ignore_link_fix_followups": true,
+        "is_non_ai_command_followup": false,
+        "ai_command_followups": true,
+        "random_replies_enabled": false,
+        "trigger_words": ["bot"],
+        "random_sample": null
+      },
+      "expected": "respond"
+    },
+    {
+      "name": "unknown slash command stays ignored",
+      "input": {
+        "known_command": false,
+        "command_starts_with_slash": true,
+        "message_text": "/unknown @bot",
+        "is_private": true,
+        "is_mention": true,
+        "is_reply": true,
+        "reply_text": "",
+        "ignore_link_fix_followups": false,
+        "is_non_ai_command_followup": false,
+        "ai_command_followups": true,
+        "random_replies_enabled": false,
+        "trigger_words": ["bot"],
+        "random_sample": null
+      },
+      "expected": "ignore"
+    },
+    {
+      "name": "trigger match needs random sample",
+      "input": {
+        "known_command": false,
+        "command_starts_with_slash": false,
+        "message_text": "hola assistant",
+        "is_private": false,
+        "is_mention": false,
+        "is_reply": false,
+        "reply_text": "",
+        "ignore_link_fix_followups": true,
+        "is_non_ai_command_followup": false,
+        "ai_command_followups": true,
+        "random_replies_enabled": true,
+        "trigger_words": ["bot", "assistant"],
+        "random_sample": null
+      },
+      "expected": "needs_random_sample"
+    },
+    {
+      "name": "low random sample responds",
+      "input": {
+        "known_command": false,
+        "command_starts_with_slash": false,
+        "message_text": "hola assistant",
+        "is_private": false,
+        "is_mention": false,
+        "is_reply": false,
+        "reply_text": "",
+        "ignore_link_fix_followups": true,
+        "is_non_ai_command_followup": false,
+        "ai_command_followups": true,
+        "random_replies_enabled": true,
+        "trigger_words": ["assistant"],
+        "random_sample": 0.099
+      },
+      "expected": "respond"
+    },
+    {
+      "name": "threshold random sample is ignored",
+      "input": {
+        "known_command": false,
+        "command_starts_with_slash": false,
+        "message_text": "hola bot",
+        "is_private": false,
+        "is_mention": false,
+        "is_reply": false,
+        "reply_text": "",
+        "ignore_link_fix_followups": true,
+        "is_non_ai_command_followup": false,
+        "ai_command_followups": true,
+        "random_replies_enabled": true,
+        "trigger_words": ["bot"],
+        "random_sample": 0.1
+      },
+      "expected": "ignore"
+    },
+    {
+      "name": "known command preserves random sampling side effect",
+      "input": {
+        "known_command": true,
+        "command_starts_with_slash": true,
+        "message_text": "/ask bot",
+        "is_private": true,
+        "is_mention": false,
+        "is_reply": false,
+        "reply_text": "",
+        "ignore_link_fix_followups": true,
+        "is_non_ai_command_followup": false,
+        "ai_command_followups": true,
+        "random_replies_enabled": true,
+        "trigger_words": ["bot"],
+        "random_sample": null
+      },
+      "expected": "needs_random_sample"
+    },
+    {
+      "name": "known command responds after random sample",
+      "input": {
+        "known_command": true,
+        "command_starts_with_slash": true,
+        "message_text": "/ask bot",
+        "is_private": true,
+        "is_mention": false,
+        "is_reply": false,
+        "reply_text": "",
+        "ignore_link_fix_followups": true,
+        "is_non_ai_command_followup": false,
+        "ai_command_followups": true,
+        "random_replies_enabled": true,
+        "trigger_words": ["bot"],
+        "random_sample": 0.9
+      },
+      "expected": "respond"
+    }
+  ]
+}

@@ -20,7 +20,9 @@ use bot_core::price_queries::{
     AmountConversion, PriceQuery, ProviderScope, parse_price_query as parse_price_query_core,
 };
 use bot_core::routing::{
-    MediaRoutingInput, should_auto_process_media as should_auto_process_media_core,
+    MediaRoutingInput, ResponseRoutingEvaluation, ResponseRoutingInput,
+    evaluate_response_routing as evaluate_response_routing_core,
+    should_auto_process_media as should_auto_process_media_core,
 };
 use bot_core::task_triggers::{
     IntegerInput, TaskTrigger, TaskTriggerInput, TriggerConfigInput, TriggerError,
@@ -181,6 +183,43 @@ impl From<TriggerError> for TriggerErrorDto {
 struct TaskTriggerResultDto {
     trigger: Option<TaskTriggerDto>,
     error: Option<TriggerErrorDto>,
+}
+
+#[derive(Deserialize)]
+struct ResponseRoutingInputDto {
+    known_command: bool,
+    command_starts_with_slash: bool,
+    message_text: String,
+    is_private: bool,
+    is_mention: bool,
+    is_reply: bool,
+    reply_text: String,
+    ignore_link_fix_followups: bool,
+    is_non_ai_command_followup: bool,
+    ai_command_followups: bool,
+    random_replies_enabled: bool,
+    trigger_words: Option<Vec<String>>,
+    random_sample: Option<f64>,
+}
+
+impl From<ResponseRoutingInputDto> for ResponseRoutingInput {
+    fn from(value: ResponseRoutingInputDto) -> Self {
+        Self {
+            known_command: value.known_command,
+            command_starts_with_slash: value.command_starts_with_slash,
+            message_text: value.message_text,
+            is_private: value.is_private,
+            is_mention: value.is_mention,
+            is_reply: value.is_reply,
+            reply_text: value.reply_text,
+            ignore_link_fix_followups: value.ignore_link_fix_followups,
+            is_non_ai_command_followup: value.is_non_ai_command_followup,
+            ai_command_followups: value.ai_command_followups,
+            random_replies_enabled: value.random_replies_enabled,
+            trigger_words: value.trigger_words,
+            random_sample: value.random_sample,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -523,6 +562,19 @@ fn should_auto_process_media(
     })
 }
 
+/// Evaluate general response routing and request missing external inputs explicitly.
+#[pyfunction]
+fn evaluate_response_routing(input_json: &str) -> PyResult<&'static str> {
+    let input: ResponseRoutingInputDto = serde_json::from_str(input_json)
+        .map_err(|error| PyValueError::new_err(format!("invalid routing input: {error}")))?;
+    Ok(match evaluate_response_routing_core(&input.into()) {
+        ResponseRoutingEvaluation::Ignore => "ignore",
+        ResponseRoutingEvaluation::Respond => "respond",
+        ResponseRoutingEvaluation::NeedsTriggerWords => "needs_trigger_words",
+        ResponseRoutingEvaluation::NeedsRandomSample => "needs_random_sample",
+    })
+}
+
 /// Register the temporary `respondedorbot_rs` Python module.
 #[pymodule]
 fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -536,5 +588,6 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(parse_price_query, module)?)?;
     module.add_function(wrap_pyfunction!(format_market_info, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;
+    module.add_function(wrap_pyfunction!(evaluate_response_routing, module)?)?;
     Ok(())
 }

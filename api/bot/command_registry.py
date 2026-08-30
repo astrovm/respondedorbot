@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import random
 from dataclasses import dataclass
 from os import environ
-import logging
 from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Tuple, cast
 
 from api.core.rust_bridge import load_rust_bridge
@@ -45,6 +46,17 @@ def _load_rust_media_router() -> Optional[_RustMediaRouter]:
     if module is None:
         return None
     return cast(_RustMediaRouter, module)
+
+
+class _RustResponseRouter(Protocol):
+    def evaluate_response_routing(self, input_json: str) -> str: ...
+
+
+def _load_rust_response_router() -> Optional[_RustResponseRouter]:
+    module = load_rust_bridge("RUST_RESPONSE_ROUTING_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustResponseRouter, module)
 
 
 @dataclass(frozen=True)
@@ -217,7 +229,7 @@ def parse_command(message_text: str, bot_name: str) -> Tuple[str, str]:
     return _parse_command_python(message_text, bot_name)
 
 
-def should_gordo_respond(
+def _should_gordo_respond_python(
     commands: Mapping[str, CommandTuple],
     command: str,
     message_text: str,
@@ -272,6 +284,131 @@ def should_gordo_respond(
 
     return is_command or (
         not command.startswith("/") and (is_trigger or is_private or is_mention or is_reply)
+    )
+
+
+def _response_routing_input(
+    commands: Mapping[str, CommandTuple],
+    command: str,
+    message_text: str,
+    message: Mapping[str, Any],
+    chat_config: Mapping[str, Any],
+    reply_metadata: Optional[Mapping[str, Any]],
+) -> dict[str, Any]:
+    message_lower = message_text.lower()
+    chat = message.get("chat") or {}
+    bot_username = environ.get("TELEGRAM_USERNAME")
+    reply = message.get("reply_to_message") or {}
+    is_reply = (
+        isinstance(reply, Mapping)
+        and reply.get("from", {}).get("username", "") == bot_username
+    )
+    return {
+        "known_command": command in commands,
+        "command_starts_with_slash": command.startswith("/"),
+        "message_text": message_text,
+        "is_private": str(chat.get("type", "")) == "private",
+        "is_mention": f"@{bot_username}" in message_lower,
+        "is_reply": is_reply,
+        "reply_text": str(reply.get("text") or "") if isinstance(reply, Mapping) else "",
+        "ignore_link_fix_followups": bool(
+            chat_config.get("ignore_link_fix_followups", True)
+        ),
+        "is_non_ai_command_followup": bool(
+            reply_metadata
+            and reply_metadata.get("type") == "command"
+            and not bool(reply_metadata.get("uses_ai", False))
+        ),
+        "ai_command_followups": bool(chat_config.get("ai_command_followups", True)),
+        "random_replies_enabled": bool(chat_config.get("ai_random_replies", True)),
+        "trigger_words": None,
+        "random_sample": None,
+    }
+
+
+def _should_gordo_respond_rust(
+    rust: _RustResponseRouter,
+    commands: Mapping[str, CommandTuple],
+    command: str,
+    message_text: str,
+    message: Mapping[str, Any],
+    chat_config: Mapping[str, Any],
+    reply_metadata: Optional[Mapping[str, Any]],
+    *,
+    load_bot_config_fn: Callable[[], Mapping[str, Any]],
+) -> bool:
+    routing_input = _response_routing_input(
+        commands,
+        command,
+        message_text,
+        message,
+        chat_config,
+        reply_metadata,
+    )
+    for _step in range(3):
+        evaluation = str(
+            rust.evaluate_response_routing(
+                json.dumps(routing_input, separators=(",", ":")),
+            )
+        )
+        if evaluation == "respond":
+            return True
+        if evaluation == "ignore":
+            return False
+        if evaluation == "needs_trigger_words":
+            try:
+                config = load_bot_config_fn()
+                routing_input["trigger_words"] = list(
+                    config.get("trigger_words", ["bot", "assistant"])
+                )
+            except ValueError:
+                routing_input["trigger_words"] = ["bot", "assistant"]
+            continue
+        if evaluation == "needs_random_sample":
+            routing_input["random_sample"] = random.random()
+            continue
+        raise ValueError("Rust response router returned an unknown evaluation")
+    raise ValueError("Rust response router did not reach a decision")
+
+
+def should_gordo_respond(
+    commands: Mapping[str, CommandTuple],
+    command: str,
+    message_text: str,
+    message: Mapping[str, Any],
+    chat_config: Mapping[str, Any],
+    reply_metadata: Optional[Mapping[str, Any]],
+    *,
+    load_bot_config_fn: Callable[[], Mapping[str, Any]],
+) -> bool:
+    """Decide if the bot should respond to a message."""
+
+    rust = _load_rust_response_router()
+    if rust is not None:
+        try:
+            return _should_gordo_respond_rust(
+                rust,
+                commands,
+                command,
+                message_text,
+                message,
+                chat_config,
+                reply_metadata,
+                load_bot_config_fn=load_bot_config_fn,
+            )
+        except Exception as error:
+            logger.warning(
+                "Rust response routing failed; using Python fallback: error_type=%s",
+                type(error).__name__,
+            )
+    return _should_gordo_respond_python(
+        commands,
+        command,
+        message_text,
+        message,
+        chat_config,
+        reply_metadata,
+        load_bot_config_fn=load_bot_config_fn,
     )
 
 
