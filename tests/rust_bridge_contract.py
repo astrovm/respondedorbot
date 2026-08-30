@@ -468,15 +468,22 @@ def verify_billing_reads(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "billing_reads.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
     for scope in contract["invalid_scopes"]:
-        try:
-            bridge.billing_read_balance(
-                "postgresql://invalid.invalid/db?sslmode=require",
-                scope,
-                1,
+        for function_name in (
+            "billing_read_balance",
+            "billing_get_or_create_balance",
+        ):
+            function = getattr(bridge, function_name)
+            try:
+                function(
+                    "postgresql://invalid.invalid/db?sslmode=require",
+                    scope,
+                    1,
+                )
+            except ValueError:
+                continue
+            raise AssertionError(
+                f"invalid billing scope must be rejected by {function_name}: {scope}"
             )
-        except ValueError:
-            continue
-        raise AssertionError(f"invalid billing scope must be rejected: {scope}")
 
 
 def verify_media_routing(bridge: ModuleType) -> None:

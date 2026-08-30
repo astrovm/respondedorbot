@@ -1781,6 +1781,19 @@ fn billing_read_balance(
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+/// Read one billing balance and create the zero-balance account when missing.
+#[pyfunction]
+fn billing_get_or_create_balance(
+    py: Python<'_>,
+    database_url: &str,
+    scope_type: &str,
+    scope_id: i64,
+) -> PyResult<i64> {
+    let repository = BillingReadRepository::new(database_url);
+    py.detach(|| repository.get_or_create_balance(scope_type, scope_id))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -1888,6 +1901,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(redis_chat_admin_set, module)?)?;
     module.add_function(wrap_pyfunction!(run_redis_maintenance, module)?)?;
     module.add_function(wrap_pyfunction!(billing_read_balance, module)?)?;
+    module.add_function(wrap_pyfunction!(billing_get_or_create_balance, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;

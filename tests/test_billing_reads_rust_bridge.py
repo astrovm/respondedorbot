@@ -59,6 +59,14 @@ class _FakeRustBillingReads:
         self.calls.append((database_url, scope_type, scope_id))
         return self.balance
 
+    def billing_get_or_create_balance(
+        self,
+        database_url: str,
+        scope_type: str,
+        scope_id: int,
+    ) -> int:
+        return self.billing_read_balance(database_url, scope_type, scope_id)
+
 
 def _patch_python_balance(
     monkeypatch: pytest.MonkeyPatch,
@@ -113,3 +121,40 @@ def test_billing_balance_shadow_failure_keeps_python_value(
     monkeypatch.setattr(credits_db, "_load_rust_billing_reads", lambda: rust)
 
     assert credits_db.get_balance("user", 7) == 1234
+
+
+def test_billing_balance_io_is_authoritative_without_python_account_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(
+        credits_db,
+        "connect",
+        lambda: pytest.fail("Python account I/O must not run"),
+    )
+    monkeypatch.setattr(
+        credits_db,
+        "get_database_url",
+        lambda: "postgresql://synthetic.invalid/db?sslmode=require",
+    )
+    rust = _FakeRustBillingReads(2468)
+    monkeypatch.setattr(credits_db, "_load_rust_billing_balance_io", lambda: rust)
+
+    assert credits_db.get_balance("chat", 9) == 2468
+    assert rust.calls == [
+        ("postgresql://synthetic.invalid/db?sslmode=require", "chat", 9)
+    ]
+
+
+def test_billing_balance_io_failure_uses_idempotent_python_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _patch_python_balance(monkeypatch, 1234)
+    rust = _FakeRustBillingReads(0, fail=True)
+    monkeypatch.setattr(credits_db, "_load_rust_billing_balance_io", lambda: rust)
+
+    with caplog.at_level(logging.ERROR, logger=credits_db.__name__):
+        assert credits_db.get_balance("user", 7) == 1234
+
+    assert "Rust billing balance I/O failed; using Python fallback" in caplog.text

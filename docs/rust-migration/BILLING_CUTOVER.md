@@ -11,8 +11,9 @@ must never enter balance mutations.
 
 | Checkpoint | Reads | Writes | Rollback |
 | --- | --- | --- | --- |
-| Current shadow | Python is authoritative; Rust compares `get_balance` with a read-only `SELECT` | Python only | Disable `RUST_BILLING_READ_SHADOW_ENABLED` |
-| Rust reads | Rust is authoritative for proven read operations | Python only | Disable the per-operation Rust read flag |
+| Balance shadow | Python is authoritative; Rust compares `get_balance` with a read-only `SELECT` | Python only | Disable `RUST_BILLING_READ_SHADOW_ENABLED` |
+| Current balance I/O | Rust reads balances and creates missing zero-balance accounts | Rust only for the idempotent account insert; Python owns all other writes | Disable `RUST_BILLING_BALANCE_IO_ENABLED` |
+| Rust reads | Rust is authoritative for proven read operations | Python owns non-balance writes | Disable the per-operation Rust read flag |
 | Shadow transaction decisions | Python commits; Rust evaluates the same synthetic transaction inputs without I/O | Python only | Disable the decision shadow flag |
 | Rust writer canary | Rust owns one proven mutation family | Rust for that family; Python for all others | Disable that family's writer flag before another owner starts |
 | Rust billing | Rust owns all reads, mutations, migrations, and reconciliation | Rust only | Deploy the last backward-compatible Python image |
@@ -65,7 +66,12 @@ credentials, provider secrets, prompts, or payment payloads.
 
 ## Current checkpoint
 
-`RUST_BILLING_READ_SHADOW_ENABLED=1` compares Python's authoritative
-`get_balance` result with Rust's read-only query. A mismatch or Rust failure is
-logged, but the Python result is returned. Python still creates missing accounts
-and remains the only billing writer.
+`RUST_BILLING_BALANCE_IO_ENABLED=1` makes Rust authoritative for `get_balance`
+and preserves its existing missing-account insert. A Rust failure uses the
+idempotent Python fallback. All balance mutations, ledger writes, payments,
+migrations, and reconciliation remain Python-owned.
+
+When authoritative balance I/O is disabled,
+`RUST_BILLING_READ_SHADOW_ENABLED=1` compares Python's result with Rust's
+read-only query. A mismatch or Rust failure is logged, but Python's result is
+returned.

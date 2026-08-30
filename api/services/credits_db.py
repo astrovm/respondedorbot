@@ -81,11 +81,27 @@ class _RustBillingReads(Protocol):
     ) -> int: ...
 
 
+class _RustBillingBalanceIo(Protocol):
+    def billing_get_or_create_balance(
+        self,
+        database_url: str,
+        scope_type: str,
+        scope_id: int,
+    ) -> int: ...
+
+
 def _load_rust_billing_reads() -> _RustBillingReads | None:
     module = load_rust_bridge("RUST_BILLING_READ_SHADOW_ENABLED")
     if module is None:
         return None
     return cast(_RustBillingReads, module)
+
+
+def _load_rust_billing_balance_io() -> _RustBillingBalanceIo | None:
+    module = load_rust_bridge("RUST_BILLING_BALANCE_IO_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustBillingBalanceIo, module)
 
 
 class CreditsDBError(RuntimeError):
@@ -622,6 +638,24 @@ def get_balance(scope_type: ScopeType, scope_id: int) -> int:
     """Return the current account balance."""
 
     ensure_schema()
+    rust_io = _load_rust_billing_balance_io()
+    database_url = get_database_url()
+    if rust_io is not None and database_url:
+        try:
+            return int(
+                rust_io.billing_get_or_create_balance(
+                    database_url,
+                    scope_type,
+                    int(scope_id),
+                )
+            )
+        except Exception:
+            logger.exception(
+                "Rust billing balance I/O failed; using Python fallback scope_type=%s scope_id=%s",
+                scope_type,
+                scope_id,
+            )
+
     with connect() as conn:
         with conn.cursor() as cur:
             _ensure_account(cur, scope_type, scope_id)
@@ -638,7 +672,6 @@ def get_balance(scope_type: ScopeType, scope_id: int) -> int:
 
     balance = int(row[0]) if row else 0
     rust = _load_rust_billing_reads()
-    database_url = get_database_url()
     if rust is not None and database_url:
         try:
             shadow_balance = int(
