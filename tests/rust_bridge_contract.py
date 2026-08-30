@@ -381,6 +381,30 @@ def verify_message_aux_io(bridge: ModuleType) -> None:
         raise AssertionError(f"{case['name']} must be rejected")
 
 
+def verify_message_history_io(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "message_history_io.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    state = bridge.RedisMessageState("localhost", 6379, None)
+    for case in contract["ttl_validation"]:
+        try:
+            state.save_message(
+                "synthetic-chat",
+                "1",
+                "synthetic text",
+                1,
+                None,
+                "7",
+                "synthetic-user",
+                None,
+                False,
+                case["ttl"],
+                400,
+            )
+        except ValueError:
+            continue
+        raise AssertionError(f"{case['name']} must be rejected")
+
+
 def verify_media_cache(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_cache.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -472,6 +496,7 @@ def main(arguments: list[str]) -> int:
     verify_compaction_jobs(bridge)
     verify_compaction_queue(bridge)
     verify_message_aux_io(bridge)
+    verify_message_history_io(bridge)
     verify_media_cache(bridge)
     verify_chat_admin_cache(bridge)
     verify_media_routing(bridge)

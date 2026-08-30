@@ -244,6 +244,70 @@ impl PyRedisMessageState {
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
         serde_json::to_string(&members).map_err(|error| PyValueError::new_err(error.to_string()))
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn save_message(
+        &self,
+        py: Python<'_>,
+        chat_id: &str,
+        message_id: &str,
+        text: &str,
+        timestamp: i64,
+        role: Option<&str>,
+        user_id: Option<&str>,
+        username: Option<&str>,
+        reply_to_message_id: Option<&str>,
+        mentions_bot: bool,
+        ttl_seconds: i64,
+        max_messages: usize,
+    ) -> PyResult<bool> {
+        let plan = prepare_message_write_core(
+            chat_id,
+            message_id,
+            text,
+            timestamp,
+            role,
+            user_id,
+            username,
+            reply_to_message_id,
+            mentions_bot,
+        )
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        py.detach(|| self.state.save_message(&plan, ttl_seconds, max_messages))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn get_history_entries(
+        &self,
+        py: Python<'_>,
+        chat_id: &str,
+        max_messages: i64,
+    ) -> PyResult<String> {
+        let entries = py
+            .detach(|| self.state.get_history_entries(chat_id, max_messages))
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        serde_json::to_string(&entries).map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn fetch_messages(&self, py: Python<'_>, chat_id: &str, limit: usize) -> PyResult<String> {
+        let rows = py
+            .detach(|| self.state.fetch_messages(chat_id, limit))
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        serde_json::to_string(&rows).map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn search_messages(
+        &self,
+        py: Python<'_>,
+        chat_id: &str,
+        query_text: &str,
+        limit: usize,
+    ) -> PyResult<String> {
+        let rows = py
+            .detach(|| self.state.search_messages(chat_id, query_text, limit))
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        serde_json::to_string(&rows).map_err(|error| PyValueError::new_err(error.to_string()))
+    }
 }
 
 #[derive(Deserialize)]

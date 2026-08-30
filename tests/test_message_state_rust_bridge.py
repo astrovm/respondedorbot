@@ -9,6 +9,11 @@ import pytest
 from api.memory import state
 
 
+@pytest.fixture(autouse=True)
+def _use_python_message_history_io(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(state, "_load_rust_message_history_io", lambda: None)
+
+
 class _FakeRustMessageState:
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail

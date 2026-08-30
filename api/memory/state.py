@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import re
 import time
+from collections.abc import Hashable
+from functools import lru_cache
 from typing import (
     Any,
     Callable,
@@ -107,6 +109,23 @@ class _RustMessageStateIo(Protocol):
         ttl_seconds: int,
     ) -> None: ...
     def get_chat_members(self, key: str) -> str: ...
+    def save_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        text: str,
+        timestamp: int,
+        role: str | None,
+        user_id: str | None,
+        username: str | None,
+        reply_to_message_id: str | None,
+        mentions_bot: bool,
+        ttl_seconds: int,
+        max_messages: int,
+    ) -> bool: ...
+    def get_history_entries(self, chat_id: str, max_messages: int) -> str: ...
+    def fetch_messages(self, chat_id: str, limit: int) -> str: ...
+    def search_messages(self, chat_id: str, query_text: str, limit: int) -> str: ...
 
 
 class _RustMessageStateIoModule(Protocol):
@@ -132,12 +151,42 @@ def _load_rust_message_state_io() -> _RustMessageStateIoModule | None:
     return cast(_RustMessageStateIoModule, module)
 
 
-def _rust_message_state_io() -> _RustMessageStateIo | None:
-    module = _load_rust_message_state_io()
+def _load_rust_message_history_io() -> _RustMessageStateIoModule | None:
+    module = load_rust_bridge("RUST_MESSAGE_HISTORY_IO_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustMessageStateIoModule, module)
+
+
+@lru_cache(maxsize=8)
+def _cached_rust_message_state_io(
+    module: Hashable,
+    host: str,
+    port: int,
+    password: str | None,
+) -> _RustMessageStateIo:
+    return cast(_RustMessageStateIoModule, module).RedisMessageState(
+        host,
+        port,
+        password,
+    )
+
+
+def _rust_message_state_io_from(
+    module: _RustMessageStateIoModule | None,
+) -> _RustMessageStateIo | None:
     if module is None:
         return None
     host, port, password = redis_endpoint_from_env()
-    return module.RedisMessageState(host, port, password)
+    return _cached_rust_message_state_io(cast(Hashable, module), host, port, password)
+
+
+def _rust_message_state_io() -> _RustMessageStateIo | None:
+    return _rust_message_state_io_from(_load_rust_message_state_io())
+
+
+def _rust_message_history_io() -> _RustMessageStateIo | None:
+    return _rust_message_state_io_from(_load_rust_message_history_io())
 
 _SAVE_MESSAGE_SCRIPT = """
 local legacy_type = redis.call('TYPE', KEYS[3]).ok
@@ -341,6 +390,23 @@ def _parse_search_result_row(key: Any, fields: Any) -> Dict[str, Any]:
     return data
 
 
+def _decode_rust_search_rows(serialized: str) -> List[Dict[str, Any]]:
+    decoded = json.loads(serialized)
+    if not isinstance(decoded, list):
+        raise TypeError("Rust message-state search rows must be a list")
+    rows: List[Dict[str, Any]] = []
+    for item in decoded:
+        if not isinstance(item, Mapping) or not isinstance(item.get("fields"), Mapping):
+            raise TypeError("Rust message-state search row is invalid")
+        rows.append(
+            {
+                "key": str(item.get("key") or ""),
+                **{str(key): value for key, value in item["fields"].items()},
+            }
+        )
+    return rows
+
+
 def get_chat_summary(redis_client: redis.Redis, chat_id: str) -> Optional[str]:
     rust = _rust_message_state_io()
     if rust is not None:
@@ -435,30 +501,39 @@ def fetch_chat_messages_for_compaction(
     """Load a larger searchable history for conversation compaction."""
 
     try:
-        _ensure_search_index(redis_client)
-        query = f"@chat_id:{{{_escape_tag_value(chat_id)}}}"
-        raw = _execute_redis_command(
-            redis_client,
-            "FT.SEARCH",
-            CHAT_SEARCH_INDEX,
-            query,
-            "DIALECT",
-            "2",
-            "SORTBY",
-            "timestamp",
-            "DESC",
-            "LIMIT",
-            "0",
-            str(limit),
-        )
-        if not isinstance(raw, list) or len(raw) <= 1:
-            return []
-        rows: List[Dict[str, Any]] = []
-        for idx in range(1, len(raw), 2):
-            row = _parse_search_result_row(raw[idx], raw[idx + 1] if idx + 1 < len(raw) else [])
+        rust = _rust_message_history_io()
+        if rust is not None:
+            rows = _decode_rust_search_rows(rust.fetch_messages(chat_id, limit))
+        else:
+            _ensure_search_index(redis_client)
+            query = f"@chat_id:{{{_escape_tag_value(chat_id)}}}"
+            raw = _execute_redis_command(
+                redis_client,
+                "FT.SEARCH",
+                CHAT_SEARCH_INDEX,
+                query,
+                "DIALECT",
+                "2",
+                "SORTBY",
+                "timestamp",
+                "DESC",
+                "LIMIT",
+                "0",
+                str(limit),
+            )
+            if not isinstance(raw, list) or len(raw) <= 1:
+                return []
+            rows = []
+            for idx in range(1, len(raw), 2):
+                rows.append(
+                    _parse_search_result_row(
+                        raw[idx],
+                        raw[idx + 1] if idx + 1 < len(raw) else [],
+                    )
+                )
+        for row in rows:
             row["id"] = str(row.get("id") or row.get("message_id") or "")
             row["timestamp"] = int(row.get("timestamp") or 0)
-            rows.append(row)
         return _sort_by_message_id(rows)
     except Exception as error:
         if admin_reporter is not None:
@@ -549,6 +624,22 @@ def save_message_to_redis(
 
     try:
         timestamp = int(time.time())
+        rust = _rust_message_history_io()
+        if rust is not None:
+            rust.save_message(
+                chat_id,
+                message_id,
+                text,
+                timestamp,
+                role,
+                user_id,
+                username,
+                reply_to_message_id,
+                mentions_bot,
+                CHAT_STATE_TTL,
+                CHAT_HISTORY_MAX_MESSAGES * 2,
+            )
+            return
         plan = _prepare_message_write(
             chat_id,
             message_id,
@@ -610,10 +701,17 @@ def get_chat_history(
     """Return the latest chat history in chronological order."""
 
     try:
-        chat_history_key = f"chat_history:{chat_id}"
-        history: List[str] = cast(
-            List[str], redis_client.lrange(chat_history_key, 0, max_messages - 1)
-        )
+        rust = _rust_message_history_io()
+        if rust is not None:
+            decoded = json.loads(rust.get_history_entries(chat_id, max_messages))
+            if not isinstance(decoded, list):
+                raise TypeError("Rust message history must be a list")
+            history = [str(entry) for entry in decoded]
+        else:
+            chat_history_key = f"chat_history:{chat_id}"
+            history = cast(
+                List[str], redis_client.lrange(chat_history_key, 0, max_messages - 1)
+            )
         if not history:
             return []
 
@@ -728,29 +826,40 @@ def search_chat_history(
     if not search_text:
         return []
     try:
-        _ensure_search_index(redis_client)
-        query = f"@chat_id:{{{_escape_tag_value(chat_id)}}} {search_text}"
-        raw = _execute_redis_command(
-            redis_client,
-            "FT.SEARCH",
-            CHAT_SEARCH_INDEX,
-            query,
-            "DIALECT",
-            "2",
-            "SORTBY",
-            "timestamp",
-            "DESC",
-            "LIMIT",
-            "0",
-            str(max(limit * 3, 10)),
-        )
-        if not isinstance(raw, list) or len(raw) <= 1:
-            return []
-        results: List[Dict[str, Any]] = []
-        for idx in range(1, len(raw), 2):
-            row = _parse_search_result_row(raw[idx], raw[idx + 1] if idx + 1 < len(raw) else [])
+        rust = _rust_message_history_io()
+        if rust is not None:
+            results = _decode_rust_search_rows(
+                rust.search_messages(chat_id, query_text, max(limit * 3, 10))
+            )
+        else:
+            _ensure_search_index(redis_client)
+            query = f"@chat_id:{{{_escape_tag_value(chat_id)}}} {search_text}"
+            raw = _execute_redis_command(
+                redis_client,
+                "FT.SEARCH",
+                CHAT_SEARCH_INDEX,
+                query,
+                "DIALECT",
+                "2",
+                "SORTBY",
+                "timestamp",
+                "DESC",
+                "LIMIT",
+                "0",
+                str(max(limit * 3, 10)),
+            )
+            if not isinstance(raw, list) or len(raw) <= 1:
+                return []
+            results = []
+            for idx in range(1, len(raw), 2):
+                results.append(
+                    _parse_search_result_row(
+                        raw[idx],
+                        raw[idx + 1] if idx + 1 < len(raw) else [],
+                    )
+                )
+        for row in results:
             row["timestamp"] = int(row.get("timestamp") or 0)
-            results.append(row)
         return _rank_search_results(
             results,
             search_text,

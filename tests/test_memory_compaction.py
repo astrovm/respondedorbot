@@ -11,6 +11,10 @@ def _use_python_message_aux_io(monkeypatch):
         "api.memory.state._load_rust_message_state_io",
         lambda: None,
     )
+    monkeypatch.setattr(
+        "api.memory.state._load_rust_message_history_io",
+        lambda: None,
+    )
 
 
 def test_compaction_uses_reasoning_model_output_limit():

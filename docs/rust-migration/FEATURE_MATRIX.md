@@ -43,6 +43,7 @@ Rows not listed under migrated components remain Python-authoritative.
 | Versioned durable memory-compaction Redis job payload | `rust-flagged` | `RUST_COMPACTION_JOBS_ENABLED=0` or missing bridge | `contracts/compaction_jobs.json` |
 | Durable memory-compaction Redis queue, atomic leases, and quarantine | `rust-flagged` | `RUST_COMPACTION_QUEUE_ENABLED=0` or missing bridge | `contracts/compaction_queue.json` |
 | Redis summaries, compaction markers, bot metadata, and chat-member I/O | `rust-flagged` | `RUST_MESSAGE_AUX_IO_ENABLED=0` or missing bridge | `contracts/message_aux_io.json` |
+| Redis conversation Lua writes, ordered history reads, index lifecycle, and RediSearch queries | `rust-flagged` | `RUST_MESSAGE_HISTORY_IO_ENABLED=0` or missing bridge | `contracts/message_history_io.json` |
 | Redis media transcription/description cache I/O | `rust-flagged` | `RUST_MEDIA_CACHE_ENABLED=0` or missing bridge | `contracts/media_cache.json` |
 | Redis chat-administrator authorization cache I/O | `rust-flagged` | `RUST_CHAT_ADMIN_CACHE_ENABLED=0` or missing bridge | `contracts/chat_admin_cache.json` |
 | Automatic media-routing decision | `rust-flagged` | `RUST_MEDIA_ROUTING_ENABLED=0` or missing bridge | `contracts/media_routing.json` |
