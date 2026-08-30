@@ -445,6 +445,13 @@ def verify_stale_cache_io(bridge: ModuleType) -> None:
         raise AssertionError(f"{case['name']} must be rejected")
 
 
+def verify_redis_maintenance(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "redis_maintenance.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    assert contract["ttl_targets"]["giphy_pool_stale:*"] == 7 * 24 * 60 * 60
+    assert callable(bridge.run_redis_maintenance)
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -525,6 +532,7 @@ def main(arguments: list[str]) -> int:
     verify_chat_admin_cache(bridge)
     verify_request_cache_io(bridge)
     verify_stale_cache_io(bridge)
+    verify_redis_maintenance(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

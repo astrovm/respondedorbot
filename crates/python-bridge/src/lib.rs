@@ -16,6 +16,7 @@ use bot_adapters::redis_connection::RedisEndpoint;
 use bot_adapters::redis_json_cache::{
     RedisJsonCache as RedisJsonCacheAdapter, RedisJsonCacheError,
 };
+use bot_adapters::redis_maintenance::run_redis_maintenance as run_redis_maintenance_adapter;
 use bot_adapters::redis_media_cache::{
     cache_media as cache_media_adapter, get_cached_media as get_cached_media_adapter,
     media_cache_key as media_cache_key_adapter,
@@ -1674,6 +1675,27 @@ fn redis_chat_admin_set(
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+/// Run Redis-only periodic maintenance while preserving the existing result shape.
+#[pyfunction]
+fn run_redis_maintenance(
+    py: Python<'_>,
+    host: &str,
+    port: u16,
+    password: Option<&str>,
+    maxmemory: &str,
+    maxmemory_policy: &str,
+) -> PyResult<String> {
+    let endpoint = RedisEndpoint {
+        host: host.to_owned(),
+        port,
+        password: password.map(ToOwned::to_owned),
+    };
+    let result = py
+        .detach(|| run_redis_maintenance_adapter(&endpoint, maxmemory, maxmemory_policy))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serde_json::to_string(&result).map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -1778,6 +1800,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(redis_chat_admin_get, module)?)?;
     module.add_function(wrap_pyfunction!(redis_chat_admin_key, module)?)?;
     module.add_function(wrap_pyfunction!(redis_chat_admin_set, module)?)?;
+    module.add_function(wrap_pyfunction!(run_redis_maintenance, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;

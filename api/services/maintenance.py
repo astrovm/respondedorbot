@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 from typing import Any, Dict, Iterable, Mapping, Optional, Protocol, cast
 
@@ -10,6 +11,7 @@ import redis
 
 from api.core.config import config_redis
 from api.core.rust_bridge import load_rust_bridge
+from api.core.rust_redis import redis_endpoint_from_env
 from api.services import credits_db
 
 CHAT_STATE_TTL = 30 * 24 * 60 * 60
@@ -40,11 +42,29 @@ class _RustCachePolicy(Protocol):
     def last_success_ttl(self, ttl: int, stale_grace: int) -> int: ...
 
 
+class _RustRedisMaintenance(Protocol):
+    def run_redis_maintenance(
+        self,
+        host: str,
+        port: int,
+        password: str | None,
+        maxmemory: str,
+        maxmemory_policy: str,
+    ) -> str: ...
+
+
 def _load_rust_cache_policy() -> _RustCachePolicy | None:
     module = load_rust_bridge("RUST_CACHE_POLICY_ENABLED")
     if module is None:
         return None
     return cast(_RustCachePolicy, module)
+
+
+def _load_rust_redis_maintenance() -> _RustRedisMaintenance | None:
+    module = load_rust_bridge("RUST_REDIS_MAINTENANCE_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustRedisMaintenance, module)
 
 
 def request_cache_key(request_hash: str) -> str:
@@ -144,9 +164,26 @@ def apply_redis_memory_policy(redis_client: redis.Redis) -> Dict[str, Any]:
 
 
 def run_maintenance() -> Dict[str, Any]:
-    redis_client = config_redis()
-    redis_config = apply_redis_memory_policy(redis_client)
-    redis_cleanup = prune_redis_growth(redis_client)
+    rust = _load_rust_redis_maintenance()
+    if rust is None:
+        redis_client = config_redis()
+        redis_config = apply_redis_memory_policy(redis_client)
+        redis_cleanup = prune_redis_growth(redis_client)
+        redis_result = {**redis_cleanup, **redis_config}
+    else:
+        host, port, password = redis_endpoint_from_env()
+        loaded = json.loads(
+            rust.run_redis_maintenance(
+                host,
+                port,
+                password,
+                REDIS_MAXMEMORY,
+                REDIS_MAXMEMORY_POLICY,
+            )
+        )
+        if not isinstance(loaded, dict):
+            raise ValueError("Rust Redis maintenance result must be an object")
+        redis_result = loaded
     if credits_db.is_configured():
         ledger_cleanup = credits_db.purge_expired_ai_ledger_events(
             AI_LEDGER_RETENTION_DAYS
@@ -154,6 +191,6 @@ def run_maintenance() -> Dict[str, Any]:
     else:
         ledger_cleanup = {"skipped": True, "reason": "postgres not configured"}
     return {
-        "redis": {**redis_cleanup, **redis_config},
+        "redis": redis_result,
         "ledger": ledger_cleanup,
     }
