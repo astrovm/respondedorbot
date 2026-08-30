@@ -3,9 +3,11 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bot_adapters::chat_config::{ChatConfigRepository, ChatConfigRepositoryError};
+use bot_adapters::redis_chat_admin::{cache_chat_admin, get_cached_chat_admin};
 use bot_adapters::redis_connection::RedisEndpoint;
 use bot_adapters::redis_message_state::{RedisMessageState, RedisMessageStateError};
 use bot_adapters::telegram_actions::{ActionError, ActionOutcome, execute_with};
+use bot_adapters::telegram_chat_admin::lookup_chat_admin_with;
 use bot_adapters::telegram_http::{
     ReqwestTelegramTransport, TelegramTransport, TransportFailureKind,
 };
@@ -21,8 +23,8 @@ use num_bigint::{BigInt, BigUint};
 use thiserror::Error;
 
 use crate::dispatcher::{
-    ActionReceipt, ActionSink, ChatConfigSource, MessageStateSink, NativeDispatcher, RandomSource,
-    RuntimeValues,
+    ActionReceipt, ActionSink, ChatConfigSource, GroupAuthorizationDecision, GroupAuthorizer,
+    MessageStateSink, NativeDispatcher, RandomSource, RuntimeValues,
 };
 use crate::runtime::{PollingRuntime, UpdateSource};
 
@@ -163,6 +165,60 @@ pub struct RedisCommandState {
     state: RedisMessageState,
 }
 
+pub struct TelegramGroupAuthorizer<Transport> {
+    transport: Transport,
+    token: String,
+    redis_endpoint: RedisEndpoint,
+}
+
+impl<Transport> TelegramGroupAuthorizer<Transport> {
+    #[must_use]
+    pub fn new(transport: Transport, token: &str, redis_endpoint: &RedisEndpoint) -> Self {
+        Self {
+            transport,
+            token: token.to_owned(),
+            redis_endpoint: redis_endpoint.clone(),
+        }
+    }
+}
+
+impl<Transport: TelegramTransport> GroupAuthorizer for TelegramGroupAuthorizer<Transport> {
+    fn authorize(&mut self, chat_id: &str, user_id: &str) -> GroupAuthorizationDecision {
+        let mut diagnostics = Vec::new();
+        match get_cached_chat_admin(&self.redis_endpoint, chat_id, user_id) {
+            Ok(Some(is_admin)) => {
+                return GroupAuthorizationDecision {
+                    is_admin,
+                    diagnostics,
+                };
+            }
+            Ok(None) => {}
+            Err(error) => diagnostics.push(format!("chat-admin cache read: {error}")),
+        }
+        let lookup = lookup_chat_admin_with(&self.transport, &self.token, chat_id, user_id);
+        let is_admin = match lookup {
+            Ok(lookup) => {
+                if let Some(diagnostic) = lookup.diagnostic {
+                    diagnostics.push(diagnostic);
+                }
+                lookup.is_admin
+            }
+            Err(error) => {
+                diagnostics.push(format!("chat-admin lookup: {error}"));
+                false
+            }
+        };
+        if let Err(error) = cache_chat_admin(&self.redis_endpoint, chat_id, user_id, is_admin, 300)
+        {
+            diagnostics.push(format!("chat-admin cache write: {error}"));
+        }
+        GroupAuthorizationDecision {
+            is_admin,
+            diagnostics,
+        }
+    }
+}
+
 impl RedisCommandState {
     pub fn new(endpoint: &RedisEndpoint) -> Result<Self, RedisMessageStateError> {
         RedisMessageState::new(endpoint).map(|state| Self { state })
@@ -260,6 +316,7 @@ pub type ConcreteNativeRuntime = PollingRuntime<
         RedisCommandState,
         SystemRuntimeValues,
         SystemRandomSource,
+        TelegramGroupAuthorizer<ReqwestTelegramTransport>,
     >,
 >;
 
@@ -269,6 +326,8 @@ pub enum CompositionError {
     PollingTransport(TransportFailureKind),
     #[error("could not construct Telegram action transport: {0:?}")]
     ActionTransport(TransportFailureKind),
+    #[error("could not construct Telegram chat-admin transport: {0:?}")]
+    AdminTransport(TransportFailureKind),
     #[error("could not construct Redis command state: {0}")]
     RedisState(#[from] RedisMessageStateError),
 }
@@ -285,10 +344,13 @@ pub fn build_native_runtime(
         ReqwestTelegramTransport::new().map_err(CompositionError::PollingTransport)?;
     let action_transport =
         ReqwestTelegramTransport::new().map_err(CompositionError::ActionTransport)?;
+    let admin_transport =
+        ReqwestTelegramTransport::new().map_err(CompositionError::AdminTransport)?;
     let source = TelegramUpdateSource::new(polling_transport, token, long_poll_timeout);
     let config = ChatConfigRepository::new(database_url);
     let actions = TelegramActionSink::new(action_transport, token);
     let state = RedisCommandState::new(redis_endpoint)?;
+    let authorization = TelegramGroupAuthorizer::new(admin_transport, token, redis_endpoint);
     Ok(PollingRuntime::new(
         source,
         NativeDispatcher::new(
@@ -297,6 +359,7 @@ pub fn build_native_runtime(
             state,
             SystemRuntimeValues::new(instance_name),
             SystemRandomSource,
+            authorization,
             bot_name,
         ),
     ))
@@ -327,14 +390,14 @@ mod tests {
     use num_bigint::BigInt;
 
     use crate::dispatcher::{
-        ActionReceipt, ActionSink, MessageStateSink, RandomSource, RuntimeValues,
+        ActionReceipt, ActionSink, GroupAuthorizer, MessageStateSink, RandomSource, RuntimeValues,
     };
     use crate::runtime::UpdateSource;
 
     use super::{
         RedisCommandState, SystemRandomError, SystemRandomSource, SystemRuntimeValues,
-        TelegramActionSink, TelegramActionSinkError, TelegramUpdateSource, build_native_runtime,
-        publish_telegram_commands,
+        TelegramActionSink, TelegramActionSinkError, TelegramGroupAuthorizer, TelegramUpdateSource,
+        build_native_runtime, publish_telegram_commands,
     };
 
     struct Transport {
@@ -552,6 +615,99 @@ mod tests {
             random.inclusive_integer(&BigInt::from(2_u8), &BigInt::from(1_u8)),
             Err(SystemRandomError::EmptyRange)
         );
+    }
+
+    #[test]
+    fn group_authorizer_uses_cached_compatible_boolean_without_telegram() {
+        let listener = TcpListener::bind(("127.0.0.1", 0));
+        assert!(listener.is_ok());
+        let Ok(listener) = listener else { return };
+        let port = listener.local_addr().map(|address| address.port());
+        assert!(port.is_ok());
+        let Ok(port) = port else { return };
+        let server = thread::spawn(move || {
+            let accepted = listener.accept();
+            assert!(accepted.is_ok());
+            let Ok((stream, _)) = accepted else { return };
+            let mut reader = BufReader::new(stream);
+            assert_eq!(
+                read_command(&mut reader).ok(),
+                Some(vec!["GET".to_owned(), "chat_admin:-42:7".to_owned()])
+            );
+            assert!(reader.get_mut().write_all(b"$4\r\ntrue\r\n").is_ok());
+        });
+        let transport = Transport {
+            response: RefCell::new(None),
+            requests: RefCell::new(Vec::new()),
+        };
+        let mut authorizer = TelegramGroupAuthorizer::new(
+            transport,
+            "token",
+            &RedisEndpoint {
+                host: "127.0.0.1".to_owned(),
+                port,
+                password: None,
+            },
+        );
+        let decision = authorizer.authorize("-42", "7");
+        assert!(decision.is_admin);
+        assert!(decision.diagnostics.is_empty());
+        assert!(authorizer.transport.requests.borrow().is_empty());
+        assert!(server.join().is_ok());
+    }
+
+    #[test]
+    fn group_authorizer_queries_telegram_on_cache_miss_and_caches_result() {
+        let listener = TcpListener::bind(("127.0.0.1", 0));
+        assert!(listener.is_ok());
+        let Ok(listener) = listener else { return };
+        let port = listener.local_addr().map(|address| address.port());
+        assert!(port.is_ok());
+        let Ok(port) = port else { return };
+        let server = thread::spawn(move || {
+            let accepted = listener.accept();
+            assert!(accepted.is_ok());
+            let Ok((stream, _)) = accepted else { return };
+            let mut reader = BufReader::new(stream);
+            assert_eq!(
+                read_command(&mut reader)
+                    .ok()
+                    .and_then(|command| command.first().cloned()),
+                Some("GET".to_owned())
+            );
+            assert!(reader.get_mut().write_all(b"$-1\r\n").is_ok());
+
+            let accepted = listener.accept();
+            assert!(accepted.is_ok());
+            let Ok((stream, _)) = accepted else { return };
+            let mut reader = BufReader::new(stream);
+            let command = read_command(&mut reader);
+            assert!(command.is_ok());
+            let Ok(command) = command else { return };
+            assert_eq!(command.first().map(String::as_str), Some("SETEX"));
+            assert_eq!(command.get(1).map(String::as_str), Some("chat_admin:-42:7"));
+            assert_eq!(command.get(2).map(String::as_str), Some("300"));
+            assert_eq!(
+                command.get(3).map(String::as_str),
+                Some(r#"{"is_admin":true}"#)
+            );
+            assert!(reader.get_mut().write_all(b"+OK\r\n").is_ok());
+        });
+        let transport = transport(200, r#"{"ok":true,"result":{"status":"administrator"}}"#);
+        let mut authorizer = TelegramGroupAuthorizer::new(
+            transport,
+            "token",
+            &RedisEndpoint {
+                host: "127.0.0.1".to_owned(),
+                port,
+                password: None,
+            },
+        );
+        let decision = authorizer.authorize("-42", "7");
+        assert!(decision.is_admin);
+        assert!(decision.diagnostics.is_empty());
+        assert_eq!(authorizer.transport.requests.borrow().len(), 1);
+        assert!(server.join().is_ok());
     }
 
     #[test]

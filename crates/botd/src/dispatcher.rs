@@ -62,6 +62,16 @@ pub trait RandomSource {
     fn inclusive_integer(&mut self, start: &BigInt, end: &BigInt) -> Result<BigInt, Self::Error>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupAuthorizationDecision {
+    pub is_admin: bool,
+    pub diagnostics: Vec<String>,
+}
+
+pub trait GroupAuthorizer {
+    fn authorize(&mut self, chat_id: &str, user_id: &str) -> GroupAuthorizationDecision;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchOutcome {
     Handled,
@@ -88,25 +98,27 @@ type NativeDispatchResult<Config, Actions, Random> = Result<
     >,
 >;
 
-pub struct NativeDispatcher<Config, Actions, State, Values, Random> {
+pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorization> {
     config: Config,
     actions: Actions,
     state: State,
     runtime_values: Values,
     random: Random,
+    authorization: Authorization,
     bot_name: String,
     last_outcome: Option<DispatchOutcome>,
     state_diagnostics: Vec<String>,
 }
 
-impl<Config, Actions, State, Values, Random>
-    NativeDispatcher<Config, Actions, State, Values, Random>
+impl<Config, Actions, State, Values, Random, Authorization>
+    NativeDispatcher<Config, Actions, State, Values, Random, Authorization>
 where
     Config: ChatConfigSource,
     Actions: ActionSink,
     State: MessageStateSink,
     Values: RuntimeValues,
     Random: RandomSource,
+    Authorization: GroupAuthorizer,
 {
     #[must_use]
     pub fn new(
@@ -115,6 +127,7 @@ where
         state: State,
         runtime_values: Values,
         random: Random,
+        authorization: Authorization,
         bot_name: &str,
     ) -> Self {
         Self {
@@ -123,6 +136,7 @@ where
             state,
             runtime_values,
             random,
+            authorization,
             bot_name: bot_name.to_owned(),
             last_outcome: None,
             state_diagnostics: Vec::new(),
@@ -166,6 +180,37 @@ where
         let timestamp = self.runtime_values.unix_timestamp();
         let parsed = parse_command(&content.text, &self.bot_name);
         let is_group = is_group_chat_type(message.chat_type.as_deref());
+        let is_language_command = matches!(parsed.command.as_str(), "/language" | "/idioma");
+        let mut language_needs_legacy_group = is_group;
+        if is_group && is_language_command {
+            let authorization = self
+                .authorization
+                .authorize(&chat_id.0.to_string(), &_sender_id.0.to_string());
+            self.state_diagnostics.clear();
+            self.state_diagnostics.extend(authorization.diagnostics);
+            if !authorization.is_admin {
+                self.state_diagnostics.push(format!(
+                    "Unauthorized config attempt chat_id={} chat_type={} user_id={} username={} action=command:{}",
+                    chat_id.0,
+                    message.chat_type.as_deref().unwrap_or_default(),
+                    _sender_id.0,
+                    message.sender_username.as_deref().unwrap_or_default(),
+                    parsed.command,
+                ));
+                let text = match locale {
+                    bot_core::locale::Locale::Es => "este comando es solo para admins del grupo",
+                    bot_core::locale::Locale::En => "Only group admins can use this command",
+                };
+                let mut response = SendMessage::new(chat_id, text);
+                response.reply_to_message_id = Some(message_id);
+                let _receipt = self
+                    .actions
+                    .execute(TelegramAction::SendMessage(response))
+                    .map_err(DispatchError::Action)?;
+                return Ok(DispatchOutcome::Handled);
+            }
+            language_needs_legacy_group = false;
+        }
         let language_plan = plan_language_command(
             chat_id,
             message_id,
@@ -173,7 +218,7 @@ where
             &self.bot_name,
             locale,
             &config,
-            is_group,
+            language_needs_legacy_group,
         );
         let (plan, updated_config) = match language_plan {
             LanguageCommandPlan::LegacyGroupRequired => {
@@ -324,14 +369,15 @@ where
     }
 }
 
-impl<Config, Actions, State, Values, Random> UpdateHandler
-    for NativeDispatcher<Config, Actions, State, Values, Random>
+impl<Config, Actions, State, Values, Random, Authorization> UpdateHandler
+    for NativeDispatcher<Config, Actions, State, Values, Random, Authorization>
 where
     Config: ChatConfigSource,
     Actions: ActionSink,
     State: MessageStateSink,
     Values: RuntimeValues,
     Random: RandomSource,
+    Authorization: GroupAuthorizer,
 {
     type Error = DispatchError<Config::Error, Actions::Error, Random::Error>;
 
@@ -353,7 +399,8 @@ mod tests {
 
     use super::{
         ActionReceipt, ActionSink, ChatConfigSource, DispatchError, DispatchOutcome,
-        MessageStateSink, NativeDispatcher, RandomSource, RuntimeValues,
+        GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink, NativeDispatcher,
+        RandomSource, RuntimeValues,
     };
 
     struct Config {
@@ -460,6 +507,30 @@ mod tests {
         }
     }
 
+    struct Authorization {
+        is_admin: bool,
+        diagnostics: Vec<String>,
+        checks: Vec<(String, String)>,
+    }
+
+    impl GroupAuthorizer for Authorization {
+        fn authorize(&mut self, chat_id: &str, user_id: &str) -> GroupAuthorizationDecision {
+            self.checks.push((chat_id.to_owned(), user_id.to_owned()));
+            GroupAuthorizationDecision {
+                is_admin: self.is_admin,
+                diagnostics: self.diagnostics.clone(),
+            }
+        }
+    }
+
+    fn authorization() -> Authorization {
+        Authorization {
+            is_admin: true,
+            diagnostics: Vec::new(),
+            checks: Vec::new(),
+        }
+    }
+
     fn update(text: &str, language: Option<&str>) -> IncomingUpdate {
         IncomingUpdate {
             update_id: 99,
@@ -496,6 +567,7 @@ mod tests {
             State::default(),
             values(),
             random(),
+            authorization(),
             "@mybot",
         );
         assert_eq!(
@@ -527,6 +599,7 @@ mod tests {
             State::default(),
             values(),
             random(),
+            authorization(),
             "@mybot",
         );
         assert_eq!(
@@ -582,6 +655,7 @@ mod tests {
             State::default(),
             values(),
             random(),
+            authorization(),
             "@mybot",
         );
         assert_eq!(
@@ -607,6 +681,7 @@ mod tests {
             State::default(),
             values(),
             random(),
+            authorization(),
             "@mybot",
         );
         assert!(matches!(
@@ -631,6 +706,7 @@ mod tests {
             State::default(),
             values(),
             random(),
+            authorization(),
             "@mybot",
         );
         assert!(matches!(
@@ -654,6 +730,7 @@ mod tests {
             State::default(),
             values(),
             random(),
+            authorization(),
             "@mybot",
         );
         assert_eq!(
@@ -694,6 +771,7 @@ mod tests {
             State::default(),
             values(),
             random(),
+            authorization(),
             "@mybot",
         );
         assert_eq!(
@@ -721,6 +799,7 @@ mod tests {
             State::default(),
             values(),
             random(),
+            authorization(),
             "@mybot",
         );
         assert_eq!(
@@ -755,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn group_language_command_stays_legacy_owned_until_admin_reporting_moves() {
+    fn group_language_command_authorizes_admin_and_persists_update() {
         let config = Config {
             value: Ok(ChatConfig::default()),
             chat_ids: Vec::new(),
@@ -766,6 +845,7 @@ mod tests {
             State::default(),
             values(),
             random(),
+            authorization(),
             "@mybot",
         );
         let mut group_update = update("/language en", None);
@@ -774,15 +854,57 @@ mod tests {
         }
         assert_eq!(
             dispatcher.dispatch(group_update),
-            Ok(DispatchOutcome::LegacyRequired)
+            Ok(DispatchOutcome::Handled)
         );
-        assert!(dispatcher.actions.0.is_empty());
-        assert!(
-            !dispatcher
-                .config
-                .chat_ids
-                .iter()
-                .any(|value| value.starts_with("set:"))
+        assert_eq!(
+            dispatcher.authorization.checks,
+            [("-42".to_owned(), "88".to_owned())]
+        );
+        assert!(dispatcher.config.chat_ids.contains(&"set:-42".to_owned()));
+        assert_eq!(dispatcher.state.incoming.len(), 1);
+        assert_eq!(dispatcher.state.outgoing.len(), 1);
+    }
+
+    #[test]
+    fn group_language_command_denies_non_admin_without_writing_command_state() {
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let denied = Authorization {
+            is_admin: false,
+            diagnostics: vec!["synthetic lookup diagnostic".to_owned()],
+            checks: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            denied,
+            "@mybot",
+        );
+        let mut group_update = update("/idioma en", None);
+        if let IncomingEvent::Message(message) = &mut group_update.event {
+            message.chat_type = Some("group".to_owned());
+        }
+        assert_eq!(
+            dispatcher.dispatch(group_update),
+            Ok(DispatchOutcome::Handled)
+        );
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
+            return;
+        };
+        assert_eq!(message.text, "este comando es solo para admins del grupo");
+        assert!(dispatcher.state.incoming.is_empty());
+        assert!(dispatcher.state.outgoing.is_empty());
+        assert_eq!(
+            dispatcher.state_diagnostics(),
+            [
+                "synthetic lookup diagnostic",
+                "Unauthorized config attempt chat_id=-42 chat_type=group user_id=88 username=tester action=command:/idioma",
+            ]
         );
     }
 
@@ -801,6 +923,7 @@ mod tests {
             State::default(),
             values(),
             random(),
+            authorization(),
             "@mybot",
         );
         assert_eq!(
@@ -869,6 +992,7 @@ mod tests {
             State::default(),
             values(),
             FailingRandom,
+            authorization(),
             "@mybot",
         );
         assert!(matches!(
@@ -909,6 +1033,7 @@ mod tests {
             FailingState,
             values(),
             random(),
+            authorization(),
             "@mybot",
         );
         assert_eq!(
