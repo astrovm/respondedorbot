@@ -101,6 +101,13 @@ pub enum TelegramFileOutcome {
 
 pub trait TelegramTransport {
     fn send(&self, request: &TelegramRequest) -> Result<HttpResponse, TransportFailureKind>;
+
+    fn send_action_multipart(
+        &self,
+        _request: &TelegramMultipartRequest,
+    ) -> Result<HttpResponse, TransportFailureKind> {
+        Err(TransportFailureKind::Request)
+    }
 }
 
 pub trait TelegramMultipartTransport {
@@ -147,6 +154,13 @@ impl TelegramTransport for ReqwestTelegramTransport {
             builder = builder.json(payload);
         }
         read_response(builder.send().map_err(classify_error)?)
+    }
+
+    fn send_action_multipart(
+        &self,
+        request: &TelegramMultipartRequest,
+    ) -> Result<HttpResponse, TransportFailureKind> {
+        TelegramMultipartTransport::send_multipart(self, request)
     }
 }
 

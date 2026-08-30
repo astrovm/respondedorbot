@@ -12,6 +12,7 @@ pub mod finviz;
 pub mod firecrawl;
 pub mod giphy;
 pub mod giphy_pool;
+pub mod link_preview;
 pub mod openrouter_generation;
 pub mod polymarket;
 pub mod redis_chat_admin;

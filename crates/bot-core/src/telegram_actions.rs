@@ -58,6 +58,13 @@ pub enum TelegramAction {
         reply_to_message_id: Option<MessageId>,
         caption: Option<String>,
     },
+    SendVideo {
+        chat_id: ChatId,
+        video: Vec<u8>,
+        reply_to_message_id: Option<MessageId>,
+        caption: String,
+        reply_markup: Option<InlineKeyboardMarkup>,
+    },
     SendInvoice {
         chat_id: ChatId,
         title: String,

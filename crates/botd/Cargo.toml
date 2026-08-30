@@ -12,6 +12,7 @@ bot-adapters.workspace = true
 bot-core.workspace = true
 num-bigint.workspace = true
 rand.workspace = true
+regex.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 

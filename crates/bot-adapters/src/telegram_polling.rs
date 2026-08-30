@@ -26,7 +26,7 @@ pub struct IncomingUpdate {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum IncomingEvent {
-    Message(IncomingMessage),
+    Message(Box<IncomingMessage>),
     SuccessfulPayment(Map<String, Value>),
     CallbackQuery(Map<String, Value>),
     PreCheckoutQuery(Map<String, Value>),
@@ -40,9 +40,11 @@ pub struct IncomingMessage {
     pub chat_type: Option<String>,
     pub sender_id: Option<UserId>,
     pub sender_first_name: Option<String>,
+    pub sender_last_name: Option<String>,
     pub sender_username: Option<String>,
     pub sender_language_code: Option<String>,
     pub has_reply: bool,
+    pub replied_message_id: Option<MessageId>,
     pub content: Option<MessageContent>,
 }
 
@@ -120,7 +122,7 @@ fn parse_event(object: &mut Map<String, Value>) -> Result<IncomingEvent, Polling
         "message" if payload.contains_key("successful_payment") => {
             IncomingEvent::SuccessfulPayment(payload)
         }
-        "message" => IncomingEvent::Message(parse_message(&payload)),
+        "message" => IncomingEvent::Message(Box::new(parse_message(&payload))),
         "callback_query" => IncomingEvent::CallbackQuery(payload),
         "pre_checkout_query" => IncomingEvent::PreCheckoutQuery(payload),
         _ => IncomingEvent::Unsupported,
@@ -158,15 +160,27 @@ fn parse_message(payload: &Map<String, Value>) -> IncomingMessage {
         .and_then(|sender| sender.get("username"))
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
+    let sender_last_name = sender
+        .and_then(|sender| sender.get("last_name"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let replied_message_id = payload
+        .get("reply_to_message")
+        .and_then(Value::as_object)
+        .and_then(|reply| reply.get("message_id"))
+        .and_then(normalize_numeric_id)
+        .map(MessageId);
     IncomingMessage {
         message_id,
         chat_id,
         chat_type,
         sender_id,
         sender_first_name,
+        sender_last_name,
         sender_username,
         sender_language_code,
         has_reply: payload.contains_key("reply_to_message"),
+        replied_message_id,
         content: extract_message_content(&Value::Object(payload.clone())).ok(),
     }
 }
@@ -312,7 +326,7 @@ mod tests {
         let actual = parse_response(
             200,
             r#"{"ok":true,"result":[
-                {"update_id":10,"message":{"message_id":1,"text":"hola"}},
+                {"update_id":10,"message":{"message_id":1,"text":"hola","chat":{"id":-42,"type":"group"},"from":{"id":8,"first_name":"Ana","last_name":"Test","username":"ana","language_code":"es"},"reply_to_message":{"message_id":3}}},
                 {"update_id":11,"callback_query":{"id":"callback"}},
                 {"update_id":12,"pre_checkout_query":{"id":"checkout"}},
                 {"update_id":13,"message":{"message_id":2,"successful_payment":{"telegram_payment_charge_id":"charge-1"}}},
@@ -340,6 +354,12 @@ mod tests {
                 .map(|content| content.text.as_str()),
             Some("hola")
         );
+        assert_eq!(message.sender_last_name.as_deref(), Some("Test"));
+        assert_eq!(
+            message.replied_message_id,
+            Some(bot_core::telegram_input::MessageId(3))
+        );
+        assert!(message.has_reply);
         assert!(matches!(updates[1].event, IncomingEvent::CallbackQuery(_)));
         assert!(matches!(
             updates[2].event,

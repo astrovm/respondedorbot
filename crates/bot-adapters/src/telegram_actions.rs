@@ -8,8 +8,10 @@ use thiserror::Error;
 use bot_core::telegram_actions::{ParseMode, TelegramAction, truncate_text};
 
 use crate::telegram_http::{
-    TelegramHttpError, TelegramHttpOutcome, TelegramTransport, TransportFailureKind, request_with,
+    TelegramHttpError, TelegramHttpOutcome, TelegramMultipartRequest, TelegramTransport,
+    TransportFailureKind, request_with,
 };
+use std::time::Duration;
 
 const ACTION_TIMEOUT_SECONDS: u64 = 5;
 
@@ -151,6 +153,7 @@ fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
                 Some(Value::Object(payload)),
             )
         }
+        TelegramAction::SendVideo { .. } => return Err(ActionError::InvalidAction),
         TelegramAction::SendInvoice {
             chat_id,
             title,
@@ -296,6 +299,47 @@ pub fn execute_with<T: TelegramTransport>(
     token: &str,
     action: TelegramAction,
 ) -> Result<ActionOutcome, ActionError> {
+    if let TelegramAction::SendVideo {
+        chat_id,
+        video,
+        reply_to_message_id,
+        caption,
+        reply_markup,
+    } = action
+    {
+        let caption = caption.chars().take(1024).collect::<String>();
+        let mut fields = vec![
+            ("chat_id".to_owned(), chat_id.0.to_string()),
+            ("caption".to_owned(), caption),
+            ("supports_streaming".to_owned(), "true".to_owned()),
+        ];
+        if let Some(reply_to_message_id) = reply_to_message_id {
+            fields.push((
+                "reply_to_message_id".to_owned(),
+                reply_to_message_id.0.to_string(),
+            ));
+        }
+        if let Some(reply_markup) = reply_markup {
+            fields.push((
+                "reply_markup".to_owned(),
+                serde_json::to_string(&reply_markup).map_err(|_| ActionError::InvalidAction)?,
+            ));
+        }
+        let request = TelegramMultipartRequest {
+            token: token.to_owned(),
+            endpoint: "sendVideo".to_owned(),
+            fields,
+            file_field: "video".to_owned(),
+            file_name: "instagram.mp4".to_owned(),
+            file_bytes: video,
+            content_type: "video/mp4".to_owned(),
+            timeout: Duration::from_secs(60),
+        };
+        return match transport.send_action_multipart(&request) {
+            Ok(response) => parse_response(response.status_code, &response.body),
+            Err(kind) => Ok(ActionOutcome::TransportFailed(kind)),
+        };
+    }
     let prepared = prepare(action)?;
     match request_with(
         transport,
@@ -314,6 +358,7 @@ pub fn execute_with<T: TelegramTransport>(
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::time::Duration;
 
     use bot_core::telegram_actions::{
         InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, ParseMode, SendMessage,
@@ -324,7 +369,8 @@ mod tests {
 
     use super::{ActionOutcome, execute_with};
     use crate::telegram_http::{
-        HttpResponse, TelegramRequest, TelegramTransport, TransportFailureKind,
+        HttpResponse, TelegramMultipartRequest, TelegramRequest, TelegramTransport,
+        TransportFailureKind,
     };
 
     struct Transport {
@@ -354,6 +400,81 @@ mod tests {
             }))),
             requests: RefCell::new(Vec::new()),
         }
+    }
+
+    #[test]
+    fn video_upload_uses_bounded_multipart_contract_and_returns_message_id() {
+        struct VideoTransport {
+            requests: RefCell<Vec<TelegramMultipartRequest>>,
+        }
+        impl TelegramTransport for VideoTransport {
+            fn send(
+                &self,
+                _request: &TelegramRequest,
+            ) -> Result<HttpResponse, TransportFailureKind> {
+                Err(TransportFailureKind::Request)
+            }
+
+            fn send_action_multipart(
+                &self,
+                request: &TelegramMultipartRequest,
+            ) -> Result<HttpResponse, TransportFailureKind> {
+                self.requests.borrow_mut().push(request.clone());
+                Ok(HttpResponse {
+                    status_code: 200,
+                    body: r#"{"ok":true,"result":{"message_id":44}}"#.to_owned(),
+                })
+            }
+        }
+        let transport = VideoTransport {
+            requests: RefCell::new(Vec::new()),
+        };
+        let markup = InlineKeyboardMarkup {
+            inline_keyboard: vec![vec![InlineKeyboardButton {
+                text: "Original".to_owned(),
+                url: Some("https://instagram.com/reel/a".to_owned()),
+                callback_data: None,
+            }]],
+        };
+        assert_eq!(
+            execute_with(
+                &transport,
+                "synthetic-token",
+                TelegramAction::SendVideo {
+                    chat_id: ChatId(42),
+                    video: vec![1, 2, 3],
+                    reply_to_message_id: Some(MessageId(7)),
+                    caption: "fixed".to_owned(),
+                    reply_markup: Some(markup),
+                },
+            ),
+            Ok(ActionOutcome::Completed {
+                message_id: Some(44)
+            })
+        );
+        let requests = transport.requests.borrow();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].endpoint, "sendVideo");
+        assert_eq!(requests[0].file_field, "video");
+        assert_eq!(requests[0].file_name, "instagram.mp4");
+        assert_eq!(requests[0].file_bytes, vec![1, 2, 3]);
+        assert_eq!(requests[0].content_type, "video/mp4");
+        assert!(
+            requests[0]
+                .fields
+                .contains(&("chat_id".to_owned(), "42".to_owned()))
+        );
+        assert!(
+            requests[0]
+                .fields
+                .contains(&("reply_to_message_id".to_owned(), "7".to_owned()))
+        );
+        assert!(
+            requests[0]
+                .fields
+                .contains(&("supports_streaming".to_owned(), "true".to_owned()))
+        );
+        assert_eq!(requests[0].timeout, Duration::from_secs(60));
     }
 
     #[test]

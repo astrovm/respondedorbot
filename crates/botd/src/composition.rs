@@ -31,6 +31,10 @@ use bot_adapters::giphy::{
     GiphyTransport, ReqwestGiphyTransport, TransportFailureKind as GiphyTransportFailureKind,
 };
 use bot_adapters::giphy_pool::{GiphyPoolCache, load_giphy_pool};
+use bot_adapters::link_preview::{
+    LinkPreviewTransport, ReqwestLinkPreviewTransport, download_oversized_video,
+    inspect_with as inspect_link_preview,
+};
 use bot_adapters::polymarket::{
     PolymarketTransport, ReqwestPolymarketTransport,
     TransportFailureKind as PolymarketTransportFailureKind, load_elections,
@@ -61,6 +65,7 @@ use bot_core::command_state::{
     BOT_MESSAGE_METADATA_TTL_SECONDS, CHAT_HISTORY_WRITE_LIMIT, CHAT_STATE_TTL_SECONDS,
     IncomingCommandWritePlan, OutgoingCommandWritePlan,
 };
+use bot_core::links::replace_social_links;
 use bot_core::market_prices::{
     CryptoAsset, CryptoMarketProvider, MarketPriceCommand, UnifiedStockProvider,
     execute_market_price_command,
@@ -77,10 +82,10 @@ use crate::dispatcher::{
     BillingBalanceSource, BillingBalances, BillingTransferSink, BitcoinPriceSource,
     ChargeHistorySource, ChatConfigSource, DollarMarketLoad, DollarMarketSource,
     DollarQuotesSource, ElectionLoad, ElectionSource, GreetingPoolLoad, GreetingPoolSource,
-    GroupAuthorizationDecision, GroupAuthorizer, MarketPriceLoad, MarketPriceSource,
-    MessageStateSink, NativeDispatcher, OilPriceSource, OilQuoteLoad, RandomSource, RuloInputLoad,
-    RuloSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink, StockPriceSource,
-    StockQuotesLoad, WeatherObservationLoad, WeatherSource,
+    GroupAuthorizationDecision, GroupAuthorizer, LinkReplacementLoad, LinkReplacementSource,
+    MarketPriceLoad, MarketPriceSource, MessageStateSink, NativeDispatcher, OilPriceSource,
+    OilQuoteLoad, RandomSource, RuloInputLoad, RuloSource, RuntimeValues, StarPaymentReceipt,
+    StarPaymentSink, StockPriceSource, StockQuotesLoad, WeatherObservationLoad, WeatherSource,
 };
 use crate::runtime::{PollingRuntime, UpdateSource};
 
@@ -215,6 +220,65 @@ struct NativeMarketPriceSource<T, C, Y, F, S> {
     cache: C,
     api_key: String,
     stocks: YahooStockPriceSource<Y, F, S>,
+}
+
+struct NativeLinkReplacementSource<T> {
+    transport: T,
+}
+
+fn bounded_link_text(value: Option<&str>, limit: usize) -> Option<String> {
+    let normalized = value?.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    if normalized.chars().count() <= limit {
+        return Some(normalized);
+    }
+    let mut truncated = normalized
+        .chars()
+        .take(limit.saturating_sub(3))
+        .collect::<String>();
+    truncated.push_str("...");
+    Some(truncated)
+}
+
+impl<T: LinkPreviewTransport> LinkReplacementSource for NativeLinkReplacementSource<T> {
+    fn load(&mut self, text: &str, now_unix: i64) -> LinkReplacementLoad {
+        let mut previews = Vec::new();
+        let replacement = replace_social_links(text, now_unix, |candidate| {
+            let preview = inspect_link_preview(&self.transport, candidate);
+            if preview.embeddable {
+                previews.push(preview);
+                true
+            } else {
+                false
+            }
+        });
+        let context = (!previews.is_empty()).then(|| {
+            let mut lines = vec!["LINKS DEL MENSAJE:".to_owned()];
+            for (index, preview) in previews.iter().enumerate() {
+                lines.push(format!("{}. {}", index + 1, preview.final_url));
+                if let Some(title) = bounded_link_text(preview.metadata.title.as_deref(), 160) {
+                    lines.push(format!("titulo: {title}"));
+                }
+                if let Some(description) =
+                    bounded_link_text(preview.metadata.description.as_deref(), 280)
+                {
+                    lines.push(format!("descripcion: {description}"));
+                }
+            }
+            lines.join("\n")
+        });
+        let oversized_video = previews
+            .iter()
+            .find_map(|preview| download_oversized_video(&self.transport, preview));
+        LinkReplacementLoad {
+            replacement,
+            context,
+            oversized_video,
+            diagnostics: Vec::new(),
+        }
+    }
 }
 
 impl<T, C, Y, F, S> MarketPriceSource for NativeMarketPriceSource<T, C, Y, F, S>
@@ -997,6 +1061,17 @@ impl<Transport: TelegramTransport> ActionSink for TelegramActionSink<Transport> 
             ActionOutcome::Completed { .. }
         ))
     }
+
+    fn try_video(&mut self, action: TelegramAction) -> Result<Option<ActionReceipt>, Self::Error> {
+        Ok(match execute_with(&self.transport, &self.token, action)? {
+            ActionOutcome::Completed { message_id } => Some(ActionReceipt {
+                message_id: message_id.map(bot_core::telegram_input::MessageId),
+            }),
+            ActionOutcome::RateLimited { .. }
+            | ActionOutcome::Failed { .. }
+            | ActionOutcome::TransportFailed(_) => None,
+        })
+    }
 }
 
 pub fn publish_telegram_commands<Actions: ActionSink>(
@@ -1046,6 +1121,8 @@ pub enum CompositionError {
     GiphyTransport(GiphyTransportFailureKind),
     #[error("could not construct Giphy Redis cache: {0}")]
     GiphyCache(RedisJsonCacheError),
+    #[error("could not construct social-link preview transport: {0:?}")]
+    LinkPreviewTransport(bot_adapters::link_preview::PreviewFailure),
     #[error("could not construct Open-Meteo transport: {0:?}")]
     WeatherTransport(WeatherTransportFailureKind),
     #[error("could not construct weather Redis cache: {0}")]
@@ -1103,6 +1180,8 @@ pub fn build_native_runtime(
     let giphy_transport = ReqwestGiphyTransport::new().map_err(CompositionError::GiphyTransport)?;
     let giphy_cache =
         RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::GiphyCache)?;
+    let link_preview_transport =
+        ReqwestLinkPreviewTransport::new().map_err(CompositionError::LinkPreviewTransport)?;
     let weather_transport =
         ReqwestWeatherTransport::new().map_err(CompositionError::WeatherTransport)?;
     let weather_cache =
@@ -1179,6 +1258,9 @@ pub fn build_native_runtime(
     .with_election_source(Box::new(PolymarketElectionSource {
         transport: polymarket_transport,
         cache: polymarket_cache,
+    }))
+    .with_link_replacement_source(Box::new(NativeLinkReplacementSource {
+        transport: link_preview_transport,
     }));
     let dispatcher = if let Some(api_key) = options.coinmarketcap_key.filter(|key| !key.is_empty())
     {

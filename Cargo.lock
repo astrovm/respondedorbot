@@ -117,6 +117,7 @@ dependencies = [
  "sha2",
  "thiserror",
  "unicode-normalization",
+ "url",
 ]
 
 [[package]]
@@ -127,6 +128,7 @@ dependencies = [
  "bot-core",
  "num-bigint",
  "rand 0.10.2",
+ "regex",
  "serde_json",
  "thiserror",
 ]

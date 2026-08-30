@@ -38,6 +38,9 @@ use bot_core::dollar::{
 };
 use bot_core::greeting_commands::{GreetingCategory, classify_greeting_command, greeting_fallback};
 use bot_core::language_command::{LanguageCommandPlan, plan_language_command};
+use bot_core::links::{
+    LinkActionContext, LinkMode, LinkReplacement, has_replaceable_link, plan_link_actions,
+};
 use bot_core::locale::resolve_locale;
 use bot_core::market_prices::{MarketPriceCommand, classify_market_price_command};
 use bot_core::polymarket::{ElectionEvent, classify_election_command, render_elections};
@@ -93,6 +96,10 @@ pub trait ActionSink {
 
     fn try_animation(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
         self.execute(action).map(|_receipt| true)
+    }
+
+    fn try_video(&mut self, action: TelegramAction) -> Result<Option<ActionReceipt>, Self::Error> {
+        self.execute(action).map(Some)
     }
 }
 
@@ -281,6 +288,18 @@ pub trait MarketPriceSource {
     ) -> MarketPriceLoad;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkReplacementLoad {
+    pub replacement: LinkReplacement,
+    pub context: Option<String>,
+    pub oversized_video: Option<Vec<u8>>,
+    pub diagnostics: Vec<String>,
+}
+
+pub trait LinkReplacementSource {
+    fn load(&mut self, text: &str, now_unix: i64) -> LinkReplacementLoad;
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ElectionLoad {
     pub events: Vec<ElectionEvent>,
@@ -345,6 +364,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     stock_price_source: Option<Box<dyn StockPriceSource>>,
     market_price_source: Option<Box<dyn MarketPriceSource>>,
     election_source: Option<Box<dyn ElectionSource>>,
+    link_replacement_source: Option<Box<dyn LinkReplacementSource>>,
     last_outcome: Option<DispatchOutcome>,
     state_diagnostics: Vec<String>,
 }
@@ -396,6 +416,7 @@ where
             stock_price_source: None,
             market_price_source: None,
             election_source: None,
+            link_replacement_source: None,
             last_outcome: None,
             state_diagnostics: Vec::new(),
         }
@@ -515,6 +536,147 @@ where
     pub fn with_election_source(mut self, source: Box<dyn ElectionSource>) -> Self {
         self.election_source = Some(source);
         self
+    }
+
+    #[must_use]
+    pub fn with_link_replacement_source(mut self, source: Box<dyn LinkReplacementSource>) -> Self {
+        self.link_replacement_source = Some(source);
+        self
+    }
+
+    fn dispatch_link_replacement(
+        &mut self,
+        message: &IncomingMessage,
+        config: &ChatConfig,
+        locale: bot_core::locale::Locale,
+        timestamp: i64,
+    ) -> NativeDispatchResult<Config, Actions, Random> {
+        let (Some(chat_id), Some(message_id), Some(sender_id), Some(content)) = (
+            message.chat_id,
+            message.message_id,
+            message.sender_id,
+            message.content.as_ref(),
+        ) else {
+            return Ok(DispatchOutcome::LegacyRequired);
+        };
+        let text = content.text.as_str();
+        let mode = LinkMode::parse(&config.link_mode);
+        if mode == LinkMode::Off || text.is_empty() || text.starts_with('/') {
+            return Ok(DispatchOutcome::LegacyRequired);
+        }
+        if message.has_reply {
+            let without_links = regex::Regex::new(r"https?://[^\s]+").ok().map_or_else(
+                || text.to_owned(),
+                |pattern| pattern.replace_all(text, "").into_owned(),
+            );
+            if !without_links.trim().is_empty() {
+                return Ok(DispatchOutcome::LegacyRequired);
+            }
+        }
+        if !has_replaceable_link(text) {
+            return Ok(DispatchOutcome::LegacyRequired);
+        }
+        let Some(source) = self.link_replacement_source.as_mut() else {
+            return Ok(DispatchOutcome::LegacyRequired);
+        };
+        let load = source.load(text, timestamp);
+        self.state_diagnostics.extend(load.diagnostics);
+        if !load.replacement.changed {
+            let incoming = prepare_incoming_command_state(IncomingCommandState {
+                chat_id,
+                message_id,
+                user_id: sender_id,
+                first_name: message.sender_first_name.as_deref(),
+                username: message.sender_username.as_deref(),
+                text,
+                is_group: is_group_chat_type(message.chat_type.as_deref()),
+                timestamp,
+            });
+            if let Ok(incoming) = incoming
+                && let Err(error) = self.state.record_incoming(&incoming)
+            {
+                self.state_diagnostics
+                    .push(format!("unreplaced link state: {error}"));
+            }
+            return Ok(DispatchOutcome::Handled);
+        }
+        let shared_by = message.sender_username.as_deref().map_or_else(
+            || {
+                [
+                    message.sender_first_name.as_deref(),
+                    message.sender_last_name.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" ")
+            },
+            |username| format!("@{username}"),
+        );
+        let Some(plan) = plan_link_actions(
+            &load.replacement,
+            mode,
+            LinkActionContext {
+                chat_id,
+                incoming_message_id: message_id,
+                replied_message_id: message.replied_message_id,
+                shared_by: (!shared_by.is_empty()).then_some(shared_by.as_str()),
+                locale,
+                link_context: load.context.as_deref(),
+            },
+        ) else {
+            return Ok(DispatchOutcome::LegacyRequired);
+        };
+        let video_action = load.oversized_video.map(|video| {
+            let TelegramAction::SendMessage(message) = &plan.send else {
+                return plan.send.clone();
+            };
+            TelegramAction::SendVideo {
+                chat_id: message.chat_id,
+                video,
+                reply_to_message_id: message.reply_to_message_id,
+                caption: message.text.clone(),
+                reply_markup: message.reply_markup.clone(),
+            }
+        });
+        let receipt = if let Some(video_action) = video_action {
+            match self
+                .actions
+                .try_video(video_action)
+                .map_err(DispatchError::Action)?
+            {
+                Some(receipt) => receipt,
+                None => self
+                    .actions
+                    .execute(plan.send)
+                    .map_err(DispatchError::Action)?,
+            }
+        } else {
+            self.actions
+                .execute(plan.send)
+                .map_err(DispatchError::Action)?
+        };
+        if let Some(delete) = plan.delete_original {
+            let _receipt = self
+                .actions
+                .execute(delete)
+                .map_err(DispatchError::Action)?;
+        }
+        let outgoing = prepare_outgoing_command_state(OutgoingCommandState {
+            chat_id,
+            incoming_message_id: message_id,
+            sent_message_id: receipt.message_id,
+            text: &plan.stored_text,
+            command: "fixed_link",
+            timestamp,
+        });
+        if let Ok(outgoing) = outgoing
+            && let Err(error) = self.state.record_outgoing(&outgoing)
+        {
+            self.state_diagnostics
+                .push(format!("fixed link state: {error}"));
+        }
+        Ok(DispatchOutcome::Handled)
     }
 
     fn dispatch_successful_payment(
@@ -961,9 +1123,6 @@ where
         &mut self,
         message: &IncomingMessage,
     ) -> NativeDispatchResult<Config, Actions, Random> {
-        if message.has_reply {
-            return Ok(DispatchOutcome::LegacyRequired);
-        }
         let (Some(chat_id), Some(message_id), Some(sender_id), Some(content)) = (
             message.chat_id,
             message.message_id,
@@ -983,6 +1142,12 @@ where
             message.chat_type.as_deref().unwrap_or_default(),
         );
         let timestamp = self.runtime_values.unix_timestamp();
+        if !content.text.starts_with('/') && has_replaceable_link(&content.text) {
+            return self.dispatch_link_replacement(message, &config, locale, timestamp);
+        }
+        if message.has_reply {
+            return Ok(DispatchOutcome::LegacyRequired);
+        }
         let parsed = parse_command(&content.text, &self.bot_name);
         let is_group = is_group_chat_type(message.chat_type.as_deref());
         let is_settings_command = matches!(
@@ -1707,14 +1872,15 @@ mod tests {
         ChargeHistoryPage, ChargeHistorySource, ChatConfigSource, DispatchError, DispatchOutcome,
         DollarMarketLoad, DollarMarketSource, DollarQuotesSource, ElectionLoad, ElectionSource,
         GreetingPoolLoad, GreetingPoolSource, GroupAuthorizationDecision, GroupAuthorizer,
-        MarketPriceLoad, MarketPriceSource, MessageStateSink, NativeDispatcher, OilPriceSource,
-        OilQuoteLoad, RandomSource, RuloInputLoad, RuloSource, RuntimeValues, StarPaymentReceipt,
-        StarPaymentSink, StockPriceSource, StockQuotesLoad, TransferResult, WeatherObservationLoad,
-        WeatherSource,
+        LinkReplacementLoad, LinkReplacementSource, MarketPriceLoad, MarketPriceSource,
+        MessageStateSink, NativeDispatcher, OilPriceSource, OilQuoteLoad, RandomSource,
+        RuloInputLoad, RuloSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink,
+        StockPriceSource, StockQuotesLoad, TransferResult, WeatherObservationLoad, WeatherSource,
     };
     use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup};
     use bot_core::devo::DevoQuotes;
     use bot_core::greeting_commands::GreetingCategory;
+    use bot_core::links::LinkReplacement;
     use bot_core::polymarket::parse_election_events;
     use bot_core::rulo::{ExchangeQuote, RuloInput};
     use bot_core::stocks::StockQuote;
@@ -1824,6 +1990,50 @@ mod tests {
         }
     }
 
+    struct Links {
+        replacement: LinkReplacement,
+        context: Option<String>,
+        oversized_video: Option<Vec<u8>>,
+        diagnostics: Vec<String>,
+        calls: Vec<(String, i64)>,
+    }
+
+    impl LinkReplacementSource for Links {
+        fn load(&mut self, text: &str, now_unix: i64) -> LinkReplacementLoad {
+            self.calls.push((text.to_owned(), now_unix));
+            LinkReplacementLoad {
+                replacement: self.replacement.clone(),
+                context: self.context.clone(),
+                oversized_video: self.oversized_video.clone(),
+                diagnostics: self.diagnostics.clone(),
+            }
+        }
+    }
+
+    fn links(changed: bool) -> Links {
+        Links {
+            replacement: LinkReplacement {
+                text: if changed {
+                    "https://fixupx.com/a/status/1".to_owned()
+                } else {
+                    "https://x.com/a/status/1".to_owned()
+                },
+                changed,
+                original_links: if changed {
+                    vec!["https://x.com/a/status/1".to_owned()]
+                } else {
+                    Vec::new()
+                },
+            },
+            context: changed.then(|| {
+                "LINKS DEL MENSAJE:\n1. https://fixupx.com/a/status/1\ntitulo: example".to_owned()
+            }),
+            oversized_video: None,
+            diagnostics: Vec::new(),
+            calls: Vec::new(),
+        }
+    }
+
     struct Authorization {
         is_admin: bool,
         diagnostics: Vec<String>,
@@ -1851,21 +2061,23 @@ mod tests {
     fn update(text: &str, language: Option<&str>) -> IncomingUpdate {
         IncomingUpdate {
             update_id: 99,
-            event: IncomingEvent::Message(IncomingMessage {
+            event: IncomingEvent::Message(Box::new(IncomingMessage {
                 message_id: Some(MessageId(7)),
                 chat_id: Some(ChatId(-42)),
                 chat_type: Some("private".to_owned()),
                 sender_id: Some(UserId(88)),
                 sender_first_name: Some("Synthetic".to_owned()),
+                sender_last_name: None,
                 sender_username: Some("tester".to_owned()),
                 sender_language_code: language.map(ToOwned::to_owned),
                 has_reply: false,
+                replied_message_id: None,
                 content: Some(MessageContent {
                     text: text.to_owned(),
                     photo_file_id: None,
                     audio_file_id: None,
                 }),
-            }),
+            })),
         }
     }
 
@@ -2282,17 +2494,19 @@ mod tests {
         );
         let incomplete = IncomingUpdate {
             update_id: 100,
-            event: IncomingEvent::Message(IncomingMessage {
+            event: IncomingEvent::Message(Box::new(IncomingMessage {
                 message_id: None,
                 chat_id: None,
                 chat_type: None,
                 sender_id: None,
                 sender_first_name: None,
+                sender_last_name: None,
                 sender_username: None,
                 sender_language_code: None,
                 has_reply: false,
+                replied_message_id: None,
                 content: None,
-            }),
+            })),
         };
         assert_eq!(
             dispatcher.dispatch(incomplete),
@@ -5561,6 +5775,248 @@ mod tests {
         );
         assert_eq!(dispatcher.state.incoming.len(), 3);
         assert_eq!(dispatcher.state.outgoing.len(), 3);
+    }
+
+    #[test]
+    fn dispatches_fixed_links_with_reply_buttons_context_and_state() {
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_link_replacement_source(Box::new(links(true)));
+        assert_eq!(
+            dispatcher.dispatch(update("https://x.com/a/status/1", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        let [TelegramAction::SendMessage(message)] = dispatcher.actions.0.as_slice() else {
+            return;
+        };
+        assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
+        assert_eq!(
+            message.text,
+            "https://fixupx.com/a/status/1\n\ncompartido por @tester"
+        );
+        let Some(markup) = &message.reply_markup else {
+            return;
+        };
+        assert_eq!(
+            markup.inline_keyboard[0][0].url.as_deref(),
+            Some("https://x.com/a/status/1")
+        );
+        assert!(dispatcher.state.incoming.is_empty());
+        assert_eq!(dispatcher.state.outgoing.len(), 1);
+        assert!(
+            dispatcher.state.outgoing[0]
+                .message
+                .text
+                .contains("titulo: example")
+        );
+        assert_eq!(dispatcher.state.outgoing[0].message.message_id, "bot_700");
+    }
+
+    #[test]
+    fn oversized_instagram_video_uploads_and_falls_back_to_text_on_rejection() {
+        let config = || Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut source = links(true);
+        source.oversized_video = Some(vec![1, 2, 3]);
+        let mut dispatcher = NativeDispatcher::new(
+            config(),
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_link_replacement_source(Box::new(source));
+        assert_eq!(
+            dispatcher.dispatch(update("https://instagram.com/reel/a", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        let [
+            TelegramAction::SendVideo {
+                video,
+                caption,
+                reply_to_message_id,
+                ..
+            },
+        ] = dispatcher.actions.0.as_slice()
+        else {
+            return;
+        };
+        assert_eq!(video, &[1, 2, 3]);
+        assert!(caption.contains("compartido por @tester"));
+        assert_eq!(*reply_to_message_id, Some(MessageId(7)));
+
+        #[derive(Default)]
+        struct RejectVideo(Vec<TelegramAction>);
+        impl ActionSink for RejectVideo {
+            type Error = Infallible;
+
+            fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
+                self.0.push(action);
+                Ok(ActionReceipt {
+                    message_id: Some(MessageId(701)),
+                })
+            }
+
+            fn try_video(
+                &mut self,
+                _action: TelegramAction,
+            ) -> Result<Option<ActionReceipt>, Self::Error> {
+                Ok(None)
+            }
+        }
+        let mut source = links(true);
+        source.oversized_video = Some(vec![4, 5, 6]);
+        let mut fallback = NativeDispatcher::new(
+            config(),
+            RejectVideo::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_link_replacement_source(Box::new(source));
+        assert_eq!(
+            fallback.dispatch(update("https://instagram.com/reel/a", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            fallback.actions.0.as_slice(),
+            [TelegramAction::SendMessage(_)]
+        ));
+        assert_eq!(fallback.state.outgoing[0].message.message_id, "bot_701");
+    }
+
+    #[test]
+    fn delete_mode_preserves_reply_target_and_deletes_only_after_send() {
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                link_mode: "delete".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_link_replacement_source(Box::new(links(true)));
+        let mut incoming = update("https://x.com/a/status/1", Some("en"));
+        let IncomingEvent::Message(message) = &mut incoming.event else {
+            return;
+        };
+        message.has_reply = true;
+        message.replied_message_id = Some(MessageId(3));
+        message.sender_username = None;
+        message.sender_first_name = Some("Ana".to_owned());
+        message.sender_last_name = Some("Test".to_owned());
+        assert_eq!(dispatcher.dispatch(incoming), Ok(DispatchOutcome::Handled));
+        let [
+            TelegramAction::SendMessage(message),
+            TelegramAction::DeleteMessage {
+                chat_id,
+                message_id,
+            },
+        ] = dispatcher.actions.0.as_slice()
+        else {
+            return;
+        };
+        assert_eq!(message.reply_to_message_id, Some(MessageId(3)));
+        assert_eq!(
+            message.text,
+            "https://fixupx.com/a/status/1\n\nshared by Ana Test"
+        );
+        assert_eq!((*chat_id, *message_id), (ChatId(-42), MessageId(7)));
+    }
+
+    #[test]
+    fn failed_supported_preview_is_suppressed_and_stored_as_user_context() {
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut source = links(false);
+        source.diagnostics.push("preview unavailable".to_owned());
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_link_replacement_source(Box::new(source));
+        assert_eq!(
+            dispatcher.dispatch(update("https://x.com/a/status/1", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(dispatcher.actions.0.is_empty());
+        assert_eq!(dispatcher.state.incoming.len(), 1);
+        assert!(dispatcher.state.outgoing.is_empty());
+        assert_eq!(dispatcher.state_diagnostics(), ["preview unavailable"]);
+    }
+
+    #[test]
+    fn link_mode_off_commands_and_non_plain_replies_remain_legacy_owned() {
+        let config = Config {
+            value: Ok(ChatConfig {
+                link_mode: "off".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_link_replacement_source(Box::new(links(true)));
+        assert_eq!(
+            dispatcher.dispatch(update("https://x.com/a/status/1", None)),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
+        dispatcher.config.value = Ok(ChatConfig::default());
+        assert_eq!(
+            dispatcher.dispatch(update("/ask https://x.com/a/status/1", None)),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
+        let mut reply = update("mirá https://x.com/a/status/1", None);
+        let IncomingEvent::Message(message) = &mut reply.event else {
+            return;
+        };
+        message.has_reply = true;
+        message.replied_message_id = Some(MessageId(3));
+        assert_eq!(
+            dispatcher.dispatch(reply),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
+        assert!(dispatcher.actions.0.is_empty());
     }
 
     #[test]
