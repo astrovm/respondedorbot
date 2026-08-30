@@ -1845,6 +1845,36 @@ fn billing_record_star_payment(
     Ok((result.inserted, result.user_balance))
 }
 
+/// Mint administrator-issued credits to one user account.
+#[pyfunction]
+fn billing_mint_user_credits(
+    py: Python<'_>,
+    database_url: &str,
+    user_id: i64,
+    amount: i32,
+    actor_user_id: Option<i64>,
+) -> PyResult<i64> {
+    let repository = BillingRepository::new(database_url);
+    py.detach(|| repository.mint_user_credits(user_id, amount, actor_user_id))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+/// Transfer credits from a user account to a chat account.
+#[pyfunction]
+fn billing_transfer_user_to_chat(
+    py: Python<'_>,
+    database_url: &str,
+    user_id: i64,
+    chat_id: i64,
+    amount: i32,
+) -> PyResult<(bool, i64, i64)> {
+    let repository = BillingRepository::new(database_url);
+    let result = py
+        .detach(|| repository.transfer_user_to_chat(user_id, chat_id, amount))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok((result.transferred, result.user_balance, result.chat_balance))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -1955,6 +1985,8 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(billing_get_or_create_balance, module)?)?;
     module.add_function(wrap_pyfunction!(billing_grant_onboarding, module)?)?;
     module.add_function(wrap_pyfunction!(billing_record_star_payment, module)?)?;
+    module.add_function(wrap_pyfunction!(billing_mint_user_credits, module)?)?;
+    module.add_function(wrap_pyfunction!(billing_transfer_user_to_chat, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;

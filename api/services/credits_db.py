@@ -107,6 +107,24 @@ class _RustBillingStarPayments(Protocol):
     ) -> tuple[bool, int]: ...
 
 
+class _RustBillingManualCredits(Protocol):
+    def billing_mint_user_credits(
+        self,
+        database_url: str,
+        user_id: int,
+        amount: int,
+        actor_user_id: int | None,
+    ) -> int: ...
+
+    def billing_transfer_user_to_chat(
+        self,
+        database_url: str,
+        user_id: int,
+        chat_id: int,
+        amount: int,
+    ) -> tuple[bool, int, int]: ...
+
+
 def _load_rust_billing_reads() -> _RustBillingReads | None:
     module = load_rust_bridge("RUST_BILLING_READ_SHADOW_ENABLED")
     if module is None:
@@ -133,6 +151,13 @@ def _load_rust_billing_star_payments() -> _RustBillingStarPayments | None:
     if module is None:
         return None
     return cast(_RustBillingStarPayments, module)
+
+
+def _load_rust_billing_manual_credits() -> _RustBillingManualCredits | None:
+    module = load_rust_bridge("RUST_BILLING_MANUAL_CREDITS_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustBillingManualCredits, module)
 
 
 class CreditsDBError(RuntimeError):
@@ -1835,6 +1860,27 @@ def transfer_user_to_chat(user_id: int, chat_id: int, amount: int) -> Dict[str, 
     """Transfer credits from personal balance to group balance."""
 
     transfer_amount = int(amount)
+    rust = _load_rust_billing_manual_credits()
+    database_url = get_database_url()
+    if rust is not None and database_url:
+        ensure_schema()
+        try:
+            transferred, user_balance, chat_balance = (
+                rust.billing_transfer_user_to_chat(
+                    database_url,
+                    int(user_id),
+                    int(chat_id),
+                    transfer_amount,
+                )
+            )
+            return {
+                "ok": bool(transferred),
+                "error": None if transferred else "insufficient",
+                "user_balance": int(user_balance),
+                "chat_balance": int(chat_balance),
+            }
+        except Exception as error:
+            raise CreditsDBError("Rust credit transfer transaction failed") from error
 
     def operation(cur: Any) -> Dict[str, Any]:
         user_balance, chat_balance = _get_user_and_chat_balances_for_update(
@@ -1914,6 +1960,20 @@ def mint_user_credits(
 
     mint_amount = int(amount)
     actor_id = int(actor_user_id) if actor_user_id is not None else int(user_id)
+    rust = _load_rust_billing_manual_credits()
+    database_url = get_database_url()
+    if rust is not None and database_url:
+        ensure_schema()
+        try:
+            user_balance = rust.billing_mint_user_credits(
+                database_url,
+                int(user_id),
+                mint_amount,
+                actor_id,
+            )
+            return {"user_balance": int(user_balance)}
+        except Exception as error:
+            raise CreditsDBError("Rust credit mint transaction failed") from error
 
     def operation(cur: Any) -> Dict[str, int]:
         user_balance = _get_balance_for_update(cur, "user", user_id)

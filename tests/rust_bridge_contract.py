@@ -504,6 +504,19 @@ def verify_billing_star_payments(bridge: ModuleType) -> None:
         raise AssertionError("Rust Stars payment bridge is unavailable")
 
 
+def verify_billing_manual_credits(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "billing_manual_credits.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    if contract["transfer"]["lock_order"] != ["user", "chat"]:
+        raise AssertionError("manual credit transfer lock order changed")
+    for function_name in (
+        "billing_mint_user_credits",
+        "billing_transfer_user_to_chat",
+    ):
+        if not callable(getattr(bridge, function_name)):
+            raise AssertionError(f"Rust manual-credit bridge unavailable: {function_name}")
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -589,6 +602,7 @@ def main(arguments: list[str]) -> int:
     verify_billing_reads(bridge)
     verify_billing_onboarding(bridge)
     verify_billing_star_payments(bridge)
+    verify_billing_manual_credits(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

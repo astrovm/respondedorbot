@@ -61,6 +61,13 @@ pub struct StarPaymentResult {
     pub user_balance: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct TransferResult {
+    pub transferred: bool,
+    pub user_balance: i64,
+    pub chat_balance: i64,
+}
+
 pub struct BillingRepository {
     database_url: String,
 }
@@ -142,27 +149,13 @@ impl BillingRepository {
                     ],
                 )?
                 .is_some();
-            transaction.execute(
-                "INSERT INTO credit_accounts (scope_type, scope_id, balance) VALUES ('user', $1, 0) \
-                 ON CONFLICT (scope_type, scope_id) DO NOTHING",
-                &[&user_id],
-            )?;
-            let mut user_balance = transaction
-                .query_one(
-                    "SELECT balance FROM credit_accounts \
-                     WHERE scope_type = 'user' AND scope_id = $1 FOR UPDATE",
-                    &[&user_id],
-                )?
-                .get::<_, i32>(0);
+            let mut user_balance =
+                Self::balance_for_update(transaction, BillingScope::User, user_id)?;
             if inserted {
                 user_balance = user_balance
                     .checked_add(credits_awarded)
                     .ok_or(BillingError::BalanceOverflow)?;
-                transaction.execute(
-                    "UPDATE credit_accounts SET balance = $1, updated_at = NOW() \
-                     WHERE scope_type = 'user' AND scope_id = $2",
-                    &[&user_balance, &user_id],
-                )?;
+                Self::set_balance(transaction, BillingScope::User, user_id, user_balance)?;
                 let metadata = json!({
                     "pack_id": pack_id,
                     "xtr_amount": xtr_amount,
@@ -178,6 +171,87 @@ impl BillingRepository {
             Ok(StarPaymentResult {
                 inserted,
                 user_balance: user_balance.into(),
+            })
+        })
+    }
+
+    pub fn mint_user_credits(
+        &self,
+        user_id: i64,
+        amount: i32,
+        actor_user_id: Option<i64>,
+    ) -> Result<i64, BillingError> {
+        self.run_transaction(|transaction| {
+            let balance = Self::balance_for_update(transaction, BillingScope::User, user_id)?
+                .checked_add(amount)
+                .ok_or(BillingError::BalanceOverflow)?;
+            Self::set_balance(transaction, BillingScope::User, user_id, balance)?;
+            let actor_user_id = actor_user_id.unwrap_or(user_id);
+            let metadata = json!({"source": "admin_command"});
+            transaction.execute(
+                "INSERT INTO credit_ledger \
+                    (event_type, actor_user_id, user_id, amount, metadata) \
+                 VALUES ('printcredits', $1, $2, $3, $4)",
+                &[&actor_user_id, &user_id, &amount, &metadata],
+            )?;
+            Ok(balance.into())
+        })
+    }
+
+    pub fn transfer_user_to_chat(
+        &self,
+        user_id: i64,
+        chat_id: i64,
+        amount: i32,
+    ) -> Result<TransferResult, BillingError> {
+        self.run_transaction(|transaction| {
+            let user_balance = Self::balance_for_update(transaction, BillingScope::User, user_id)?;
+            let chat_balance = Self::balance_for_update(transaction, BillingScope::Chat, chat_id)?;
+            if user_balance < amount {
+                return Ok(TransferResult {
+                    transferred: false,
+                    user_balance: user_balance.into(),
+                    chat_balance: chat_balance.into(),
+                });
+            }
+
+            let updated_user_balance = user_balance
+                .checked_sub(amount)
+                .ok_or(BillingError::BalanceOverflow)?;
+            let updated_chat_balance = chat_balance
+                .checked_add(amount)
+                .ok_or(BillingError::BalanceOverflow)?;
+            Self::set_balance(
+                transaction,
+                BillingScope::User,
+                user_id,
+                updated_user_balance,
+            )?;
+            Self::set_balance(
+                transaction,
+                BillingScope::Chat,
+                chat_id,
+                updated_chat_balance,
+            )?;
+            let user_amount = amount.checked_neg().ok_or(BillingError::BalanceOverflow)?;
+            let user_metadata = json!({"direction": "user_to_chat"});
+            transaction.execute(
+                "INSERT INTO credit_ledger \
+                    (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
+                 VALUES ('transfer_user_to_chat', $1, $1, $2, $3, $4)",
+                &[&user_id, &chat_id, &user_amount, &user_metadata],
+            )?;
+            let chat_metadata = json!({"direction": "chat_from_user"});
+            transaction.execute(
+                "INSERT INTO credit_ledger \
+                    (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
+                 VALUES ('transfer_user_to_chat', $1, $1, $2, $3, $4)",
+                &[&user_id, &chat_id, &amount, &chat_metadata],
+            )?;
+            Ok(TransferResult {
+                transferred: true,
+                user_balance: updated_user_balance.into(),
+                chat_balance: updated_chat_balance.into(),
             })
         })
     }
@@ -208,6 +282,39 @@ impl BillingRepository {
         Err(BillingError::TransactionRetriesExhausted)
     }
 
+    fn balance_for_update(
+        transaction: &mut Transaction<'_>,
+        scope: BillingScope,
+        scope_id: i64,
+    ) -> Result<i32, BillingError> {
+        transaction.execute(
+            "INSERT INTO credit_accounts (scope_type, scope_id, balance) VALUES ($1, $2, 0) \
+             ON CONFLICT (scope_type, scope_id) DO NOTHING",
+            &[&scope.as_str(), &scope_id],
+        )?;
+        Ok(transaction
+            .query_one(
+                "SELECT balance FROM credit_accounts \
+                 WHERE scope_type = $1 AND scope_id = $2 FOR UPDATE",
+                &[&scope.as_str(), &scope_id],
+            )?
+            .get(0))
+    }
+
+    fn set_balance(
+        transaction: &mut Transaction<'_>,
+        scope: BillingScope,
+        scope_id: i64,
+        balance: i32,
+    ) -> Result<(), BillingError> {
+        transaction.execute(
+            "UPDATE credit_accounts SET balance = $1, updated_at = NOW() \
+             WHERE scope_type = $2 AND scope_id = $3",
+            &[&balance, &scope.as_str(), &scope_id],
+        )?;
+        Ok(())
+    }
+
     fn apply_onboarding_grant(
         transaction: &mut Transaction<'_>,
         user_id: i64,
@@ -217,18 +324,7 @@ impl BillingRepository {
             "SELECT pg_advisory_xact_lock($1)",
             &[&ONBOARDING_GRANTS_ADVISORY_LOCK_KEY],
         )?;
-        transaction.execute(
-            "INSERT INTO credit_accounts (scope_type, scope_id, balance) VALUES ('user', $1, 0) \
-             ON CONFLICT (scope_type, scope_id) DO NOTHING",
-            &[&user_id],
-        )?;
-        let mut balance = transaction
-            .query_one(
-                "SELECT balance FROM credit_accounts \
-                 WHERE scope_type = 'user' AND scope_id = $1 FOR UPDATE",
-                &[&user_id],
-            )?
-            .get::<_, i32>(0);
+        let mut balance = Self::balance_for_update(transaction, BillingScope::User, user_id)?;
         if transaction
             .query_opt(
                 "SELECT 1 FROM onboarding_grants WHERE user_id = $1",
@@ -284,11 +380,7 @@ impl BillingRepository {
             balance = balance
                 .checked_add(credits)
                 .ok_or(BillingError::BalanceOverflow)?;
-            transaction.execute(
-                "UPDATE credit_accounts SET balance = $1, updated_at = NOW() \
-                 WHERE scope_type = 'user' AND scope_id = $2",
-                &[&balance, &user_id],
-            )?;
+            Self::set_balance(transaction, BillingScope::User, user_id, balance)?;
             let metadata = json!({"credits": credits});
             transaction.execute(
                 "INSERT INTO credit_ledger \
@@ -329,6 +421,7 @@ mod tests {
 
     use super::{
         BillingError, BillingRepository, BillingScope, OnboardingGrantResult, StarPaymentResult,
+        TransferResult,
     };
 
     #[test]
@@ -561,6 +654,105 @@ mod tests {
         assert_eq!(topup_evidence.get::<_, i64>(0), 2);
         assert_eq!(topup_evidence.get::<_, i64>(1), 2);
 
+        assert_eq!(
+            repository.mint_user_credits(7_000_000_000_009, 500, Some(99))?,
+            500
+        );
+        assert_eq!(
+            repository.transfer_user_to_chat(7_000_000_000_009, 7_000_000_000_010, 300,)?,
+            TransferResult {
+                transferred: true,
+                user_balance: 200,
+                chat_balance: 300,
+            }
+        );
+        assert_eq!(
+            repository.transfer_user_to_chat(7_000_000_000_009, 7_000_000_000_010, 500,)?,
+            TransferResult {
+                transferred: false,
+                user_balance: 200,
+                chat_balance: 300,
+            }
+        );
+        let manual_evidence = client.query_one(
+            "SELECT \
+                COUNT(*) FILTER (WHERE event_type = 'printcredits'), \
+                COUNT(*) FILTER (WHERE event_type = 'transfer_user_to_chat') \
+             FROM credit_ledger WHERE user_id = $1",
+            &[&7_000_000_000_009_i64],
+        )?;
+        assert_eq!(manual_evidence.get::<_, i64>(0), 1);
+        assert_eq!(manual_evidence.get::<_, i64>(1), 2);
+
+        assert_eq!(
+            repository.mint_user_credits(7_000_000_000_011, 500, None)?,
+            500
+        );
+        let first_database_url = database_url.clone();
+        let second_database_url = database_url.clone();
+        let first = std::thread::spawn(move || {
+            BillingRepository::new(&first_database_url).transfer_user_to_chat(
+                7_000_000_000_011,
+                7_000_000_000_012,
+                300,
+            )
+        });
+        let second = std::thread::spawn(move || {
+            BillingRepository::new(&second_database_url).transfer_user_to_chat(
+                7_000_000_000_011,
+                7_000_000_000_012,
+                300,
+            )
+        });
+        let concurrent_transfer_results = [
+            first
+                .join()
+                .map_err(|_| std::io::Error::other("first transfer thread panicked"))??,
+            second
+                .join()
+                .map_err(|_| std::io::Error::other("second transfer thread panicked"))??,
+        ];
+        assert_eq!(
+            concurrent_transfer_results
+                .iter()
+                .filter(|result| result.transferred)
+                .count(),
+            1
+        );
+        assert!(concurrent_transfer_results.iter().any(|result| {
+            result.transferred && result.user_balance == 200 && result.chat_balance == 300
+        }));
+        assert!(concurrent_transfer_results.iter().any(|result| {
+            !result.transferred && result.user_balance == 200 && result.chat_balance == 300
+        }));
+
+        let first_database_url = database_url.clone();
+        let second_database_url = database_url.clone();
+        let first = std::thread::spawn(move || {
+            BillingRepository::new(&first_database_url).mint_user_credits(
+                7_000_000_000_013,
+                500,
+                Some(99),
+            )
+        });
+        let second = std::thread::spawn(move || {
+            BillingRepository::new(&second_database_url).mint_user_credits(
+                7_000_000_000_013,
+                500,
+                Some(99),
+            )
+        });
+        let mut concurrent_mint_balances = [
+            first
+                .join()
+                .map_err(|_| std::io::Error::other("first mint thread panicked"))??,
+            second
+                .join()
+                .map_err(|_| std::io::Error::other("second mint thread panicked"))??,
+        ];
+        concurrent_mint_balances.sort_unstable();
+        assert_eq!(concurrent_mint_balances, [500, 1000]);
+
         let synthetic_ids = [
             7_000_000_000_001_i64,
             7_000_000_000_002_i64,
@@ -570,6 +762,11 @@ mod tests {
             7_000_000_000_006_i64,
             7_000_000_000_007_i64,
             7_000_000_000_008_i64,
+            7_000_000_000_009_i64,
+            7_000_000_000_010_i64,
+            7_000_000_000_011_i64,
+            7_000_000_000_012_i64,
+            7_000_000_000_013_i64,
         ];
         client.execute(
             "DELETE FROM star_payments WHERE user_id = ANY($1)",

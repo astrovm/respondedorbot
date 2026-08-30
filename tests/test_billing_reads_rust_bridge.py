@@ -114,6 +114,37 @@ class _FakeRustStarPayments:
         return self.result
 
 
+class _FakeRustManualCredits:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.mint_calls: list[tuple[str, int, int, int | None]] = []
+        self.transfer_calls: list[tuple[str, int, int, int]] = []
+
+    def billing_mint_user_credits(
+        self,
+        database_url: str,
+        user_id: int,
+        amount: int,
+        actor_user_id: int | None,
+    ) -> int:
+        self.mint_calls.append((database_url, user_id, amount, actor_user_id))
+        if self.fail:
+            raise ValueError("synthetic uncertain mint failure")
+        return 7000
+
+    def billing_transfer_user_to_chat(
+        self,
+        database_url: str,
+        user_id: int,
+        chat_id: int,
+        amount: int,
+    ) -> tuple[bool, int, int]:
+        self.transfer_calls.append((database_url, user_id, chat_id, amount))
+        if self.fail:
+            raise ValueError("synthetic uncertain transfer failure")
+        return True, 200, 520
+
+
 def _patch_python_balance(
     monkeypatch: pytest.MonkeyPatch,
     balance: int,
@@ -317,3 +348,68 @@ def test_billing_star_payment_uncertain_failure_does_not_start_python_writer(
 
     with pytest.raises(credits_db.CreditsDBError, match="Stars payment"):
         credits_db.record_star_payment("synthetic-charge", 42, "small", 100, 500)
+
+
+def test_billing_manual_credit_operations_are_authoritative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(
+        credits_db,
+        "get_database_url",
+        lambda: "postgresql://synthetic.invalid/db?sslmode=require",
+    )
+    monkeypatch.setattr(
+        credits_db,
+        "_run_credit_transaction",
+        lambda *_arguments: pytest.fail("Python manual-credit writer must not run"),
+    )
+    rust = _FakeRustManualCredits()
+    monkeypatch.setattr(
+        credits_db,
+        "_load_rust_billing_manual_credits",
+        lambda: rust,
+    )
+
+    assert credits_db.mint_user_credits(42, 5000, 99) == {"user_balance": 7000}
+    assert credits_db.transfer_user_to_chat(42, 202, 300) == {
+        "ok": True,
+        "error": None,
+        "user_balance": 200,
+        "chat_balance": 520,
+    }
+    assert rust.mint_calls == [
+        ("postgresql://synthetic.invalid/db?sslmode=require", 42, 5000, 99)
+    ]
+    assert rust.transfer_calls == [
+        ("postgresql://synthetic.invalid/db?sslmode=require", 42, 202, 300)
+    ]
+
+
+@pytest.mark.parametrize("operation", ["mint", "transfer"])
+def test_billing_manual_credit_uncertain_failure_does_not_start_python_writer(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(
+        credits_db,
+        "get_database_url",
+        lambda: "postgresql://synthetic.invalid/db?sslmode=require",
+    )
+    monkeypatch.setattr(
+        credits_db,
+        "_run_credit_transaction",
+        lambda *_arguments: pytest.fail("uncertain writes must fail closed"),
+    )
+    monkeypatch.setattr(
+        credits_db,
+        "_load_rust_billing_manual_credits",
+        lambda: _FakeRustManualCredits(fail=True),
+    )
+
+    with pytest.raises(credits_db.CreditsDBError, match=f"credit {operation}"):
+        if operation == "mint":
+            credits_db.mint_user_credits(42, 5000, 99)
+        else:
+            credits_db.transfer_user_to_chat(42, 202, 300)
