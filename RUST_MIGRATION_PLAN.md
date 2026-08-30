@@ -19,6 +19,18 @@
 6. Preserve existing Redis, PostgreSQL, Telegram, and scheduled-task data.
 7. End with one native Rust application and remove all Python code and tooling.
 
+## Working Documents
+
+- [`docs/rust-migration/ARCHITECTURE.md`](docs/rust-migration/ARCHITECTURE.md)
+  defines the final crate boundaries, type rules, concurrency ownership, and
+  temporary bridge constraints.
+- [`docs/rust-migration/FEATURE_MATRIX.md`](docs/rust-migration/FEATURE_MATRIX.md)
+  tracks every user-visible and cross-cutting feature through parity and removal.
+- [`docs/rust-migration/PERSISTENCE_CONTRACTS.md`](docs/rust-migration/PERSISTENCE_CONTRACTS.md)
+  records PostgreSQL, Redis, task, configuration, and rollback contracts.
+- [`docs/rust-migration/TEST_PLAN.md`](docs/rust-migration/TEST_PLAN.md) defines
+  the contract runner, critical scenarios, coverage gates, and CI layers.
+
 ## Non-goals
 
 - Do not redesign user-visible behavior during the compatibility migration.
