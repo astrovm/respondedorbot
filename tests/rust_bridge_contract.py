@@ -572,6 +572,17 @@ def verify_billing_provider_usage(bridge: ModuleType) -> None:
             raise AssertionError(f"Rust provider-usage bridge unavailable: {function_name}")
 
 
+def verify_billing_ai_settlements(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "billing_ai_settlements.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    if contract["lock_order"] != ["user", "chat"]:
+        raise AssertionError("AI settlement lock order changed")
+    if contract["idempotency_key"] != ["user_id", "operation_id"]:
+        raise AssertionError("AI settlement idempotency changed")
+    if not callable(bridge.billing_settle_ai_operation_once):
+        raise AssertionError("Rust AI settlement bridge is unavailable")
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -663,6 +674,7 @@ def main(arguments: list[str]) -> int:
     verify_billing_ai_refunds(bridge)
     verify_billing_ai_charges(bridge)
     verify_billing_provider_usage(bridge)
+    verify_billing_ai_settlements(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

@@ -364,6 +364,40 @@ class _FakeRustProviderUsage:
         return True
 
 
+class _FakeRustAiSettlements:
+    def __init__(
+        self,
+        result: dict[str, object],
+        *,
+        fail: bool = False,
+    ) -> None:
+        self.result = result
+        self.fail = fail
+        self.calls: list[tuple[str, int, int | None, str, int, dict[str, object]]] = []
+
+    def billing_settle_ai_operation_once(
+        self,
+        database_url: str,
+        user_id: int,
+        chat_id: int | None,
+        operation_id: str,
+        actual_credit_units: int,
+        metadata_json: str,
+    ) -> str:
+        self.calls.append(
+            (
+                database_url,
+                user_id,
+                chat_id,
+                operation_id,
+                actual_credit_units,
+                json.loads(metadata_json),
+            )
+        )
+        if self.fail:
+            raise ValueError("synthetic uncertain AI settlement failure")
+        return json.dumps(self.result)
+
 def _patch_python_balance(
     monkeypatch: pytest.MonkeyPatch,
     balance: int,
@@ -1075,3 +1109,88 @@ def test_billing_provider_usage_followup_failure_is_not_retried_in_python(
             credits_db.list_ai_provider_segments(42, "operation")
         else:
             credits_db.update_ai_provider_usage("operation", "segment", {})
+
+
+@pytest.mark.parametrize(
+    ("rust_result", "expected"),
+    [
+        (
+            {
+                "applied": True,
+                "source": "user",
+                "authorized_credit_units": 300,
+                "actual_credit_units": 0,
+                "refunded_credit_units": 300,
+                "debt_applied_credit_units": 0,
+                "user_balance": 500,
+                "chat_balance": 700,
+            },
+            {
+                "applied": True,
+                "source": "user",
+                "authorized_credit_units": 300,
+                "actual_credit_units": 0,
+                "refunded_credit_units": 300,
+                "debt_applied_credit_units": 0,
+                "user_balance": 500,
+                "chat_balance": 700,
+            },
+        ),
+        (
+            {"applied": False, "user_balance": 500, "chat_balance": 700},
+            {"applied": False, "user_balance": 500, "chat_balance": 700},
+        ),
+    ],
+)
+def test_billing_ai_settlement_is_authoritative_and_preserves_result_shape(
+    monkeypatch: pytest.MonkeyPatch,
+    rust_result: dict[str, object],
+    expected: dict[str, object],
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(credits_db, "get_database_url", lambda: "postgresql://db")
+    monkeypatch.setattr(
+        credits_db,
+        "_run_credit_transaction",
+        lambda *_arguments: pytest.fail("Python AI settlement writer must not run"),
+    )
+    rust = _FakeRustAiSettlements(rust_result)
+    monkeypatch.setattr(credits_db, "_load_rust_billing_ai_settlements", lambda: rust)
+
+    assert credits_db.settle_ai_operation_once(
+        42,
+        202,
+        "synthetic-operation",
+        -10,
+        metadata={"trace_id": "synthetic"},
+    ) == expected
+    assert rust.calls == [
+        (
+            "postgresql://db",
+            42,
+            202,
+            "synthetic-operation",
+            0,
+            {"trace_id": "synthetic"},
+        )
+    ]
+
+
+def test_billing_ai_settlement_uncertain_failure_does_not_start_python_writer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(credits_db, "get_database_url", lambda: "postgresql://db")
+    monkeypatch.setattr(
+        credits_db,
+        "_run_credit_transaction",
+        lambda *_arguments: pytest.fail("uncertain writes must fail closed"),
+    )
+    monkeypatch.setattr(
+        credits_db,
+        "_load_rust_billing_ai_settlements",
+        lambda: _FakeRustAiSettlements({}, fail=True),
+    )
+
+    with pytest.raises(credits_db.CreditsDBError, match="AI settlement"):
+        credits_db.settle_ai_operation_once(42, None, "operation", 10, metadata={})

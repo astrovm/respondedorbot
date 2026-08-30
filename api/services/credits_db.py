@@ -222,6 +222,18 @@ class _RustBillingProviderUsage(Protocol):
     ) -> bool: ...
 
 
+class _RustBillingAiSettlements(Protocol):
+    def billing_settle_ai_operation_once(
+        self,
+        database_url: str,
+        user_id: int,
+        chat_id: int | None,
+        operation_id: str,
+        actual_credit_units: int,
+        metadata_json: str,
+    ) -> str: ...
+
+
 def _load_rust_billing_reads() -> _RustBillingReads | None:
     module = load_rust_bridge("RUST_BILLING_READ_SHADOW_ENABLED")
     if module is None:
@@ -290,6 +302,13 @@ def _load_rust_billing_provider_usage() -> _RustBillingProviderUsage | None:
     if module is None:
         return None
     return cast(_RustBillingProviderUsage, module)
+
+
+def _load_rust_billing_ai_settlements() -> _RustBillingAiSettlements | None:
+    module = load_rust_bridge("RUST_BILLING_AI_SETTLEMENTS_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustBillingAiSettlements, module)
 
 
 class CreditsDBError(RuntimeError):
@@ -1532,6 +1551,26 @@ def settle_ai_operation_once(
 
     actual = max(0, int(actual_credit_units or 0))
     normalized_operation_id = str(operation_id)
+    rust = _load_rust_billing_ai_settlements()
+    database_url = get_database_url()
+    if rust is not None and database_url:
+        ensure_schema()
+        try:
+            loaded = json.loads(
+                rust.billing_settle_ai_operation_once(
+                    database_url,
+                    int(user_id),
+                    int(chat_id) if chat_id is not None else None,
+                    normalized_operation_id,
+                    actual,
+                    json.dumps(dict(metadata), default=str),
+                )
+            )
+            if not isinstance(loaded, Mapping):
+                raise ValueError("Rust AI settlement result must be an object")
+            return dict(loaded)
+        except Exception as error:
+            raise CreditsDBError("Rust AI settlement transaction failed") from error
 
     def operation(cur: Any) -> Dict[str, Any]:
         user_balance, chat_balance = _get_user_and_chat_balances_for_update(

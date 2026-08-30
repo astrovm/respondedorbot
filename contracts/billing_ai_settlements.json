@@ -1,0 +1,11 @@
+{
+  "idempotency_key": ["user_id", "operation_id"],
+  "lock_order": ["user", "chat"],
+  "payer_invariant": "one distinct source",
+  "adjustment": "authorized minus actual",
+  "positive_event": "ai_refund",
+  "negative_event": "ai_settlement_debt",
+  "result_event": "ai_settlement_result",
+  "transaction_attempts": 3,
+  "uncertain_failure": "fail closed"
+}

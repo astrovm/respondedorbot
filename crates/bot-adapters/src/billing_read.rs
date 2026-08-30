@@ -47,6 +47,10 @@ pub enum BillingError {
     TransactionRetriesExhausted,
     #[error("billing balance exceeds the PostgreSQL integer range")]
     BalanceOverflow,
+    #[error("AI operation has more than one payer")]
+    MultiplePayers,
+    #[error("chat-funded AI operation requires chat_id")]
+    ChatIdRequired,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -95,6 +99,23 @@ pub struct AiChargeResult {
     pub reason: Option<String>,
     pub source: Option<String>,
     pub amount: i64,
+    pub user_balance: i64,
+    pub chat_balance: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AiSettlementResult {
+    pub applied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorized_credit_units: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_credit_units: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refunded_credit_units: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debt_applied_credit_units: Option<i64>,
     pub user_balance: i64,
     pub chat_balance: i64,
 }
@@ -730,6 +751,145 @@ impl BillingRepository {
         })
     }
 
+    pub fn settle_ai_operation_once(
+        &self,
+        user_id: i64,
+        chat_id: Option<i64>,
+        operation_id: &str,
+        actual_credit_units: i64,
+        metadata: &Map<String, Value>,
+    ) -> Result<AiSettlementResult, BillingError> {
+        let actual_credit_units = actual_credit_units.max(0);
+        self.run_transaction(|transaction| {
+            let user_balance = Self::balance_for_update(transaction, BillingScope::User, user_id)?;
+            let chat_balance = match chat_id {
+                Some(chat_id) => {
+                    Self::balance_for_update(transaction, BillingScope::Chat, chat_id)?
+                }
+                None => 0,
+            };
+            if Self::ai_operation_is_settled(transaction, user_id, operation_id)? {
+                return Ok(AiSettlementResult {
+                    applied: false,
+                    source: None,
+                    authorized_credit_units: None,
+                    actual_credit_units: None,
+                    refunded_credit_units: None,
+                    debt_applied_credit_units: None,
+                    user_balance: user_balance.into(),
+                    chat_balance: chat_balance.into(),
+                });
+            }
+
+            let hold = transaction.query_one(
+                "SELECT COALESCE(SUM(-amount), 0), \
+                    COUNT(DISTINCT metadata->>'source'), MIN(metadata->>'source') \
+                 FROM credit_ledger WHERE user_id = $1 \
+                   AND event_type IN ('ai_reserve', 'ai_refund') \
+                   AND metadata->>'operation_id' = $2",
+                &[&user_id, &operation_id],
+            )?;
+            let authorized = hold.get::<_, i64>(0).max(0);
+            let payer_count = hold.get::<_, i64>(1);
+            if payer_count > 1 {
+                return Err(BillingError::MultiplePayers);
+            }
+            let payer = if hold.get::<_, Option<String>>(2).as_deref() == Some("chat") {
+                BillingScope::Chat
+            } else {
+                BillingScope::User
+            };
+            if payer == BillingScope::Chat && chat_id.is_none() {
+                return Err(BillingError::ChatIdRequired);
+            }
+
+            let adjustment = authorized
+                .checked_sub(actual_credit_units)
+                .ok_or(BillingError::BalanceOverflow)?;
+            let adjustment_i32 =
+                i32::try_from(adjustment).map_err(|_| BillingError::BalanceOverflow)?;
+            let (updated_user_balance, updated_chat_balance) = match payer {
+                BillingScope::Chat => {
+                    let payer_chat_id = chat_id.ok_or(BillingError::ChatIdRequired)?;
+                    let updated_chat_balance = chat_balance
+                        .checked_add(adjustment_i32)
+                        .ok_or(BillingError::BalanceOverflow)?;
+                    Self::set_balance(
+                        transaction,
+                        BillingScope::Chat,
+                        payer_chat_id,
+                        updated_chat_balance,
+                    )?;
+                    (user_balance, updated_chat_balance)
+                }
+                BillingScope::User => {
+                    let updated_user_balance = user_balance
+                        .checked_add(adjustment_i32)
+                        .ok_or(BillingError::BalanceOverflow)?;
+                    Self::set_balance(
+                        transaction,
+                        BillingScope::User,
+                        user_id,
+                        updated_user_balance,
+                    )?;
+                    (updated_user_balance, chat_balance)
+                }
+            };
+            let refunded = adjustment.max(0);
+            let debt = if adjustment < 0 {
+                adjustment
+                    .checked_neg()
+                    .ok_or(BillingError::BalanceOverflow)?
+            } else {
+                0
+            };
+            let settlement_metadata = settlement_metadata(
+                metadata,
+                operation_id,
+                payer,
+                authorized,
+                actual_credit_units,
+                refunded,
+                debt,
+            );
+            if adjustment != 0 {
+                let event_type = if adjustment > 0 {
+                    "ai_refund"
+                } else {
+                    "ai_settlement_debt"
+                };
+                transaction.execute(
+                    "INSERT INTO credit_ledger \
+                        (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
+                     VALUES ($1, $2, $2, $3, $4, $5)",
+                    &[
+                        &event_type,
+                        &user_id,
+                        &chat_id,
+                        &adjustment_i32,
+                        &settlement_metadata,
+                    ],
+                )?;
+            }
+            transaction.execute(
+                "INSERT INTO credit_ledger \
+                    (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
+                 VALUES ('ai_settlement_result', $1, $1, $2, 0, $3)",
+                &[&user_id, &chat_id, &settlement_metadata],
+            )?;
+            Ok(AiSettlementResult {
+                applied: true,
+                source: Some(payer.as_str().to_owned()),
+                authorized_credit_units: Some(authorized),
+                actual_credit_units: Some(actual_credit_units),
+                refunded_credit_units: Some(refunded),
+                debt_applied_credit_units: Some(debt),
+                user_balance: updated_user_balance.into(),
+                chat_balance: updated_chat_balance.into(),
+            })
+        })
+    }
+
     fn ai_operation_is_settled(
         transaction: &mut Transaction<'_>,
         user_id: i64,
@@ -945,6 +1105,41 @@ fn billing_metadata(source: &str, metadata: &Map<String, Value>) -> Value {
     Value::Object(merged)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn settlement_metadata(
+    metadata: &Map<String, Value>,
+    operation_id: &str,
+    payer: BillingScope,
+    authorized: i64,
+    actual: i64,
+    refunded: i64,
+    debt: i64,
+) -> Value {
+    let mut merged = metadata.clone();
+    merged.insert(
+        "operation_id".to_owned(),
+        Value::String(operation_id.to_owned()),
+    );
+    merged.insert(
+        "source".to_owned(),
+        Value::String(payer.as_str().to_owned()),
+    );
+    merged.insert(
+        "payer_scope".to_owned(),
+        Value::String(payer.as_str().to_owned()),
+    );
+    for (key, value) in [
+        ("reserved_credit_units_total", authorized),
+        ("settled_credit_units", actual),
+        ("refunded_credit_units", refunded),
+        ("debt_applied_credit_units", debt),
+        ("charged_credit_units_total", actual),
+    ] {
+        merged.insert(key.to_owned(), Value::from(value));
+    }
+    Value::Object(merged)
+}
+
 #[cfg(test)]
 mod tests {
     use native_tls::TlsConnector;
@@ -953,8 +1148,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        AiChargeResult, AiRefundResult, BalancePairResult, BillingError, BillingRepository,
-        BillingScope, ChatAiChargeResult, OnboardingGrantResult, StarPaymentResult, TransferResult,
+        AiChargeResult, AiRefundResult, AiSettlementResult, BalancePairResult, BillingError,
+        BillingRepository, BillingScope, ChatAiChargeResult, OnboardingGrantResult,
+        StarPaymentResult, TransferResult,
     };
 
     #[test]
@@ -1994,6 +2190,249 @@ mod tests {
             serde_json::Value::from(1)
         );
 
+        client.batch_execute(
+            "INSERT INTO credit_accounts (scope_type, scope_id, balance) VALUES \
+                ('user', 7000000000026, 500), \
+                ('user', 7000000000027, 500), \
+                ('chat', 7000000000028, 700), \
+                ('user', 7000000000029, 500), \
+                ('user', 7000000000030, 0), \
+                ('chat', 7000000000031, 0), \
+                ('user', 7000000000032, 0) \
+             ON CONFLICT (scope_type, scope_id) DO UPDATE SET balance = EXCLUDED.balance;",
+        )?;
+        let user_settlement_operation = "synthetic-user-settlement";
+        let user_settlement_hold =
+            charge_metadata("synthetic-user-settlement-hold", user_settlement_operation);
+        assert!(
+            repository
+                .charge_ai_credits(
+                    7_000_000_000_026,
+                    None,
+                    300,
+                    "ai_reserve",
+                    &user_settlement_hold,
+                    None,
+                    Some("synthetic-user-settlement-hold"),
+                    user_settlement_operation,
+                )?
+                .applied
+        );
+        let caller_metadata = serde_json::Map::from_iter([
+            (
+                "source".to_owned(),
+                serde_json::Value::String("caller-must-not-override".to_owned()),
+            ),
+            (
+                "trace_id".to_owned(),
+                serde_json::Value::String("synthetic-trace".to_owned()),
+            ),
+        ]);
+        assert_eq!(
+            repository.settle_ai_operation_once(
+                7_000_000_000_026,
+                None,
+                user_settlement_operation,
+                100,
+                &caller_metadata,
+            )?,
+            AiSettlementResult {
+                applied: true,
+                source: Some("user".to_owned()),
+                authorized_credit_units: Some(300),
+                actual_credit_units: Some(100),
+                refunded_credit_units: Some(200),
+                debt_applied_credit_units: Some(0),
+                user_balance: 400,
+                chat_balance: 0,
+            }
+        );
+        assert_eq!(
+            repository.settle_ai_operation_once(
+                7_000_000_000_026,
+                None,
+                user_settlement_operation,
+                999,
+                &serde_json::Map::new(),
+            )?,
+            AiSettlementResult {
+                applied: false,
+                source: None,
+                authorized_credit_units: None,
+                actual_credit_units: None,
+                refunded_credit_units: None,
+                debt_applied_credit_units: None,
+                user_balance: 400,
+                chat_balance: 0,
+            }
+        );
+        let user_settlement_evidence = client.query_one(
+            "SELECT \
+                COUNT(*) FILTER (WHERE event_type = 'ai_refund'), \
+                COUNT(*) FILTER (WHERE event_type = 'ai_settlement_result'), \
+                COUNT(*) FILTER (WHERE metadata->>'source' = 'user'), \
+                COUNT(*) FILTER (WHERE metadata->>'trace_id' = 'synthetic-trace'), \
+                COUNT(*) FILTER (WHERE metadata->>'reserved_credit_units_total' = '300' \
+                    AND metadata->>'settled_credit_units' = '100') \
+             FROM credit_ledger WHERE user_id = $1 \
+               AND metadata->>'operation_id' = $2",
+            &[&7_000_000_000_026_i64, &user_settlement_operation],
+        )?;
+        assert_eq!(user_settlement_evidence.get::<_, i64>(0), 1);
+        assert_eq!(user_settlement_evidence.get::<_, i64>(1), 1);
+        assert_eq!(user_settlement_evidence.get::<_, i64>(2), 3);
+        assert_eq!(user_settlement_evidence.get::<_, i64>(3), 2);
+        assert_eq!(user_settlement_evidence.get::<_, i64>(4), 2);
+
+        let chat_settlement_operation = "synthetic-chat-settlement";
+        let chat_settlement_hold =
+            charge_metadata("synthetic-chat-settlement-hold", chat_settlement_operation);
+        assert!(
+            repository
+                .charge_ai_credits(
+                    7_000_000_000_027,
+                    Some(7_000_000_000_028),
+                    300,
+                    "ai_reserve",
+                    &chat_settlement_hold,
+                    Some("chat"),
+                    Some("synthetic-chat-settlement-hold"),
+                    chat_settlement_operation,
+                )?
+                .applied
+        );
+        assert_eq!(
+            repository.settle_ai_operation_once(
+                7_000_000_000_027,
+                Some(7_000_000_000_028),
+                chat_settlement_operation,
+                500,
+                &serde_json::Map::new(),
+            )?,
+            AiSettlementResult {
+                applied: true,
+                source: Some("chat".to_owned()),
+                authorized_credit_units: Some(300),
+                actual_credit_units: Some(500),
+                refunded_credit_units: Some(0),
+                debt_applied_credit_units: Some(200),
+                user_balance: 500,
+                chat_balance: 200,
+            }
+        );
+        let debt_evidence = client.query_one(
+            "SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM credit_ledger \
+             WHERE user_id = $1 AND event_type = 'ai_settlement_debt' \
+               AND metadata->>'operation_id' = $2 \
+               AND metadata->>'source' = 'chat'",
+            &[&7_000_000_000_027_i64, &chat_settlement_operation],
+        )?;
+        assert_eq!(debt_evidence.get::<_, i64>(0), 1);
+        assert_eq!(debt_evidence.get::<_, i64>(1), -200);
+
+        let concurrent_settlement_operation = "synthetic-concurrent-settlement";
+        let concurrent_settlement_hold = charge_metadata(
+            "synthetic-concurrent-settlement-hold",
+            concurrent_settlement_operation,
+        );
+        assert!(
+            repository
+                .charge_ai_credits(
+                    7_000_000_000_029,
+                    None,
+                    300,
+                    "ai_reserve",
+                    &concurrent_settlement_hold,
+                    None,
+                    Some("synthetic-concurrent-settlement-hold"),
+                    concurrent_settlement_operation,
+                )?
+                .applied
+        );
+        let first_database_url = database_url.clone();
+        let second_database_url = database_url.clone();
+        let first = std::thread::spawn(move || {
+            BillingRepository::new(&first_database_url).settle_ai_operation_once(
+                7_000_000_000_029,
+                None,
+                "synthetic-concurrent-settlement",
+                100,
+                &serde_json::Map::new(),
+            )
+        });
+        let second = std::thread::spawn(move || {
+            BillingRepository::new(&second_database_url).settle_ai_operation_once(
+                7_000_000_000_029,
+                None,
+                "synthetic-concurrent-settlement",
+                100,
+                &serde_json::Map::new(),
+            )
+        });
+        let concurrent_settlement_results = [
+            first
+                .join()
+                .map_err(|_| std::io::Error::other("first settlement thread panicked"))??,
+            second
+                .join()
+                .map_err(|_| std::io::Error::other("second settlement thread panicked"))??,
+        ];
+        assert_eq!(
+            concurrent_settlement_results
+                .iter()
+                .filter(|result| result.applied)
+                .count(),
+            1
+        );
+        assert!(
+            concurrent_settlement_results
+                .iter()
+                .all(|result| result.user_balance == 400)
+        );
+
+        client.execute(
+            "INSERT INTO credit_ledger \
+                (event_type, actor_user_id, user_id, chat_id, amount, metadata) VALUES \
+                ('ai_reserve', $1, $1, NULL, -1, $3), \
+                ('ai_reserve', $1, $1, $2, -1, $4)",
+            &[
+                &7_000_000_000_030_i64,
+                &7_000_000_000_031_i64,
+                &json!({"operation_id": "synthetic-mixed-payer", "source": "user"}),
+                &json!({"operation_id": "synthetic-mixed-payer", "source": "chat"}),
+            ],
+        )?;
+        assert!(matches!(
+            repository.settle_ai_operation_once(
+                7_000_000_000_030,
+                Some(7_000_000_000_031),
+                "synthetic-mixed-payer",
+                1,
+                &serde_json::Map::new(),
+            ),
+            Err(BillingError::MultiplePayers)
+        ));
+        client.execute(
+            "INSERT INTO credit_ledger \
+                (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
+             VALUES ('ai_reserve', $1, $1, $2, -1, $3)",
+            &[
+                &7_000_000_000_032_i64,
+                &7_000_000_000_031_i64,
+                &json!({"operation_id": "synthetic-missing-chat", "source": "chat"}),
+            ],
+        )?;
+        assert!(matches!(
+            repository.settle_ai_operation_once(
+                7_000_000_000_032,
+                None,
+                "synthetic-missing-chat",
+                1,
+                &serde_json::Map::new(),
+            ),
+            Err(BillingError::ChatIdRequired)
+        ));
+
         let synthetic_ids = [
             7_000_000_000_001_i64,
             7_000_000_000_002_i64,
@@ -2020,6 +2459,13 @@ mod tests {
             7_000_000_000_023_i64,
             7_000_000_000_024_i64,
             7_000_000_000_025_i64,
+            7_000_000_000_026_i64,
+            7_000_000_000_027_i64,
+            7_000_000_000_028_i64,
+            7_000_000_000_029_i64,
+            7_000_000_000_030_i64,
+            7_000_000_000_031_i64,
+            7_000_000_000_032_i64,
         ];
         client.execute(
             "DELETE FROM star_payments WHERE user_id = ANY($1)",
