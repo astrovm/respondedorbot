@@ -2,18 +2,15 @@
 
 from __future__ import annotations
 
-import importlib
 import logging
-import os
 from decimal import Decimal, InvalidOperation
-from functools import lru_cache
 from typing import Any, Optional, Protocol, cast
+
+from api.core.rust_bridge import load_rust_bridge
 
 CREDIT_SCALE = 100
 LEGACY_CREDIT_SCALE = 10
 _CREDIT_SCALE_DECIMAL = Decimal(CREDIT_SCALE)
-_RUST_ENABLED_VALUES = frozenset({"1", "on", "true", "yes"})
-
 logger = logging.getLogger(__name__)
 
 
@@ -27,24 +24,11 @@ class _RustCreditUnits(Protocol):
     def format_credit_units(self, units: int) -> str: ...
 
 
-@lru_cache(maxsize=1)
-def _import_rust_credit_units() -> Optional[_RustCreditUnits]:
-    try:
-        module = importlib.import_module("respondedorbot_rs")
-    except ImportError as error:
-        logger.warning(
-            "Rust credit-unit bridge unavailable; using Python fallback: error_type=%s",
-            type(error).__name__,
-        )
+def _load_rust_credit_units() -> Optional[_RustCreditUnits]:
+    module = load_rust_bridge("RUST_CREDIT_UNITS_ENABLED")
+    if module is None:
         return None
     return cast(_RustCreditUnits, module)
-
-
-def _load_rust_credit_units() -> Optional[_RustCreditUnits]:
-    enabled = str(os.environ.get("RUST_CREDIT_UNITS_ENABLED") or "").strip().lower()
-    if enabled not in _RUST_ENABLED_VALUES:
-        return None
-    return _import_rust_credit_units()
 
 
 def _log_rust_fallback(operation: str, error: Exception) -> None:

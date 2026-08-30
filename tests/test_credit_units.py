@@ -109,19 +109,3 @@ def test_rust_credit_unit_failure_falls_back_to_python(monkeypatch, caplog):
     assert parse_credit_units("1.55") == 155
     assert format_credit_units(155) == "1.55"
     assert len(caplog.records) == 4
-
-
-def test_missing_enabled_rust_bridge_warns_once_and_falls_back(monkeypatch, caplog):
-    def missing_bridge(_name):
-        raise ImportError("synthetic missing bridge")
-
-    monkeypatch.setenv("RUST_CREDIT_UNITS_ENABLED", "yes")
-    monkeypatch.setattr(credit_units_module.importlib, "import_module", missing_bridge)
-    credit_units_module._import_rust_credit_units.cache_clear()
-    try:
-        assert whole_credits_to_units(3) == 300
-        assert whole_credits_to_units(4) == 400
-    finally:
-        credit_units_module._import_rust_credit_units.cache_clear()
-
-    assert len(caplog.records) == 1

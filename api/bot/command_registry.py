@@ -5,13 +5,28 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 from os import environ
-from typing import Any, Callable, Dict, Mapping, Optional, Tuple
+import logging
+from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Tuple, cast
 
+from api.core.rust_bridge import load_rust_bridge
 from api.i18n import normalize_locale
 from api.i18n.content import command_description
 
 CommandHandler = Callable[..., Any]
 CommandTuple = Tuple[CommandHandler, bool, bool]
+
+logger = logging.getLogger(__name__)
+
+
+class _RustCommandParser(Protocol):
+    def parse_command(self, message_text: str, bot_name: str) -> Tuple[str, str]: ...
+
+
+def _load_rust_command_parser() -> Optional[_RustCommandParser]:
+    module = load_rust_bridge("RUST_COMMAND_PARSING_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustCommandParser, module)
 
 
 @dataclass(frozen=True)
@@ -147,9 +162,7 @@ def build_command_registry(
     return registry
 
 
-def parse_command(message_text: str, bot_name: str) -> Tuple[str, str]:
-    """Parse command and message text from input."""
-
+def _parse_command_python(message_text: str, bot_name: str) -> Tuple[str, str]:
     message_text = message_text.strip()
     if not message_text:
         return "", ""
@@ -168,6 +181,22 @@ def parse_command(message_text: str, bot_name: str) -> Tuple[str, str]:
         message_text = ""
 
     return command, message_text
+
+
+def parse_command(message_text: str, bot_name: str) -> Tuple[str, str]:
+    """Parse command and message text from input."""
+
+    rust = _load_rust_command_parser()
+    if rust is not None:
+        try:
+            command, remaining = rust.parse_command(message_text, bot_name)
+            return str(command), str(remaining)
+        except Exception as error:
+            logger.warning(
+                "Rust command parsing failed; using Python fallback: error_type=%s",
+                type(error).__name__,
+            )
+    return _parse_command_python(message_text, bot_name)
 
 
 def should_gordo_respond(

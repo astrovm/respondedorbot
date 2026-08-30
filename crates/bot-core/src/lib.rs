@@ -1,5 +1,6 @@
 //! Typed domain and application logic for respondedorbot.
 
+pub mod command_parsing;
 pub mod credit_units;
 
 /// Version of the temporary Python/Rust compatibility protocol.

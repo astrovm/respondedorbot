@@ -48,12 +48,23 @@ def verify_credit_units(bridge: ModuleType) -> None:
         assert bridge.whole_credits_to_units(case["credits"]) == case["expected"]
 
 
+def verify_command_parsing(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "command_parsing.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["cases"]:
+        assert bridge.parse_command(case["input"], case["bot_name"]) == (
+            case["command"],
+            case["message_text"],
+        )
+
+
 def main(arguments: list[str]) -> int:
     if len(arguments) != 2:
         raise SystemExit("usage: rust_bridge_contract.py PATH_TO_EXTENSION")
     bridge = _load_bridge(Path(arguments[1]).resolve())
     assert bridge.migration_protocol_version() == 1
     verify_credit_units(bridge)
+    verify_command_parsing(bridge)
     return 0
 
 

@@ -22,6 +22,7 @@ All features currently have status `python`.
 | Component | Status | Rollback control | Shared contract |
 | --- | --- | --- | --- |
 | Credit-unit parsing, scaling, and formatting | `rust-flagged` | `RUST_CREDIT_UNITS_ENABLED=0` or missing bridge | `contracts/credit_units.json` |
+| Command parsing | `rust-flagged` | `RUST_COMMAND_PARSING_ENABLED=0` or missing bridge | `contracts/command_parsing.json` |
 
 ## Commands and user-visible features
 

@@ -3,6 +3,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use bot_core::command_parsing::parse_command as parse_command_core;
 use bot_core::credit_units::{
     CreditUnits, format_credit_units as format_credit_units_core,
     parse_credit_units as parse_credit_units_core,
@@ -44,6 +45,13 @@ fn format_credit_units(units: i64) -> String {
     format_credit_units_core(CreditUnits::new(units))
 }
 
+/// Normalize one Telegram command token and its remaining text.
+#[pyfunction]
+fn parse_command(message_text: &str, bot_name: &str) -> (String, String) {
+    let parsed = parse_command_core(message_text, bot_name);
+    (parsed.command, parsed.message_text)
+}
+
 /// Register the temporary `respondedorbot_rs` Python module.
 #[pymodule]
 fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -52,5 +60,6 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(rescale_credit_units, module)?)?;
     module.add_function(wrap_pyfunction!(parse_credit_units, module)?)?;
     module.add_function(wrap_pyfunction!(format_credit_units, module)?)?;
+    module.add_function(wrap_pyfunction!(parse_command, module)?)?;
     Ok(())
 }
