@@ -42,6 +42,7 @@ use bot_adapters::redis_media_cache::{
 };
 use bot_adapters::redis_message_state::RedisMessageState as RedisMessageStateAdapter;
 use bot_adapters::redis_task_store::RedisTaskStore as RedisTaskStoreAdapter;
+use bot_adapters::task_record::normalize_task_record as normalize_task_record_adapter;
 use bot_adapters::telegram_http::{
     MultipartUpload as TelegramMultipartUpload, TelegramFileOutcome,
     download_file as telegram_download_file_adapter,
@@ -1797,6 +1798,11 @@ fn normalize_compaction_job(payload: &str) -> PyResult<String> {
 }
 
 #[pyfunction]
+fn normalize_task_record(payload: &str) -> PyResult<String> {
+    normalize_task_record_adapter(payload).map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
 fn redis_media_cache_get(
     py: Python<'_>,
     host: &str,
@@ -3515,6 +3521,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(compaction_job_is_due, module)?)?;
     module.add_function(wrap_pyfunction!(compaction_retry_transition, module)?)?;
     module.add_function(wrap_pyfunction!(normalize_compaction_job, module)?)?;
+    module.add_function(wrap_pyfunction!(normalize_task_record, module)?)?;
     module.add_function(wrap_pyfunction!(redis_media_cache_get, module)?)?;
     module.add_function(wrap_pyfunction!(redis_media_cache_key, module)?)?;
     module.add_function(wrap_pyfunction!(redis_media_cache_set, module)?)?;

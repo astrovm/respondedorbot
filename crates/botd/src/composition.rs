@@ -43,6 +43,7 @@ use bot_adapters::redis_chat_admin::{cache_chat_admin, get_cached_chat_admin};
 use bot_adapters::redis_connection::RedisEndpoint;
 use bot_adapters::redis_json_cache::{RedisJsonCache, RedisJsonCacheError};
 use bot_adapters::redis_message_state::{RedisMessageState, RedisMessageStateError};
+use bot_adapters::redis_task_store::{RedisTaskStore, RedisTaskStoreError};
 use bot_adapters::request_cache::RequestCache;
 use bot_adapters::stock_pool::{StockPoolCache, load_stock_pool};
 use bot_adapters::telegram_actions::{ActionError, ActionOutcome, execute_with};
@@ -84,8 +85,9 @@ use crate::dispatcher::{
     DollarQuotesSource, ElectionLoad, ElectionSource, GreetingPoolLoad, GreetingPoolSource,
     GroupAuthorizationDecision, GroupAuthorizer, LinkReplacementLoad, LinkReplacementSource,
     MarketPriceLoad, MarketPriceSource, MessageStateSink, NativeDispatcher, OilPriceSource,
-    OilQuoteLoad, RandomSource, RuloInputLoad, RuloSource, RuntimeValues, StarPaymentReceipt,
-    StarPaymentSink, StockPriceSource, StockQuotesLoad, WeatherObservationLoad, WeatherSource,
+    OilQuoteLoad, RandomSource, RuloInputLoad, RuloSource, RuntimeValues, ScheduledTaskSource,
+    StarPaymentReceipt, StarPaymentSink, StockPriceSource, StockQuotesLoad, WeatherObservationLoad,
+    WeatherSource,
 };
 use crate::runtime::{PollingRuntime, UpdateSource};
 
@@ -908,6 +910,37 @@ pub struct RedisCommandState {
     state: RedisMessageState,
 }
 
+struct RedisScheduledTaskSource {
+    store: RedisTaskStore,
+}
+
+impl ScheduledTaskSource for RedisScheduledTaskSource {
+    fn list(
+        &mut self,
+        chat_id: &str,
+    ) -> Result<Vec<bot_core::scheduled_tasks::ScheduledTask>, String> {
+        self.store
+            .list_chat_tasks(chat_id)
+            .map(|documents| {
+                documents
+                    .into_iter()
+                    .map(|document| document.task)
+                    .collect()
+            })
+            .map_err(|error| error.to_string())
+    }
+
+    fn cancel(
+        &mut self,
+        task_id: &bot_core::scheduled_tasks::TaskId,
+        chat_id: &str,
+    ) -> Result<bool, String> {
+        self.store
+            .cancel_task(task_id.as_str(), chat_id)
+            .map_err(|error| error.to_string())
+    }
+}
+
 pub struct TelegramGroupAuthorizer<Transport> {
     transport: Transport,
     token: String,
@@ -1143,6 +1176,8 @@ pub enum CompositionError {
     PolymarketCache(RedisJsonCacheError),
     #[error("could not construct Redis command state: {0}")]
     RedisState(#[from] RedisMessageStateError),
+    #[error("could not construct Redis scheduled-task state: {0}")]
+    RedisTasks(#[from] RedisTaskStoreError),
 }
 
 pub struct NativeRuntimeOptions<'a> {
@@ -1205,6 +1240,9 @@ pub fn build_native_runtime(
     let config = ChatConfigRepository::new(options.database_url);
     let actions = TelegramActionSink::new(action_transport, options.token);
     let state = RedisCommandState::new(options.redis_endpoint)?;
+    let task_source = RedisScheduledTaskSource {
+        store: RedisTaskStore::new(options.redis_endpoint)?,
+    };
     let authorization =
         TelegramGroupAuthorizer::new(admin_transport, options.token, options.redis_endpoint);
     let dispatcher = NativeDispatcher::new(
@@ -1261,7 +1299,8 @@ pub fn build_native_runtime(
     }))
     .with_link_replacement_source(Box::new(NativeLinkReplacementSource {
         transport: link_preview_transport,
-    }));
+    }))
+    .with_scheduled_task_source(Box::new(task_source));
     let dispatcher = if let Some(api_key) = options.coinmarketcap_key.filter(|key| !key.is_empty())
     {
         let transport = ReqwestCoinMarketCapTransport::new()

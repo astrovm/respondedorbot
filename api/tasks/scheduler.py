@@ -43,6 +43,7 @@ _task_executor: Optional[Any] = None
 TASK_REDIS_PREFIX = "task:data:"
 TASK_CHAT_INDEX_PREFIX = "task:chat:"
 TASK_INDEX_TTL = 86400 * 3650
+TASK_SCHEMA_VERSION = 1
 
 _MINUTE = 60
 _HOUR = 3600
@@ -419,7 +420,7 @@ def _task_index_marker_key(chat_id: str) -> str:
 
 
 def _task_score(data: Mapping[str, Any]) -> float:
-    raw_run_date = data.get("run_date")
+    raw_run_date = data.get("next_run_at") or data.get("run_date")
     if raw_run_date:
         try:
             return datetime.fromisoformat(str(raw_run_date).replace("Z", "+00:00")).timestamp()
@@ -447,6 +448,118 @@ def _decode_task(raw: Any) -> Optional[Dict[str, Any]]:
     except json.JSONDecodeError, TypeError:
         return None
     return loaded if isinstance(loaded, dict) else None
+
+
+def _iso_utc(value: Any) -> str | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC).isoformat()
+
+
+def _job_next_run(scheduler: Any, task_id: str) -> str | None:
+    if scheduler is None:
+        return None
+    try:
+        job = scheduler.get_job(f"task_{task_id}")
+        return _iso_utc(job.next_run_time) if job is not None else None
+    except Exception:
+        return None
+
+
+def _canonical_task_data(
+    data: Mapping[str, Any],
+    *,
+    next_run_at: str | None = None,
+    schedule_anchor_at: str | None = None,
+) -> Dict[str, Any]:
+    canonical = dict(data)
+    canonical["schema_version"] = TASK_SCHEMA_VERSION
+    canonical["schedule_anchor_at"] = (
+        _iso_utc(schedule_anchor_at)
+        or _iso_utc(canonical.get("schedule_anchor_at"))
+        or _iso_utc(canonical.get("run_date"))
+    )
+    canonical["next_run_at"] = (
+        _iso_utc(next_run_at)
+        or _iso_utc(canonical.get("next_run_at"))
+        or _iso_utc(canonical.get("run_date"))
+    )
+    canonical.setdefault("last_execution_id", None)
+    return canonical
+
+
+def _is_recurring(data: Mapping[str, Any]) -> bool:
+    return bool(data.get("interval_seconds") or data.get("trigger_config"))
+
+
+def backfill_canonical_task_records() -> Dict[str, int]:
+    """Copy APScheduler next-run state into every readable task record.
+
+    This is safe while Python remains the sole scheduler owner. Missing
+    recurring jobs are reported instead of receiving an invented schedule.
+    """
+
+    redis_client = _get_redis()
+    scheduler = get_scheduler()
+    status = {"scanned": 0, "updated": 0, "unmatched": 0, "invalid": 0}
+    if redis_client is None or scheduler is None:
+        return status
+
+    try:
+        keys = list(redis_client.scan_iter(f"{TASK_REDIS_PREFIX}*"))
+    except Exception as error:
+        logger.error("failed to scan task records for canonical backfill: %s", error)
+        return status
+
+    for raw_key in keys:
+        key = raw_key if isinstance(raw_key, str) else raw_key.decode("utf-8")
+        status["scanned"] += 1
+        try:
+            data = _decode_task(redis_client.get(key))
+            if data is None:
+                status["invalid"] += 1
+                continue
+            task_id = str(data.get("id") or "")
+            if not task_id:
+                status["invalid"] += 1
+                continue
+            next_run_at = _job_next_run(scheduler, task_id)
+            if next_run_at is None and _is_recurring(data):
+                status["unmatched"] += 1
+                continue
+            canonical = _canonical_task_data(data, next_run_at=next_run_at)
+            if canonical != data:
+                redis_client.setex(key, TASK_INDEX_TTL, json.dumps(canonical))
+                _index_task(redis_client, canonical)
+                status["updated"] += 1
+        except Exception as error:
+            status["invalid"] += 1
+            logger.warning("failed to canonicalize task record %s: %s", key, error)
+
+    if status["unmatched"] or status["invalid"]:
+        logger.warning(
+            "task canonical backfill incomplete: scanned=%d updated=%d unmatched=%d invalid=%d",
+            status["scanned"],
+            status["updated"],
+            status["unmatched"],
+            status["invalid"],
+        )
+    else:
+        logger.info(
+            "task canonical backfill complete: scanned=%d updated=%d",
+            status["scanned"],
+            status["updated"],
+        )
+    return status
 
 
 def _delete_task(
@@ -512,24 +625,67 @@ def _execute_and_cleanup(
             )
 
 
-def _run_date(trigger: TaskTrigger) -> datetime | None:
+def _run_date(trigger: TaskTrigger, created_at: datetime | None = None) -> datetime | None:
     if not isinstance(trigger, DelayTrigger):
         return None
-    return datetime.fromtimestamp(
-        datetime.now(UTC).timestamp() + trigger.seconds,
-        tz=UTC,
-    )
+    created_at = created_at or datetime.now(UTC)
+    return created_at + timedelta(seconds=trigger.seconds)
+
+
+def _apscheduler_trigger(
+    trigger: TaskTrigger,
+    timezone_offset: int,
+    run_date: datetime | None,
+    created_at: datetime,
+) -> Any:
+    if isinstance(trigger, CronTrigger):
+        from apscheduler.triggers.cron import (  # type: ignore[import-untyped]
+            CronTrigger as APSCronTrigger,
+        )
+
+        kwargs: Dict[str, Any] = {
+            "timezone": timezone(timedelta(hours=timezone_offset)),
+            "hour": trigger.hour,
+            "minute": trigger.minute,
+        }
+        if trigger.weekdays:
+            kwargs["day_of_week"] = ",".join(trigger.weekdays)
+        if trigger.day is not None:
+            kwargs["day"] = trigger.day
+        return APSCronTrigger(**kwargs)
+    if isinstance(trigger, (DayIntervalTrigger, IntervalTrigger)):
+        from apscheduler.triggers.interval import (  # type: ignore[import-untyped]
+            IntervalTrigger as APSIntervalTrigger,
+        )
+
+        if isinstance(trigger, DayIntervalTrigger):
+            return APSIntervalTrigger(
+                days=trigger.days,
+                start_date=created_at + timedelta(days=trigger.days),
+            )
+        if isinstance(trigger, IntervalTrigger):
+            return APSIntervalTrigger(
+                seconds=trigger.seconds,
+                start_date=created_at + timedelta(seconds=trigger.seconds),
+            )
+    if run_date is not None:
+        from apscheduler.triggers.date import DateTrigger  # type: ignore[import-untyped]
+
+        return DateTrigger(run_date=run_date)
+    raise ValueError("task trigger has no schedulable occurrence")
 
 
 def _task_payload(
     task_id: str,
     request: ScheduledTaskRequest,
     run_date: datetime | None,
+    created_at: datetime,
+    next_run_at: datetime,
 ) -> Dict[str, Any]:
     interval_seconds = (
         request.trigger.seconds if isinstance(request.trigger, IntervalTrigger) else None
     )
-    return {
+    return _canonical_task_data({
         "id": task_id,
         "chat_id": request.chat_id,
         "text": request.text,
@@ -540,59 +696,48 @@ def _task_payload(
         "trigger_config": trigger_config(request.trigger),
         "timezone_offset": _coerce_timezone_offset(request.timezone_offset),
         "locale": request.locale,
-    }
+    }, schedule_anchor_at=created_at.isoformat(), next_run_at=next_run_at.isoformat())
 
 
 def _add_scheduled_job(
     scheduler: Any,
     task_id: str,
-    trigger: TaskTrigger,
-    timezone_offset: int,
-    run_date: datetime | None,
+    scheduler_trigger: Any,
 ) -> None:
     common = {
         "id": f"task_{task_id}",
         "args": [task_id],
         "replace_existing": True,
     }
-    if isinstance(trigger, CronTrigger):
-        kwargs: Dict[str, Any] = {
-            "timezone": timezone(timedelta(hours=timezone_offset)),
-            "hour": trigger.hour,
-            "minute": trigger.minute,
-        }
-        if trigger.weekdays:
-            kwargs["day_of_week"] = ",".join(trigger.weekdays)
-        if trigger.day is not None:
-            kwargs["day"] = trigger.day
-        scheduler.add_job(_fire_task, "cron", **common, **kwargs)
-    elif isinstance(trigger, DayIntervalTrigger):
-        scheduler.add_job(_fire_task, "interval", days=trigger.days, **common)
-    elif isinstance(trigger, IntervalTrigger):
-        scheduler.add_job(
-            _fire_task,
-            "interval",
-            seconds=trigger.seconds,
-            **common,
-        )
-    elif run_date is not None:
-        scheduler.add_job(_fire_task, "date", run_date=run_date, **common)
+    scheduler.add_job(_fire_task, scheduler_trigger, **common)
 
 
 def schedule_task(request: ScheduledTaskRequest) -> Optional[str]:
     scheduler = get_scheduler()
-    if scheduler is None:
-        return None
-
     redis_client = _get_redis()
-    if redis_client is None:
-        logger.warning("no redis, cannot schedule task")
+    if scheduler is None or redis_client is None:
+        if redis_client is None:
+            logger.warning("no redis, cannot schedule task")
         return None
 
     task_id = str(uuid.uuid4())[:8]
-    run_date = _run_date(request.trigger)
+    created_at = datetime.now(UTC)
+    run_date = _run_date(request.trigger, created_at)
+    try:
+        scheduler_trigger = _apscheduler_trigger(
+            request.trigger,
+            request.timezone_offset,
+            run_date,
+            created_at,
+        )
+        next_run_at = scheduler_trigger.get_next_fire_time(None, created_at)
+        if next_run_at is None:
+            return None
+    except Exception as e:
+        logger.error("failed to construct task trigger: %s", e)
+        return None
     redis_key = f"{TASK_REDIS_PREFIX}{task_id}"
-    data = _task_payload(task_id, request, run_date)
+    data = _task_payload(task_id, request, run_date, created_at, next_run_at)
     try:
         redis_client.setex(redis_key, TASK_INDEX_TTL, json.dumps(data))
         _index_task(redis_client, data)
@@ -609,9 +754,7 @@ def schedule_task(request: ScheduledTaskRequest) -> Optional[str]:
         _add_scheduled_job(
             scheduler,
             task_id,
-            request.trigger,
-            request.timezone_offset,
-            run_date,
+            scheduler_trigger,
         )
     except Exception as e:
         logger.error("add_job failed for %s: %s", task_id, e)
@@ -675,21 +818,18 @@ def list_tasks(chat_id: str) -> List[Dict[str, Any]]:
             interval = data.get("interval_seconds")
             timezone_offset = _coerce_timezone_offset(data.get("timezone_offset"), -3)
 
-            next_run = data.get("run_date") or "unknown"
+            next_run = data.get("next_run_at") or data.get("run_date") or "unknown"
             if scheduler is not None:
-                job_id = f"task_{task_id}"
-                try:
-                    job = scheduler.get_job(job_id)
-                    if job and job.next_run_time:
-                        next_run = str(job.next_run_time)
-                except Exception:
-                    pass
+                scheduler_next_run = _job_next_run(scheduler, str(task_id))
+                if scheduler_next_run:
+                    next_run = scheduler_next_run
 
             results.append(
                 {
                     "id": task_id,
                     "text": data.get("text", ""),
                     "user_name": data.get("user_name", ""),
+                    "user_id": data.get("user_id"),
                     "interval_seconds": interval,
                     "trigger_config": data.get("trigger_config"),
                     "next_run": _format_run_time(next_run, timezone_offset),

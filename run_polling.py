@@ -71,7 +71,11 @@ def main() -> int:
     from api import index
     from api.bot.general_commands import gen_random
     from api.bot.ptb import run_polling
-    from api.tasks.scheduler import get_scheduler, init_scheduler
+    from api.tasks.scheduler import (
+        backfill_canonical_task_records,
+        get_scheduler,
+        init_scheduler,
+    )
 
     runtime = index.app_runtime
     threading.Thread(target=_price_refresh_loop, daemon=True).start()
@@ -94,6 +98,13 @@ def main() -> int:
             },
         )
         get_scheduler()
+        task_backfill = backfill_canonical_task_records()
+        if task_backfill["unmatched"] or task_backfill["invalid"]:
+            print(
+                "Warning: scheduled-task canonical backfill is incomplete: "
+                f"{task_backfill}",
+                file=sys.stderr,
+            )
     except Exception as error:
         print(f"Warning: failed to initialize task scheduler: {error}", file=sys.stderr)
 

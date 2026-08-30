@@ -300,6 +300,10 @@ class PollingEntrypointTests(unittest.TestCase):
             patch("api.bot.ptb.run_polling") as mock_run_polling,
             patch("api.tasks.scheduler.init_scheduler") as mock_init_scheduler,
             patch("api.tasks.scheduler.get_scheduler") as mock_get_scheduler,
+            patch(
+                "api.tasks.scheduler.backfill_canonical_task_records",
+                return_value={"updated": 0, "unmatched": 0, "invalid": 0},
+            ) as mock_backfill_canonical_task_records,
         ):
             import importlib
             import run_polling
@@ -313,6 +317,7 @@ class PollingEntrypointTests(unittest.TestCase):
             allowed_updates=["message", "callback_query", "pre_checkout_query"],
         )
         mock_get_scheduler.assert_called_once_with()
+        mock_backfill_canonical_task_records.assert_called_once_with()
 
         from api import index
 

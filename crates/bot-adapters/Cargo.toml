@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 bot-core.workspace = true
 calamine.workspace = true
+chrono.workspace = true
 native-tls.workspace = true
 postgres.workspace = true
 postgres-native-tls.workspace = true

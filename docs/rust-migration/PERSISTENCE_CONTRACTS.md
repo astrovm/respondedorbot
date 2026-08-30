@@ -169,6 +169,10 @@ Before the Rust scheduler becomes authoritative, this record needs an explicit
 schema version, next-run state for every trigger, claim/lease fields or a separate
 claim key, and an execution idempotency identifier.
 
+The accepted version 1 schema and claim protocol are defined in
+[ADR 0003](decisions/0003-canonical-scheduled-tasks.md). Its new fields are
+additive; legacy trigger fields remain required during rollback compatibility.
+
 ### Caches and callback state
 
 Known compatibility key families include:

@@ -1,0 +1,94 @@
+# ADR 0003: Canonical Scheduled Tasks and Single-Owner Claims
+
+## Status
+
+Accepted for the compatibility migration.
+
+## Context
+
+APScheduler stores executable Python objects in Redis database 1. Rust cannot
+safely decode that state. The existing `task:data:*` JSON record is readable by
+both runtimes, but recurring records do not contain their next run. Reading the
+APScheduler job store is therefore still required to list or reconstruct them.
+
+The migration must preserve existing jobs, coalescing, the five-minute misfire
+grace period, cancellation, AI billing, and the invariant that only one
+scheduler executes tasks.
+
+## Decision
+
+`task:data:{task_id}` becomes the canonical, language-neutral record. Version 1
+is additive and keeps every legacy field so the current Python image can read a
+Rust-compatible record:
+
+```json
+{
+  "schema_version": 1,
+  "id": "abc12345",
+  "chat_id": "-100123",
+  "text": "synthetic task",
+  "user_name": "synthetic-user",
+  "user_id": 42,
+  "interval_seconds": 3600,
+  "run_date": null,
+  "trigger_config": null,
+  "timezone_offset": -3,
+  "locale": "es",
+  "schedule_anchor_at": "2026-08-30T12:00:00+00:00",
+  "next_run_at": "2026-08-30T13:00:00+00:00",
+  "last_execution_id": null
+}
+```
+
+`run_date`, `interval_seconds`, and `trigger_config` remain the rollback trigger
+representation. `next_run_at` is authoritative for all trigger kinds.
+`schedule_anchor_at` preserves interval alignment across restarts.
+`last_execution_id` records the most recently completed occurrence. Unknown
+fields remain permitted during the compatibility period.
+
+Python dual-writes version 1 while it owns APScheduler. It backfills
+`next_run_at` from `job.next_run_time` for every active legacy record. Startup
+must report records that cannot be matched to a valid job; it must not silently
+invent a recurring schedule. Python is then changed to reconstruct APScheduler
+only from canonical records before Rust can become the owner.
+
+Rust uses these additional Redis keys:
+
+| Key | Purpose |
+| --- | --- |
+| `task:due` | Global sorted set of task IDs scored by `next_run_at` |
+| `task:claim:{task_id}:{execution_id}` | Bounded lease acquired with `SET NX` |
+| `task:scheduler:owner` | Renewable unique-token lease for the active owner |
+
+An execution ID is deterministically derived from the task ID and scheduled UTC
+instant. Claim completion is a Lua compare-and-update operation: it validates
+the lease token and expected execution ID, records completion, advances or
+deletes the canonical record, updates indexes, and releases the claim. A stale
+worker cannot advance a newer occurrence.
+
+The Rust scheduler preserves APScheduler policy:
+
+- coalesce multiple due occurrences into one execution;
+- allow an occurrence up to 300 seconds late;
+- skip occurrences beyond that grace period and advance to the first future
+  occurrence;
+- allow at most one in-flight execution per task;
+- keep recurring tasks after AI or credit failures, matching the current task
+  executor;
+- remove successful one-shot tasks.
+
+The ownership switch is atomic at deployment level: stop the Python scheduler,
+validate its final canonical-state sync, then start the Rust scheduler. Shadow
+mode computes decisions but never acquires claims or executes tasks.
+
+## Consequences
+
+Task listing no longer depends on Python pickles. Rust can reconstruct jobs from
+Redis database 0, and rollback remains possible while legacy fields are kept.
+The claim protocol prevents concurrent workers from executing the same live
+occurrence. As with the existing implementation, a process crash after an
+external Telegram send but before durable completion cannot provide strict
+exactly-once delivery; stable execution and billing identifiers make retries
+detectable and financial mutations idempotent.
+
+Redis database 1 is retained until the Rust-only observation period ends.

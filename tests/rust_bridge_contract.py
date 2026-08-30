@@ -358,6 +358,27 @@ def verify_compaction_jobs(bridge: ModuleType) -> None:
         raise AssertionError("future compaction-job version must be rejected")
 
 
+def verify_task_records(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "task_records.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["cases"]:
+        normalized = json.loads(
+            bridge.normalize_task_record(
+                json.dumps(case["input"], separators=(",", ":"))
+            )
+        )
+        for key, value in case["expected"].items():
+            assert normalized[key] == value, case["name"]
+
+    future = {**contract["cases"][0]["input"], "schema_version": 2}
+    try:
+        bridge.normalize_task_record(json.dumps(future, separators=(",", ":")))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("future task-record version must be rejected")
+
+
 def verify_compaction_queue(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "compaction_queue.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -1370,6 +1391,7 @@ def main(arguments: list[str]) -> int:
     verify_command_parsing(bridge)
     verify_command_normalization(bridge)
     verify_task_triggers(bridge)
+    verify_task_records(bridge)
     verify_price_queries(bridge)
     verify_market_context(bridge)
     verify_market_models(bridge)

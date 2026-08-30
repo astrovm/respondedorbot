@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+chrono.workspace = true
 num-bigint.workspace = true
 regex.workspace = true
 serde.workspace = true

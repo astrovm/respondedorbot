@@ -210,3 +210,7 @@ be recorded before implementation. At minimum, later work must record:
 5. Billing repository transaction and idempotency mapping.
 6. AI streaming event model.
 7. Final container base and system dependency strategy.
+
+Recorded decisions:
+
+- [ADR 0003: Canonical Scheduled Tasks and Single-Owner Claims](decisions/0003-canonical-scheduled-tasks.md)

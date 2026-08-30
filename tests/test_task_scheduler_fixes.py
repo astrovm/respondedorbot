@@ -11,6 +11,8 @@ import pytest
 from api.tasks.scheduler import (
     TASK_CHAT_INDEX_PREFIX,
     TASK_REDIS_PREFIX,
+    TASK_SCHEMA_VERSION,
+    backfill_canonical_task_records,
     get_scheduler_runtime_status,
     get_scheduler,
     list_tasks,
@@ -687,6 +689,7 @@ class TestListTasksResilience:
             "chat_id": "123",
             "text": "recordame algo",
             "user_name": "astro",
+            "user_id": 42,
             "interval_seconds": None,
             "run_date": "2026-04-15T04:22:00+00:00",
         }
@@ -697,6 +700,7 @@ class TestListTasksResilience:
         assert len(tasks) == 1
         assert tasks[0]["id"] == "abc1"
         assert tasks[0]["text"] == "recordame algo"
+        assert tasks[0]["user_id"] == 42
         assert tasks[0]["next_run"] == "15/04 01:22"
 
     @patch("api.tasks.scheduler._get_redis")
@@ -943,6 +947,10 @@ class TestScheduleTaskStoresRunDate:
         stored_data = _stored_task_payload(redis_client)
         assert stored_data["run_date"] is not None
         assert "T" in stored_data["run_date"]
+        assert stored_data["schema_version"] == TASK_SCHEMA_VERSION
+        assert stored_data["next_run_at"] == stored_data["run_date"]
+        assert stored_data["schedule_anchor_at"] is not None
+        assert stored_data["last_execution_id"] is None
         redis_client.zadd.assert_called_once()
         assert redis_client.zadd.call_args.args[0] == f"{TASK_CHAT_INDEX_PREFIX}123"
 
@@ -969,6 +977,9 @@ class TestScheduleTaskStoresRunDate:
         assert task_id is not None
         stored_data = _stored_task_payload(redis_client)
         assert stored_data["run_date"] is None
+        assert stored_data["schema_version"] == TASK_SCHEMA_VERSION
+        assert stored_data["next_run_at"] is not None
+        assert stored_data["schedule_anchor_at"] is not None
 
     @patch("api.tasks.scheduler._get_redis")
     @patch("api.tasks.scheduler.get_scheduler")
@@ -1009,6 +1020,65 @@ class TestScheduleTaskStoresRunDate:
 
         assert task_id is None
         scheduler.add_job.assert_not_called()
+
+
+class TestCanonicalTaskBackfill:
+    @patch("api.tasks.scheduler._get_redis")
+    @patch("api.tasks.scheduler.get_scheduler")
+    def test_backfills_legacy_recurring_next_run(self, mock_sched, mock_redis):
+        scheduler = MagicMock()
+        job = MagicMock()
+        job.next_run_time = "2026-08-30T13:00:00+00:00"
+        scheduler.get_job.return_value = job
+        mock_sched.return_value = scheduler
+
+        redis_client = MagicMock()
+        redis_client.scan_iter.return_value = [f"{TASK_REDIS_PREFIX}repeat01"]
+        redis_client.get.return_value = json.dumps(
+            {
+                "id": "repeat01",
+                "chat_id": "123",
+                "text": "synthetic interval",
+                "user_name": "synthetic-user",
+                "interval_seconds": 3600,
+                "run_date": None,
+                "trigger_config": None,
+            }
+        )
+        mock_redis.return_value = redis_client
+
+        status = backfill_canonical_task_records()
+
+        assert status == {"scanned": 1, "updated": 1, "unmatched": 0, "invalid": 0}
+        stored = _stored_task_payload(redis_client)
+        assert stored["schema_version"] == TASK_SCHEMA_VERSION
+        assert stored["next_run_at"] == "2026-08-30T13:00:00+00:00"
+        assert stored["last_execution_id"] is None
+
+    @patch("api.tasks.scheduler._get_redis")
+    @patch("api.tasks.scheduler.get_scheduler")
+    def test_reports_recurring_record_without_scheduler_job(self, mock_sched, mock_redis):
+        scheduler = MagicMock()
+        scheduler.get_job.return_value = None
+        mock_sched.return_value = scheduler
+
+        redis_client = MagicMock()
+        redis_client.scan_iter.return_value = [f"{TASK_REDIS_PREFIX}repeat01"]
+        redis_client.get.return_value = json.dumps(
+            {
+                "id": "repeat01",
+                "chat_id": "123",
+                "text": "synthetic interval",
+                "interval_seconds": 3600,
+                "run_date": None,
+            }
+        )
+        mock_redis.return_value = redis_client
+
+        status = backfill_canonical_task_records()
+
+        assert status == {"scanned": 1, "updated": 0, "unmatched": 1, "invalid": 0}
+        redis_client.setex.assert_not_called()
 
 
 class TestSchedulerRuntimeStatus:

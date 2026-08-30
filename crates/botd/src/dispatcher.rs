@@ -46,6 +46,7 @@ use bot_core::market_prices::{MarketPriceCommand, classify_market_price_command}
 use bot_core::polymarket::{ElectionEvent, classify_election_command, render_elections};
 use bot_core::random_selection::{RandomSelection, parse_random_selection};
 use bot_core::rulo::{RuloInput, evaluate_rulo, render_rulo};
+use bot_core::scheduled_tasks::{ScheduledTask, TaskId};
 use bot_core::stateless_commands::{
     StatelessCommandPlan, StatelessRuntimeContext, plan_runtime_stateless_command,
     plan_stateless_command,
@@ -54,8 +55,14 @@ use bot_core::stocks::{
     StockQuote, classify_oil_command, classify_stock_command, render_oil_quotes,
     render_stock_quotes,
 };
+use bot_core::task_commands::{
+    TaskCallbackParse, can_delete_task, parse_task_callback, render_task_list,
+    task_delete_forbidden, task_deleted, task_not_found,
+};
 use bot_core::telegram_actions::{ParseMode, SendMessage, TelegramAction};
-use bot_core::telegram_callbacks::{CallbackContextOutcome, CallbackRoute, parse_callback_context};
+use bot_core::telegram_callbacks::{
+    CallbackContext, CallbackContextOutcome, CallbackRoute, parse_callback_context,
+};
 use bot_core::telegram_input::{ChatId, MessageId, is_group_chat_type};
 use bot_core::telegram_payments::{
     BalanceCommandContext, BalanceCommandPlan, StarPaymentRecord, SuccessfulPaymentDecision,
@@ -300,6 +307,12 @@ pub trait LinkReplacementSource {
     fn load(&mut self, text: &str, now_unix: i64) -> LinkReplacementLoad;
 }
 
+pub trait ScheduledTaskSource {
+    fn list(&mut self, chat_id: &str) -> Result<Vec<ScheduledTask>, String>;
+
+    fn cancel(&mut self, task_id: &TaskId, chat_id: &str) -> Result<bool, String>;
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ElectionLoad {
     pub events: Vec<ElectionEvent>,
@@ -365,6 +378,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     market_price_source: Option<Box<dyn MarketPriceSource>>,
     election_source: Option<Box<dyn ElectionSource>>,
     link_replacement_source: Option<Box<dyn LinkReplacementSource>>,
+    scheduled_task_source: Option<Box<dyn ScheduledTaskSource>>,
     last_outcome: Option<DispatchOutcome>,
     state_diagnostics: Vec<String>,
 }
@@ -417,6 +431,7 @@ where
             market_price_source: None,
             election_source: None,
             link_replacement_source: None,
+            scheduled_task_source: None,
             last_outcome: None,
             state_diagnostics: Vec::new(),
         }
@@ -541,6 +556,12 @@ where
     #[must_use]
     pub fn with_link_replacement_source(mut self, source: Box<dyn LinkReplacementSource>) -> Self {
         self.link_replacement_source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub fn with_scheduled_task_source(mut self, source: Box<dyn ScheduledTaskSource>) -> Self {
+        self.scheduled_task_source = Some(source);
         self
     }
 
@@ -804,6 +825,135 @@ where
         }
     }
 
+    fn dispatch_task_callback(
+        &mut self,
+        context: &CallbackContext,
+    ) -> NativeDispatchResult<Config, Actions, Random> {
+        if self.scheduled_task_source.is_none() {
+            return Ok(DispatchOutcome::LegacyRequired);
+        }
+        let config = self
+            .config
+            .get(&context.chat_id)
+            .map_err(DispatchError::Config)?;
+        let locale = resolve_locale(
+            Some(&config.language),
+            context.user_language_code.as_deref(),
+            &context.chat_type,
+        );
+        let TaskCallbackParse::Delete(task_id) = parse_task_callback(&context.data) else {
+            self.answer_callback_best_effort(context.callback_id.as_deref());
+            return Ok(DispatchOutcome::Handled);
+        };
+        let Some(source) = self.scheduled_task_source.as_mut() else {
+            return Ok(DispatchOutcome::LegacyRequired);
+        };
+        let tasks = match source.list(&context.chat_id) {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                self.state_diagnostics.push(format!(
+                    "scheduled task list callback chat_id={}: {error}",
+                    context.chat_id
+                ));
+                Vec::new()
+            }
+        };
+        let Some(target) = tasks.iter().find(|task| task.id == task_id).cloned() else {
+            if let Some(callback_id) = context.callback_id.as_deref() {
+                let _receipt = self
+                    .actions
+                    .execute(TelegramAction::AnswerCallback {
+                        callback_id: callback_id.to_owned(),
+                        text: Some(task_not_found(locale).to_owned()),
+                        show_alert: true,
+                    })
+                    .map_err(DispatchError::Action)?;
+            }
+            return Ok(DispatchOutcome::Handled);
+        };
+        let is_group = is_group_chat_type(Some(&context.chat_type));
+        let authorization = if is_group {
+            context.user_id.map_or(
+                GroupAuthorizationDecision {
+                    is_admin: false,
+                    diagnostics: Vec::new(),
+                },
+                |user_id| {
+                    self.authorization
+                        .authorize(&context.chat_id, &user_id.to_string())
+                },
+            )
+        } else {
+            GroupAuthorizationDecision {
+                is_admin: true,
+                diagnostics: Vec::new(),
+            }
+        };
+        self.state_diagnostics.extend(authorization.diagnostics);
+        if !can_delete_task(
+            is_group,
+            context.user_id,
+            target.user_id,
+            authorization.is_admin,
+        ) {
+            if let Some(callback_id) = context.callback_id.as_deref() {
+                let _receipt = self
+                    .actions
+                    .execute(TelegramAction::AnswerCallback {
+                        callback_id: callback_id.to_owned(),
+                        text: Some(task_delete_forbidden(locale).to_owned()),
+                        show_alert: true,
+                    })
+                    .map_err(DispatchError::Action)?;
+            }
+            return Ok(DispatchOutcome::Handled);
+        }
+        if let Err(error) = source.cancel(&task_id, &context.chat_id) {
+            self.state_diagnostics.push(format!(
+                "scheduled task cancellation chat_id={} task_id={}: {error}",
+                context.chat_id,
+                task_id.as_str()
+            ));
+        }
+        if let Some(callback_id) = context.callback_id.as_deref() {
+            let _receipt = self
+                .actions
+                .execute(TelegramAction::AnswerCallback {
+                    callback_id: callback_id.to_owned(),
+                    text: Some(task_deleted(&task_id, locale)),
+                    show_alert: false,
+                })
+                .map_err(DispatchError::Action)?;
+        }
+        let tasks = source.list(&context.chat_id).unwrap_or_else(|error| {
+            self.state_diagnostics.push(format!(
+                "scheduled task list after cancellation chat_id={}: {error}",
+                context.chat_id
+            ));
+            Vec::new()
+        });
+        let view = render_task_list(&tasks, locale);
+        let Ok(chat_id) = context.chat_id.parse::<i64>() else {
+            return Ok(DispatchOutcome::Handled);
+        };
+        if self
+            .actions
+            .try_edit(TelegramAction::EditMessage {
+                chat_id: ChatId(chat_id),
+                message_id: MessageId(context.message_id),
+                text: view.text,
+                reply_markup: view.keyboard,
+            })
+            .is_err()
+        {
+            self.state_diagnostics.push(format!(
+                "scheduled task edit failed chat_id={} message_id={}",
+                context.chat_id, context.message_id
+            ));
+        }
+        Ok(DispatchOutcome::Handled)
+    }
+
     fn dispatch_callback(
         &mut self,
         callback: &Map<String, Value>,
@@ -818,6 +968,9 @@ where
         let Ok(CallbackContextOutcome::Context { context }) = parsed else {
             return Ok(DispatchOutcome::LegacyRequired);
         };
+        if context.route == CallbackRoute::Task {
+            return self.dispatch_task_callback(&context);
+        }
         if context.route == CallbackRoute::Topup {
             let Ok(chat_id) = context.chat_id.parse::<i64>() else {
                 return Ok(DispatchOutcome::LegacyRequired);
@@ -1225,6 +1378,31 @@ where
             self.billing_available,
         ) {
             StatelessCommandPlan::Action(action)
+        } else if matches!(
+            parsed.command.as_str(),
+            "/tarea" | "/tareas" | "/task" | "/tasks"
+        ) {
+            if !parsed.message_text.is_empty() {
+                return Ok(DispatchOutcome::LegacyRequired);
+            }
+            let Some(source) = self.scheduled_task_source.as_mut() else {
+                return Ok(DispatchOutcome::LegacyRequired);
+            };
+            let tasks = match source.list(&chat_id.0.to_string()) {
+                Ok(tasks) => tasks,
+                Err(error) => {
+                    self.state_diagnostics.push(format!(
+                        "scheduled task list command chat_id={}: {error}",
+                        chat_id.0
+                    ));
+                    Vec::new()
+                }
+            };
+            let view = render_task_list(&tasks, locale);
+            let mut message = SendMessage::new(chat_id, &view.text);
+            message.reply_to_message_id = Some(message_id);
+            message.reply_markup = view.keyboard;
+            StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if parsed.command == "/balance" {
             match plan_balance_command(
                 &content.text,
@@ -1874,8 +2052,9 @@ mod tests {
         GreetingPoolLoad, GreetingPoolSource, GroupAuthorizationDecision, GroupAuthorizer,
         LinkReplacementLoad, LinkReplacementSource, MarketPriceLoad, MarketPriceSource,
         MessageStateSink, NativeDispatcher, OilPriceSource, OilQuoteLoad, RandomSource,
-        RuloInputLoad, RuloSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink,
-        StockPriceSource, StockQuotesLoad, TransferResult, WeatherObservationLoad, WeatherSource,
+        RuloInputLoad, RuloSource, RuntimeValues, ScheduledTaskSource, StarPaymentReceipt,
+        StarPaymentSink, StockPriceSource, StockQuotesLoad, TransferResult, WeatherObservationLoad,
+        WeatherSource,
     };
     use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup};
     use bot_core::devo::DevoQuotes;
@@ -1883,6 +2062,7 @@ mod tests {
     use bot_core::links::LinkReplacement;
     use bot_core::polymarket::parse_election_events;
     use bot_core::rulo::{ExchangeQuote, RuloInput};
+    use bot_core::scheduled_tasks::{ScheduledTask, TaskId, TaskSchedule, TaskStateError};
     use bot_core::stocks::StockQuote;
     use bot_core::weather::WeatherObservation;
 
@@ -2032,6 +2212,44 @@ mod tests {
             diagnostics: Vec::new(),
             calls: Vec::new(),
         }
+    }
+
+    struct Tasks {
+        lists: Vec<Vec<ScheduledTask>>,
+        cancellations: Rc<RefCell<Vec<(String, String)>>>,
+    }
+
+    impl ScheduledTaskSource for Tasks {
+        fn list(&mut self, _chat_id: &str) -> Result<Vec<ScheduledTask>, String> {
+            if self.lists.len() > 1 {
+                Ok(self.lists.remove(0))
+            } else {
+                Ok(self.lists.first().cloned().unwrap_or_default())
+            }
+        }
+
+        fn cancel(&mut self, task_id: &TaskId, chat_id: &str) -> Result<bool, String> {
+            self.cancellations
+                .borrow_mut()
+                .push((task_id.as_str().to_owned(), chat_id.to_owned()));
+            Ok(true)
+        }
+    }
+
+    fn scheduled_task(owner_user_id: i64) -> Result<ScheduledTask, TaskStateError> {
+        Ok(ScheduledTask {
+            id: TaskId::new("task0001")?,
+            chat_id: "-42".to_owned(),
+            text: "synthetic reminder".to_owned(),
+            user_name: "tester".to_owned(),
+            user_id: Some(owner_user_id),
+            schedule: TaskSchedule::IntervalSeconds { seconds: 3_600 },
+            timezone_offset: -3,
+            locale: "es".to_owned(),
+            schedule_anchor_at: Some(1_777_523_400),
+            next_run_at: Some(1_777_527_000),
+            last_execution_id: None,
+        })
     }
 
     struct Authorization {
@@ -4657,6 +4875,141 @@ mod tests {
         );
         assert!(dispatcher.config.chat_ids.is_empty());
         assert!(dispatcher.actions.0.is_empty());
+    }
+
+    #[test]
+    fn task_list_aliases_render_native_keyboard_but_creation_stays_legacy()
+    -> Result<(), TaskStateError> {
+        let cancellations = Rc::new(RefCell::new(Vec::new()));
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_scheduled_task_source(Box::new(Tasks {
+            lists: vec![vec![scheduled_task(88)?]],
+            cancellations,
+        }));
+
+        assert_eq!(
+            dispatcher.dispatch(update("/tasks", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            dispatcher.actions.0.first(),
+            Some(TelegramAction::SendMessage(_))
+        ));
+        if let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() {
+            assert!(message.text.starts_with("• [task0001] synthetic reminder"));
+            assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
+            let callback = message
+                .reply_markup
+                .as_ref()
+                .and_then(|keyboard| keyboard.inline_keyboard.first())
+                .and_then(|row| row.first())
+                .and_then(|button| button.callback_data.as_deref());
+            assert_eq!(callback, Some("task:del:task0001"));
+        }
+
+        let before = dispatcher.actions.0.len();
+        assert_eq!(
+            dispatcher.dispatch(update("/tarea create something", None)),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
+        assert_eq!(dispatcher.actions.0.len(), before);
+        Ok(())
+    }
+
+    #[test]
+    fn task_owner_can_delete_in_group_and_message_is_refreshed() -> Result<(), TaskStateError> {
+        let cancellations = Rc::new(RefCell::new(Vec::new()));
+        let mut denied_admin = authorization();
+        denied_admin.is_admin = false;
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            denied_admin,
+            "@mybot",
+        )
+        .with_scheduled_task_source(Box::new(Tasks {
+            lists: vec![vec![scheduled_task(88)?], Vec::new()],
+            cancellations: Rc::clone(&cancellations),
+        }));
+
+        assert_eq!(
+            dispatcher.dispatch(callback_update("task:del:task0001", "group", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            cancellations.borrow().as_slice(),
+            &[("task0001".to_owned(), "-42".to_owned())]
+        );
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [
+                TelegramAction::AnswerCallback {
+                    text: Some(text),
+                    show_alert: false,
+                    ..
+                },
+                TelegramAction::EditMessage { text: edit_text, .. }
+            ] if text == "tarea task0001 borrada" && edit_text == "no hay tareas"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn unrelated_group_member_cannot_delete_a_task() -> Result<(), TaskStateError> {
+        let cancellations = Rc::new(RefCell::new(Vec::new()));
+        let mut denied_admin = authorization();
+        denied_admin.is_admin = false;
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            denied_admin,
+            "@mybot",
+        )
+        .with_scheduled_task_source(Box::new(Tasks {
+            lists: vec![vec![scheduled_task(42)?]],
+            cancellations: Rc::clone(&cancellations),
+        }));
+
+        assert_eq!(
+            dispatcher.dispatch(callback_update("task:del:task0001", "group", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(cancellations.borrow().is_empty());
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [TelegramAction::AnswerCallback {
+                text: Some(text),
+                show_alert: true,
+                ..
+            }] if text == "solo el creador o un admin pueden borrar esta tarea"
+        ));
+        Ok(())
     }
 
     #[test]
