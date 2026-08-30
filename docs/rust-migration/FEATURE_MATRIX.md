@@ -29,6 +29,7 @@ Rows not listed under migrated components remain Python-authoritative.
 | AI market-context normalization and formatting | `rust-flagged` | `RUST_MARKET_CONTEXT_ENABLED=0` or missing bridge | `contracts/market_context.json` |
 | Durable provider segment identity and unresolved-usage policy | `rust-flagged` | `RUST_AI_USAGE_POLICY_ENABLED=0` or missing bridge | `contracts/ai_usage_policy.json` |
 | AI token and preflight credit reserve estimates | `rust-flagged` | `RUST_AI_RESERVE_ESTIMATES_ENABLED=0`, missing bridge, or bridge error | `contracts/ai_reserve_estimates.json` |
+| Exact AI provider, model, transcription, cache, and tool pricing | `rust-flagged` | `RUST_AI_PRICING_ENABLED=0`, missing bridge, or bridge error | `contracts/ai_pricing.json` |
 | Provider rate-limit and Groq account-fallback classification | `rust-flagged` | `RUST_PROVIDER_ERROR_POLICY_ENABLED=0` or missing bridge | `contracts/provider_error_policy.json` |
 | Bitcoin power-law and rainbow model calculations | `rust-flagged` | `RUST_MARKET_MODELS_ENABLED=0` or missing bridge | `contracts/market_models.json` |
 | Satoshi quote calculation and formatting | `rust-flagged` | `RUST_SATOSHI_ENABLED=0` or missing bridge | `contracts/satoshi.json` |

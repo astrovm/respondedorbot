@@ -52,6 +52,11 @@ def reset_caches(monkeypatch):
         lambda: None,
     )
     monkeypatch.setattr(
+        ai_pricing_module,
+        "_load_rust_ai_pricing",
+        lambda: None,
+    )
+    monkeypatch.setattr(
         provider_usage_module,
         "_load_rust_ai_usage_policy",
         lambda: None,

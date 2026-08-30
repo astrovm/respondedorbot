@@ -29,6 +29,7 @@ use bot_core::admin_reports::{
     CreditLogLimit, parse_creditlog_limit as parse_creditlog_limit_core,
     truncate_report as truncate_admin_report_core,
 };
+use bot_core::ai_pricing::calculate_billing_for_segments as calculate_ai_billing_for_segments_core;
 use bot_core::ai_reserve::{
     EstimatedMessage, TokenEstimateValue,
     chat_output_token_limit as ai_chat_output_token_limit_core,
@@ -2518,6 +2519,15 @@ fn ai_credit_units_from_usd_micros(usd_micros: i64) -> PyResult<i64> {
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+#[pyfunction]
+fn ai_calculate_billing_for_segments(segments_json: &str) -> PyResult<String> {
+    let segments: Value = serde_json::from_str(segments_json)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let result = calculate_ai_billing_for_segments_core(&segments)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serde_json::to_string(&result).map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -2689,6 +2699,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module
     )?)?;
     module.add_function(wrap_pyfunction!(ai_credit_units_from_usd_micros, module)?)?;
+    module.add_function(wrap_pyfunction!(ai_calculate_billing_for_segments, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;

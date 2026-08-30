@@ -818,6 +818,31 @@ def verify_ai_reserve_estimates(bridge: ModuleType) -> None:
     )
 
 
+def verify_ai_pricing(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "ai_pricing.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["cases"]:
+        actual = json.loads(
+            bridge.ai_calculate_billing_for_segments(
+                json.dumps(case["segments"], ensure_ascii=False)
+            )
+        )
+        expected = case["expected"]
+        for key in (
+            "raw_usd_micros",
+            "raw_usd_micros_exact",
+            "charged_credit_units",
+            "pricing_complete",
+        ):
+            assert actual[key] == expected[key], (case["name"], key)
+        if "pricing_basis" in expected:
+            assert actual["segment_breakdown"][0]["pricing_basis"] == expected["pricing_basis"], case["name"]
+        if "model_usd_micros" in expected:
+            assert actual["model_breakdown"][0]["usd_micros"] == expected["model_usd_micros"], case["name"]
+        if "tool_usd_micros" in expected:
+            assert actual["tool_breakdown"][0]["usd_micros"] == expected["tool_usd_micros"], case["name"]
+
+
 def main(arguments: list[str]) -> int:
     if len(arguments) != 2:
         raise SystemExit("usage: rust_bridge_contract.py PATH_TO_EXTENSION")
@@ -856,6 +881,7 @@ def main(arguments: list[str]) -> int:
     verify_ai_usage_policy(bridge)
     verify_provider_error_policy(bridge)
     verify_ai_reserve_estimates(bridge)
+    verify_ai_pricing(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

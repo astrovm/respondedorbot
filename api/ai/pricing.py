@@ -54,6 +54,10 @@ class _RustAiReserveEstimates(Protocol):
     def ai_credit_units_from_usd_micros(self, usd_micros: int) -> int: ...
 
 
+class _RustAiPricing(Protocol):
+    def ai_calculate_billing_for_segments(self, segments_json: str) -> str: ...
+
+
 def _load_rust_ai_reserve_estimates() -> _RustAiReserveEstimates | None:
     module = load_rust_bridge("RUST_AI_RESERVE_ESTIMATES_ENABLED")
     if module is None:
@@ -61,9 +65,16 @@ def _load_rust_ai_reserve_estimates() -> _RustAiReserveEstimates | None:
     return cast(_RustAiReserveEstimates, module)
 
 
-def _rust_estimate_failed(operation: str) -> None:
+def _load_rust_ai_pricing() -> _RustAiPricing | None:
+    module = load_rust_bridge("RUST_AI_PRICING_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustAiPricing, module)
+
+
+def _rust_ai_operation_failed(operation: str) -> None:
     logger.exception(
-        "Rust AI reserve estimate failed; using Python fallback: operation=%s",
+        "Rust AI operation failed; using Python fallback: operation=%s",
         operation,
     )
 
@@ -129,7 +140,7 @@ def chat_output_token_limit(model: str) -> int:
         try:
             return int(rust.ai_chat_output_token_limit(str(model or "")))
         except Exception:
-            _rust_estimate_failed("chat_output_token_limit")
+            _rust_ai_operation_failed("chat_output_token_limit")
 
     if str(model or "").split(":", 1)[0] == "deepseek/deepseek-v4-flash-0731":
         return REASONING_CHAT_OUTPUT_TOKEN_LIMIT
@@ -189,7 +200,7 @@ def estimate_text_tokens(text: Optional[str]) -> int:
         try:
             return int(rust.ai_estimate_text_tokens(None if text is None else str(text)))
         except Exception:
-            _rust_estimate_failed("estimate_text_tokens")
+            _rust_ai_operation_failed("estimate_text_tokens")
 
     if not text:
         return 0
@@ -204,7 +215,7 @@ def estimate_nested_tokens(value: Any) -> int:
         try:
             return int(rust.ai_estimate_nested_tokens(_estimate_json(value)))
         except Exception:
-            _rust_estimate_failed("estimate_nested_tokens")
+            _rust_ai_operation_failed("estimate_nested_tokens")
 
     if value is None:
         return 0
@@ -231,7 +242,7 @@ def estimate_message_tokens(messages: Sequence[Mapping[str, Any]]) -> int:
         try:
             return int(rust.ai_estimate_message_tokens(_estimate_json(messages)))
         except Exception:
-            _rust_estimate_failed("estimate_message_tokens")
+            _rust_ai_operation_failed("estimate_message_tokens")
 
     total = 0
     for message in messages:
@@ -262,7 +273,7 @@ def estimate_chat_reserve_credits(
                 )
             )
         except Exception:
-            _rust_estimate_failed("estimate_chat_reserve_credits")
+            _rust_ai_operation_failed("estimate_chat_reserve_credits")
     pricing = MODEL_PRICING_USD_MICROS.get(
         model, MODEL_PRICING_USD_MICROS["deepseek/deepseek-v4-flash-0731"]
     )
@@ -300,7 +311,7 @@ def estimate_vision_reserve_credits(
                 )
             )
         except Exception:
-            _rust_estimate_failed("estimate_vision_reserve_credits")
+            _rust_ai_operation_failed("estimate_vision_reserve_credits")
     pricing = MODEL_PRICING_USD_MICROS.get(
         model, MODEL_PRICING_USD_MICROS["google/gemini-3.1-flash-lite-preview"]
     )
@@ -335,7 +346,7 @@ def estimate_transcribe_reserve_credits(audio_seconds: float) -> int:
                 )
             )
         except Exception:
-            _rust_estimate_failed("estimate_transcribe_reserve_credits")
+            _rust_ai_operation_failed("estimate_transcribe_reserve_credits")
     usd_micros = _calculate_transcription_usd_micros(audio_seconds)
     if usd_micros <= 0:
         return 1
@@ -350,7 +361,7 @@ def estimate_firecrawl_reserve_credits() -> int:
         try:
             return int(rust.ai_estimate_firecrawl_reserve_credit_units())
         except Exception:
-            _rust_estimate_failed("estimate_firecrawl_reserve_credits")
+            _rust_ai_operation_failed("estimate_firecrawl_reserve_credits")
 
     return max(
         1,
@@ -368,7 +379,7 @@ def credit_units_from_usd_micros(usd_micros: int) -> int:
         try:
             return int(rust.ai_credit_units_from_usd_micros(int(usd_micros or 0)))
         except Exception:
-            _rust_estimate_failed("credit_units_from_usd_micros")
+            _rust_ai_operation_failed("credit_units_from_usd_micros")
 
     micros = max(0, int(usd_micros or 0))
     if micros == 0:
@@ -568,18 +579,49 @@ def _standalone_firecrawl_breakdown(
     return usd_micros
 
 
+def _calculate_billing_with_rust(
+    segments: Sequence[Optional[Mapping[str, Any]]],
+) -> Dict[str, Any] | None:
+    rust = _load_rust_ai_pricing()
+    if rust is None:
+        return None
+    try:
+        result = json.loads(
+            rust.ai_calculate_billing_for_segments(_estimate_json(segments))
+        )
+        if isinstance(result, dict):
+            return result
+        raise ValueError("Rust AI pricing response must be an object")
+    except Exception:
+        _rust_ai_operation_failed("calculate_billing_for_segments")
+        return None
+
+
+def _empty_billing_breakdowns() -> tuple[
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[str],
+]:
+    return [], [], [], []
+
+
 def calculate_billing_for_segments(
     segments: Iterable[Optional[Mapping[str, Any]]],
 ) -> Dict[str, Any]:
     """Calculate raw and marked-up billing totals for AI usage segments."""
 
-    total_usd_micros = Decimal(0)
-    model_breakdown: List[Dict[str, Any]] = []
-    tool_breakdown: List[Dict[str, Any]] = []
-    segment_breakdown: List[Dict[str, Any]] = []
-    unsupported_notes: List[str] = []
+    materialized_segments = list(segments)
+    rust_result = _calculate_billing_with_rust(materialized_segments)
+    if rust_result is not None:
+        return rust_result
 
-    present_segments = (segment for segment in segments if segment is not None)
+    total_usd_micros = Decimal(0)
+    model_breakdown, tool_breakdown, segment_breakdown, unsupported_notes = (
+        _empty_billing_breakdowns()
+    )
+
+    present_segments = (segment for segment in materialized_segments if segment is not None)
     for segment_index, raw_segment in enumerate(present_segments):
         segment = dict(raw_segment or {})
         if str(segment.get("source") or "").strip().lower() == "cache":
