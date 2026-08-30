@@ -1,5 +1,7 @@
 //! Typed domain and application logic for respondedorbot.
 
+pub mod credit_units;
+
 /// Version of the temporary Python/Rust compatibility protocol.
 pub const MIGRATION_PROTOCOL_VERSION: u16 = 1;
 

@@ -60,8 +60,8 @@ jobs:
       - name: Verify Python 3.14 Rust bridge
         run: |
           cargo build --locked --release -p python-bridge
-          cp target/release/librespondedorbot_rs.so /tmp/respondedorbot_rs.so
-          uv run --locked python -c "import sys; sys.path.insert(0, '/tmp'); import respondedorbot_rs; assert respondedorbot_rs.migration_protocol_version() == 1"
+          uv run --locked python tests/rust_bridge_contract.py \
+            target/release/librespondedorbot_rs.so
 
       - name: Lint with ruff
         run: uv run --locked ruff check api/ tests/

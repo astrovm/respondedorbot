@@ -17,6 +17,7 @@ repository = "https://github.com/astrovm/respondedorbot"
 [workspace.dependencies]
 bot-adapters = { path = "crates/bot-adapters" }
 bot-core = { path = "crates/bot-core" }
+proptest = "1.11.0"
 pyo3 = { version = "0.29.2", features = ["abi3-py314", "extension-module"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

@@ -17,6 +17,12 @@ Status values used during implementation:
 
 All features currently have status `python`.
 
+## Migrated components
+
+| Component | Status | Rollback control | Shared contract |
+| --- | --- | --- | --- |
+| Credit-unit parsing, scaling, and formatting | `rust-flagged` | `RUST_CREDIT_UNITS_ENABLED=0` or missing bridge | `contracts/credit_units.json` |
+
 ## Commands and user-visible features
 
 | Feature | Entrypoints | Critical observable contract | Current test evidence |
