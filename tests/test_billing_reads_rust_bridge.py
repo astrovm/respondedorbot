@@ -484,6 +484,23 @@ class _FakeRustBillingAuditReads:
             raise ValueError("synthetic audit read failure")
         return json.dumps(self.result)
 
+
+class _FakeRustBillingReconciliationReads:
+    def __init__(self, result: list[dict[str, object]], *, fail: bool = False) -> None:
+        self.result = result
+        self.fail = fail
+        self.calls: list[tuple[str, int]] = []
+
+    def billing_list_unsettled_ai_operations(
+        self,
+        database_url: str,
+        limit: int,
+    ) -> str:
+        self.calls.append((database_url, limit))
+        if self.fail:
+            raise ValueError("synthetic reconciliation read failure")
+        return json.dumps(self.result)
+
 def _patch_python_balance(
     monkeypatch: pytest.MonkeyPatch,
     balance: int,
@@ -1515,4 +1532,101 @@ def test_billing_audit_read_failure_safely_uses_python_fallback(
         results = credits_db.list_recent_ai_settlement_results()
 
     assert results[0]["created_at"] is created_at
+    assert "using Python fallback" in caplog.text
+
+
+def test_billing_reconciliation_read_is_authoritative_and_restores_datetimes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(credits_db, "get_database_url", lambda: "postgresql://db")
+    monkeypatch.setattr(
+        credits_db,
+        "connect",
+        lambda: pytest.fail("Python reconciliation read must not run"),
+    )
+    rust = _FakeRustBillingReconciliationReads(
+        [
+            {
+                "operation_id": "synthetic-operation",
+                "user_id": 42,
+                "chat_id": 202,
+                "authorized_credit_units": 300,
+                "source": "chat",
+                "created_at": "2026-08-30 12:34:56+00:00",
+                "last_activity_at": "2026-08-30 12:35:56+00:00",
+                "reserve_metadata": {"trace_id": "synthetic"},
+                "segments": [{"segment_id": "one", "segment": {"input_tokens": 1}}],
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        credits_db,
+        "_load_rust_billing_reconciliation_reads",
+        lambda: rust,
+    )
+
+    results = credits_db.list_unsettled_ai_operations(limit=999)
+
+    assert results[0]["created_at"] == datetime(
+        2026,
+        8,
+        30,
+        12,
+        34,
+        56,
+        tzinfo=UTC,
+    )
+    assert results[0]["last_activity_at"] == datetime(
+        2026,
+        8,
+        30,
+        12,
+        35,
+        56,
+        tzinfo=UTC,
+    )
+    assert results[0]["segments"][0]["segment_id"] == "one"
+    assert rust.calls == [("postgresql://db", 500)]
+
+
+def test_billing_reconciliation_read_failure_safely_uses_python_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class Cursor:
+        def __enter__(self) -> Cursor:
+            return self
+
+        def __exit__(self, *_arguments: object) -> None:
+            return None
+
+        def execute(self, *_arguments: object) -> None:
+            return None
+
+        def fetchall(self) -> list[tuple[object, ...]]:
+            return []
+
+    class Connection:
+        def __enter__(self) -> Connection:
+            return self
+
+        def __exit__(self, *_arguments: object) -> None:
+            return None
+
+        def cursor(self) -> Cursor:
+            return Cursor()
+
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(credits_db, "get_database_url", lambda: "postgresql://db")
+    monkeypatch.setattr(credits_db, "connect", lambda: Connection())
+    monkeypatch.setattr(
+        credits_db,
+        "_load_rust_billing_reconciliation_reads",
+        lambda: _FakeRustBillingReconciliationReads([], fail=True),
+    )
+
+    with caplog.at_level(logging.ERROR, logger=credits_db.__name__):
+        assert credits_db.list_unsettled_ai_operations() == []
+
     assert "using Python fallback" in caplog.text

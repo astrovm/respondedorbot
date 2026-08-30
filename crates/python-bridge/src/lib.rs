@@ -2178,6 +2178,20 @@ fn billing_list_recent_ai_settlement_results(
     serde_json::to_string(&results).map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+/// Return durable provider usage that still needs final settlement.
+#[pyfunction]
+fn billing_list_unsettled_ai_operations(
+    py: Python<'_>,
+    database_url: &str,
+    limit: i64,
+) -> PyResult<String> {
+    let repository = BillingRepository::new(database_url);
+    let results = py
+        .detach(|| repository.list_unsettled_ai_operations(limit))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serde_json::to_string(&results).map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -2310,6 +2324,10 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_function(wrap_pyfunction!(
         billing_list_recent_ai_settlement_results,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        billing_list_unsettled_ai_operations,
         module
     )?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;

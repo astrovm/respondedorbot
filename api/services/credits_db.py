@@ -269,6 +269,14 @@ class _RustBillingAuditReads(Protocol):
     ) -> str: ...
 
 
+class _RustBillingReconciliationReads(Protocol):
+    def billing_list_unsettled_ai_operations(
+        self,
+        database_url: str,
+        limit: int,
+    ) -> str: ...
+
+
 def _load_rust_billing_reads() -> _RustBillingReads | None:
     module = load_rust_bridge("RUST_BILLING_READ_SHADOW_ENABLED")
     if module is None:
@@ -367,6 +375,15 @@ def _load_rust_billing_audit_reads() -> _RustBillingAuditReads | None:
     if module is None:
         return None
     return cast(_RustBillingAuditReads, module)
+
+
+def _load_rust_billing_reconciliation_reads() -> (
+    _RustBillingReconciliationReads | None
+):
+    module = load_rust_bridge("RUST_BILLING_RECONCILIATION_READS_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustBillingReconciliationReads, module)
 
 
 class CreditsDBError(RuntimeError):
@@ -1497,6 +1514,33 @@ def list_unsettled_ai_operations(limit: int = 100) -> List[Dict[str, Any]]:
 
     ensure_schema()
     normalized_limit = max(1, min(int(limit or 100), 500))
+    rust = _load_rust_billing_reconciliation_reads()
+    database_url = get_database_url()
+    if rust is not None and database_url:
+        try:
+            loaded = json.loads(
+                rust.billing_list_unsettled_ai_operations(
+                    database_url,
+                    normalized_limit,
+                )
+            )
+            if not isinstance(loaded, list):
+                raise ValueError("Rust unsettled AI operations must be an array")
+            operations: List[Dict[str, Any]] = []
+            for item in loaded:
+                if not isinstance(item, Mapping):
+                    raise ValueError("Rust unsettled AI operation must be an object")
+                operation = dict(item)
+                for timestamp_key in ("created_at", "last_activity_at"):
+                    timestamp = operation.get(timestamp_key)
+                    if isinstance(timestamp, str):
+                        operation[timestamp_key] = datetime.fromisoformat(timestamp)
+                operations.append(operation)
+            return operations
+        except Exception:
+            logger.exception(
+                "Rust unsettled AI operation read failed; using Python fallback"
+            )
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -1514,6 +1558,7 @@ def list_unsettled_ai_operations(limit: int = 100) -> List[Dict[str, Any]]:
                         AS reserve_metadata
                 FROM credit_ledger AS ledger
                 WHERE ledger.event_type IN ('ai_reserve', 'ai_refund')
+                  AND ledger.user_id IS NOT NULL
                   AND ledger.metadata ? 'operation_id'
                   AND NOT EXISTS (
                       SELECT 1

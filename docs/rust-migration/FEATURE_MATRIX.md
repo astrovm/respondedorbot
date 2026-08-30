@@ -64,6 +64,7 @@ Rows not listed under migrated components remain Python-authoritative.
 | PostgreSQL exact-once legacy usage-tag settlement | `rust-flagged` | `RUST_BILLING_LEGACY_SETTLEMENTS_ENABLED=0` or missing bridge | `contracts/billing_legacy_settlements.json` |
 | PostgreSQL idempotent AI settlement audit writes | `rust-flagged` | `RUST_BILLING_AUDIT_WRITES_ENABLED=0` or missing bridge | `contracts/billing_audit_writes.json` |
 | PostgreSQL recent AI settlement audit reads | `rust-flagged` | `RUST_BILLING_AUDIT_READS_ENABLED=0` or missing bridge | `contracts/billing_audit_reads.json` |
+| PostgreSQL unsettled AI operation reconciliation reads | `rust-flagged` | `RUST_BILLING_RECONCILIATION_READS_ENABLED=0` or missing bridge | `contracts/billing_reconciliation_reads.json` |
 | Automatic media-routing decision | `rust-flagged` | `RUST_MEDIA_ROUTING_ENABLED=0` or missing bridge | `contracts/media_routing.json` |
 | General response-routing state machine | `rust-flagged` | `RUST_RESPONSE_ROUTING_ENABLED=0` or missing bridge | `contracts/response_routing.json` |
 | Base-conversion command | `rust-flagged` | `RUST_BASE_CONVERSION_ENABLED=0` or missing bridge | `contracts/base_conversion.json` |

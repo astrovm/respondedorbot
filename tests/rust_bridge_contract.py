@@ -616,6 +616,21 @@ def verify_billing_audit_reads(bridge: ModuleType) -> None:
         raise AssertionError("Rust AI settlement audit read bridge is unavailable")
 
 
+def verify_billing_reconciliation_reads(bridge: ModuleType) -> None:
+    path = (
+        Path(__file__).parents[1]
+        / "contracts"
+        / "billing_reconciliation_reads.json"
+    )
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    if contract["grouping_key"] != "operation_id":
+        raise AssertionError("AI reconciliation grouping changed")
+    if contract["provider_segment_order"] != "ledger id ascending":
+        raise AssertionError("AI reconciliation provider ordering changed")
+    if not callable(bridge.billing_list_unsettled_ai_operations):
+        raise AssertionError("Rust AI reconciliation read bridge is unavailable")
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -678,6 +693,7 @@ def verify_billing_contracts(bridge: ModuleType) -> None:
     verify_billing_legacy_settlements(bridge)
     verify_billing_audit_writes(bridge)
     verify_billing_audit_reads(bridge)
+    verify_billing_reconciliation_reads(bridge)
 
 
 def main(arguments: list[str]) -> int:

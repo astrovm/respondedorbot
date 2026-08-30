@@ -143,6 +143,19 @@ pub struct LedgerEntry {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnsettledAiOperation {
+    pub operation_id: String,
+    pub user_id: i64,
+    pub chat_id: Option<i64>,
+    pub authorized_credit_units: i64,
+    pub source: String,
+    pub created_at: String,
+    pub last_activity_at: String,
+    pub reserve_metadata: Value,
+    pub segments: Vec<Value>,
+}
+
 pub struct BillingRepository {
     database_url: String,
 }
@@ -1062,6 +1075,92 @@ impl BillingRepository {
                     amount: row.try_get(5)?,
                     metadata: row.try_get(6)?,
                     created_at: row.try_get(7)?,
+                })
+            })
+            .collect()
+    }
+
+    pub fn list_unsettled_ai_operations(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<UnsettledAiOperation>, BillingError> {
+        let mut client = self.connect()?;
+        client
+            .query(
+                "WITH pending AS ( \
+                    SELECT ledger.metadata->>'operation_id' AS operation_id, \
+                        MIN(ledger.user_id) AS user_id, MIN(ledger.chat_id) AS chat_id, \
+                        GREATEST(0, COALESCE(SUM(-ledger.amount), 0)) AS authorized, \
+                        MIN(ledger.metadata->>'source') AS source, \
+                        MIN(ledger.created_at) AS created_at, \
+                        MAX(ledger.created_at) AS hold_activity_at, \
+                        (ARRAY_AGG(ledger.metadata ORDER BY ledger.id) \
+                            FILTER (WHERE ledger.event_type = 'ai_reserve'))[1] \
+                            AS reserve_metadata \
+                    FROM credit_ledger AS ledger \
+                    WHERE ledger.event_type IN ('ai_reserve', 'ai_refund') \
+                      AND ledger.user_id IS NOT NULL \
+                      AND ledger.metadata ? 'operation_id' \
+                      AND NOT EXISTS ( \
+                          SELECT 1 FROM credit_ledger AS settled WHERE ( \
+                              settled.event_type = 'ai_settlement_result' \
+                              AND settled.metadata->>'operation_id' \
+                                  = ledger.metadata->>'operation_id' \
+                          ) OR ( \
+                              settled.event_type = 'memory_compaction_settlement' \
+                              AND settled.user_id = ledger.user_id \
+                              AND settled.metadata->>'usage_tag' \
+                                  = ledger.metadata->>'usage_tag' \
+                          ) \
+                      ) \
+                    GROUP BY ledger.metadata->>'operation_id' \
+                ) \
+                SELECT pending.operation_id, pending.user_id, pending.chat_id, \
+                    pending.authorized, pending.source, pending.created_at::text, \
+                    GREATEST( \
+                        pending.hold_activity_at, \
+                        COALESCE(( \
+                            SELECT MAX(usage.created_at) FROM credit_ledger AS usage \
+                            WHERE usage.event_type = 'ai_provider_usage' \
+                              AND usage.metadata->>'operation_id' = pending.operation_id \
+                        ), pending.hold_activity_at) \
+                    )::text AS last_activity_at, pending.reserve_metadata, \
+                    COALESCE(( \
+                        SELECT jsonb_agg(jsonb_build_object( \
+                            'segment_id', usage.metadata->>'segment_id', \
+                            'segment', usage.metadata->'segment') ORDER BY usage.id) \
+                        FROM credit_ledger AS usage \
+                        WHERE usage.event_type = 'ai_provider_usage' \
+                          AND usage.metadata->>'operation_id' = pending.operation_id \
+                    ), '[]'::jsonb) AS segments \
+                FROM pending \
+                WHERE pending.authorized > 0 OR EXISTS ( \
+                    SELECT 1 FROM credit_ledger AS usage \
+                    WHERE usage.event_type = 'ai_provider_usage' \
+                      AND usage.metadata->>'operation_id' = pending.operation_id \
+                ) \
+                ORDER BY pending.created_at LIMIT $1",
+                &[&limit],
+            )?
+            .into_iter()
+            .map(|row| {
+                let segments: Value = row.try_get(8)?;
+                Ok(UnsettledAiOperation {
+                    operation_id: row.try_get(0)?,
+                    user_id: row.try_get(1)?,
+                    chat_id: row.try_get(2)?,
+                    authorized_credit_units: row.try_get(3)?,
+                    source: if row.try_get::<_, Option<String>>(4)?.as_deref() == Some("chat") {
+                        "chat".to_owned()
+                    } else {
+                        "user".to_owned()
+                    },
+                    created_at: row.try_get(5)?,
+                    last_activity_at: row.try_get(6)?,
+                    reserve_metadata: row
+                        .try_get::<_, Option<Value>>(7)?
+                        .unwrap_or_else(|| json!({})),
+                    segments: segments.as_array().cloned().unwrap_or_default(),
                 })
             })
             .collect()
@@ -2818,6 +2917,79 @@ mod tests {
         );
         assert!(!recent_audit_results[0].created_at.is_empty());
 
+        client.execute(
+            "INSERT INTO credit_ledger \
+                (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
+             VALUES ('ai_reserve', $1, $1, NULL, -300, $2)",
+            &[
+                &7_000_000_000_038_i64,
+                &json!({
+                    "operation_id": "synthetic-unsettled-operation",
+                    "usage_tag": "synthetic-unsettled-usage",
+                    "source": "user",
+                    "trace_id": "unsettled-trace"
+                }),
+            ],
+        )?;
+        assert!(repository.record_ai_provider_usage(
+            7_000_000_000_038,
+            None,
+            &json!({
+                "operation_id": "synthetic-unsettled-operation",
+                "segment_id": "unsettled-segment",
+                "segment": {"input_tokens": 12}
+            }),
+        )?);
+        client.execute(
+            "INSERT INTO credit_ledger \
+                (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
+             VALUES ('ai_reserve', $1, $1, NULL, -100, $2)",
+            &[
+                &7_000_000_000_039_i64,
+                &json!({
+                    "operation_id": "synthetic-legacy-excluded-operation",
+                    "usage_tag": "synthetic-legacy-excluded-usage",
+                    "source": "user"
+                }),
+            ],
+        )?;
+        assert!(
+            repository
+                .settle_legacy_ai_reservation_once(
+                    7_000_000_000_039,
+                    None,
+                    "user",
+                    100,
+                    100,
+                    "synthetic-legacy-excluded-usage",
+                    &serde_json::Map::new(),
+                )?
+                .applied
+        );
+        let unsettled_operations = repository.list_unsettled_ai_operations(500)?;
+        let unsettled = unsettled_operations
+            .iter()
+            .find(|operation| operation.operation_id == "synthetic-unsettled-operation")
+            .ok_or_else(|| std::io::Error::other("unsettled operation must be returned"))?;
+        assert_eq!(unsettled.user_id, 7_000_000_000_038);
+        assert_eq!(unsettled.authorized_credit_units, 300);
+        assert_eq!(unsettled.source, "user");
+        assert_eq!(unsettled.reserve_metadata["trace_id"], "unsettled-trace");
+        assert_eq!(unsettled.segments.len(), 1);
+        assert_eq!(unsettled.segments[0]["segment_id"], "unsettled-segment");
+        assert!(!unsettled.created_at.is_empty());
+        assert!(!unsettled.last_activity_at.is_empty());
+        assert!(
+            !unsettled_operations.iter().any(|operation| {
+                operation.operation_id == "synthetic-legacy-excluded-operation"
+            })
+        );
+        assert!(
+            !unsettled_operations
+                .iter()
+                .any(|operation| operation.operation_id == "synthetic-chat-automation")
+        );
+
         let synthetic_ids = [
             7_000_000_000_001_i64,
             7_000_000_000_002_i64,
@@ -2856,6 +3028,8 @@ mod tests {
             7_000_000_000_035_i64,
             7_000_000_000_036_i64,
             7_000_000_000_037_i64,
+            7_000_000_000_038_i64,
+            7_000_000_000_039_i64,
         ];
         client.execute(
             "DELETE FROM star_payments WHERE user_id = ANY($1)",
