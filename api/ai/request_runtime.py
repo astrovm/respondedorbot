@@ -23,11 +23,74 @@ class _RustAIRequestSanitization(Protocol):
     def ai_sanitize_assistant_text(self, text: str) -> str: ...
 
 
+class _RustAIImageContextPlanning(Protocol):
+    def ai_plan_image_context(
+        self,
+        has_image_data: bool,
+        description: str | None,
+        last_text_content: str | None,
+        localized_context: str,
+    ) -> tuple[str, str | None]: ...
+
+
 def _load_rust_ai_request_sanitization() -> _RustAIRequestSanitization | None:
     module = load_rust_bridge("RUST_AI_REQUEST_SANITIZATION_ENABLED")
     if module is None:
         return None
     return cast(_RustAIRequestSanitization, module)
+
+
+def _load_rust_ai_image_context_planning() -> _RustAIImageContextPlanning | None:
+    module = load_rust_bridge("RUST_AI_IMAGE_CONTEXT_PLANNING_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustAIImageContextPlanning, module)
+
+
+def _plan_image_context(
+    has_image_data: bool,
+    description: str | None,
+    last_text_content: str | None,
+    localized_context: str,
+) -> tuple[str, str | None]:
+    rust = _load_rust_ai_image_context_planning()
+    if rust is not None:
+        try:
+            action, updated_content = rust.ai_plan_image_context(
+                has_image_data,
+                description,
+                last_text_content,
+                localized_context,
+            )
+            action = str(action)
+            if action not in {"no_image", "description_failed", "description_ready"}:
+                raise ValueError(f"invalid Rust image-context action: {action}")
+            if updated_content is not None and not isinstance(updated_content, str):
+                raise ValueError("Rust image-context content must be text or null")
+            if action == "description_ready" and description is None:
+                raise ValueError("Rust cannot complete a missing image description")
+            if action != "description_ready" and updated_content is not None:
+                raise ValueError("Rust returned content for an incomplete image description")
+            if updated_content is not None and last_text_content is None:
+                raise ValueError("Rust returned image context without a text message tail")
+            return action, updated_content
+        except Exception:
+            logger.exception(
+                "Rust AI image-context planning failed; using Python fallback"
+            )
+
+    if not has_image_data:
+        return "no_image", None
+    if description is None:
+        return "description_failed", None
+    return (
+        "description_ready",
+        (
+            f"{last_text_content}\n\n{localized_context}"
+            if last_text_content is not None
+            else None
+        ),
+    )
 
 
 def _python_sanitize_assistant_text(text: str) -> str:
@@ -181,17 +244,27 @@ def inject_image_context(
     user_text = tr("media.image_prompt")
     image_result = describe_image(image_data, user_text, image_file_id)
     image_description = image_result.text if image_result else None
+    description = str(image_description) if image_description else None
+    image_context = (
+        tr("media.image_context", description=description) if description else ""
+    )
+    last_content = None
+    if messages and isinstance(messages[-1].get("content"), str):
+        last_content = messages[-1]["content"]
+    action, updated_content = _plan_image_context(
+        True,
+        description,
+        last_content,
+        image_context,
+    )
 
-    if image_description:
-        # Vision is a separate billable provider call.
+    if action == "description_ready":
+        # Vision is a separate billable provider call after Rust accepts the result.
         append_billing_segment(response_meta, image_result)
-        image_context = tr("media.image_context", description=image_description)
-        if messages:
-            last_message = messages[-1]
-            if isinstance(last_message.get("content"), str):
-                last_message["content"] += f"\n\n{image_context}"
+        if updated_content is not None:
+            messages[-1]["content"] = updated_content
         logger.info("vision model described image, continuing ai flow")
-    else:
+    elif action == "description_failed":
         print("Failed to describe image, continuing without description...")
 
 

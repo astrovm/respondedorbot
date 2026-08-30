@@ -1078,6 +1078,18 @@ def verify_ai_settlement_policy(bridge: ModuleType) -> None:
             assert actual == case["expected"], case["name"]
 
 
+def verify_ai_image_context_planning(bridge: ModuleType) -> None:
+    path = (
+        Path(__file__).parents[1]
+        / "contracts"
+        / "ai_image_context_planning.json"
+    )
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["cases"]:
+        actual = bridge.ai_plan_image_context(*case["facts"])
+        assert list(actual) == case["expected"], case["name"]
+
+
 def verify_ai_request_sanitization(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "ai_request_sanitization.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -1114,6 +1126,7 @@ def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_provider_config_policy(bridge)
     verify_provider_usage_normalization(bridge)
     verify_ai_settlement_policy(bridge)
+    verify_ai_image_context_planning(bridge)
     verify_ai_request_sanitization(bridge)
     verify_tool_execution_policy(bridge)
 

@@ -29,6 +29,7 @@ use bot_core::admin_reports::{
     CreditLogLimit, parse_creditlog_limit as parse_creditlog_limit_core,
     truncate_report as truncate_admin_report_core,
 };
+use bot_core::ai_image_context::plan_image_context as plan_ai_image_context_core;
 use bot_core::ai_pricing::calculate_billing_for_segments as calculate_ai_billing_for_segments_core;
 use bot_core::ai_request::sanitize_assistant_text as ai_sanitize_assistant_text_core;
 use bot_core::ai_reserve::{
@@ -2862,6 +2863,23 @@ fn ai_delivery_failure_settlement_action(has_billing_segments: bool) -> &'static
 }
 
 #[pyfunction]
+fn ai_plan_image_context(
+    has_image_data: bool,
+    description: Option<&str>,
+    last_text_content: Option<&str>,
+    localized_context: &str,
+) -> (&'static str, Option<String>) {
+    let plan = plan_ai_image_context_core(
+        has_image_data,
+        description,
+        last_text_content,
+        localized_context,
+    );
+    let action = plan.action();
+    (action, plan.updated_last_content())
+}
+
+#[pyfunction]
 fn provider_chain_select(availability: Vec<bool>) -> Vec<usize> {
     provider_chain_select_core(&availability)
 }
@@ -3221,6 +3239,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
         ai_delivery_failure_settlement_action,
         module
     )?)?;
+    module.add_function(wrap_pyfunction!(ai_plan_image_context, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_select, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_outcome, module)?)?;
     module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;

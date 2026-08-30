@@ -1,0 +1,32 @@
+{
+  "cases": [
+    {
+      "name": "missing image is ignored",
+      "facts": [false, "description", "prompt", "Image: description"],
+      "expected": ["no_image", null]
+    },
+    {
+      "name": "missing description continues without context",
+      "facts": [true, null, "prompt", ""],
+      "expected": ["description_failed", null]
+    },
+    {
+      "name": "description appends localized context to text tail",
+      "facts": [true, "a cat", "look at this", "Image description: a cat"],
+      "expected": [
+        "description_ready",
+        "look at this\n\nImage description: a cat"
+      ]
+    },
+    {
+      "name": "description is billable even without a text tail",
+      "facts": [true, "un gráfico", null, "Imagen: un gráfico"],
+      "expected": ["description_ready", null]
+    },
+    {
+      "name": "empty text tail still receives context",
+      "facts": [true, "chart", "", "Image: chart"],
+      "expected": ["description_ready", "\n\nImage: chart"]
+    }
+  ]
+}

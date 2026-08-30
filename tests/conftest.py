@@ -78,6 +78,11 @@ def reset_caches(monkeypatch):
         lambda: None,
     )
     monkeypatch.setattr(
+        ai_request_runtime_module,
+        "_load_rust_ai_image_context_planning",
+        lambda: None,
+    )
+    monkeypatch.setattr(
         ai_service_module,
         "_load_rust_ai_settlement_policy",
         lambda: None,
