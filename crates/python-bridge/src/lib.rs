@@ -2033,6 +2033,22 @@ fn billing_charge_ai_credits(
     ))
 }
 
+/// Record one idempotent provider-usage segment before another external call.
+#[pyfunction]
+fn billing_record_ai_provider_usage(
+    py: Python<'_>,
+    database_url: &str,
+    user_id: i64,
+    chat_id: Option<i64>,
+    metadata_json: &str,
+) -> PyResult<bool> {
+    let metadata: Value = serde_json::from_str(metadata_json)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let repository = BillingRepository::new(database_url);
+    py.detach(|| repository.record_ai_provider_usage(user_id, chat_id, &metadata))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -2151,6 +2167,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(billing_apply_ai_debt, module)?)?;
     module.add_function(wrap_pyfunction!(billing_refund_ai_charge, module)?)?;
     module.add_function(wrap_pyfunction!(billing_charge_ai_credits, module)?)?;
+    module.add_function(wrap_pyfunction!(billing_record_ai_provider_usage, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;

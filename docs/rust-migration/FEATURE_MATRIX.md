@@ -59,6 +59,7 @@ Rows not listed under migrated components remain Python-authoritative.
 | PostgreSQL user-or-chat AI debt transactions | `rust-flagged` | `RUST_BILLING_AI_DEBT_ENABLED=0` or missing bridge | `contracts/billing_ai_debt.json` |
 | PostgreSQL idempotent user-or-chat AI refunds | `rust-flagged` | `RUST_BILLING_AI_REFUNDS_ENABLED=0` or missing bridge | `contracts/billing_ai_refunds.json` |
 | PostgreSQL AI payer selection, reserve, charge, and replay guards | `rust-flagged` | `RUST_BILLING_AI_CHARGES_ENABLED=0` or missing bridge | `contracts/billing_ai_charges.json` |
+| PostgreSQL idempotent AI provider-usage segments | `rust-flagged` | `RUST_BILLING_PROVIDER_USAGE_ENABLED=0` or missing bridge | `contracts/billing_provider_usage.json` |
 | Automatic media-routing decision | `rust-flagged` | `RUST_MEDIA_ROUTING_ENABLED=0` or missing bridge | `contracts/media_routing.json` |
 | General response-routing state machine | `rust-flagged` | `RUST_RESPONSE_ROUTING_ENABLED=0` or missing bridge | `contracts/response_routing.json` |
 | Base-conversion command | `rust-flagged` | `RUST_BASE_CONVERSION_ENABLED=0` or missing bridge | `contracts/base_conversion.json` |

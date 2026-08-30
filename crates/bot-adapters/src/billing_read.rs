@@ -672,6 +672,25 @@ impl BillingRepository {
         })
     }
 
+    pub fn record_ai_provider_usage(
+        &self,
+        user_id: i64,
+        chat_id: Option<i64>,
+        metadata: &Value,
+    ) -> Result<bool, BillingError> {
+        self.run_transaction(|transaction| {
+            Ok(transaction
+                .query_opt(
+                    "INSERT INTO credit_ledger \
+                        (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
+                     VALUES ('ai_provider_usage', $1, $1, $2, 0, $3) \
+                     ON CONFLICT DO NOTHING RETURNING id",
+                    &[&user_id, &chat_id, &metadata],
+                )?
+                .is_some())
+        })
+    }
+
     fn ai_operation_is_settled(
         transaction: &mut Transaction<'_>,
         user_id: i64,
@@ -954,6 +973,10 @@ mod tests {
                 metadata JSONB NOT NULL DEFAULT '{}'::jsonb, \
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\
             ); \
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_unique_ai_provider_segment \
+            ON credit_ledger ((metadata->>'operation_id'), (metadata->>'segment_id')) \
+            WHERE event_type = 'ai_provider_usage' \
+              AND metadata ? 'operation_id' AND metadata ? 'segment_id'; \
             INSERT INTO credit_accounts (scope_type, scope_id, balance) \
             VALUES ('user', 7000000000001, 1234) \
             ON CONFLICT (scope_type, scope_id) DO UPDATE SET balance = EXCLUDED.balance;",
@@ -1839,6 +1862,72 @@ mod tests {
                 .all(|result| result.ok && result.user_balance == 200)
         );
 
+        let provider_metadata = json!({
+            "operation_id": "synthetic-provider-operation",
+            "segment_id": "segment-1",
+            "segment": {"input_tokens": 12, "output_tokens": 34}
+        });
+        assert!(repository.record_ai_provider_usage(
+            7_000_000_000_025,
+            Some(7_000_000_000_023),
+            &provider_metadata,
+        )?);
+        assert!(!repository.record_ai_provider_usage(
+            7_000_000_000_025,
+            Some(7_000_000_000_023),
+            &provider_metadata,
+        )?);
+        let first_database_url = database_url.clone();
+        let second_database_url = database_url.clone();
+        let first = std::thread::spawn(move || {
+            let metadata = json!({
+                "operation_id": "synthetic-provider-operation",
+                "segment_id": "segment-2",
+                "segment": {"input_tokens": 1}
+            });
+            BillingRepository::new(&first_database_url).record_ai_provider_usage(
+                7_000_000_000_025,
+                None,
+                &metadata,
+            )
+        });
+        let second = std::thread::spawn(move || {
+            let metadata = json!({
+                "operation_id": "synthetic-provider-operation",
+                "segment_id": "segment-2",
+                "segment": {"input_tokens": 1}
+            });
+            BillingRepository::new(&second_database_url).record_ai_provider_usage(
+                7_000_000_000_025,
+                None,
+                &metadata,
+            )
+        });
+        let concurrent_provider_results = [
+            first
+                .join()
+                .map_err(|_| std::io::Error::other("first provider thread panicked"))??,
+            second
+                .join()
+                .map_err(|_| std::io::Error::other("second provider thread panicked"))??,
+        ];
+        assert_eq!(
+            concurrent_provider_results
+                .iter()
+                .filter(|inserted| **inserted)
+                .count(),
+            1
+        );
+        let provider_evidence = client.query_one(
+            "SELECT COUNT(*), \
+                COUNT(*) FILTER (WHERE metadata->'segment'->>'input_tokens' = '12') \
+             FROM credit_ledger \
+             WHERE user_id = $1 AND event_type = 'ai_provider_usage'",
+            &[&7_000_000_000_025_i64],
+        )?;
+        assert_eq!(provider_evidence.get::<_, i64>(0), 2);
+        assert_eq!(provider_evidence.get::<_, i64>(1), 1);
+
         let synthetic_ids = [
             7_000_000_000_001_i64,
             7_000_000_000_002_i64,
@@ -1864,6 +1953,7 @@ mod tests {
             7_000_000_000_022_i64,
             7_000_000_000_023_i64,
             7_000_000_000_024_i64,
+            7_000_000_000_025_i64,
         ];
         client.execute(
             "DELETE FROM star_payments WHERE user_id = ANY($1)",

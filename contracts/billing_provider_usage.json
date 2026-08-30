@@ -1,0 +1,9 @@
+{
+  "event": "ai_provider_usage",
+  "idempotency_key": ["operation_id", "segment_id"],
+  "amount": 0,
+  "metadata_fields": ["operation_id", "segment_id", "segment"],
+  "duplicate_behavior": "return false without another row",
+  "transaction_attempts": 3,
+  "uncertain_failure": "fail closed"
+}

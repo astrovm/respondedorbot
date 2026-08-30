@@ -197,6 +197,16 @@ class _RustBillingAiCharges(Protocol):
     ) -> tuple[bool, bool, str | None, str | None, int, int, int]: ...
 
 
+class _RustBillingProviderUsage(Protocol):
+    def billing_record_ai_provider_usage(
+        self,
+        database_url: str,
+        user_id: int,
+        chat_id: int | None,
+        metadata_json: str,
+    ) -> bool: ...
+
+
 def _load_rust_billing_reads() -> _RustBillingReads | None:
     module = load_rust_bridge("RUST_BILLING_READ_SHADOW_ENABLED")
     if module is None:
@@ -258,6 +268,13 @@ def _load_rust_billing_ai_charges() -> _RustBillingAiCharges | None:
     if module is None:
         return None
     return cast(_RustBillingAiCharges, module)
+
+
+def _load_rust_billing_provider_usage() -> _RustBillingProviderUsage | None:
+    module = load_rust_bridge("RUST_BILLING_PROVIDER_USAGE_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustBillingProviderUsage, module)
 
 
 class CreditsDBError(RuntimeError):
@@ -1250,6 +1267,27 @@ def record_ai_provider_usage(
 ) -> bool:
     """Persist one provider result before the next external call starts."""
 
+    metadata = {
+        "operation_id": str(operation_id),
+        "segment_id": str(segment_id),
+        "segment": dict(segment),
+    }
+    rust = _load_rust_billing_provider_usage()
+    database_url = get_database_url()
+    if rust is not None and database_url:
+        ensure_schema()
+        try:
+            return bool(
+                rust.billing_record_ai_provider_usage(
+                    database_url,
+                    int(user_id),
+                    int(chat_id) if chat_id is not None else None,
+                    json.dumps(metadata, default=str),
+                )
+            )
+        except Exception as error:
+            raise CreditsDBError("Rust AI provider usage transaction failed") from error
+
     ensure_schema()
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
@@ -1270,14 +1308,7 @@ def record_ai_provider_usage(
                 int(user_id),
                 int(user_id),
                 int(chat_id) if chat_id is not None else None,
-                json.dumps(
-                    {
-                        "operation_id": str(operation_id),
-                        "segment_id": str(segment_id),
-                        "segment": dict(segment),
-                    },
-                    default=str,
-                ),
+                json.dumps(metadata, default=str),
             ),
         )
         inserted = cur.fetchone() is not None

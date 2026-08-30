@@ -313,6 +313,24 @@ class _FakeRustAiCharges:
         return True, True, None, "chat", amount, 100, 500
 
 
+class _FakeRustProviderUsage:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls: list[tuple[str, int, int | None, dict[str, object]]] = []
+
+    def billing_record_ai_provider_usage(
+        self,
+        database_url: str,
+        user_id: int,
+        chat_id: int | None,
+        metadata_json: str,
+    ) -> bool:
+        self.calls.append((database_url, user_id, chat_id, json.loads(metadata_json)))
+        if self.fail:
+            raise ValueError("synthetic uncertain provider usage failure")
+        return True
+
+
 def _patch_python_balance(
     monkeypatch: pytest.MonkeyPatch,
     balance: int,
@@ -910,3 +928,57 @@ def test_billing_ai_charge_uncertain_failure_does_not_start_python_writer(
 
     with pytest.raises(credits_db.CreditsDBError, match="Rust AI charge"):
         credits_db.charge_ai_credits(42, 202, 300)
+
+
+def test_billing_provider_usage_is_authoritative_and_preserves_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(credits_db, "get_database_url", lambda: "postgresql://db")
+    monkeypatch.setattr(
+        credits_db,
+        "connect",
+        lambda: pytest.fail("Python provider usage writer must not run"),
+    )
+    rust = _FakeRustProviderUsage()
+    monkeypatch.setattr(credits_db, "_load_rust_billing_provider_usage", lambda: rust)
+
+    assert credits_db.record_ai_provider_usage(
+        42,
+        202,
+        "synthetic-operation",
+        "segment-1",
+        {"input_tokens": 12},
+    )
+    assert rust.calls == [
+        (
+            "postgresql://db",
+            42,
+            202,
+            {
+                "operation_id": "synthetic-operation",
+                "segment_id": "segment-1",
+                "segment": {"input_tokens": 12},
+            },
+        )
+    ]
+
+
+def test_billing_provider_usage_uncertain_failure_does_not_start_python_writer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(credits_db, "get_database_url", lambda: "postgresql://db")
+    monkeypatch.setattr(
+        credits_db,
+        "connect",
+        lambda: pytest.fail("uncertain writes must fail closed"),
+    )
+    monkeypatch.setattr(
+        credits_db,
+        "_load_rust_billing_provider_usage",
+        lambda: _FakeRustProviderUsage(fail=True),
+    )
+
+    with pytest.raises(credits_db.CreditsDBError, match="provider usage"):
+        credits_db.record_ai_provider_usage(42, None, "operation", "segment", {})
