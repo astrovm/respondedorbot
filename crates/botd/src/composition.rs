@@ -25,9 +25,9 @@ use num_bigint::{BigInt, BigUint};
 use thiserror::Error;
 
 use crate::dispatcher::{
-    ActionReceipt, ActionSink, BillingBalanceSource, BillingBalances, ChatConfigSource,
-    GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink, NativeDispatcher, RandomSource,
-    RuntimeValues, StarPaymentReceipt, StarPaymentSink,
+    ActionReceipt, ActionSink, BillingBalanceSource, BillingBalances, BillingTransferSink,
+    ChatConfigSource, GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink,
+    NativeDispatcher, RandomSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink,
 };
 use crate::runtime::{PollingRuntime, UpdateSource};
 
@@ -85,6 +85,26 @@ impl BillingBalanceSource for BillingRepository {
             user_balance,
             chat_balance,
             diagnostics,
+        })
+    }
+}
+
+impl BillingTransferSink for BillingRepository {
+    fn transfer(
+        &mut self,
+        user_id: i64,
+        chat_id: i64,
+        amount: i64,
+    ) -> Result<bot_core::billing_commands::TransferResult, String> {
+        let amount = i32::try_from(amount)
+            .map_err(|_| "credit transfer amount exceeds the persistent range".to_owned())?;
+        let result = self
+            .transfer_user_to_chat(user_id, chat_id, amount)
+            .map_err(|error| error.to_string())?;
+        Ok(bot_core::billing_commands::TransferResult {
+            transferred: result.transferred,
+            user_balance: result.user_balance,
+            chat_balance: result.chat_balance,
         })
     }
 }
@@ -426,7 +446,8 @@ pub fn build_native_runtime(
             bot_name,
         )
         .with_payment_sink(Box::new(BillingRepository::new(database_url)))
-        .with_balance_source(Box::new(BillingRepository::new(database_url))),
+        .with_balance_source(Box::new(BillingRepository::new(database_url)))
+        .with_transfer_sink(Box::new(BillingRepository::new(database_url))),
     ))
 }
 
@@ -457,8 +478,8 @@ mod tests {
     use num_bigint::BigInt;
 
     use crate::dispatcher::{
-        ActionReceipt, ActionSink, GroupAuthorizer, MessageStateSink, RandomSource, RuntimeValues,
-        StarPaymentSink,
+        ActionReceipt, ActionSink, BillingTransferSink, GroupAuthorizer, MessageStateSink,
+        RandomSource, RuntimeValues, StarPaymentSink,
     };
     use crate::runtime::UpdateSource;
 
@@ -607,6 +628,15 @@ mod tests {
                 ..base
             }),
             Err("credit amount exceeds the PostgreSQL integer range".to_owned())
+        );
+    }
+
+    #[test]
+    fn transfer_sink_rejects_values_that_cannot_fit_the_persistent_schema() {
+        let mut repository = BillingRepository::new("postgresql://unused");
+        assert_eq!(
+            repository.transfer(42, -202, i64::from(i32::MAX) + 1),
+            Err("credit transfer amount exceeds the persistent range".to_owned())
         );
     }
 

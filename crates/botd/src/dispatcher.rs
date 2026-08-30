@@ -1,6 +1,10 @@
 //! Native update dispatch for feature-complete command vertical slices.
 
 use bot_adapters::telegram_polling::{IncomingEvent, IncomingMessage, IncomingUpdate};
+use bot_core::billing_commands::{
+    TransferCommandContext, TransferCommandPlan, TransferResult, plan_transfer_command,
+    transfer_result_reply,
+};
 use bot_core::chat_config::ChatConfig;
 use bot_core::command_parsing::parse_command;
 use bot_core::command_state::{
@@ -113,6 +117,15 @@ pub trait BillingBalanceSource {
     fn load(&mut self, user_id: i64, chat_id: Option<i64>) -> Result<BillingBalances, String>;
 }
 
+pub trait BillingTransferSink {
+    fn transfer(
+        &mut self,
+        user_id: i64,
+        chat_id: i64,
+        amount: i64,
+    ) -> Result<TransferResult, String>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchOutcome {
     Handled,
@@ -150,6 +163,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     billing_available: bool,
     payment_sink: Option<Box<dyn StarPaymentSink>>,
     balance_source: Option<Box<dyn BillingBalanceSource>>,
+    transfer_sink: Option<Box<dyn BillingTransferSink>>,
     last_outcome: Option<DispatchOutcome>,
     state_diagnostics: Vec<String>,
 }
@@ -185,6 +199,7 @@ where
             billing_available: true,
             payment_sink: None,
             balance_source: None,
+            transfer_sink: None,
             last_outcome: None,
             state_diagnostics: Vec::new(),
         }
@@ -207,6 +222,12 @@ where
     #[must_use]
     pub fn with_balance_source(mut self, source: Box<dyn BillingBalanceSource>) -> Self {
         self.balance_source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub fn with_transfer_sink(mut self, sink: Box<dyn BillingTransferSink>) -> Self {
+        self.transfer_sink = Some(sink);
         self
     }
 
@@ -674,6 +695,50 @@ where
                 }
                 BalanceCommandPlan::NotHandled => StatelessCommandPlan::NotHandled,
             }
+        } else if parsed.command == "/transfer" {
+            match plan_transfer_command(
+                &content.text,
+                &self.bot_name,
+                TransferCommandContext {
+                    chat_id,
+                    message_id,
+                    user_id: Some(sender_id.0),
+                    locale,
+                    is_group,
+                    billing_available: self.billing_available,
+                },
+            ) {
+                TransferCommandPlan::Reply(action) => StatelessCommandPlan::Action(action),
+                TransferCommandPlan::Transfer {
+                    user_id,
+                    chat_id,
+                    amount,
+                } => {
+                    let Some(sink) = self.transfer_sink.as_mut() else {
+                        return Ok(DispatchOutcome::LegacyRequired);
+                    };
+                    let text = match sink.transfer(user_id, chat_id, amount) {
+                        Ok(result) => transfer_result_reply(amount, result, locale),
+                        Err(error) => {
+                            self.state_diagnostics.push(format!(
+                                "credit transfer chat_id={chat_id} user_id={user_id} amount={amount}: {error}"
+                            ));
+                            match locale {
+                                bot_core::locale::Locale::Es => {
+                                    "se trabó la transferencia, probá de nuevo".to_owned()
+                                }
+                                bot_core::locale::Locale::En => {
+                                    "the transfer failed, try again".to_owned()
+                                }
+                            }
+                        }
+                    };
+                    let mut message = SendMessage::new(ChatId(chat_id), &text);
+                    message.reply_to_message_id = Some(message_id);
+                    StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+                }
+                TransferCommandPlan::NotHandled => StatelessCommandPlan::NotHandled,
+            }
         } else if parsed.command == "/random" {
             match parse_random_selection(&parsed.message_text) {
                 Err(_) => StatelessCommandPlan::LegacyFallbackRequired,
@@ -868,10 +933,10 @@ mod tests {
     use serde_json::{Map, json};
 
     use super::{
-        ActionReceipt, ActionSink, BillingBalanceSource, BillingBalances, ChatConfigSource,
-        DispatchError, DispatchOutcome, GroupAuthorizationDecision, GroupAuthorizer,
-        MessageStateSink, NativeDispatcher, RandomSource, RuntimeValues, StarPaymentReceipt,
-        StarPaymentSink,
+        ActionReceipt, ActionSink, BillingBalanceSource, BillingBalances, BillingTransferSink,
+        ChatConfigSource, DispatchError, DispatchOutcome, GroupAuthorizationDecision,
+        GroupAuthorizer, MessageStateSink, NativeDispatcher, RandomSource, RuntimeValues,
+        StarPaymentReceipt, StarPaymentSink, TransferResult,
     };
 
     struct Config {
@@ -1125,6 +1190,25 @@ mod tests {
     impl BillingBalanceSource for Balances {
         fn load(&mut self, user_id: i64, chat_id: Option<i64>) -> Result<BillingBalances, String> {
             self.calls.borrow_mut().push((user_id, chat_id));
+            self.result.clone()
+        }
+    }
+
+    type TransferCalls = Rc<RefCell<Vec<(i64, i64, i64)>>>;
+
+    struct Transfers {
+        result: Result<TransferResult, String>,
+        calls: TransferCalls,
+    }
+
+    impl BillingTransferSink for Transfers {
+        fn transfer(
+            &mut self,
+            user_id: i64,
+            chat_id: i64,
+            amount: i64,
+        ) -> Result<TransferResult, String> {
+            self.calls.borrow_mut().push((user_id, chat_id, amount));
             self.result.clone()
         }
     }
@@ -2222,6 +2306,161 @@ mod tests {
         );
         assert_eq!(
             shadow.dispatch(update("/balance", Some("es"))),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
+        assert!(shadow.actions.0.is_empty());
+    }
+
+    #[test]
+    fn transfer_command_moves_fractional_credits_and_reports_insufficient_balance() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut success = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_transfer_sink(Box::new(Transfers {
+            result: Ok(TransferResult {
+                transferred: true,
+                user_balance: 285,
+                chat_balance: 1_215,
+            }),
+            calls: Rc::clone(&calls),
+        }));
+        let mut group_update = update("/transfer 0.1", Some("es"));
+        if let IncomingEvent::Message(message) = &mut group_update.event {
+            message.chat_type = Some("group".to_owned());
+        }
+        assert_eq!(success.dispatch(group_update), Ok(DispatchOutcome::Handled));
+        assert_eq!(calls.borrow().as_slice(), [(88, -42, 10)]);
+        let Some(TelegramAction::SendMessage(message)) = success.actions.0.first() else {
+            return;
+        };
+        assert_eq!(
+            message.text,
+            "listo, le pasé 0.10 créditos al grupo\n- lo tuyo: 2.85\n- lo del grupo: 12.15"
+        );
+
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut insufficient = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_transfer_sink(Box::new(Transfers {
+            result: Ok(TransferResult {
+                transferred: false,
+                user_balance: 70,
+                chat_balance: 0,
+            }),
+            calls,
+        }));
+        let mut group_update = update("/transfer 1.5", Some("es"));
+        if let IncomingEvent::Message(message) = &mut group_update.event {
+            message.chat_type = Some("supergroup".to_owned());
+        }
+        assert_eq!(
+            insufficient.dispatch(group_update),
+            Ok(DispatchOutcome::Handled)
+        );
+        let Some(TelegramAction::SendMessage(message)) = insufficient.actions.0.first() else {
+            return;
+        };
+        assert_eq!(
+            message.text,
+            "you do not have enough personal credits\nyou have: 0.70"
+        );
+    }
+
+    #[test]
+    fn transfer_guards_are_native_and_transaction_failures_are_safe() {
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut private = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            private.dispatch(update("/transfer 1", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let Some(TelegramAction::SendMessage(message)) = private.actions.0.first() else {
+            return;
+        };
+        assert_eq!(message.text, "esto es para grupos, capo: /transfer <monto>");
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut failed = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_transfer_sink(Box::new(Transfers {
+            result: Err("synthetic uncertain transaction".to_owned()),
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }));
+        let mut group_update = update("/transfer 1", Some("es"));
+        if let IncomingEvent::Message(message) = &mut group_update.event {
+            message.chat_type = Some("group".to_owned());
+        }
+        assert_eq!(failed.dispatch(group_update), Ok(DispatchOutcome::Handled));
+        let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
+            return;
+        };
+        assert_eq!(message.text, "se trabó la transferencia, probá de nuevo");
+        assert!(failed.state_diagnostics()[0].contains("synthetic uncertain transaction"));
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut shadow = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        let mut group_update = update("/transfer 1", Some("es"));
+        if let IncomingEvent::Message(message) = &mut group_update.event {
+            message.chat_type = Some("group".to_owned());
+        }
+        assert_eq!(
+            shadow.dispatch(group_update),
             Ok(DispatchOutcome::LegacyRequired)
         );
         assert!(shadow.actions.0.is_empty());

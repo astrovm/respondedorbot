@@ -9,6 +9,7 @@ pub mod ai_response_cleanup;
 pub mod ai_settlement;
 pub mod ai_usage;
 pub mod base_conversion;
+pub mod billing_commands;
 pub mod cache_policy;
 pub mod chat_config;
 pub mod command_normalization;
