@@ -19,11 +19,13 @@ pub mod redis_maintenance;
 pub mod redis_media_cache;
 pub mod redis_message_state;
 pub mod redis_task_store;
+pub mod request_cache;
 pub mod telegram_actions;
 pub mod telegram_chat_admin;
 pub mod telegram_http;
 pub mod telegram_polling;
 pub mod weather;
+pub mod yahoo_finance;
 
 /// Return the core protocol version used by this adapter build.
 #[must_use]

@@ -6,6 +6,8 @@ use regex::Regex;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::locale::Locale;
+
 static SYMBOL_REGEX: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -31,6 +33,47 @@ pub struct StockQueryPlan {
     pub queries: Vec<StockQuery>,
     pub full_query_fallback: bool,
     pub needs_top_stocks: bool,
+}
+
+#[must_use]
+pub fn classify_oil_command(command: &str) -> bool {
+    matches!(command, "/petroleo" | "/oil")
+}
+
+fn trimmed_decimal(value: f64) -> String {
+    let formatted = format!("{value:.2}");
+    formatted
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_owned()
+}
+
+#[must_use]
+pub fn render_oil_quotes(
+    brent: Option<&StockQuote>,
+    wti: Option<&StockQuote>,
+    locale: Locale,
+) -> String {
+    let mut lines = Vec::new();
+    for (name, quote) in [("Brent", brent), ("WTI", wti)] {
+        let Some(quote) = quote else {
+            continue;
+        };
+        let sign = if quote.variation >= 0.0 { "+" } else { "" };
+        lines.push(format!(
+            "{name}: {} USD ({sign}{}% 24hs)",
+            trimmed_decimal(quote.price),
+            trimmed_decimal(quote.variation)
+        ));
+    }
+    if lines.is_empty() {
+        match locale {
+            Locale::Es => "no pude traer el precio del petróleo boludo".to_owned(),
+            Locale::En => "I could not load the oil price".to_owned(),
+        }
+    } else {
+        lines.join("\n")
+    }
 }
 
 fn number(value: Option<&Value>) -> Option<f64> {
@@ -192,8 +235,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        StockQuery, StockQueryPlan, parse_yahoo_quote, plan_stock_query, select_yahoo_symbol,
+        StockQuery, StockQueryPlan, classify_oil_command, parse_yahoo_quote, plan_stock_query,
+        render_oil_quotes, select_yahoo_symbol,
     };
+    use crate::locale::Locale;
 
     #[test]
     fn quote_parser_uses_metadata_and_calculates_variation() {
@@ -304,6 +349,45 @@ mod tests {
             .queries
             .len(),
             20
+        );
+    }
+
+    #[test]
+    fn oil_commands_render_partial_full_and_localized_failure_results() {
+        assert!(classify_oil_command("/petroleo"));
+        assert!(classify_oil_command("/oil"));
+        assert!(!classify_oil_command("/oily"));
+        let brent = super::StockQuote {
+            symbol: "BZ=F".to_owned(),
+            name: String::new(),
+            price: 98.15,
+            currency: "USD".to_owned(),
+            exchange: String::new(),
+            variation: -8.782_527_881_040_9,
+        };
+        let wti = super::StockQuote {
+            symbol: "CL=F".to_owned(),
+            name: String::new(),
+            price: 95.0,
+            currency: "USD".to_owned(),
+            exchange: String::new(),
+            variation: 0.0,
+        };
+        assert_eq!(
+            render_oil_quotes(Some(&brent), Some(&wti), Locale::Es),
+            "Brent: 98.15 USD (-8.78% 24hs)\nWTI: 95 USD (+0% 24hs)"
+        );
+        assert_eq!(
+            render_oil_quotes(Some(&brent), None, Locale::En),
+            "Brent: 98.15 USD (-8.78% 24hs)"
+        );
+        assert_eq!(
+            render_oil_quotes(None, None, Locale::Es),
+            "no pude traer el precio del petróleo boludo"
+        );
+        assert_eq!(
+            render_oil_quotes(None, None, Locale::En),
+            "I could not load the oil price"
         );
     }
 }

@@ -41,6 +41,7 @@ use bot_core::stateless_commands::{
     StatelessCommandPlan, StatelessRuntimeContext, plan_runtime_stateless_command,
     plan_stateless_command,
 };
+use bot_core::stocks::{StockQuote, classify_oil_command, render_oil_quotes};
 use bot_core::telegram_actions::{SendMessage, TelegramAction};
 use bot_core::telegram_callbacks::{CallbackContextOutcome, CallbackRoute, parse_callback_context};
 use bot_core::telegram_input::{ChatId, MessageId, is_group_chat_type};
@@ -209,6 +210,17 @@ pub trait WeatherSource {
     fn load(&mut self, location: &str, now_unix: i64) -> WeatherObservationLoad;
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct OilQuoteLoad {
+    pub brent: Option<StockQuote>,
+    pub wti: Option<StockQuote>,
+    pub diagnostics: Vec<String>,
+}
+
+pub trait OilPriceSource {
+    fn load(&mut self, now_unix: i64) -> OilQuoteLoad;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchOutcome {
     Handled,
@@ -256,6 +268,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     rulo_source: Option<Box<dyn RuloSource>>,
     greeting_pool_source: Option<Box<dyn GreetingPoolSource>>,
     weather_source: Option<Box<dyn WeatherSource>>,
+    oil_price_source: Option<Box<dyn OilPriceSource>>,
     last_outcome: Option<DispatchOutcome>,
     state_diagnostics: Vec<String>,
 }
@@ -301,6 +314,7 @@ where
             rulo_source: None,
             greeting_pool_source: None,
             weather_source: None,
+            oil_price_source: None,
             last_outcome: None,
             state_diagnostics: Vec::new(),
         }
@@ -383,6 +397,12 @@ where
     #[must_use]
     pub fn with_weather_source(mut self, source: Box<dyn WeatherSource>) -> Self {
         self.weather_source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub fn with_oil_price_source(mut self, source: Box<dyn OilPriceSource>) -> Self {
+        self.oil_price_source = Some(source);
         self
     }
 
@@ -1167,6 +1187,16 @@ where
                 CreditLogPlan::NotHandled => StatelessCommandPlan::NotHandled,
                 CreditLogPlan::LegacyRequired => StatelessCommandPlan::LegacyFallbackRequired,
             }
+        } else if classify_oil_command(&parsed.command) {
+            let Some(source) = self.oil_price_source.as_mut() else {
+                return Ok(DispatchOutcome::LegacyRequired);
+            };
+            let load = source.load(timestamp);
+            self.state_diagnostics.extend(load.diagnostics);
+            let text = render_oil_quotes(load.brent.as_ref(), load.wti.as_ref(), locale);
+            let mut message = SendMessage::new(chat_id, &text);
+            message.reply_to_message_id = Some(message_id);
+            StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if classify_weather_command(&parsed.command) {
             let location = requested_location(&parsed.message_text);
             let Some(source) = self.weather_source.as_mut() else {
@@ -1490,13 +1520,15 @@ mod tests {
         BillingBalances, BillingTransferSink, BitcoinPriceSource, ChargeHistoryPage,
         ChargeHistorySource, ChatConfigSource, DispatchError, DispatchOutcome, DollarQuotesSource,
         GreetingPoolLoad, GreetingPoolSource, GroupAuthorizationDecision, GroupAuthorizer,
-        MessageStateSink, NativeDispatcher, RandomSource, RuloInputLoad, RuloSource, RuntimeValues,
-        StarPaymentReceipt, StarPaymentSink, TransferResult, WeatherObservationLoad, WeatherSource,
+        MessageStateSink, NativeDispatcher, OilPriceSource, OilQuoteLoad, RandomSource,
+        RuloInputLoad, RuloSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink,
+        TransferResult, WeatherObservationLoad, WeatherSource,
     };
     use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup};
     use bot_core::devo::DevoQuotes;
     use bot_core::greeting_commands::GreetingCategory;
     use bot_core::rulo::{ExchangeQuote, RuloInput};
+    use bot_core::stocks::StockQuote;
     use bot_core::weather::WeatherObservation;
 
     struct Config {
@@ -1860,6 +1892,18 @@ mod tests {
             self.calls
                 .borrow_mut()
                 .push((location.to_owned(), now_unix));
+            self.result.clone()
+        }
+    }
+
+    struct OilQuotes {
+        result: OilQuoteLoad,
+        calls: Rc<RefCell<Vec<i64>>>,
+    }
+
+    impl OilPriceSource for OilQuotes {
+        fn load(&mut self, now_unix: i64) -> OilQuoteLoad {
+            self.calls.borrow_mut().push(now_unix);
             self.result.clone()
         }
     }
@@ -2262,6 +2306,112 @@ mod tests {
             return;
         };
         assert_eq!(message.text, "no se pudo obtener el clima de Buenos Aires");
+    }
+
+    #[test]
+    fn oil_commands_render_partial_quotes_diagnostics_and_command_state() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let quote = |symbol: &str, price: f64, variation: f64| StockQuote {
+            symbol: symbol.to_owned(),
+            name: String::new(),
+            price,
+            currency: "USD".to_owned(),
+            exchange: String::new(),
+            variation,
+        };
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_oil_price_source(Box::new(OilQuotes {
+            result: OilQuoteLoad {
+                brent: Some(quote("BZ=F", 98.15, -8.78)),
+                wti: Some(quote("CL=F", 95.45, 1.25)),
+                diagnostics: vec!["synthetic stale quote".to_owned()],
+            },
+            calls: Rc::clone(&calls),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(update("/oil", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(calls.borrow().as_slice(), &[1_672_531_200]);
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
+            return;
+        };
+        assert_eq!(
+            message.text,
+            "Brent: 98.15 USD (-8.78% 24hs)\nWTI: 95.45 USD (+1.25% 24hs)"
+        );
+        assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
+        assert_eq!(dispatcher.state.incoming.len(), 1);
+        assert_eq!(dispatcher.state.outgoing.len(), 1);
+        assert_eq!(dispatcher.state_diagnostics(), &["synthetic stale quote"]);
+    }
+
+    #[test]
+    fn oil_failure_is_localized_and_missing_source_stays_legacy() {
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut failed = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_oil_price_source(Box::new(OilQuotes {
+            result: OilQuoteLoad {
+                brent: None,
+                wti: None,
+                diagnostics: vec!["synthetic Yahoo failure".to_owned()],
+            },
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            failed.dispatch(update("/petroleo", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
+            return;
+        };
+        assert_eq!(message.text, "no pude traer el precio del petróleo boludo");
+        assert!(failed.state_diagnostics()[0].contains("Yahoo failure"));
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut missing = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            missing.dispatch(update("/oil", None)),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
+        assert!(missing.actions.0.is_empty());
     }
 
     #[test]

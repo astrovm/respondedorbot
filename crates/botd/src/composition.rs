@@ -22,6 +22,7 @@ use bot_adapters::redis_chat_admin::{cache_chat_admin, get_cached_chat_admin};
 use bot_adapters::redis_connection::RedisEndpoint;
 use bot_adapters::redis_json_cache::{RedisJsonCache, RedisJsonCacheError};
 use bot_adapters::redis_message_state::{RedisMessageState, RedisMessageStateError};
+use bot_adapters::request_cache::RequestCache;
 use bot_adapters::telegram_actions::{ActionError, ActionOutcome, execute_with};
 use bot_adapters::telegram_chat_admin::lookup_chat_admin_with;
 use bot_adapters::telegram_http::{
@@ -29,8 +30,12 @@ use bot_adapters::telegram_http::{
 };
 use bot_adapters::telegram_polling::{PollOutcome, PollingError, poll_once_with};
 use bot_adapters::weather::{
-    ReqwestWeatherTransport, TransportFailureKind as WeatherTransportFailureKind, WeatherCache,
-    WeatherTransport, load_weather,
+    ReqwestWeatherTransport, TransportFailureKind as WeatherTransportFailureKind, WeatherTransport,
+    load_weather,
+};
+use bot_adapters::yahoo_finance::{
+    ReqwestYahooFinanceTransport, TransportFailureKind as YahooTransportFailureKind,
+    YahooFinanceTransport, load_quote as load_yahoo_quote,
 };
 use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup, ChargeHistoryPage};
 use bot_core::chat_config::ChatConfig;
@@ -48,9 +53,9 @@ use crate::dispatcher::{
     ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BillingBalanceSource,
     BillingBalances, BillingTransferSink, BitcoinPriceSource, ChargeHistorySource,
     ChatConfigSource, DollarQuotesSource, GreetingPoolLoad, GreetingPoolSource,
-    GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink, NativeDispatcher, RandomSource,
-    RuloInputLoad, RuloSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink,
-    WeatherObservationLoad, WeatherSource,
+    GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink, NativeDispatcher,
+    OilPriceSource, OilQuoteLoad, RandomSource, RuloInputLoad, RuloSource, RuntimeValues,
+    StarPaymentReceipt, StarPaymentSink, WeatherObservationLoad, WeatherSource,
 };
 use crate::runtime::{PollingRuntime, UpdateSource};
 
@@ -204,12 +209,31 @@ struct OpenMeteoWeatherSource<T, C> {
     cache: C,
 }
 
-impl<T: WeatherTransport, C: WeatherCache> WeatherSource for OpenMeteoWeatherSource<T, C> {
+impl<T: WeatherTransport, C: RequestCache> WeatherSource for OpenMeteoWeatherSource<T, C> {
     fn load(&mut self, location: &str, now_unix: i64) -> WeatherObservationLoad {
         let load = load_weather(&self.transport, &mut self.cache, location, now_unix);
         WeatherObservationLoad {
             observation: load.observation,
             diagnostics: load.diagnostics,
+        }
+    }
+}
+
+struct YahooOilPriceSource<T, C> {
+    transport: T,
+    cache: C,
+}
+
+impl<T: YahooFinanceTransport, C: RequestCache> OilPriceSource for YahooOilPriceSource<T, C> {
+    fn load(&mut self, now_unix: i64) -> OilQuoteLoad {
+        let brent = load_yahoo_quote(&self.transport, &mut self.cache, "BZ=F", now_unix);
+        let wti = load_yahoo_quote(&self.transport, &mut self.cache, "CL=F", now_unix);
+        let mut diagnostics = brent.diagnostics;
+        diagnostics.extend(wti.diagnostics);
+        OilQuoteLoad {
+            brent: brent.quote,
+            wti: wti.quote,
+            diagnostics,
         }
     }
 }
@@ -678,6 +702,10 @@ pub enum CompositionError {
     WeatherTransport(WeatherTransportFailureKind),
     #[error("could not construct weather Redis cache: {0}")]
     WeatherCache(RedisJsonCacheError),
+    #[error("could not construct Yahoo Finance transport: {0:?}")]
+    YahooTransport(YahooTransportFailureKind),
+    #[error("could not construct Yahoo Finance Redis cache: {0}")]
+    YahooCache(RedisJsonCacheError),
     #[error("could not construct Redis command state: {0}")]
     RedisState(#[from] RedisMessageStateError),
 }
@@ -714,6 +742,10 @@ pub fn build_native_runtime(
         ReqwestWeatherTransport::new().map_err(CompositionError::WeatherTransport)?;
     let weather_cache =
         RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::WeatherCache)?;
+    let yahoo_transport =
+        ReqwestYahooFinanceTransport::new().map_err(CompositionError::YahooTransport)?;
+    let yahoo_cache =
+        RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::YahooCache)?;
     let source =
         TelegramUpdateSource::new(polling_transport, options.token, options.long_poll_timeout);
     let config = ChatConfigRepository::new(options.database_url);
@@ -751,6 +783,10 @@ pub fn build_native_runtime(
     .with_weather_source(Box::new(OpenMeteoWeatherSource {
         transport: weather_transport,
         cache: weather_cache,
+    }))
+    .with_oil_price_source(Box::new(YahooOilPriceSource {
+        transport: yahoo_transport,
+        cache: yahoo_cache,
     }));
     let dispatcher = if let Some(api_key) = options.coinmarketcap_key.filter(|key| !key.is_empty())
     {
@@ -780,13 +816,18 @@ mod tests {
         TransportFailureKind as CriptoYaFailure,
     };
     use bot_adapters::redis_connection::RedisEndpoint;
+    use bot_adapters::request_cache::RequestCache;
     use bot_adapters::telegram_http::{
         HttpResponse, TelegramRequest, TelegramTransport, TransportFailureKind,
     };
     use bot_adapters::telegram_polling::{PollFailure, PollOutcome};
     use bot_adapters::weather::{
-        HttpResponse as WeatherHttpResponse, TransportFailureKind as WeatherFailure, WeatherCache,
+        HttpResponse as WeatherHttpResponse, TransportFailureKind as WeatherFailure,
         WeatherRequest, WeatherTransport,
+    };
+    use bot_adapters::yahoo_finance::{
+        HttpResponse as YahooHttpResponse, TransportFailureKind as YahooFailure, YahooChartRequest,
+        YahooFinanceTransport,
     };
     use bot_core::telegram_actions::{LabeledPrice, SendMessage, TelegramAction};
     use bot_core::telegram_input::ChatId;
@@ -802,7 +843,7 @@ mod tests {
 
     use crate::dispatcher::{
         ActionReceipt, ActionSink, BillingTransferSink, GroupAuthorizer, MessageStateSink,
-        RandomSource, RuntimeValues, StarPaymentSink, WeatherSource,
+        OilPriceSource, RandomSource, RuntimeValues, StarPaymentSink, WeatherSource,
     };
     use crate::runtime::UpdateSource;
 
@@ -812,7 +853,7 @@ mod tests {
         CriptoYaRuloSource, NativeRuntimeOptions, OpenMeteoWeatherSource, RedisCommandState,
         SystemRandomError, SystemRandomSource, SystemRuntimeValues, TelegramActionSink,
         TelegramActionSinkError, TelegramGroupAuthorizer, TelegramUpdateSource,
-        build_native_runtime, publish_telegram_commands,
+        YahooOilPriceSource, build_native_runtime, publish_telegram_commands,
     };
     use crate::dispatcher::RuloSource;
 
@@ -830,6 +871,21 @@ mod tests {
         response: RefCell<Option<Result<WeatherHttpResponse, WeatherFailure>>>,
     }
 
+    struct YahooTransportStub {
+        responses: RefCell<Vec<Result<YahooHttpResponse, YahooFailure>>>,
+        requests: RefCell<Vec<YahooChartRequest>>,
+    }
+
+    impl YahooFinanceTransport for YahooTransportStub {
+        fn chart(&self, request: &YahooChartRequest) -> Result<YahooHttpResponse, YahooFailure> {
+            self.requests.borrow_mut().push(request.clone());
+            if self.responses.borrow().is_empty() {
+                return Err(YahooFailure::Request);
+            }
+            self.responses.borrow_mut().remove(0)
+        }
+    }
+
     impl WeatherTransport for WeatherTransportStub {
         fn get(&self, _request: &WeatherRequest) -> Result<WeatherHttpResponse, WeatherFailure> {
             self.response
@@ -842,7 +898,7 @@ mod tests {
     #[derive(Default)]
     struct WeatherCacheStub;
 
-    impl WeatherCache for WeatherCacheStub {
+    impl RequestCache for WeatherCacheStub {
         type Error = std::convert::Infallible;
 
         fn get(&mut self, _key: &str) -> Result<Option<String>, Self::Error> {
@@ -1483,5 +1539,37 @@ mod tests {
             Some("Buenos Aires, Argentina".to_owned())
         );
         assert!(load.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn oil_source_loads_both_yahoo_contract_symbols() {
+        let chart = |symbol: &str, price: f64| YahooHttpResponse {
+            status_code: 200,
+            body: format!(
+                r#"{{"chart":{{"result":[{{"meta":{{"symbol":"{symbol}","regularMarketPrice":{price},"chartPreviousClose":100,"currency":"USD"}}}}]}}}}"#
+            ),
+        };
+        let transport = YahooTransportStub {
+            responses: RefCell::new(vec![Ok(chart("BZ=F", 98.15)), Ok(chart("CL=F", 95.45))]),
+            requests: RefCell::default(),
+        };
+        let mut source = YahooOilPriceSource {
+            transport,
+            cache: WeatherCacheStub,
+        };
+        let load = source.load(100);
+        assert_eq!(load.brent.map(|quote| quote.price), Some(98.15));
+        assert_eq!(load.wti.map(|quote| quote.price), Some(95.45));
+        assert!(load.diagnostics.is_empty());
+        assert_eq!(
+            source
+                .transport
+                .requests
+                .borrow()
+                .iter()
+                .map(|request| request.symbol.as_str())
+                .collect::<Vec<_>>(),
+            vec!["BZ=F", "CL=F"]
+        );
     }
 }

@@ -3,17 +3,16 @@
 use std::thread;
 use std::time::Duration;
 
-use bot_core::cache_policy::{request_cache_key, request_cache_ttl};
+use bot_core::cache_policy::request_cache_key;
 use bot_core::weather::{
     DEFAULT_WEATHER_LOCATION, WeatherObservation, search_key, select_forecast_hour,
     select_location_candidate,
 };
 use reqwest::blocking::Client;
-use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::redis_json_cache::{RedisJsonCache, RedisJsonCacheError};
+use crate::request_cache::{JsonHttpResponse, RequestCache, load_cached_json};
 
 const GEOCODING_URL: &str = "https://geocoding-api.open-meteo.com/v1/search";
 const FORECAST_URL: &str = "https://api.open-meteo.com/v1/forecast";
@@ -43,26 +42,6 @@ pub trait WeatherTransport {
     fn get(&self, request: &WeatherRequest) -> Result<HttpResponse, TransportFailureKind>;
 
     fn before_retry(&self) {}
-}
-
-pub trait WeatherCache {
-    type Error: std::fmt::Display;
-
-    fn get(&mut self, key: &str) -> Result<Option<String>, Self::Error>;
-
-    fn set(&mut self, key: &str, value: &str, ttl_seconds: i64) -> Result<(), Self::Error>;
-}
-
-impl WeatherCache for RedisJsonCache {
-    type Error = RedisJsonCacheError;
-
-    fn get(&mut self, key: &str) -> Result<Option<String>, Self::Error> {
-        RedisJsonCache::get(self, key)
-    }
-
-    fn set(&mut self, key: &str, value: &str, ttl_seconds: i64) -> Result<(), Self::Error> {
-        RedisJsonCache::set(self, key, value, Some(ttl_seconds)).map(|_stored| ())
-    }
 }
 
 pub struct ReqwestWeatherTransport {
@@ -133,12 +112,6 @@ pub struct WeatherLoad {
     pub diagnostics: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct CachedResponse {
-    timestamp: i64,
-    data: Value,
-}
-
 fn python_string(value: &str) -> String {
     let mut encoded = String::from("\"");
     for character in value.chars() {
@@ -195,7 +168,7 @@ fn compatible_cache_key(request: &WeatherRequest) -> String {
     request_cache_key(&encoded)
 }
 
-fn cached_request<T: WeatherTransport, C: WeatherCache>(
+fn cached_request<T: WeatherTransport, C: RequestCache>(
     transport: &T,
     cache: &mut C,
     request: &WeatherRequest,
@@ -203,67 +176,30 @@ fn cached_request<T: WeatherTransport, C: WeatherCache>(
     diagnostics: &mut Vec<String>,
 ) -> Option<Value> {
     let key = compatible_cache_key(request);
-    let cached = match cache.get(&key) {
-        Ok(Some(raw)) => match serde_json::from_str::<CachedResponse>(&raw) {
-            Ok(cached) => Some(cached),
-            Err(error) => {
-                diagnostics.push(format!("invalid weather cache key {key}: {error}"));
-                return None;
-            }
+    let label = format!("weather request {request:?}");
+    let load = load_cached_json(
+        cache,
+        &key,
+        CACHE_TTL_SECONDS,
+        now_unix,
+        &label,
+        || {
+            transport
+                .get(request)
+                .map(|response| JsonHttpResponse {
+                    status_code: response.status_code,
+                    body: response.body,
+                })
+                .map_err(|error| match error {
+                    TransportFailureKind::Timeout => "timeout".to_owned(),
+                    TransportFailureKind::Connection => "connection error".to_owned(),
+                    TransportFailureKind::Request => "request error".to_owned(),
+                })
         },
-        Ok(None) => None,
-        Err(error) => {
-            diagnostics.push(format!("could not read weather cache key {key}: {error}"));
-            return None;
-        }
-    };
-    if let Some(cached) = &cached
-        && now_unix.saturating_sub(cached.timestamp) <= CACHE_TTL_SECONDS
-    {
-        return Some(cached.data.clone());
-    }
-
-    for attempt in 0..2 {
-        let fetched = match transport.get(request) {
-            Ok(response) if response.status_code < 400 => {
-                serde_json::from_str::<Value>(&response.body).map_err(|_| "invalid JSON")
-            }
-            Ok(response) => Err(if response.status_code >= 500 {
-                "server HTTP error"
-            } else {
-                "HTTP error"
-            }),
-            Err(TransportFailureKind::Timeout) => Err("timeout"),
-            Err(TransportFailureKind::Connection) => Err("connection error"),
-            Err(TransportFailureKind::Request) => Err("request error"),
-        };
-        if let Ok(data) = fetched {
-            let value = json!({"timestamp": now_unix, "data": data});
-            let encoded = match serde_json::to_string(&value) {
-                Ok(encoded) => encoded,
-                Err(error) => {
-                    diagnostics.push(format!("could not encode weather cache value: {error}"));
-                    return cached.map(|cached| cached.data);
-                }
-            };
-            match cache.set(&key, &encoded, request_cache_ttl(CACHE_TTL_SECONDS)) {
-                Ok(()) => return value.get("data").cloned(),
-                Err(error) => diagnostics.push(format!(
-                    "could not write weather cache key {key} on attempt {}: {error}",
-                    attempt + 1
-                )),
-            }
-        } else if let Err(error) = fetched {
-            diagnostics.push(format!(
-                "weather request {request:?} attempt {} failed: {error}",
-                attempt + 1
-            ));
-        }
-        if attempt == 0 {
-            transport.before_retry();
-        }
-    }
-    cached.map(|cached| cached.data)
+        || transport.before_retry(),
+    );
+    diagnostics.extend(load.diagnostics);
+    load.data
 }
 
 #[derive(Debug, Clone)]
@@ -303,7 +239,7 @@ fn locations(data: &Value) -> Vec<Location> {
         .collect()
 }
 
-fn search_locations<T: WeatherTransport, C: WeatherCache>(
+fn search_locations<T: WeatherTransport, C: RequestCache>(
     transport: &T,
     cache: &mut C,
     name: &str,
@@ -322,7 +258,7 @@ fn search_locations<T: WeatherTransport, C: WeatherCache>(
     .map_or_else(Vec::new, |data| locations(&data))
 }
 
-fn resolve_location<T: WeatherTransport, C: WeatherCache>(
+fn resolve_location<T: WeatherTransport, C: RequestCache>(
     transport: &T,
     cache: &mut C,
     requested: &str,
@@ -456,7 +392,7 @@ fn observation(data: &Value, location: &Location, now_unix: i64) -> Option<Weath
 }
 
 #[must_use]
-pub fn load_weather<T: WeatherTransport, C: WeatherCache>(
+pub fn load_weather<T: WeatherTransport, C: RequestCache>(
     transport: &T,
     cache: &mut C,
     requested: &str,
@@ -499,9 +435,10 @@ mod tests {
     use std::convert::Infallible;
 
     use super::{
-        HttpResponse, TransportFailureKind, WeatherCache, WeatherRequest, WeatherTransport,
-        compatible_cache_key, load_weather, python_cache_arguments,
+        HttpResponse, TransportFailureKind, WeatherRequest, WeatherTransport, compatible_cache_key,
+        load_weather, python_cache_arguments,
     };
+    use crate::request_cache::RequestCache;
 
     struct Transport {
         responses: RefCell<VecDeque<Result<HttpResponse, TransportFailureKind>>>,
@@ -524,7 +461,7 @@ mod tests {
         sets: Vec<(String, String, i64)>,
     }
 
-    impl WeatherCache for Cache {
+    impl RequestCache for Cache {
         type Error = Infallible;
 
         fn get(&mut self, _key: &str) -> Result<Option<String>, Self::Error> {
