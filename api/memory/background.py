@@ -8,7 +8,7 @@ import time
 from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Protocol, cast
 from uuid import uuid4
 
 from api.ai.pricing import calculate_billing_for_segments, credit_units_from_usd_micros
@@ -18,6 +18,7 @@ from api.billing.reconciliation import (
     mark_ai_operation_active,
     mark_ai_operation_inactive,
 )
+from api.core.rust_bridge import load_rust_bridge
 from api.i18n import current_locale, normalize_locale, use_locale
 from api.memory.compaction import CompactionPlan
 
@@ -28,6 +29,112 @@ _LOCK_PREFIX = "memory:compaction:lock:"
 _LOCK_TTL_SECONDS = 60 * 60
 _POLL_SECONDS = 2.0
 _MAX_ATTEMPTS = 3
+
+
+class _RustCompactionPolicy(Protocol):
+    def evaluate_compaction_policy(
+        self,
+        current_summary: str | None,
+        current_marker: str | None,
+        prior_summary: str | None,
+        expected_marker: str | None,
+        result_summary: str | None,
+        target_marker: str,
+    ) -> str: ...
+
+    def compaction_job_is_due(self, next_attempt_at: float, now: float) -> bool: ...
+
+    def compaction_retry_transition(
+        self,
+        attempts: int,
+        now: float,
+        has_billing_segment: bool,
+    ) -> str: ...
+
+
+def _load_rust_compaction_policy() -> _RustCompactionPolicy | None:
+    module = load_rust_bridge("RUST_COMPACTION_POLICY_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustCompactionPolicy, module)
+
+
+def _compaction_job_is_due(next_attempt_at: float, now: float) -> bool:
+    rust = _load_rust_compaction_policy()
+    if rust is not None:
+        try:
+            return bool(rust.compaction_job_is_due(next_attempt_at, now))
+        except Exception:
+            pass
+    return next_attempt_at <= now
+
+
+def _compaction_disposition(
+    *,
+    current_summary: str | None,
+    current_marker: str | None,
+    prior_summary: str | None,
+    expected_marker: str | None,
+    result_summary: str | None,
+    target_marker: str,
+) -> str:
+    rust = _load_rust_compaction_policy()
+    if rust is not None:
+        try:
+            return rust.evaluate_compaction_policy(
+                current_summary,
+                current_marker,
+                prior_summary,
+                expected_marker,
+                result_summary,
+                target_marker,
+            )
+        except Exception:
+            pass
+    if (
+        result_summary
+        and current_summary == result_summary
+        and current_marker == target_marker
+    ):
+        return "settle_recovered_success"
+    if current_summary != prior_summary or current_marker != expected_marker:
+        return "settle_obsolete"
+    return "generate_summary" if not result_summary else "save_and_settle"
+
+
+def _compaction_retry_transition(
+    attempts: int,
+    now: float,
+    has_billing_segment: bool,
+) -> dict[str, Any]:
+    rust = _load_rust_compaction_policy()
+    if rust is not None:
+        try:
+            transition = json.loads(
+                rust.compaction_retry_transition(
+                    attempts,
+                    now,
+                    has_billing_segment,
+                )
+            )
+            if isinstance(transition, dict):
+                return cast(dict[str, Any], transition)
+        except Exception:
+            pass
+    attempts += 1
+    if attempts >= _MAX_ATTEMPTS:
+        return {
+            "attempts": attempts,
+            "terminal": True,
+            "next_attempt_at": None,
+            "actual_credit_units": None if has_billing_segment else 0,
+        }
+    return {
+        "attempts": attempts,
+        "terminal": False,
+        "next_attempt_at": now + 30 * (2 ** (attempts - 1)),
+        "actual_credit_units": None,
+    }
 
 
 def _reservation_credit_scale(reservation: Mapping[str, Any]) -> Any:
@@ -220,7 +327,7 @@ class DurableCompactionQueue:
                 if self._settle_invalid_job(decoded, chat_id=chat_id):
                     client.hdel(_JOBS_KEY, chat_id)
                 continue
-            if job.next_attempt_at > time.time():
+            if not _compaction_job_is_due(job.next_attempt_at, time.time()):
                 continue
             token = uuid4().hex
             if not client.set(f"{_LOCK_PREFIX}{chat_id}", token, nx=True, ex=_LOCK_TTL_SECONDS):
@@ -247,16 +354,20 @@ class DurableCompactionQueue:
                 job.chat_id,
                 json.dumps(asdict(job), ensure_ascii=False),
             )
-        if (
-            job.result_summary
-            and current_summary == job.result_summary
-            and current_marker == job.target_marker
-        ):
+        disposition = _compaction_disposition(
+            current_summary=current_summary,
+            current_marker=current_marker,
+            prior_summary=job.prior_summary,
+            expected_marker=job.expected_marker,
+            result_summary=job.result_summary,
+            target_marker=job.target_marker,
+        )
+        if disposition == "settle_recovered_success":
             # The process stopped after saving memory but before deleting the
             # durable job. Finish its billing instead of refunding it.
             self._settle(job, reason="memory_compaction_success")
             return
-        if current_summary != job.prior_summary or current_marker != job.expected_marker:
+        if disposition == "settle_obsolete":
             self._settle(
                 job,
                 actual_credit_units=(None if job.result_billing_segment is not None else 0),
@@ -264,7 +375,7 @@ class DurableCompactionQueue:
             )
             return
 
-        if not job.result_summary:
+        if disposition == "generate_summary":
             with use_locale(normalize_locale(job.locale)):
                 result = self._compact(job.messages, job.prior_summary)
             summary, cost = result[:2]
@@ -283,10 +394,13 @@ class DurableCompactionQueue:
 
         else:
             self._persist_provider_usage(job)
+        result_summary = job.result_summary
+        if not result_summary:
+            raise RuntimeError("compaction policy selected save without a result")
         self._save_result(
             client,
             job.chat_id,
-            job.result_summary,
+            result_summary,
             job.target_marker,
         )
         self._settle(job, reason="memory_compaction_success")
@@ -299,7 +413,12 @@ class DurableCompactionQueue:
         )
 
     def _retry_or_refund(self, client: Any, job: CompactionJob, error: Exception) -> None:
-        job.attempts += 1
+        transition = _compaction_retry_transition(
+            job.attempts,
+            time.time(),
+            job.result_billing_segment is not None,
+        )
+        job.attempts = int(transition["attempts"])
         self._logger.warning(
             "compaction: attempt failed chat_id=%s attempt=%d/%d error=%s",
             job.chat_id,
@@ -307,15 +426,15 @@ class DurableCompactionQueue:
             _MAX_ATTEMPTS,
             error,
         )
-        if job.attempts >= _MAX_ATTEMPTS:
+        if bool(transition["terminal"]):
             self._settle(
                 job,
-                actual_credit_units=(None if job.result_billing_segment is not None else 0),
+                actual_credit_units=transition["actual_credit_units"],
                 reason="memory_compaction_failed",
             )
             client.hdel(_JOBS_KEY, job.chat_id)
             return
-        job.next_attempt_at = time.time() + 30 * (2 ** (job.attempts - 1))
+        job.next_attempt_at = float(transition["next_attempt_at"])
         client.hset(
             _JOBS_KEY,
             job.chat_id,

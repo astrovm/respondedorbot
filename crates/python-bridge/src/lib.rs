@@ -17,6 +17,10 @@ use bot_core::cache_policy::{
 };
 use bot_core::command_normalization::normalize_command_text as normalize_command_text_core;
 use bot_core::command_parsing::parse_command as parse_command_core;
+use bot_core::compaction_policy::{
+    CompactionDisposition, evaluate_compaction as evaluate_compaction_core,
+    is_due as compaction_is_due_core, retry_after_failure as retry_compaction_core,
+};
 use bot_core::config_callbacks::{
     ConfigCallbackEvaluation, ConfigCallbackInput, ToggleField,
     evaluate_config_callback as evaluate_config_callback_core,
@@ -1239,6 +1243,46 @@ fn rank_message_search_results(
     .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn evaluate_compaction_policy(
+    current_summary: Option<&str>,
+    current_marker: Option<&str>,
+    prior_summary: Option<&str>,
+    expected_marker: Option<&str>,
+    result_summary: Option<&str>,
+    target_marker: &str,
+) -> &'static str {
+    match evaluate_compaction_core(
+        current_summary,
+        current_marker,
+        prior_summary,
+        expected_marker,
+        result_summary,
+        target_marker,
+    ) {
+        CompactionDisposition::SettleRecoveredSuccess => "settle_recovered_success",
+        CompactionDisposition::SettleObsolete => "settle_obsolete",
+        CompactionDisposition::GenerateSummary => "generate_summary",
+        CompactionDisposition::SaveAndSettle => "save_and_settle",
+    }
+}
+
+#[pyfunction]
+fn compaction_job_is_due(next_attempt_at: f64, now: f64) -> bool {
+    compaction_is_due_core(next_attempt_at, now)
+}
+
+#[pyfunction]
+fn compaction_retry_transition(
+    attempts: u32,
+    now: f64,
+    has_billing_segment: bool,
+) -> PyResult<String> {
+    serde_json::to_string(&retry_compaction_core(attempts, now, has_billing_segment))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -1328,6 +1372,9 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(escape_message_search_text, module)?)?;
     module.add_function(wrap_pyfunction!(escape_message_search_tag, module)?)?;
     module.add_function(wrap_pyfunction!(rank_message_search_results, module)?)?;
+    module.add_function(wrap_pyfunction!(evaluate_compaction_policy, module)?)?;
+    module.add_function(wrap_pyfunction!(compaction_job_is_due, module)?)?;
+    module.add_function(wrap_pyfunction!(compaction_retry_transition, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;

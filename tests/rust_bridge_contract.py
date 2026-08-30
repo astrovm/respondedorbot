@@ -297,6 +297,34 @@ def verify_message_state(bridge: ModuleType) -> None:
     assert actual_ranking == ranking["expected"]
 
 
+def verify_compaction_policy(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "compaction_policy.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["due"]:
+        actual = bridge.compaction_job_is_due(case["next_attempt_at"], case["now"])
+        assert actual is case["expected"], case["name"]
+    for case in contract["dispositions"]:
+        request = case["input"]
+        actual = bridge.evaluate_compaction_policy(
+            request["current_summary"],
+            request["current_marker"],
+            request["prior_summary"],
+            request["expected_marker"],
+            request["result_summary"],
+            request["target_marker"],
+        )
+        assert actual == case["expected"], case["name"]
+    for case in contract["retries"]:
+        actual = json.loads(
+            bridge.compaction_retry_transition(
+                case["attempts"],
+                case["now"],
+                case["has_billing_segment"],
+            )
+        )
+        assert actual == case["expected"], case["name"]
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -368,6 +396,7 @@ def main(arguments: list[str]) -> int:
     verify_admin_reports(bridge)
     verify_cache_policy(bridge)
     verify_message_state(bridge)
+    verify_compaction_policy(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

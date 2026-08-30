@@ -5,6 +5,7 @@ pub mod base_conversion;
 pub mod cache_policy;
 pub mod command_normalization;
 pub mod command_parsing;
+pub mod compaction_policy;
 pub mod config_callbacks;
 pub mod credit_units;
 pub mod devo;
