@@ -19,6 +19,7 @@ must never enter balance mutations.
 | Current chat-owned AI writer | Rust owns chat-only AI reserves, refunds, and debts | Rust only for these automation mutations; Python owns all other AI billing | Disable `RUST_BILLING_CHAT_AI_CREDITS_ENABLED` |
 | Current general AI debt writer | Rust owns user-or-chat settlement debt | Rust only for this debt mutation; Python owns all other interaction billing | Disable `RUST_BILLING_AI_DEBT_ENABLED` |
 | Current AI refund writer | Rust owns user-or-chat refunds and their replay/settlement guards | Rust only for this refund mutation; Python owns all other interaction billing | Disable `RUST_BILLING_AI_REFUNDS_ENABLED` |
+| Current AI charge writer | Rust owns user-first payer selection, explicit payer charges, reserves, and replay guards | Rust only for these charge mutations; Python owns settlement and provider usage | Disable `RUST_BILLING_AI_CHARGES_ENABLED` |
 | Rust reads | Rust is authoritative for proven read operations | Python owns non-balance writes | Disable the per-operation Rust read flag |
 | Shadow transaction decisions | Python commits; Rust evaluates the same synthetic transaction inputs without I/O | Python only | Disable the decision shadow flag |
 | Rust writer canary | Rust owns one proven mutation family | Rust for that family; Python for all others | Disable that family's writer flag before another owner starts |
@@ -114,3 +115,8 @@ uncertain failures fail closed without invoking Python.
 refunds. It preserves optional idempotency keys, refuses refunds after an
 operation settlement, locks user before chat, and records the chosen payer in
 ledger metadata. An uncertain failure never starts the Python writer.
+
+`RUST_BILLING_AI_CHARGES_ENABLED=1` makes Rust authoritative for AI reserves
+and charges. It locks user before chat, uses user-first funding unless a payer
+is explicit, returns prior idempotent results, and rejects refunded or settled
+reservations. An uncertain failure never starts the Python writer.

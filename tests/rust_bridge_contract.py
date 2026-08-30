@@ -549,6 +549,15 @@ def verify_billing_ai_refunds(bridge: ModuleType) -> None:
         raise AssertionError("Rust AI refund bridge is unavailable")
 
 
+def verify_billing_ai_charges(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "billing_ai_charges.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    if contract["payer_order"] != ["user", "chat"]:
+        raise AssertionError("AI charge payer order changed")
+    if not callable(bridge.billing_charge_ai_credits):
+        raise AssertionError("Rust AI charge bridge is unavailable")
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -638,6 +647,7 @@ def main(arguments: list[str]) -> int:
     verify_billing_chat_ai_credits(bridge)
     verify_billing_ai_debt(bridge)
     verify_billing_ai_refunds(bridge)
+    verify_billing_ai_charges(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

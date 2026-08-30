@@ -1991,6 +1991,48 @@ fn billing_refund_ai_charge(
     ))
 }
 
+/// Reserve or charge AI credits with payer selection and replay protection.
+#[pyfunction]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn billing_charge_ai_credits(
+    py: Python<'_>,
+    database_url: &str,
+    user_id: i64,
+    chat_id: Option<i64>,
+    amount: i32,
+    event_type: &str,
+    metadata_json: &str,
+    source: Option<&str>,
+    idempotency_key: Option<&str>,
+    operation_id: &str,
+) -> PyResult<(bool, bool, Option<String>, Option<String>, i64, i64, i64)> {
+    let metadata = billing_metadata(metadata_json)?;
+    let repository = BillingRepository::new(database_url);
+    let result = py
+        .detach(|| {
+            repository.charge_ai_credits(
+                user_id,
+                chat_id,
+                amount,
+                event_type,
+                &metadata,
+                source,
+                idempotency_key,
+                operation_id,
+            )
+        })
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok((
+        result.ok,
+        result.applied,
+        result.reason,
+        result.source,
+        result.amount,
+        result.user_balance,
+        result.chat_balance,
+    ))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -2108,6 +2150,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(billing_apply_chat_ai_debt, module)?)?;
     module.add_function(wrap_pyfunction!(billing_apply_ai_debt, module)?)?;
     module.add_function(wrap_pyfunction!(billing_refund_ai_charge, module)?)?;
+    module.add_function(wrap_pyfunction!(billing_charge_ai_credits, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;

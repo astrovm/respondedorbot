@@ -278,6 +278,41 @@ class _FakeRustAiRefunds:
         return True, None, 500, 900
 
 
+class _FakeRustAiCharges:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls: list[tuple[object, ...]] = []
+
+    def billing_charge_ai_credits(
+        self,
+        database_url: str,
+        user_id: int,
+        chat_id: int | None,
+        amount: int,
+        event_type: str,
+        metadata_json: str,
+        source: str | None,
+        idempotency_key: str | None,
+        operation_id: str,
+    ) -> tuple[bool, bool, str | None, str | None, int, int, int]:
+        self.calls.append(
+            (
+                database_url,
+                user_id,
+                chat_id,
+                amount,
+                event_type,
+                json.loads(metadata_json),
+                source,
+                idempotency_key,
+                operation_id,
+            )
+        )
+        if self.fail:
+            raise ValueError("synthetic uncertain AI charge failure")
+        return True, True, None, "chat", amount, 100, 500
+
+
 def _patch_python_balance(
     monkeypatch: pytest.MonkeyPatch,
     balance: int,
@@ -787,3 +822,91 @@ def test_billing_ai_refund_uncertain_failure_does_not_start_python_writer(
 
     with pytest.raises(credits_db.CreditsDBError, match="Rust AI refund"):
         credits_db.refund_ai_charge(42, 202, 300, "chat")
+
+
+def test_billing_ai_charge_is_authoritative_and_preserves_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(credits_db, "get_database_url", lambda: "postgresql://db")
+    monkeypatch.setattr(
+        credits_db,
+        "_run_credit_transaction",
+        lambda *_arguments: pytest.fail("Python AI charge writer must not run"),
+    )
+    rust = _FakeRustAiCharges()
+    monkeypatch.setattr(credits_db, "_load_rust_billing_ai_charges", lambda: rust)
+
+    assert credits_db.charge_ai_credits(
+        42,
+        202,
+        300,
+        event_type="ai_reserve",
+        metadata={"operation_id": "synthetic-operation"},
+        source="chat",
+        idempotency_key=" synthetic-reserve ",
+    ) == {
+        "ok": True,
+        "applied": True,
+        "source": "chat",
+        "amount": 300,
+        "user_balance": 100,
+        "chat_balance": 500,
+        "user_balance_credit_units": 100,
+        "chat_balance_credit_units": 500,
+    }
+    assert rust.calls == [
+        (
+            "postgresql://db",
+            42,
+            202,
+            300,
+            "ai_reserve",
+            {
+                "operation_id": "synthetic-operation",
+                "idempotency_key": "synthetic-reserve",
+            },
+            "chat",
+            "synthetic-reserve",
+            "synthetic-operation",
+        )
+    ]
+
+
+def test_billing_ai_charge_preserves_rejection_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rust = _FakeRustAiCharges()
+    monkeypatch.setattr(
+        rust,
+        "billing_charge_ai_credits",
+        lambda *_arguments: (False, False, "operation_settled", None, 0, 100, 200),
+    )
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(credits_db, "get_database_url", lambda: "postgresql://db")
+    monkeypatch.setattr(credits_db, "_load_rust_billing_ai_charges", lambda: rust)
+
+    result = credits_db.charge_ai_credits(42, 202, 300)
+    assert result["ok"] is False
+    assert result["reason"] == "operation_settled"
+    assert result["source"] is None
+
+
+def test_billing_ai_charge_uncertain_failure_does_not_start_python_writer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(credits_db, "get_database_url", lambda: "postgresql://db")
+    monkeypatch.setattr(
+        credits_db,
+        "_run_credit_transaction",
+        lambda *_arguments: pytest.fail("uncertain writes must fail closed"),
+    )
+    monkeypatch.setattr(
+        credits_db,
+        "_load_rust_billing_ai_charges",
+        lambda: _FakeRustAiCharges(fail=True),
+    )
+
+    with pytest.raises(credits_db.CreditsDBError, match="Rust AI charge"):
+        credits_db.charge_ai_credits(42, 202, 300)

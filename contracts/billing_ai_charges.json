@@ -1,0 +1,11 @@
+{
+  "default_event": "ai_charge",
+  "lock_order": ["user", "chat"],
+  "payer_order": ["user", "chat"],
+  "explicit_payer": true,
+  "optional_idempotency_key": "metadata.idempotency_key",
+  "reservation_rejections": ["reservation_refunded", "operation_settled"],
+  "insufficient_behavior": "no mutation",
+  "transaction_attempts": 3,
+  "uncertain_failure": "fail closed"
+}
