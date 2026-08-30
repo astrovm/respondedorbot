@@ -2107,6 +2107,38 @@ fn billing_settle_ai_operation_once(
     serde_json::to_string(&result).map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+/// Settle one legacy usage-tag reservation atomically and exactly once.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn billing_settle_legacy_ai_reservation_once(
+    py: Python<'_>,
+    database_url: &str,
+    user_id: i64,
+    chat_id: Option<i64>,
+    source: &str,
+    reserved_credit_units: i64,
+    actual_credit_units: i64,
+    usage_tag: &str,
+    metadata_json: &str,
+) -> PyResult<String> {
+    let metadata = billing_metadata(metadata_json)?;
+    let repository = BillingRepository::new(database_url);
+    let result = py
+        .detach(|| {
+            repository.settle_legacy_ai_reservation_once(
+                user_id,
+                chat_id,
+                source,
+                reserved_credit_units,
+                actual_credit_units,
+                usage_tag,
+                &metadata,
+            )
+        })
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serde_json::to_string(&result).map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -2229,6 +2261,10 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(billing_list_ai_provider_segments, module)?)?;
     module.add_function(wrap_pyfunction!(billing_update_ai_provider_usage, module)?)?;
     module.add_function(wrap_pyfunction!(billing_settle_ai_operation_once, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        billing_settle_legacy_ai_reservation_once,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;

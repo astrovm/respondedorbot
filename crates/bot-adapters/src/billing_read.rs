@@ -51,6 +51,8 @@ pub enum BillingError {
     MultiplePayers,
     #[error("chat-funded AI operation requires chat_id")]
     ChatIdRequired,
+    #[error("chat-funded settlement requires chat_id")]
+    LegacyChatIdRequired,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -116,6 +118,15 @@ pub struct AiSettlementResult {
     pub refunded_credit_units: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub debt_applied_credit_units: Option<i64>,
+    pub user_balance: i64,
+    pub chat_balance: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LegacySettlementResult {
+    pub applied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adjustment_credit_units: Option<i64>,
     pub user_balance: i64,
     pub chat_balance: i64,
 }
@@ -890,6 +901,107 @@ impl BillingRepository {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn settle_legacy_ai_reservation_once(
+        &self,
+        user_id: i64,
+        chat_id: Option<i64>,
+        source: &str,
+        reserved_credit_units: i64,
+        actual_credit_units: i64,
+        usage_tag: &str,
+        metadata: &Map<String, Value>,
+    ) -> Result<LegacySettlementResult, BillingError> {
+        let payer = if source == "chat" {
+            BillingScope::Chat
+        } else {
+            BillingScope::User
+        };
+        if payer == BillingScope::Chat && chat_id.is_none() {
+            return Err(BillingError::LegacyChatIdRequired);
+        }
+        let reserved_credit_units = reserved_credit_units.max(0);
+        let actual_credit_units = actual_credit_units.max(0);
+        self.run_transaction(|transaction| {
+            let user_balance = Self::balance_for_update(transaction, BillingScope::User, user_id)?;
+            let chat_balance = match chat_id {
+                Some(chat_id) => {
+                    Self::balance_for_update(transaction, BillingScope::Chat, chat_id)?
+                }
+                None => 0,
+            };
+            let already_settled = transaction
+                .query_opt(
+                    "SELECT 1 FROM credit_ledger \
+                     WHERE event_type = 'memory_compaction_settlement' \
+                       AND metadata->>'usage_tag' = $1 LIMIT 1",
+                    &[&usage_tag],
+                )?
+                .is_some();
+            if already_settled {
+                return Ok(LegacySettlementResult {
+                    applied: false,
+                    adjustment_credit_units: None,
+                    user_balance: user_balance.into(),
+                    chat_balance: chat_balance.into(),
+                });
+            }
+
+            let adjustment = reserved_credit_units
+                .checked_sub(actual_credit_units)
+                .ok_or(BillingError::BalanceOverflow)?;
+            let adjustment_i32 =
+                i32::try_from(adjustment).map_err(|_| BillingError::BalanceOverflow)?;
+            let (updated_user_balance, updated_chat_balance) = match payer {
+                BillingScope::Chat => {
+                    let payer_chat_id = chat_id.ok_or(BillingError::LegacyChatIdRequired)?;
+                    let updated_chat_balance = chat_balance
+                        .checked_add(adjustment_i32)
+                        .ok_or(BillingError::BalanceOverflow)?;
+                    Self::set_balance(
+                        transaction,
+                        BillingScope::Chat,
+                        payer_chat_id,
+                        updated_chat_balance,
+                    )?;
+                    (user_balance, updated_chat_balance)
+                }
+                BillingScope::User => {
+                    let updated_user_balance = user_balance
+                        .checked_add(adjustment_i32)
+                        .ok_or(BillingError::BalanceOverflow)?;
+                    Self::set_balance(
+                        transaction,
+                        BillingScope::User,
+                        user_id,
+                        updated_user_balance,
+                    )?;
+                    (updated_user_balance, chat_balance)
+                }
+            };
+            let settlement_metadata = legacy_settlement_metadata(
+                metadata,
+                payer,
+                usage_tag,
+                reserved_credit_units,
+                actual_credit_units,
+                adjustment,
+            );
+            transaction.execute(
+                "INSERT INTO credit_ledger \
+                    (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
+                 VALUES ('memory_compaction_settlement', $1, $1, $2, $3, $4)",
+                &[&user_id, &chat_id, &adjustment_i32, &settlement_metadata],
+            )?;
+            Ok(LegacySettlementResult {
+                applied: true,
+                adjustment_credit_units: Some(adjustment),
+                user_balance: updated_user_balance.into(),
+                chat_balance: updated_chat_balance.into(),
+            })
+        })
+    }
+
     fn ai_operation_is_settled(
         transaction: &mut Transaction<'_>,
         user_id: i64,
@@ -1140,6 +1252,31 @@ fn settlement_metadata(
     Value::Object(merged)
 }
 
+fn legacy_settlement_metadata(
+    metadata: &Map<String, Value>,
+    payer: BillingScope,
+    usage_tag: &str,
+    reserved: i64,
+    actual: i64,
+    adjustment: i64,
+) -> Value {
+    let mut merged = Map::from_iter([
+        (
+            "source".to_owned(),
+            Value::String(payer.as_str().to_owned()),
+        ),
+        ("usage_tag".to_owned(), Value::String(usage_tag.to_owned())),
+        ("reserved_credit_units".to_owned(), Value::from(reserved)),
+        ("actual_credit_units".to_owned(), Value::from(actual)),
+        (
+            "adjustment_credit_units".to_owned(),
+            Value::from(adjustment),
+        ),
+    ]);
+    merged.extend(metadata.clone());
+    Value::Object(merged)
+}
+
 #[cfg(test)]
 mod tests {
     use native_tls::TlsConnector;
@@ -1149,8 +1286,8 @@ mod tests {
 
     use super::{
         AiChargeResult, AiRefundResult, AiSettlementResult, BalancePairResult, BillingError,
-        BillingRepository, BillingScope, ChatAiChargeResult, OnboardingGrantResult,
-        StarPaymentResult, TransferResult,
+        BillingRepository, BillingScope, ChatAiChargeResult, LegacySettlementResult,
+        OnboardingGrantResult, StarPaymentResult, TransferResult,
     };
 
     #[test]
@@ -2433,6 +2570,146 @@ mod tests {
             Err(BillingError::ChatIdRequired)
         ));
 
+        client.batch_execute(
+            "INSERT INTO credit_accounts (scope_type, scope_id, balance) VALUES \
+                ('user', 7000000000033, 200), \
+                ('user', 7000000000034, 100), \
+                ('chat', 7000000000035, 500), \
+                ('user', 7000000000036, 0) \
+             ON CONFLICT (scope_type, scope_id) DO UPDATE SET balance = EXCLUDED.balance;",
+        )?;
+        let legacy_metadata = serde_json::Map::from_iter([
+            (
+                "source".to_owned(),
+                serde_json::Value::String("caller-override".to_owned()),
+            ),
+            (
+                "trace_id".to_owned(),
+                serde_json::Value::String("legacy-trace".to_owned()),
+            ),
+        ]);
+        assert_eq!(
+            repository.settle_legacy_ai_reservation_once(
+                7_000_000_000_033,
+                None,
+                "user",
+                300,
+                100,
+                "synthetic-legacy-user",
+                &legacy_metadata,
+            )?,
+            LegacySettlementResult {
+                applied: true,
+                adjustment_credit_units: Some(200),
+                user_balance: 400,
+                chat_balance: 0,
+            }
+        );
+        assert_eq!(
+            repository.settle_legacy_ai_reservation_once(
+                7_000_000_000_033,
+                None,
+                "user",
+                999,
+                0,
+                "synthetic-legacy-user",
+                &serde_json::Map::new(),
+            )?,
+            LegacySettlementResult {
+                applied: false,
+                adjustment_credit_units: None,
+                user_balance: 400,
+                chat_balance: 0,
+            }
+        );
+        let legacy_user_evidence = client.query_one(
+            "SELECT COUNT(*), COALESCE(SUM(amount), 0), \
+                COUNT(*) FILTER (WHERE metadata->>'source' = 'caller-override' \
+                    AND metadata->>'trace_id' = 'legacy-trace' \
+                    AND metadata->>'reserved_credit_units' = '300') \
+             FROM credit_ledger WHERE user_id = $1 \
+               AND event_type = 'memory_compaction_settlement'",
+            &[&7_000_000_000_033_i64],
+        )?;
+        assert_eq!(legacy_user_evidence.get::<_, i64>(0), 1);
+        assert_eq!(legacy_user_evidence.get::<_, i64>(1), 200);
+        assert_eq!(legacy_user_evidence.get::<_, i64>(2), 1);
+
+        assert_eq!(
+            repository.settle_legacy_ai_reservation_once(
+                7_000_000_000_034,
+                Some(7_000_000_000_035),
+                "chat",
+                300,
+                500,
+                "synthetic-legacy-chat",
+                &serde_json::Map::new(),
+            )?,
+            LegacySettlementResult {
+                applied: true,
+                adjustment_credit_units: Some(-200),
+                user_balance: 100,
+                chat_balance: 300,
+            }
+        );
+        assert!(matches!(
+            repository.settle_legacy_ai_reservation_once(
+                7_000_000_000_034,
+                None,
+                "chat",
+                300,
+                100,
+                "synthetic-legacy-missing-chat",
+                &serde_json::Map::new(),
+            ),
+            Err(BillingError::LegacyChatIdRequired)
+        ));
+
+        let first_database_url = database_url.clone();
+        let second_database_url = database_url.clone();
+        let first = std::thread::spawn(move || {
+            BillingRepository::new(&first_database_url).settle_legacy_ai_reservation_once(
+                7_000_000_000_036,
+                None,
+                "user",
+                100,
+                0,
+                "synthetic-legacy-concurrent",
+                &serde_json::Map::new(),
+            )
+        });
+        let second = std::thread::spawn(move || {
+            BillingRepository::new(&second_database_url).settle_legacy_ai_reservation_once(
+                7_000_000_000_036,
+                None,
+                "user",
+                100,
+                0,
+                "synthetic-legacy-concurrent",
+                &serde_json::Map::new(),
+            )
+        });
+        let concurrent_legacy_results = [
+            first
+                .join()
+                .map_err(|_| std::io::Error::other("first legacy settlement thread panicked"))??,
+            second
+                .join()
+                .map_err(|_| std::io::Error::other("second legacy settlement thread panicked"))??,
+        ];
+        assert_eq!(
+            concurrent_legacy_results
+                .iter()
+                .filter(|result| result.applied)
+                .count(),
+            1
+        );
+        assert!(
+            concurrent_legacy_results
+                .iter()
+                .all(|result| result.user_balance == 100)
+        );
+
         let synthetic_ids = [
             7_000_000_000_001_i64,
             7_000_000_000_002_i64,
@@ -2466,6 +2743,10 @@ mod tests {
             7_000_000_000_030_i64,
             7_000_000_000_031_i64,
             7_000_000_000_032_i64,
+            7_000_000_000_033_i64,
+            7_000_000_000_034_i64,
+            7_000_000_000_035_i64,
+            7_000_000_000_036_i64,
         ];
         client.execute(
             "DELETE FROM star_payments WHERE user_id = ANY($1)",

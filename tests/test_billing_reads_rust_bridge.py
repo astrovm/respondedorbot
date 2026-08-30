@@ -398,6 +398,45 @@ class _FakeRustAiSettlements:
             raise ValueError("synthetic uncertain AI settlement failure")
         return json.dumps(self.result)
 
+
+class _FakeRustLegacySettlements:
+    def __init__(
+        self,
+        result: dict[str, object],
+        *,
+        fail: bool = False,
+    ) -> None:
+        self.result = result
+        self.fail = fail
+        self.calls: list[tuple[object, ...]] = []
+
+    def billing_settle_legacy_ai_reservation_once(
+        self,
+        database_url: str,
+        user_id: int,
+        chat_id: int | None,
+        source: str,
+        reserved_credit_units: int,
+        actual_credit_units: int,
+        usage_tag: str,
+        metadata_json: str,
+    ) -> str:
+        self.calls.append(
+            (
+                database_url,
+                user_id,
+                chat_id,
+                source,
+                reserved_credit_units,
+                actual_credit_units,
+                usage_tag,
+                json.loads(metadata_json),
+            )
+        )
+        if self.fail:
+            raise ValueError("synthetic uncertain legacy settlement failure")
+        return json.dumps(self.result)
+
 def _patch_python_balance(
     monkeypatch: pytest.MonkeyPatch,
     balance: int,
@@ -1194,3 +1233,83 @@ def test_billing_ai_settlement_uncertain_failure_does_not_start_python_writer(
 
     with pytest.raises(credits_db.CreditsDBError, match="AI settlement"):
         credits_db.settle_ai_operation_once(42, None, "operation", 10, metadata={})
+
+
+@pytest.mark.parametrize(
+    "rust_result",
+    [
+        {
+            "applied": True,
+            "adjustment_credit_units": 200,
+            "user_balance": 500,
+            "chat_balance": 700,
+        },
+        {"applied": False, "user_balance": 500, "chat_balance": 700},
+    ],
+)
+def test_billing_legacy_settlement_is_authoritative_and_preserves_result_shape(
+    monkeypatch: pytest.MonkeyPatch,
+    rust_result: dict[str, object],
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(credits_db, "get_database_url", lambda: "postgresql://db")
+    monkeypatch.setattr(
+        credits_db,
+        "_run_credit_transaction",
+        lambda *_arguments: pytest.fail("Python legacy settlement writer must not run"),
+    )
+    rust = _FakeRustLegacySettlements(rust_result)
+    monkeypatch.setattr(
+        credits_db,
+        "_load_rust_billing_legacy_settlements",
+        lambda: rust,
+    )
+
+    assert credits_db.settle_ai_reservation_once(
+        42,
+        202,
+        "invalid",
+        -300,
+        -100,
+        "synthetic-usage",
+        metadata={"trace_id": "synthetic"},
+    ) == rust_result
+    assert rust.calls == [
+        (
+            "postgresql://db",
+            42,
+            202,
+            "user",
+            0,
+            0,
+            "synthetic-usage",
+            {"trace_id": "synthetic"},
+        )
+    ]
+
+
+def test_billing_legacy_settlement_uncertain_failure_does_not_start_python_writer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(credits_db, "get_database_url", lambda: "postgresql://db")
+    monkeypatch.setattr(
+        credits_db,
+        "_run_credit_transaction",
+        lambda *_arguments: pytest.fail("uncertain writes must fail closed"),
+    )
+    monkeypatch.setattr(
+        credits_db,
+        "_load_rust_billing_legacy_settlements",
+        lambda: _FakeRustLegacySettlements({}, fail=True),
+    )
+
+    with pytest.raises(credits_db.CreditsDBError, match="legacy AI settlement"):
+        credits_db.settle_ai_reservation_once(
+            42,
+            None,
+            "user",
+            300,
+            100,
+            "synthetic-usage",
+        )

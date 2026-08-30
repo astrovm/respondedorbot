@@ -1,0 +1,10 @@
+{
+  "idempotency_key": "usage_tag",
+  "idempotency_scope": "global",
+  "lock_order": ["user", "chat"],
+  "adjustment": "reserved minus actual",
+  "event_type": "memory_compaction_settlement",
+  "metadata_precedence": "caller overrides computed fields",
+  "transaction_attempts": 3,
+  "uncertain_failure": "fail closed"
+}

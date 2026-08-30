@@ -234,6 +234,20 @@ class _RustBillingAiSettlements(Protocol):
     ) -> str: ...
 
 
+class _RustBillingLegacySettlements(Protocol):
+    def billing_settle_legacy_ai_reservation_once(
+        self,
+        database_url: str,
+        user_id: int,
+        chat_id: int | None,
+        source: str,
+        reserved_credit_units: int,
+        actual_credit_units: int,
+        usage_tag: str,
+        metadata_json: str,
+    ) -> str: ...
+
+
 def _load_rust_billing_reads() -> _RustBillingReads | None:
     module = load_rust_bridge("RUST_BILLING_READ_SHADOW_ENABLED")
     if module is None:
@@ -309,6 +323,15 @@ def _load_rust_billing_ai_settlements() -> _RustBillingAiSettlements | None:
     if module is None:
         return None
     return cast(_RustBillingAiSettlements, module)
+
+
+def _load_rust_billing_legacy_settlements() -> (
+    _RustBillingLegacySettlements | None
+):
+    module = load_rust_bridge("RUST_BILLING_LEGACY_SETTLEMENTS_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustBillingLegacySettlements, module)
 
 
 class CreditsDBError(RuntimeError):
@@ -2065,6 +2088,29 @@ def settle_ai_reservation_once(
                 "payer_breakdown": payer_breakdown,
             },
         )
+
+    rust = _load_rust_billing_legacy_settlements()
+    database_url = get_database_url()
+    if rust is not None and database_url:
+        ensure_schema()
+        try:
+            loaded = json.loads(
+                rust.billing_settle_legacy_ai_reservation_once(
+                    database_url,
+                    int(user_id),
+                    int(chat_id) if chat_id is not None else None,
+                    normalized_source,
+                    reserved,
+                    actual,
+                    str(usage_tag),
+                    json.dumps(metadata_dict, default=str),
+                )
+            )
+            if not isinstance(loaded, Mapping):
+                raise ValueError("Rust legacy AI settlement result must be an object")
+            return dict(loaded)
+        except Exception as error:
+            raise CreditsDBError("Rust legacy AI settlement transaction failed") from error
 
     if normalized_source == "chat" and chat_id is None:
         raise CreditsDBError("chat-funded settlement requires chat_id")
