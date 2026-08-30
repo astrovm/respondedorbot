@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, Mapping, Protocol, cast
 
 import requests
 
 from api.i18n import tr
 from api.core.logging import get_logger
+from api.core.rust_bridge import load_rust_bridge
 from api.tools.registry import ToolResult, register_tool
 
 
@@ -22,6 +23,17 @@ _MAX_ATTEMPTS = 3
 _API_TIMEOUT_MS = 60_000
 _REQUEST_TIMEOUT_SECONDS = (10.0, 75.0)
 _MAX_DESCRIPTION_CHARS = 1_200
+
+
+class _RustFirecrawlAdapter(Protocol):
+    def firecrawl_search(self, api_key: str, query: str) -> str: ...
+
+
+def _load_rust_firecrawl_adapter() -> _RustFirecrawlAdapter | None:
+    module = load_rust_bridge("RUST_FIRECRAWL_ADAPTER_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustFirecrawlAdapter, module)
 
 
 def _clean_text(value: Any, *, max_chars: int) -> str:
@@ -163,6 +175,91 @@ def _parse_search_response(response: requests.Response, query: str) -> ToolResul
     )
 
 
+def _rust_firecrawl_error_result(outcome: Mapping[str, Any]) -> ToolResult | None:
+    status = outcome.get("status")
+    simple_errors = {
+        "timeout": "tool.search.timeout",
+        "connection": "tool.search.connection",
+        "invalid_json": "tool.search.invalid_json",
+    }
+    if status in simple_errors:
+        return ToolResult(output=tr(simple_errors[cast(str, status)]))
+    if status == "http_error":
+        status_code = outcome.get("status_code")
+        detail = outcome.get("detail")
+        if not isinstance(status_code, int) or isinstance(status_code, bool):
+            raise ValueError("Rust Firecrawl HTTP status must be an integer")
+        if not isinstance(detail, str):
+            raise ValueError("Rust Firecrawl HTTP detail must be text")
+        return ToolResult(
+            output=tr(
+                "tool.search.response",
+                error=f"Firecrawl HTTP {status_code}: {detail}",
+            ),
+            metadata={"status_code": status_code},
+        )
+    if status == "api_error":
+        detail = outcome.get("detail")
+        if not isinstance(detail, str):
+            raise ValueError("Rust Firecrawl API detail must be text")
+        return ToolResult(output=tr("tool.search.response", error=detail))
+    return None
+
+
+def _rust_firecrawl_results(raw_results: Any) -> list[dict[str, str]]:
+    if not isinstance(raw_results, list) or len(raw_results) > _MAX_RESULTS:
+        raise ValueError("Rust Firecrawl results must be a bounded list")
+    results: list[dict[str, str]] = []
+    for raw_result in raw_results:
+        if not isinstance(raw_result, Mapping):
+            raise ValueError("Rust Firecrawl result must be an object")
+        title = raw_result.get("title")
+        url = raw_result.get("url")
+        description = raw_result.get("description")
+        if not all(isinstance(value, str) for value in (title, url, description)):
+            raise ValueError("Rust Firecrawl result fields must be text")
+        results.append(
+            {
+                "title": cast(str, title),
+                "url": cast(str, url),
+                "description": cast(str, description),
+            }
+        )
+    return results
+
+
+def _rust_firecrawl_result(raw_result: str, query: str) -> ToolResult:
+    outcome = json.loads(raw_result)
+    if not isinstance(outcome, Mapping):
+        raise ValueError("Rust Firecrawl outcome must be an object")
+    error_result = _rust_firecrawl_error_result(outcome)
+    if error_result is not None:
+        return error_result
+    if outcome.get("status") != "success":
+        raise ValueError(f"invalid Rust Firecrawl status: {outcome.get('status')!r}")
+    if outcome.get("query") != query:
+        raise ValueError("Rust Firecrawl query does not match the request")
+    results = _rust_firecrawl_results(outcome.get("results"))
+    credits_used = outcome.get("credits_used")
+    request_id = outcome.get("request_id")
+    logger.info(
+        "web_search: firecrawl query=%r results=%d credits=%s request_id=%s",
+        query,
+        len(results),
+        credits_used,
+        request_id,
+    )
+    return ToolResult(
+        output=json.dumps({"query": query, "results": results}, ensure_ascii=False),
+        metadata={
+            "query": query,
+            "result_count": len(results),
+            "credits_used": credits_used,
+            "request_id": request_id,
+        },
+    )
+
+
 def _execute_web_search(
     params: Dict[str, Any],
     context: Dict[str, Any],
@@ -174,6 +271,13 @@ def _execute_web_search(
     api_key = str(os.environ.get("FIRECRAWL_API_KEY") or "").strip()
     if not api_key:
         return ToolResult(output=tr("tool.search.not_configured"))
+
+    rust = _load_rust_firecrawl_adapter()
+    if rust is not None:
+        try:
+            return _rust_firecrawl_result(rust.firecrawl_search(api_key, query), query)
+        except Exception:
+            logger.exception("Rust Firecrawl adapter failed; using Python fallback")
 
     try:
         response = _search_request(query, api_key)

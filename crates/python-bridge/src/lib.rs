@@ -1,6 +1,6 @@
 //! Temporary Python bridge for incrementally adopting `bot-core`.
 
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -8,6 +8,10 @@ use serde_json::{Map, Value};
 use bot_adapters::billing_read::BillingRepository;
 use bot_adapters::billing_schema::BillingSchemaRepository;
 use bot_adapters::compaction_job::normalize_compaction_job as normalize_compaction_job_adapter;
+use bot_adapters::firecrawl::{
+    HttpResponse as FirecrawlHttpResponse, parse_response as firecrawl_parse_response_adapter,
+    search as firecrawl_search_adapter,
+};
 use bot_adapters::redis_chat_admin::{
     cache_chat_admin as cache_chat_admin_adapter,
     chat_admin_cache_key as chat_admin_cache_key_adapter,
@@ -2880,6 +2884,25 @@ fn ai_plan_image_context(
 }
 
 #[pyfunction]
+fn firecrawl_search(api_key: &str, query: &str) -> PyResult<String> {
+    let outcome = firecrawl_search_adapter(api_key, query)
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    serde_json::to_string(&outcome).map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+fn firecrawl_parse_response(status_code: u16, body: &str, query: &str) -> PyResult<String> {
+    let outcome = firecrawl_parse_response_adapter(
+        FirecrawlHttpResponse {
+            status_code,
+            body: body.to_owned(),
+        },
+        query,
+    );
+    serde_json::to_string(&outcome).map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
 fn provider_chain_select(availability: Vec<bool>) -> Vec<usize> {
     provider_chain_select_core(&availability)
 }
@@ -3240,6 +3263,8 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module
     )?)?;
     module.add_function(wrap_pyfunction!(ai_plan_image_context, module)?)?;
+    module.add_function(wrap_pyfunction!(firecrawl_search, module)?)?;
+    module.add_function(wrap_pyfunction!(firecrawl_parse_response, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_select, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_outcome, module)?)?;
     module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;

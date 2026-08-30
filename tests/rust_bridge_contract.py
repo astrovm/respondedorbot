@@ -1109,6 +1109,20 @@ def verify_tool_execution_policy(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_firecrawl_adapter(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "firecrawl_adapter.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["cases"]:
+        actual = json.loads(
+            bridge.firecrawl_parse_response(
+                case["status_code"],
+                case["body"],
+                case["query"],
+            )
+        )
+        assert actual == case["expected"], case["name"]
+
+
 def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_ai_usage_policy(bridge)
     verify_provider_error_policy(bridge)
@@ -1129,6 +1143,7 @@ def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_ai_image_context_planning(bridge)
     verify_ai_request_sanitization(bridge)
     verify_tool_execution_policy(bridge)
+    verify_firecrawl_adapter(bridge)
 
 
 def main(arguments: list[str]) -> int:
