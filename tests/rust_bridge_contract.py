@@ -1228,6 +1228,37 @@ def verify_stock_market(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_telegram_input(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "telegram_input.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["content_cases"]:
+        actual = json.loads(
+            bridge.telegram_extract_message_content(
+                json.dumps(case["message"], separators=(",", ":"))
+            )
+        )
+        assert actual == case["expected"], case["name"]
+    for case in contract["numeric_id_cases"]:
+        actual = bridge.telegram_normalize_numeric_id(
+            json.dumps(case["value"], separators=(",", ":"))
+        )
+        assert actual == case["expected"]
+    for case in contract["user_cases"]:
+        user_json = json.dumps(case["user"], separators=(",", ":"))
+        assert bridge.telegram_extract_user_id(
+            json.dumps({"from": case["user"]}, separators=(",", ":"))
+        ) == case["expected_id"]
+        assert (
+            bridge.telegram_format_user_identity(user_json)
+            == case["expected_identity"]
+        )
+    for case in contract["group_cases"]:
+        assert (
+            bridge.telegram_is_group_chat_type(case["chat_type"])
+            is case["expected"]
+        )
+
+
 def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_ai_usage_policy(bridge)
     verify_provider_error_policy(bridge)
@@ -1253,6 +1284,7 @@ def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_telegram_http_adapter(bridge)
     verify_giphy_adapter(bridge)
     verify_stock_market(bridge)
+    verify_telegram_input(bridge)
 
 
 def main(arguments: list[str]) -> int:

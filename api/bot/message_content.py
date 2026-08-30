@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import Any
 
 from api.core.logging import get_logger
+from api.core.rust_telegram_input import load_rust_telegram_input
 
 logger = get_logger(__name__)
 
@@ -51,13 +53,43 @@ def sticker_vision_file_id(sticker: Mapping[str, Any]) -> str | None:
     return str(file_id) if file_id else None
 
 
-def extract_message_content(
+def _extract_message_content_python(
     message: dict[str, Any],
 ) -> tuple[str, str | None, str | None]:
     text = extract_message_text(message)
     photo_file_id = _extract_visual_file_id(message)
     audio_file_id = _extract_audio_file_id(message)
     return text, photo_file_id, audio_file_id
+
+
+def extract_message_content(
+    message: dict[str, Any],
+) -> tuple[str, str | None, str | None]:
+    rust = load_rust_telegram_input()
+    if rust is not None:
+        try:
+            content = json.loads(
+                rust.telegram_extract_message_content(
+                    json.dumps(message, ensure_ascii=False, separators=(",", ":"))
+                )
+            )
+            if not isinstance(content, Mapping):
+                raise ValueError("Rust Telegram content must be an object")
+            text = content.get("text")
+            photo_file_id = content.get("photo_file_id")
+            audio_file_id = content.get("audio_file_id")
+            if not isinstance(text, str):
+                raise ValueError("Rust Telegram message text must be text")
+            if photo_file_id is not None and not isinstance(photo_file_id, str):
+                raise ValueError("Rust Telegram photo file id must be text")
+            if audio_file_id is not None and not isinstance(audio_file_id, str):
+                raise ValueError("Rust Telegram audio file id must be text")
+            return text, photo_file_id, audio_file_id
+        except Exception:
+            logger.exception(
+                "Rust Telegram content parser failed; using Python fallback"
+            )
+    return _extract_message_content_python(message)
 
 
 def _extract_visual_file_id(message: dict[str, Any]) -> str | None:

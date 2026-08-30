@@ -200,6 +200,13 @@ use bot_core::task_triggers::{
     IntegerInput, TaskTrigger, TaskTriggerInput, TriggerConfigInput, TriggerError,
     parse_task_trigger as parse_task_trigger_core,
 };
+use bot_core::telegram_input::{
+    extract_message_content as extract_telegram_message_content_core,
+    extract_user_id as extract_telegram_user_id_core,
+    format_user_identity as format_telegram_user_identity_core,
+    is_group_chat_type as is_telegram_group_chat_type_core,
+    normalize_numeric_id as normalize_telegram_numeric_id_core,
+};
 use bot_core::telegram_streaming::{
     plan_feed as telegram_stream_plan_feed_core,
     plan_finalize as telegram_stream_plan_finalize_core,
@@ -3063,6 +3070,41 @@ fn finviz_parse_symbols(html: &str) -> Vec<String> {
 }
 
 #[pyfunction]
+fn telegram_extract_message_content(message_json: &str) -> PyResult<String> {
+    let message = serde_json::from_str(message_json)
+        .map_err(|error| PyValueError::new_err(format!("invalid JSON value: {error}")))?;
+    let content = extract_telegram_message_content_core(&message)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serde_json::to_string(&content).map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+fn telegram_is_group_chat_type(chat_type: Option<&str>) -> bool {
+    is_telegram_group_chat_type_core(chat_type)
+}
+
+#[pyfunction]
+fn telegram_normalize_numeric_id(value_json: &str) -> PyResult<Option<i64>> {
+    let value = serde_json::from_str(value_json)
+        .map_err(|error| PyValueError::new_err(format!("invalid JSON value: {error}")))?;
+    Ok(normalize_telegram_numeric_id_core(&value))
+}
+
+#[pyfunction]
+fn telegram_extract_user_id(message_json: &str) -> PyResult<Option<i64>> {
+    let message = serde_json::from_str(message_json)
+        .map_err(|error| PyValueError::new_err(format!("invalid JSON value: {error}")))?;
+    Ok(extract_telegram_user_id_core(&message).map(|user_id| user_id.0))
+}
+
+#[pyfunction]
+fn telegram_format_user_identity(user_json: &str) -> PyResult<String> {
+    let user = serde_json::from_str(user_json)
+        .map_err(|error| PyValueError::new_err(format!("invalid JSON value: {error}")))?;
+    Ok(format_telegram_user_identity_core(&user))
+}
+
+#[pyfunction]
 fn provider_chain_select(availability: Vec<bool>) -> Vec<usize> {
     provider_chain_select_core(&availability)
 }
@@ -3441,6 +3483,11 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(stock_query_plan, module)?)?;
     module.add_function(wrap_pyfunction!(finviz_fetch, module)?)?;
     module.add_function(wrap_pyfunction!(finviz_parse_symbols, module)?)?;
+    module.add_function(wrap_pyfunction!(telegram_extract_message_content, module)?)?;
+    module.add_function(wrap_pyfunction!(telegram_is_group_chat_type, module)?)?;
+    module.add_function(wrap_pyfunction!(telegram_normalize_numeric_id, module)?)?;
+    module.add_function(wrap_pyfunction!(telegram_extract_user_id, module)?)?;
+    module.add_function(wrap_pyfunction!(telegram_format_user_identity, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_select, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_outcome, module)?)?;
     module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;
