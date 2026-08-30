@@ -118,6 +118,8 @@ use bot_core::provider_runtime_policy::{
     retry_wait_seconds as provider_retry_wait_seconds_core,
 };
 use bot_core::provider_stream_policy::{
+    StreamToolCall, StreamToolCallFragment,
+    accumulate_stream_tool_calls as provider_stream_accumulate_tool_calls_core,
     apply_stream_text as provider_stream_text_decision_core,
     could_be_pseudo_tool_call as provider_stream_could_be_pseudo_tool_call_core,
 };
@@ -2592,6 +2594,25 @@ fn provider_stream_could_be_pseudo_tool_call(
     provider_stream_could_be_pseudo_tool_call_core(text, &possible_pseudo_tools)
 }
 
+#[pyfunction]
+fn provider_stream_accumulate_tool_calls(
+    current_calls_json: &str,
+    fragments_json: &str,
+) -> PyResult<String> {
+    let current: Vec<StreamToolCall> =
+        serde_json::from_str(current_calls_json).map_err(|error| {
+            PyValueError::new_err(format!("invalid stream tool-call state: {error}"))
+        })?;
+    let fragments: Vec<StreamToolCallFragment> =
+        serde_json::from_str(fragments_json).map_err(|error| {
+            PyValueError::new_err(format!("invalid stream tool-call fragments: {error}"))
+        })?;
+    serde_json::to_string(&provider_stream_accumulate_tool_calls_core(
+        current, fragments,
+    ))
+    .map_err(|error| PyValueError::new_err(format!("stream tool-call encoding failed: {error}")))
+}
+
 fn token_estimate_value(value: &Value) -> TokenEstimateValue {
     match value {
         Value::Null => TokenEstimateValue::Empty,
@@ -2908,6 +2929,10 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(provider_stream_text_decision, module)?)?;
     module.add_function(wrap_pyfunction!(
         provider_stream_could_be_pseudo_tool_call,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        provider_stream_accumulate_tool_calls,
         module
     )?)?;
     module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;

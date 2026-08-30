@@ -860,6 +860,14 @@ def verify_provider_stream_policy(bridge: ModuleType) -> None:
     for case in contract["decision_cases"]:
         actual = bridge.provider_stream_text_decision(*case["facts"])
         assert list(actual) == case["expected"], case["name"]
+    for case in contract["tool_accumulation_cases"]:
+        actual = json.loads(
+            bridge.provider_stream_accumulate_tool_calls(
+                json.dumps(case["current"], ensure_ascii=False),
+                json.dumps(case["fragments"], ensure_ascii=False),
+            )
+        )
+        assert actual == case["expected"], case["name"]
 
 
 def verify_ai_reserve_estimates(bridge: ModuleType) -> None:

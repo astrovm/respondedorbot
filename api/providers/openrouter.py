@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -34,6 +35,12 @@ class _RustProviderStreamPolicy(Protocol):
         text: str,
         possible_pseudo_tools: list[str],
     ) -> bool: ...
+
+    def provider_stream_accumulate_tool_calls(
+        self,
+        current_calls_json: str,
+        fragments_json: str,
+    ) -> str: ...
 
 
 def _load_rust_provider_stream_policy() -> _RustProviderStreamPolicy | None:
@@ -560,7 +567,13 @@ class OpenRouterProvider(StreamingAIProvider):
         annotations = cls._field(delta, "annotations") or []
         streamed_round.annotations.extend(annotations)
 
-        for position, fragment in enumerate(cls._field(delta, "tool_calls") or []):
+        fragments = cls._field(delta, "tool_calls") or []
+        if fragments and cls._accumulate_stream_tool_calls_with_rust(
+            streamed_round,
+            fragments,
+        ):
+            return
+        for position, fragment in enumerate(fragments):
             try:
                 index = int(cls._field(fragment, "index", position))
             except TypeError, ValueError:
@@ -583,6 +596,65 @@ class OpenRouterProvider(StreamingAIProvider):
                     accumulated.name += str(name)
                 if arguments:
                     accumulated.arguments += str(arguments)
+
+    @classmethod
+    def _accumulate_stream_tool_calls_with_rust(
+        cls,
+        streamed_round: _StreamRound,
+        fragments: Any,
+    ) -> bool:
+        rust = _load_rust_provider_stream_policy()
+        if rust is None:
+            return False
+        current_calls = [
+            {
+                "index": call.index,
+                "id": call.id,
+                "type": call.type,
+                "name": call.name,
+                "arguments": call.arguments,
+            }
+            for _, call in sorted(streamed_round.tool_calls.items())
+        ]
+        normalized_fragments = []
+        for position, fragment in enumerate(fragments):
+            function = cls._field(fragment, "function")
+            normalized_fragments.append(
+                {
+                    "position": position,
+                    "index": cls._field(fragment, "index", position),
+                    "id": cls._truthy_string(cls._field(fragment, "id")),
+                    "type": cls._truthy_string(cls._field(fragment, "type")),
+                    "name": cls._truthy_string(cls._field(function, "name")),
+                    "arguments": cls._truthy_string(
+                        cls._field(function, "arguments")
+                    ),
+                }
+            )
+        try:
+            encoded = rust.provider_stream_accumulate_tool_calls(
+                json.dumps(current_calls, ensure_ascii=False),
+                json.dumps(normalized_fragments, ensure_ascii=False, default=str),
+            )
+            accumulated_calls = json.loads(encoded)
+            streamed_round.tool_calls = {
+                int(call["index"]): _StreamToolCall(
+                    index=int(call["index"]),
+                    id=str(call["id"]),
+                    type=str(call["type"]),
+                    name=str(call["name"]),
+                    arguments=str(call["arguments"]),
+                )
+                for call in accumulated_calls
+            }
+        except Exception:
+            _rust_stream_policy_failed("tool_call_accumulation")
+            return False
+        return True
+
+    @staticmethod
+    def _truthy_string(value: Any) -> str | None:
+        return str(value) if value else None
 
     @staticmethod
     def _extra_tool_names(

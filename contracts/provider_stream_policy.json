@@ -37,5 +37,34 @@
       "facts": ["prior", "", false, true, ["web_fetch"]],
       "expected": ["prior", "", true]
     }
+  ],
+  "tool_accumulation_cases": [
+    {
+      "name": "interleaved_fragments",
+      "current": [],
+      "fragments": [
+        {"position": 0, "index": 1, "id": "call_b", "type": "function", "name": "web_", "arguments": "{\"url\":"},
+        {"position": 1, "index": "0", "id": "call_a", "type": null, "name": "calc", "arguments": "{\"x\":1}"},
+        {"position": 0, "index": 1, "id": null, "type": null, "name": "fetch", "arguments": "\"https://example.com\"}"}
+      ],
+      "expected": [
+        {"index": 0, "id": "call_a", "type": "function", "name": "calc", "arguments": "{\"x\":1}"},
+        {"index": 1, "id": "call_b", "type": "function", "name": "web_fetch", "arguments": "{\"url\":\"https://example.com\"}"}
+      ]
+    },
+    {
+      "name": "existing_and_position_fallback",
+      "current": [
+        {"index": -1, "id": "prefix", "type": "custom", "name": "tool", "arguments": "{"}
+      ],
+      "fragments": [
+        {"position": -1, "index": [], "id": "_suffix", "type": "function", "name": null, "arguments": "}"},
+        {"position": 2, "index": 2.9, "id": null, "type": null, "name": "other", "arguments": null}
+      ],
+      "expected": [
+        {"index": -1, "id": "prefix_suffix", "type": "function", "name": "tool", "arguments": "{}"},
+        {"index": 2, "id": "", "type": "function", "name": "other", "arguments": ""}
+      ]
+    }
   ]
 }
