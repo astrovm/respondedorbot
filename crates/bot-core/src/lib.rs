@@ -10,6 +10,7 @@ pub mod price_queries;
 pub mod random_reply;
 pub mod random_selection;
 pub mod routing;
+pub mod satoshi;
 pub mod task_triggers;
 
 /// Version of the temporary Python/Rust compatibility protocol.

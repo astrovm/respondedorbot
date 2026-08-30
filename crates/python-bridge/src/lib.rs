@@ -35,6 +35,7 @@ use bot_core::routing::{
     evaluate_response_routing as evaluate_response_routing_core,
     should_auto_process_media as should_auto_process_media_core,
 };
+use bot_core::satoshi::format_satoshi_quote as format_satoshi_quote_core;
 use bot_core::task_triggers::{
     IntegerInput, TaskTrigger, TaskTriggerInput, TriggerConfigInput, TriggerError,
     parse_task_trigger as parse_task_trigger_core,
@@ -688,6 +689,13 @@ fn evaluate_market_model(model: &str, elapsed_days: i64, market_price: f64) -> P
         .map_err(|error| PyValueError::new_err(format!("cannot encode market model: {error}")))
 }
 
+/// Format two adapter-provided Bitcoin prices as the legacy satoshi command.
+#[pyfunction]
+fn format_satoshi_quote(price_usd: f64, price_ars: f64) -> PyResult<String> {
+    format_satoshi_quote_core(price_usd, price_ars)
+        .map_err(|_| PyValueError::new_err("Bitcoin prices must be finite and nonzero"))
+}
+
 /// Decide whether one normalized message should auto-process attached media.
 #[pyfunction]
 fn should_auto_process_media(
@@ -736,6 +744,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(parse_price_query, module)?)?;
     module.add_function(wrap_pyfunction!(format_market_info, module)?)?;
     module.add_function(wrap_pyfunction!(evaluate_market_model, module)?)?;
+    module.add_function(wrap_pyfunction!(format_satoshi_quote, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;
     module.add_function(wrap_pyfunction!(evaluate_response_routing, module)?)?;
     Ok(())

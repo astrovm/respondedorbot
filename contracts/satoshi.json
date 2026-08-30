@@ -1,0 +1,26 @@
+{
+  "cases": [
+    {
+      "name": "standard quote",
+      "price_usd": 50000.0,
+      "price_ars": 10000000.0,
+      "expected": "1 satoshi = $0.00050000 USD\n1 satoshi = $0.1000 ARS\n\n$1 USD = 2,000 sats\n$1 ARS = 10.000 sats"
+    },
+    {
+      "name": "truncates USD reciprocal",
+      "price_usd": 30000.0,
+      "price_ars": 30000000.0,
+      "expected": "1 satoshi = $0.00030000 USD\n1 satoshi = $0.3000 ARS\n\n$1 USD = 3,333 sats\n$1 ARS = 3.333 sats"
+    },
+    {
+      "name": "negative quote",
+      "price_usd": -40000.0,
+      "price_ars": -20000000.0,
+      "expected": "1 satoshi = $-0.00040000 USD\n1 satoshi = $-0.2000 ARS\n\n$1 USD = -2,500 sats\n$1 ARS = -5.000 sats"
+    }
+  ],
+  "errors": [
+    { "name": "zero USD", "price_usd": 0.0, "price_ars": 1.0 },
+    { "name": "zero ARS", "price_usd": 1.0, "price_ars": 0.0 }
+  ]
+}

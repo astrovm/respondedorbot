@@ -3,10 +3,11 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 from logging import Logger
-from typing import Any
+from typing import Any, Protocol, cast
 
 from api.cache.service import CacheService
 from api.core.config_runtime import ConfigRuntime
+from api.core.rust_bridge import load_rust_bridge
 from api.i18n import tr
 from api.markets.rulo import build_rulo_message
 from api.services.stale_cache import StaleCache
@@ -27,6 +28,17 @@ RatesFormatter = Callable[
 CachedRequest = Callable[..., dict[str, Any] | None]
 RuloBuilder = Callable[..., str]
 PriceGetter = Callable[[str], float | None]
+
+
+class _RustSatoshiFormatter(Protocol):
+    def format_satoshi_quote(self, price_usd: float, price_ars: float) -> str: ...
+
+
+def _load_rust_satoshi_formatter() -> _RustSatoshiFormatter | None:
+    module = load_rust_bridge("RUST_SATOSHI_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustSatoshiFormatter, module)
 
 
 def format_dollar_rates(
@@ -214,6 +226,14 @@ def get_rulo(
     )
 
 
+def _format_satoshi_python(price_usd: float, price_ars: float) -> str:
+    return f"""1 satoshi = ${price_usd / 100_000_000:.8f} USD
+1 satoshi = ${price_ars / 100_000_000:.4f} ARS
+
+$1 USD = {int(100_000_000 / price_usd):,} sats
+$1 ARS = {100_000_000 / price_ars:.3f} sats"""
+
+
 def satoshi(*, get_btc_price: PriceGetter, logger: Logger) -> str:
     try:
         price_usd = get_btc_price("USD")
@@ -222,11 +242,16 @@ def satoshi(*, get_btc_price: PriceGetter, logger: Logger) -> str:
             return tr("market.dollar.btc_usd_error")
         if price_ars is None:
             return tr("market.dollar.btc_ars_error")
-        return f"""1 satoshi = ${price_usd / 100_000_000:.8f} USD
-1 satoshi = ${price_ars / 100_000_000:.4f} ARS
-
-$1 USD = {int(100_000_000 / price_usd):,} sats
-$1 ARS = {100_000_000 / price_ars:.3f} sats"""
+        rust = _load_rust_satoshi_formatter()
+        if rust is not None:
+            try:
+                return rust.format_satoshi_quote(price_usd, price_ars)
+            except Exception as error:
+                logger.warning(
+                    "Rust satoshi formatter failed; using Python fallback: error_type=%s",
+                    type(error).__name__,
+                )
+        return _format_satoshi_python(price_usd, price_ars)
     except TypeError, ValueError, ZeroDivisionError:
         return tr("market.dollar.btc_error")
     except Exception as error:

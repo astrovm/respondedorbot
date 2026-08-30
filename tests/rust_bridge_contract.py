@@ -108,6 +108,21 @@ def verify_market_models(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_satoshi(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "satoshi.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["cases"]:
+        actual = bridge.format_satoshi_quote(case["price_usd"], case["price_ars"])
+        assert actual == case["expected"], case["name"]
+    for case in contract["errors"]:
+        try:
+            bridge.format_satoshi_quote(case["price_usd"], case["price_ars"])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected satoshi failure for {case['name']}")
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -168,6 +183,7 @@ def main(arguments: list[str]) -> int:
     verify_price_queries(bridge)
     verify_market_context(bridge)
     verify_market_models(bridge)
+    verify_satoshi(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)
