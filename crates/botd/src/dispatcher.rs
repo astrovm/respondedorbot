@@ -35,6 +35,7 @@ use bot_core::devo::{
 use bot_core::greeting_commands::{GreetingCategory, classify_greeting_command, greeting_fallback};
 use bot_core::language_command::{LanguageCommandPlan, plan_language_command};
 use bot_core::locale::resolve_locale;
+use bot_core::polymarket::{ElectionEvent, classify_election_command, render_elections};
 use bot_core::random_selection::{RandomSelection, parse_random_selection};
 use bot_core::rulo::{RuloInput, evaluate_rulo, render_rulo};
 use bot_core::stateless_commands::{
@@ -45,7 +46,7 @@ use bot_core::stocks::{
     StockQuote, classify_oil_command, classify_stock_command, render_oil_quotes,
     render_stock_quotes,
 };
-use bot_core::telegram_actions::{SendMessage, TelegramAction};
+use bot_core::telegram_actions::{ParseMode, SendMessage, TelegramAction};
 use bot_core::telegram_callbacks::{CallbackContextOutcome, CallbackRoute, parse_callback_context};
 use bot_core::telegram_input::{ChatId, MessageId, is_group_chat_type};
 use bot_core::telegram_payments::{
@@ -234,6 +235,17 @@ pub trait StockPriceSource {
     fn load(&mut self, query: &str, now_unix: i64) -> StockQuotesLoad;
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ElectionLoad {
+    pub events: Vec<ElectionEvent>,
+    pub live_prices: std::collections::HashMap<String, f64>,
+    pub diagnostics: Vec<String>,
+}
+
+pub trait ElectionSource {
+    fn load(&mut self, now_unix: i64) -> ElectionLoad;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchOutcome {
     Handled,
@@ -283,6 +295,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     weather_source: Option<Box<dyn WeatherSource>>,
     oil_price_source: Option<Box<dyn OilPriceSource>>,
     stock_price_source: Option<Box<dyn StockPriceSource>>,
+    election_source: Option<Box<dyn ElectionSource>>,
     last_outcome: Option<DispatchOutcome>,
     state_diagnostics: Vec<String>,
 }
@@ -330,6 +343,7 @@ where
             weather_source: None,
             oil_price_source: None,
             stock_price_source: None,
+            election_source: None,
             last_outcome: None,
             state_diagnostics: Vec::new(),
         }
@@ -424,6 +438,12 @@ where
     #[must_use]
     pub fn with_stock_price_source(mut self, source: Box<dyn StockPriceSource>) -> Self {
         self.stock_price_source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub fn with_election_source(mut self, source: Box<dyn ElectionSource>) -> Self {
+        self.election_source = Some(source);
         self
     }
 
@@ -1208,6 +1228,18 @@ where
                 CreditLogPlan::NotHandled => StatelessCommandPlan::NotHandled,
                 CreditLogPlan::LegacyRequired => StatelessCommandPlan::LegacyFallbackRequired,
             }
+        } else if classify_election_command(&parsed.command) {
+            let Some(source) = self.election_source.as_mut() else {
+                return Ok(DispatchOutcome::LegacyRequired);
+            };
+            let load = source.load(timestamp);
+            self.state_diagnostics.extend(load.diagnostics);
+            let text = render_elections(&load.events, &load.live_prices, locale);
+            let mut message = SendMessage::new(chat_id, &text);
+            message.reply_to_message_id = Some(message_id);
+            message.parse_mode = Some(ParseMode::Html);
+            message.disable_web_page_preview = true;
+            StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if classify_stock_command(&parsed.command) {
             let Some(source) = self.stock_price_source.as_mut() else {
                 return Ok(DispatchOutcome::LegacyRequired);
@@ -1534,6 +1566,7 @@ where
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::collections::HashMap;
     use std::convert::Infallible;
     use std::rc::Rc;
 
@@ -1550,14 +1583,16 @@ mod tests {
         ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BillingBalanceSource,
         BillingBalances, BillingTransferSink, BitcoinPriceSource, ChargeHistoryPage,
         ChargeHistorySource, ChatConfigSource, DispatchError, DispatchOutcome, DollarQuotesSource,
-        GreetingPoolLoad, GreetingPoolSource, GroupAuthorizationDecision, GroupAuthorizer,
-        MessageStateSink, NativeDispatcher, OilPriceSource, OilQuoteLoad, RandomSource,
-        RuloInputLoad, RuloSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink,
-        StockPriceSource, StockQuotesLoad, TransferResult, WeatherObservationLoad, WeatherSource,
+        ElectionLoad, ElectionSource, GreetingPoolLoad, GreetingPoolSource,
+        GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink, NativeDispatcher,
+        OilPriceSource, OilQuoteLoad, RandomSource, RuloInputLoad, RuloSource, RuntimeValues,
+        StarPaymentReceipt, StarPaymentSink, StockPriceSource, StockQuotesLoad, TransferResult,
+        WeatherObservationLoad, WeatherSource,
     };
     use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup};
     use bot_core::devo::DevoQuotes;
     use bot_core::greeting_commands::GreetingCategory;
+    use bot_core::polymarket::parse_election_events;
     use bot_core::rulo::{ExchangeQuote, RuloInput};
     use bot_core::stocks::StockQuote;
     use bot_core::weather::WeatherObservation;
@@ -1947,6 +1982,18 @@ mod tests {
     impl StockPriceSource for StockQuotes {
         fn load(&mut self, query: &str, now_unix: i64) -> StockQuotesLoad {
             self.calls.borrow_mut().push((query.to_owned(), now_unix));
+            self.result.clone()
+        }
+    }
+
+    struct Elections {
+        result: ElectionLoad,
+        calls: Rc<RefCell<Vec<i64>>>,
+    }
+
+    impl ElectionSource for Elections {
+        fn load(&mut self, now_unix: i64) -> ElectionLoad {
+            self.calls.borrow_mut().push(now_unix);
             self.result.clone()
         }
     }
@@ -2349,6 +2396,117 @@ mod tests {
             return;
         };
         assert_eq!(message.text, "no se pudo obtener el clima de Buenos Aires");
+    }
+
+    #[test]
+    fn election_commands_render_html_live_prices_diagnostics_and_command_state() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let events = parse_election_events(&json!([{
+            "title":"US election","slug":"us-election","liquidity":2500000,"tags":[{"slug":"united-states"}],"markets":[
+                {"groupItemTitle":"Candidate A","outcomes":["Yes","No"],"outcomePrices":[0.4,0.6],"clobTokenIds":["a","a-no"]}
+            ]
+        }]));
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_election_source(Box::new(Elections {
+            result: ElectionLoad {
+                events,
+                live_prices: HashMap::from([("a".to_owned(), 0.72)]),
+                diagnostics: vec!["synthetic midpoint fallback".to_owned()],
+            },
+            calls: Rc::clone(&calls),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(update("/elections", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(calls.borrow().as_slice(), &[1_672_531_200]);
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
+            return;
+        };
+        assert!(message.text.contains("Global elections by liquidity"));
+        assert!(message.text.contains("Candidate A 72%"));
+        assert_eq!(
+            message.parse_mode,
+            Some(bot_core::telegram_actions::ParseMode::Html)
+        );
+        assert!(message.disable_web_page_preview);
+        assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
+        assert_eq!(dispatcher.state.incoming.len(), 1);
+        assert_eq!(dispatcher.state.outgoing.len(), 1);
+        assert_eq!(
+            dispatcher.state_diagnostics(),
+            &["synthetic midpoint fallback"]
+        );
+    }
+
+    #[test]
+    fn election_failure_is_localized_and_missing_source_stays_legacy() {
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut failed = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_election_source(Box::new(Elections {
+            result: ElectionLoad {
+                events: Vec::new(),
+                live_prices: HashMap::new(),
+                diagnostics: vec!["synthetic Gamma failure".to_owned()],
+            },
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            failed.dispatch(update("/eleccion", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
+            return;
+        };
+        assert_eq!(
+            message.text,
+            "No pude traer las elecciones desde Polymarket"
+        );
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut missing = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            missing.dispatch(update("/election", None)),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
+        assert!(missing.actions.0.is_empty());
     }
 
     #[test]

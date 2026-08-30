@@ -21,6 +21,10 @@ use bot_adapters::giphy::{
     GiphyTransport, ReqwestGiphyTransport, TransportFailureKind as GiphyTransportFailureKind,
 };
 use bot_adapters::giphy_pool::{GiphyPoolCache, load_giphy_pool};
+use bot_adapters::polymarket::{
+    PolymarketTransport, ReqwestPolymarketTransport,
+    TransportFailureKind as PolymarketTransportFailureKind, load_elections,
+};
 use bot_adapters::redis_chat_admin::{cache_chat_admin, get_cached_chat_admin};
 use bot_adapters::redis_connection::RedisEndpoint;
 use bot_adapters::redis_json_cache::{RedisJsonCache, RedisJsonCacheError};
@@ -57,11 +61,11 @@ use thiserror::Error;
 use crate::dispatcher::{
     ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BillingBalanceSource,
     BillingBalances, BillingTransferSink, BitcoinPriceSource, ChargeHistorySource,
-    ChatConfigSource, DollarQuotesSource, GreetingPoolLoad, GreetingPoolSource,
-    GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink, NativeDispatcher,
-    OilPriceSource, OilQuoteLoad, RandomSource, RuloInputLoad, RuloSource, RuntimeValues,
-    StarPaymentReceipt, StarPaymentSink, StockPriceSource, StockQuotesLoad, WeatherObservationLoad,
-    WeatherSource,
+    ChatConfigSource, DollarQuotesSource, ElectionLoad, ElectionSource, GreetingPoolLoad,
+    GreetingPoolSource, GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink,
+    NativeDispatcher, OilPriceSource, OilQuoteLoad, RandomSource, RuloInputLoad, RuloSource,
+    RuntimeValues, StarPaymentReceipt, StarPaymentSink, StockPriceSource, StockQuotesLoad,
+    WeatherObservationLoad, WeatherSource,
 };
 use crate::runtime::{PollingRuntime, UpdateSource};
 
@@ -379,6 +383,22 @@ where
         StockQuotesLoad {
             quotes: Some(self.resolve_missing(quotes, now_unix, &mut diagnostics)),
             diagnostics,
+        }
+    }
+}
+
+struct PolymarketElectionSource<T, C> {
+    transport: T,
+    cache: C,
+}
+
+impl<T: PolymarketTransport, C: RequestCache> ElectionSource for PolymarketElectionSource<T, C> {
+    fn load(&mut self, now_unix: i64) -> ElectionLoad {
+        let load = load_elections(&self.transport, &mut self.cache, now_unix);
+        ElectionLoad {
+            events: load.events,
+            live_prices: load.live_prices,
+            diagnostics: load.diagnostics,
         }
     }
 }
@@ -857,6 +877,10 @@ pub enum CompositionError {
     FinvizTransport(FinvizTransportFailureKind),
     #[error("could not construct stock Redis cache: {0}")]
     StockCache(RedisJsonCacheError),
+    #[error("could not construct Polymarket transport: {0:?}")]
+    PolymarketTransport(PolymarketTransportFailureKind),
+    #[error("could not construct Polymarket Redis cache: {0}")]
+    PolymarketCache(RedisJsonCacheError),
     #[error("could not construct Redis command state: {0}")]
     RedisState(#[from] RedisMessageStateError),
 }
@@ -903,6 +927,10 @@ pub fn build_native_runtime(
         ReqwestFinvizTransport::new().map_err(CompositionError::FinvizTransport)?;
     let stock_cache =
         RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::StockCache)?;
+    let polymarket_transport =
+        ReqwestPolymarketTransport::new().map_err(CompositionError::PolymarketTransport)?;
+    let polymarket_cache =
+        RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::PolymarketCache)?;
     let source =
         TelegramUpdateSource::new(polling_transport, options.token, options.long_poll_timeout);
     let config = ChatConfigRepository::new(options.database_url);
@@ -949,6 +977,10 @@ pub fn build_native_runtime(
         yahoo_transport: stock_yahoo_transport,
         finviz_transport,
         cache: stock_cache,
+    }))
+    .with_election_source(Box::new(PolymarketElectionSource {
+        transport: polymarket_transport,
+        cache: polymarket_cache,
     }));
     let dispatcher = if let Some(api_key) = options.coinmarketcap_key.filter(|key| !key.is_empty())
     {
@@ -980,6 +1012,10 @@ mod tests {
     use bot_adapters::finviz::{
         FinvizTransport, HttpResponse as FinvizHttpResponse, TransportFailureKind as FinvizFailure,
     };
+    use bot_adapters::polymarket::{
+        HttpResponse as PolymarketHttpResponse, MidpointsRequest, PolymarketTransport,
+        TransportFailureKind as PolymarketFailure,
+    };
     use bot_adapters::redis_connection::RedisEndpoint;
     use bot_adapters::request_cache::RequestCache;
     use bot_adapters::stock_pool::StockPoolCache;
@@ -1008,18 +1044,18 @@ mod tests {
     use num_bigint::BigInt;
 
     use crate::dispatcher::{
-        ActionReceipt, ActionSink, BillingTransferSink, GroupAuthorizer, MessageStateSink,
-        OilPriceSource, RandomSource, RuntimeValues, StarPaymentSink, StockPriceSource,
-        WeatherSource,
+        ActionReceipt, ActionSink, BillingTransferSink, ElectionSource, GroupAuthorizer,
+        MessageStateSink, OilPriceSource, RandomSource, RuntimeValues, StarPaymentSink,
+        StockPriceSource, WeatherSource,
     };
     use crate::runtime::UpdateSource;
 
     use super::build_charge_history_page;
 
     use super::{
-        CriptoYaRuloSource, NativeRuntimeOptions, OpenMeteoWeatherSource, RedisCommandState,
-        SystemRandomError, SystemRandomSource, SystemRuntimeValues, TelegramActionSink,
-        TelegramActionSinkError, TelegramGroupAuthorizer, TelegramUpdateSource,
+        CriptoYaRuloSource, NativeRuntimeOptions, OpenMeteoWeatherSource, PolymarketElectionSource,
+        RedisCommandState, SystemRandomError, SystemRandomSource, SystemRuntimeValues,
+        TelegramActionSink, TelegramActionSinkError, TelegramGroupAuthorizer, TelegramUpdateSource,
         YahooOilPriceSource, YahooStockPriceSource, build_native_runtime,
         publish_telegram_commands,
     };
@@ -1071,6 +1107,32 @@ mod tests {
 
     struct FinvizTransportStub {
         response: RefCell<Option<Result<FinvizHttpResponse, FinvizFailure>>>,
+    }
+
+    struct PolymarketTransportStub {
+        events: RefCell<Option<Result<PolymarketHttpResponse, PolymarketFailure>>>,
+        midpoints: RefCell<Option<Result<PolymarketHttpResponse, PolymarketFailure>>>,
+        requests: RefCell<Vec<MidpointsRequest>>,
+    }
+
+    impl PolymarketTransport for PolymarketTransportStub {
+        fn events(&self) -> Result<PolymarketHttpResponse, PolymarketFailure> {
+            self.events
+                .borrow_mut()
+                .take()
+                .unwrap_or(Err(PolymarketFailure::Request))
+        }
+
+        fn midpoints(
+            &self,
+            request: &MidpointsRequest,
+        ) -> Result<PolymarketHttpResponse, PolymarketFailure> {
+            self.requests.borrow_mut().push(request.clone());
+            self.midpoints
+                .borrow_mut()
+                .take()
+                .unwrap_or(Err(PolymarketFailure::Request))
+        }
     }
 
     impl FinvizTransport for FinvizTransportStub {
@@ -1793,6 +1855,30 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["BZ=F", "CL=F"]
         );
+    }
+
+    #[test]
+    fn election_source_maps_cached_events_and_batch_live_prices() {
+        let transport = PolymarketTransportStub {
+            events: RefCell::new(Some(Ok(PolymarketHttpResponse {
+                status_code: 200,
+                body: r#"[{"title":"Election","slug":"election","liquidity":1000,"markets":[{"groupItemTitle":"A","outcomes":["Yes","No"],"outcomePrices":[0.4,0.6],"clobTokenIds":["a","a-no"]}]}]"#.to_owned(),
+            }))),
+            midpoints: RefCell::new(Some(Ok(PolymarketHttpResponse {
+                status_code: 200,
+                body: r#"{"a":"0.72"}"#.to_owned(),
+            }))),
+            requests: RefCell::default(),
+        };
+        let mut source = PolymarketElectionSource {
+            transport,
+            cache: WeatherCacheStub,
+        };
+        let load = source.load(100);
+        assert_eq!(load.events.len(), 1);
+        assert_eq!(load.live_prices.get("a"), Some(&0.72));
+        assert!(load.diagnostics.is_empty());
+        assert_eq!(source.transport.requests.borrow()[0].token_ids, ["a"]);
     }
 
     #[test]
