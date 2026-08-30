@@ -53,6 +53,7 @@ CREDIT_HUNDREDTHS_MIGRATION_ADVISORY_LOCK_KEY = 48_610_003
 CREDIT_HUNDREDTHS_MIGRATION_NAME = "credit_amounts_scaled_to_hundredths_v2"
 COMPACTION_REPAIR_ADVISORY_LOCK_KEY = 48_610_004
 COMPACTION_REPAIR_MIGRATION_NAME = "repair_duplicate_compaction_refunds_v1"
+BILLING_SCHEMA_ADVISORY_LOCK_KEY = 48_610_005
 _LEGACY_WHOLE_TO_TENTHS_FACTOR = 10
 _TENTHS_TO_HUNDREDTHS_FACTOR = CREDIT_SCALE // 10
 _LEGACY_METADATA_CREDIT_KEYS = (
@@ -71,6 +72,10 @@ _RETRYABLE_CREDIT_TRANSACTION_ERRORS = {
 }
 
 logger = logging.getLogger(__name__)
+
+
+class _RustBillingSchema(Protocol):
+    def billing_ensure_schema(self, database_url: str) -> str: ...
 
 
 class _RustBillingReads(Protocol):
@@ -296,6 +301,13 @@ class _RustBillingChargeHistory(Protocol):
     ) -> str: ...
 
 
+def _load_rust_billing_schema() -> _RustBillingSchema | None:
+    module = load_rust_bridge("RUST_BILLING_SCHEMA_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustBillingSchema, module)
+
+
 def _load_rust_billing_reads() -> _RustBillingReads | None:
     module = load_rust_bridge("RUST_BILLING_READ_SHADOW_ENABLED")
     if module is None:
@@ -498,8 +510,26 @@ def ensure_schema() -> None:
         if _schema_is_ready():
             return
 
+        rust = _load_rust_billing_schema()
+        database_url = get_database_url()
+        if rust is not None and database_url:
+            try:
+                result = json.loads(rust.billing_ensure_schema(database_url))
+                if not isinstance(result, Mapping):
+                    raise ValueError("Rust billing schema result must be an object")
+            except Exception as error:
+                raise CreditsDBError(
+                    "Rust billing schema initialization failed; refusing Python fallback"
+                ) from error
+            _SCHEMA_READY = True
+            return
+
         with connect() as conn:
             with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(%s)",
+                    (BILLING_SCHEMA_ADVISORY_LOCK_KEY,),
+                )
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS credit_accounts (
                         scope_type TEXT NOT NULL CHECK (scope_type IN ('user', 'chat')),

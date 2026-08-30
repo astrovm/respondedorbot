@@ -1646,6 +1646,7 @@ mod tests {
         BillingRepository, BillingScope, ChatAiChargeResult, LegacySettlementResult,
         OnboardingGrantResult, PurgeResult, StarPaymentResult, TransferResult,
     };
+    use crate::billing_schema::{BillingSchemaRepository, BillingSchemaResult};
 
     #[test]
     fn validates_the_persistent_scope_contract_before_connecting() {
@@ -1670,49 +1671,134 @@ mod tests {
         };
         let connector = TlsConnector::builder().build()?;
         let mut client = Client::connect(&database_url, MakeTlsConnector::new(connector))?;
+        BillingSchemaRepository::new(&database_url).ensure_schema()?;
         client.batch_execute(
-            "CREATE TABLE IF NOT EXISTS credit_accounts (\
-                scope_type TEXT NOT NULL, \
-                scope_id BIGINT NOT NULL, \
-                balance INTEGER NOT NULL, \
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), \
-                PRIMARY KEY (scope_type, scope_id)\
-            ); \
-            CREATE TABLE IF NOT EXISTS onboarding_grants (\
-                user_id BIGINT PRIMARY KEY, \
-                credits INTEGER NOT NULL, \
-                granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\
-            ); \
-            CREATE TABLE IF NOT EXISTS star_payments (\
-                telegram_payment_charge_id TEXT PRIMARY KEY, \
-                user_id BIGINT NOT NULL, \
-                pack_id TEXT NOT NULL, \
-                xtr_amount INTEGER NOT NULL, \
-                credits_awarded INTEGER NOT NULL, \
-                payload TEXT, \
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\
-            ); \
-            CREATE TABLE IF NOT EXISTS credit_ledger (\
-                id BIGSERIAL PRIMARY KEY, \
-                event_type TEXT NOT NULL, \
-                actor_user_id BIGINT, \
-                user_id BIGINT, \
-                chat_id BIGINT, \
-                amount INTEGER NOT NULL, \
-                metadata JSONB NOT NULL DEFAULT '{}'::jsonb, \
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\
-            ); \
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_unique_ai_provider_segment \
-            ON credit_ledger ((metadata->>'operation_id'), (metadata->>'segment_id')) \
-            WHERE event_type = 'ai_provider_usage' \
-              AND metadata ? 'operation_id' AND metadata ? 'segment_id'; \
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_unique_ai_settlement \
-            ON credit_ledger (user_id, (metadata->>'settlement_id')) \
-            WHERE event_type = 'ai_settlement_result' \
-              AND metadata ? 'settlement_id'; \
-            INSERT INTO credit_accounts (scope_type, scope_id, balance) \
-            VALUES ('user', 7000000000001, 1234) \
-            ON CONFLICT (scope_type, scope_id) DO UPDATE SET balance = EXCLUDED.balance;",
+            "DELETE FROM star_payments \
+                WHERE user_id IN (7000000000043, 7000000000044); \
+             DELETE FROM credit_ledger \
+                WHERE user_id IN (7000000000043, 7000000000044) \
+                   OR chat_id IN (7000000000043, 7000000000044); \
+             DELETE FROM onboarding_grants \
+                WHERE user_id IN (7000000000043, 7000000000044); \
+             DELETE FROM credit_accounts \
+                WHERE scope_id IN (7000000000043, 7000000000044); \
+             DELETE FROM credit_schema_migrations WHERE name IN ( \
+                'credit_amounts_scaled_to_tenths_v1', \
+                'credit_amounts_scaled_to_hundredths_v2', \
+                'repair_duplicate_compaction_refunds_v1' \
+             ); \
+             INSERT INTO credit_accounts (scope_type, scope_id, balance) VALUES \
+                ('user', 7000000000043, 3), \
+                ('user', 7000000000044, 100); \
+             INSERT INTO onboarding_grants (user_id, credits) \
+                VALUES (7000000000043, 3); \
+             INSERT INTO star_payments (telegram_payment_charge_id, user_id, \
+                pack_id, xtr_amount, credits_awarded, payload) \
+                VALUES ('synthetic-schema-scale', 7000000000043, 'probe', 1, 100, NULL); \
+             INSERT INTO credit_ledger (event_type, actor_user_id, user_id, amount, metadata) \
+                VALUES ('synthetic_schema_scale', 7000000000043, 7000000000043, -3, \
+                    '{\"reserved_credit_units\":3,\"note\":\"keep\"}'); \
+             INSERT INTO credit_ledger (event_type, actor_user_id, user_id, amount, metadata) \
+                VALUES \
+                ('memory_compaction_settlement', 7000000000044, 7000000000044, 0, \
+                    '{\"usage_tag\":\"memory_compaction:synthetic:schema\"}'), \
+                ('ai_settlement_result', 7000000000044, 7000000000044, 0, \
+                    '{\"operation_id\":\"synthetic-schema-repair\",\"settled_credit_units\":0}'), \
+                ('ai_refund', 7000000000044, 7000000000044, 5, \
+                    '{\"source\":\"user\",\"operation_id\":\"synthetic-schema-repair\",\
+                      \"usage_tag\":\"memory_compaction:synthetic:schema\",\
+                      \"reason\":\"unused_stale_reservation\"}');",
+        )?;
+
+        let first_schema_url = database_url.clone();
+        let second_schema_url = database_url.clone();
+        let first_schema = std::thread::spawn(move || {
+            BillingSchemaRepository::new(&first_schema_url).ensure_schema()
+        });
+        let second_schema = std::thread::spawn(move || {
+            BillingSchemaRepository::new(&second_schema_url).ensure_schema()
+        });
+        let first_schema = first_schema
+            .join()
+            .map_err(|_| std::io::Error::other("first schema migration thread panicked"))??;
+        let second_schema = second_schema
+            .join()
+            .map_err(|_| std::io::Error::other("second schema migration thread panicked"))??;
+        let schema_results = [first_schema, second_schema];
+        assert_eq!(
+            schema_results
+                .iter()
+                .filter(|result| result.migrated_to_tenths)
+                .count(),
+            1
+        );
+        assert_eq!(
+            schema_results
+                .iter()
+                .filter(|result| result.migrated_to_hundredths)
+                .count(),
+            1
+        );
+        assert_eq!(
+            schema_results
+                .iter()
+                .map(|result| result.repaired_compaction_refunds)
+                .sum::<u64>(),
+            1
+        );
+        let schema_evidence = client.query_one(
+            "SELECT \
+                (SELECT balance FROM credit_accounts \
+                    WHERE scope_type = 'user' AND scope_id = 7000000000043), \
+                (SELECT credits FROM onboarding_grants \
+                    WHERE user_id = 7000000000043), \
+                (SELECT credits_awarded FROM star_payments \
+                    WHERE telegram_payment_charge_id = 'synthetic-schema-scale'), \
+                (SELECT amount FROM credit_ledger \
+                    WHERE user_id = 7000000000043 \
+                      AND event_type = 'synthetic_schema_scale'), \
+                (SELECT metadata FROM credit_ledger \
+                    WHERE user_id = 7000000000043 \
+                      AND event_type = 'synthetic_schema_scale'), \
+                (SELECT balance FROM credit_accounts \
+                    WHERE scope_type = 'user' AND scope_id = 7000000000044), \
+                (SELECT COUNT(*) FROM credit_schema_migrations), \
+                (SELECT COUNT(*) FROM pg_indexes WHERE indexname IN ( \
+                    'idx_credit_ledger_compaction_usage_tag', \
+                    'idx_credit_ledger_user_ai_settlements', \
+                    'idx_credit_ledger_unique_ai_settlement', \
+                    'idx_credit_ledger_settlement_id', \
+                    'idx_credit_ledger_unique_ai_provider_segment', \
+                    'idx_credit_ledger_user_charge_history', \
+                    'idx_credit_ledger_user_charge_operations', \
+                    'idx_credit_ledger_user_settlement_lookup' \
+                ))",
+            &[],
+        )?;
+        assert_eq!(schema_evidence.get::<_, i32>(0), 300);
+        assert_eq!(schema_evidence.get::<_, i32>(1), 300);
+        assert_eq!(schema_evidence.get::<_, i32>(2), 10_000);
+        assert_eq!(schema_evidence.get::<_, i32>(3), -300);
+        assert_eq!(
+            schema_evidence.get::<_, Value>(4),
+            json!({"reserved_credit_units": 30, "note": "keep", "credit_scale": 100})
+        );
+        assert_eq!(schema_evidence.get::<_, i32>(5), 9_500);
+        assert_eq!(schema_evidence.get::<_, i64>(6), 3);
+        assert_eq!(schema_evidence.get::<_, i64>(7), 8);
+        assert_eq!(
+            BillingSchemaRepository::new(&database_url).ensure_schema()?,
+            BillingSchemaResult {
+                migrated_to_tenths: false,
+                migrated_to_hundredths: false,
+                repaired_compaction_refunds: 0,
+            }
+        );
+        client.execute(
+            "INSERT INTO credit_accounts (scope_type, scope_id, balance) \
+             VALUES ('user', $1, 1234) \
+             ON CONFLICT (scope_type, scope_id) DO UPDATE SET balance = EXCLUDED.balance",
+            &[&7_000_000_000_001_i64],
         )?;
         drop(client);
 
@@ -3309,6 +3395,8 @@ mod tests {
             7_000_000_000_040_i64,
             7_000_000_000_041_i64,
             7_000_000_000_042_i64,
+            7_000_000_000_043_i64,
+            7_000_000_000_044_i64,
         ];
         client.execute(
             "DELETE FROM star_payments WHERE user_id = ANY($1)",

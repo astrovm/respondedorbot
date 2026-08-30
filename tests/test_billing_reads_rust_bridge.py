@@ -10,6 +10,24 @@ import pytest
 from api.services import credits_db
 
 
+class _FakeRustBillingSchema:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls: list[str] = []
+
+    def billing_ensure_schema(self, database_url: str) -> str:
+        self.calls.append(database_url)
+        if self.fail:
+            raise ValueError("synthetic uncertain schema failure")
+        return json.dumps(
+            {
+                "migrated_to_tenths": False,
+                "migrated_to_hundredths": False,
+                "repaired_compaction_refunds": 0,
+            }
+        )
+
+
 class _Cursor:
     def __init__(self, balance: int) -> None:
         self.balance = balance
@@ -556,6 +574,104 @@ def _patch_python_balance(
         credits_db,
         "get_database_url",
         lambda: "postgresql://synthetic.invalid/db?sslmode=require",
+    )
+
+
+def test_billing_schema_is_rust_authoritative_and_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rust = _FakeRustBillingSchema()
+    monkeypatch.setattr(credits_db, "_SCHEMA_READY", False)
+    monkeypatch.setattr(credits_db, "get_database_url", lambda: "postgresql://db")
+    monkeypatch.setattr(credits_db, "_load_rust_billing_schema", lambda: rust)
+    monkeypatch.setattr(
+        credits_db,
+        "connect",
+        lambda: pytest.fail("Python schema writer must not run"),
+    )
+
+    credits_db.ensure_schema()
+    credits_db.ensure_schema()
+
+    assert rust.calls == ["postgresql://db"]
+    assert credits_db._schema_is_ready() is True
+
+
+def test_billing_schema_uncertain_failure_does_not_start_python_writer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(credits_db, "_SCHEMA_READY", False)
+    monkeypatch.setattr(credits_db, "get_database_url", lambda: "postgresql://db")
+    monkeypatch.setattr(
+        credits_db,
+        "_load_rust_billing_schema",
+        lambda: _FakeRustBillingSchema(fail=True),
+    )
+    monkeypatch.setattr(
+        credits_db,
+        "connect",
+        lambda: pytest.fail("uncertain schema writes must fail closed"),
+    )
+
+    with pytest.raises(credits_db.CreditsDBError, match="refusing Python fallback"):
+        credits_db.ensure_schema()
+
+    assert credits_db._schema_is_ready() is False
+
+
+def test_python_schema_rollback_path_takes_the_shared_schema_lock_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Cursor:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, object]] = []
+
+        def __enter__(self) -> Cursor:
+            return self
+
+        def __exit__(self, *_arguments: object) -> None:
+            return None
+
+        def execute(self, query: str, params: object = None) -> None:
+            self.calls.append((" ".join(query.split()), params))
+
+    class Connection:
+        def __init__(self, cursor: Cursor) -> None:
+            self.cursor_value = cursor
+
+        def __enter__(self) -> Connection:
+            return self
+
+        def __exit__(self, *_arguments: object) -> None:
+            return None
+
+        def cursor(self) -> Cursor:
+            return self.cursor_value
+
+        def commit(self) -> None:
+            return None
+
+    cursor = Cursor()
+    monkeypatch.setattr(credits_db, "_SCHEMA_READY", False)
+    monkeypatch.setattr(credits_db, "_load_rust_billing_schema", lambda: None)
+    monkeypatch.setattr(credits_db, "connect", lambda: Connection(cursor))
+    monkeypatch.setattr(credits_db, "_migrate_credit_amounts_to_units", lambda _cur: False)
+    monkeypatch.setattr(
+        credits_db,
+        "_migrate_credit_amounts_to_hundredths",
+        lambda _cur: False,
+    )
+    monkeypatch.setattr(
+        credits_db,
+        "_repair_duplicate_compaction_refunds",
+        lambda _cur: 0,
+    )
+
+    credits_db.ensure_schema()
+
+    assert cursor.calls[0] == (
+        "SELECT pg_advisory_xact_lock(%s)",
+        (credits_db.BILLING_SCHEMA_ADVISORY_LOCK_KEY,),
     )
 
 

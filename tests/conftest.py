@@ -45,6 +45,11 @@ def reset_caches(monkeypatch):
     bcra_service.reset_local_caches()
     monkeypatch.setattr(
         credits_db_service,
+        "_load_rust_billing_schema",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        credits_db_service,
         "_load_rust_billing_reads",
         lambda: None,
     )

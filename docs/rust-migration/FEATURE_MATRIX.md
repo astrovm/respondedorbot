@@ -67,6 +67,7 @@ Rows not listed under migrated components remain Python-authoritative.
 | PostgreSQL unsettled AI operation reconciliation reads | `rust-flagged` | `RUST_BILLING_RECONCILIATION_READS_ENABLED=0` or missing bridge | `contracts/billing_reconciliation_reads.json` |
 | PostgreSQL AI ledger retention purge | `rust-flagged` | `RUST_BILLING_MAINTENANCE_ENABLED=0` or missing bridge | `contracts/billing_maintenance.json` |
 | PostgreSQL paginated user AI charge-history query | `rust-flagged` | `RUST_BILLING_CHARGE_HISTORY_ENABLED=0` or missing bridge | `contracts/billing_charge_history.json` |
+| PostgreSQL billing schema and historical data migrations | `rust-flagged` | `RUST_BILLING_SCHEMA_ENABLED=0` or missing bridge | `contracts/billing_schema.json` |
 | Automatic media-routing decision | `rust-flagged` | `RUST_MEDIA_ROUTING_ENABLED=0` or missing bridge | `contracts/media_routing.json` |
 | General response-routing state machine | `rust-flagged` | `RUST_RESPONSE_ROUTING_ENABLED=0` or missing bridge | `contracts/response_routing.json` |
 | Base-conversion command | `rust-flagged` | `RUST_BASE_CONVERSION_ENABLED=0` or missing bridge | `contracts/base_conversion.json` |

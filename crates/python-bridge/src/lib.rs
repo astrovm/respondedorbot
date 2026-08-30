@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use bot_adapters::billing_read::BillingRepository;
+use bot_adapters::billing_schema::BillingSchemaRepository;
 use bot_adapters::compaction_job::normalize_compaction_job as normalize_compaction_job_adapter;
 use bot_adapters::redis_chat_admin::{
     cache_chat_admin as cache_chat_admin_adapter,
@@ -1779,6 +1780,16 @@ fn run_redis_maintenance(
     serde_json::to_string(&result).map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+/// Create the additive billing schema and apply each data migration once.
+#[pyfunction]
+fn billing_ensure_schema(py: Python<'_>, database_url: &str) -> PyResult<String> {
+    let repository = BillingSchemaRepository::new(database_url);
+    let result = py
+        .detach(|| repository.ensure_schema())
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serde_json::to_string(&result).map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Read one billing balance without creating accounts or writing ledger state.
 #[pyfunction]
 fn billing_read_balance(
@@ -2329,6 +2340,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(redis_chat_admin_key, module)?)?;
     module.add_function(wrap_pyfunction!(redis_chat_admin_set, module)?)?;
     module.add_function(wrap_pyfunction!(run_redis_maintenance, module)?)?;
+    module.add_function(wrap_pyfunction!(billing_ensure_schema, module)?)?;
     module.add_function(wrap_pyfunction!(billing_read_balance, module)?)?;
     module.add_function(wrap_pyfunction!(billing_get_or_create_balance, module)?)?;
     module.add_function(wrap_pyfunction!(billing_grant_onboarding, module)?)?;

@@ -28,6 +28,7 @@ must never enter balance mutations.
 | AI reconciliation reader | Rust reads unsettled holds, activity, and provider segments | Rust with safe Python read fallback; Python owns reconciliation decisions | Disable `RUST_BILLING_RECONCILIATION_READS_ENABLED` |
 | AI ledger maintenance | Rust deletes expired AI ledger event families in one transaction | Rust only for retention purge; Python owns schema migration | Disable `RUST_BILLING_MAINTENANCE_ENABLED` |
 | User AI charge history | Rust selects finalized and pending charge groups with cursor pagination | Rust query with safe Python read fallback; Python groups and formats rows | Disable `RUST_BILLING_CHARGE_HISTORY_ENABLED` |
+| Schema and historical migrations | Rust owns additive DDL, credit scaling, and compaction-refund repair in one transaction | Rust fail-closed; Python remains the disabled rollback path | Disable `RUST_BILLING_SCHEMA_ENABLED` before another schema owner starts |
 | Rust reads | Rust is authoritative for proven read operations | Python owns non-balance writes | Disable the per-operation Rust read flag |
 | Shadow transaction decisions | Python commits; Rust evaluates the same synthetic transaction inputs without I/O | Python only | Disable the decision shadow flag |
 | Rust writer canary | Rust owns one proven mutation family | Rust for that family; Python for all others | Disable that family's writer flag before another owner starts |
@@ -166,3 +167,7 @@ and an uncertain failure never starts the Python delete transaction.
 `RUST_BILLING_CHARGE_HISTORY_ENABLED=1` makes Rust authoritative for selecting
 the grouped charge-history rows and page cursors. Python temporarily keeps the
 presentation grouping, and a Rust failure may safely use the read-only query.
+
+`RUST_BILLING_SCHEMA_ENABLED=1` makes Rust the sole schema and historical data
+migration owner. DDL, migration markers, scaling, and repair commit atomically.
+An uncertain Rust result fails closed and never starts the Python schema writer.

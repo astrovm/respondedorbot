@@ -486,6 +486,17 @@ def verify_billing_reads(bridge: ModuleType) -> None:
             )
 
 
+def verify_billing_schema(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "billing_schema.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    if contract["current_credit_scale"] != 100:
+        raise AssertionError("billing schema credit scale changed")
+    if contract["advisory_lock_keys"] != [48610002, 48610003, 48610004, 48610005]:
+        raise AssertionError("billing schema advisory locks changed")
+    if not callable(bridge.billing_ensure_schema):
+        raise AssertionError("Rust billing schema bridge is unavailable")
+
+
 def verify_billing_onboarding(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "billing_onboarding.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -702,6 +713,7 @@ def verify_random_reply(bridge: ModuleType) -> None:
 
 
 def verify_billing_contracts(bridge: ModuleType) -> None:
+    verify_billing_schema(bridge)
     verify_billing_reads(bridge)
     verify_billing_onboarding(bridge)
     verify_billing_star_payments(bridge)
