@@ -7,6 +7,7 @@ use bot_core::command_state::{
     IncomingCommandState, IncomingCommandWritePlan, OutgoingCommandState, OutgoingCommandWritePlan,
     prepare_incoming_command_state, prepare_outgoing_command_state,
 };
+use bot_core::config_command::{ConfigCommandPlan, plan_config_command};
 use bot_core::language_command::{LanguageCommandPlan, plan_language_command};
 use bot_core::locale::resolve_locale;
 use bot_core::random_selection::{RandomSelection, parse_random_selection};
@@ -180,9 +181,12 @@ where
         let timestamp = self.runtime_values.unix_timestamp();
         let parsed = parse_command(&content.text, &self.bot_name);
         let is_group = is_group_chat_type(message.chat_type.as_deref());
-        let is_language_command = matches!(parsed.command.as_str(), "/language" | "/idioma");
+        let is_settings_command = matches!(
+            parsed.command.as_str(),
+            "/language" | "/idioma" | "/config" | "/configs" | "/settings"
+        );
         let mut language_needs_legacy_group = is_group;
-        if is_group && is_language_command {
+        if is_group && is_settings_command {
             let authorization = self
                 .authorization
                 .authorize(&chat_id.0.to_string(), &_sender_id.0.to_string());
@@ -232,6 +236,16 @@ where
         };
         let plan = if plan != StatelessCommandPlan::NotHandled {
             plan
+        } else if let ConfigCommandPlan::Action(action) = plan_config_command(
+            chat_id,
+            message_id,
+            &content.text,
+            &self.bot_name,
+            locale,
+            &config,
+            is_group,
+        ) {
+            StatelessCommandPlan::Action(action)
         } else if parsed.command == "/random" {
             match parse_random_selection(&parsed.message_text) {
                 Err(_) => StatelessCommandPlan::LegacyFallbackRequired,
@@ -906,6 +920,126 @@ mod tests {
                 "Unauthorized config attempt chat_id=-42 chat_type=group user_id=88 username=tester action=command:/idioma",
             ]
         );
+    }
+
+    #[test]
+    fn private_settings_render_native_english_configuration_without_authorization() {
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            dispatcher.dispatch(update("/settings@mybot", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(dispatcher.authorization.checks.is_empty());
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
+            return;
+        };
+        assert!(message.text.starts_with("Bot settings"));
+        assert_eq!(
+            message
+                .reply_markup
+                .as_ref()
+                .map(|markup| markup.inline_keyboard.len()),
+            Some(5)
+        );
+        assert_eq!(dispatcher.state.incoming.len(), 1);
+        assert_eq!(dispatcher.state.outgoing.len(), 1);
+    }
+
+    #[test]
+    fn group_config_authorizes_admin_and_renders_group_only_settings() {
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        let mut group_update = update("/configs", None);
+        if let IncomingEvent::Message(message) = &mut group_update.event {
+            message.chat_type = Some("group".to_owned());
+        }
+        assert_eq!(
+            dispatcher.dispatch(group_update),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            dispatcher.authorization.checks,
+            [("-42".to_owned(), "88".to_owned())]
+        );
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
+            return;
+        };
+        assert!(message.text.starts_with("config del gordo"));
+        assert_eq!(
+            message
+                .reply_markup
+                .as_ref()
+                .map(|markup| markup.inline_keyboard.len()),
+            Some(7)
+        );
+        assert_eq!(dispatcher.state.incoming.len(), 1);
+        assert_eq!(dispatcher.state.outgoing.len(), 1);
+    }
+
+    #[test]
+    fn group_config_denial_uses_the_shared_admin_boundary() {
+        let denied = Authorization {
+            is_admin: false,
+            diagnostics: Vec::new(),
+            checks: Vec::new(),
+        };
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            denied,
+            "@mybot",
+        );
+        let mut group_update = update("/config", None);
+        if let IncomingEvent::Message(message) = &mut group_update.event {
+            message.chat_type = Some("supergroup".to_owned());
+        }
+        assert_eq!(
+            dispatcher.dispatch(group_update),
+            Ok(DispatchOutcome::Handled)
+        );
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
+            return;
+        };
+        assert_eq!(message.text, "Only group admins can use this command");
+        assert!(dispatcher.state.incoming.is_empty());
+        assert!(dispatcher.state.outgoing.is_empty());
+        assert!(dispatcher.state_diagnostics()[0].contains("action=command:/config"));
     }
 
     #[test]

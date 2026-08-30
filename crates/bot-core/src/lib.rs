@@ -16,6 +16,7 @@ pub mod command_parsing;
 pub mod command_state;
 pub mod compaction_policy;
 pub mod config_callbacks;
+pub mod config_command;
 pub mod credit_units;
 pub mod devo;
 pub mod hacker_news;
