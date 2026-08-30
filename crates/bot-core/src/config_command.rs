@@ -11,12 +11,6 @@ use crate::telegram_input::{ChatId, MessageId};
 pub const TIMEZONE_OFFSET_MIN: i64 = -12;
 pub const TIMEZONE_OFFSET_MAX: i64 = 14;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConfigCommandPlan {
-    NotHandled,
-    Action(TelegramAction),
-}
-
 fn offset_text(offset: i64) -> String {
     match offset.cmp(&0) {
         std::cmp::Ordering::Equal => "UTC".to_owned(),
@@ -208,6 +202,18 @@ fn render_config_keyboard(
 }
 
 #[must_use]
+pub fn render_config(
+    config: &ChatConfig,
+    locale: Locale,
+    is_group: bool,
+) -> (String, InlineKeyboardMarkup) {
+    (
+        render_config_text(config, locale, is_group),
+        render_config_keyboard(config, locale, is_group),
+    )
+}
+
+#[must_use]
 pub fn plan_config_command(
     chat_id: ChatId,
     message_id: MessageId,
@@ -216,18 +222,19 @@ pub fn plan_config_command(
     locale: Locale,
     config: &ChatConfig,
     is_group: bool,
-) -> ConfigCommandPlan {
+) -> Option<TelegramAction> {
     let parsed = parse_command(message_text, bot_name);
     if !matches!(
         parsed.command.as_str(),
         "/config" | "/configs" | "/settings"
     ) {
-        return ConfigCommandPlan::NotHandled;
+        return None;
     }
-    let mut message = SendMessage::new(chat_id, &render_config_text(config, locale, is_group));
+    let (text, reply_markup) = render_config(config, locale, is_group);
+    let mut message = SendMessage::new(chat_id, &text);
     message.reply_to_message_id = Some(message_id);
-    message.reply_markup = Some(render_config_keyboard(config, locale, is_group));
-    ConfigCommandPlan::Action(TelegramAction::SendMessage(message))
+    message.reply_markup = Some(reply_markup);
+    Some(TelegramAction::SendMessage(message))
 }
 
 #[cfg(test)]
@@ -237,7 +244,7 @@ mod tests {
     use serde_json::Value;
     use sha2::{Digest, Sha256};
 
-    use super::{ConfigCommandPlan, TIMEZONE_OFFSET_MAX, plan_config_command};
+    use super::{TIMEZONE_OFFSET_MAX, plan_config_command, render_config};
     use crate::{
         chat_config::ChatConfig,
         locale::Locale,
@@ -245,10 +252,10 @@ mod tests {
         telegram_input::{ChatId, MessageId},
     };
 
-    fn message(plan: ConfigCommandPlan) -> Option<crate::telegram_actions::SendMessage> {
+    fn message(plan: Option<TelegramAction>) -> Option<crate::telegram_actions::SendMessage> {
         match plan {
-            ConfigCommandPlan::Action(TelegramAction::SendMessage(message)) => Some(message),
-            ConfigCommandPlan::NotHandled | ConfigCommandPlan::Action(_) => None,
+            Some(TelegramAction::SendMessage(message)) => Some(message),
+            None | Some(_) => None,
         }
     }
 
@@ -385,7 +392,7 @@ mod tests {
 
     #[test]
     fn ignores_unrelated_commands() {
-        assert_eq!(
+        assert!(
             plan_config_command(
                 ChatId(1),
                 MessageId(2),
@@ -394,8 +401,79 @@ mod tests {
                 Locale::Es,
                 &ChatConfig::default(),
                 true,
-            ),
-            ConfigCommandPlan::NotHandled
+            )
+            .is_none()
         );
+    }
+
+    #[test]
+    fn renderer_covers_alternate_locales_states_and_integer_extremes() {
+        let cases = [
+            (
+                ChatConfig {
+                    language: "es".to_owned(),
+                    link_mode: "delete".to_owned(),
+                    ai_command_followups: false,
+                    ignore_link_fix_followups: false,
+                    timezone_offset: 0,
+                    ai_random_replies: false,
+                    creditless_user_hourly_limit: 0,
+                },
+                Locale::Es,
+                false,
+                "borro el original y reposteo el link arreglado",
+            ),
+            (
+                ChatConfig {
+                    language: "auto".to_owned(),
+                    link_mode: "off".to_owned(),
+                    timezone_offset: i64::MIN,
+                    ai_random_replies: false,
+                    creditless_user_hourly_limit: -1,
+                    ..ChatConfig::default()
+                },
+                Locale::Es,
+                true,
+                "no toco los links",
+            ),
+            (
+                ChatConfig {
+                    language: "en".to_owned(),
+                    link_mode: "off".to_owned(),
+                    timezone_offset: i64::MAX,
+                    ai_random_replies: false,
+                    ..ChatConfig::default()
+                },
+                Locale::En,
+                true,
+                "Do not modify links",
+            ),
+        ];
+        for (config, locale, is_group, expected) in cases {
+            let (text, reply_markup) = render_config(&config, locale, is_group);
+            assert!(text.contains(expected));
+            assert!(text.contains(if config.timezone_offset == 0 {
+                "UTC\n"
+            } else if config.timezone_offset > 0 {
+                "UTC+"
+            } else {
+                "UTC-"
+            }));
+            assert_eq!(
+                reply_markup.inline_keyboard.len(),
+                if is_group { 7 } else { 5 }
+            );
+        }
+
+        let plan = plan_config_command(
+            ChatId(1),
+            MessageId(2),
+            "/config",
+            "@mybot",
+            Locale::Es,
+            &ChatConfig::default(),
+            true,
+        );
+        assert!(plan.is_some());
     }
 }

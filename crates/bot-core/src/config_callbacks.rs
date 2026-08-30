@@ -1,5 +1,10 @@
 //! Pure chat-configuration callback state transitions.
 
+use num_bigint::BigInt;
+
+use crate::chat_config::ChatConfig;
+use crate::config_command::{TIMEZONE_OFFSET_MAX, TIMEZONE_OFFSET_MIN};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfigCallbackInput {
     pub action: String,
@@ -29,6 +34,21 @@ pub enum ConfigCallbackEvaluation {
     SetToggle { field: ToggleField, value: bool },
     SetTimezone(i64),
     SetCreditlessLimit(i64),
+}
+
+pub enum ConfigCallbackDiagnostic {
+    InvalidTimezone,
+    InvalidCreditlessLimit,
+}
+
+pub enum ConfigCallbackOutcome {
+    NotHandled,
+    LegacyRequired,
+    Guard,
+    Render {
+        changed: bool,
+        diagnostic: Option<ConfigCallbackDiagnostic>,
+    },
 }
 
 fn toggle_field(action: &str) -> Option<ToggleField> {
@@ -95,11 +115,124 @@ pub fn evaluate_config_callback(input: &ConfigCallbackInput) -> ConfigCallbackEv
     }
 }
 
+fn parsed_timezone(value: &str) -> Option<i64> {
+    let parsed = value.parse::<BigInt>().ok()?;
+    let minimum = BigInt::from(TIMEZONE_OFFSET_MIN);
+    let maximum = BigInt::from(TIMEZONE_OFFSET_MAX);
+    if parsed < minimum {
+        Some(TIMEZONE_OFFSET_MIN)
+    } else if parsed > maximum {
+        Some(TIMEZONE_OFFSET_MAX)
+    } else {
+        parsed.try_into().ok()
+    }
+}
+
+/// Plan a complete `cfg:*` transition while preserving Python integer behavior.
+#[must_use]
+pub fn plan_config_callback(
+    data: &str,
+    current: &ChatConfig,
+) -> (ConfigCallbackOutcome, ChatConfig) {
+    let Some(payload) = data.strip_prefix("cfg:") else {
+        return (ConfigCallbackOutcome::NotHandled, current.clone());
+    };
+    let Some((action, value)) = payload.split_once(':') else {
+        return (ConfigCallbackOutcome::Guard, current.clone());
+    };
+    let current_toggle = match action {
+        "random" => Some(current.ai_random_replies),
+        "followups" => Some(current.ai_command_followups),
+        "linkfixfollowups" => Some(current.ignore_link_fix_followups),
+        _ => None,
+    };
+    if action == "creditless"
+        && ((value == "increase" && current.creditless_user_hourly_limit == i64::MAX)
+            || (!matches!(
+                value,
+                "none" | "decrease" | "increase" | "unlimited" | "current"
+            ) && value.parse::<BigInt>().is_ok()
+                && value.parse::<i64>().is_err()))
+    {
+        return (ConfigCallbackOutcome::LegacyRequired, current.clone());
+    }
+    let numeric_value = if action == "timezone" {
+        parsed_timezone(value)
+    } else {
+        value.parse().ok()
+    };
+    let evaluation = evaluate_config_callback(&ConfigCallbackInput {
+        action: action.to_owned(),
+        value: value.to_owned(),
+        current_toggle,
+        current_creditless_limit: (action == "creditless")
+            .then_some(current.creditless_user_hourly_limit),
+        numeric_value,
+        timezone_min: TIMEZONE_OFFSET_MIN,
+        timezone_max: TIMEZONE_OFFSET_MAX,
+    });
+    let mut config = current.clone();
+    let mut changed = true;
+    let diagnostic = match evaluation {
+        ConfigCallbackEvaluation::NoChange => {
+            changed = false;
+            None
+        }
+        ConfigCallbackEvaluation::GuardCurrent => {
+            return (ConfigCallbackOutcome::Guard, current.clone());
+        }
+        ConfigCallbackEvaluation::InvalidTimezone => {
+            changed = false;
+            Some(ConfigCallbackDiagnostic::InvalidTimezone)
+        }
+        ConfigCallbackEvaluation::InvalidCreditlessLimit => {
+            changed = false;
+            Some(ConfigCallbackDiagnostic::InvalidCreditlessLimit)
+        }
+        ConfigCallbackEvaluation::SetLanguage(value) => {
+            config.language = value;
+            None
+        }
+        ConfigCallbackEvaluation::SetLinkMode(value) => {
+            config.link_mode = value;
+            None
+        }
+        ConfigCallbackEvaluation::SetToggle { field, value } => {
+            match field {
+                ToggleField::RandomReplies => config.ai_random_replies = value,
+                ToggleField::CommandFollowups => config.ai_command_followups = value,
+                ToggleField::IgnoreLinkFixFollowups => {
+                    config.ignore_link_fix_followups = value;
+                }
+            }
+            None
+        }
+        ConfigCallbackEvaluation::SetTimezone(value) => {
+            config.timezone_offset = value;
+            None
+        }
+        ConfigCallbackEvaluation::SetCreditlessLimit(value) => {
+            config.creditless_user_hourly_limit = value;
+            None
+        }
+    };
+    (
+        ConfigCallbackOutcome::Render {
+            changed,
+            diagnostic,
+        },
+        config,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigCallbackEvaluation, ConfigCallbackInput, ToggleField, evaluate_config_callback,
+        ConfigCallbackDiagnostic, ConfigCallbackEvaluation, ConfigCallbackInput,
+        ConfigCallbackOutcome, ToggleField, evaluate_config_callback, plan_config_callback,
     };
+    use crate::chat_config::ChatConfig;
+    use crate::config_command::TIMEZONE_OFFSET_MAX;
 
     fn input(action: &str, value: &str) -> ConfigCallbackInput {
         ConfigCallbackInput {
@@ -110,6 +243,40 @@ mod tests {
             numeric_value: None,
             timezone_min: -12,
             timezone_max: 14,
+        }
+    }
+
+    fn diagnostic_name(diagnostic: Option<ConfigCallbackDiagnostic>) -> Option<&'static str> {
+        diagnostic.map(|diagnostic| match diagnostic {
+            ConfigCallbackDiagnostic::InvalidTimezone => "timezone",
+            ConfigCallbackDiagnostic::InvalidCreditlessLimit => "creditless",
+        })
+    }
+
+    fn render_matches(
+        plan: (ConfigCallbackOutcome, ChatConfig),
+        expected: &ChatConfig,
+        expected_changed: bool,
+        expected_diagnostic: Option<&str>,
+    ) -> bool {
+        match plan {
+            (
+                ConfigCallbackOutcome::Render {
+                    changed,
+                    diagnostic,
+                },
+                config,
+            ) => {
+                config == *expected
+                    && changed == expected_changed
+                    && diagnostic_name(diagnostic) == expected_diagnostic
+            }
+            (
+                ConfigCallbackOutcome::NotHandled
+                | ConfigCallbackOutcome::LegacyRequired
+                | ConfigCallbackOutcome::Guard,
+                _,
+            ) => false,
         }
     }
 
@@ -204,5 +371,170 @@ mod tests {
             evaluate_config_callback(&input("unknown", "value")),
             ConfigCallbackEvaluation::NoChange
         );
+    }
+
+    #[test]
+    fn complete_plan_mutates_typed_config_and_preserves_guard_behavior() {
+        let current = ChatConfig::default();
+        assert!(render_matches(
+            plan_config_callback("cfg:random:toggle", &current),
+            &ChatConfig {
+                ai_random_replies: false,
+                ..current.clone()
+            },
+            true,
+            None,
+        ));
+        assert!(matches!(
+            plan_config_callback("cfg:timezone:current", &current),
+            (ConfigCallbackOutcome::Guard, _)
+        ));
+        assert!(matches!(
+            plan_config_callback("cfg:broken", &current),
+            (ConfigCallbackOutcome::Guard, _)
+        ));
+        assert!(matches!(
+            plan_config_callback("other", &current),
+            (ConfigCallbackOutcome::NotHandled, _)
+        ));
+    }
+
+    #[test]
+    fn complete_plan_clamps_arbitrary_timezone_and_defers_unrepresentable_limits() {
+        let current = ChatConfig::default();
+        assert!(render_matches(
+            plan_config_callback(
+                "cfg:timezone:999999999999999999999999999999999999",
+                &current,
+            ),
+            &ChatConfig {
+                timezone_offset: TIMEZONE_OFFSET_MAX,
+                ..current.clone()
+            },
+            true,
+            None,
+        ));
+        assert!(matches!(
+            plan_config_callback(
+                "cfg:creditless:999999999999999999999999999999999999",
+                &current,
+            ),
+            (ConfigCallbackOutcome::LegacyRequired, _)
+        ));
+    }
+
+    #[test]
+    fn complete_plan_reports_invalid_values_but_still_renders_current_config() {
+        let current = ChatConfig::default();
+        assert!(render_matches(
+            plan_config_callback("cfg:timezone:later", &current),
+            &current,
+            false,
+            Some("timezone"),
+        ));
+        assert!(render_matches(
+            plan_config_callback("cfg:creditless:-2", &current),
+            &current,
+            false,
+            Some("creditless"),
+        ));
+    }
+
+    #[test]
+    fn complete_plan_applies_every_supported_field_transition() {
+        let current = ChatConfig::default();
+        for (data, expected) in [
+            (
+                "cfg:language:en",
+                ChatConfig {
+                    language: "en".to_owned(),
+                    ..current.clone()
+                },
+            ),
+            (
+                "cfg:link:delete",
+                ChatConfig {
+                    link_mode: "delete".to_owned(),
+                    ..current.clone()
+                },
+            ),
+            (
+                "cfg:followups:any-value",
+                ChatConfig {
+                    ai_command_followups: false,
+                    ..current.clone()
+                },
+            ),
+            (
+                "cfg:linkfixfollowups:toggle",
+                ChatConfig {
+                    ignore_link_fix_followups: false,
+                    ..current.clone()
+                },
+            ),
+            (
+                "cfg:timezone:-999999999999999999999999999999999999",
+                ChatConfig {
+                    timezone_offset: super::TIMEZONE_OFFSET_MIN,
+                    ..current.clone()
+                },
+            ),
+            (
+                "cfg:timezone:2",
+                ChatConfig {
+                    timezone_offset: 2,
+                    ..current.clone()
+                },
+            ),
+            (
+                "cfg:creditless:unlimited",
+                ChatConfig {
+                    creditless_user_hourly_limit: -1,
+                    ..current.clone()
+                },
+            ),
+        ] {
+            assert!(render_matches(
+                plan_config_callback(data, &current),
+                &expected,
+                true,
+                None,
+            ));
+        }
+
+        let maximum = ChatConfig {
+            creditless_user_hourly_limit: i64::MAX,
+            ..current
+        };
+        assert!(matches!(
+            plan_config_callback("cfg:creditless:increase", &maximum),
+            (ConfigCallbackOutcome::LegacyRequired, _)
+        ));
+    }
+
+    #[test]
+    fn derived_traits_cover_every_callback_outcome_shape() {
+        let input = input("random", "toggle");
+        assert_eq!(input.clone(), input);
+        assert!(!format!("{input:?}").is_empty());
+
+        let evaluations = [
+            ConfigCallbackEvaluation::NoChange,
+            ConfigCallbackEvaluation::GuardCurrent,
+            ConfigCallbackEvaluation::InvalidTimezone,
+            ConfigCallbackEvaluation::InvalidCreditlessLimit,
+            ConfigCallbackEvaluation::SetLanguage("en".to_owned()),
+            ConfigCallbackEvaluation::SetLinkMode("off".to_owned()),
+            ConfigCallbackEvaluation::SetToggle {
+                field: ToggleField::CommandFollowups,
+                value: false,
+            },
+            ConfigCallbackEvaluation::SetTimezone(2),
+            ConfigCallbackEvaluation::SetCreditlessLimit(7),
+        ];
+        for evaluation in evaluations {
+            assert_eq!(evaluation.clone(), evaluation);
+            assert!(!format!("{evaluation:?}").is_empty());
+        }
     }
 }

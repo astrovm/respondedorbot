@@ -127,6 +127,10 @@ All state is created from synthetic fixtures and discarded after the run.
 The CI checks job currently provides PostgreSQL 17 to Rust tests through
 `TEST_POSTGRES_URL`; migrated billing transactions therefore contribute real
 database execution to the adapter coverage gate.
+Coverage targets are cleaned between crate gates so instrumented binaries from
+an earlier crate cannot dilute or inflate a later crate's report. CI enforces
+the documented line thresholds independently for `bot-core`, `bot-adapters`,
+and `botd`.
 
 ## Coverage and mutation gates
 

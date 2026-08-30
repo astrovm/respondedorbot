@@ -7,7 +7,10 @@ use bot_core::command_state::{
     IncomingCommandState, IncomingCommandWritePlan, OutgoingCommandState, OutgoingCommandWritePlan,
     prepare_incoming_command_state, prepare_outgoing_command_state,
 };
-use bot_core::config_command::{ConfigCommandPlan, plan_config_command};
+use bot_core::config_callbacks::{
+    ConfigCallbackDiagnostic, ConfigCallbackOutcome, plan_config_callback,
+};
+use bot_core::config_command::{plan_config_command, render_config};
 use bot_core::language_command::{LanguageCommandPlan, plan_language_command};
 use bot_core::locale::resolve_locale;
 use bot_core::random_selection::{RandomSelection, parse_random_selection};
@@ -16,8 +19,10 @@ use bot_core::stateless_commands::{
     plan_stateless_command,
 };
 use bot_core::telegram_actions::{SendMessage, TelegramAction};
-use bot_core::telegram_input::{MessageId, is_group_chat_type};
+use bot_core::telegram_callbacks::{CallbackContextOutcome, CallbackRoute, parse_callback_context};
+use bot_core::telegram_input::{ChatId, MessageId, is_group_chat_type};
 use num_bigint::BigInt;
+use serde_json::{Map, Value};
 use thiserror::Error;
 
 use crate::runtime::UpdateHandler;
@@ -34,6 +39,10 @@ pub trait ActionSink {
     type Error;
 
     fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error>;
+
+    fn try_edit(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
+        self.execute(action).map(|_receipt| true)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +163,155 @@ where
         &self.state_diagnostics
     }
 
+    fn answer_callback_best_effort(&mut self, callback_id: Option<&str>) {
+        if let Some(callback_id) = callback_id {
+            let _result = self.actions.execute(TelegramAction::AnswerCallback {
+                callback_id: callback_id.to_owned(),
+                text: None,
+                show_alert: false,
+            });
+        }
+    }
+
+    fn dispatch_callback(
+        &mut self,
+        callback: &Map<String, Value>,
+    ) -> NativeDispatchResult<Config, Actions, Random> {
+        let username = callback
+            .get("from")
+            .and_then(Value::as_object)
+            .and_then(|user| user.get("username"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let parsed = parse_callback_context(&Value::Object(callback.clone()));
+        let Ok(CallbackContextOutcome::Context { context }) = parsed else {
+            return Ok(DispatchOutcome::LegacyRequired);
+        };
+        if context.route != CallbackRoute::Config {
+            return Ok(DispatchOutcome::LegacyRequired);
+        }
+        let Ok(chat_id_value) = context.chat_id.parse::<i64>() else {
+            return Ok(DispatchOutcome::LegacyRequired);
+        };
+        let chat_id = ChatId(chat_id_value);
+        let message_id = MessageId(context.message_id);
+        let config = self
+            .config
+            .get(&context.chat_id)
+            .map_err(DispatchError::Config)?;
+        let locale = resolve_locale(
+            Some(&config.language),
+            context.user_language_code.as_deref(),
+            &context.chat_type,
+        );
+        let is_group = is_group_chat_type(Some(&context.chat_type));
+        self.state_diagnostics.clear();
+        if is_group {
+            let authorization = context.user_id.map_or(
+                GroupAuthorizationDecision {
+                    is_admin: false,
+                    diagnostics: Vec::new(),
+                },
+                |user_id| {
+                    self.authorization
+                        .authorize(&context.chat_id, &user_id.to_string())
+                },
+            );
+            self.state_diagnostics.extend(authorization.diagnostics);
+            if !authorization.is_admin {
+                self.state_diagnostics.push(format!(
+                    "Unauthorized config attempt chat_id={} chat_type={} user_id={} username={} action=callback:config callback_data={}",
+                    context.chat_id,
+                    context.chat_type,
+                    context.user_id.map_or_else(String::new, |value| value.to_string()),
+                    username,
+                    context.data,
+                ));
+                self.answer_callback_best_effort(context.callback_id.as_deref());
+                let text = match locale {
+                    bot_core::locale::Locale::Es => "este comando es solo para admins del grupo",
+                    bot_core::locale::Locale::En => "Only group admins can use this command",
+                };
+                let mut response = SendMessage::new(chat_id, text);
+                response.reply_to_message_id = Some(message_id);
+                let _receipt = self
+                    .actions
+                    .execute(TelegramAction::SendMessage(response))
+                    .map_err(DispatchError::Action)?;
+                return Ok(DispatchOutcome::Handled);
+            }
+        }
+        let (outcome, config) = plan_config_callback(&context.data, &config);
+        let (changed, diagnostic) = match outcome {
+            ConfigCallbackOutcome::Render {
+                changed,
+                diagnostic,
+            } => (changed, diagnostic),
+            ConfigCallbackOutcome::Guard => {
+                self.answer_callback_best_effort(context.callback_id.as_deref());
+                return Ok(DispatchOutcome::Handled);
+            }
+            ConfigCallbackOutcome::NotHandled | ConfigCallbackOutcome::LegacyRequired => {
+                return Ok(DispatchOutcome::LegacyRequired);
+            }
+        };
+        if let Some(diagnostic) = diagnostic {
+            let value = context
+                .data
+                .strip_prefix("cfg:")
+                .and_then(|payload| payload.split_once(':'))
+                .map_or("", |(_, value)| value);
+            let name = match diagnostic {
+                ConfigCallbackDiagnostic::InvalidTimezone => "timezone",
+                ConfigCallbackDiagnostic::InvalidCreditlessLimit => "creditless",
+            };
+            self.state_diagnostics.push(format!(
+                "Invalid {name} callback value chat_id={} value={value}",
+                context.chat_id
+            ));
+        }
+        if changed {
+            self.config
+                .set(&context.chat_id, &config)
+                .map_err(DispatchError::Config)?;
+        }
+        let rendered_locale = resolve_locale(
+            Some(&config.language),
+            context.user_language_code.as_deref(),
+            &context.chat_type,
+        );
+        let (rendered_text, rendered_markup) = render_config(&config, rendered_locale, is_group);
+        let edit = TelegramAction::EditMessage {
+            chat_id,
+            message_id,
+            text: rendered_text.clone(),
+            reply_markup: Some(rendered_markup.clone()),
+        };
+        let edited = match self.actions.try_edit(edit) {
+            Ok(edited) => edited,
+            Err(error) => {
+                self.answer_callback_best_effort(context.callback_id.as_deref());
+                return Err(DispatchError::Action(error));
+            }
+        };
+        let fallback = if edited {
+            Ok(())
+        } else {
+            self.state_diagnostics.push(format!(
+                "Falling back to new config message chat_id={} message_id={}",
+                context.chat_id, context.message_id
+            ));
+            let mut message = SendMessage::new(chat_id, &rendered_text);
+            message.reply_markup = Some(rendered_markup);
+            self.actions
+                .execute(TelegramAction::SendMessage(message))
+                .map(|_receipt| ())
+        };
+        self.answer_callback_best_effort(context.callback_id.as_deref());
+        fallback.map_err(DispatchError::Action)?;
+        Ok(DispatchOutcome::Handled)
+    }
+
     fn dispatch_message(
         &mut self,
         message: &IncomingMessage,
@@ -236,7 +394,7 @@ where
         };
         let plan = if plan != StatelessCommandPlan::NotHandled {
             plan
-        } else if let ConfigCommandPlan::Action(action) = plan_config_command(
+        } else if let Some(action) = plan_config_command(
             chat_id,
             message_id,
             &content.text,
@@ -374,9 +532,10 @@ where
     ) -> NativeDispatchResult<Config, Actions, Random> {
         let outcome = match update.event {
             IncomingEvent::Message(message) => self.dispatch_message(&message)?,
-            IncomingEvent::CallbackQuery(_)
-            | IncomingEvent::PreCheckoutQuery(_)
-            | IncomingEvent::Unsupported => DispatchOutcome::Unsupported,
+            IncomingEvent::CallbackQuery(callback) => self.dispatch_callback(&callback)?,
+            IncomingEvent::PreCheckoutQuery(_) | IncomingEvent::Unsupported => {
+                DispatchOutcome::Unsupported
+            }
         };
         self.last_outcome = Some(outcome);
         Ok(outcome)
@@ -410,6 +569,7 @@ mod tests {
     use bot_core::telegram_actions::TelegramAction;
     use bot_core::telegram_input::{ChatId, MessageContent, MessageId, UserId};
     use num_bigint::BigInt;
+    use serde_json::{Map, json};
 
     use super::{
         ActionReceipt, ActionSink, ChatConfigSource, DispatchError, DispatchOutcome,
@@ -563,6 +723,32 @@ mod tests {
                     audio_file_id: None,
                 }),
             }),
+        }
+    }
+
+    fn callback_update(data: &str, chat_type: &str, language: Option<&str>) -> IncomingUpdate {
+        let callback = Map::from_iter([
+            ("id".to_owned(), json!("callback-1")),
+            ("data".to_owned(), json!(data)),
+            (
+                "from".to_owned(),
+                json!({
+                    "id": 88,
+                    "username": "tester",
+                    "language_code": language,
+                }),
+            ),
+            (
+                "message".to_owned(),
+                json!({
+                    "message_id": 7,
+                    "chat": {"id": -42, "type": chat_type},
+                }),
+            ),
+        ]);
+        IncomingUpdate {
+            update_id: 100,
+            event: IncomingEvent::CallbackQuery(callback),
         }
     }
 
@@ -1040,6 +1226,226 @@ mod tests {
         assert!(dispatcher.state.incoming.is_empty());
         assert!(dispatcher.state.outgoing.is_empty());
         assert!(dispatcher.state_diagnostics()[0].contains("action=command:/config"));
+    }
+
+    #[test]
+    fn private_config_callback_updates_persists_edits_and_acknowledges() {
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            dispatcher.dispatch(callback_update("cfg:random:toggle", "private", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            dispatcher
+                .config
+                .value
+                .as_ref()
+                .map(|config| config.ai_random_replies),
+            Ok(false)
+        );
+        assert!(dispatcher.config.chat_ids.contains(&"set:-42".to_owned()));
+        assert!(matches!(
+            dispatcher.actions.0.first(),
+            Some(TelegramAction::EditMessage { reply_markup: Some(markup), .. })
+                if markup.inline_keyboard.len() == 5
+        ));
+        assert!(matches!(
+            dispatcher.actions.0.get(1),
+            Some(TelegramAction::AnswerCallback { callback_id, .. })
+                if callback_id == "callback-1"
+        ));
+        assert!(dispatcher.state.incoming.is_empty());
+        assert!(dispatcher.state.outgoing.is_empty());
+    }
+
+    #[test]
+    fn language_callback_immediately_renders_the_new_locale() {
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            dispatcher.dispatch(callback_update("cfg:language:en", "private", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            dispatcher.actions.0.first(),
+            Some(TelegramAction::EditMessage { text, .. }) if text.starts_with("Bot settings")
+        ));
+    }
+
+    #[test]
+    fn config_callback_current_and_malformed_buttons_only_acknowledge() {
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        for data in ["cfg:timezone:current", "cfg:broken"] {
+            assert_eq!(
+                dispatcher.dispatch(callback_update(data, "private", None)),
+                Ok(DispatchOutcome::Handled)
+            );
+        }
+        assert_eq!(dispatcher.actions.0.len(), 2);
+        assert!(
+            dispatcher
+                .actions
+                .0
+                .iter()
+                .all(|action| matches!(action, TelegramAction::AnswerCallback { .. }))
+        );
+        assert!(
+            !dispatcher
+                .config
+                .chat_ids
+                .iter()
+                .any(|chat_id| chat_id.starts_with("set:"))
+        );
+    }
+
+    #[test]
+    fn group_config_callback_denial_acknowledges_replies_and_audits() {
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let denied = Authorization {
+            is_admin: false,
+            diagnostics: vec!["synthetic callback lookup".to_owned()],
+            checks: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            denied,
+            "@mybot",
+        );
+        assert_eq!(
+            dispatcher.dispatch(callback_update("cfg:link:off", "group", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            dispatcher.authorization.checks,
+            [("-42".to_owned(), "88".to_owned())]
+        );
+        assert!(matches!(
+            dispatcher.actions.0.first(),
+            Some(TelegramAction::AnswerCallback { .. })
+        ));
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.get(1) else {
+            return;
+        };
+        assert_eq!(message.text, "este comando es solo para admins del grupo");
+        assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
+        assert!(dispatcher.state_diagnostics()[1].contains("callback_data=cfg:link:off"));
+    }
+
+    #[test]
+    fn config_callback_uses_new_message_fallback_before_acknowledging() {
+        #[derive(Default)]
+        struct EditFallbackActions(Vec<TelegramAction>);
+
+        impl ActionSink for EditFallbackActions {
+            type Error = Infallible;
+
+            fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
+                self.0.push(action);
+                Ok(ActionReceipt { message_id: None })
+            }
+
+            fn try_edit(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
+                self.0.push(action);
+                Ok(false)
+            }
+        }
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            EditFallbackActions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            dispatcher.dispatch(callback_update("cfg:link:delete", "private", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [
+                TelegramAction::EditMessage { .. },
+                TelegramAction::SendMessage(_),
+                TelegramAction::AnswerCallback { .. }
+            ]
+        ));
+        assert!(
+            dispatcher
+                .state_diagnostics()
+                .iter()
+                .any(|message| message.starts_with("Falling back to new config message"))
+        );
+    }
+
+    #[test]
+    fn non_config_callbacks_remain_owned_by_the_legacy_runtime() {
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            dispatcher.dispatch(callback_update("task:delete:1", "private", None)),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
+        assert!(dispatcher.config.chat_ids.is_empty());
+        assert!(dispatcher.actions.0.is_empty());
     }
 
     #[test]

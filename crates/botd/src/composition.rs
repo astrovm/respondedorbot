@@ -297,6 +297,13 @@ impl<Transport: TelegramTransport> ActionSink for TelegramActionSink<Transport> 
             }
         }
     }
+
+    fn try_edit(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
+        Ok(matches!(
+            execute_with(&self.transport, &self.token, action)?,
+            ActionOutcome::Completed { .. }
+        ))
+    }
 }
 
 pub fn publish_telegram_commands<Actions: ActionSink>(
@@ -547,6 +554,40 @@ mod tests {
             Err(TelegramActionSinkError::Transport(
                 TransportFailureKind::Connection
             ))
+        );
+    }
+
+    #[test]
+    fn optional_edit_reports_api_failure_for_new_message_fallback() {
+        let mut sink = TelegramActionSink::new(
+            transport(
+                400,
+                r#"{"ok":false,"description":"message cannot be edited"}"#,
+            ),
+            "token",
+        );
+        assert_eq!(
+            sink.try_edit(TelegramAction::EditMessage {
+                chat_id: ChatId(1),
+                message_id: MessageId(2),
+                text: "updated settings".to_owned(),
+                reply_markup: None,
+            }),
+            Ok(false)
+        );
+
+        let mut sink = TelegramActionSink::new(
+            transport(200, r#"{"ok":true,"result":{"message_id":2}}"#),
+            "token",
+        );
+        assert_eq!(
+            sink.try_edit(TelegramAction::EditMessage {
+                chat_id: ChatId(1),
+                message_id: MessageId(2),
+                text: "updated settings".to_owned(),
+                reply_markup: None,
+            }),
+            Ok(true)
         );
     }
 
