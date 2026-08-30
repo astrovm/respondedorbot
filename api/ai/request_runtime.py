@@ -4,14 +4,50 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Any
+import logging
+from typing import Any, Protocol, cast
 
 from api.billing.authorization import (
     AI_COST_AUTHORIZER_KEY,
     AI_SEGMENT_RECORDER_KEY,
     AIAuthorizationDenied,
 )
+from api.core.rust_bridge import load_rust_bridge
 from api.i18n import current_locale, tr
+
+
+logger = logging.getLogger(__name__)
+
+
+class _RustAIRequestSanitization(Protocol):
+    def ai_sanitize_assistant_text(self, text: str) -> str: ...
+
+
+def _load_rust_ai_request_sanitization() -> _RustAIRequestSanitization | None:
+    module = load_rust_bridge("RUST_AI_REQUEST_SANITIZATION_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustAIRequestSanitization, module)
+
+
+def _python_sanitize_assistant_text(text: str) -> str:
+    content = text.lower()
+    content = "".join(
+        character for character in content if not (0x1F000 <= ord(character) <= 0x1FFFF)
+    )
+    return content.rstrip(".")
+
+
+def _sanitize_assistant_text(text: str) -> str:
+    rust = _load_rust_ai_request_sanitization()
+    if rust is not None:
+        try:
+            return str(rust.ai_sanitize_assistant_text(text))
+        except Exception:
+            logger.exception(
+                "Rust AI request sanitization failed; using Python fallback"
+            )
+    return _python_sanitize_assistant_text(text)
 
 
 def _copy_billing_context(
@@ -32,11 +68,7 @@ def sanitize_bot_message(message: dict[str, Any]) -> dict[str, Any]:
         return message
     content = message.get("content", "")
     if isinstance(content, str):
-        content = content.lower()
-        content = "".join(
-            character for character in content if not (0x1F000 <= ord(character) <= 0x1FFFF)
-        )
-        content = content.rstrip(".")
+        content = _sanitize_assistant_text(content)
     elif isinstance(content, list):
         for part in content:
             if (
@@ -44,13 +76,7 @@ def sanitize_bot_message(message: dict[str, Any]) -> dict[str, Any]:
                 and part.get("type") == "text"
                 and isinstance(part.get("text"), str)
             ):
-                part["text"] = part["text"].lower()
-                part["text"] = "".join(
-                    character
-                    for character in part["text"]
-                    if not (0x1F000 <= ord(character) <= 0x1FFFF)
-                )
-                part["text"] = part["text"].rstrip(".")
+                part["text"] = _sanitize_assistant_text(part["text"])
     return {**message, "content": content}
 
 

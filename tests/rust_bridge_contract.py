@@ -1015,6 +1015,14 @@ def verify_provider_chain_policy(bridge: ModuleType) -> None:
             raise AssertionError(f"expected provider-chain failure for {case['name']}")
 
 
+def verify_ai_request_sanitization(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "ai_request_sanitization.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["text_cases"]:
+        actual = bridge.ai_sanitize_assistant_text(case["input"])
+        assert actual == case["expected"], case["name"]
+
+
 def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_ai_usage_policy(bridge)
     verify_provider_error_policy(bridge)
@@ -1029,6 +1037,7 @@ def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_telegram_stream_planning(bridge)
     verify_tool_registry_policy(bridge)
     verify_provider_chain_policy(bridge)
+    verify_ai_request_sanitization(bridge)
 
 
 def main(arguments: list[str]) -> int:

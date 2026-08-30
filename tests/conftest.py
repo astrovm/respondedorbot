@@ -7,6 +7,7 @@ import redis as redis_module
 from api.core import config as config_module
 from api.ai import pricing as ai_pricing_module
 from api.ai import pipeline as ai_pipeline_module
+from api.ai import request_runtime as ai_request_runtime_module
 from api.billing import provider_usage as provider_usage_module
 from api.bot import streaming as bot_streaming_module
 from api.providers import errors as provider_errors_module
@@ -65,6 +66,11 @@ def reset_caches(monkeypatch):
     monkeypatch.setattr(
         ai_pipeline_module,
         "_load_rust_ai_response_cleanup",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        ai_request_runtime_module,
+        "_load_rust_ai_request_sanitization",
         lambda: None,
     )
     monkeypatch.setattr(

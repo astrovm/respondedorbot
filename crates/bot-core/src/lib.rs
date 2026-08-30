@@ -2,6 +2,7 @@
 
 pub mod admin_reports;
 pub mod ai_pricing;
+pub mod ai_request;
 pub mod ai_reserve;
 pub mod ai_response_cleanup;
 pub mod ai_usage;

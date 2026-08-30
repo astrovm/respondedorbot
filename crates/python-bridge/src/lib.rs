@@ -30,6 +30,7 @@ use bot_core::admin_reports::{
     truncate_report as truncate_admin_report_core,
 };
 use bot_core::ai_pricing::calculate_billing_for_segments as calculate_ai_billing_for_segments_core;
+use bot_core::ai_request::sanitize_assistant_text as ai_sanitize_assistant_text_core;
 use bot_core::ai_reserve::{
     EstimatedMessage, TokenEstimateValue,
     chat_output_token_limit as ai_chat_output_token_limit_core,
@@ -2646,6 +2647,11 @@ fn ai_cleanup_response(
 }
 
 #[pyfunction]
+fn ai_sanitize_assistant_text(text: &str) -> String {
+    ai_sanitize_assistant_text_core(text)
+}
+
+#[pyfunction]
 #[allow(clippy::too_many_arguments)]
 fn telegram_stream_should_edit(
     done: bool,
@@ -3070,6 +3076,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module
     )?)?;
     module.add_function(wrap_pyfunction!(ai_cleanup_response, module)?)?;
+    module.add_function(wrap_pyfunction!(ai_sanitize_assistant_text, module)?)?;
     module.add_function(wrap_pyfunction!(telegram_stream_should_edit, module)?)?;
     module.add_function(wrap_pyfunction!(telegram_stream_plan_feed, module)?)?;
     module.add_function(wrap_pyfunction!(telegram_stream_plan_finalize, module)?)?;
