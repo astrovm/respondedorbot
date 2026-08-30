@@ -15,11 +15,18 @@ class _FakeRustTelegramHttp:
         self.outcome = outcome
         self.fail = fail
         self.calls: list[tuple[object, ...]] = []
+        self.multipart_calls: list[tuple[object, ...]] = []
 
     def telegram_http_request(self, *arguments: object) -> str:
         self.calls.append(arguments)
         if self.fail:
             raise ValueError("synthetic Rust Telegram failure")
+        return json.dumps(self.outcome)
+
+    def telegram_multipart_request(self, *arguments: object) -> str:
+        self.multipart_calls.append(arguments)
+        if self.fail:
+            raise ValueError("synthetic Rust Telegram multipart failure")
         return json.dumps(self.outcome)
 
 
@@ -141,11 +148,16 @@ def test_bridge_failure_uses_python_fallback(monkeypatch, caplog) -> None:
     send.assert_called_once()
 
 
-def test_multipart_requests_remain_on_python_during_this_slice(monkeypatch) -> None:
-    loader = MagicMock()
-    monkeypatch.setattr(telegram, "_load_rust_telegram_http_adapter", loader)
-    response = _python_response({"ok": True, "result": {"message_id": 7}})
-    send = MagicMock(return_value=response)
+def test_rust_multipart_request_is_authoritative(monkeypatch) -> None:
+    rust = _FakeRustTelegramHttp(
+        {
+            "status": "response",
+            "status_code": 200,
+            "body": '{"ok":true,"result":{"message_id":7}}',
+        }
+    )
+    monkeypatch.setattr(telegram, "_load_rust_telegram_http_adapter", lambda: rust)
+    send = MagicMock(side_effect=AssertionError("Python upload must not run"))
     monkeypatch.setattr(telegram, "_send_telegram_request", send)
 
     actual = telegram.telegram_request(
@@ -157,6 +169,96 @@ def test_multipart_requests_remain_on_python_during_this_slice(monkeypatch) -> N
     )
 
     assert actual == ({"ok": True, "result": {"message_id": 7}}, None)
+    assert rust.multipart_calls == [
+        (
+            "synthetic-token",
+            "sendPhoto",
+            '{"chat_id":"42"}',
+            "photo",
+            "chart.png",
+            b"synthetic",
+            "image/png",
+            5,
+        )
+    ]
+    send.assert_not_called()
+
+
+def test_multipart_transport_error_does_not_repeat_upload(monkeypatch) -> None:
+    rust = _FakeRustTelegramHttp(
+        {"status": "transport_error", "kind": "connection"}
+    )
+    monkeypatch.setattr(telegram, "_load_rust_telegram_http_adapter", lambda: rust)
+    send = MagicMock(side_effect=AssertionError("failed upload must not be repeated"))
+    monkeypatch.setattr(telegram, "_send_telegram_request", send)
+
+    actual = telegram.telegram_request(
+        "sendVideo",
+        method="POST",
+        data_payload={"chat_id": "42"},
+        files={"video": ("video.mp4", b"synthetic", "video/mp4")},
+        token="synthetic-token",
+        log_errors=False,
+    )
+
+    assert actual == (None, "Telegram connection failed")
+    send.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("method", "params", "json_payload", "files"),
+    [
+        ("POST", None, None, {"document": ("file.bin", b"synthetic")}),
+        (
+            "GET",
+            None,
+            None,
+            {"photo": ("chart.png", b"synthetic", "image/png")},
+        ),
+        (
+            "POST",
+            {"chat_id": "42"},
+            None,
+            {"photo": ("chart.png", b"synthetic", "image/png")},
+        ),
+        (
+            "POST",
+            None,
+            {"chat_id": "42"},
+            {"photo": ("chart.png", b"synthetic", "image/png")},
+        ),
+        (
+            "POST",
+            None,
+            None,
+            {"document": ("file.bin", b"synthetic", "application/octet-stream")},
+        ),
+    ],
+)
+def test_unsupported_multipart_shape_remains_on_python(
+    monkeypatch,
+    method: str,
+    params: dict[str, object] | None,
+    json_payload: dict[str, object] | None,
+    files: dict[str, tuple[object, ...]],
+) -> None:
+    loader = MagicMock()
+    monkeypatch.setattr(telegram, "_load_rust_telegram_http_adapter", loader)
+    response = _python_response({"ok": True, "result": True})
+    send = MagicMock(return_value=response)
+    monkeypatch.setattr(telegram, "_send_telegram_request", send)
+
+    actual = telegram.telegram_request(
+        "customUpload",
+        method=method,
+        params=params,
+        json_payload=json_payload,
+        data_payload={"chat_id": "42"},
+        files=files,
+        token="synthetic-token",
+    )
+
+    assert actual == ({"ok": True, "result": True}, None)
     loader.assert_not_called()
     send.assert_called_once()
 

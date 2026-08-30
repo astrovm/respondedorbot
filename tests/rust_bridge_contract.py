@@ -1165,6 +1165,22 @@ def verify_telegram_http_adapter(bridge: ModuleType) -> None:
             "status_code": case["status_code"],
             "body": case["body"],
         }, case["name"]
+    for case in contract["multipart_validation"]:
+        try:
+            bridge.telegram_multipart_request(
+                "synthetic-token",
+                "sendPhoto",
+                json.dumps(case["data_payload"], separators=(",", ":")),
+                "photo",
+                "chart.png",
+                bytes(case["file_bytes"]),
+                "image/png",
+                case["timeout_seconds"],
+            )
+        except ValueError as error:
+            assert str(error) == case["error"], case["name"]
+        else:
+            raise AssertionError(f"expected multipart failure for {case['name']}")
 
 
 def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:

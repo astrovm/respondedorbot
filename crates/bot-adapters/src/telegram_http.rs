@@ -1,10 +1,11 @@
-//! Blocking Telegram Bot API transport for non-multipart requests.
+//! Blocking Telegram Bot API transport.
 
 use std::io::Read;
 use std::time::Duration;
 
 use reqwest::Method;
 use reqwest::blocking::Client;
+use reqwest::blocking::multipart::{Form, Part};
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
@@ -26,6 +27,30 @@ pub struct TelegramRequest {
 pub struct HttpResponse {
     pub status_code: u16,
     pub body: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct TelegramMultipartRequest {
+    pub token: String,
+    pub endpoint: String,
+    pub fields: Vec<(String, String)>,
+    pub file_field: String,
+    pub file_name: String,
+    pub file_bytes: Vec<u8>,
+    pub content_type: String,
+    pub timeout: Duration,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct MultipartUpload {
+    pub token: String,
+    pub endpoint: String,
+    pub data_payload: Value,
+    pub file_field: String,
+    pub file_name: String,
+    pub file_bytes: Vec<u8>,
+    pub content_type: String,
+    pub timeout: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -58,6 +83,13 @@ pub trait TelegramTransport {
     fn send(&self, request: &TelegramRequest) -> Result<HttpResponse, TransportFailureKind>;
 }
 
+pub trait TelegramMultipartTransport {
+    fn send_multipart(
+        &self,
+        request: &TelegramMultipartRequest,
+    ) -> Result<HttpResponse, TransportFailureKind>;
+}
+
 pub struct ReqwestTelegramTransport {
     client: Client,
 }
@@ -87,21 +119,55 @@ impl TelegramTransport for ReqwestTelegramTransport {
         if let Some(payload) = &request.json_payload {
             builder = builder.json(payload);
         }
-        let response = builder.send().map_err(classify_error)?;
-        let status_code = response.status().as_u16();
-        let mut body = Vec::new();
-        response
-            .take(MAX_RESPONSE_BYTES + 1)
-            .read_to_end(&mut body)
-            .map_err(|_| TransportFailureKind::Request)?;
-        if body.len() as u64 > MAX_RESPONSE_BYTES {
-            return Err(TransportFailureKind::ResponseTooLarge);
-        }
-        Ok(HttpResponse {
-            status_code,
-            body: String::from_utf8_lossy(&body).into_owned(),
-        })
+        read_response(builder.send().map_err(classify_error)?)
     }
+}
+
+impl TelegramMultipartTransport for ReqwestTelegramTransport {
+    fn send_multipart(
+        &self,
+        request: &TelegramMultipartRequest,
+    ) -> Result<HttpResponse, TransportFailureKind> {
+        let url = format!(
+            "{TELEGRAM_API_BASE}/bot{}/{}",
+            request.token, request.endpoint
+        );
+        let mut form = Form::new();
+        for (name, value) in &request.fields {
+            form = form.text(name.clone(), value.clone());
+        }
+        let part = Part::bytes(request.file_bytes.clone())
+            .file_name(request.file_name.clone())
+            .mime_str(&request.content_type)
+            .map_err(|_| TransportFailureKind::Request)?;
+        form = form.part(request.file_field.clone(), part);
+        read_response(
+            self.client
+                .post(url)
+                .timeout(request.timeout)
+                .multipart(form)
+                .send()
+                .map_err(classify_error)?,
+        )
+    }
+}
+
+fn read_response(
+    response: reqwest::blocking::Response,
+) -> Result<HttpResponse, TransportFailureKind> {
+    let status_code = response.status().as_u16();
+    let mut body = Vec::new();
+    response
+        .take(MAX_RESPONSE_BYTES + 1)
+        .read_to_end(&mut body)
+        .map_err(|_| TransportFailureKind::Request)?;
+    if body.len() as u64 > MAX_RESPONSE_BYTES {
+        return Err(TransportFailureKind::ResponseTooLarge);
+    }
+    Ok(HttpResponse {
+        status_code,
+        body: String::from_utf8_lossy(&body).into_owned(),
+    })
 }
 
 fn classify_error(error: reqwest::Error) -> TransportFailureKind {
@@ -177,16 +243,67 @@ pub fn request(
     }
 }
 
+fn form_fields(payload: Value) -> Result<Vec<(String, String)>, TelegramHttpError> {
+    let Value::Object(payload) = payload else {
+        return Err(TelegramHttpError::InvalidPayload);
+    };
+    payload
+        .into_iter()
+        .filter_map(|(name, value)| match value {
+            Value::Null => None,
+            Value::String(value) => Some(Ok((name, value))),
+            Value::Bool(true) => Some(Ok((name, "True".to_owned()))),
+            Value::Bool(false) => Some(Ok((name, "False".to_owned()))),
+            Value::Number(value) => Some(Ok((name, value.to_string()))),
+            Value::Array(_) | Value::Object(_) => Some(Err(TelegramHttpError::InvalidPayload)),
+        })
+        .collect()
+}
+
+pub fn multipart_request_with<T: TelegramMultipartTransport>(
+    transport: &T,
+    upload: MultipartUpload,
+) -> Result<TelegramHttpOutcome, TelegramHttpError> {
+    if upload.timeout.is_zero() {
+        return Err(TelegramHttpError::InvalidTimeout);
+    }
+    let request = TelegramMultipartRequest {
+        token: upload.token,
+        endpoint: upload.endpoint,
+        fields: form_fields(upload.data_payload)?,
+        file_field: upload.file_field,
+        file_name: upload.file_name,
+        file_bytes: upload.file_bytes,
+        content_type: upload.content_type,
+        timeout: upload.timeout,
+    };
+    match transport.send_multipart(&request) {
+        Ok(response) => Ok(response_outcome(response.status_code, response.body)),
+        Err(kind) => Ok(TelegramHttpOutcome::TransportError { kind }),
+    }
+}
+
+pub fn multipart_request(
+    upload: MultipartUpload,
+) -> Result<TelegramHttpOutcome, TelegramHttpError> {
+    match ReqwestTelegramTransport::new() {
+        Ok(transport) => multipart_request_with(&transport, upload),
+        Err(kind) => Ok(TelegramHttpOutcome::TransportError { kind }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::time::Duration;
 
     use reqwest::Method;
     use serde_json::json;
 
     use super::{
-        HttpResponse, TelegramHttpError, TelegramHttpOutcome, TelegramRequest, TelegramTransport,
-        TransportFailureKind, request_with, response_outcome,
+        HttpResponse, MultipartUpload, TelegramHttpError, TelegramHttpOutcome,
+        TelegramMultipartRequest, TelegramMultipartTransport, TelegramRequest, TelegramTransport,
+        TransportFailureKind, multipart_request_with, request_with, response_outcome,
     };
 
     struct FakeTransport {
@@ -196,6 +313,24 @@ mod tests {
 
     impl TelegramTransport for FakeTransport {
         fn send(&self, request: &TelegramRequest) -> Result<HttpResponse, TransportFailureKind> {
+            self.requests.borrow_mut().push(request.clone());
+            self.response
+                .borrow_mut()
+                .take()
+                .unwrap_or(Err(TransportFailureKind::Request))
+        }
+    }
+
+    struct FakeMultipartTransport {
+        response: RefCell<Option<Result<HttpResponse, TransportFailureKind>>>,
+        requests: RefCell<Vec<TelegramMultipartRequest>>,
+    }
+
+    impl TelegramMultipartTransport for FakeMultipartTransport {
+        fn send_multipart(
+            &self,
+            request: &TelegramMultipartRequest,
+        ) -> Result<HttpResponse, TransportFailureKind> {
             self.requests.borrow_mut().push(request.clone());
             self.response
                 .borrow_mut()
@@ -297,5 +432,76 @@ mod tests {
                 body: "  body  ".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn multipart_request_preserves_python_form_and_file_semantics() {
+        let transport = FakeMultipartTransport {
+            response: RefCell::new(Some(Ok(HttpResponse {
+                status_code: 200,
+                body: r#"{"ok":true}"#.to_owned(),
+            }))),
+            requests: RefCell::new(Vec::new()),
+        };
+        let actual = multipart_request_with(
+            &transport,
+            MultipartUpload {
+                token: "synthetic-token".to_owned(),
+                endpoint: "sendPhoto".to_owned(),
+                data_payload: json!({"chat_id": "42", "reply_to_message_id": 7, "enabled": true, "skip": null}),
+                file_field: "photo".to_owned(),
+                file_name: "chart.png".to_owned(),
+                file_bytes: vec![1, 2, 3],
+                content_type: "image/png".to_owned(),
+                timeout: Duration::from_secs(30),
+            },
+        );
+        assert!(matches!(
+            actual,
+            Ok(TelegramHttpOutcome::Response {
+                status_code: 200,
+                ..
+            })
+        ));
+        let requests = transport.requests.borrow();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].fields,
+            vec![
+                ("chat_id".to_owned(), "42".to_owned()),
+                ("enabled".to_owned(), "True".to_owned()),
+                ("reply_to_message_id".to_owned(), "7".to_owned()),
+            ]
+        );
+        assert_eq!(requests[0].file_field, "photo");
+        assert_eq!(requests[0].file_name, "chart.png");
+        assert_eq!(requests[0].file_bytes, vec![1, 2, 3]);
+        assert_eq!(requests[0].content_type, "image/png");
+        assert_eq!(requests[0].timeout.as_secs(), 30);
+    }
+
+    #[test]
+    fn multipart_rejects_nested_form_values_before_transport() {
+        let transport = FakeMultipartTransport {
+            response: RefCell::new(Some(Err(TransportFailureKind::Request))),
+            requests: RefCell::new(Vec::new()),
+        };
+        assert_eq!(
+            multipart_request_with(
+                &transport,
+                MultipartUpload {
+                    token: "token".to_owned(),
+                    endpoint: "sendPhoto".to_owned(),
+                    data_payload: json!({"nested": {"unsupported": true}}),
+                    file_field: "photo".to_owned(),
+                    file_name: "chart.png".to_owned(),
+                    file_bytes: Vec::new(),
+                    content_type: "image/png".to_owned(),
+                    timeout: Duration::from_secs(5),
+                },
+            ),
+            Err(TelegramHttpError::InvalidPayload)
+        );
+        assert!(transport.requests.borrow().is_empty());
     }
 }

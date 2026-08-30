@@ -34,6 +34,18 @@ class _RustTelegramHttpAdapter(Protocol):
         timeout_seconds: int,
     ) -> str: ...
 
+    def telegram_multipart_request(
+        self,
+        token: str,
+        endpoint: str,
+        data_payload_json: str,
+        file_field: str,
+        file_name: str,
+        file_bytes: bytes,
+        content_type: str,
+        timeout_seconds: int,
+    ) -> str: ...
+
 
 def _load_rust_telegram_http_adapter() -> _RustTelegramHttpAdapter | None:
     module = load_rust_bridge("RUST_TELEGRAM_HTTP_ADAPTER_ENABLED")
@@ -249,6 +261,25 @@ def _rust_telegram_result(
     return _parse_telegram_body(endpoint, body, log_errors=log_errors)
 
 
+def _rust_multipart_file(
+    data_payload: Optional[Dict[str, Any]],
+    files: Optional[Dict[str, Any]],
+) -> tuple[str, str, bytes, str] | None:
+    if data_payload is None or not files or len(files) != 1:
+        return None
+    file_field, raw_file = next(iter(files.items()))
+    if not isinstance(raw_file, (tuple, list)) or len(raw_file) != 3:
+        return None
+    file_name, file_bytes, content_type = raw_file
+    if not isinstance(file_name, str) or not isinstance(content_type, str):
+        return None
+    if not isinstance(file_bytes, (bytes, bytearray)):
+        return None
+    if content_type not in {"image/png", "video/mp4"}:
+        return None
+    return str(file_field), file_name, bytes(file_bytes), content_type
+
+
 def telegram_request(
     endpoint: str,
     *,
@@ -280,33 +311,52 @@ def telegram_request(
         files=files,
         timeout=timeout,
     )
-    rust = (
-        _load_rust_telegram_http_adapter()
-        if files is None and data_payload is None
+    multipart_file = (
+        _rust_multipart_file(data_payload, files)
+        if method.upper() == "POST" and params is None and json_payload is None
         else None
     )
+    rust_eligible = (files is None and data_payload is None) or multipart_file is not None
+    rust = _load_rust_telegram_http_adapter() if rust_eligible else None
     if rust is not None:
         try:
-            raw_result = rust.telegram_http_request(
-                str(resolved_token),
-                endpoint,
-                method,
-                (
-                    json.dumps(params, ensure_ascii=False, separators=(",", ":"))
-                    if params is not None
-                    else None
-                ),
-                (
+            if multipart_file is None:
+                raw_result = rust.telegram_http_request(
+                    str(resolved_token),
+                    endpoint,
+                    method,
+                    (
+                        json.dumps(params, ensure_ascii=False, separators=(",", ":"))
+                        if params is not None
+                        else None
+                    ),
+                    (
+                        json.dumps(
+                            json_payload,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                        if json_payload is not None
+                        else None
+                    ),
+                    timeout,
+                )
+            else:
+                file_field, file_name, file_bytes, content_type = multipart_file
+                raw_result = rust.telegram_multipart_request(
+                    str(resolved_token),
+                    endpoint,
                     json.dumps(
-                        json_payload,
+                        data_payload,
                         ensure_ascii=False,
                         separators=(",", ":"),
-                    )
-                    if json_payload is not None
-                    else None
-                ),
-                timeout,
-            )
+                    ),
+                    file_field,
+                    file_name,
+                    file_bytes,
+                    content_type,
+                    timeout,
+                )
             return _rust_telegram_result(
                 raw_result,
                 endpoint,

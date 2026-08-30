@@ -34,7 +34,10 @@ use bot_adapters::redis_media_cache::{
 use bot_adapters::redis_message_state::RedisMessageState as RedisMessageStateAdapter;
 use bot_adapters::redis_task_store::RedisTaskStore as RedisTaskStoreAdapter;
 use bot_adapters::telegram_http::{
-    request as telegram_http_request_adapter, response_outcome as telegram_response_outcome_adapter,
+    MultipartUpload as TelegramMultipartUpload,
+    multipart_request as telegram_multipart_request_adapter,
+    request as telegram_http_request_adapter,
+    response_outcome as telegram_response_outcome_adapter,
 };
 use bot_core::admin_reports::{
     CreditLogLimit, parse_creditlog_limit as parse_creditlog_limit_core,
@@ -2957,6 +2960,34 @@ fn telegram_http_response(status_code: u16, body: &str) -> PyResult<String> {
 }
 
 #[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn telegram_multipart_request(
+    token: &str,
+    endpoint: &str,
+    data_payload_json: &str,
+    file_field: &str,
+    file_name: &str,
+    file_bytes: Vec<u8>,
+    content_type: &str,
+    timeout_seconds: u64,
+) -> PyResult<String> {
+    let data_payload = serde_json::from_str(data_payload_json)
+        .map_err(|error| PyValueError::new_err(format!("invalid JSON value: {error}")))?;
+    let outcome = telegram_multipart_request_adapter(TelegramMultipartUpload {
+        token: token.to_owned(),
+        endpoint: endpoint.to_owned(),
+        data_payload,
+        file_field: file_field.to_owned(),
+        file_name: file_name.to_owned(),
+        file_bytes,
+        content_type: content_type.to_owned(),
+        timeout: std::time::Duration::from_secs(timeout_seconds),
+    })
+    .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serde_json::to_string(&outcome).map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
 fn provider_chain_select(availability: Vec<bool>) -> Vec<usize> {
     provider_chain_select_core(&availability)
 }
@@ -3326,6 +3357,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_function(wrap_pyfunction!(telegram_http_request, module)?)?;
     module.add_function(wrap_pyfunction!(telegram_http_response, module)?)?;
+    module.add_function(wrap_pyfunction!(telegram_multipart_request, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_select, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_outcome, module)?)?;
     module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;

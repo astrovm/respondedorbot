@@ -89,5 +89,23 @@
       "kind": "response_too_large",
       "expected_error": "Telegram response too large"
     }
+  ],
+  "multipart_validation": [
+    {
+      "name": "zero timeout is rejected before upload",
+      "data_payload": {
+        "chat_id": "42"
+      },
+      "file_bytes": [0, 127, 255],
+      "timeout_seconds": 0,
+      "error": "Telegram timeout must be positive"
+    },
+    {
+      "name": "non-object form is rejected before upload",
+      "data_payload": [],
+      "file_bytes": [1, 2, 3],
+      "timeout_seconds": 5,
+      "error": "Telegram HTTP payload must be a JSON object"
+    }
   ]
 }
