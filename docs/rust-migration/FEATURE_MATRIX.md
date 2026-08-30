@@ -37,6 +37,7 @@ Rows not listed under migrated components remain Python-authoritative.
 | Provider credentials, account ordering, backoff keys, scope availability, and Firecrawl tool configuration | `rust-flagged` | `RUST_PROVIDER_CONFIG_POLICY_ENABLED=0`, missing bridge, or bridge error | `contracts/provider_config_policy.json` |
 | Provider response model, upstream, service-tier, and source normalization | `rust-flagged` | `RUST_PROVIDER_USAGE_NORMALIZATION_ENABLED=0`, missing bridge, or bridge error | `contracts/provider_usage_normalization.json` |
 | Stored assistant-text normalization before AI requests | `rust-flagged` | `RUST_AI_REQUEST_SANITIZATION_ENABLED=0`, missing bridge, or bridge error | `contracts/ai_request_sanitization.json` |
+| AI conversation, summary, media, fallback, and delivery-failure settlement decisions | `rust-flagged` | `RUST_AI_SETTLEMENT_POLICY_ENABLED=0`, missing bridge, or bridge error | `contracts/ai_settlement_policy.json` |
 | Provider tool-call missing, unregistered, and execute dispatch decisions | `rust-flagged` | `RUST_TOOL_EXECUTION_POLICY_ENABLED=0`, missing bridge, or bridge error | `contracts/tool_execution_policy.json` |
 | Provider rate-limit and Groq account-fallback classification | `rust-flagged` | `RUST_PROVIDER_ERROR_POLICY_ENABLED=0` or missing bridge | `contracts/provider_error_policy.json` |
 | Provider retry-window parsing and rate-limit header precedence | `rust-flagged` | `RUST_PROVIDER_RETRY_POLICY_ENABLED=0`, missing bridge, or bridge error | `contracts/provider_retry_policy.json` |

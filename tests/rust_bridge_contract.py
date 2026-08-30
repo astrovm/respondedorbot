@@ -1063,6 +1063,21 @@ def verify_provider_usage_normalization(bridge: ModuleType) -> None:
         assert list(actual) == case["expected"], case["name"]
 
 
+def verify_ai_settlement_policy(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "ai_settlement_policy.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    functions = {
+        "media_cases": bridge.ai_media_settlement_action,
+        "conversation_cases": bridge.ai_conversation_settlement_action,
+        "summary_cases": bridge.ai_summary_settlement_action,
+        "delivery_failure_cases": bridge.ai_delivery_failure_settlement_action,
+    }
+    for group, function in functions.items():
+        for case in contract[group]:
+            actual = function(*case["facts"])
+            assert actual == case["expected"], case["name"]
+
+
 def verify_ai_request_sanitization(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "ai_request_sanitization.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -1098,6 +1113,7 @@ def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_provider_chain_policy(bridge)
     verify_provider_config_policy(bridge)
     verify_provider_usage_normalization(bridge)
+    verify_ai_settlement_policy(bridge)
     verify_ai_request_sanitization(bridge)
     verify_tool_execution_policy(bridge)
 

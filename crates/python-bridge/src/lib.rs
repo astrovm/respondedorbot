@@ -44,6 +44,12 @@ use bot_core::ai_reserve::{
     estimate_vision_reserve_credit_units as estimate_vision_reserve_credit_units_core,
 };
 use bot_core::ai_response_cleanup::cleanup_response as ai_cleanup_response_core;
+use bot_core::ai_settlement::{
+    conversation_settlement_action as ai_conversation_settlement_action_core,
+    delivery_failure_settlement_action as ai_delivery_failure_settlement_action_core,
+    media_settlement_action as ai_media_settlement_action_core,
+    summary_settlement_action as ai_summary_settlement_action_core,
+};
 use bot_core::ai_usage::{
     ProviderSegmentIdentity, ProviderUsageStatus,
     needs_reconciliation as provider_usage_needs_reconciliation_core,
@@ -2828,6 +2834,34 @@ fn provider_normalize_usage(
 }
 
 #[pyfunction]
+fn ai_media_settlement_action(has_reservation: bool, has_billing_segments: bool) -> &'static str {
+    ai_media_settlement_action_core(has_reservation, has_billing_segments).as_str()
+}
+
+#[pyfunction]
+fn ai_conversation_settlement_action(
+    is_fallback: bool,
+    has_billing_segments: bool,
+) -> &'static str {
+    ai_conversation_settlement_action_core(is_fallback, has_billing_segments).as_str()
+}
+
+#[pyfunction]
+fn ai_summary_settlement_action(
+    provider_unavailable: bool,
+    is_fallback: bool,
+    has_billing_segments: bool,
+) -> &'static str {
+    ai_summary_settlement_action_core(provider_unavailable, is_fallback, has_billing_segments)
+        .as_str()
+}
+
+#[pyfunction]
+fn ai_delivery_failure_settlement_action(has_billing_segments: bool) -> &'static str {
+    ai_delivery_failure_settlement_action_core(has_billing_segments).as_str()
+}
+
+#[pyfunction]
 fn provider_chain_select(availability: Vec<bool>) -> Vec<usize> {
     provider_chain_select_core(&availability)
 }
@@ -3180,6 +3214,13 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(provider_scope_is_available, module)?)?;
     module.add_function(wrap_pyfunction!(provider_web_search_tool, module)?)?;
     module.add_function(wrap_pyfunction!(provider_normalize_usage, module)?)?;
+    module.add_function(wrap_pyfunction!(ai_media_settlement_action, module)?)?;
+    module.add_function(wrap_pyfunction!(ai_conversation_settlement_action, module)?)?;
+    module.add_function(wrap_pyfunction!(ai_summary_settlement_action, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        ai_delivery_failure_settlement_action,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(provider_chain_select, module)?)?;
     module.add_function(wrap_pyfunction!(provider_chain_outcome, module)?)?;
     module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;

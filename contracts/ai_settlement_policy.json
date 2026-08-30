@@ -1,0 +1,85 @@
+{
+  "media_cases": [
+    {
+      "name": "no media reservation is a no-op",
+      "facts": [false, false],
+      "expected": "noop"
+    },
+    {
+      "name": "usage without a media reservation is still a no-op",
+      "facts": [false, true],
+      "expected": "noop"
+    },
+    {
+      "name": "incurred media usage is settled",
+      "facts": [true, true],
+      "expected": "settle_success"
+    },
+    {
+      "name": "unused media reservation is refunded",
+      "facts": [true, false],
+      "expected": "refund_fallback"
+    }
+  ],
+  "conversation_cases": [
+    {
+      "name": "successful empty-cost conversation settles",
+      "facts": [false, false],
+      "expected": "settle_success"
+    },
+    {
+      "name": "successful used conversation settles",
+      "facts": [false, true],
+      "expected": "settle_success"
+    },
+    {
+      "name": "fallback preserves incurred provider usage",
+      "facts": [true, true],
+      "expected": "settle_usage_before_fallback"
+    },
+    {
+      "name": "fallback without provider usage refunds",
+      "facts": [true, false],
+      "expected": "refund_fallback"
+    }
+  ],
+  "summary_cases": [
+    {
+      "name": "provider unavailable has priority",
+      "facts": [true, true, true],
+      "expected": "refund_provider_unavailable"
+    },
+    {
+      "name": "successful summary continues to final settlement",
+      "facts": [false, false, false],
+      "expected": "continue"
+    },
+    {
+      "name": "successful summary with usage continues",
+      "facts": [false, false, true],
+      "expected": "continue"
+    },
+    {
+      "name": "summary fallback preserves incurred usage",
+      "facts": [false, true, true],
+      "expected": "settle_usage_before_fallback"
+    },
+    {
+      "name": "summary fallback without usage refunds",
+      "facts": [false, true, false],
+      "expected": "refund_fallback"
+    }
+  ],
+  "delivery_failure_cases": [
+    {
+      "name": "delivery failure preserves incurred provider usage",
+      "facts": [true],
+      "expected": "settle_usage_before_delivery_failure"
+    },
+    {
+      "name": "delivery failure without usage refunds",
+      "facts": [false],
+      "expected": "refund_delivery_failure"
+    }
+  ]
+}

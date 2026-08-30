@@ -8,14 +8,179 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+    cast,
+)
 
 from api.ai.pricing import IMAGE_CONTEXT_EXTRA_TOKENS_ESTIMATE
 from api.billing.authorization import AI_COST_AUTHORIZER_KEY, AI_SEGMENT_RECORDER_KEY
+from api.core.rust_bridge import load_rust_bridge
 from api.i18n import tr
 
 
 _summary_logger = logging.getLogger(__name__)
+
+_SETTLEMENT_ACTIONS = frozenset(
+    {
+        "noop",
+        "settle_success",
+        "settle_usage_before_fallback",
+        "settle_usage_before_delivery_failure",
+        "refund_fallback",
+        "refund_provider_unavailable",
+        "refund_delivery_failure",
+        "continue",
+    }
+)
+
+
+class _RustAISettlementPolicy(Protocol):
+    def ai_media_settlement_action(
+        self,
+        has_reservation: bool,
+        has_billing_segments: bool,
+    ) -> str: ...
+
+    def ai_conversation_settlement_action(
+        self,
+        is_fallback: bool,
+        has_billing_segments: bool,
+    ) -> str: ...
+
+    def ai_summary_settlement_action(
+        self,
+        provider_unavailable: bool,
+        is_fallback: bool,
+        has_billing_segments: bool,
+    ) -> str: ...
+
+    def ai_delivery_failure_settlement_action(
+        self,
+        has_billing_segments: bool,
+    ) -> str: ...
+
+
+def _load_rust_ai_settlement_policy() -> _RustAISettlementPolicy | None:
+    module = load_rust_bridge("RUST_AI_SETTLEMENT_POLICY_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustAISettlementPolicy, module)
+
+
+def _validate_settlement_action(action: object, allowed: frozenset[str]) -> str:
+    normalized = str(action)
+    if normalized not in _SETTLEMENT_ACTIONS or normalized not in allowed:
+        raise ValueError(f"invalid Rust AI settlement action: {normalized}")
+    return normalized
+
+
+def _media_settlement_action(has_reservation: bool, has_segments: bool) -> str:
+    rust = _load_rust_ai_settlement_policy()
+    if rust is not None:
+        try:
+            return _validate_settlement_action(
+                rust.ai_media_settlement_action(has_reservation, has_segments),
+                frozenset({"noop", "settle_success", "refund_fallback"}),
+            )
+        except Exception:
+            _summary_logger.exception(
+                "Rust AI settlement policy failed; using Python fallback: operation=media"
+            )
+    if not has_reservation:
+        return "noop"
+    return "settle_success" if has_segments else "refund_fallback"
+
+
+def _conversation_settlement_action(is_fallback: bool, has_segments: bool) -> str:
+    rust = _load_rust_ai_settlement_policy()
+    if rust is not None:
+        try:
+            return _validate_settlement_action(
+                rust.ai_conversation_settlement_action(is_fallback, has_segments),
+                frozenset(
+                    {
+                        "settle_success",
+                        "settle_usage_before_fallback",
+                        "refund_fallback",
+                    }
+                ),
+            )
+        except Exception:
+            _summary_logger.exception(
+                "Rust AI settlement policy failed; using Python fallback: "
+                "operation=conversation"
+            )
+    if not is_fallback:
+        return "settle_success"
+    return "settle_usage_before_fallback" if has_segments else "refund_fallback"
+
+
+def _summary_settlement_action(
+    provider_unavailable: bool,
+    is_fallback: bool,
+    has_segments: bool,
+) -> str:
+    rust = _load_rust_ai_settlement_policy()
+    if rust is not None:
+        try:
+            return _validate_settlement_action(
+                rust.ai_summary_settlement_action(
+                    provider_unavailable,
+                    is_fallback,
+                    has_segments,
+                ),
+                frozenset(
+                    {
+                        "refund_provider_unavailable",
+                        "continue",
+                        "settle_usage_before_fallback",
+                        "refund_fallback",
+                    }
+                ),
+            )
+        except Exception:
+            _summary_logger.exception(
+                "Rust AI settlement policy failed; using Python fallback: operation=summary"
+            )
+    if provider_unavailable:
+        return "refund_provider_unavailable"
+    if not is_fallback:
+        return "continue"
+    return "settle_usage_before_fallback" if has_segments else "refund_fallback"
+
+
+def _delivery_failure_settlement_action(has_segments: bool) -> str:
+    rust = _load_rust_ai_settlement_policy()
+    if rust is not None:
+        try:
+            return _validate_settlement_action(
+                rust.ai_delivery_failure_settlement_action(has_segments),
+                frozenset(
+                    {
+                        "settle_usage_before_delivery_failure",
+                        "refund_delivery_failure",
+                    }
+                ),
+            )
+        except Exception:
+            _summary_logger.exception(
+                "Rust AI settlement policy failed; using Python fallback: "
+                "operation=delivery_failure"
+            )
+    return (
+        "settle_usage_before_delivery_failure"
+        if has_segments
+        else "refund_delivery_failure"
+    )
 
 
 @dataclass(frozen=True)
@@ -52,9 +217,10 @@ class AIService:
         *,
         reason: str,
     ) -> None:
-        if not reservation:
+        action = _media_settlement_action(bool(reservation), bool(billing_segments))
+        if action == "noop":
             return
-        if billing_segments:
+        if action == "settle_success":
             request.billing_helper.settle_reserved_ai_credits_batch(
                 [reservation],
                 billing_segments,
@@ -208,20 +374,24 @@ class AIService:
         response_meta.pop(AI_SEGMENT_RECORDER_KEY, None)
         billing_segments = list(response_meta.get("billing_segments") or [])
         reservations = list(authorizer.reservations)
+        settlement_action = _conversation_settlement_action(
+            bool(response_meta.get("ai_fallback")),
+            bool(billing_segments),
+        )
 
-        if bool(response_meta.get("ai_fallback")):
-            if billing_segments:
-                request.billing_helper.settle_reserved_ai_credits_batch(
-                    reservations,
-                    billing_segments,
-                    reason="ai_response_provider_usage_before_fallback",
-                )
-            else:
-                self._refund_reservations(
-                    request,
-                    reservations,
-                    reason="ai_response_fallback",
-                )
+        if settlement_action == "settle_usage_before_fallback":
+            request.billing_helper.settle_reserved_ai_credits_batch(
+                reservations,
+                billing_segments,
+                reason="ai_response_provider_usage_before_fallback",
+            )
+            return response_msg, True
+        if settlement_action == "refund_fallback":
+            self._refund_reservations(
+                request,
+                reservations,
+                reason="ai_response_fallback",
+            )
             return response_msg, True
 
         request.billing_helper.settle_reserved_ai_credits_batch(
@@ -381,19 +551,24 @@ class AIService:
         final_text: str,
         pending_marker: Optional[str],
     ) -> Optional[Tuple[str, Optional[str], bool]]:
-        if response_meta.get("provider_unavailable"):
+        billing_segments = list(response_meta.get("billing_segments") or [])
+        settlement_action = _summary_settlement_action(
+            bool(response_meta.get("provider_unavailable")),
+            bool(response_meta.get("ai_fallback")),
+            bool(billing_segments),
+        )
+        if settlement_action == "refund_provider_unavailable":
             for reservation in authorizer.reservations:
                 request.billing_helper.refund_reserved_ai_credits(
                     reservation,
                     reason="summary_provider_unavailable",
-                )
+            )
             return final_text, pending_marker, False
 
-        if not response_meta.get("ai_fallback"):
+        if settlement_action == "continue":
             return None
 
-        billing_segments = list(response_meta.get("billing_segments") or [])
-        if billing_segments:
+        if settlement_action == "settle_usage_before_fallback":
             request.billing_helper.settle_reserved_ai_credits_batch(
                 authorizer.reservations,
                 billing_segments,
@@ -475,7 +650,10 @@ class AIService:
                     "summary_stream: failed for chat_id=%s", request.chat_id
                 )
                 billing_segments = list(response_meta.get("billing_segments") or [])
-                if billing_segments:
+                settlement_action = _delivery_failure_settlement_action(
+                    bool(billing_segments)
+                )
+                if settlement_action == "settle_usage_before_delivery_failure":
                     request.billing_helper.settle_reserved_ai_credits_batch(
                         authorizer.reservations,
                         billing_segments,
