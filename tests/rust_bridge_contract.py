@@ -357,6 +357,14 @@ def verify_compaction_jobs(bridge: ModuleType) -> None:
         raise AssertionError("future compaction-job version must be rejected")
 
 
+def verify_media_cache(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "media_cache.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["keys"]:
+        actual = bridge.redis_media_cache_key(case["prefix"], case["file_id"])
+        assert actual == case["expected"], case["name"]
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -430,6 +438,7 @@ def main(arguments: list[str]) -> int:
     verify_message_state(bridge)
     verify_compaction_policy(bridge)
     verify_compaction_jobs(bridge)
+    verify_media_cache(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

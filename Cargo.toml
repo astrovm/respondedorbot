@@ -21,6 +21,7 @@ num-bigint = "0.5.1"
 proptest = "1.11.0"
 pyo3 = { version = "0.29.2", features = ["abi3-py314", "extension-module"] }
 regex = "1.13.1"
+redis = "1.6.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.20"

@@ -4,12 +4,51 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from logging import Logger
+import os
+from typing import Protocol, cast
 
 import redis
 
 from api.core.config_runtime import ConfigRuntime
+from api.core.rust_bridge import load_rust_bridge
 
 RedisFactory = Callable[[], redis.Redis]
+
+
+class _RustMediaCache(Protocol):
+    def redis_media_cache_get(
+        self,
+        host: str,
+        port: int,
+        password: str | None,
+        prefix: str,
+        file_id: str,
+    ) -> str | None: ...
+
+    def redis_media_cache_set(
+        self,
+        host: str,
+        port: int,
+        password: str | None,
+        prefix: str,
+        file_id: str,
+        text: str,
+        ttl: int,
+    ) -> None: ...
+
+
+def _load_rust_media_cache() -> _RustMediaCache | None:
+    module = load_rust_bridge("RUST_MEDIA_CACHE_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustMediaCache, module)
+
+
+def _redis_endpoint() -> tuple[str, int, str | None]:
+    host = str(os.environ.get("REDIS_HOST") or "localhost")
+    port = int(os.environ.get("REDIS_PORT") or "6379")
+    password = os.environ.get("REDIS_PASSWORD") or None
+    return host, port, password
 
 
 def get_cached_media(
@@ -20,6 +59,15 @@ def get_cached_media(
     logger: Logger,
 ) -> str | None:
     """Read one cached media result without making Redis failures fatal."""
+
+    rust = _load_rust_media_cache()
+    if rust is not None:
+        try:
+            host, port, password = _redis_endpoint()
+            return rust.redis_media_cache_get(host, port, password, prefix, file_id)
+        except Exception:
+            logger.exception("Error getting cached %s through Rust", prefix)
+            return None
 
     cache_key = f"{prefix}:{file_id}"
     try:
@@ -40,6 +88,23 @@ def cache_media(
     logger: Logger,
 ) -> None:
     """Store one media result; processing can continue if Redis is down."""
+
+    rust = _load_rust_media_cache()
+    if rust is not None:
+        try:
+            host, port, password = _redis_endpoint()
+            rust.redis_media_cache_set(
+                host,
+                port,
+                password,
+                prefix,
+                file_id,
+                text,
+                ttl,
+            )
+        except Exception:
+            logger.exception("Error caching %s through Rust", prefix)
+        return
 
     cache_key = f"{prefix}:{file_id}"
     try:

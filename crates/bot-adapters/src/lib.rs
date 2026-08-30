@@ -1,6 +1,7 @@
 //! External service adapters for respondedorbot.
 
 pub mod compaction_job;
+pub mod redis_media_cache;
 
 /// Return the core protocol version used by this adapter build.
 #[must_use]

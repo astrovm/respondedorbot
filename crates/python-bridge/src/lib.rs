@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use bot_adapters::compaction_job::normalize_compaction_job as normalize_compaction_job_adapter;
+use bot_adapters::redis_media_cache::{
+    RedisEndpoint, cache_media as cache_media_adapter,
+    get_cached_media as get_cached_media_adapter, media_cache_key as media_cache_key_adapter,
+};
 use bot_core::admin_reports::{
     CreditLogLimit, parse_creditlog_limit as parse_creditlog_limit_core,
     truncate_report as truncate_admin_report_core,
@@ -1317,6 +1321,56 @@ fn normalize_compaction_job(payload: &str) -> PyResult<String> {
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+#[pyfunction]
+fn redis_media_cache_get(
+    host: &str,
+    port: u16,
+    password: Option<&str>,
+    prefix: &str,
+    file_id: &str,
+) -> PyResult<Option<String>> {
+    get_cached_media_adapter(
+        &RedisEndpoint {
+            host: host.to_owned(),
+            port,
+            password: password.map(ToOwned::to_owned),
+        },
+        prefix,
+        file_id,
+    )
+    .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+fn redis_media_cache_key(prefix: &str, file_id: &str) -> String {
+    media_cache_key_adapter(prefix, file_id)
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn redis_media_cache_set(
+    host: &str,
+    port: u16,
+    password: Option<&str>,
+    prefix: &str,
+    file_id: &str,
+    text: &str,
+    ttl_seconds: i64,
+) -> PyResult<()> {
+    cache_media_adapter(
+        &RedisEndpoint {
+            host: host.to_owned(),
+            port,
+            password: password.map(ToOwned::to_owned),
+        },
+        prefix,
+        file_id,
+        text,
+        ttl_seconds,
+    )
+    .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -1412,6 +1466,9 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(compaction_job_is_due, module)?)?;
     module.add_function(wrap_pyfunction!(compaction_retry_transition, module)?)?;
     module.add_function(wrap_pyfunction!(normalize_compaction_job, module)?)?;
+    module.add_function(wrap_pyfunction!(redis_media_cache_get, module)?)?;
+    module.add_function(wrap_pyfunction!(redis_media_cache_key, module)?)?;
+    module.add_function(wrap_pyfunction!(redis_media_cache_set, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;

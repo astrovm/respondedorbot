@@ -1,6 +1,13 @@
 from tests.support import *
 
 
+@pytest.fixture(autouse=True)
+def _use_python_media_cache(monkeypatch):
+    """Keep legacy cache tests scoped to the Python fallback implementation."""
+
+    monkeypatch.setattr("api.media.cache._load_rust_media_cache", lambda: None)
+
+
 @pytest.mark.parametrize(
     "prefix,file_id,cached_value",
     [
