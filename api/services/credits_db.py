@@ -14,14 +14,18 @@ from typing import (
     Literal,
     Mapping,
     Optional,
+    Protocol,
     Sequence,
     Tuple,
     TypeVar,
+    cast,
 )
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import json
+import logging
 
 from api.billing.credit_units import CREDIT_SCALE
+from api.core.rust_bridge import load_rust_bridge
 
 ScopeType = Literal["user", "chat"]
 T = TypeVar("T")
@@ -64,6 +68,24 @@ _RETRYABLE_CREDIT_TRANSACTION_ERRORS = {
     "DeadlockDetected",
     "SerializationFailure",
 }
+
+logger = logging.getLogger(__name__)
+
+
+class _RustBillingReads(Protocol):
+    def billing_read_balance(
+        self,
+        database_url: str,
+        scope_type: str,
+        scope_id: int,
+    ) -> int: ...
+
+
+def _load_rust_billing_reads() -> _RustBillingReads | None:
+    module = load_rust_bridge("RUST_BILLING_READ_SHADOW_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustBillingReads, module)
 
 
 class CreditsDBError(RuntimeError):
@@ -614,9 +636,29 @@ def get_balance(scope_type: ScopeType, scope_id: int) -> int:
             row = cur.fetchone()
         conn.commit()
 
-    if not row:
-        return 0
-    return int(row[0])
+    balance = int(row[0]) if row else 0
+    rust = _load_rust_billing_reads()
+    database_url = get_database_url()
+    if rust is not None and database_url:
+        try:
+            shadow_balance = int(
+                rust.billing_read_balance(database_url, scope_type, int(scope_id))
+            )
+            if shadow_balance != balance:
+                logger.warning(
+                    "billing balance shadow mismatch scope_type=%s scope_id=%s python=%s rust=%s",
+                    scope_type,
+                    scope_id,
+                    balance,
+                    shadow_balance,
+                )
+        except Exception:
+            logger.exception(
+                "Rust billing balance shadow read failed scope_type=%s scope_id=%s",
+                scope_type,
+                scope_id,
+            )
+    return balance
 
 
 def grant_onboarding_if_needed(user_id: int, credits: int) -> Tuple[bool, int]:

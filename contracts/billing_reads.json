@@ -1,0 +1,10 @@
+{
+  "scopes": ["user", "chat"],
+  "invalid_scopes": ["group"],
+  "missing_balance": 0,
+  "storage": {
+    "table": "credit_accounts",
+    "primary_key": ["scope_type", "scope_id"],
+    "balance_type": "signed integer hundredths"
+  }
+}

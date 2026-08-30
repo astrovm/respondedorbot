@@ -50,6 +50,7 @@ Rows not listed under migrated components remain Python-authoritative.
 | Redis stale-while-refresh values and atomic refresh locks | `rust-flagged` | `RUST_STALE_CACHE_IO_ENABLED=0` or missing bridge | `contracts/stale_cache_io.json` |
 | Redis memory policy, TTL repair, and legacy request-cache cleanup | `rust-flagged` | `RUST_REDIS_MAINTENANCE_ENABLED=0` or missing bridge | `contracts/redis_maintenance.json` |
 | Scheduled-task payload and per-chat Redis index I/O | `rust-flagged` | `RUST_TASK_STORE_IO_ENABLED=0` or missing bridge | `contracts/task_store_io.json` |
+| PostgreSQL billing balance read parity | `shadow` | `RUST_BILLING_READ_SHADOW_ENABLED=0` or missing bridge | `contracts/billing_reads.json` |
 | Automatic media-routing decision | `rust-flagged` | `RUST_MEDIA_ROUTING_ENABLED=0` or missing bridge | `contracts/media_routing.json` |
 | General response-routing state machine | `rust-flagged` | `RUST_RESPONSE_ROUTING_ENABLED=0` or missing bridge | `contracts/response_routing.json` |
 | Base-conversion command | `rust-flagged` | `RUST_BASE_CONVERSION_ENABLED=0` or missing bridge | `contracts/base_conversion.json` |

@@ -28,6 +28,8 @@
   tracks every user-visible and cross-cutting feature through parity and removal.
 - [`docs/rust-migration/PERSISTENCE_CONTRACTS.md`](docs/rust-migration/PERSISTENCE_CONTRACTS.md)
   records PostgreSQL, Redis, task, configuration, and rollback contracts.
+- [`docs/rust-migration/BILLING_CUTOVER.md`](docs/rust-migration/BILLING_CUTOVER.md)
+  defines billing ownership, transaction invariants, and the staged writer cutover.
 - [`docs/rust-migration/TEST_PLAN.md`](docs/rust-migration/TEST_PLAN.md) defines
   the contract runner, critical scenarios, coverage gates, and CI layers.
 

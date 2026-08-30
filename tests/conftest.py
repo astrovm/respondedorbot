@@ -8,6 +8,7 @@ from api.core import config as config_module
 from api import index as index_module
 from api.providers.backoff import clear_all_cooldowns
 from api.services import bcra as bcra_service
+from api.services import credits_db as credits_db_service
 
 
 class _FastFailRedis:
@@ -42,6 +43,11 @@ def cleanup_test_artifacts():
 @pytest.fixture(autouse=True)
 def reset_caches(monkeypatch):
     bcra_service.reset_local_caches()
+    monkeypatch.setattr(
+        credits_db_service,
+        "_load_rust_billing_reads",
+        lambda: None,
+    )
     clear_all_cooldowns()
     index_module._chat_config_service.clear_cache()
     monkeypatch.setenv(

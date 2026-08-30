@@ -5,6 +5,7 @@ use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use bot_adapters::billing_read::BillingReadRepository;
 use bot_adapters::compaction_job::normalize_compaction_job as normalize_compaction_job_adapter;
 use bot_adapters::redis_chat_admin::{
     cache_chat_admin as cache_chat_admin_adapter,
@@ -1767,6 +1768,19 @@ fn run_redis_maintenance(
     serde_json::to_string(&result).map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+/// Read one billing balance without creating accounts or writing ledger state.
+#[pyfunction]
+fn billing_read_balance(
+    py: Python<'_>,
+    database_url: &str,
+    scope_type: &str,
+    scope_id: i64,
+) -> PyResult<i64> {
+    let repository = BillingReadRepository::new(database_url);
+    py.detach(|| repository.get_balance(scope_type, scope_id))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -1873,6 +1887,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(redis_chat_admin_key, module)?)?;
     module.add_function(wrap_pyfunction!(redis_chat_admin_set, module)?)?;
     module.add_function(wrap_pyfunction!(run_redis_maintenance, module)?)?;
+    module.add_function(wrap_pyfunction!(billing_read_balance, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;

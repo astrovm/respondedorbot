@@ -9,6 +9,9 @@ repository.workspace = true
 
 [dependencies]
 bot-core.workspace = true
+native-tls.workspace = true
+postgres.workspace = true
+postgres-native-tls.workspace = true
 redis.workspace = true
 serde.workspace = true
 serde_json.workspace = true

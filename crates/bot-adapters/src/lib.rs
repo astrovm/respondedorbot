@@ -1,5 +1,6 @@
 //! External service adapters for respondedorbot.
 
+pub mod billing_read;
 pub mod compaction_job;
 pub mod redis_chat_admin;
 pub mod redis_compaction_queue;
