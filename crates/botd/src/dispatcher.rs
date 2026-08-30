@@ -32,6 +32,9 @@ use bot_core::devo::{
     DevoCommandPlan, DevoQuotes, DevoReply, calculate_devo, plan_devo_command, render_devo_reply,
     render_devo_result,
 };
+use bot_core::dollar::{
+    DollarCommandPlan, classify_dollar_command, invalid_timeframe_message, plan_dollar_command,
+};
 use bot_core::greeting_commands::{GreetingCategory, classify_greeting_command, greeting_fallback};
 use bot_core::language_command::{LanguageCommandPlan, plan_language_command};
 use bot_core::locale::resolve_locale;
@@ -185,6 +188,21 @@ pub trait DollarQuotesSource {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct DollarMarketLoad {
+    pub text: Option<String>,
+    pub diagnostics: Vec<String>,
+}
+
+pub trait DollarMarketSource {
+    fn load(
+        &mut self,
+        hours_ago: i64,
+        locale: bot_core::locale::Locale,
+        now_unix: i64,
+    ) -> DollarMarketLoad;
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct RuloInputLoad {
     pub input: RuloInput,
     pub diagnostics: Vec<String>,
@@ -290,6 +308,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     admin_creditlog_source: Option<Box<dyn AdminCreditLogSource>>,
     bitcoin_price_source: Option<Box<dyn BitcoinPriceSource>>,
     dollar_quotes_source: Option<Box<dyn DollarQuotesSource>>,
+    dollar_market_source: Option<Box<dyn DollarMarketSource>>,
     rulo_source: Option<Box<dyn RuloSource>>,
     greeting_pool_source: Option<Box<dyn GreetingPoolSource>>,
     weather_source: Option<Box<dyn WeatherSource>>,
@@ -338,6 +357,7 @@ where
             admin_creditlog_source: None,
             bitcoin_price_source: None,
             dollar_quotes_source: None,
+            dollar_market_source: None,
             rulo_source: None,
             greeting_pool_source: None,
             weather_source: None,
@@ -408,6 +428,12 @@ where
     #[must_use]
     pub fn with_dollar_quotes_source(mut self, source: Box<dyn DollarQuotesSource>) -> Self {
         self.dollar_quotes_source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub fn with_dollar_market_source(mut self, source: Box<dyn DollarMarketSource>) -> Self {
+        self.dollar_market_source = Some(source);
         self
     }
 
@@ -1228,6 +1254,31 @@ where
                 CreditLogPlan::NotHandled => StatelessCommandPlan::NotHandled,
                 CreditLogPlan::LegacyRequired => StatelessCommandPlan::LegacyFallbackRequired,
             }
+        } else if classify_dollar_command(&parsed.command) {
+            match plan_dollar_command(&parsed.message_text) {
+                DollarCommandPlan::InvalidTimeframe => {
+                    let text = invalid_timeframe_message(&parsed.message_text, locale);
+                    let mut message = SendMessage::new(chat_id, &text);
+                    message.reply_to_message_id = Some(message_id);
+                    StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+                }
+                DollarCommandPlan::Load { hours_ago } => {
+                    let Some(source) = self.dollar_market_source.as_mut() else {
+                        return Ok(DispatchOutcome::LegacyRequired);
+                    };
+                    let load = source.load(hours_ago, locale, timestamp);
+                    self.state_diagnostics.extend(load.diagnostics);
+                    let text = load.text.unwrap_or_else(|| match locale {
+                        bot_core::locale::Locale::Es => {
+                            "no pude traer cotizaciones del dólar boludo".to_owned()
+                        }
+                        bot_core::locale::Locale::En => "I could not load dollar rates".to_owned(),
+                    });
+                    let mut message = SendMessage::new(chat_id, &text);
+                    message.reply_to_message_id = Some(message_id);
+                    StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+                }
+            }
         } else if classify_election_command(&parsed.command) {
             let Some(source) = self.election_source.as_mut() else {
                 return Ok(DispatchOutcome::LegacyRequired);
@@ -1582,12 +1633,12 @@ mod tests {
     use super::{
         ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BillingBalanceSource,
         BillingBalances, BillingTransferSink, BitcoinPriceSource, ChargeHistoryPage,
-        ChargeHistorySource, ChatConfigSource, DispatchError, DispatchOutcome, DollarQuotesSource,
-        ElectionLoad, ElectionSource, GreetingPoolLoad, GreetingPoolSource,
-        GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink, NativeDispatcher,
-        OilPriceSource, OilQuoteLoad, RandomSource, RuloInputLoad, RuloSource, RuntimeValues,
-        StarPaymentReceipt, StarPaymentSink, StockPriceSource, StockQuotesLoad, TransferResult,
-        WeatherObservationLoad, WeatherSource,
+        ChargeHistorySource, ChatConfigSource, DispatchError, DispatchOutcome, DollarMarketLoad,
+        DollarMarketSource, DollarQuotesSource, ElectionLoad, ElectionSource, GreetingPoolLoad,
+        GreetingPoolSource, GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink,
+        NativeDispatcher, OilPriceSource, OilQuoteLoad, RandomSource, RuloInputLoad, RuloSource,
+        RuntimeValues, StarPaymentReceipt, StarPaymentSink, StockPriceSource, StockQuotesLoad,
+        TransferResult, WeatherObservationLoad, WeatherSource,
     };
     use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup};
     use bot_core::devo::DevoQuotes;
@@ -1927,6 +1978,23 @@ mod tests {
     impl DollarQuotesSource for DollarQuotes {
         fn devo_quotes(&mut self) -> Result<Option<DevoQuotes>, String> {
             *self.calls.borrow_mut() += 1;
+            self.result.clone()
+        }
+    }
+
+    struct DollarMarket {
+        result: DollarMarketLoad,
+        calls: Rc<RefCell<Vec<(i64, bot_core::locale::Locale, i64)>>>,
+    }
+
+    impl DollarMarketSource for DollarMarket {
+        fn load(
+            &mut self,
+            hours_ago: i64,
+            locale: bot_core::locale::Locale,
+            now_unix: i64,
+        ) -> DollarMarketLoad {
+            self.calls.borrow_mut().push((hours_ago, locale, now_unix));
             self.result.clone()
         }
     }
@@ -2310,6 +2378,123 @@ mod tests {
         );
         assert_eq!(dispatcher.state.incoming.len(), 2);
         assert_eq!(dispatcher.state.outgoing.len(), 2);
+    }
+
+    #[test]
+    fn dollar_commands_pass_timeframe_locale_and_record_diagnostics_and_state() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_dollar_market_source(Box::new(DollarMarket {
+            result: DollarMarketLoad {
+                text: Some("synthetic dollar rates".to_owned()),
+                diagnostics: vec!["synthetic stale cache".to_owned()],
+            },
+            calls: Rc::clone(&calls),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(update("/usd 6h", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            calls.borrow().as_slice(),
+            &[(6, bot_core::locale::Locale::En, 1_672_531_200)]
+        );
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
+            return;
+        };
+        assert_eq!(message.text, "synthetic dollar rates");
+        assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
+        assert_eq!(dispatcher.state.incoming.len(), 1);
+        assert_eq!(dispatcher.state.outgoing.len(), 1);
+        assert_eq!(dispatcher.state_diagnostics(), &["synthetic stale cache"]);
+    }
+
+    #[test]
+    fn dollar_invalid_timeframe_and_failure_are_localized_without_losing_legacy_fallback() {
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut invalid = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            invalid.dispatch(update("/dolar 7d", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        let Some(TelegramAction::SendMessage(message)) = invalid.actions.0.first() else {
+            return;
+        };
+        assert!(message.text.contains("7d"));
+        assert!(message.text.contains("no soportado"));
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut failed = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_dollar_market_source(Box::new(DollarMarket {
+            result: DollarMarketLoad {
+                text: None,
+                diagnostics: vec!["synthetic provider failure".to_owned()],
+            },
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            failed.dispatch(update("/dollar", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
+            return;
+        };
+        assert_eq!(message.text, "no pude traer cotizaciones del dólar boludo");
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut missing = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            missing.dispatch(update("/usd", None)),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
     }
 
     #[test]

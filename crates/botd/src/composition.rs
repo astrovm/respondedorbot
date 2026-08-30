@@ -14,6 +14,10 @@ use bot_adapters::criptoya::{
     TransportFailureKind as CriptoYaTransportFailureKind, fetch_dollar_quotes,
     fetch_exchange_quotes, fetch_rulo_market,
 };
+use bot_adapters::dollar::{
+    DollarCache, DollarTransport, ReqwestDollarTransport,
+    TransportFailureKind as DollarTransportFailureKind, load_dollar_market,
+};
 use bot_adapters::finviz::{
     FinvizTransport, ReqwestFinvizTransport, TransportFailureKind as FinvizTransportFailureKind,
 };
@@ -61,11 +65,11 @@ use thiserror::Error;
 use crate::dispatcher::{
     ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BillingBalanceSource,
     BillingBalances, BillingTransferSink, BitcoinPriceSource, ChargeHistorySource,
-    ChatConfigSource, DollarQuotesSource, ElectionLoad, ElectionSource, GreetingPoolLoad,
-    GreetingPoolSource, GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink,
-    NativeDispatcher, OilPriceSource, OilQuoteLoad, RandomSource, RuloInputLoad, RuloSource,
-    RuntimeValues, StarPaymentReceipt, StarPaymentSink, StockPriceSource, StockQuotesLoad,
-    WeatherObservationLoad, WeatherSource,
+    ChatConfigSource, DollarMarketLoad, DollarMarketSource, DollarQuotesSource, ElectionLoad,
+    ElectionSource, GreetingPoolLoad, GreetingPoolSource, GroupAuthorizationDecision,
+    GroupAuthorizer, MessageStateSink, NativeDispatcher, OilPriceSource, OilQuoteLoad,
+    RandomSource, RuloInputLoad, RuloSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink,
+    StockPriceSource, StockQuotesLoad, WeatherObservationLoad, WeatherSource,
 };
 use crate::runtime::{PollingRuntime, UpdateSource};
 
@@ -125,6 +129,32 @@ impl<T: CoinMarketCapTransport> BitcoinPriceSource for CoinMarketCapBitcoinPrice
 
 struct CriptoYaDollarQuotesSource<T> {
     transport: T,
+}
+
+struct CriptoYaDollarMarketSource<T, C> {
+    transport: T,
+    cache: C,
+}
+
+impl<T: DollarTransport, C: DollarCache> DollarMarketSource for CriptoYaDollarMarketSource<T, C> {
+    fn load(
+        &mut self,
+        hours_ago: i64,
+        locale: bot_core::locale::Locale,
+        now_unix: i64,
+    ) -> DollarMarketLoad {
+        let load = load_dollar_market(
+            &self.transport,
+            &mut self.cache,
+            hours_ago,
+            locale,
+            now_unix,
+        );
+        DollarMarketLoad {
+            text: load.text,
+            diagnostics: load.diagnostics,
+        }
+    }
 }
 
 impl<T: CriptoYaTransport> DollarQuotesSource for CriptoYaDollarQuotesSource<T> {
@@ -859,6 +889,10 @@ pub enum CompositionError {
     CoinMarketCapTransport(CoinMarketCapTransportFailureKind),
     #[error("could not construct CriptoYa transport: {0:?}")]
     CriptoYaTransport(CriptoYaTransportFailureKind),
+    #[error("could not construct dollar-market transport: {0:?}")]
+    DollarTransport(DollarTransportFailureKind),
+    #[error("could not construct dollar-market Redis cache: {0}")]
+    DollarCache(RedisJsonCacheError),
     #[error("could not construct Giphy transport: {0:?}")]
     GiphyTransport(GiphyTransportFailureKind),
     #[error("could not construct Giphy Redis cache: {0}")]
@@ -908,6 +942,10 @@ pub fn build_native_runtime(
         ReqwestTelegramTransport::new().map_err(CompositionError::AdminTransport)?;
     let criptoya_transport =
         ReqwestCriptoYaTransport::new().map_err(CompositionError::CriptoYaTransport)?;
+    let dollar_transport =
+        ReqwestDollarTransport::new().map_err(CompositionError::DollarTransport)?;
+    let dollar_cache =
+        RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::DollarCache)?;
     let rulo_transport =
         ReqwestCriptoYaTransport::new().map_err(CompositionError::CriptoYaTransport)?;
     let giphy_transport = ReqwestGiphyTransport::new().map_err(CompositionError::GiphyTransport)?;
@@ -956,6 +994,10 @@ pub fn build_native_runtime(
     .with_admin_creditlog_source(Box::new(BillingRepository::new(options.database_url)))
     .with_dollar_quotes_source(Box::new(CriptoYaDollarQuotesSource {
         transport: criptoya_transport,
+    }))
+    .with_dollar_market_source(Box::new(CriptoYaDollarMarketSource {
+        transport: dollar_transport,
+        cache: dollar_cache,
     }))
     .with_rulo_source(Box::new(CriptoYaRuloSource {
         transport: rulo_transport,
