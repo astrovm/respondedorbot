@@ -6,8 +6,52 @@ import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+import logging
+from typing import Protocol, cast
 
 from requests.exceptions import RequestException
+
+from api.core.rust_bridge import load_rust_bridge
+
+
+logger = logging.getLogger(__name__)
+
+
+class _RustProviderErrorPolicy(Protocol):
+    def classify_provider_error(
+        self,
+        status_code: int | None,
+        status: int | None,
+        code: str,
+        message: str,
+    ) -> tuple[bool, bool]: ...
+
+
+def _load_rust_provider_error_policy() -> _RustProviderErrorPolicy | None:
+    module = load_rust_bridge("RUST_PROVIDER_ERROR_POLICY_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustProviderErrorPolicy, module)
+
+
+def _integer_status(value: object) -> int | None:
+    return int(value) if isinstance(value, int) else None
+
+
+def _rust_error_policy(error: Exception) -> tuple[bool, bool] | None:
+    rust = _load_rust_provider_error_policy()
+    if rust is None:
+        return None
+    try:
+        return rust.classify_provider_error(
+            _integer_status(getattr(error, "status_code", None)),
+            _integer_status(getattr(error, "status", None)),
+            str(getattr(error, "code", "") or ""),
+            str(getattr(error, "message", "") or error),
+        )
+    except Exception:
+        logger.exception("Rust provider error policy failed; using Python fallback")
+        return None
 
 
 def extract_error_headers(error: Exception) -> dict[str, str]:
@@ -81,6 +125,9 @@ def extract_rate_limit_backoff_seconds(
 
 
 def is_rate_limit_error(error: Exception) -> bool:
+    rust_policy = _rust_error_policy(error)
+    if rust_policy is not None:
+        return bool(rust_policy[0])
     if getattr(error, "status_code", None) == 429:
         return True
     if getattr(error, "status", None) == 429:
@@ -90,6 +137,9 @@ def is_rate_limit_error(error: Exception) -> bool:
 
 
 def should_try_next_groq_account(error: Exception) -> bool:
+    rust_policy = _rust_error_policy(error)
+    if rust_policy is not None:
+        return bool(rust_policy[1])
     if getattr(error, "status_code", None) == 413:
         return True
     if getattr(error, "status", None) == 413:

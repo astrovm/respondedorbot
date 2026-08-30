@@ -90,6 +90,9 @@ use bot_core::polymarket::{MarketOutcome, rank_outcomes as rank_outcomes_core};
 use bot_core::price_queries::{
     AmountConversion, PriceQuery, ProviderScope, parse_price_query as parse_price_query_core,
 };
+use bot_core::provider_errors::{
+    ProviderErrorFacts, classify_provider_error as classify_provider_error_core,
+};
 use bot_core::random_reply::{
     RandomAnswer, RandomSuffix, evaluate_random_reply as evaluate_random_reply_core,
 };
@@ -2356,6 +2359,23 @@ fn provider_usage_needs_reconciliation(segment_json: &str) -> PyResult<bool> {
     ))
 }
 
+/// Classify normalized provider failure facts for cooldown and account fallback.
+#[pyfunction]
+fn classify_provider_error(
+    status_code: Option<i64>,
+    status: Option<i64>,
+    code: &str,
+    message: &str,
+) -> (bool, bool) {
+    let policy = classify_provider_error_core(ProviderErrorFacts {
+        status_code,
+        status,
+        code,
+        message,
+    });
+    (policy.rate_limited, policy.try_next_groq_account)
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -2505,6 +2525,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
         provider_usage_needs_reconciliation,
         module
     )?)?;
+    module.add_function(wrap_pyfunction!(classify_provider_error, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;

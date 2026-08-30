@@ -17,6 +17,7 @@ pub mod market_models;
 pub mod message_state;
 pub mod polymarket;
 pub mod price_queries;
+pub mod provider_errors;
 pub mod random_reply;
 pub mod random_selection;
 pub mod routing;

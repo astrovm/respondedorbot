@@ -6,6 +6,7 @@ import redis as redis_module
 
 from api.core import config as config_module
 from api.billing import provider_usage as provider_usage_module
+from api.providers import errors as provider_errors_module
 from api import index as index_module
 from api.providers.backoff import clear_all_cooldowns
 from api.services import bcra as bcra_service
@@ -47,6 +48,11 @@ def reset_caches(monkeypatch):
     monkeypatch.setattr(
         provider_usage_module,
         "_load_rust_ai_usage_policy",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        provider_errors_module,
+        "_load_rust_provider_error_policy",
         lambda: None,
     )
     monkeypatch.setattr(

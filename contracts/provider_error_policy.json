@@ -1,0 +1,44 @@
+{
+  "cases": [
+    {
+      "name": "status-code rate limit",
+      "status_code": 429,
+      "status": null,
+      "code": "",
+      "message": "unrelated",
+      "expected": [true, false]
+    },
+    {
+      "name": "status payload too large",
+      "status_code": null,
+      "status": 413,
+      "code": "",
+      "message": "unrelated",
+      "expected": [false, true]
+    },
+    {
+      "name": "normalized error code",
+      "status_code": null,
+      "status": null,
+      "code": " REQUEST_TOO_LARGE ",
+      "message": "unrelated",
+      "expected": [false, true]
+    },
+    {
+      "name": "message classifications",
+      "status_code": null,
+      "status": null,
+      "code": "",
+      "message": "Error 429: RATE LIMIT; payload too large",
+      "expected": [true, true]
+    },
+    {
+      "name": "ordinary server failure",
+      "status_code": 500,
+      "status": null,
+      "code": "server_error",
+      "message": "try again",
+      "expected": [false, false]
+    }
+  ]
+}
