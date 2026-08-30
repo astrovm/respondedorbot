@@ -54,6 +54,7 @@ Rows not listed under migrated components remain Python-authoritative.
 | Native localized `/convertbase` command-to-action vertical slice | `shadow` | Python command dispatcher remains authoritative until native message-state and locale storage are connected | Rust core tests |
 | PostgreSQL chat-configuration schema, typed reads, and typed upserts | `rust-flagged` | `RUST_CHAT_CONFIG_IO_ENABLED=0`, missing bridge, or bridge error | Rust core, adapter integration, and Python service tests |
 | Native typed message-envelope dispatch with chat configuration and action execution ports | `shadow` | `botd` still refuses to poll; unsupported or incomplete paths remain legacy-owned | `botd` dispatcher tests |
+| Concrete native Telegram polling, PostgreSQL config, and confirmed-delivery action composition | `shadow` | `botd` still refuses to start polling; Python remains the only side-effect owner | `botd` composition tests |
 | Provider rate-limit and Groq account-fallback classification | `rust-flagged` | `RUST_PROVIDER_ERROR_POLICY_ENABLED=0` or missing bridge | `contracts/provider_error_policy.json` |
 | Provider retry-window parsing and rate-limit header precedence | `rust-flagged` | `RUST_PROVIDER_RETRY_POLICY_ENABLED=0`, missing bridge, or bridge error | `contracts/provider_retry_policy.json` |
 | Provider exception, usage, finish-response, and retry-delay policy | `rust-flagged` | `RUST_PROVIDER_RUNTIME_POLICY_ENABLED=0`, missing bridge, or bridge error | `contracts/provider_runtime_policy.json` |
