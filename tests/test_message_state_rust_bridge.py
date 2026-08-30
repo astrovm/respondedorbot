@@ -73,6 +73,34 @@ class _FakeRustMessageState:
             ]
         )
 
+    def message_state_key(
+        self,
+        kind: str,
+        chat_id: str,
+        message_id: str | None,
+    ) -> str:
+        if self.fail:
+            raise ValueError("synthetic state-key failure")
+        suffix = f":{message_id}" if message_id is not None else ""
+        return f"rust:{kind}:{chat_id}{suffix}"
+
+    def prepare_chat_member(
+        self,
+        first_name: str,
+        username: str,
+        last_seen: int,
+    ) -> str:
+        if self.fail:
+            raise ValueError("synthetic member failure")
+        return json.dumps(
+            {
+                "rust": True,
+                "first_name": first_name,
+                "username": username,
+                "last_seen": last_seen,
+            }
+        )
+
 
 def test_message_write_uses_one_rust_plan_and_one_atomic_redis_call(
     monkeypatch: pytest.MonkeyPatch,
@@ -200,3 +228,36 @@ def test_search_helpers_fall_back_after_bridge_failure(
     assert state._escape_tag_value("-1") == "\\-1"
     ranked = state._rank_search_results(rows, "wallet error", None, set(), 2)
     assert [row["message_id"] for row in ranked] == ["2", "1"]
+
+
+def test_auxiliary_state_helpers_use_rust_and_fall_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        state,
+        "_load_rust_message_state",
+        _FakeRustMessageState,
+    )
+
+    assert state._summary_key("1") == "rust:summary:1"
+    assert state.bot_message_meta_key("1", 2) == "rust:bot_metadata:1:2"
+    member = json.loads(state._prepare_chat_member_payload("Ana", "ana", 100))
+    assert member == {
+        "rust": True,
+        "first_name": "Ana",
+        "username": "ana",
+        "last_seen": 100,
+    }
+
+    monkeypatch.setattr(
+        state,
+        "_load_rust_message_state",
+        lambda: _FakeRustMessageState(fail=True),
+    )
+    assert state._summary_key("1") == "chat_summary:1"
+    assert state.bot_message_meta_key("1", 2) == "bot_message_meta:1:2"
+    assert json.loads(state._prepare_chat_member_payload("Ana", "ana", 100)) == {
+        "first_name": "Ana",
+        "username": "ana",
+        "last_seen": 100,
+    }

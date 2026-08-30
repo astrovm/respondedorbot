@@ -78,5 +78,19 @@
       { "index": 0, "reply_score": 1, "overlap_score": 2 },
       { "index": 1, "reply_score": 0, "overlap_score": 2 }
     ]
+  },
+  "auxiliary_keys": [
+    { "name": "summary", "kind": "summary", "chat_id": "-1", "message_id": null, "expected": "chat_summary:-1" },
+    { "name": "user summary", "kind": "user_summary", "chat_id": "-1", "message_id": null, "expected": "chat_user_summary:-1" },
+    { "name": "compaction marker", "kind": "compacted_until", "chat_id": "-1", "message_id": null, "expected": "chat_compacted_until:-1" },
+    { "name": "user compaction marker", "kind": "user_compacted_until", "chat_id": "-1", "message_id": null, "expected": "chat_user_compacted_until:-1" },
+    { "name": "bot metadata", "kind": "bot_metadata", "chat_id": "-1", "message_id": "42", "expected": "bot_message_meta:-1:42" },
+    { "name": "members", "kind": "members", "chat_id": "-1", "message_id": null, "expected": "chat_members:-1" }
+  ],
+  "member": {
+    "first_name": "Ana",
+    "username": "ana",
+    "last_seen": 100,
+    "expected": { "schema_version": 1, "first_name": "Ana", "username": "ana", "last_seen": 100 }
   }
 }

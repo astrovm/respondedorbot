@@ -38,7 +38,7 @@ Rows not listed under migrated components remain Python-authoritative.
 | Telegram link entity parsing and URL selection | `rust-flagged` | `RUST_LINK_PARSING_ENABLED=0` or missing bridge | `contracts/link_parsing.json` |
 | Admin credit-log limit parsing and truncation | `rust-flagged` | `RUST_ADMIN_REPORTS_ENABLED=0` or missing bridge | `contracts/admin_reports.json` |
 | Redis cache keys, TTLs, and stale-while-refresh decision | `rust-flagged` | `RUST_CACHE_POLICY_ENABLED=0` or missing bridge | `contracts/cache_policy.json` |
-| Redis conversation-message keys, versioned writes, and search ranking | `rust-flagged` | `RUST_MESSAGE_STATE_ENABLED=0` or missing bridge | `contracts/message_state.json` |
+| Redis conversation-message keys, versioned writes/member records, and search ranking | `rust-flagged` | `RUST_MESSAGE_STATE_ENABLED=0` or missing bridge | `contracts/message_state.json` |
 | Durable memory-compaction due, recovery, obsolescence, and retry transitions | `rust-flagged` | `RUST_COMPACTION_POLICY_ENABLED=0` or missing bridge | `contracts/compaction_policy.json` |
 | Automatic media-routing decision | `rust-flagged` | `RUST_MEDIA_ROUTING_ENABLED=0` or missing bridge | `contracts/media_routing.json` |
 | General response-routing state machine | `rust-flagged` | `RUST_RESPONSE_ROUTING_ENABLED=0` or missing bridge | `contracts/response_routing.json` |

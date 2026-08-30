@@ -6,6 +6,7 @@ use std::collections::HashSet;
 
 pub const MESSAGE_HISTORY_SCHEMA_VERSION: u8 = 1;
 pub const CHAT_HISTORY_MAX_MESSAGES: usize = 200;
+pub const CHAT_MEMBER_SCHEMA_VERSION: u8 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct MessageWritePlan {
@@ -54,6 +55,14 @@ struct HistoryEntry<'a> {
     text: &'a str,
     timestamp: i64,
     role: &'a str,
+}
+
+#[derive(Serialize)]
+struct ChatMemberEntry<'a> {
+    schema_version: u8,
+    first_name: &'a str,
+    username: &'a str,
+    last_seen: i64,
 }
 
 /// Truncate stored message text using the legacy character-count rule.
@@ -106,6 +115,50 @@ pub fn escape_search_tag(value: &str) -> String {
         escaped.push(character);
     }
     escaped
+}
+
+#[must_use]
+pub fn chat_summary_key(chat_id: &str) -> String {
+    format!("chat_summary:{chat_id}")
+}
+
+#[must_use]
+pub fn user_chat_summary_key(chat_id: &str) -> String {
+    format!("chat_user_summary:{chat_id}")
+}
+
+#[must_use]
+pub fn chat_compacted_until_key(chat_id: &str) -> String {
+    format!("chat_compacted_until:{chat_id}")
+}
+
+#[must_use]
+pub fn user_chat_compacted_until_key(chat_id: &str) -> String {
+    format!("chat_user_compacted_until:{chat_id}")
+}
+
+#[must_use]
+pub fn bot_message_metadata_key(chat_id: &str, message_id: &str) -> String {
+    format!("bot_message_meta:{chat_id}:{message_id}")
+}
+
+#[must_use]
+pub fn chat_members_key(chat_id: &str) -> String {
+    format!("chat_members:{chat_id}")
+}
+
+/// Encode a versioned member record that legacy readers can still consume.
+pub fn prepare_chat_member_payload(
+    first_name: &str,
+    username: &str,
+    last_seen: i64,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&ChatMemberEntry {
+        schema_version: CHAT_MEMBER_SCHEMA_VERSION,
+        first_name,
+        username,
+        last_seen,
+    })
 }
 
 /// Rank adapter-parsed RediSearch rows without losing their original payloads.
@@ -218,8 +271,11 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        MESSAGE_HISTORY_SCHEMA_VERSION, SearchCandidate, escape_search_tag, escape_search_text,
-        prepare_message_write, rank_search_candidates, truncate_text,
+        CHAT_MEMBER_SCHEMA_VERSION, MESSAGE_HISTORY_SCHEMA_VERSION, SearchCandidate,
+        bot_message_metadata_key, chat_compacted_until_key, chat_members_key, chat_summary_key,
+        escape_search_tag, escape_search_text, prepare_chat_member_payload, prepare_message_write,
+        rank_search_candidates, truncate_text, user_chat_compacted_until_key,
+        user_chat_summary_key,
     };
 
     #[test]
@@ -344,5 +400,29 @@ mod tests {
         assert_eq!(ranked[0].reply_score, 1);
         assert_eq!(ranked[1].index, 1);
         assert_eq!(ranked[1].overlap_score, 2);
+    }
+
+    #[test]
+    fn preserves_auxiliary_state_keys_and_versions_member_payloads() {
+        assert_eq!(chat_summary_key("-1"), "chat_summary:-1");
+        assert_eq!(user_chat_summary_key("-1"), "chat_user_summary:-1");
+        assert_eq!(chat_compacted_until_key("-1"), "chat_compacted_until:-1");
+        assert_eq!(
+            user_chat_compacted_until_key("-1"),
+            "chat_user_compacted_until:-1"
+        );
+        assert_eq!(
+            bot_message_metadata_key("-1", "42"),
+            "bot_message_meta:-1:42"
+        );
+        assert_eq!(chat_members_key("-1"), "chat_members:-1");
+        let payload = prepare_chat_member_payload("Ana", "ana", 100);
+        assert!(payload.is_ok());
+        let version = payload.ok().and_then(|encoded| {
+            serde_json::from_str::<serde_json::Value>(&encoded)
+                .ok()
+                .and_then(|value| value["schema_version"].as_u64())
+        });
+        assert_eq!(version, Some(u64::from(CHAT_MEMBER_SCHEMA_VERSION)));
     }
 }

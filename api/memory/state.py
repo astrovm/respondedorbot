@@ -59,6 +59,20 @@ class _RustMessageState(Protocol):
         mentions_bot: bool,
     ) -> str: ...
 
+    def message_state_key(
+        self,
+        kind: str,
+        chat_id: str,
+        message_id: str | None,
+    ) -> str: ...
+
+    def prepare_chat_member(
+        self,
+        first_name: str,
+        username: str,
+        last_seen: int,
+    ) -> str: ...
+
     def escape_message_search_text(self, query_text: str) -> str: ...
 
     def escape_message_search_tag(self, value: str) -> str: ...
@@ -143,20 +157,43 @@ def _search_doc_key(chat_id: str, message_id: str) -> str:
     return f"chatmsg:{chat_id}:{message_id}"
 
 
+def _message_state_key(
+    kind: str,
+    chat_id: str,
+    message_id: str | None = None,
+) -> str:
+    rust = _load_rust_message_state()
+    if rust is not None:
+        try:
+            return rust.message_state_key(kind, chat_id, message_id)
+        except Exception:
+            pass
+    prefixes = {
+        "summary": "chat_summary",
+        "user_summary": "chat_user_summary",
+        "compacted_until": "chat_compacted_until",
+        "user_compacted_until": "chat_user_compacted_until",
+        "bot_metadata": BOT_MESSAGE_META_PREFIX.rstrip(":"),
+        "members": "chat_members",
+    }
+    prefix = prefixes[kind]
+    return f"{prefix}:{chat_id}:{message_id}" if message_id is not None else f"{prefix}:{chat_id}"
+
+
 def _summary_key(chat_id: str) -> str:
-    return f"chat_summary:{chat_id}"
+    return _message_state_key("summary", chat_id)
 
 
 def _user_summary_key(chat_id: str) -> str:
-    return f"chat_user_summary:{chat_id}"
+    return _message_state_key("user_summary", chat_id)
 
 
 def _compacted_until_key(chat_id: str) -> str:
-    return f"chat_compacted_until:{chat_id}"
+    return _message_state_key("compacted_until", chat_id)
 
 
 def _user_compacted_until_key(chat_id: str) -> str:
-    return f"chat_user_compacted_until:{chat_id}"
+    return _message_state_key("user_compacted_until", chat_id)
 
 
 def _sort_by_message_id(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -650,7 +687,7 @@ def search_chat_history(
 def bot_message_meta_key(chat_id: str, message_id: Union[str, int]) -> str:
     """Return the Redis key for persisted bot message metadata."""
 
-    return f"{BOT_MESSAGE_META_PREFIX}{chat_id}:{message_id}"
+    return _message_state_key("bot_metadata", chat_id, str(message_id))
 
 
 def save_bot_message_metadata(
@@ -759,7 +796,23 @@ def build_reply_context_text(
 
 
 def _chat_members_key(chat_id: str) -> str:
-    return f"chat_members:{chat_id}"
+    return _message_state_key("members", chat_id)
+
+
+def _prepare_chat_member_payload(first_name: str, username: str, last_seen: int) -> str:
+    rust = _load_rust_message_state()
+    if rust is not None:
+        try:
+            return rust.prepare_chat_member(first_name, username, last_seen)
+        except Exception:
+            pass
+    return json.dumps(
+        {
+            "first_name": first_name,
+            "username": username,
+            "last_seen": last_seen,
+        }
+    )
 
 
 def save_chat_member(
@@ -774,13 +827,10 @@ def save_chat_member(
     if not user_id:
         return
     try:
-        data = json.dumps(
-            {
-                "first_name": str(first_name or ""),
-                "username": str(username or ""),
-                "last_seen": int(time.time()),
-            }
-        )
+        first_name = str(first_name or "")
+        username = str(username or "")
+        last_seen = int(time.time())
+        data = _prepare_chat_member_payload(first_name, username, last_seen)
         key = _chat_members_key(chat_id)
         redis_client.hset(key, user_id, data)
         redis_client.expire(key, CHAT_STATE_TTL)

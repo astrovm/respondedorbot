@@ -51,10 +51,15 @@ use bot_core::market_models::{
     MarketModel, Valuation, evaluate_market_model as evaluate_market_model_core,
 };
 use bot_core::message_state::{
-    SearchCandidate, escape_search_tag as escape_search_tag_core,
+    SearchCandidate, bot_message_metadata_key as bot_metadata_key_core,
+    chat_compacted_until_key as compacted_key_core, chat_members_key as members_key_core,
+    chat_summary_key as summary_key_core, escape_search_tag as escape_search_tag_core,
     escape_search_text as escape_search_text_core,
+    prepare_chat_member_payload as prepare_chat_member_core,
     prepare_message_write as prepare_message_write_core,
     rank_search_candidates as rank_search_candidates_core,
+    user_chat_compacted_until_key as user_compacted_key_core,
+    user_chat_summary_key as user_summary_key_core,
 };
 use bot_core::polymarket::{MarketOutcome, rank_outcomes as rank_outcomes_core};
 use bot_core::price_queries::{
@@ -1244,6 +1249,28 @@ fn rank_message_search_results(
 }
 
 #[pyfunction]
+fn message_state_key(kind: &str, chat_id: &str, message_id: Option<&str>) -> PyResult<String> {
+    match kind {
+        "summary" => Ok(summary_key_core(chat_id)),
+        "user_summary" => Ok(user_summary_key_core(chat_id)),
+        "compacted_until" => Ok(compacted_key_core(chat_id)),
+        "user_compacted_until" => Ok(user_compacted_key_core(chat_id)),
+        "bot_metadata" => message_id.map_or_else(
+            || Err(PyValueError::new_err("bot metadata requires message_id")),
+            |value| Ok(bot_metadata_key_core(chat_id, value)),
+        ),
+        "members" => Ok(members_key_core(chat_id)),
+        _ => Err(PyValueError::new_err("unsupported message-state key kind")),
+    }
+}
+
+#[pyfunction]
+fn prepare_chat_member(first_name: &str, username: &str, last_seen: i64) -> PyResult<String> {
+    prepare_chat_member_core(first_name, username, last_seen)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
 #[allow(clippy::too_many_arguments)]
 fn evaluate_compaction_policy(
     current_summary: Option<&str>,
@@ -1372,6 +1399,8 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(escape_message_search_text, module)?)?;
     module.add_function(wrap_pyfunction!(escape_message_search_tag, module)?)?;
     module.add_function(wrap_pyfunction!(rank_message_search_results, module)?)?;
+    module.add_function(wrap_pyfunction!(message_state_key, module)?)?;
+    module.add_function(wrap_pyfunction!(prepare_chat_member, module)?)?;
     module.add_function(wrap_pyfunction!(evaluate_compaction_policy, module)?)?;
     module.add_function(wrap_pyfunction!(compaction_job_is_due, module)?)?;
     module.add_function(wrap_pyfunction!(compaction_retry_transition, module)?)?;

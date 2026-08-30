@@ -295,6 +295,18 @@ def verify_message_state(bridge: ModuleType) -> None:
         )
     )
     assert actual_ranking == ranking["expected"]
+    for case in contract["auxiliary_keys"]:
+        actual = bridge.message_state_key(
+            case["kind"], case["chat_id"], case["message_id"]
+        )
+        assert actual == case["expected"], case["name"]
+    member = contract["member"]
+    actual_member = json.loads(
+        bridge.prepare_chat_member(
+            member["first_name"], member["username"], member["last_seen"]
+        )
+    )
+    assert actual_member == member["expected"]
 
 
 def verify_compaction_policy(bridge: ModuleType) -> None:
