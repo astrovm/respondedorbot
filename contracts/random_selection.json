@@ -1,0 +1,32 @@
+{
+  "cases": [
+    {
+      "name": "trimmed choices",
+      "input": "pizza, pasta, sushi",
+      "expected": { "kind": "choices", "values": ["pizza", "pasta", "sushi"] }
+    },
+    {
+      "name": "empty and Unicode choices",
+      "input": " , mate, 🧉",
+      "expected": { "kind": "choices", "values": ["", "mate", "🧉"] }
+    },
+    {
+      "name": "inclusive range",
+      "input": "1-10",
+      "expected": { "kind": "range", "start": "1", "end": "10" }
+    },
+    {
+      "name": "arbitrary precision range",
+      "input": "100000000000000000000-100000000000000000002",
+      "expected": {
+        "kind": "range",
+        "start": "100000000000000000000",
+        "end": "100000000000000000002"
+      }
+    },
+    { "name": "invalid text", "input": "invalid input", "expected": { "kind": "invalid" } },
+    { "name": "equal range", "input": "3-3", "expected": { "kind": "invalid" } },
+    { "name": "descending range", "input": "4-3", "expected": { "kind": "invalid" } },
+    { "name": "negative range", "input": "-2-3", "expected": { "kind": "invalid" } }
+  ]
+}

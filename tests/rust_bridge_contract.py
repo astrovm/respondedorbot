@@ -121,6 +121,14 @@ def verify_base_conversion(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_random_selection(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "random_selection.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["cases"]:
+        actual = json.loads(bridge.parse_random_selection(case["input"]))
+        assert actual == case["expected"], case["name"]
+
+
 def main(arguments: list[str]) -> int:
     if len(arguments) != 2:
         raise SystemExit("usage: rust_bridge_contract.py PATH_TO_EXTENSION")
@@ -134,6 +142,7 @@ def main(arguments: list[str]) -> int:
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)
+    verify_random_selection(bridge)
     return 0
 
 

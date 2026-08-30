@@ -5,6 +5,7 @@ pub mod command_parsing;
 pub mod credit_units;
 pub mod market_context;
 pub mod price_queries;
+pub mod random_selection;
 pub mod routing;
 pub mod task_triggers;
 

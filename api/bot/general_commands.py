@@ -24,11 +24,22 @@ class _RustBaseConverter(Protocol):
     def convert_base(self, message_text: str) -> str: ...
 
 
+class _RustRandomSelectionParser(Protocol):
+    def parse_random_selection(self, message_text: str) -> str: ...
+
+
 def _load_rust_base_converter() -> Optional[_RustBaseConverter]:
     module = load_rust_bridge("RUST_BASE_CONVERSION_ENABLED")
     if module is None:
         return None
     return cast(_RustBaseConverter, module)
+
+
+def _load_rust_random_selection_parser() -> Optional[_RustRandomSelectionParser]:
+    module = load_rust_bridge("RUST_RANDOM_SELECTION_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustRandomSelectionParser, module)
 
 
 def gen_random(name: str) -> str:
@@ -48,7 +59,7 @@ def gen_random(name: str) -> str:
     return msg
 
 
-def select_random(msg_text: str) -> str:
+def _select_random_python(msg_text: str) -> str:
     values = [v.strip() for v in msg_text.split(",")]
     if len(values) >= 2:
         return random.choice(values)
@@ -61,6 +72,36 @@ def select_random(msg_text: str) -> str:
         return tr("random.invalid")
 
     return tr("random.invalid")
+
+
+def _random_selection_from_rust(raw_result: str) -> str:
+    result = json.loads(raw_result)
+    if not isinstance(result, Mapping):
+        raise ValueError("Rust random selection result is not a mapping")
+    kind = result.get("kind")
+    if kind == "choices":
+        values = result.get("values")
+        if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+            raise ValueError("Rust random choices are invalid")
+        return cast(str, random.choice(values))
+    if kind == "range":
+        return str(random.randint(int(str(result["start"])), int(str(result["end"]))))
+    if kind == "invalid":
+        return tr("random.invalid")
+    raise ValueError("Rust random selection result has an unknown kind")
+
+
+def select_random(msg_text: str) -> str:
+    rust = _load_rust_random_selection_parser()
+    if rust is not None:
+        try:
+            return _random_selection_from_rust(rust.parse_random_selection(msg_text))
+        except Exception as error:
+            logger.warning(
+                "Rust random selection failed; using Python fallback: error_type=%s",
+                type(error).__name__,
+            )
+    return _select_random_python(msg_text)
 
 
 def _convert_base_python(msg_text: str) -> str:

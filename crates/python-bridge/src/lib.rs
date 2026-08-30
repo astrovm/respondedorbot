@@ -20,6 +20,9 @@ use bot_core::market_context::{
 use bot_core::price_queries::{
     AmountConversion, PriceQuery, ProviderScope, parse_price_query as parse_price_query_core,
 };
+use bot_core::random_selection::{
+    RandomSelection, parse_random_selection as parse_random_selection_core,
+};
 use bot_core::routing::{
     MediaRoutingInput, ResponseRoutingEvaluation, ResponseRoutingInput,
     evaluate_response_routing as evaluate_response_routing_core,
@@ -279,6 +282,27 @@ enum BaseConversionDto {
         input: String,
     },
     NumbersRequired,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RandomSelectionDto {
+    Choices { values: Vec<String> },
+    Range { start: String, end: String },
+    Invalid,
+}
+
+impl From<RandomSelection> for RandomSelectionDto {
+    fn from(value: RandomSelection) -> Self {
+        match value {
+            RandomSelection::Choices { values } => Self::Choices { values },
+            RandomSelection::InclusiveRange { start, end } => Self::Range {
+                start: start.to_string(),
+                end: end.to_string(),
+            },
+            RandomSelection::Invalid => Self::Invalid,
+        }
+    }
 }
 
 impl From<BaseConversion> for BaseConversionDto {
@@ -555,6 +579,15 @@ fn convert_base(message_text: &str) -> PyResult<String> {
         .map_err(|error| PyValueError::new_err(format!("cannot encode base conversion: {error}")))
 }
 
+/// Parse a random choice or inclusive integer range without consuming randomness.
+#[pyfunction]
+fn parse_random_selection(message_text: &str) -> PyResult<String> {
+    let result = parse_random_selection_core(message_text)
+        .map_err(|_| PyValueError::new_err("Unicode range requires the legacy parser"))?;
+    serde_json::to_string(&RandomSelectionDto::from(result))
+        .map_err(|error| PyValueError::new_err(format!("cannot encode random selection: {error}")))
+}
+
 /// Validate and normalize a task-trigger input encoded by the Python adapter.
 #[pyfunction]
 fn parse_task_trigger(input_json: &str) -> PyResult<String> {
@@ -638,6 +671,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(format_credit_units, module)?)?;
     module.add_function(wrap_pyfunction!(parse_command, module)?)?;
     module.add_function(wrap_pyfunction!(convert_base, module)?)?;
+    module.add_function(wrap_pyfunction!(parse_random_selection, module)?)?;
     module.add_function(wrap_pyfunction!(parse_task_trigger, module)?)?;
     module.add_function(wrap_pyfunction!(parse_price_query, module)?)?;
     module.add_function(wrap_pyfunction!(format_market_info, module)?)?;
