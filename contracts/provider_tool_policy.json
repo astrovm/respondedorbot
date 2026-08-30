@@ -1,0 +1,84 @@
+{
+  "cases": [
+    {
+      "name": "standalone_double_quote",
+      "text": "web_fetch(\"https://example.com/a\")",
+      "round_index": 0,
+      "advertised_tool_names": ["web_fetch"],
+      "web_fetch_registered": true,
+      "expected": ["pseudo_call_1", "web_fetch", "https://example.com/a"]
+    },
+    {
+      "name": "preamble_last_line",
+      "text": "I will check that now.\nweb_fetch(\"https://example.com/b\")",
+      "round_index": 2,
+      "advertised_tool_names": ["calculate", "web_fetch"],
+      "web_fetch_registered": true,
+      "expected": ["pseudo_call_3", "web_fetch", "https://example.com/b"]
+    },
+    {
+      "name": "json_object",
+      "text": "web_fetch({\"url\":\"https://example.com/c\"})",
+      "round_index": 4,
+      "advertised_tool_names": ["web_fetch"],
+      "web_fetch_registered": true,
+      "expected": ["pseudo_call_5", "web_fetch", "https://example.com/c"]
+    },
+    {
+      "name": "single_quote",
+      "text": "web_fetch('https://example.com/d')",
+      "round_index": 1,
+      "advertised_tool_names": ["web_fetch"],
+      "web_fetch_registered": true,
+      "expected": ["pseudo_call_2", "web_fetch", "https://example.com/d"]
+    },
+    {
+      "name": "dsml",
+      "text": "<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"web_fetch\">\n<｜｜DSML｜｜parameter name=\"url\" string=\"true\">https://example.com/post</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>",
+      "round_index": 0,
+      "advertised_tool_names": ["web_fetch"],
+      "web_fetch_registered": true,
+      "expected": ["pseudo_call_1", "web_fetch", "https://example.com/post"]
+    },
+    {
+      "name": "inline_prose",
+      "text": "I may call web_fetch(\"https://example.com\") later",
+      "round_index": 0,
+      "advertised_tool_names": ["web_fetch"],
+      "web_fetch_registered": true,
+      "expected": null
+    },
+    {
+      "name": "unknown_tool",
+      "text": "calculate(\"https://example.com\")",
+      "round_index": 0,
+      "advertised_tool_names": ["web_fetch"],
+      "web_fetch_registered": true,
+      "expected": null
+    },
+    {
+      "name": "invalid_url",
+      "text": "web_fetch(\"ftp://example.com\")",
+      "round_index": 0,
+      "advertised_tool_names": ["web_fetch"],
+      "web_fetch_registered": true,
+      "expected": null
+    },
+    {
+      "name": "unadvertised",
+      "text": "web_fetch(\"https://example.com\")",
+      "round_index": 0,
+      "advertised_tool_names": ["calculate"],
+      "web_fetch_registered": true,
+      "expected": null
+    },
+    {
+      "name": "unregistered",
+      "text": "web_fetch(\"https://example.com\")",
+      "round_index": 0,
+      "advertised_tool_names": ["web_fetch"],
+      "web_fetch_registered": false,
+      "expected": null
+    }
+  ]
+}

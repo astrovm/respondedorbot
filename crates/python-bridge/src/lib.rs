@@ -117,6 +117,7 @@ use bot_core::provider_runtime_policy::{
     response_has_billable_usage as provider_usage_has_billable_activity_core,
     retry_wait_seconds as provider_retry_wait_seconds_core,
 };
+use bot_core::provider_tools::parse_pseudo_web_fetch as parse_pseudo_web_fetch_core;
 use bot_core::random_reply::{
     RandomAnswer, RandomSuffix, evaluate_random_reply as evaluate_random_reply_core,
 };
@@ -2474,6 +2475,22 @@ fn provider_retry_wait_seconds(attempt: u32) -> PyResult<u64> {
         .ok_or_else(|| PyValueError::new_err("provider retry delay exceeds supported range"))
 }
 
+#[pyfunction]
+fn parse_pseudo_web_fetch(
+    text: &str,
+    round_index: usize,
+    advertised_tool_names: Vec<String>,
+    web_fetch_registered: bool,
+) -> Option<(String, String, String)> {
+    parse_pseudo_web_fetch_core(
+        text,
+        round_index,
+        &advertised_tool_names,
+        web_fetch_registered,
+    )
+    .map(|call| (call.id, call.name, call.url))
+}
+
 fn token_estimate_value(value: &Value) -> TokenEstimateValue {
     match value {
         Value::Null => TokenEstimateValue::Empty,
@@ -2775,6 +2792,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module
     )?)?;
     module.add_function(wrap_pyfunction!(provider_retry_wait_seconds, module)?)?;
+    module.add_function(wrap_pyfunction!(parse_pseudo_web_fetch, module)?)?;
     module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;
     module.add_function(wrap_pyfunction!(ai_estimate_text_tokens, module)?)?;
     module.add_function(wrap_pyfunction!(ai_estimate_nested_tokens, module)?)?;

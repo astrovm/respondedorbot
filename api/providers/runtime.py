@@ -75,11 +75,28 @@ class _RustProviderRuntimePolicy(Protocol):
     def provider_retry_wait_seconds(self, attempt: int) -> int: ...
 
 
+class _RustProviderToolPolicy(Protocol):
+    def parse_pseudo_web_fetch(
+        self,
+        text: str,
+        round_index: int,
+        advertised_tool_names: list[str],
+        web_fetch_registered: bool,
+    ) -> tuple[str, str, str] | None: ...
+
+
 def _load_rust_provider_runtime_policy() -> _RustProviderRuntimePolicy | None:
     module = load_rust_bridge("RUST_PROVIDER_RUNTIME_POLICY_ENABLED")
     if module is None:
         return None
     return cast(_RustProviderRuntimePolicy, module)
+
+
+def _load_rust_provider_tool_policy() -> _RustProviderToolPolicy | None:
+    module = load_rust_bridge("RUST_PROVIDER_TOOL_POLICY_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustProviderToolPolicy, module)
 
 
 def _rust_runtime_policy_failed(operation: str) -> None:
@@ -599,6 +616,27 @@ class ProviderRuntime:
         round_idx: int,
         extra_tools: Optional[List[Dict[str, Any]]],
     ) -> ToolCall | None:
+        rust = _load_rust_provider_tool_policy()
+        if rust is not None:
+            try:
+                parsed = rust.parse_pseudo_web_fetch(
+                    str(text or ""),
+                    int(round_idx),
+                    sorted(_extra_tool_names(extra_tools)),
+                    self._tool_runtime.has_tool("web_fetch"),
+                )
+                if parsed is None:
+                    return None
+                call_id, tool_name, rust_url = parsed
+                return ToolCall(
+                    id=call_id,
+                    function=ToolFunctionCall(
+                        name=tool_name,
+                        arguments=json.dumps({"url": rust_url}),
+                    ),
+                )
+            except Exception:
+                _rust_runtime_policy_failed("pseudo_tool_call")
         dsml_match = _DSML_TOOL_CALL_PATTERN.search(str(text or ""))
         if dsml_match:
             return self._build_pseudo_tool_call(
