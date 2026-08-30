@@ -42,6 +42,7 @@ use bot_core::ai_reserve::{
     estimate_transcription_reserve_credit_units as estimate_transcription_reserve_credit_units_core,
     estimate_vision_reserve_credit_units as estimate_vision_reserve_credit_units_core,
 };
+use bot_core::ai_response_cleanup::cleanup_response as ai_cleanup_response_core;
 use bot_core::ai_usage::{
     ProviderSegmentIdentity, ProviderUsageStatus,
     needs_reconciliation as provider_usage_needs_reconciliation_core,
@@ -2613,6 +2614,24 @@ fn provider_stream_accumulate_tool_calls(
     .map_err(|error| PyValueError::new_err(format!("stream tool-call encoding failed: {error}")))
 }
 
+#[pyfunction]
+fn ai_cleanup_response(
+    response: &str,
+    contexts_json: &str,
+    user_identity: Option<&str>,
+) -> PyResult<(String, String, String, String, String)> {
+    let contexts: Vec<Option<String>> = serde_json::from_str(contexts_json)
+        .map_err(|error| PyValueError::new_err(format!("invalid cleanup contexts: {error}")))?;
+    let stages = ai_cleanup_response_core(response, &contexts, user_identity);
+    Ok((
+        stages.raw,
+        stages.persona,
+        stages.context,
+        stages.identity,
+        stages.final_text,
+    ))
+}
+
 fn token_estimate_value(value: &Value) -> TokenEstimateValue {
     match value {
         Value::Null => TokenEstimateValue::Empty,
@@ -2935,6 +2954,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
         provider_stream_accumulate_tool_calls,
         module
     )?)?;
+    module.add_function(wrap_pyfunction!(ai_cleanup_response, module)?)?;
     module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;
     module.add_function(wrap_pyfunction!(ai_estimate_text_tokens, module)?)?;
     module.add_function(wrap_pyfunction!(ai_estimate_nested_tokens, module)?)?;

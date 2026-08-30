@@ -2,16 +2,34 @@
 
 from __future__ import annotations
 
-import re
 import inspect
+import json
 import logging
+import re
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, cast
 
+from api.core.rust_bridge import load_rust_bridge
 from api.i18n import tr
 from api.i18n.prompts import prompt
 
 _logger = logging.getLogger(__name__)
+
+
+class _RustAIResponseCleanup(Protocol):
+    def ai_cleanup_response(
+        self,
+        response: str,
+        contexts_json: str,
+        user_identity: str | None,
+    ) -> tuple[str, str, str, str, str]: ...
+
+
+def _load_rust_ai_response_cleanup() -> _RustAIResponseCleanup | None:
+    module = load_rust_bridge("RUST_AI_RESPONSE_CLEANUP_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustAIResponseCleanup, module)
 
 GORDO_PREFIX_PATTERN = re.compile(r"^\s*gordo\b\s*:\s*", re.IGNORECASE)
 IDENTITY_USER_PATTERN = re.compile(r"\(@?(\w+)\)")
@@ -244,6 +262,27 @@ def _invoke_handler(request: AIResponseRequest, handler_name: str) -> Any:
 
 def _clean_response(request: AIResponseRequest, response: Any) -> _CleanupStages:
     raw = str(response or "")
+    rust = _load_rust_ai_response_cleanup()
+    if rust is not None:
+        try:
+            contexts = [
+                str(context) if context is not None else None
+                for context in request.context_texts or []
+            ]
+            raw, persona, context, identity, final = rust.ai_cleanup_response(
+                raw,
+                json.dumps(contexts, ensure_ascii=False),
+                str(request.user_identity) if request.user_identity is not None else None,
+            )
+            return _CleanupStages(
+                raw=raw,
+                persona=persona,
+                context=context,
+                identity=identity,
+                final=final,
+            )
+        except Exception:
+            _logger.exception("Rust AI response cleanup failed; using Python fallback")
     persona = remove_gordo_prefix(raw)
     context = strip_leading_context(persona, request.context_texts)
     identity = strip_user_identity_prefix(context, request.user_identity)

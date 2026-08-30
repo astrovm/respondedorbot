@@ -946,6 +946,18 @@ def verify_ai_pricing(bridge: ModuleType) -> None:
             assert actual["tool_breakdown"][0]["usd_micros"] == expected["tool_usd_micros"], case["name"]
 
 
+def verify_ai_response_cleanup(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "ai_response_cleanup.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["cases"]:
+        actual = bridge.ai_cleanup_response(
+            case["response"],
+            json.dumps(case["contexts"], ensure_ascii=False),
+            case["user_identity"],
+        )
+        assert list(actual) == case["expected"], case["name"]
+
+
 def main(arguments: list[str]) -> int:
     if len(arguments) != 2:
         raise SystemExit("usage: rust_bridge_contract.py PATH_TO_EXTENSION")
@@ -990,6 +1002,7 @@ def main(arguments: list[str]) -> int:
     verify_provider_stream_policy(bridge)
     verify_ai_reserve_estimates(bridge)
     verify_ai_pricing(bridge)
+    verify_ai_response_cleanup(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

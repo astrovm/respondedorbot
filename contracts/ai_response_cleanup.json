@@ -1,0 +1,64 @@
+{
+  "cases": [
+    {
+      "name": "plain",
+      "response": "plain answer",
+      "contexts": [],
+      "user_identity": null,
+      "expected": ["plain answer", "plain answer", "plain answer", "plain answer", "plain answer"]
+    },
+    {
+      "name": "all_prefix_stages",
+      "response": "Gordo: CONTEXT: @User: **answer**\nanswer",
+      "contexts": ["context"],
+      "user_identity": "@user",
+      "expected": [
+        "Gordo: CONTEXT: @User: **answer**\nanswer",
+        "CONTEXT: @User: **answer**\nanswer",
+        "@User: **answer**\nanswer",
+        "**answer**\nanswer",
+        "answer\nanswer"
+      ]
+    },
+    {
+      "name": "markdown",
+      "response": "## Header\n> **bold** and *italic* and __strong__ and _soft_\n- `code` [link](https://example.com) ![cat](cat.png)\n---\nhttps://example.com/my_path_value\n```rust\nlet x = 1;\n```",
+      "contexts": [],
+      "user_identity": null,
+      "expected": [
+        "## Header\n> **bold** and *italic* and __strong__ and _soft_\n- `code` [link](https://example.com) ![cat](cat.png)\n---\nhttps://example.com/my_path_value\n```rust\nlet x = 1;\n```",
+        "## Header\n> **bold** and *italic* and __strong__ and _soft_\n- `code` [link](https://example.com) ![cat](cat.png)\n---\nhttps://example.com/my_path_value\n```rust\nlet x = 1;\n```",
+        "## Header\n> **bold** and *italic* and __strong__ and _soft_\n- `code` [link](https://example.com) ![cat](cat.png)\n---\nhttps://example.com/my_path_value\n```rust\nlet x = 1;\n```",
+        "## Header\n> **bold** and *italic* and __strong__ and _soft_\n- `code` [link](https://example.com) ![cat](cat.png)\n---\nhttps://example.com/my_path_value\n```rust\nlet x = 1;\n```",
+        "Header\nbold and italic and strong and soft\ncode link cat\nhttps://example.com/my_path_value\nlet x = 1;"
+      ]
+    },
+    {
+      "name": "repeated_contexts",
+      "response": "First: second - final",
+      "contexts": [null, " ", "first", "second"],
+      "user_identity": null,
+      "expected": ["First: second - final", "First: second - final", "final", "final", "final"]
+    },
+    {
+      "name": "identity_requires_colon",
+      "response": "@user without colon",
+      "contexts": [],
+      "user_identity": "@USER",
+      "expected": ["@user without colon", "@user without colon", "@user without colon", "@user without colon", "@user without colon"]
+    },
+    {
+      "name": "duplicate_lines_and_sentences",
+      "response": " hola \nhola\nmundo. mundo. final..",
+      "contexts": [],
+      "user_identity": null,
+      "expected": [
+        " hola \nhola\nmundo. mundo. final..",
+        "hola \nhola\nmundo. mundo. final..",
+        "hola \nhola\nmundo. mundo. final..",
+        "hola \nhola\nmundo. mundo. final..",
+        "hola\nmundo. mundo. final."
+      ]
+    }
+  ]
+}
