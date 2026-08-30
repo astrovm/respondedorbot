@@ -1,7 +1,7 @@
 //! Telegram `getUpdates` request and response handling.
 //!
 //! This module owns the untrusted JSON boundary. Callers receive an update id
-//! and one of the three update kinds supported by the bot runtime.
+//! and one of the update kinds supported by the bot runtime.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -27,6 +27,7 @@ pub struct IncomingUpdate {
 #[derive(Debug, Clone, PartialEq)]
 pub enum IncomingEvent {
     Message(IncomingMessage),
+    SuccessfulPayment(Map<String, Value>),
     CallbackQuery(Map<String, Value>),
     PreCheckoutQuery(Map<String, Value>),
     Unsupported,
@@ -116,6 +117,9 @@ fn parse_event(object: &mut Map<String, Value>) -> Result<IncomingEvent, Polling
         .and_then(|value| value.as_object().cloned())
         .ok_or(PollingError::InvalidResponse)?;
     Ok(match *field {
+        "message" if payload.contains_key("successful_payment") => {
+            IncomingEvent::SuccessfulPayment(payload)
+        }
         "message" => IncomingEvent::Message(parse_message(&payload)),
         "callback_query" => IncomingEvent::CallbackQuery(payload),
         "pre_checkout_query" => IncomingEvent::PreCheckoutQuery(payload),
@@ -246,7 +250,7 @@ mod tests {
     use std::cell::RefCell;
 
     use reqwest::Method;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::{
         IncomingEvent, PollFailure, PollOutcome, PollingError, next_offset, parse_response,
@@ -311,7 +315,8 @@ mod tests {
                 {"update_id":10,"message":{"message_id":1,"text":"hola"}},
                 {"update_id":11,"callback_query":{"id":"callback"}},
                 {"update_id":12,"pre_checkout_query":{"id":"checkout"}},
-                {"update_id":13,"edited_message":{"message_id":2}}
+                {"update_id":13,"message":{"message_id":2,"successful_payment":{"telegram_payment_charge_id":"charge-1"}}},
+                {"update_id":14,"edited_message":{"message_id":3}}
             ]}"#,
         );
         assert!(matches!(&actual, Ok(PollOutcome::Updates(_))));
@@ -319,7 +324,7 @@ mod tests {
             Ok(PollOutcome::Updates(updates)) => updates,
             Ok(PollOutcome::Retry(_)) | Err(_) => Vec::new(),
         };
-        assert_eq!(updates.len(), 4);
+        assert_eq!(updates.len(), 5);
         assert!(matches!(updates[0].event, IncomingEvent::Message(_)));
         let IncomingEvent::Message(message) = &updates[0].event else {
             return;
@@ -340,8 +345,18 @@ mod tests {
             updates[2].event,
             IncomingEvent::PreCheckoutQuery(_)
         ));
-        assert_eq!(updates[3].event, IncomingEvent::Unsupported);
-        assert_eq!(next_offset(&updates, None), Some(14));
+        let IncomingEvent::SuccessfulPayment(payment) = &updates[3].event else {
+            return;
+        };
+        assert_eq!(
+            payment
+                .get("successful_payment")
+                .and_then(Value::as_object)
+                .and_then(|payment| payment.get("telegram_payment_charge_id")),
+            Some(&json!("charge-1"))
+        );
+        assert_eq!(updates[4].event, IncomingEvent::Unsupported);
+        assert_eq!(next_offset(&updates, None), Some(15));
     }
 
     #[test]

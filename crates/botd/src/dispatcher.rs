@@ -21,7 +21,10 @@ use bot_core::stateless_commands::{
 use bot_core::telegram_actions::{SendMessage, TelegramAction};
 use bot_core::telegram_callbacks::{CallbackContextOutcome, CallbackRoute, parse_callback_context};
 use bot_core::telegram_input::{ChatId, MessageId, is_group_chat_type};
-use bot_core::telegram_payments::plan_pre_checkout;
+use bot_core::telegram_payments::{
+    StarPaymentRecord, SuccessfulPaymentDecision, evaluate_default_successful_payment,
+    payment_record, plan_pre_checkout, successful_payment_reply,
+};
 use num_bigint::BigInt;
 use serde_json::{Map, Value};
 use thiserror::Error;
@@ -84,6 +87,16 @@ pub trait GroupAuthorizer {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StarPaymentReceipt {
+    pub inserted: bool,
+    pub user_balance: i64,
+}
+
+pub trait StarPaymentSink {
+    fn record(&mut self, payment: &StarPaymentRecord) -> Result<StarPaymentReceipt, String>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchOutcome {
     Handled,
     LegacyRequired,
@@ -118,6 +131,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     authorization: Authorization,
     bot_name: String,
     billing_available: bool,
+    payment_sink: Option<Box<dyn StarPaymentSink>>,
     last_outcome: Option<DispatchOutcome>,
     state_diagnostics: Vec<String>,
 }
@@ -151,6 +165,7 @@ where
             authorization,
             bot_name: bot_name.to_owned(),
             billing_available: true,
+            payment_sink: None,
             last_outcome: None,
             state_diagnostics: Vec::new(),
         }
@@ -161,6 +176,118 @@ where
     pub const fn with_billing_available(mut self, available: bool) -> Self {
         self.billing_available = available;
         self
+    }
+
+    /// Connect the exact-once PostgreSQL Stars payment writer.
+    #[must_use]
+    pub fn with_payment_sink(mut self, sink: Box<dyn StarPaymentSink>) -> Self {
+        self.payment_sink = Some(sink);
+        self
+    }
+
+    fn dispatch_successful_payment(
+        &mut self,
+        message: Map<String, Value>,
+    ) -> NativeDispatchResult<Config, Actions, Random> {
+        let language_code = message
+            .get("from")
+            .and_then(Value::as_object)
+            .and_then(|user| user.get("language_code"))
+            .and_then(Value::as_str);
+        let chat_type = message
+            .get("chat")
+            .and_then(Value::as_object)
+            .and_then(|chat| chat.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("private");
+        let locale = resolve_locale(None, language_code, chat_type);
+        let decision = match evaluate_default_successful_payment(
+            &Value::Object(message),
+            self.billing_available,
+        ) {
+            Ok(decision) => decision,
+            Err(_) => return Ok(DispatchOutcome::LegacyRequired),
+        };
+        self.state_diagnostics.clear();
+        let (chat_id, text) = match &decision {
+            SuccessfulPaymentDecision::Ignore => return Ok(DispatchOutcome::Handled),
+            SuccessfulPaymentDecision::BillingUnavailable { chat_id } => (
+                chat_id,
+                match locale {
+                    bot_core::locale::Locale::Es => {
+                        "el cobro de ia no está andando, avisale al admin".to_owned()
+                    }
+                    bot_core::locale::Locale::En => {
+                        "AI billing is unavailable, please tell the admin".to_owned()
+                    }
+                },
+            ),
+            SuccessfulPaymentDecision::InvalidPayment {
+                chat_id,
+                user_id,
+                currency,
+                payload,
+                total_amount,
+                charge_id,
+            } => {
+                self.state_diagnostics.push(format!(
+                    "Invalid successful payment payload chat_id={chat_id} user_id={user_id} currency={currency} payload={payload} total_amount={total_amount} charge_id={charge_id}"
+                ));
+                (
+                    chat_id,
+                    match locale {
+                        bot_core::locale::Locale::Es => {
+                            "me cayó un pago raro y no lo pude validar, avisale al admin".to_owned()
+                        }
+                        bot_core::locale::Locale::En => {
+                            "I received an invalid payment, please tell the admin".to_owned()
+                        }
+                    },
+                )
+            }
+            SuccessfulPaymentDecision::Record {
+                chat_id,
+                credits_awarded,
+                ..
+            } => {
+                let Some(payment) = payment_record(&decision) else {
+                    return Ok(DispatchOutcome::LegacyRequired);
+                };
+                let Some(sink) = self.payment_sink.as_mut() else {
+                    return Ok(DispatchOutcome::LegacyRequired);
+                };
+                let text = match sink.record(&payment) {
+                    Ok(receipt) => successful_payment_reply(
+                        *credits_awarded,
+                        receipt.user_balance,
+                        receipt.inserted,
+                        locale,
+                    ),
+                    Err(error) => {
+                        self.state_diagnostics.push(format!(
+                            "successful payment persistence chat_id={chat_id} user_id={} charge_id={}: {error}",
+                            payment.user_id, payment.charge_id
+                        ));
+                        match locale {
+                            bot_core::locale::Locale::Es => "me entró la guita pero se trabó la acreditación, avisale al admin".to_owned(),
+                            bot_core::locale::Locale::En => "I received the payment but could not add the credits, please tell the admin".to_owned(),
+                        }
+                    }
+                };
+                (chat_id, text)
+            }
+        };
+        let Ok(chat_id) = chat_id.parse::<i64>() else {
+            return Ok(DispatchOutcome::LegacyRequired);
+        };
+        let _receipt = self
+            .actions
+            .execute(TelegramAction::SendMessage(SendMessage::new(
+                ChatId(chat_id),
+                &text,
+            )))
+            .map_err(DispatchError::Action)?;
+        Ok(DispatchOutcome::Handled)
     }
 
     #[must_use]
@@ -542,6 +669,9 @@ where
     ) -> NativeDispatchResult<Config, Actions, Random> {
         let outcome = match update.event {
             IncomingEvent::Message(message) => self.dispatch_message(&message)?,
+            IncomingEvent::SuccessfulPayment(message) => {
+                self.dispatch_successful_payment(message)?
+            }
             IncomingEvent::CallbackQuery(callback) => self.dispatch_callback(&callback)?,
             IncomingEvent::PreCheckoutQuery(query) => {
                 let language_code = query
@@ -588,20 +718,23 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::convert::Infallible;
+    use std::rc::Rc;
 
     use bot_adapters::telegram_polling::{IncomingEvent, IncomingMessage, IncomingUpdate};
     use bot_core::chat_config::ChatConfig;
     use bot_core::command_state::{IncomingCommandWritePlan, OutgoingCommandWritePlan};
     use bot_core::telegram_actions::TelegramAction;
     use bot_core::telegram_input::{ChatId, MessageContent, MessageId, UserId};
+    use bot_core::telegram_payments::StarPaymentRecord;
     use num_bigint::BigInt;
     use serde_json::{Map, json};
 
     use super::{
         ActionReceipt, ActionSink, ChatConfigSource, DispatchError, DispatchOutcome,
         GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink, NativeDispatcher,
-        RandomSource, RuntimeValues,
+        RandomSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink,
     };
 
     struct Config {
@@ -803,6 +936,45 @@ mod tests {
         IncomingUpdate {
             update_id: 101,
             event: IncomingEvent::PreCheckoutQuery(query),
+        }
+    }
+
+    fn successful_payment_update(
+        pack_id: &str,
+        user_id: i64,
+        total_amount: i64,
+        language: Option<&str>,
+    ) -> IncomingUpdate {
+        IncomingUpdate {
+            update_id: 102,
+            event: IncomingEvent::SuccessfulPayment(Map::from_iter([
+                ("chat".to_owned(), json!({"id":42,"type":"private"})),
+                (
+                    "from".to_owned(),
+                    json!({"id":user_id,"language_code":language}),
+                ),
+                (
+                    "successful_payment".to_owned(),
+                    json!({
+                        "currency":"XTR",
+                        "invoice_payload":format!("topup:{pack_id}:42:en"),
+                        "telegram_payment_charge_id":"charge-1",
+                        "total_amount":total_amount,
+                    }),
+                ),
+            ])),
+        }
+    }
+
+    struct Payments {
+        result: Result<StarPaymentReceipt, String>,
+        records: Rc<RefCell<Vec<StarPaymentRecord>>>,
+    }
+
+    impl StarPaymentSink for Payments {
+        fn record(&mut self, payment: &StarPaymentRecord) -> Result<StarPaymentReceipt, String> {
+            self.records.borrow_mut().push(payment.clone());
+            self.result.clone()
         }
     }
 
@@ -1620,6 +1792,168 @@ mod tests {
                 update_id: 101,
                 event: IncomingEvent::PreCheckoutQuery(query),
             }),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
+        assert!(dispatcher.actions.0.is_empty());
+    }
+
+    #[test]
+    fn successful_payment_records_once_and_sends_the_localized_balance() {
+        let records = Rc::new(RefCell::new(Vec::new()));
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_payment_sink(Box::new(Payments {
+            result: Ok(StarPaymentReceipt {
+                inserted: true,
+                user_balance: 5_300,
+            }),
+            records: Rc::clone(&records),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(successful_payment_update("p50", 42, 25, Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            records.borrow().as_slice(),
+            [StarPaymentRecord {
+                charge_id: "charge-1".to_owned(),
+                user_id: 42,
+                pack_id: "p50".to_owned(),
+                xtr_amount: 25,
+                credits_awarded: 5_000,
+                payload: "topup:p50:42:en".to_owned(),
+            }]
+        );
+        let [TelegramAction::SendMessage(message)] = dispatcher.actions.0.as_slice() else {
+            return;
+        };
+        assert_eq!(message.chat_id, ChatId(42));
+        assert_eq!(
+            message.text,
+            "listo, te cargué 50.00 créditos\nahora te quedaron 53.00\nsi querés mandarle al grupo: /transfer <monto>"
+        );
+    }
+
+    #[test]
+    fn duplicate_and_failed_payment_writes_have_distinct_safe_replies() {
+        for (result, expected, diagnostic) in [
+            (
+                Ok(StarPaymentReceipt {
+                    inserted: false,
+                    user_balance: 5_300,
+                }),
+                "this payment was already credited\nyour balance is 53.00",
+                false,
+            ),
+            (
+                Err("synthetic database failure".to_owned()),
+                "I received the payment but could not add the credits, please tell the admin",
+                true,
+            ),
+        ] {
+            let config = Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            };
+            let mut dispatcher = NativeDispatcher::new(
+                config,
+                Actions::default(),
+                State::default(),
+                values(),
+                random(),
+                authorization(),
+                "@mybot",
+            )
+            .with_payment_sink(Box::new(Payments {
+                result,
+                records: Rc::new(RefCell::new(Vec::new())),
+            }));
+            assert_eq!(
+                dispatcher.dispatch(successful_payment_update("p50", 42, 25, Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+            let [TelegramAction::SendMessage(message)] = dispatcher.actions.0.as_slice() else {
+                return;
+            };
+            assert_eq!(message.text, expected);
+            assert_eq!(!dispatcher.state_diagnostics().is_empty(), diagnostic);
+        }
+    }
+
+    #[test]
+    fn invalid_and_unavailable_successful_payments_never_reach_the_ledger() {
+        let records = Rc::new(RefCell::new(Vec::new()));
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_payment_sink(Box::new(Payments {
+            result: Ok(StarPaymentReceipt {
+                inserted: true,
+                user_balance: 5_000,
+            }),
+            records: Rc::clone(&records),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(successful_payment_update("p50", 99, 25, Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(records.borrow().is_empty());
+        assert_eq!(dispatcher.actions.0.len(), 1);
+        assert!(dispatcher.state_diagnostics()[0].contains("user_id=99"));
+
+        dispatcher.billing_available = false;
+        assert_eq!(
+            dispatcher.dispatch(successful_payment_update("p50", 42, 25, Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(records.borrow().is_empty());
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.last() else {
+            return;
+        };
+        assert_eq!(
+            message.text,
+            "el cobro de ia no está andando, avisale al admin"
+        );
+    }
+
+    #[test]
+    fn valid_successful_payment_waits_for_a_native_ledger_sink_during_shadowing() {
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            dispatcher.dispatch(successful_payment_update("p50", 42, 25, Some("en"))),
             Ok(DispatchOutcome::LegacyRequired)
         );
         assert!(dispatcher.actions.0.is_empty());

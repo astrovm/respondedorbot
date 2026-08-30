@@ -4,6 +4,7 @@ use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::credit_units::{CreditUnits, format_credit_units};
 use crate::locale::Locale;
 use crate::telegram_actions::TelegramAction;
 use crate::telegram_input::{python_string, python_truthy};
@@ -22,6 +23,16 @@ pub struct BillingPackTerms {
     pub id: String,
     pub xtr_amount: i64,
     pub credits_awarded: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StarPaymentRecord {
+    pub charge_id: String,
+    pub user_id: i64,
+    pub pack_id: String,
+    pub xtr_amount: i64,
+    pub credits_awarded: i64,
+    pub payload: String,
 }
 
 /// Return one production Telegram Stars pack using stored hundredth-credit units.
@@ -71,6 +82,75 @@ pub enum SuccessfulPaymentDecision {
         credits_awarded: i64,
         payload: String,
     },
+}
+
+/// Build the exact user-visible reply after an idempotent Stars ledger write.
+#[must_use]
+pub fn successful_payment_reply(
+    credits_awarded: i64,
+    user_balance: i64,
+    inserted: bool,
+    locale: Locale,
+) -> String {
+    let credits = format_credit_units(CreditUnits::new(credits_awarded));
+    let balance = format_credit_units(CreditUnits::new(user_balance));
+    match (inserted, locale) {
+        (true, Locale::Es) => format!(
+            "listo, te cargué {credits} créditos\nahora te quedaron {balance}\nsi querés mandarle al grupo: /transfer <monto>"
+        ),
+        (true, Locale::En) => format!(
+            "added {credits} credits\nyour balance is now {balance}\nuse /transfer <amount> to fund a group"
+        ),
+        (false, Locale::Es) => {
+            format!("ese pago ya estaba cargado, no rompas las bolas\nte quedaron {balance}")
+        }
+        (false, Locale::En) => {
+            format!("this payment was already credited\nyour balance is {balance}")
+        }
+    }
+}
+
+/// Convert a validated payment decision into the typed PostgreSQL write input.
+#[must_use]
+pub fn payment_record(decision: &SuccessfulPaymentDecision) -> Option<StarPaymentRecord> {
+    let SuccessfulPaymentDecision::Record {
+        user_id,
+        charge_id,
+        pack_id,
+        xtr_amount,
+        credits_awarded,
+        payload,
+        ..
+    } = decision
+    else {
+        return None;
+    };
+    Some(StarPaymentRecord {
+        charge_id: charge_id.clone(),
+        user_id: *user_id,
+        pack_id: pack_id.clone(),
+        xtr_amount: *xtr_amount,
+        credits_awarded: *credits_awarded,
+        payload: payload.clone(),
+    })
+}
+
+/// Evaluate a successful payment against the production Stars pack catalog.
+pub fn evaluate_default_successful_payment(
+    message: &Value,
+    billing_available: bool,
+) -> Result<SuccessfulPaymentDecision, PaymentValidationError> {
+    let payload = message
+        .as_object()
+        .and_then(|message| message.get("successful_payment"))
+        .and_then(Value::as_object)
+        .and_then(|payment| payment.get("invoice_payload"))
+        .map_or_else(String::new, python_string);
+    let pack = parse_topup_payload(&payload)
+        .0
+        .as_deref()
+        .and_then(default_billing_pack);
+    evaluate_successful_payment(message, billing_available, pack.as_ref())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -288,9 +368,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        BillingPackTerms, PaymentValidationError, PreCheckoutDecision, SuccessfulPaymentDecision,
-        default_billing_pack, evaluate_pre_checkout, evaluate_successful_payment,
-        parse_topup_payload, plan_pre_checkout,
+        BillingPackTerms, PaymentValidationError, PreCheckoutDecision, StarPaymentRecord,
+        SuccessfulPaymentDecision, default_billing_pack, evaluate_default_successful_payment,
+        evaluate_pre_checkout, evaluate_successful_payment, parse_topup_payload, payment_record,
+        plan_pre_checkout, successful_payment_reply,
     };
     use crate::locale::Locale;
     use crate::telegram_actions::TelegramAction;
@@ -371,6 +452,65 @@ mod tests {
                 }))
             );
         }
+    }
+
+    #[test]
+    fn default_successful_payment_evaluation_and_record_use_production_terms() {
+        let message = json!({
+            "chat":{"id":42},
+            "from":{"id":42},
+            "successful_payment":{
+                "currency":"XTR",
+                "invoice_payload":"topup:p100:42:es",
+                "telegram_payment_charge_id":"charge-1",
+                "total_amount":50
+            }
+        });
+        let decision = evaluate_default_successful_payment(&message, true);
+        assert_eq!(
+            decision,
+            Ok(SuccessfulPaymentDecision::Record {
+                chat_id: "42".to_owned(),
+                user_id: 42,
+                charge_id: "charge-1".to_owned(),
+                pack_id: "p100".to_owned(),
+                xtr_amount: 50,
+                credits_awarded: 10_000,
+                payload: "topup:p100:42:es".to_owned(),
+            })
+        );
+        assert_eq!(
+            decision.as_ref().ok().and_then(payment_record),
+            Some(StarPaymentRecord {
+                charge_id: "charge-1".to_owned(),
+                user_id: 42,
+                pack_id: "p100".to_owned(),
+                xtr_amount: 50,
+                credits_awarded: 10_000,
+                payload: "topup:p100:42:es".to_owned(),
+            })
+        );
+        assert_eq!(payment_record(&SuccessfulPaymentDecision::Ignore), None);
+    }
+
+    #[test]
+    fn successful_payment_replies_preserve_exact_credit_format_and_locale() {
+        assert_eq!(
+            successful_payment_reply(5_000, 5_300, true, Locale::Es),
+            "listo, te cargué 50.00 créditos\nahora te quedaron 53.00\nsi querés mandarle al grupo: /transfer <monto>"
+        );
+        assert_eq!(
+            successful_payment_reply(5_000, 5_300, true, Locale::En),
+            "added 50.00 credits\nyour balance is now 53.00\nuse /transfer <amount> to fund a group"
+        );
+        assert_eq!(
+            successful_payment_reply(5_000, 5_300, false, Locale::Es),
+            "ese pago ya estaba cargado, no rompas las bolas\nte quedaron 53.00"
+        );
+        assert_eq!(
+            successful_payment_reply(5_000, 5_300, false, Locale::En),
+            "this payment was already credited\nyour balance is 53.00"
+        );
     }
 
     #[test]

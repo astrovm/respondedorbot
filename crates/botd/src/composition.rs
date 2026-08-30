@@ -2,6 +2,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use bot_adapters::billing_read::BillingRepository;
 use bot_adapters::chat_config::{ChatConfigRepository, ChatConfigRepositoryError};
 use bot_adapters::redis_chat_admin::{cache_chat_admin, get_cached_chat_admin};
 use bot_adapters::redis_connection::RedisEndpoint;
@@ -19,12 +20,14 @@ use bot_core::command_state::{
 };
 use bot_core::telegram_actions::TelegramAction;
 use bot_core::telegram_commands::command_publication_actions;
+use bot_core::telegram_payments::StarPaymentRecord;
 use num_bigint::{BigInt, BigUint};
 use thiserror::Error;
 
 use crate::dispatcher::{
     ActionReceipt, ActionSink, ChatConfigSource, GroupAuthorizationDecision, GroupAuthorizer,
-    MessageStateSink, NativeDispatcher, RandomSource, RuntimeValues,
+    MessageStateSink, NativeDispatcher, RandomSource, RuntimeValues, StarPaymentReceipt,
+    StarPaymentSink,
 };
 use crate::runtime::{PollingRuntime, UpdateSource};
 
@@ -37,6 +40,29 @@ impl ChatConfigSource for ChatConfigRepository {
 
     fn set(&mut self, chat_id: &str, config: &ChatConfig) -> Result<ChatConfig, Self::Error> {
         ChatConfigRepository::set(self, chat_id, config)
+    }
+}
+
+impl StarPaymentSink for BillingRepository {
+    fn record(&mut self, payment: &StarPaymentRecord) -> Result<StarPaymentReceipt, String> {
+        let xtr_amount = i32::try_from(payment.xtr_amount)
+            .map_err(|_| "Stars amount exceeds the PostgreSQL integer range".to_owned())?;
+        let credits_awarded = i32::try_from(payment.credits_awarded)
+            .map_err(|_| "credit amount exceeds the PostgreSQL integer range".to_owned())?;
+        BillingRepository::record_star_payment(
+            self,
+            &payment.charge_id,
+            payment.user_id,
+            &payment.pack_id,
+            xtr_amount,
+            credits_awarded,
+            Some(&payment.payload),
+        )
+        .map(|result| StarPaymentReceipt {
+            inserted: result.inserted,
+            user_balance: result.user_balance,
+        })
+        .map_err(|error| error.to_string())
     }
 }
 
@@ -368,7 +394,8 @@ pub fn build_native_runtime(
             SystemRandomSource,
             authorization,
             bot_name,
-        ),
+        )
+        .with_payment_sink(Box::new(BillingRepository::new(database_url))),
     ))
 }
 
@@ -380,6 +407,7 @@ mod tests {
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    use bot_adapters::billing_read::BillingRepository;
     use bot_adapters::redis_connection::RedisEndpoint;
     use bot_adapters::telegram_http::{
         HttpResponse, TelegramRequest, TelegramTransport, TransportFailureKind,
@@ -387,6 +415,7 @@ mod tests {
     use bot_adapters::telegram_polling::{PollFailure, PollOutcome};
     use bot_core::telegram_actions::{SendMessage, TelegramAction};
     use bot_core::telegram_input::ChatId;
+    use bot_core::telegram_payments::StarPaymentRecord;
     use bot_core::{
         command_state::{
             IncomingCommandState, OutgoingCommandState, prepare_incoming_command_state,
@@ -398,6 +427,7 @@ mod tests {
 
     use crate::dispatcher::{
         ActionReceipt, ActionSink, GroupAuthorizer, MessageStateSink, RandomSource, RuntimeValues,
+        StarPaymentSink,
     };
     use crate::runtime::UpdateSource;
 
@@ -521,6 +551,31 @@ mod tests {
             Err(TelegramActionSinkError::RateLimited {
                 retry_after_seconds: Some(4)
             })
+        );
+    }
+
+    #[test]
+    fn payment_sink_rejects_values_that_cannot_fit_the_persistent_schema() {
+        let mut repository = BillingRepository::new("postgresql://unused");
+        let base = StarPaymentRecord {
+            charge_id: "charge-1".to_owned(),
+            user_id: 42,
+            pack_id: "p50".to_owned(),
+            xtr_amount: i64::from(i32::MAX) + 1,
+            credits_awarded: 5_000,
+            payload: "topup:p50:42:en".to_owned(),
+        };
+        assert_eq!(
+            repository.record(&base),
+            Err("Stars amount exceeds the PostgreSQL integer range".to_owned())
+        );
+        assert_eq!(
+            repository.record(&StarPaymentRecord {
+                xtr_amount: 25,
+                credits_awarded: i64::from(i32::MAX) + 1,
+                ..base
+            }),
+            Err("credit amount exceeds the PostgreSQL integer range".to_owned())
         );
     }
 
