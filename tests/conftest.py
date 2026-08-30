@@ -9,6 +9,7 @@ from api.ai import pricing as ai_pricing_module
 from api.billing import provider_usage as provider_usage_module
 from api.providers import errors as provider_errors_module
 from api.providers import runtime as provider_runtime_module
+from api.providers import openrouter as openrouter_module
 from api import index as index_module
 from api.providers.backoff import clear_all_cooldowns
 from api.services import bcra as bcra_service
@@ -80,6 +81,11 @@ def reset_caches(monkeypatch):
     monkeypatch.setattr(
         provider_runtime_module,
         "_load_rust_provider_web_search_policy",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        openrouter_module,
+        "_load_rust_provider_stream_policy",
         lambda: None,
     )
     monkeypatch.setattr(

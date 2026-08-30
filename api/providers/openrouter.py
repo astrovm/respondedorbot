@@ -5,13 +5,49 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, Generator, Iterator, List, Optional
+from typing import Any, Callable, Dict, Generator, Iterator, List, Optional, Protocol, cast
 
 from api.ai.pricing import AIUsageResult, chat_output_token_limit
 from api.billing.authorization import AIAuthorizationDenied
+from api.core.logging import get_logger
+from api.core.rust_bridge import load_rust_bridge
 from api.providers.runtime import ProviderRuntime, ProviderRuntimeDeps
 from api.tools.runtime import ToolRuntime
 from api.providers.base import StreamingAIProvider
+
+
+logger = get_logger(__name__)
+
+
+class _RustProviderStreamPolicy(Protocol):
+    def provider_stream_text_decision(
+        self,
+        held_text: str,
+        content: str,
+        hold_all_text: bool,
+        text_released: bool,
+        possible_pseudo_tools: list[str],
+    ) -> tuple[str, str, bool]: ...
+
+    def provider_stream_could_be_pseudo_tool_call(
+        self,
+        text: str,
+        possible_pseudo_tools: list[str],
+    ) -> bool: ...
+
+
+def _load_rust_provider_stream_policy() -> _RustProviderStreamPolicy | None:
+    module = load_rust_bridge("RUST_PROVIDER_STREAM_POLICY_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustProviderStreamPolicy, module)
+
+
+def _rust_stream_policy_failed(operation: str) -> None:
+    logger.exception(
+        "Rust provider stream policy failed; using Python fallback: operation=%s",
+        operation,
+    )
 
 
 @dataclass
@@ -462,21 +498,48 @@ class OpenRouterProvider(StreamingAIProvider):
             content = str(self._field(delta, "content") or "")
             if not content:
                 continue
-            if hold_all_text:
-                held_text += content
-                continue
-            if text_released:
-                yield content
-                continue
-            held_text += content
-            if not self._could_be_pseudo_tool_call(
+            held_text, emitted_text, text_released = self._stream_text_decision(
                 held_text,
+                content,
+                hold_all_text,
+                text_released,
                 possible_pseudo_tools,
-            ):
-                yield held_text
-                held_text = ""
-                text_released = True
+            )
+            if emitted_text:
+                yield emitted_text
         return streamed_round, held_text, text_released
+
+    @staticmethod
+    def _stream_text_decision(
+        held_text: str,
+        content: str,
+        hold_all_text: bool,
+        text_released: bool,
+        possible_pseudo_tools: set[str],
+    ) -> tuple[str, str, bool]:
+        rust = _load_rust_provider_stream_policy()
+        if rust is not None:
+            try:
+                return rust.provider_stream_text_decision(
+                    held_text,
+                    content,
+                    hold_all_text,
+                    text_released,
+                    sorted(possible_pseudo_tools),
+                )
+            except Exception:
+                _rust_stream_policy_failed("text_decision")
+        if hold_all_text:
+            return held_text + content, "", text_released
+        if text_released:
+            return held_text, content, True
+        candidate = held_text + content
+        if OpenRouterProvider._python_could_be_pseudo_tool_call(
+            candidate,
+            possible_pseudo_tools,
+        ):
+            return candidate, "", False
+        return "", candidate, True
 
     @staticmethod
     def _field(value: Any, name: str, default: Any = None) -> Any:
@@ -536,6 +599,21 @@ class OpenRouterProvider(StreamingAIProvider):
 
     @staticmethod
     def _could_be_pseudo_tool_call(text: str, tool_names: set[str]) -> bool:
+        rust = _load_rust_provider_stream_policy()
+        if rust is not None:
+            try:
+                return bool(
+                    rust.provider_stream_could_be_pseudo_tool_call(
+                        text,
+                        sorted(tool_names),
+                    )
+                )
+            except Exception:
+                _rust_stream_policy_failed("pseudo_tool_candidate")
+        return OpenRouterProvider._python_could_be_pseudo_tool_call(text, tool_names)
+
+    @staticmethod
+    def _python_could_be_pseudo_tool_call(text: str, tool_names: set[str]) -> bool:
         stripped = text.lstrip()
         if not stripped:
             return bool(tool_names)

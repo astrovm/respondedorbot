@@ -848,6 +848,20 @@ def verify_provider_web_search_policy(bridge: ModuleType) -> None:
         assert actual is case["expected"], case
 
 
+def verify_provider_stream_policy(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "provider_stream_policy.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["candidate_cases"]:
+        actual = bridge.provider_stream_could_be_pseudo_tool_call(
+            case["text"],
+            case["tools"],
+        )
+        assert actual is case["expected"], case
+    for case in contract["decision_cases"]:
+        actual = bridge.provider_stream_text_decision(*case["facts"])
+        assert list(actual) == case["expected"], case["name"]
+
+
 def verify_ai_reserve_estimates(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "ai_reserve_estimates.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -965,6 +979,7 @@ def main(arguments: list[str]) -> int:
     verify_provider_runtime_policy(bridge)
     verify_provider_tool_policy(bridge)
     verify_provider_web_search_policy(bridge)
+    verify_provider_stream_policy(bridge)
     verify_ai_reserve_estimates(bridge)
     verify_ai_pricing(bridge)
     verify_media_routing(bridge)

@@ -117,6 +117,10 @@ use bot_core::provider_runtime_policy::{
     response_has_billable_usage as provider_usage_has_billable_activity_core,
     retry_wait_seconds as provider_retry_wait_seconds_core,
 };
+use bot_core::provider_stream_policy::{
+    apply_stream_text as provider_stream_text_decision_core,
+    could_be_pseudo_tool_call as provider_stream_could_be_pseudo_tool_call_core,
+};
 use bot_core::provider_tools::parse_pseudo_web_fetch as parse_pseudo_web_fetch_core;
 use bot_core::provider_web_search::{
     nonnegative_limit as provider_web_search_max_uses_core,
@@ -2558,6 +2562,36 @@ fn provider_web_search_outcome_is_grounded(
     provider_web_search_outcome_is_grounded_core(source_count, citation_count, text)
 }
 
+#[pyfunction]
+fn provider_stream_text_decision(
+    held_text: &str,
+    content: &str,
+    hold_all_text: bool,
+    text_released: bool,
+    possible_pseudo_tools: Vec<String>,
+) -> (String, String, bool) {
+    let decision = provider_stream_text_decision_core(
+        held_text,
+        content,
+        hold_all_text,
+        text_released,
+        &possible_pseudo_tools,
+    );
+    (
+        decision.held_text,
+        decision.emitted_text,
+        decision.text_released,
+    )
+}
+
+#[pyfunction]
+fn provider_stream_could_be_pseudo_tool_call(
+    text: &str,
+    possible_pseudo_tools: Vec<String>,
+) -> bool {
+    provider_stream_could_be_pseudo_tool_call_core(text, &possible_pseudo_tools)
+}
+
 fn token_estimate_value(value: &Value) -> TokenEstimateValue {
     match value {
         Value::Null => TokenEstimateValue::Empty,
@@ -2869,6 +2903,11 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(provider_web_search_source_urls, module)?)?;
     module.add_function(wrap_pyfunction!(
         provider_web_search_outcome_is_grounded,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(provider_stream_text_decision, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        provider_stream_could_be_pseudo_tool_call,
         module
     )?)?;
     module.add_function(wrap_pyfunction!(ai_chat_output_token_limit, module)?)?;
