@@ -39,6 +39,9 @@ use bot_core::routing::{
     evaluate_response_routing as evaluate_response_routing_core,
     should_auto_process_media as should_auto_process_media_core,
 };
+use bot_core::rulo::{
+    ExchangeQuote, RuloDetail, RuloEvaluation, RuloInput, evaluate_rulo as evaluate_rulo_core,
+};
 use bot_core::satoshi::format_satoshi_quote as format_satoshi_quote_core;
 use bot_core::task_triggers::{
     IntegerInput, TaskTrigger, TaskTriggerInput, TriggerConfigInput, TriggerError,
@@ -198,6 +201,105 @@ struct DevoPurchaseDto {
     profit_usdt: String,
     total_ars: String,
     total_usdt: String,
+}
+
+#[derive(Deserialize)]
+struct RuloInputDto {
+    official: Option<f64>,
+    mep: Option<f64>,
+    blue: Option<f64>,
+    usd_to_usdt: Vec<ExchangeQuoteDto>,
+    usdt_to_ars: Vec<ExchangeQuoteDto>,
+    usd_amount: f64,
+}
+
+#[derive(Deserialize)]
+struct ExchangeQuoteDto {
+    exchange: String,
+    price: Option<f64>,
+}
+
+impl From<RuloInputDto> for RuloInput {
+    fn from(value: RuloInputDto) -> Self {
+        let convert_quotes = |quotes: Vec<ExchangeQuoteDto>| {
+            quotes
+                .into_iter()
+                .map(|quote| ExchangeQuote {
+                    exchange: quote.exchange,
+                    price: quote.price,
+                })
+                .collect()
+        };
+        Self {
+            official: value.official,
+            mep: value.mep,
+            blue: value.blue,
+            usd_to_usdt: convert_quotes(value.usd_to_usdt),
+            usdt_to_ars: convert_quotes(value.usdt_to_ars),
+            usd_amount: value.usd_amount,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RuloEvaluationDto {
+    OfficialError,
+    Routes {
+        official: String,
+        base_usd: String,
+        base_ars: String,
+        routes: Vec<RuloRouteDto>,
+    },
+}
+
+#[derive(Serialize)]
+struct RuloRouteDto {
+    label: &'static str,
+    sell_price: String,
+    difference: String,
+    percentage: String,
+    details: Vec<RuloDetailDto>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", content = "text", rename_all = "snake_case")]
+enum RuloDetailDto {
+    Steps(String),
+    Result(String),
+    Profit(String),
+}
+
+impl From<RuloEvaluation> for RuloEvaluationDto {
+    fn from(value: RuloEvaluation) -> Self {
+        match value {
+            RuloEvaluation::OfficialError => Self::OfficialError,
+            RuloEvaluation::Routes(plan) => Self::Routes {
+                official: plan.official,
+                base_usd: plan.base_usd,
+                base_ars: plan.base_ars,
+                routes: plan
+                    .routes
+                    .into_iter()
+                    .map(|route| RuloRouteDto {
+                        label: route.label,
+                        sell_price: route.sell_price,
+                        difference: route.difference,
+                        percentage: route.percentage,
+                        details: route
+                            .details
+                            .into_iter()
+                            .map(|detail| match detail {
+                                RuloDetail::Steps(text) => RuloDetailDto::Steps(text),
+                                RuloDetail::Result(text) => RuloDetailDto::Result(text),
+                                RuloDetail::Profit(text) => RuloDetailDto::Profit(text),
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            },
+        }
+    }
 }
 
 impl From<DevoResult> for DevoResultDto {
@@ -780,6 +882,15 @@ fn calculate_devo(
         .map_err(|error| PyValueError::new_err(format!("cannot encode devo result: {error}")))
 }
 
+/// Select and calculate all viable `/rulo` routes from normalized quotes.
+#[pyfunction]
+fn evaluate_rulo(input_json: &str) -> PyResult<String> {
+    let input: RuloInputDto = serde_json::from_str(input_json)
+        .map_err(|error| PyValueError::new_err(format!("invalid rulo input: {error}")))?;
+    serde_json::to_string(&RuloEvaluationDto::from(evaluate_rulo_core(&input.into())))
+        .map_err(|error| PyValueError::new_err(format!("cannot encode rulo result: {error}")))
+}
+
 /// Decide whether one normalized message should auto-process attached media.
 #[pyfunction]
 fn should_auto_process_media(
@@ -831,6 +942,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(format_satoshi_quote, module)?)?;
     module.add_function(wrap_pyfunction!(parse_devo_input, module)?)?;
     module.add_function(wrap_pyfunction!(calculate_devo, module)?)?;
+    module.add_function(wrap_pyfunction!(evaluate_rulo, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;
     module.add_function(wrap_pyfunction!(evaluate_response_routing, module)?)?;
     Ok(())

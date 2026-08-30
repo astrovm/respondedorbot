@@ -11,6 +11,7 @@ pub mod price_queries;
 pub mod random_reply;
 pub mod random_selection;
 pub mod routing;
+pub mod rulo;
 pub mod satoshi;
 pub mod task_triggers;
 

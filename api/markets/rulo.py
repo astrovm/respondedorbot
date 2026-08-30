@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional, Sequence, Tuple
+import json
+import logging
+from typing import Any, Mapping, Optional, Protocol, Sequence, Tuple, cast
 
+from api.core.rust_bridge import load_rust_bridge
 from api.i18n import tr
 from api.utils import fmt_signed_pct
 
@@ -9,6 +12,18 @@ from api.utils import fmt_signed_pct
 USD_AMOUNT = 1000.0
 EXCLUDED_USD_TO_USDT_EXCHANGES = {"banexcoin", "xapo", "x4t"}
 EXCLUDED_USDT_TO_ARS_EXCHANGES = {"okexp2p"}
+logger = logging.getLogger(__name__)
+
+
+class _RustRuloEvaluator(Protocol):
+    def evaluate_rulo(self, input_json: str) -> str: ...
+
+
+def _load_rust_rulo_evaluator() -> _RustRuloEvaluator | None:
+    module = load_rust_bridge("RUST_RULO_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustRuloEvaluator, module)
 
 
 def _safe_float(value: Any) -> Optional[float]:
@@ -92,7 +107,7 @@ def _best_bid(
     return best
 
 
-def build_rulo_message(
+def _build_rulo_message_python(
     data: Mapping[str, Any],
     usd_usdt_data: Optional[Mapping[str, Any]],
     usdt_ars_data: Optional[Mapping[str, Any]],
@@ -208,3 +223,120 @@ def build_rulo_message(
         return tr("market.rulo.none")
 
     return "\n".join(lines)
+
+
+def _normalized_exchange_quotes(
+    quotes: Mapping[str, Any],
+    excluded: set[str],
+    primary_key: str,
+    fallback_key: str,
+) -> list[dict[str, Any]]:
+    result = []
+    for exchange, quote in quotes.items():
+        if not isinstance(quote, Mapping) or exchange.lower() in excluded:
+            continue
+        price = _safe_float(quote.get(primary_key)) or _safe_float(quote.get(fallback_key))
+        result.append({"exchange": exchange, "price": price})
+    return result
+
+
+def _normalize_rulo_input(
+    data: Mapping[str, Any],
+    usd_usdt_data: Optional[Mapping[str, Any]],
+    usdt_ars_data: Optional[Mapping[str, Any]],
+    usd_amount: float,
+) -> dict[str, Any]:
+    blue_data = data.get("blue") or {}
+    return {
+        "official": _safe_float((data.get("oficial") or {}).get("price")),
+        "mep": _safe_float(
+            ((data.get("mep") or {}).get("al30") or {}).get("ci", {}).get("price")
+        ),
+        "blue": _safe_float(blue_data.get("bid")) or _safe_float(blue_data.get("price")),
+        "usd_to_usdt": _normalized_exchange_quotes(
+            usd_usdt_data or {},
+            EXCLUDED_USD_TO_USDT_EXCHANGES,
+            "totalAsk",
+            "ask",
+        ),
+        "usdt_to_ars": _normalized_exchange_quotes(
+            usdt_ars_data or {},
+            EXCLUDED_USDT_TO_ARS_EXCHANGES,
+            "totalBid",
+            "bid",
+        ),
+        "usd_amount": usd_amount,
+    }
+
+
+def _render_rulo_result(result: Mapping[str, Any]) -> str:
+    kind = result.get("kind")
+    if kind == "official_error":
+        return tr("market.rulo.official_error")
+    if kind == "no_routes":
+        return tr("market.rulo.none")
+    if kind != "routes":
+        raise ValueError("Rust rulo result has an unknown kind")
+    routes = result.get("routes")
+    if not isinstance(routes, list):
+        raise ValueError("Rust rulo routes are invalid")
+    lines = [
+        tr("market.rulo.title", price=result["official"]),
+        tr("market.rulo.base", usd=result["base_usd"], ars=result["base_ars"]),
+        "",
+    ]
+    for route in routes:
+        if not isinstance(route, Mapping):
+            raise ValueError("Rust rulo route is invalid")
+        route_lines = [
+            f"- {route['label']}",
+            "  • " + tr("market.rulo.sell_price", price=route["sell_price"]),
+            "  • "
+            + tr(
+                "market.rulo.official_diff",
+                difference=route["difference"],
+                percentage=route["percentage"],
+            ),
+        ]
+        details = route.get("details")
+        if not isinstance(details, list):
+            raise ValueError("Rust rulo details are invalid")
+        for detail in details:
+            if not isinstance(detail, Mapping) or detail.get("kind") not in {
+                "steps",
+                "result",
+                "profit",
+            }:
+                raise ValueError("Rust rulo detail is invalid")
+            detail_kind = str(detail["kind"])
+            route_lines.append(
+                "  • " + tr(f"market.rulo.{detail_kind}", **{detail_kind: detail["text"]})
+            )
+        lines.append("\n".join(route_lines))
+    return "\n".join(lines)
+
+
+def build_rulo_message(
+    data: Mapping[str, Any],
+    usd_usdt_data: Optional[Mapping[str, Any]],
+    usdt_ars_data: Optional[Mapping[str, Any]],
+    usd_amount: float = USD_AMOUNT,
+) -> str:
+    rust = _load_rust_rulo_evaluator()
+    if rust is not None:
+        try:
+            normalized = _normalize_rulo_input(
+                data,
+                usd_usdt_data,
+                usdt_ars_data,
+                usd_amount,
+            )
+            return _render_rulo_result(
+                json.loads(rust.evaluate_rulo(json.dumps(normalized, separators=(",", ":"))))
+            )
+        except Exception as error:
+            logger.warning(
+                "Rust rulo evaluation failed; using Python fallback: error_type=%s",
+                type(error).__name__,
+            )
+    return _build_rulo_message_python(data, usd_usdt_data, usdt_ars_data, usd_amount)
