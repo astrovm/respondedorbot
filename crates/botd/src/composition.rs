@@ -32,6 +32,10 @@ impl ChatConfigSource for ChatConfigRepository {
     fn get(&mut self, chat_id: &str) -> Result<ChatConfig, Self::Error> {
         ChatConfigRepository::get(self, chat_id).map(|config| config.unwrap_or_default())
     }
+
+    fn set(&mut self, chat_id: &str, config: &ChatConfig) -> Result<ChatConfig, Self::Error> {
+        ChatConfigRepository::set(self, chat_id, config)
+    }
 }
 
 pub struct TelegramUpdateSource<Transport> {

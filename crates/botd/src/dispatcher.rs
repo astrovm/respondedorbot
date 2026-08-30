@@ -7,6 +7,7 @@ use bot_core::command_state::{
     IncomingCommandState, IncomingCommandWritePlan, OutgoingCommandState, OutgoingCommandWritePlan,
     prepare_incoming_command_state, prepare_outgoing_command_state,
 };
+use bot_core::language_command::{LanguageCommandPlan, plan_language_command};
 use bot_core::locale::resolve_locale;
 use bot_core::random_selection::{RandomSelection, parse_random_selection};
 use bot_core::stateless_commands::{
@@ -24,6 +25,8 @@ pub trait ChatConfigSource {
     type Error;
 
     fn get(&mut self, chat_id: &str) -> Result<ChatConfig, Self::Error>;
+
+    fn set(&mut self, chat_id: &str, config: &ChatConfig) -> Result<ChatConfig, Self::Error>;
 }
 
 pub trait ActionSink {
@@ -162,7 +165,29 @@ where
         );
         let timestamp = self.runtime_values.unix_timestamp();
         let parsed = parse_command(&content.text, &self.bot_name);
-        let plan = if parsed.command == "/random" {
+        let is_group = is_group_chat_type(message.chat_type.as_deref());
+        let language_plan = plan_language_command(
+            chat_id,
+            message_id,
+            &content.text,
+            &self.bot_name,
+            locale,
+            &config,
+            is_group,
+        );
+        let (plan, updated_config) = match language_plan {
+            LanguageCommandPlan::LegacyGroupRequired => {
+                return Ok(DispatchOutcome::LegacyRequired);
+            }
+            LanguageCommandPlan::Action {
+                action,
+                updated_config,
+            } => (StatelessCommandPlan::Action(action), updated_config),
+            LanguageCommandPlan::NotHandled => (StatelessCommandPlan::NotHandled, None),
+        };
+        let plan = if plan != StatelessCommandPlan::NotHandled {
+            plan
+        } else if parsed.command == "/random" {
             match parse_random_selection(&parsed.message_text) {
                 Err(_) => StatelessCommandPlan::LegacyFallbackRequired,
                 Ok(RandomSelection::Invalid) => {
@@ -219,6 +244,11 @@ where
         };
         match plan {
             StatelessCommandPlan::Action(action) => {
+                if let Some(updated_config) = updated_config {
+                    self.config
+                        .set(&chat_id.0.to_string(), &updated_config)
+                        .map_err(DispatchError::Config)?;
+                }
                 self.state_diagnostics.clear();
                 let command = parsed.command;
                 let incoming = prepare_incoming_command_state(IncomingCommandState {
@@ -228,7 +258,7 @@ where
                     first_name: message.sender_first_name.as_deref(),
                     username: message.sender_username.as_deref(),
                     text: &content.text,
-                    is_group: is_group_chat_type(message.chat_type.as_deref()),
+                    is_group,
                     timestamp,
                 });
                 match incoming {
@@ -337,6 +367,12 @@ mod tests {
         fn get(&mut self, chat_id: &str) -> Result<ChatConfig, Self::Error> {
             self.chat_ids.push(chat_id.to_owned());
             self.value.clone()
+        }
+
+        fn set(&mut self, chat_id: &str, config: &ChatConfig) -> Result<ChatConfig, Self::Error> {
+            self.chat_ids.push(format!("set:{chat_id}"));
+            self.value = Ok(config.clone());
+            Ok(config.clone())
         }
     }
 
@@ -671,6 +707,83 @@ mod tests {
         assert!(message.text.contains("/summary focus on crypto"));
         assert_eq!(dispatcher.state.incoming.len(), 1);
         assert_eq!(dispatcher.state.outgoing.len(), 1);
+    }
+
+    #[test]
+    fn dispatches_private_language_reads_and_persisted_updates() {
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            "@mybot",
+        );
+        assert_eq!(
+            dispatcher.dispatch(update("/language", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            dispatcher.dispatch(update("/idioma en", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            dispatcher
+                .config
+                .value
+                .as_ref()
+                .map(|config| config.language.as_str()),
+            Ok("en")
+        );
+        assert!(dispatcher.config.chat_ids.contains(&"set:-42".to_owned()));
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.last() else {
+            return;
+        };
+        assert_eq!(message.text, "done, I will speak English now");
+        assert_eq!(
+            message
+                .reply_markup
+                .as_ref()
+                .and_then(|markup| markup.inline_keyboard.first())
+                .map(Vec::len),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn group_language_command_stays_legacy_owned_until_admin_reporting_moves() {
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            "@mybot",
+        );
+        let mut group_update = update("/language en", None);
+        if let IncomingEvent::Message(message) = &mut group_update.event {
+            message.chat_type = Some("supergroup".to_owned());
+        }
+        assert_eq!(
+            dispatcher.dispatch(group_update),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
+        assert!(dispatcher.actions.0.is_empty());
+        assert!(
+            !dispatcher
+                .config
+                .chat_ids
+                .iter()
+                .any(|value| value.starts_with("set:"))
+        );
     }
 
     #[test]
