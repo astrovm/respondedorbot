@@ -28,6 +28,10 @@ class _RustRandomSelectionParser(Protocol):
     def parse_random_selection(self, message_text: str) -> str: ...
 
 
+class _RustRandomReplyEvaluator(Protocol):
+    def evaluate_random_reply(self, response_sample: int, suffix_sample: int) -> tuple[str, str]: ...
+
+
 def _load_rust_base_converter() -> Optional[_RustBaseConverter]:
     module = load_rust_bridge("RUST_BASE_CONVERSION_ENABLED")
     if module is None:
@@ -42,10 +46,14 @@ def _load_rust_random_selection_parser() -> Optional[_RustRandomSelectionParser]
     return cast(_RustRandomSelectionParser, module)
 
 
-def gen_random(name: str) -> str:
-    rand_res = random.randint(0, 1)
-    rand_name = random.randint(0, 2)
+def _load_rust_random_reply_evaluator() -> Optional[_RustRandomReplyEvaluator]:
+    module = load_rust_bridge("RUST_RANDOM_REPLY_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustRandomReplyEvaluator, module)
 
+
+def _gen_random_python(name: str, rand_res: int, rand_name: int) -> str:
     if rand_res:
         msg = tr("random.yes")
     else:
@@ -57,6 +65,36 @@ def gen_random(name: str) -> str:
         msg = f"{msg} {name}"
 
     return msg
+
+
+def _random_reply_from_rust(name: str, outcome: tuple[str, str]) -> str:
+    answer, suffix = outcome
+    if answer not in {"yes", "no"} or suffix not in {"none", "address", "name"}:
+        raise ValueError("Rust random reply result is invalid")
+    message = tr(f"random.{answer}")
+    if suffix == "address":
+        return f"{message} {tr('random.address')}"
+    if suffix == "name":
+        return f"{message} {name}"
+    return message
+
+
+def gen_random(name: str) -> str:
+    rand_res = random.randint(0, 1)
+    rand_name = random.randint(0, 2)
+    rust = _load_rust_random_reply_evaluator()
+    if rust is not None:
+        try:
+            return _random_reply_from_rust(
+                name,
+                rust.evaluate_random_reply(rand_res, rand_name),
+            )
+        except Exception as error:
+            logger.warning(
+                "Rust random reply evaluation failed; using Python fallback: error_type=%s",
+                type(error).__name__,
+            )
+    return _gen_random_python(name, rand_res, rand_name)
 
 
 def _select_random_python(msg_text: str) -> str:

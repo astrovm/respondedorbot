@@ -1,0 +1,11 @@
+{
+  "cases": [
+    { "response": 0, "suffix": 0, "expected": ["no", "none"] },
+    { "response": 0, "suffix": 1, "expected": ["no", "address"] },
+    { "response": 0, "suffix": 2, "expected": ["no", "name"] },
+    { "response": 1, "suffix": 0, "expected": ["yes", "none"] },
+    { "response": 1, "suffix": 1, "expected": ["yes", "address"] },
+    { "response": 1, "suffix": 2, "expected": ["yes", "name"] },
+    { "response": -4, "suffix": 99, "expected": ["yes", "none"] }
+  ]
+}

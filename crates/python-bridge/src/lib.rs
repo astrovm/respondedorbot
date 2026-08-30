@@ -20,6 +20,9 @@ use bot_core::market_context::{
 use bot_core::price_queries::{
     AmountConversion, PriceQuery, ProviderScope, parse_price_query as parse_price_query_core,
 };
+use bot_core::random_reply::{
+    RandomAnswer, RandomSuffix, evaluate_random_reply as evaluate_random_reply_core,
+};
 use bot_core::random_selection::{
     RandomSelection, parse_random_selection as parse_random_selection_core,
 };
@@ -588,6 +591,22 @@ fn parse_random_selection(message_text: &str) -> PyResult<String> {
         .map_err(|error| PyValueError::new_err(format!("cannot encode random selection: {error}")))
 }
 
+/// Map adapter-owned random samples to localization keys for a spontaneous reply.
+#[pyfunction]
+fn evaluate_random_reply(response_sample: i64, suffix_sample: i64) -> (&'static str, &'static str) {
+    let result = evaluate_random_reply_core(response_sample, suffix_sample);
+    let answer = match result.answer {
+        RandomAnswer::Yes => "yes",
+        RandomAnswer::No => "no",
+    };
+    let suffix = match result.suffix {
+        RandomSuffix::None => "none",
+        RandomSuffix::Address => "address",
+        RandomSuffix::Name => "name",
+    };
+    (answer, suffix)
+}
+
 /// Validate and normalize a task-trigger input encoded by the Python adapter.
 #[pyfunction]
 fn parse_task_trigger(input_json: &str) -> PyResult<String> {
@@ -672,6 +691,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(parse_command, module)?)?;
     module.add_function(wrap_pyfunction!(convert_base, module)?)?;
     module.add_function(wrap_pyfunction!(parse_random_selection, module)?)?;
+    module.add_function(wrap_pyfunction!(evaluate_random_reply, module)?)?;
     module.add_function(wrap_pyfunction!(parse_task_trigger, module)?)?;
     module.add_function(wrap_pyfunction!(parse_price_query, module)?)?;
     module.add_function(wrap_pyfunction!(format_market_info, module)?)?;
