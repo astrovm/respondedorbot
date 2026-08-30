@@ -113,6 +113,7 @@ use bot_core::links::{
     select_unique_urls as select_unique_urls_core, trim_detected_url as trim_detected_url_core,
     utf16_slice as utf16_slice_core,
 };
+use bot_core::locale::Locale;
 use bot_core::market_context::{
     CryptoQuote as MarketCryptoQuote, DollarQuote as MarketDollarQuote, MarketSnapshot,
     format_market_context as format_market_context_core,
@@ -192,6 +193,9 @@ use bot_core::rulo::{
     ExchangeQuote, RuloDetail, RuloEvaluation, RuloInput, evaluate_rulo as evaluate_rulo_core,
 };
 use bot_core::satoshi::format_satoshi_quote as format_satoshi_quote_core;
+use bot_core::stateless_commands::{
+    StatelessCommandPlan, plan_stateless_command as plan_native_stateless_command_core,
+};
 use bot_core::stocks::{
     parse_yahoo_quote as parse_yahoo_stock_quote_core, plan_stock_query as plan_stock_query_core,
     select_yahoo_symbol as select_yahoo_stock_symbol_core,
@@ -3110,6 +3114,47 @@ fn telegram_format_user_identity(user_json: &str) -> PyResult<String> {
 }
 
 #[pyfunction]
+fn plan_native_stateless_command(
+    chat_id: i64,
+    message_id: i64,
+    message_text: &str,
+    bot_name: &str,
+    locale: &str,
+) -> PyResult<String> {
+    let locale = match locale {
+        "es" => Locale::Es,
+        "en" => Locale::En,
+        _ => return Err(PyValueError::new_err("unsupported locale")),
+    };
+    let outcome = match plan_native_stateless_command_core(
+        bot_core::telegram_input::ChatId(chat_id),
+        bot_core::telegram_input::MessageId(message_id),
+        message_text,
+        bot_name,
+        locale,
+    ) {
+        StatelessCommandPlan::NotHandled => serde_json::json!({"kind":"not_handled"}),
+        StatelessCommandPlan::LegacyFallbackRequired => {
+            serde_json::json!({"kind":"legacy_fallback_required"})
+        }
+        StatelessCommandPlan::Action(bot_core::telegram_actions::TelegramAction::SendMessage(
+            message,
+        )) => serde_json::json!({
+            "kind":"send_message",
+            "chat_id":message.chat_id.0,
+            "text":message.text,
+            "reply_to_message_id":message.reply_to_message_id.map(|value| value.0),
+        }),
+        StatelessCommandPlan::Action(_) => {
+            return Err(PyRuntimeError::new_err(
+                "unsupported native stateless action",
+            ));
+        }
+    };
+    serde_json::to_string(&outcome).map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
 fn telegram_parse_callback_context(callback_json: &str) -> PyResult<String> {
     let callback = serde_json::from_str(callback_json)
         .map_err(|error| PyValueError::new_err(format!("invalid JSON value: {error}")))?;
@@ -3550,6 +3595,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(telegram_normalize_numeric_id, module)?)?;
     module.add_function(wrap_pyfunction!(telegram_extract_user_id, module)?)?;
     module.add_function(wrap_pyfunction!(telegram_format_user_identity, module)?)?;
+    module.add_function(wrap_pyfunction!(plan_native_stateless_command, module)?)?;
     module.add_function(wrap_pyfunction!(telegram_parse_callback_context, module)?)?;
     module.add_function(wrap_pyfunction!(telegram_evaluate_pre_checkout, module)?)?;
     module.add_function(wrap_pyfunction!(

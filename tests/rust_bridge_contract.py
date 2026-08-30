@@ -1297,6 +1297,22 @@ def verify_telegram_payments(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_stateless_commands(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "stateless_commands.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["cases"]:
+        actual = json.loads(
+            bridge.plan_native_stateless_command(
+                case["chat_id"],
+                case["message_id"],
+                case["message_text"],
+                case["bot_name"],
+                case["locale"],
+            )
+        )
+        assert actual == case["expected"], case["name"]
+
+
 def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_ai_usage_policy(bridge)
     verify_provider_error_policy(bridge)
@@ -1362,6 +1378,7 @@ def main(arguments: list[str]) -> int:
     verify_redis_maintenance(bridge)
     verify_task_store_io(bridge)
     verify_billing_contracts(bridge)
+    verify_stateless_commands(bridge)
     verify_ai_orchestration_contracts(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
