@@ -206,6 +206,21 @@ class _RustBillingProviderUsage(Protocol):
         metadata_json: str,
     ) -> bool: ...
 
+    def billing_list_ai_provider_segments(
+        self,
+        database_url: str,
+        user_id: int,
+        operation_id: str,
+    ) -> str: ...
+
+    def billing_update_ai_provider_usage(
+        self,
+        database_url: str,
+        operation_id: str,
+        segment_id: str,
+        segment_json: str,
+    ) -> bool: ...
+
 
 def _load_rust_billing_reads() -> _RustBillingReads | None:
     module = load_rust_bridge("RUST_BILLING_READ_SHADOW_ENABLED")
@@ -1322,6 +1337,22 @@ def list_ai_provider_segments(
 ) -> List[Dict[str, Any]]:
     """Return every durable provider segment for one operation in call order."""
 
+    rust = _load_rust_billing_provider_usage()
+    database_url = get_database_url()
+    if rust is not None and database_url:
+        ensure_schema()
+        try:
+            loaded = json.loads(
+                rust.billing_list_ai_provider_segments(
+                    database_url,
+                    int(user_id),
+                    str(operation_id),
+                )
+            )
+            return [dict(value) for value in loaded if isinstance(value, Mapping)]
+        except Exception as error:
+            raise CreditsDBError("Rust AI provider segment read failed") from error
+
     ensure_schema()
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
@@ -1345,6 +1376,22 @@ def update_ai_provider_usage(
     segment: Mapping[str, Any],
 ) -> bool:
     """Replace one pending provider segment with reconciled usage."""
+
+    rust = _load_rust_billing_provider_usage()
+    database_url = get_database_url()
+    if rust is not None and database_url:
+        ensure_schema()
+        try:
+            return bool(
+                rust.billing_update_ai_provider_usage(
+                    database_url,
+                    str(operation_id),
+                    str(segment_id),
+                    json.dumps(dict(segment), default=str),
+                )
+            )
+        except Exception as error:
+            raise CreditsDBError("Rust AI provider usage update failed") from error
 
     ensure_schema()
     with connect() as conn, conn.cursor() as cur:

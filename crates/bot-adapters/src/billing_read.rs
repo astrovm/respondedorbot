@@ -691,6 +691,45 @@ impl BillingRepository {
         })
     }
 
+    pub fn list_ai_provider_segments(
+        &self,
+        user_id: i64,
+        operation_id: &str,
+    ) -> Result<Vec<Value>, BillingError> {
+        let mut client = self.connect()?;
+        Ok(client
+            .query(
+                "SELECT metadata->'segment' FROM credit_ledger \
+                 WHERE user_id = $1 AND event_type = 'ai_provider_usage' \
+                   AND metadata->>'operation_id' = $2 ORDER BY id",
+                &[&user_id, &operation_id],
+            )?
+            .into_iter()
+            .map(|row| row.get(0))
+            .filter(Value::is_object)
+            .collect())
+    }
+
+    pub fn update_ai_provider_usage(
+        &self,
+        operation_id: &str,
+        segment_id: &str,
+        segment: &Value,
+    ) -> Result<bool, BillingError> {
+        self.run_transaction(|transaction| {
+            Ok(transaction
+                .query_opt(
+                    "UPDATE credit_ledger \
+                     SET metadata = jsonb_set(metadata, '{segment}', $1) \
+                     WHERE event_type = 'ai_provider_usage' \
+                       AND metadata->>'operation_id' = $2 \
+                       AND metadata->>'segment_id' = $3 RETURNING id",
+                    &[&segment, &operation_id, &segment_id],
+                )?
+                .is_some())
+        })
+    }
+
     fn ai_operation_is_settled(
         transaction: &mut Transaction<'_>,
         user_id: i64,
@@ -1927,6 +1966,33 @@ mod tests {
         )?;
         assert_eq!(provider_evidence.get::<_, i64>(0), 2);
         assert_eq!(provider_evidence.get::<_, i64>(1), 1);
+        let provider_segments = repository
+            .list_ai_provider_segments(7_000_000_000_025, "synthetic-provider-operation")?;
+        assert_eq!(provider_segments.len(), 2);
+        assert_eq!(
+            provider_segments[0]["input_tokens"],
+            serde_json::Value::from(12)
+        );
+        assert!(repository.update_ai_provider_usage(
+            "synthetic-provider-operation",
+            "segment-1",
+            &json!({"input_tokens": 99, "output_tokens": 100}),
+        )?);
+        assert!(!repository.update_ai_provider_usage(
+            "synthetic-provider-operation",
+            "missing-segment",
+            &json!({"input_tokens": 0}),
+        )?);
+        let updated_provider_segments = repository
+            .list_ai_provider_segments(7_000_000_000_025, "synthetic-provider-operation")?;
+        assert_eq!(
+            updated_provider_segments[0]["input_tokens"],
+            serde_json::Value::from(99)
+        );
+        assert_eq!(
+            updated_provider_segments[1]["input_tokens"],
+            serde_json::Value::from(1)
+        );
 
         let synthetic_ids = [
             7_000_000_000_001_i64,

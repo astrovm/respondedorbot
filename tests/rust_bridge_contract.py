@@ -563,8 +563,13 @@ def verify_billing_provider_usage(bridge: ModuleType) -> None:
     contract = json.loads(path.read_text(encoding="utf-8"))
     if contract["idempotency_key"] != ["operation_id", "segment_id"]:
         raise AssertionError("provider usage idempotency changed")
-    if not callable(bridge.billing_record_ai_provider_usage):
-        raise AssertionError("Rust provider-usage bridge is unavailable")
+    for function_name in (
+        "billing_record_ai_provider_usage",
+        "billing_list_ai_provider_segments",
+        "billing_update_ai_provider_usage",
+    ):
+        if not callable(getattr(bridge, function_name)):
+            raise AssertionError(f"Rust provider-usage bridge unavailable: {function_name}")
 
 
 def verify_media_routing(bridge: ModuleType) -> None:

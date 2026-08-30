@@ -123,6 +123,7 @@ is explicit, returns prior idempotent results, and rejects refunded or settled
 reservations. An uncertain failure never starts the Python writer.
 
 `RUST_BILLING_PROVIDER_USAGE_ENABLED=1` makes Rust authoritative for durable
-provider-usage segments. The `(operation_id, segment_id)` database index is the
-idempotency boundary, so retry and concurrent duplicates add only one row. An
-uncertain failure never starts the Python writer.
+provider-usage segment insertion, ordered reads, and reconciled segment
+replacement. The `(operation_id, segment_id)` database index is the idempotency
+boundary, so retry and concurrent duplicates add only one row. An uncertain
+failure never starts the Python writer.

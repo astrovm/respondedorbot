@@ -330,6 +330,39 @@ class _FakeRustProviderUsage:
             raise ValueError("synthetic uncertain provider usage failure")
         return True
 
+    def billing_list_ai_provider_segments(
+        self,
+        database_url: str,
+        user_id: int,
+        operation_id: str,
+    ) -> str:
+        if self.fail:
+            raise ValueError("synthetic provider usage read failure")
+        return json.dumps([{"input_tokens": 12}])
+
+    def billing_update_ai_provider_usage(
+        self,
+        database_url: str,
+        operation_id: str,
+        segment_id: str,
+        segment_json: str,
+    ) -> bool:
+        if self.fail:
+            raise ValueError("synthetic uncertain provider usage update failure")
+        self.calls.append(
+            (
+                database_url,
+                0,
+                None,
+                {
+                    "operation_id": operation_id,
+                    "segment_id": segment_id,
+                    "segment": json.loads(segment_json),
+                },
+            )
+        )
+        return True
+
 
 def _patch_python_balance(
     monkeypatch: pytest.MonkeyPatch,
@@ -982,3 +1015,63 @@ def test_billing_provider_usage_uncertain_failure_does_not_start_python_writer(
 
     with pytest.raises(credits_db.CreditsDBError, match="provider usage"):
         credits_db.record_ai_provider_usage(42, None, "operation", "segment", {})
+
+
+def test_billing_provider_usage_reads_and_updates_are_authoritative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(credits_db, "get_database_url", lambda: "postgresql://db")
+    monkeypatch.setattr(
+        credits_db,
+        "connect",
+        lambda: pytest.fail("Python provider usage I/O must not run"),
+    )
+    rust = _FakeRustProviderUsage()
+    monkeypatch.setattr(credits_db, "_load_rust_billing_provider_usage", lambda: rust)
+
+    assert credits_db.list_ai_provider_segments(42, "operation") == [
+        {"input_tokens": 12}
+    ]
+    assert credits_db.update_ai_provider_usage(
+        "operation",
+        "segment",
+        {"input_tokens": 99},
+    )
+    assert rust.calls == [
+        (
+            "postgresql://db",
+            0,
+            None,
+            {
+                "operation_id": "operation",
+                "segment_id": "segment",
+                "segment": {"input_tokens": 99},
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize("operation", ["list", "update"])
+def test_billing_provider_usage_followup_failure_is_not_retried_in_python(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    monkeypatch.setattr(credits_db, "ensure_schema", lambda: None)
+    monkeypatch.setattr(credits_db, "get_database_url", lambda: "postgresql://db")
+    monkeypatch.setattr(
+        credits_db,
+        "connect",
+        lambda: pytest.fail("Rust-authoritative I/O must not run in Python"),
+    )
+    monkeypatch.setattr(
+        credits_db,
+        "_load_rust_billing_provider_usage",
+        lambda: _FakeRustProviderUsage(fail=True),
+    )
+
+    with pytest.raises(credits_db.CreditsDBError, match="provider"):
+        if operation == "list":
+            credits_db.list_ai_provider_segments(42, "operation")
+        else:
+            credits_db.update_ai_provider_usage("operation", "segment", {})
