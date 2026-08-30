@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from os import environ
-from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple, cast
 
 from api.ai.pricing import MODEL_PRICING_USD_MICROS
 from api.billing.credit_units import format_credit_units, parse_credit_units
+from api.core.rust_bridge import load_rust_bridge
 from api.i18n import tr
 
 CommandResponse = Tuple[Optional[str], Optional[Dict[str, Any]], bool, Optional[str]]
@@ -18,6 +20,24 @@ class AdminCommandDeps(Protocol):
 
     @property
     def admin_report(self) -> Any: ...
+
+
+class _RustAdminReports(Protocol):
+    def parse_creditlog_limit(self, message_text: str) -> int | None: ...
+
+    def truncate_admin_report(
+        self, text: str, max_length: int, truncated_label: str
+    ) -> str: ...
+
+
+logger = logging.getLogger(__name__)
+
+
+def _load_rust_admin_reports() -> _RustAdminReports | None:
+    module = load_rust_bridge("RUST_ADMIN_REPORTS_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustAdminReports, module)
 
 
 def _get_admin_chat_id() -> str:
@@ -241,8 +261,33 @@ def build_creditlog_lines(entries: Sequence[Mapping[str, Any]]) -> List[str]:
 def truncate_creditlog_message(text: str, max_length: int = 3500) -> str:
     if len(text) <= max_length:
         return text
-    suffix = f"\n\n[{tr('admin.truncated')}]"
+    truncated_label = tr("admin.truncated")
+    rust = _load_rust_admin_reports()
+    if rust is not None:
+        try:
+            return rust.truncate_admin_report(text, max_length, truncated_label)
+        except Exception:
+            logger.exception("Rust admin report truncation failed; using Python")
+    suffix = f"\n\n[{truncated_label}]"
     return text[: max_length - len(suffix)].rstrip() + suffix
+
+
+def _parse_creditlog_limit(message_text: str) -> int | None:
+    rust = _load_rust_admin_reports()
+    if rust is not None:
+        try:
+            return rust.parse_creditlog_limit(message_text)
+        except Exception:
+            logger.exception("Rust creditlog limit parsing failed; using Python")
+
+    raw_limit = str(message_text or "").strip()
+    limit = 10
+    if raw_limit:
+        try:
+            limit = int(raw_limit.split(" ", 1)[0].strip())
+        except TypeError, ValueError:
+            return None
+    return max(1, min(limit, 25))
 
 
 def handle_admin_creditlog_command(
@@ -264,14 +309,9 @@ def handle_admin_creditlog_command(
     if billing_required_response is not None:
         return billing_required_response
 
-    raw_limit = str(sanitized_message_text or "").strip()
-    limit = 10
-    if raw_limit:
-        try:
-            limit = int(raw_limit.split(" ", 1)[0].strip())
-        except (TypeError, ValueError):
-            return tr("admin.creditlog_usage"), None, False, command
-    limit = max(1, min(limit, 25))
+    limit = _parse_creditlog_limit(sanitized_message_text)
+    if limit is None:
+        return tr("admin.creditlog_usage"), None, False, command
 
     try:
         entries = deps.credits_db_service.list_recent_ai_settlement_results(limit=limit)

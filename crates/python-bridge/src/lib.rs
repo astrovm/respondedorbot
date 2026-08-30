@@ -5,6 +5,10 @@ use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use bot_core::admin_reports::{
+    CreditLogLimit, parse_creditlog_limit as parse_creditlog_limit_core,
+    truncate_report as truncate_admin_report_core,
+};
 use bot_core::base_conversion::{BaseConversion, convert_base as convert_base_core};
 use bot_core::command_normalization::normalize_command_text as normalize_command_text_core;
 use bot_core::command_parsing::parse_command as parse_command_core;
@@ -1093,6 +1097,24 @@ fn select_unique_urls(candidates: Vec<String>, max_links: usize) -> Vec<String> 
     select_unique_urls_core(&candidates, max_links)
 }
 
+/// Parse and clamp the optional `/creditlog` row limit.
+#[pyfunction]
+fn parse_creditlog_limit(message_text: &str) -> PyResult<Option<usize>> {
+    match parse_creditlog_limit_core(message_text) {
+        CreditLogLimit::Valid(limit) => Ok(Some(limit)),
+        CreditLogLimit::Invalid => Ok(None),
+        CreditLogLimit::NeedsLegacyParser => Err(PyValueError::new_err(
+            "Unicode or underscored input requires the legacy parser",
+        )),
+    }
+}
+
+/// Truncate an admin report with a localized marker.
+#[pyfunction]
+fn truncate_admin_report(text: &str, max_length: usize, truncated_label: &str) -> String {
+    truncate_admin_report_core(text, max_length, truncated_label)
+}
+
 /// Select one geocoding result from adapter-normalized qualifier keys.
 #[pyfunction]
 fn select_weather_location(
@@ -1171,6 +1193,8 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(slice_telegram_utf16, module)?)?;
     module.add_function(wrap_pyfunction!(trim_detected_url, module)?)?;
     module.add_function(wrap_pyfunction!(select_unique_urls, module)?)?;
+    module.add_function(wrap_pyfunction!(parse_creditlog_limit, module)?)?;
+    module.add_function(wrap_pyfunction!(truncate_admin_report, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_location, module)?)?;
     module.add_function(wrap_pyfunction!(select_weather_hour, module)?)?;
     module.add_function(wrap_pyfunction!(should_auto_process_media, module)?)?;

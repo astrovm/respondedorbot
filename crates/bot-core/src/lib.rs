@@ -1,5 +1,6 @@
 //! Typed domain and application logic for respondedorbot.
 
+pub mod admin_reports;
 pub mod base_conversion;
 pub mod command_normalization;
 pub mod command_parsing;

@@ -217,6 +217,18 @@ def verify_link_parsing(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_admin_reports(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "admin_reports.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["limits"]:
+        assert bridge.parse_creditlog_limit(case["input"]) == case["expected"], case["name"]
+    for case in contract["truncate"]:
+        actual = bridge.truncate_admin_report(
+            case["text"], case["max_length"], case["label"]
+        )
+        assert actual == case["expected"], case["name"]
+
+
 def verify_media_routing(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "media_routing.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -285,6 +297,7 @@ def main(arguments: list[str]) -> int:
     verify_hacker_news(bridge)
     verify_config_callbacks(bridge)
     verify_link_parsing(bridge)
+    verify_admin_reports(bridge)
     verify_media_routing(bridge)
     verify_response_routing(bridge)
     verify_base_conversion(bridge)

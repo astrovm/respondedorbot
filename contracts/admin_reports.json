@@ -1,0 +1,13 @@
+{
+  "limits": [
+    { "name": "default", "input": "", "expected": 10 },
+    { "name": "valid with ignored suffix", "input": "5 ignored", "expected": 5 },
+    { "name": "minimum clamp", "input": "0", "expected": 1 },
+    { "name": "arbitrary precision maximum clamp", "input": "999999999999999999999999", "expected": 25 },
+    { "name": "invalid", "input": "bad", "expected": null }
+  ],
+  "truncate": [
+    { "name": "short report", "text": "short", "max_length": 10, "label": "truncated", "expected": "short" },
+    { "name": "unicode report", "text": "😀😀😀😀😀 trailing", "max_length": 10, "label": "x", "expected": "😀😀😀😀😀\n\n[x]" }
+  ]
+}
