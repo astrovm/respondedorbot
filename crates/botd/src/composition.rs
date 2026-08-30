@@ -26,12 +26,21 @@ use num_bigint::{BigInt, BigUint};
 use thiserror::Error;
 
 use crate::dispatcher::{
-    ActionReceipt, ActionSink, BillingBalanceSource, BillingBalances, BillingTransferSink,
-    ChargeHistorySource, ChatConfigSource, GroupAuthorizationDecision, GroupAuthorizer,
-    MessageStateSink, NativeDispatcher, RandomSource, RuntimeValues, StarPaymentReceipt,
-    StarPaymentSink,
+    ActionReceipt, ActionSink, AdminCreditSink, BillingBalanceSource, BillingBalances,
+    BillingTransferSink, ChargeHistorySource, ChatConfigSource, GroupAuthorizationDecision,
+    GroupAuthorizer, MessageStateSink, NativeDispatcher, RandomSource, RuntimeValues,
+    StarPaymentReceipt, StarPaymentSink,
 };
 use crate::runtime::{PollingRuntime, UpdateSource};
+
+impl AdminCreditSink for BillingRepository {
+    fn mint(&mut self, user_id: i64, amount: i64) -> Result<i64, String> {
+        let amount = i32::try_from(amount)
+            .map_err(|_| "admin credit amount exceeds the persistent range".to_owned())?;
+        self.mint_user_credits(user_id, amount, Some(user_id))
+            .map_err(|error| error.to_string())
+    }
+}
 
 impl ChatConfigSource for ChatConfigRepository {
     type Error = ChatConfigRepositoryError;
@@ -489,6 +498,7 @@ pub fn build_native_runtime(
     instance_name: Option<String>,
     redis_endpoint: &RedisEndpoint,
     long_poll_timeout: Duration,
+    admin_user_id: Option<i64>,
 ) -> Result<ConcreteNativeRuntime, CompositionError> {
     let polling_transport =
         ReqwestTelegramTransport::new().map_err(CompositionError::PollingTransport)?;
@@ -515,7 +525,9 @@ pub fn build_native_runtime(
         .with_payment_sink(Box::new(BillingRepository::new(database_url)))
         .with_balance_source(Box::new(BillingRepository::new(database_url)))
         .with_transfer_sink(Box::new(BillingRepository::new(database_url)))
-        .with_charge_history_source(Box::new(BillingRepository::new(database_url))),
+        .with_charge_history_source(Box::new(BillingRepository::new(database_url)))
+        .with_admin_user_id(admin_user_id)
+        .with_admin_credit_sink(Box::new(BillingRepository::new(database_url))),
     ))
 }
 
@@ -1114,6 +1126,7 @@ mod tests {
                 password: None,
             },
             Duration::from_secs(30),
+            Some(99),
         );
         assert!(result.is_ok());
     }

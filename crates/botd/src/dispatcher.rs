@@ -1,6 +1,9 @@
 //! Native update dispatch for feature-complete command vertical slices.
 
 use bot_adapters::telegram_polling::{IncomingEvent, IncomingMessage, IncomingUpdate};
+use bot_core::admin_commands::{
+    PrintCreditsContext, PrintCreditsPlan, plan_printcredits_command, printcredits_result_reply,
+};
 use bot_core::billing_commands::{
     TransferCommandContext, TransferCommandPlan, TransferResult, plan_transfer_command,
     transfer_result_reply,
@@ -141,6 +144,10 @@ pub trait ChargeHistorySource {
     ) -> Result<ChargeHistoryPage, String>;
 }
 
+pub trait AdminCreditSink {
+    fn mint(&mut self, user_id: i64, amount: i64) -> Result<i64, String>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchOutcome {
     Handled,
@@ -180,6 +187,8 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     balance_source: Option<Box<dyn BillingBalanceSource>>,
     transfer_sink: Option<Box<dyn BillingTransferSink>>,
     charge_history_source: Option<Box<dyn ChargeHistorySource>>,
+    admin_user_id: Option<i64>,
+    admin_credit_sink: Option<Box<dyn AdminCreditSink>>,
     last_outcome: Option<DispatchOutcome>,
     state_diagnostics: Vec<String>,
 }
@@ -217,6 +226,8 @@ where
             balance_source: None,
             transfer_sink: None,
             charge_history_source: None,
+            admin_user_id: None,
+            admin_credit_sink: None,
             last_outcome: None,
             state_diagnostics: Vec::new(),
         }
@@ -251,6 +262,18 @@ where
     #[must_use]
     pub fn with_charge_history_source(mut self, source: Box<dyn ChargeHistorySource>) -> Self {
         self.charge_history_source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_admin_user_id(mut self, user_id: Option<i64>) -> Self {
+        self.admin_user_id = user_id;
+        self
+    }
+
+    #[must_use]
+    pub fn with_admin_credit_sink(mut self, sink: Box<dyn AdminCreditSink>) -> Self {
+        self.admin_credit_sink = Some(sink);
         self
     }
 
@@ -944,6 +967,47 @@ where
                 }
                 TransferCommandPlan::NotHandled => StatelessCommandPlan::NotHandled,
             }
+        } else if parsed.command == "/printcredits" {
+            match plan_printcredits_command(
+                &content.text,
+                &self.bot_name,
+                PrintCreditsContext {
+                    chat_id,
+                    message_id,
+                    user_id: sender_id.0,
+                    admin_user_id: self.admin_user_id,
+                    billing_available: self.billing_available,
+                    locale,
+                },
+            ) {
+                PrintCreditsPlan::Reply(action) => StatelessCommandPlan::Action(action),
+                PrintCreditsPlan::Mint { user_id, amount } => {
+                    let Some(sink) = self.admin_credit_sink.as_mut() else {
+                        return Ok(DispatchOutcome::LegacyRequired);
+                    };
+                    let text = match sink.mint(user_id, amount) {
+                        Ok(balance) => printcredits_result_reply(amount, balance, locale),
+                        Err(error) => {
+                            self.state_diagnostics.push(format!(
+                                "admin credit mint chat_id={} user_id={user_id} amount={amount}: {error}",
+                                chat_id.0
+                            ));
+                            match locale {
+                                bot_core::locale::Locale::Es => {
+                                    "se trabó imprimiendo créditos, probá de nuevo".to_owned()
+                                }
+                                bot_core::locale::Locale::En => {
+                                    "I could not mint credits, try again".to_owned()
+                                }
+                            }
+                        }
+                    };
+                    let mut message = SendMessage::new(chat_id, &text);
+                    message.reply_to_message_id = Some(message_id);
+                    StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+                }
+                PrintCreditsPlan::NotHandled => StatelessCommandPlan::NotHandled,
+            }
         } else if parsed.command == "/random" {
             match parse_random_selection(&parsed.message_text) {
                 Err(_) => StatelessCommandPlan::LegacyFallbackRequired,
@@ -1138,10 +1202,11 @@ mod tests {
     use serde_json::{Map, json};
 
     use super::{
-        ActionReceipt, ActionSink, BillingBalanceSource, BillingBalances, BillingTransferSink,
-        ChargeHistoryPage, ChargeHistorySource, ChatConfigSource, DispatchError, DispatchOutcome,
-        GroupAuthorizationDecision, GroupAuthorizer, MessageStateSink, NativeDispatcher,
-        RandomSource, RuntimeValues, StarPaymentReceipt, StarPaymentSink, TransferResult,
+        ActionReceipt, ActionSink, AdminCreditSink, BillingBalanceSource, BillingBalances,
+        BillingTransferSink, ChargeHistoryPage, ChargeHistorySource, ChatConfigSource,
+        DispatchError, DispatchOutcome, GroupAuthorizationDecision, GroupAuthorizer,
+        MessageStateSink, NativeDispatcher, RandomSource, RuntimeValues, StarPaymentReceipt,
+        StarPaymentSink, TransferResult,
     };
     use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup};
 
@@ -1415,6 +1480,20 @@ mod tests {
             amount: i64,
         ) -> Result<TransferResult, String> {
             self.calls.borrow_mut().push((user_id, chat_id, amount));
+            self.result.clone()
+        }
+    }
+
+    type AdminCreditCalls = Rc<RefCell<Vec<(i64, i64)>>>;
+
+    struct AdminCredits {
+        result: Result<i64, String>,
+        calls: AdminCreditCalls,
+    }
+
+    impl AdminCreditSink for AdminCredits {
+        fn mint(&mut self, user_id: i64, amount: i64) -> Result<i64, String> {
+            self.calls.borrow_mut().push((user_id, amount));
             self.result.clone()
         }
     }
@@ -1724,6 +1803,130 @@ mod tests {
         );
         assert_eq!(dispatcher.state.incoming.len(), 2);
         assert_eq!(dispatcher.state.outgoing.len(), 2);
+    }
+
+    #[test]
+    fn printcredits_authorizes_parses_mints_and_records_command_state() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_admin_user_id(Some(88))
+        .with_admin_credit_sink(Box::new(AdminCredits {
+            result: Ok(12_000),
+            calls: Rc::clone(&calls),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(update("/printcredits 100.0", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(calls.borrow().as_slice(), &[(88, 10_000)]);
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
+            return;
+        };
+        assert_eq!(
+            message.text,
+            "minted 100.00 credits\nyour balance is 120.00"
+        );
+        assert_eq!(dispatcher.state.incoming.len(), 1);
+        assert_eq!(dispatcher.state.outgoing.len(), 1);
+    }
+
+    #[test]
+    fn printcredits_guards_and_failures_are_safe_without_duplicate_mints() {
+        let denied_calls = Rc::new(RefCell::new(Vec::new()));
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut denied = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_admin_user_id(Some(99))
+        .with_admin_credit_sink(Box::new(AdminCredits {
+            result: Ok(0),
+            calls: Rc::clone(&denied_calls),
+        }));
+        assert_eq!(
+            denied.dispatch(update("/printcredits 100", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(denied_calls.borrow().is_empty());
+        let Some(TelegramAction::SendMessage(message)) = denied.actions.0.first() else {
+            return;
+        };
+        assert_eq!(message.text, "this command is only for the admin");
+
+        let failed_calls = Rc::new(RefCell::new(Vec::new()));
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut failed = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_admin_user_id(Some(88))
+        .with_admin_credit_sink(Box::new(AdminCredits {
+            result: Err("synthetic database failure".to_owned()),
+            calls: Rc::clone(&failed_calls),
+        }));
+        assert_eq!(
+            failed.dispatch(update("/printcredits 1", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(failed_calls.borrow().as_slice(), &[(88, 100)]);
+        let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
+            return;
+        };
+        assert_eq!(
+            message.text,
+            "se trabó imprimiendo créditos, probá de nuevo"
+        );
+        assert!(failed.state_diagnostics()[0].contains("synthetic database failure"));
+
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut missing = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_admin_user_id(Some(88));
+        assert_eq!(
+            missing.dispatch(update("/printcredits 1", None)),
+            Ok(DispatchOutcome::LegacyRequired)
+        );
     }
 
     #[test]
