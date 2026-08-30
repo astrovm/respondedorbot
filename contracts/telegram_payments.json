@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "pre_checkout": [
+    {
+      "name": "current_invoice_is_approved",
+      "query": {
+        "id": "checkout-1",
+        "from": {"id": 42},
+        "invoice_payload": "topup:p50:42:en",
+        "currency": "XTR",
+        "total_amount": 25
+      },
+      "billing_available": true,
+      "pack_id": "p50",
+      "pack_xtr_amount": 25,
+      "expected": {"kind": "approve", "query_id": "checkout-1"}
+    },
+    {
+      "name": "unavailable_billing_precedes_payload_validation",
+      "query": {"id": "checkout-2"},
+      "billing_available": false,
+      "pack_id": null,
+      "pack_xtr_amount": null,
+      "expected": {"kind": "billing_unavailable", "query_id": "checkout-2"}
+    },
+    {
+      "name": "missing_sender_is_rejected",
+      "query": {"id": "checkout-3"},
+      "billing_available": true,
+      "pack_id": "p50",
+      "pack_xtr_amount": 25,
+      "expected": {"kind": "invalid_user", "query_id": "checkout-3"}
+    },
+    {
+      "name": "owner_mismatch_is_rejected",
+      "query": {
+        "id": "checkout-4",
+        "from": {"id": 43},
+        "invoice_payload": "topup:p50:42:en",
+        "currency": "XTR",
+        "total_amount": 25
+      },
+      "billing_available": true,
+      "pack_id": "p50",
+      "pack_xtr_amount": 25,
+      "expected": {"kind": "invalid_payment", "query_id": "checkout-4"}
+    }
+  ]
+}

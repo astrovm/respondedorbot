@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import json
+import logging
 from collections.abc import Callable, Mapping
 from typing import Any
 
 from api.billing.ai import AIBillingPack
 from api.billing.commands import build_user_charge_history_page
+from api.core.rust_telegram_payments import load_rust_telegram_payments
 from api.i18n import current_locale, tr
 
 ChargeCallbackParams = tuple[int, int, str, int, int, int, int]
+logger = logging.getLogger(__name__)
 
 
 def _answer_charge_callback(
@@ -22,6 +26,74 @@ def _answer_charge_callback(
             answer_callback(callback_id)
         else:
             answer_callback(callback_id, text=text, show_alert=show_alert)
+
+
+def _evaluate_rust_pre_checkout(
+    query: Mapping[str, Any],
+    *,
+    is_available: bool,
+    parse_payload: Callable[[str], tuple[str | None, int | None]],
+    get_pack: Callable[[str], AIBillingPack | None],
+) -> Mapping[str, Any] | None:
+    rust = load_rust_telegram_payments()
+    if rust is None:
+        return None
+    try:
+        pack: AIBillingPack | None = None
+        if is_available:
+            payload = str(query.get("invoice_payload") or "")
+            pack_id, _payload_user_id = parse_payload(payload)
+            pack = get_pack(pack_id or "")
+        result = json.loads(
+            rust.telegram_evaluate_pre_checkout(
+                json.dumps(query, separators=(",", ":")),
+                is_available,
+                str(pack["id"]) if pack else None,
+                int(pack["xtr"]) if pack else None,
+            )
+        )
+        if not isinstance(result, Mapping):
+            raise ValueError("Rust pre-checkout result is not an object")
+        kind = result.get("kind")
+        if kind == "ignore":
+            return result
+        if kind not in {
+            "billing_unavailable",
+            "invalid_user",
+            "invalid_payment",
+            "approve",
+        } or not isinstance(result.get("query_id"), str):
+            raise ValueError("Rust pre-checkout result is invalid")
+        return result
+    except Exception:
+        # No write occurs before this decision, so the established fail-closed
+        # Python validation is safe to retry.
+        logger.exception("Rust pre-checkout validation failed; using Python fallback")
+        return None
+
+
+def _apply_rust_pre_checkout(
+    result: Mapping[str, Any] | None,
+    *,
+    answer_query: Callable[..., None],
+    unavailable_alert: Callable[[], str],
+) -> bool:
+    if result is None:
+        return False
+    kind = str(result["kind"])
+    if kind == "ignore":
+        return True
+    query_id = str(result["query_id"])
+    if kind == "approve":
+        answer_query(query_id, ok=True)
+        return True
+    error_messages: dict[str, Callable[[], str]] = {
+        "billing_unavailable": unavailable_alert,
+        "invalid_user": lambda: tr("payment.invalid_user"),
+        "invalid_payment": lambda: tr("payment.invalid"),
+    }
+    answer_query(query_id, ok=False, error_message=error_messages[kind]())
+    return True
 
 
 def send_stars_invoice(
@@ -255,7 +327,21 @@ def handle_pre_checkout_query(
     query_id = query.get("id")
     if not query_id:
         return
-    if not billing_available():
+    is_available = billing_available()
+    rust_result = _evaluate_rust_pre_checkout(
+        query,
+        is_available=is_available,
+        parse_payload=parse_payload,
+        get_pack=get_pack,
+    )
+    if _apply_rust_pre_checkout(
+        rust_result,
+        answer_query=answer_query,
+        unavailable_alert=unavailable_alert,
+    ):
+        return
+
+    if not is_available:
         answer_query(
             str(query_id),
             ok=False,

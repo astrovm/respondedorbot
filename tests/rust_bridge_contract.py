@@ -1271,6 +1271,21 @@ def verify_telegram_callbacks(bridge: ModuleType) -> None:
         assert actual == case["expected"], case["name"]
 
 
+def verify_telegram_payments(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "telegram_payments.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["pre_checkout"]:
+        actual = json.loads(
+            bridge.telegram_evaluate_pre_checkout(
+                json.dumps(case["query"], separators=(",", ":")),
+                case["billing_available"],
+                case["pack_id"],
+                case["pack_xtr_amount"],
+            )
+        )
+        assert actual == case["expected"], case["name"]
+
+
 def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_ai_usage_policy(bridge)
     verify_provider_error_policy(bridge)
@@ -1298,6 +1313,7 @@ def verify_ai_orchestration_contracts(bridge: ModuleType) -> None:
     verify_stock_market(bridge)
     verify_telegram_input(bridge)
     verify_telegram_callbacks(bridge)
+    verify_telegram_payments(bridge)
 
 
 def main(arguments: list[str]) -> int:
