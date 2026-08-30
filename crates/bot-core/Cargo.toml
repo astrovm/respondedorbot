@@ -11,6 +11,7 @@ repository.workspace = true
 num-bigint.workspace = true
 regex.workspace = true
 thiserror.workspace = true
+unicode-normalization.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

@@ -32,6 +32,10 @@ class _RustRandomReplyEvaluator(Protocol):
     def evaluate_random_reply(self, response_sample: int, suffix_sample: int) -> tuple[str, str]: ...
 
 
+class _RustCommandNormalizer(Protocol):
+    def normalize_command_text(self, message_text: str) -> Optional[str]: ...
+
+
 def _load_rust_base_converter() -> Optional[_RustBaseConverter]:
     module = load_rust_bridge("RUST_BASE_CONVERSION_ENABLED")
     if module is None:
@@ -51,6 +55,13 @@ def _load_rust_random_reply_evaluator() -> Optional[_RustRandomReplyEvaluator]:
     if module is None:
         return None
     return cast(_RustRandomReplyEvaluator, module)
+
+
+def _load_rust_command_normalizer() -> Optional[_RustCommandNormalizer]:
+    module = load_rust_bridge("RUST_COMMAND_NORMALIZATION_ENABLED")
+    if module is None:
+        return None
+    return cast(_RustCommandNormalizer, module)
 
 
 def _gen_random_python(name: str, rand_res: int, rand_name: int) -> str:
@@ -248,10 +259,7 @@ def is_japanese_text(text: str) -> bool:
     return bool(JAPANESE_TEXT_RE.search(text))
 
 
-def convert_to_command(msg_text: str) -> str:
-    if not msg_text:
-        return tr("command.empty")
-
+def _preprocess_command_text(msg_text: str) -> str:
     emoji_text = emoji.demojize(
         msg_text,
         delimiters=("_", "_"),
@@ -260,9 +268,12 @@ def convert_to_command(msg_text: str) -> str:
     if is_japanese_text(emoji_text):
         romanized_text = romanize_japanese(emoji_text)
     else:
-        romanized_text = emoji_text
+        return emoji_text
+    return romanized_text
 
-    replaced_ni_text = re.sub(r"\bÑ\b", "ENIE", romanized_text.upper()).replace("Ñ", "NI")
+
+def _normalize_command_python(preprocessed_text: str) -> str:
+    replaced_ni_text = re.sub(r"\bÑ\b", "ENIE", preprocessed_text.upper()).replace("Ñ", "NI")
 
     single_spaced_text = re.sub(
         r"\s+",
@@ -291,6 +302,23 @@ def convert_to_command(msg_text: str) -> str:
         return tr("command.invalid")
 
     return f"/{cleaned_text}"
+
+
+def convert_to_command(msg_text: str) -> str:
+    if not msg_text:
+        return tr("command.empty")
+    preprocessed_text = _preprocess_command_text(msg_text)
+    rust = _load_rust_command_normalizer()
+    if rust is not None:
+        try:
+            normalized = rust.normalize_command_text(preprocessed_text)
+            return normalized if normalized is not None else tr("command.invalid")
+        except Exception as error:
+            logger.warning(
+                "Rust command normalization failed; using Python fallback: error_type=%s",
+                type(error).__name__,
+            )
+    return _normalize_command_python(preprocessed_text)
 
 
 def get_instance_name() -> str:

@@ -58,6 +58,13 @@ def verify_command_parsing(bridge: ModuleType) -> None:
         )
 
 
+def verify_command_normalization(bridge: ModuleType) -> None:
+    path = Path(__file__).parents[1] / "contracts" / "command_normalization.json"
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    for case in contract["normalization"]:
+        assert bridge.normalize_command_text(case["input"]) == case["expected"], case["name"]
+
+
 def verify_task_triggers(bridge: ModuleType) -> None:
     path = Path(__file__).parents[1] / "contracts" / "task_triggers.json"
     contract = json.loads(path.read_text(encoding="utf-8"))
@@ -144,6 +151,7 @@ def main(arguments: list[str]) -> int:
     assert bridge.migration_protocol_version() == 1
     verify_credit_units(bridge)
     verify_command_parsing(bridge)
+    verify_command_normalization(bridge)
     verify_task_triggers(bridge)
     verify_price_queries(bridge)
     verify_market_context(bridge)

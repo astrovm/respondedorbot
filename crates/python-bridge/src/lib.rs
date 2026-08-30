@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use bot_core::base_conversion::{BaseConversion, convert_base as convert_base_core};
+use bot_core::command_normalization::normalize_command_text as normalize_command_text_core;
 use bot_core::command_parsing::parse_command as parse_command_core;
 use bot_core::credit_units::{
     CreditUnits, format_credit_units as format_credit_units_core,
@@ -573,6 +574,12 @@ fn parse_command(message_text: &str, bot_name: &str) -> (String, String) {
     (parsed.command, parsed.message_text)
 }
 
+/// Normalize adapter-preprocessed text into a Telegram slash command.
+#[pyfunction]
+fn normalize_command_text(message_text: &str) -> Option<String> {
+    normalize_command_text_core(message_text)
+}
+
 /// Convert an arbitrary-precision number between bases from 2 through 36.
 #[pyfunction]
 fn convert_base(message_text: &str) -> PyResult<String> {
@@ -689,6 +696,7 @@ fn respondedorbot_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(parse_credit_units, module)?)?;
     module.add_function(wrap_pyfunction!(format_credit_units, module)?)?;
     module.add_function(wrap_pyfunction!(parse_command, module)?)?;
+    module.add_function(wrap_pyfunction!(normalize_command_text, module)?)?;
     module.add_function(wrap_pyfunction!(convert_base, module)?)?;
     module.add_function(wrap_pyfunction!(parse_random_selection, module)?)?;
     module.add_function(wrap_pyfunction!(evaluate_random_reply, module)?)?;
