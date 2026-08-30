@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 bot-adapters.workspace = true
 bot-core.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

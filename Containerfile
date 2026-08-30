@@ -35,6 +35,7 @@ COPY . .
 COPY --from=rust-builder \
     /app/target/release/librespondedorbot_rs.so \
     /app/respondedorbot_rs.so
+COPY --from=rust-builder /app/target/release/botd /usr/local/bin/botd
 
 RUN useradd -m -u 1000 botuser && chown -R botuser:botuser /app
 USER botuser
