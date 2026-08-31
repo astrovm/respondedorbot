@@ -1,21 +1,58 @@
 //! Environment configuration for the native runtime.
 
 use std::fmt;
+use std::fs;
 use std::num::NonZeroUsize;
+use std::path::Path;
 use std::time::Duration;
 
 use bot_adapters::redis_connection::RedisEndpoint;
 use thiserror::Error;
 
+use crate::reconciliation::ReconciliationSettings;
+
 const DEFAULT_HANDLER_WORKERS: usize = 16;
 const DEFAULT_LONG_POLL_SECONDS: u64 = 30;
 const DEFAULT_AI_LEDGER_RETENTION_DAYS: i64 = 30;
+const DEFAULT_RECONCILIATION_INTERVAL_SECONDS: i64 = 60;
+const DEFAULT_RECONCILIATION_RETRY_SECONDS: i64 = 3_600;
+const DEFAULT_RECONCILIATION_SAFETY_CREDIT_UNITS: i64 = 10;
+const DEFAULT_RECONCILIATION_STALE_SECONDS: i64 = 300;
+const DEFAULT_TRIGGER_WORDS: [&str; 6] = [
+    "gordo",
+    "respondedor",
+    "atendedor",
+    "gordito",
+    "dogor",
+    "bot",
+];
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct RuntimeConfig {
     telegram_token: String,
     pub handler_workers: NonZeroUsize,
     pub long_poll_timeout: Duration,
+}
+
+#[derive(Clone)]
+pub struct ProductionConfig {
+    pub runtime: RuntimeConfig,
+    database_url: String,
+    pub bot_name: String,
+    pub instance_name: Option<String>,
+    pub redis_endpoint: RedisEndpoint,
+    pub admin_user_id: Option<i64>,
+    coinmarketcap_key: Option<String>,
+    giphy_api_key: Option<String>,
+    openrouter_api_key: Option<String>,
+    pub openrouter_base_url: Option<String>,
+    groq_free_api_key: Option<String>,
+    groq_api_key: Option<String>,
+    firecrawl_api_key: Option<String>,
+    pub system_prompt: String,
+    pub trigger_words: Vec<String>,
+    pub reconciliation_interval: Duration,
+    pub reconciliation_settings: ReconciliationSettings,
 }
 
 #[derive(Clone)]
@@ -59,6 +96,38 @@ impl fmt::Debug for RuntimeConfig {
     }
 }
 
+impl fmt::Debug for ProductionConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProductionConfig")
+            .field("runtime", &self.runtime)
+            .field("database_url", &"[REDACTED]")
+            .field("bot_name", &self.bot_name)
+            .field("instance_name", &self.instance_name)
+            .field("redis_host", &self.redis_endpoint.host)
+            .field("redis_port", &self.redis_endpoint.port)
+            .field(
+                "redis_password",
+                &self.redis_endpoint.password.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("admin_user_id", &self.admin_user_id)
+            .field(
+                "coinmarketcap_configured",
+                &self.coinmarketcap_key.is_some(),
+            )
+            .field("giphy_configured", &self.giphy_api_key.is_some())
+            .field("openrouter_configured", &self.openrouter_api_key.is_some())
+            .field("groq_free_configured", &self.groq_free_api_key.is_some())
+            .field("groq_configured", &self.groq_api_key.is_some())
+            .field("firecrawl_configured", &self.firecrawl_api_key.is_some())
+            .field("system_prompt", &"[REDACTED]")
+            .field("trigger_words", &self.trigger_words)
+            .field("reconciliation_interval", &self.reconciliation_interval)
+            .field("reconciliation_settings", &self.reconciliation_settings)
+            .finish()
+    }
+}
+
 impl fmt::Debug for MaintenanceConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -90,6 +159,16 @@ pub enum ConfigError {
     InvalidRedisPort,
     #[error("AI_LEDGER_RETENTION_DAYS must be a positive integer")]
     InvalidLedgerRetention,
+    #[error("SUPABASE_POSTGRES_URL not set")]
+    MissingDatabaseUrl,
+    #[error("TELEGRAM_USERNAME not set")]
+    MissingTelegramUsername,
+    #[error("ADMIN_CHAT_ID must be an integer")]
+    InvalidAdminUserId,
+    #[error("BOT_SYSTEM_PROMPT not set and workspace/SOUL.md or workspace/RULES.md is missing")]
+    MissingSystemPrompt,
+    #[error("could not read the workspace prompt: {0}")]
+    WorkspacePrompt(String),
 }
 
 fn redis_endpoint_from_lookup<F>(lookup: &F) -> Result<RedisEndpoint, ConfigError>
@@ -218,12 +297,179 @@ impl RuntimeConfig {
     }
 }
 
+fn optional_trimmed<F>(lookup: &F, name: &str) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup(name)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn configured_integer<F>(lookup: &F, name: &str, default: i64) -> i64
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup(name)
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(default)
+}
+
+fn read_workspace_prompt() -> Result<Option<String>, ConfigError> {
+    let mut parts = Vec::new();
+    for path in [
+        Path::new("workspace/SOUL.md"),
+        Path::new("workspace/RULES.md"),
+    ] {
+        match fs::read_to_string(path) {
+            Ok(value) if !value.trim().is_empty() => parts.push(value.trim().to_owned()),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(ConfigError::WorkspacePrompt(error.to_string())),
+        }
+    }
+    Ok((!parts.is_empty()).then(|| parts.join("\n\n")))
+}
+
+impl ProductionConfig {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Self::from_lookup_and_prompt(|name| std::env::var(name).ok(), read_workspace_prompt)
+    }
+
+    pub fn from_lookup_and_prompt<F, P>(lookup: F, prompt: P) -> Result<Self, ConfigError>
+    where
+        F: Fn(&str) -> Option<String>,
+        P: FnOnce() -> Result<Option<String>, ConfigError>,
+    {
+        let runtime = RuntimeConfig::from_lookup(&lookup)?;
+        let redis_endpoint = redis_endpoint_from_lookup(&lookup)?;
+        let database_url = optional_trimmed(&lookup, "SUPABASE_POSTGRES_URL")
+            .ok_or(ConfigError::MissingDatabaseUrl)?;
+        let bot_name = optional_trimmed(&lookup, "TELEGRAM_USERNAME")
+            .map(|value| value.trim_start_matches('@').to_owned())
+            .filter(|value| !value.is_empty())
+            .ok_or(ConfigError::MissingTelegramUsername)?;
+        let admin_user_id = optional_trimmed(&lookup, "ADMIN_CHAT_ID")
+            .map(|value| {
+                value
+                    .parse::<i64>()
+                    .map_err(|_| ConfigError::InvalidAdminUserId)
+            })
+            .transpose()?;
+        let system_prompt = match optional_trimmed(&lookup, "BOT_SYSTEM_PROMPT") {
+            Some(value) => value,
+            None => prompt()?.ok_or(ConfigError::MissingSystemPrompt)?,
+        };
+        let trigger_words = optional_trimmed(&lookup, "BOT_TRIGGER_WORDS")
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|values| !values.is_empty())
+            .unwrap_or_else(|| DEFAULT_TRIGGER_WORDS.map(str::to_owned).to_vec());
+        let reconciliation_interval = Duration::from_secs(
+            configured_integer(
+                &lookup,
+                "AI_RECONCILIATION_INTERVAL_SECONDS",
+                DEFAULT_RECONCILIATION_INTERVAL_SECONDS,
+            )
+            .max(5) as u64,
+        );
+        let reconciliation_settings = ReconciliationSettings {
+            batch_limit: 500,
+            retry_window_seconds: configured_integer(
+                &lookup,
+                "AI_RECONCILIATION_RETRY_SECONDS",
+                DEFAULT_RECONCILIATION_RETRY_SECONDS,
+            ),
+            safety_credit_units: configured_integer(
+                &lookup,
+                "AI_RECONCILIATION_SAFETY_CREDIT_UNITS",
+                DEFAULT_RECONCILIATION_SAFETY_CREDIT_UNITS,
+            ),
+            stale_seconds: configured_integer(
+                &lookup,
+                "AI_RECONCILIATION_STALE_SECONDS",
+                DEFAULT_RECONCILIATION_STALE_SECONDS,
+            ),
+        }
+        .normalized();
+        Ok(Self {
+            runtime,
+            database_url,
+            bot_name,
+            instance_name: optional_trimmed(&lookup, "FRIENDLY_INSTANCE_NAME"),
+            redis_endpoint,
+            admin_user_id,
+            coinmarketcap_key: optional_trimmed(&lookup, "COINMARKETCAP_KEY"),
+            giphy_api_key: optional_trimmed(&lookup, "GIPHY_API_KEY"),
+            openrouter_api_key: optional_trimmed(&lookup, "OPENROUTER_API_KEY"),
+            openrouter_base_url: optional_trimmed(&lookup, "OPENROUTER_BASE_URL"),
+            groq_free_api_key: optional_trimmed(&lookup, "GROQ_FREE_API_KEY"),
+            groq_api_key: optional_trimmed(&lookup, "GROQ_API_KEY"),
+            firecrawl_api_key: optional_trimmed(&lookup, "FIRECRAWL_API_KEY"),
+            system_prompt,
+            trigger_words,
+            reconciliation_interval,
+            reconciliation_settings,
+        })
+    }
+
+    #[must_use]
+    pub fn database_url(&self) -> &str {
+        &self.database_url
+    }
+
+    #[must_use]
+    pub fn coinmarketcap_key(&self) -> Option<&str> {
+        self.coinmarketcap_key.as_deref()
+    }
+
+    #[must_use]
+    pub fn giphy_api_key(&self) -> Option<&str> {
+        self.giphy_api_key.as_deref()
+    }
+
+    #[must_use]
+    pub fn openrouter_api_key(&self) -> Option<&str> {
+        self.openrouter_api_key.as_deref()
+    }
+
+    #[must_use]
+    pub fn groq_free_api_key(&self) -> Option<&str> {
+        self.groq_free_api_key.as_deref()
+    }
+
+    #[must_use]
+    pub fn groq_api_key(&self) -> Option<&str> {
+        self.groq_api_key.as_deref()
+    }
+
+    #[must_use]
+    pub fn firecrawl_api_key(&self) -> Option<&str> {
+        self.firecrawl_api_key.as_deref()
+    }
+
+    #[must_use]
+    pub fn owner_token(&self) -> String {
+        self.instance_name
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .unwrap_or("botd")
+            .to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use super::{
-        ConfigError, DEFAULT_HANDLER_WORKERS, MaintenanceConfig, RuntimeConfig,
+        ConfigError, DEFAULT_HANDLER_WORKERS, MaintenanceConfig, ProductionConfig, RuntimeConfig,
         TaskVerificationConfig,
     };
 
@@ -233,6 +479,20 @@ mod tests {
             .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
             .collect::<HashMap<_, _>>();
         RuntimeConfig::from_lookup(|name| values.get(name).cloned())
+    }
+
+    fn production(
+        values: &[(&str, &str)],
+        workspace_prompt: Option<&str>,
+    ) -> Result<ProductionConfig, ConfigError> {
+        let values = values
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect::<HashMap<_, _>>();
+        ProductionConfig::from_lookup_and_prompt(
+            |name| values.get(name).cloned(),
+            || Ok(workspace_prompt.map(str::to_owned)),
+        )
     }
 
     #[test]
@@ -394,5 +654,135 @@ mod tests {
                 Err(ConfigError::InvalidLedgerRetention)
             );
         }
+    }
+
+    #[test]
+    fn production_configuration_validates_required_boundaries_and_workspace_prompt() {
+        let base = [
+            ("TELEGRAM_TOKEN", "synthetic-telegram-secret"),
+            ("TELEGRAM_USERNAME", " @test_bot "),
+            (
+                "SUPABASE_POSTGRES_URL",
+                "postgresql://synthetic-database-secret",
+            ),
+        ];
+        assert_eq!(
+            production(&[], Some("prompt")).map(|_| ()),
+            Err(ConfigError::MissingTelegramToken)
+        );
+        assert_eq!(
+            production(&[("TELEGRAM_TOKEN", "token")], Some("prompt")).map(|_| ()),
+            Err(ConfigError::MissingDatabaseUrl)
+        );
+        assert_eq!(
+            production(
+                &[
+                    ("TELEGRAM_TOKEN", "token"),
+                    ("SUPABASE_POSTGRES_URL", "postgresql://database"),
+                ],
+                Some("prompt"),
+            )
+            .map(|_| ()),
+            Err(ConfigError::MissingTelegramUsername)
+        );
+        assert_eq!(
+            production(&base, None).map(|_| ()),
+            Err(ConfigError::MissingSystemPrompt)
+        );
+        let config = production(&base, Some("soul\n\nrules"));
+        assert!(config.is_ok());
+        let Some(config) = config.ok() else {
+            return;
+        };
+        assert_eq!(config.bot_name, "test_bot");
+        assert_eq!(config.system_prompt, "soul\n\nrules");
+        assert_eq!(config.trigger_words.len(), 6);
+        assert_eq!(config.reconciliation_interval.as_secs(), 60);
+    }
+
+    #[test]
+    fn production_configuration_parses_optional_services_and_redacts_all_secrets() {
+        let config = production(
+            &[
+                ("TELEGRAM_TOKEN", "telegram-secret"),
+                ("TELEGRAM_USERNAME", "test_bot"),
+                ("SUPABASE_POSTGRES_URL", "database-secret"),
+                ("REDIS_PASSWORD", "redis-secret"),
+                ("ADMIN_CHAT_ID", "99"),
+                ("COINMARKETCAP_KEY", "cmc-secret"),
+                ("GIPHY_API_KEY", "giphy-secret"),
+                ("OPENROUTER_API_KEY", "openrouter-secret"),
+                ("GROQ_FREE_API_KEY", "groq-free-secret"),
+                ("GROQ_API_KEY", "groq-secret"),
+                ("FIRECRAWL_API_KEY", "firecrawl-secret"),
+                ("BOT_SYSTEM_PROMPT", "prompt-secret"),
+                ("BOT_TRIGGER_WORDS", " gordo, test, ,bot "),
+                ("FRIENDLY_INSTANCE_NAME", "VPS"),
+                ("AI_RECONCILIATION_INTERVAL_SECONDS", "1"),
+                ("AI_RECONCILIATION_RETRY_SECONDS", "20"),
+                ("AI_RECONCILIATION_SAFETY_CREDIT_UNITS", "-5"),
+                ("AI_RECONCILIATION_STALE_SECONDS", "4"),
+            ],
+            Some("unused"),
+        );
+        assert!(config.is_ok());
+        let Some(config) = config.ok() else {
+            return;
+        };
+        assert_eq!(config.admin_user_id, Some(99));
+        assert_eq!(config.trigger_words, ["gordo", "test", "bot"]);
+        assert_eq!(config.owner_token(), "VPS");
+        assert_eq!(config.reconciliation_interval.as_secs(), 5);
+        assert_eq!(config.reconciliation_settings.retry_window_seconds, 60);
+        assert_eq!(config.reconciliation_settings.safety_credit_units, 0);
+        assert_eq!(config.reconciliation_settings.stale_seconds, 30);
+        let debug = format!("{config:?}");
+        for secret in [
+            "telegram-secret",
+            "database-secret",
+            "redis-secret",
+            "cmc-secret",
+            "giphy-secret",
+            "openrouter-secret",
+            "groq-free-secret",
+            "groq-secret",
+            "firecrawl-secret",
+            "prompt-secret",
+        ] {
+            assert!(!debug.contains(secret));
+        }
+    }
+
+    #[test]
+    fn production_configuration_rejects_invalid_admin_id_and_uses_numeric_defaults() {
+        let base = [
+            ("TELEGRAM_TOKEN", "token"),
+            ("TELEGRAM_USERNAME", "bot"),
+            ("SUPABASE_POSTGRES_URL", "database"),
+            ("BOT_SYSTEM_PROMPT", "prompt"),
+            ("ADMIN_CHAT_ID", "not-a-number"),
+        ];
+        assert_eq!(
+            production(&base, None).map(|_| ()),
+            Err(ConfigError::InvalidAdminUserId)
+        );
+        let config = production(
+            &[
+                ("TELEGRAM_TOKEN", "token"),
+                ("TELEGRAM_USERNAME", "bot"),
+                ("SUPABASE_POSTGRES_URL", "database"),
+                ("BOT_SYSTEM_PROMPT", "prompt"),
+                ("AI_RECONCILIATION_INTERVAL_SECONDS", "invalid"),
+                ("AI_RECONCILIATION_RETRY_SECONDS", "invalid"),
+            ],
+            None,
+        );
+        assert_eq!(
+            config.map(|config| (
+                config.reconciliation_interval.as_secs(),
+                config.reconciliation_settings.retry_window_seconds,
+            )),
+            Ok((60, 3_600))
+        );
     }
 }
