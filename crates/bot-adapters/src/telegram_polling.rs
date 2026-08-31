@@ -38,6 +38,7 @@ pub struct IncomingMessage {
     pub message_id: Option<MessageId>,
     pub chat_id: Option<ChatId>,
     pub chat_type: Option<String>,
+    pub chat_title: Option<String>,
     pub sender_id: Option<UserId>,
     pub sender_first_name: Option<String>,
     pub sender_last_name: Option<String>,
@@ -45,6 +46,9 @@ pub struct IncomingMessage {
     pub sender_language_code: Option<String>,
     pub has_reply: bool,
     pub replied_message_id: Option<MessageId>,
+    pub replied_sender_first_name: Option<String>,
+    pub replied_sender_username: Option<String>,
+    pub replied_text: Option<String>,
     pub content: Option<MessageContent>,
 }
 
@@ -143,6 +147,10 @@ fn parse_message(payload: &Map<String, Value>) -> IncomingMessage {
         .and_then(|chat| chat.get("type"))
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
+    let chat_title = chat
+        .and_then(|chat| chat.get("title"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
     let sender = payload.get("from").and_then(Value::as_object);
     let sender_id = sender
         .and_then(|sender| sender.get("id"))
@@ -164,16 +172,32 @@ fn parse_message(payload: &Map<String, Value>) -> IncomingMessage {
         .and_then(|sender| sender.get("last_name"))
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
-    let replied_message_id = payload
-        .get("reply_to_message")
-        .and_then(Value::as_object)
+    let replied = payload.get("reply_to_message").and_then(Value::as_object);
+    let replied_message_id = replied
         .and_then(|reply| reply.get("message_id"))
         .and_then(normalize_numeric_id)
         .map(MessageId);
+    let replied_sender_username = replied
+        .and_then(|reply| reply.get("from"))
+        .and_then(Value::as_object)
+        .and_then(|sender| sender.get("username"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let replied_sender_first_name = replied
+        .and_then(|reply| reply.get("from"))
+        .and_then(Value::as_object)
+        .and_then(|sender| sender.get("first_name"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let replied_text = replied
+        .and_then(|reply| extract_message_content(&Value::Object(reply.clone())).ok())
+        .map(|content| content.text)
+        .filter(|text| !text.is_empty());
     IncomingMessage {
         message_id,
         chat_id,
         chat_type,
+        chat_title,
         sender_id,
         sender_first_name,
         sender_last_name,
@@ -181,6 +205,9 @@ fn parse_message(payload: &Map<String, Value>) -> IncomingMessage {
         sender_language_code,
         has_reply: payload.contains_key("reply_to_message"),
         replied_message_id,
+        replied_sender_first_name,
+        replied_sender_username,
+        replied_text,
         content: extract_message_content(&Value::Object(payload.clone())).ok(),
     }
 }
@@ -326,7 +353,7 @@ mod tests {
         let actual = parse_response(
             200,
             r#"{"ok":true,"result":[
-                {"update_id":10,"message":{"message_id":1,"text":"hola","chat":{"id":-42,"type":"group"},"from":{"id":8,"first_name":"Ana","last_name":"Test","username":"ana","language_code":"es"},"reply_to_message":{"message_id":3}}},
+                {"update_id":10,"message":{"message_id":1,"text":"hola","chat":{"id":-42,"type":"group","title":"Synthetic Group"},"from":{"id":8,"first_name":"Ana","last_name":"Test","username":"ana","language_code":"es"},"reply_to_message":{"message_id":3,"text":"earlier answer","from":{"first_name":"Gordo","username":"testbot"}}}},
                 {"update_id":11,"callback_query":{"id":"callback"}},
                 {"update_id":12,"pre_checkout_query":{"id":"checkout"}},
                 {"update_id":13,"message":{"message_id":2,"successful_payment":{"telegram_payment_charge_id":"charge-1"}}},
@@ -355,10 +382,14 @@ mod tests {
             Some("hola")
         );
         assert_eq!(message.sender_last_name.as_deref(), Some("Test"));
+        assert_eq!(message.chat_title.as_deref(), Some("Synthetic Group"));
         assert_eq!(
             message.replied_message_id,
             Some(bot_core::telegram_input::MessageId(3))
         );
+        assert_eq!(message.replied_sender_first_name.as_deref(), Some("Gordo"));
+        assert_eq!(message.replied_sender_username.as_deref(), Some("testbot"));
+        assert_eq!(message.replied_text.as_deref(), Some("earlier answer"));
         assert!(message.has_reply);
         assert!(matches!(updates[1].event, IncomingEvent::CallbackQuery(_)));
         assert!(matches!(

@@ -45,6 +45,9 @@ use bot_core::locale::resolve_locale;
 use bot_core::market_prices::{MarketPriceCommand, classify_market_price_command};
 use bot_core::polymarket::{ElectionEvent, classify_election_command, render_elections};
 use bot_core::random_selection::{RandomSelection, parse_random_selection};
+use bot_core::routing::{
+    ResponseRoutingEvaluation, ResponseRoutingInput, evaluate_response_routing,
+};
 use bot_core::rulo::{RuloInput, evaluate_rulo, render_rulo};
 use bot_core::scheduled_tasks::{ScheduledTask, TaskId};
 use bot_core::stateless_commands::{
@@ -63,6 +66,7 @@ use bot_core::telegram_actions::{ParseMode, SendMessage, TelegramAction};
 use bot_core::telegram_callbacks::{
     CallbackContext, CallbackContextOutcome, CallbackRoute, parse_callback_context,
 };
+use bot_core::telegram_commands::telegram_commands;
 use bot_core::telegram_input::{ChatId, MessageId, is_group_chat_type};
 use bot_core::telegram_payments::{
     BalanceCommandContext, BalanceCommandPlan, StarPaymentRecord, SuccessfulPaymentDecision,
@@ -78,6 +82,9 @@ use num_bigint::BigInt;
 use serde_json::{Map, Value};
 use thiserror::Error;
 
+use crate::ai_dispatch::{
+    AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, reply_context,
+};
 use crate::runtime::UpdateHandler;
 
 pub trait ChatConfigSource {
@@ -135,6 +142,11 @@ pub trait RandomSource {
     fn choice_index(&mut self, upper_exclusive: usize) -> Result<usize, Self::Error>;
 
     fn inclusive_integer(&mut self, start: &BigInt, end: &BigInt) -> Result<BigInt, Self::Error>;
+
+    fn unit_interval(&mut self) -> Result<f64, Self::Error> {
+        self.choice_index(10_000)
+            .map(|sample| sample.min(9_999) as f64 / 10_000.0)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -379,6 +391,8 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     election_source: Option<Box<dyn ElectionSource>>,
     link_replacement_source: Option<Box<dyn LinkReplacementSource>>,
     scheduled_task_source: Option<Box<dyn ScheduledTaskSource>>,
+    ai_conversation_source: Option<Box<dyn AiConversationSource>>,
+    trigger_words: Vec<String>,
     last_outcome: Option<DispatchOutcome>,
     state_diagnostics: Vec<String>,
 }
@@ -432,6 +446,8 @@ where
             election_source: None,
             link_replacement_source: None,
             scheduled_task_source: None,
+            ai_conversation_source: None,
+            trigger_words: vec!["bot".to_owned(), "assistant".to_owned()],
             last_outcome: None,
             state_diagnostics: Vec::new(),
         }
@@ -562,6 +578,18 @@ where
     #[must_use]
     pub fn with_scheduled_task_source(mut self, source: Box<dyn ScheduledTaskSource>) -> Self {
         self.scheduled_task_source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub fn with_ai_conversation_source(mut self, source: Box<dyn AiConversationSource>) -> Self {
+        self.ai_conversation_source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub fn with_trigger_words(mut self, trigger_words: Vec<String>) -> Self {
+        self.trigger_words = trigger_words;
         self
     }
 
@@ -1272,6 +1300,188 @@ where
         Ok(DispatchOutcome::Handled)
     }
 
+    fn dispatch_ai_message(
+        &mut self,
+        message: &IncomingMessage,
+        config: &ChatConfig,
+        locale: bot_core::locale::Locale,
+        timestamp: i64,
+        command: &str,
+        prompt_text: &str,
+    ) -> NativeDispatchResult<Config, Actions, Random> {
+        let (Some(chat_id), Some(message_id), Some(sender_id), Some(content)) = (
+            message.chat_id,
+            message.message_id,
+            message.sender_id,
+            message.content.as_ref(),
+        ) else {
+            return Ok(DispatchOutcome::LegacyRequired);
+        };
+        if self.ai_conversation_source.is_none() {
+            return Ok(DispatchOutcome::LegacyRequired);
+        }
+
+        let bot_username = self.bot_name.trim().trim_start_matches('@');
+        let mention = (!bot_username.is_empty())
+            && content
+                .text
+                .to_lowercase()
+                .contains(&format!("@{}", bot_username.to_lowercase()));
+        let reply_to_bot = message.replied_sender_username.as_deref() == Some(bot_username);
+        let command_name = command
+            .trim_start_matches('/')
+            .split('@')
+            .next()
+            .unwrap_or_default();
+        let known_command = telegram_commands(locale)
+            .iter()
+            .any(|candidate| candidate.command == command_name);
+        let reply_metadata = if reply_to_bot {
+            message.replied_message_id.and_then(|reply_id| {
+                let source = self.ai_conversation_source.as_mut()?;
+                match source.reply_metadata(&chat_id.0.to_string(), &reply_id.0.to_string()) {
+                    Ok(metadata) => metadata,
+                    Err(error) => {
+                        self.state_diagnostics
+                            .push(format!("AI reply metadata: {error}"));
+                        None
+                    }
+                }
+            })
+        } else {
+            None
+        };
+        let mut routing = ResponseRoutingInput {
+            known_command,
+            command_starts_with_slash: command.starts_with('/'),
+            message_text: prompt_text.to_owned(),
+            is_private: message.chat_type.as_deref() == Some("private"),
+            is_mention: mention,
+            is_reply: reply_to_bot,
+            reply_text: message.replied_text.clone().unwrap_or_default(),
+            ignore_link_fix_followups: config.ignore_link_fix_followups,
+            is_non_ai_command_followup: reply_metadata
+                .as_ref()
+                .is_some_and(crate::ai_dispatch::AiReplyMetadata::is_non_ai_command),
+            ai_command_followups: config.ai_command_followups,
+            random_replies_enabled: config.ai_random_replies,
+            trigger_words: Some(self.trigger_words.clone()),
+            random_sample: None,
+        };
+        let evaluation = loop {
+            match evaluate_response_routing(&routing) {
+                ResponseRoutingEvaluation::NeedsTriggerWords => {
+                    routing.trigger_words = Some(self.trigger_words.clone());
+                }
+                ResponseRoutingEvaluation::NeedsRandomSample => {
+                    routing.random_sample =
+                        Some(self.random.unit_interval().map_err(DispatchError::Random)?);
+                }
+                resolved => break resolved,
+            }
+        };
+        let spontaneous = !routing.is_private
+            && !routing.known_command
+            && !routing.is_mention
+            && !routing.is_reply;
+        let ai_prompt_text = if known_command {
+            prompt_text
+        } else {
+            content.text.as_str()
+        };
+        let input = AiConversationInput {
+            chat_id,
+            message_id,
+            chat_type: message.chat_type.clone().unwrap_or_default(),
+            chat_title: message.chat_title.clone().unwrap_or_default(),
+            sender_id,
+            sender_first_name: message.sender_first_name.clone().unwrap_or_default(),
+            sender_username: message.sender_username.clone().unwrap_or_default(),
+            message_text: ai_prompt_text.to_owned(),
+            command: command.to_owned(),
+            reply_to_message_id: message.replied_message_id,
+            reply_context: reply_context(
+                message.replied_sender_first_name.as_deref(),
+                message.replied_sender_username.as_deref(),
+                message.replied_text.as_deref(),
+            ),
+            photo_file_id: content.photo_file_id.clone(),
+            audio_file_id: content.audio_file_id.clone(),
+            locale,
+            timezone_offset_hours: config.timezone_offset,
+            timestamp,
+            spontaneous,
+        };
+        if evaluation == ResponseRoutingEvaluation::Ignore {
+            if let Some(source) = self.ai_conversation_source.as_mut()
+                && let Err(error) = source.record_ignored(input)
+            {
+                self.state_diagnostics
+                    .push(format!("ignored AI message state: {error}"));
+            }
+            return Ok(DispatchOutcome::Handled);
+        }
+
+        let preparation = match self
+            .ai_conversation_source
+            .as_mut()
+            .map(|source| source.prepare(input))
+        {
+            Some(Ok(preparation)) => preparation,
+            Some(Err(error)) => {
+                self.state_diagnostics
+                    .push(format!("AI conversation: {error}"));
+                return Ok(DispatchOutcome::LegacyRequired);
+            }
+            None => return Ok(DispatchOutcome::LegacyRequired),
+        };
+        let (text, completion_id, diagnostics) = match preparation {
+            AiPreparation::Silent { diagnostics } => {
+                self.state_diagnostics.extend(diagnostics);
+                return Ok(DispatchOutcome::Handled);
+            }
+            AiPreparation::Reply {
+                text,
+                completion_id,
+                diagnostics,
+            } => (text, completion_id, diagnostics),
+        };
+        self.state_diagnostics.extend(diagnostics);
+        let mut response = SendMessage::new(chat_id, &text);
+        response.reply_to_message_id = Some(message_id);
+        let delivery = self.actions.execute(TelegramAction::SendMessage(response));
+        match delivery {
+            Ok(receipt) => {
+                if let Some(completion_id) = completion_id
+                    && let Some(source) = self.ai_conversation_source.as_mut()
+                    && let Err(error) = source.complete_delivery(AiDelivery {
+                        completion_id,
+                        delivered: true,
+                        sent_message_id: receipt.message_id,
+                    })
+                {
+                    self.state_diagnostics
+                        .push(format!("AI delivery completion: {error}"));
+                }
+                Ok(DispatchOutcome::Handled)
+            }
+            Err(error) => {
+                if let Some(completion_id) = completion_id
+                    && let Some(source) = self.ai_conversation_source.as_mut()
+                    && let Err(finalize_error) = source.complete_delivery(AiDelivery {
+                        completion_id,
+                        delivered: false,
+                        sent_message_id: None,
+                    })
+                {
+                    self.state_diagnostics
+                        .push(format!("AI delivery failure completion: {finalize_error}"));
+                }
+                Err(DispatchError::Action(error))
+            }
+        }
+    }
+
     fn dispatch_message(
         &mut self,
         message: &IncomingMessage,
@@ -1298,7 +1508,7 @@ where
         if !content.text.starts_with('/') && has_replaceable_link(&content.text) {
             return self.dispatch_link_replacement(message, &config, locale, timestamp);
         }
-        if message.has_reply {
+        if message.has_reply && self.ai_conversation_source.is_none() {
             return Ok(DispatchOutcome::LegacyRequired);
         }
         let parsed = parse_command(&content.text, &self.bot_name);
@@ -1965,9 +2175,15 @@ where
                 }
                 Ok(DispatchOutcome::Handled)
             }
-            StatelessCommandPlan::NotHandled | StatelessCommandPlan::LegacyFallbackRequired => {
-                Ok(DispatchOutcome::LegacyRequired)
-            }
+            StatelessCommandPlan::NotHandled | StatelessCommandPlan::LegacyFallbackRequired => self
+                .dispatch_ai_message(
+                    message,
+                    &config,
+                    locale,
+                    timestamp,
+                    &parsed.command,
+                    &parsed.message_text,
+                ),
         }
     }
 
@@ -2044,6 +2260,10 @@ mod tests {
     use num_bigint::BigInt;
     use serde_json::{Map, json};
 
+    use crate::ai_dispatch::{
+        AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, AiReplyMetadata,
+    };
+
     use super::{
         ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BcraLoad, BcraSource,
         BillingBalanceSource, BillingBalances, BillingTransferSink, BitcoinPriceSource,
@@ -2118,6 +2338,63 @@ mod tests {
             self.outgoing.push(plan.clone());
             Ok(())
         }
+    }
+
+    struct AiSource {
+        metadata: Option<AiReplyMetadata>,
+        preparation: Option<Result<AiPreparation, String>>,
+        prepared: Rc<RefCell<Vec<AiConversationInput>>>,
+        ignored: Rc<RefCell<Vec<AiConversationInput>>>,
+        deliveries: Rc<RefCell<Vec<AiDelivery>>>,
+    }
+
+    impl AiConversationSource for AiSource {
+        fn reply_metadata(
+            &mut self,
+            _chat_id: &str,
+            _message_id: &str,
+        ) -> Result<Option<AiReplyMetadata>, String> {
+            Ok(self.metadata.clone())
+        }
+
+        fn prepare(&mut self, input: AiConversationInput) -> Result<AiPreparation, String> {
+            self.prepared.borrow_mut().push(input);
+            self.preparation
+                .take()
+                .unwrap_or_else(|| Ok(AiPreparation::silent()))
+        }
+
+        fn record_ignored(&mut self, input: AiConversationInput) -> Result<(), String> {
+            self.ignored.borrow_mut().push(input);
+            Ok(())
+        }
+
+        fn complete_delivery(&mut self, delivery: AiDelivery) -> Result<(), String> {
+            self.deliveries.borrow_mut().push(delivery);
+            Ok(())
+        }
+    }
+
+    type AiObservations = (
+        Rc<RefCell<Vec<AiConversationInput>>>,
+        Rc<RefCell<Vec<AiConversationInput>>>,
+        Rc<RefCell<Vec<AiDelivery>>>,
+    );
+
+    fn ai_source(preparation: Result<AiPreparation, String>) -> (AiSource, AiObservations) {
+        let prepared = Rc::new(RefCell::new(Vec::new()));
+        let ignored = Rc::new(RefCell::new(Vec::new()));
+        let deliveries = Rc::new(RefCell::new(Vec::new()));
+        (
+            AiSource {
+                metadata: None,
+                preparation: Some(preparation),
+                prepared: Rc::clone(&prepared),
+                ignored: Rc::clone(&ignored),
+                deliveries: Rc::clone(&deliveries),
+            },
+            (prepared, ignored, deliveries),
+        )
     }
 
     struct Values {
@@ -2283,6 +2560,7 @@ mod tests {
                 message_id: Some(MessageId(7)),
                 chat_id: Some(ChatId(-42)),
                 chat_type: Some("private".to_owned()),
+                chat_title: None,
                 sender_id: Some(UserId(88)),
                 sender_first_name: Some("Synthetic".to_owned()),
                 sender_last_name: None,
@@ -2290,6 +2568,9 @@ mod tests {
                 sender_language_code: language.map(ToOwned::to_owned),
                 has_reply: false,
                 replied_message_id: None,
+                replied_sender_first_name: None,
+                replied_sender_username: None,
+                replied_text: None,
                 content: Some(MessageContent {
                     text: text.to_owned(),
                     photo_file_id: None,
@@ -2716,6 +2997,7 @@ mod tests {
                 message_id: None,
                 chat_id: None,
                 chat_type: None,
+                chat_title: None,
                 sender_id: None,
                 sender_first_name: None,
                 sender_last_name: None,
@@ -2723,6 +3005,9 @@ mod tests {
                 sender_language_code: None,
                 has_reply: false,
                 replied_message_id: None,
+                replied_sender_first_name: None,
+                replied_sender_username: None,
+                replied_text: None,
                 content: None,
             })),
         };
@@ -2730,6 +3015,115 @@ mod tests {
             dispatcher.dispatch(incomplete),
             Ok(DispatchOutcome::LegacyRequired)
         );
+        assert!(dispatcher.actions.0.is_empty());
+    }
+
+    #[test]
+    fn private_ai_turn_crosses_the_transaction_seam_and_acknowledges_delivery() {
+        let (source, (prepared, ignored, deliveries)) = ai_source(Ok(AiPreparation::Reply {
+            text: "native answer".to_owned(),
+            completion_id: Some("conversation-1".to_owned()),
+            diagnostics: vec!["provider diagnostic".to_owned()],
+        }));
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig {
+                    language: "en".to_owned(),
+                    timezone_offset: 4,
+                    ..ChatConfig::default()
+                }),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_ai_conversation_source(Box::new(source));
+
+        assert_eq!(
+            dispatcher.dispatch(update("tell me something", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let prepared = prepared.borrow();
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].message_text, "tell me something");
+        assert_eq!(prepared[0].chat_type, "private");
+        assert_eq!(prepared[0].sender_id, UserId(88));
+        assert_eq!(prepared[0].timezone_offset_hours, 4);
+        assert!(!prepared[0].spontaneous);
+        assert!(ignored.borrow().is_empty());
+        let [TelegramAction::SendMessage(message)] = dispatcher.actions.0.as_slice() else {
+            return;
+        };
+        assert_eq!(message.text, "native answer");
+        assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
+        assert_eq!(
+            deliveries.borrow().as_slice(),
+            [AiDelivery {
+                completion_id: "conversation-1".to_owned(),
+                delivered: true,
+                sent_message_id: Some(MessageId(700)),
+            }]
+        );
+        assert_eq!(dispatcher.state_diagnostics(), ["provider diagnostic"]);
+    }
+
+    #[test]
+    fn ai_routing_records_ignored_groups_and_honors_non_ai_followup_config() {
+        let (source, (prepared, ignored, deliveries)) = ai_source(Ok(AiPreparation::silent()));
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig {
+                    ai_command_followups: false,
+                    ..ChatConfig::default()
+                }),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            Samples {
+                choice_index: 9_999,
+                integer: BigInt::from(2_u8),
+            },
+            authorization(),
+            "@mybot",
+        )
+        .with_ai_conversation_source(Box::new(AiSource {
+            metadata: Some(AiReplyMetadata {
+                kind: "command".to_owned(),
+                uses_ai: false,
+            }),
+            ..source
+        }));
+        let mut ordinary = update("ordinary group message", None);
+        let IncomingEvent::Message(message) = &mut ordinary.event else {
+            return;
+        };
+        message.chat_type = Some("group".to_owned());
+        assert_eq!(dispatcher.dispatch(ordinary), Ok(DispatchOutcome::Handled));
+
+        let mut followup = update("and why?", None);
+        let IncomingEvent::Message(message) = &mut followup.event else {
+            return;
+        };
+        message.chat_type = Some("group".to_owned());
+        message.has_reply = true;
+        message.replied_message_id = Some(MessageId(3));
+        message.replied_sender_first_name = Some("Gordo".to_owned());
+        message.replied_sender_username = Some("mybot".to_owned());
+        message.replied_text = Some("command answer".to_owned());
+        assert_eq!(dispatcher.dispatch(followup), Ok(DispatchOutcome::Handled));
+        assert!(prepared.borrow().is_empty());
+        assert_eq!(ignored.borrow().len(), 2);
+        assert_eq!(
+            ignored.borrow()[1].reply_context.as_deref(),
+            Some("Gordo (mybot): command answer")
+        );
+        assert!(deliveries.borrow().is_empty());
         assert!(dispatcher.actions.0.is_empty());
     }
 

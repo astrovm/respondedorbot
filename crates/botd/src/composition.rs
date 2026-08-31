@@ -27,13 +27,18 @@ use bot_adapters::dollar::{
 use bot_adapters::finviz::{
     FinvizTransport, ReqwestFinvizTransport, TransportFailureKind as FinvizTransportFailureKind,
 };
+use bot_adapters::firecrawl::ReqwestFirecrawlTransport;
 use bot_adapters::giphy::{
     GiphyTransport, ReqwestGiphyTransport, TransportFailureKind as GiphyTransportFailureKind,
 };
 use bot_adapters::giphy_pool::{GiphyPoolCache, load_giphy_pool};
+use bot_adapters::hacker_news::ReqwestHackerNewsTransport;
 use bot_adapters::link_preview::{
     LinkPreviewTransport, ReqwestLinkPreviewTransport, download_oversized_video,
     inspect_with as inspect_link_preview,
+};
+use bot_adapters::openrouter_chat::{
+    DEFAULT_OPENROUTER_BASE_URL, OpenRouterChatError, ReqwestOpenRouterTransport,
 };
 use bot_adapters::polymarket::{
     PolymarketTransport, ReqwestPolymarketTransport,
@@ -56,6 +61,7 @@ use bot_adapters::weather::{
     ReqwestWeatherTransport, TransportFailureKind as WeatherTransportFailureKind, WeatherTransport,
     load_weather,
 };
+use bot_adapters::web_fetch::{ReqwestWebFetchTransport, SystemHostResolver};
 use bot_adapters::yahoo_finance::{
     ReqwestYahooFinanceTransport, TransportFailureKind as YahooTransportFailureKind,
     YahooFinanceTransport, load_quote as load_yahoo_quote, load_symbol as load_yahoo_symbol,
@@ -78,6 +84,12 @@ use bot_core::telegram_payments::StarPaymentRecord;
 use num_bigint::{BigInt, BigUint};
 use thiserror::Error;
 
+use crate::chat_members_tool::ChatMembersTool;
+use crate::chat_provider::OpenRouterChatStreamer;
+use crate::chat_tool_loop::DEFAULT_MAX_TOOL_ROUNDS;
+use crate::conversation::ConversationToolFactory;
+use crate::conversation::NativeConversation;
+use crate::conversation_adapters::{PostgresConversationBilling, RedisConversationState};
 use crate::dispatcher::{
     ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BcraLoad, BcraSource,
     BillingBalanceSource, BillingBalances, BillingTransferSink, BitcoinPriceSource,
@@ -89,7 +101,17 @@ use crate::dispatcher::{
     StarPaymentReceipt, StarPaymentSink, StockPriceSource, StockQuotesLoad, WeatherObservationLoad,
     WeatherSource,
 };
+use crate::firecrawl_tool::FirecrawlTool;
+use crate::hacker_news_tool::HackerNewsTool;
+use crate::market_tools::{CryptoPricesTool, DollarRatesTool, StockPricesTool, WeatherTool};
+use crate::native_tools::{NativeTool, NativeToolRegistry, StandardNativeToolBackend};
+use crate::random_tool::RandomChoiceTool;
 use crate::runtime::{PollingRuntime, UpdateSource};
+use crate::task_tools::{
+    RandomTaskIdSource, TaskCancelTool, TaskListTool, TaskSetTool, TaskToolContext,
+};
+use crate::tool_requests::{ExternalToolbox, ValidatedNativeToolPorts};
+use crate::web_fetch_tool::WebFetchTool;
 
 impl AdminCreditSink for BillingRepository {
     fn mint(&mut self, user_id: i64, amount: i64) -> Result<i64, String> {
@@ -1178,6 +1200,10 @@ pub enum CompositionError {
     RedisState(#[from] RedisMessageStateError),
     #[error("could not construct Redis scheduled-task state: {0}")]
     RedisTasks(#[from] RedisTaskStoreError),
+    #[error("could not construct OpenRouter chat transport: {0}")]
+    OpenRouterChatTransport(OpenRouterChatError),
+    #[error("could not construct Redis AI conversation state: {0}")]
+    ConversationState(String),
 }
 
 pub struct NativeRuntimeOptions<'a> {
@@ -1190,11 +1216,216 @@ pub struct NativeRuntimeOptions<'a> {
     pub admin_user_id: Option<i64>,
     pub coinmarketcap_key: Option<String>,
     pub giphy_api_key: Option<String>,
+    pub openrouter_api_key: Option<String>,
+    pub openrouter_base_url: Option<String>,
+    pub firecrawl_api_key: Option<String>,
+    pub system_prompt: Option<String>,
+    pub trigger_words: Option<Vec<String>>,
+}
+
+pub type ProductionConversationTools =
+    NativeToolRegistry<StandardNativeToolBackend<ValidatedNativeToolPorts<ExternalToolbox>>>;
+
+pub struct ProductionToolFactory {
+    redis_endpoint: RedisEndpoint,
+    database_url: String,
+    coinmarketcap_key: Option<String>,
+    firecrawl_key: Option<String>,
+}
+
+impl ProductionToolFactory {
+    #[must_use]
+    pub fn new(
+        redis_endpoint: &RedisEndpoint,
+        database_url: &str,
+        coinmarketcap_key: Option<String>,
+        firecrawl_key: Option<String>,
+    ) -> Self {
+        Self {
+            redis_endpoint: redis_endpoint.clone(),
+            database_url: database_url.to_owned(),
+            coinmarketcap_key,
+            firecrawl_key,
+        }
+    }
+}
+
+impl ConversationToolFactory for ProductionToolFactory {
+    type Tools = ProductionConversationTools;
+
+    fn create(
+        &mut self,
+        input: &crate::ai_dispatch::AiConversationInput,
+    ) -> Result<Self::Tools, String> {
+        let locale = input.locale;
+        let chat_id = input.chat_id.0.to_string();
+        let mut toolbox = ExternalToolbox::default();
+
+        if let Some(api_key) = self.coinmarketcap_key.clone().filter(|key| !key.is_empty()) {
+            let market = NativeMarketPriceSource {
+                transport: ReqwestCoinMarketCapTransport::new()
+                    .map_err(|error| format!("CoinMarketCap tool transport: {error:?}"))?,
+                cache: RedisJsonCache::new(&self.redis_endpoint)
+                    .map_err(|error| error.to_string())?,
+                api_key,
+                stocks: YahooStockPriceSource {
+                    yahoo_transport: ReqwestYahooFinanceTransport::new()
+                        .map_err(|error| format!("Yahoo tool transport: {error:?}"))?,
+                    finviz_transport: ReqwestFinvizTransport::new()
+                        .map_err(|error| format!("Finviz tool transport: {error:?}"))?,
+                    cache: RedisJsonCache::new(&self.redis_endpoint)
+                        .map_err(|error| error.to_string())?,
+                },
+            };
+            toolbox = toolbox.with_executor(
+                NativeTool::CryptoPrices,
+                Box::new(CryptoPricesTool::new(
+                    market,
+                    current_unix_timestamp,
+                    locale,
+                )),
+            );
+        }
+
+        toolbox = toolbox
+            .with_executor(
+                NativeTool::StockPrices,
+                Box::new(StockPricesTool::new(
+                    YahooStockPriceSource {
+                        yahoo_transport: ReqwestYahooFinanceTransport::new()
+                            .map_err(|error| format!("Yahoo tool transport: {error:?}"))?,
+                        finviz_transport: ReqwestFinvizTransport::new()
+                            .map_err(|error| format!("Finviz tool transport: {error:?}"))?,
+                        cache: RedisJsonCache::new(&self.redis_endpoint)
+                            .map_err(|error| error.to_string())?,
+                    },
+                    current_unix_timestamp,
+                    locale,
+                )),
+            )
+            .with_executor(
+                NativeTool::DollarRates,
+                Box::new(DollarRatesTool::new(
+                    CriptoYaDollarMarketSource {
+                        transport: ReqwestDollarTransport::new()
+                            .map_err(|error| format!("dollar tool transport: {error:?}"))?,
+                        cache: RedisJsonCache::new(&self.redis_endpoint)
+                            .map_err(|error| error.to_string())?,
+                    },
+                    current_unix_timestamp,
+                    locale,
+                )),
+            )
+            .with_executor(
+                NativeTool::Weather,
+                Box::new(WeatherTool::new(
+                    OpenMeteoWeatherSource {
+                        transport: ReqwestWeatherTransport::new()
+                            .map_err(|error| format!("weather tool transport: {error:?}"))?,
+                        cache: RedisJsonCache::new(&self.redis_endpoint)
+                            .map_err(|error| error.to_string())?,
+                    },
+                    current_unix_timestamp,
+                    locale,
+                )),
+            )
+            .with_executor(
+                NativeTool::WebFetch,
+                Box::new(WebFetchTool::new(
+                    ReqwestWebFetchTransport::new().map_err(|error| error.to_string())?,
+                    SystemHostResolver,
+                    locale,
+                )),
+            )
+            .with_executor(
+                NativeTool::RandomChoice,
+                Box::new(RandomChoiceTool::new(SystemRandomSource, locale)),
+            )
+            .with_executor(
+                NativeTool::TaskSet,
+                Box::new(TaskSetTool::new(
+                    RedisTaskStore::new(&self.redis_endpoint).map_err(|error| error.to_string())?,
+                    BillingRepository::new(&self.database_url),
+                    RandomTaskIdSource,
+                    current_unix_timestamp,
+                    TaskToolContext {
+                        chat_id: chat_id.clone(),
+                        user_name: if input.sender_username.is_empty() {
+                            input.sender_first_name.clone()
+                        } else {
+                            input.sender_username.clone()
+                        },
+                        user_id: Some(input.sender_id.0),
+                        timezone_offset: i32::try_from(input.timezone_offset_hours)
+                            .unwrap_or_default(),
+                        locale,
+                    },
+                )),
+            )
+            .with_executor(
+                NativeTool::TaskList,
+                Box::new(TaskListTool::new(
+                    RedisTaskStore::new(&self.redis_endpoint).map_err(|error| error.to_string())?,
+                    &chat_id,
+                    locale,
+                )),
+            )
+            .with_executor(
+                NativeTool::TaskCancel,
+                Box::new(TaskCancelTool::new(
+                    RedisTaskStore::new(&self.redis_endpoint).map_err(|error| error.to_string())?,
+                    &chat_id,
+                    locale,
+                )),
+            )
+            .with_executor(
+                NativeTool::GetChatMembers,
+                Box::new(ChatMembersTool::new(
+                    RedisMessageState::new(&self.redis_endpoint)
+                        .map_err(|error| error.to_string())?,
+                    current_unix_timestamp,
+                    &chat_id,
+                )),
+            )
+            .with_executor(
+                NativeTool::HackerNews,
+                Box::new(HackerNewsTool::new(
+                    ReqwestHackerNewsTransport::new().map_err(|error| error.to_string())?,
+                    RedisJsonCache::new(&self.redis_endpoint).map_err(|error| error.to_string())?,
+                    locale,
+                )),
+            );
+
+        if let Some(api_key) = self.firecrawl_key.clone().filter(|key| !key.is_empty()) {
+            toolbox = toolbox.with_executor(
+                NativeTool::WebSearch,
+                Box::new(FirecrawlTool::new(
+                    ReqwestFirecrawlTransport::new().map_err(|error| error.to_string())?,
+                    std::thread::sleep,
+                    &api_key,
+                    locale,
+                )),
+            );
+        }
+
+        Ok(NativeToolRegistry::new(StandardNativeToolBackend::new(
+            ValidatedNativeToolPorts::new(toolbox, locale),
+            locale,
+        )))
+    }
+}
+
+fn current_unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs().min(i64::MAX as u64) as i64)
 }
 
 pub fn build_native_runtime(
     options: NativeRuntimeOptions<'_>,
 ) -> Result<ConcreteNativeRuntime, CompositionError> {
+    let conversation_coinmarketcap_key = options.coinmarketcap_key.clone();
+    let conversation_firecrawl_key = options.firecrawl_api_key.clone();
     let polling_transport =
         ReqwestTelegramTransport::new().map_err(CompositionError::PollingTransport)?;
     let action_transport =
@@ -1301,6 +1532,46 @@ pub fn build_native_runtime(
         transport: link_preview_transport,
     }))
     .with_scheduled_task_source(Box::new(task_source));
+    let dispatcher = if let Some(words) = options.trigger_words.filter(|words| !words.is_empty()) {
+        dispatcher.with_trigger_words(words)
+    } else {
+        dispatcher
+    };
+    let dispatcher = match (
+        options.openrouter_api_key.filter(|key| !key.is_empty()),
+        options.system_prompt.filter(|prompt| !prompt.is_empty()),
+    ) {
+        (Some(api_key), Some(system_prompt)) => {
+            let provider = OpenRouterChatStreamer::new(
+                ReqwestOpenRouterTransport::new()
+                    .map_err(CompositionError::OpenRouterChatTransport)?,
+                &api_key,
+                options
+                    .openrouter_base_url
+                    .as_deref()
+                    .filter(|url| !url.is_empty())
+                    .unwrap_or(DEFAULT_OPENROUTER_BASE_URL),
+                crate::native_ai::PRIMARY_CHAT_MODEL,
+            );
+            let conversation = NativeConversation::new(
+                provider,
+                ProductionToolFactory::new(
+                    options.redis_endpoint,
+                    options.database_url,
+                    conversation_coinmarketcap_key,
+                    conversation_firecrawl_key,
+                ),
+                RedisConversationState::new(options.redis_endpoint)
+                    .map_err(CompositionError::ConversationState)?,
+                PostgresConversationBilling::new(options.database_url),
+                &system_prompt,
+                crate::native_ai::PRIMARY_CHAT_MODEL,
+                DEFAULT_MAX_TOOL_ROUNDS,
+            );
+            dispatcher.with_ai_conversation_source(Box::new(conversation))
+        }
+        _ => dispatcher,
+    };
     let dispatcher = if let Some(api_key) = options.coinmarketcap_key.filter(|key| !key.is_empty())
     {
         let transport = ReqwestCoinMarketCapTransport::new()
@@ -2141,6 +2412,11 @@ mod tests {
             admin_user_id: Some(99),
             coinmarketcap_key: None,
             giphy_api_key: None,
+            openrouter_api_key: None,
+            openrouter_base_url: None,
+            firecrawl_api_key: None,
+            system_prompt: None,
+            trigger_words: None,
         });
         assert!(result.is_ok());
         let result = build_native_runtime(NativeRuntimeOptions {
@@ -2153,6 +2429,28 @@ mod tests {
             admin_user_id: Some(99),
             coinmarketcap_key: Some("synthetic-cmc-key".to_owned()),
             giphy_api_key: None,
+            openrouter_api_key: None,
+            openrouter_base_url: None,
+            firecrawl_api_key: None,
+            system_prompt: None,
+            trigger_words: None,
+        });
+        assert!(result.is_ok());
+        let result = build_native_runtime(NativeRuntimeOptions {
+            token: "synthetic-token",
+            database_url: "postgresql://synthetic.invalid/database",
+            bot_name: "@synthetic_bot",
+            instance_name: Some("synthetic-instance".to_owned()),
+            redis_endpoint: &endpoint,
+            long_poll_timeout: Duration::from_secs(30),
+            admin_user_id: Some(99),
+            coinmarketcap_key: Some("synthetic-cmc-key".to_owned()),
+            giphy_api_key: None,
+            openrouter_api_key: Some("synthetic-openrouter-key".to_owned()),
+            openrouter_base_url: Some("https://openrouter.example.test/v1".to_owned()),
+            firecrawl_api_key: Some("synthetic-firecrawl-key".to_owned()),
+            system_prompt: Some("synthetic persona".to_owned()),
+            trigger_words: Some(vec!["synthetic".to_owned()]),
         });
         assert!(result.is_ok());
     }

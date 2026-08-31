@@ -1,10 +1,13 @@
 //! Application composition and lifecycle for the native bot process.
 
+pub mod ai_dispatch;
 pub mod chat_members_tool;
 pub mod chat_provider;
 pub mod chat_tool_loop;
 pub mod composition;
 pub mod config;
+pub mod conversation;
+pub mod conversation_adapters;
 pub mod dispatcher;
 pub mod firecrawl_tool;
 pub mod hacker_news_tool;
