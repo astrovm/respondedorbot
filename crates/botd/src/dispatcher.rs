@@ -86,6 +86,7 @@ use crate::ai_dispatch::{
     AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, reply_context,
 };
 use crate::runtime::UpdateHandler;
+use crate::telegram_stream::{StreamFinalizeError, TelegramStream};
 
 pub trait ChatConfigSource {
     type Error;
@@ -1422,42 +1423,82 @@ where
             return Ok(DispatchOutcome::Handled);
         }
 
-        let preparation = match self
-            .ai_conversation_source
-            .as_mut()
-            .map(|source| source.prepare(input))
-        {
-            Some(Ok(preparation)) => preparation,
-            Some(Err(error)) => {
+        let (preparation, stream_finalize, ignored_edit_failures) = {
+            let Some(source) = self.ai_conversation_source.as_mut() else {
+                return Ok(DispatchOutcome::LegacyRequired);
+            };
+            let mut stream = TelegramStream::new(&mut self.actions, chat_id, message_id);
+            let preparation = source.prepare_streaming(input, &mut |token| {
+                stream
+                    .feed(token)
+                    .map_err(|_error| "Telegram rejected the initial streamed response".to_owned())
+            });
+            match preparation {
+                Err(error) => {
+                    stream.cancel();
+                    let ignored = stream.ignored_edit_failures();
+                    (Err(error), None, ignored)
+                }
+                Ok(AiPreparation::Silent { diagnostics }) => {
+                    stream.cancel();
+                    let ignored = stream.ignored_edit_failures();
+                    (Ok(AiPreparation::Silent { diagnostics }), None, ignored)
+                }
+                Ok(AiPreparation::Reply {
+                    text,
+                    completion_id,
+                    diagnostics,
+                }) => {
+                    let finalized = stream.finalize(&text);
+                    let ignored = stream.ignored_edit_failures();
+                    (
+                        Ok(AiPreparation::Reply {
+                            text,
+                            completion_id,
+                            diagnostics,
+                        }),
+                        Some(finalized),
+                        ignored,
+                    )
+                }
+            }
+        };
+        if ignored_edit_failures > 0 {
+            self.state_diagnostics.push(format!(
+                "AI Telegram stream ignored {ignored_edit_failures} intermediate edit failures"
+            ));
+        }
+        let preparation = match preparation {
+            Ok(preparation) => preparation,
+            Err(error) => {
                 self.state_diagnostics
                     .push(format!("AI conversation: {error}"));
                 return Ok(DispatchOutcome::LegacyRequired);
             }
-            None => return Ok(DispatchOutcome::LegacyRequired),
         };
-        let (text, completion_id, diagnostics) = match preparation {
+        let (completion_id, diagnostics) = match preparation {
             AiPreparation::Silent { diagnostics } => {
                 self.state_diagnostics.extend(diagnostics);
                 return Ok(DispatchOutcome::Handled);
             }
             AiPreparation::Reply {
-                text,
                 completion_id,
                 diagnostics,
-            } => (text, completion_id, diagnostics),
+                ..
+            } => (completion_id, diagnostics),
         };
         self.state_diagnostics.extend(diagnostics);
-        let mut response = SendMessage::new(chat_id, &text);
-        response.reply_to_message_id = Some(message_id);
-        let delivery = self.actions.execute(TelegramAction::SendMessage(response));
-        match delivery {
-            Ok(receipt) => {
+        let Some(stream_finalize) = stream_finalize else {
+            return Ok(DispatchOutcome::Handled);
+        };
+        match stream_finalize {
+            Ok(delivery) => {
                 if let Some(completion_id) = completion_id
                     && let Some(source) = self.ai_conversation_source.as_mut()
                     && let Err(error) = source.complete_delivery(AiDelivery {
                         completion_id,
                         delivered: true,
-                        sent_message_id: receipt.message_id,
+                        sent_message_id: Some(delivery.message_id),
                     })
                 {
                     self.state_diagnostics
@@ -1465,7 +1506,23 @@ where
                 }
                 Ok(DispatchOutcome::Handled)
             }
-            Err(error) => {
+            Err(StreamFinalizeError::MissingMessageId) => {
+                if let Some(completion_id) = completion_id
+                    && let Some(source) = self.ai_conversation_source.as_mut()
+                    && let Err(error) = source.complete_delivery(AiDelivery {
+                        completion_id,
+                        delivered: false,
+                        sent_message_id: None,
+                    })
+                {
+                    self.state_diagnostics
+                        .push(format!("AI unconfirmed delivery completion: {error}"));
+                }
+                self.state_diagnostics
+                    .push("AI Telegram send returned no message identifier".to_owned());
+                Ok(DispatchOutcome::Handled)
+            }
+            Err(StreamFinalizeError::Action(error)) => {
                 if let Some(completion_id) = completion_id
                     && let Some(source) = self.ai_conversation_source.as_mut()
                     && let Err(finalize_error) = source.complete_delivery(AiDelivery {
@@ -2343,6 +2400,7 @@ mod tests {
     struct AiSource {
         metadata: Option<AiReplyMetadata>,
         preparation: Option<Result<AiPreparation, String>>,
+        tokens: Vec<String>,
         prepared: Rc<RefCell<Vec<AiConversationInput>>>,
         ignored: Rc<RefCell<Vec<AiConversationInput>>>,
         deliveries: Rc<RefCell<Vec<AiDelivery>>>,
@@ -2359,6 +2417,20 @@ mod tests {
 
         fn prepare(&mut self, input: AiConversationInput) -> Result<AiPreparation, String> {
             self.prepared.borrow_mut().push(input);
+            self.preparation
+                .take()
+                .unwrap_or_else(|| Ok(AiPreparation::silent()))
+        }
+
+        fn prepare_streaming(
+            &mut self,
+            input: AiConversationInput,
+            on_token: &mut dyn FnMut(&str) -> Result<(), String>,
+        ) -> Result<AiPreparation, String> {
+            self.prepared.borrow_mut().push(input);
+            for token in &self.tokens {
+                on_token(token)?;
+            }
             self.preparation
                 .take()
                 .unwrap_or_else(|| Ok(AiPreparation::silent()))
@@ -2389,6 +2461,7 @@ mod tests {
             AiSource {
                 metadata: None,
                 preparation: Some(preparation),
+                tokens: Vec::new(),
                 prepared: Rc::clone(&prepared),
                 ignored: Rc::clone(&ignored),
                 deliveries: Rc::clone(&deliveries),
@@ -3069,6 +3142,51 @@ mod tests {
             }]
         );
         assert_eq!(dispatcher.state_diagnostics(), ["provider diagnostic"]);
+    }
+
+    #[test]
+    fn private_ai_turn_streams_a_draft_then_finalizes_the_cleaned_response() {
+        let (mut source, (_prepared, _ignored, deliveries)) = ai_source(Ok(AiPreparation::Reply {
+            text: "cleaned answer".to_owned(),
+            completion_id: Some("conversation-1".to_owned()),
+            diagnostics: Vec::new(),
+        }));
+        source.tokens = vec!["raw ".to_owned(), "answer".to_owned()];
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_ai_conversation_source(Box::new(source));
+
+        assert_eq!(
+            dispatcher.dispatch(update("tell me something", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(dispatcher.actions.0.len(), 2);
+        assert!(matches!(
+            &dispatcher.actions.0[0],
+            TelegramAction::SendMessage(message) if message.text == "raw "
+        ));
+        assert!(matches!(
+            &dispatcher.actions.0[1],
+            TelegramAction::EditMessage { text, .. } if text == "cleaned answer"
+        ));
+        assert_eq!(
+            deliveries.borrow().as_slice(),
+            [AiDelivery {
+                completion_id: "conversation-1".to_owned(),
+                delivered: true,
+                sent_message_id: Some(MessageId(700)),
+            }]
+        );
     }
 
     #[test]

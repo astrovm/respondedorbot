@@ -85,6 +85,14 @@ pub trait AiConversationSource {
 
     fn prepare(&mut self, input: AiConversationInput) -> Result<AiPreparation, String>;
 
+    fn prepare_streaming(
+        &mut self,
+        input: AiConversationInput,
+        _on_token: &mut dyn FnMut(&str) -> Result<(), String>,
+    ) -> Result<AiPreparation, String> {
+        self.prepare(input)
+    }
+
     fn record_ignored(&mut self, _input: AiConversationInput) -> Result<(), String> {
         Ok(())
     }

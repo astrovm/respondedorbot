@@ -282,7 +282,11 @@ where
         Ok((messages, tools))
     }
 
-    fn prepare_transaction(&mut self, input: AiConversationInput) -> Result<AiPreparation, String> {
+    fn prepare_transaction(
+        &mut self,
+        input: AiConversationInput,
+        on_token: &mut dyn FnMut(&str) -> Result<(), String>,
+    ) -> Result<AiPreparation, String> {
         self.state.record_incoming(&input)?;
         let operation_id = operation_id(&input);
         let admission = vec![PromptMessage::text(PromptRole::User, &input.message_text)];
@@ -338,7 +342,9 @@ where
             &messages,
             false,
             self.max_tool_rounds,
-            |_token| Ok(()),
+            |token| {
+                on_token(token).map_err(bot_adapters::openrouter_chat::OpenRouterChatError::Stream)
+            },
         );
         let (raw_text, segments, diagnostics, provider_failed) = match loop_result {
             Ok(result) => (
@@ -409,7 +415,15 @@ where
     }
 
     fn prepare(&mut self, input: AiConversationInput) -> Result<AiPreparation, String> {
-        self.prepare_transaction(input)
+        self.prepare_transaction(input, &mut |_token| Ok(()))
+    }
+
+    fn prepare_streaming(
+        &mut self,
+        input: AiConversationInput,
+        on_token: &mut dyn FnMut(&str) -> Result<(), String>,
+    ) -> Result<AiPreparation, String> {
+        self.prepare_transaction(input, on_token)
     }
 
     fn record_ignored(&mut self, input: AiConversationInput) -> Result<(), String> {
@@ -841,6 +855,26 @@ mod tests {
             Ok(())
         );
         assert_eq!(service.billing.settlements.len(), 1);
+    }
+
+    #[test]
+    fn successful_turn_forwards_provider_text_before_returning_cleaned_output() {
+        let mut service = conversation(
+            vec![Ok(round("Gordo: **answer**", None))],
+            Billing::default(),
+        );
+        let mut streamed = String::new();
+        let preparation = service.prepare_streaming(input(), &mut |token| {
+            streamed.push_str(token);
+            Ok(())
+        });
+
+        assert_eq!(streamed, "Gordo: **answer**");
+        assert!(matches!(
+            preparation,
+            Ok(AiPreparation::Reply { text, .. }) if text == "answer"
+        ));
+        assert!(service.billing.settlements.is_empty());
     }
 
     #[test]
