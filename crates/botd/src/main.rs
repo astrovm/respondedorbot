@@ -25,9 +25,8 @@ fn check_config() -> ExitCode {
     match ProductionConfig::from_env() {
         Ok(config) => {
             println!(
-                "configuration valid: bot={} handler_workers={} long_poll_seconds={} trigger_words={}",
+                "configuration valid: bot={} long_poll_seconds={} trigger_words={}",
                 config.bot_name,
-                config.runtime.handler_workers,
                 config.runtime.long_poll_timeout.as_secs(),
                 config.trigger_words.len(),
             );

@@ -2,6 +2,6 @@
   "event_type": "ai_settlement_result",
   "ordering": ["created_at descending", "id descending"],
   "limit": {"minimum": 1, "maximum": 50, "default": 10},
-  "timestamp_type": "timezone-aware Python datetime",
-  "failure_behavior": "safe Python read fallback"
+  "timestamp_type": "timezone-aware instant",
+  "failure_behavior": "typed read error with a safe administrative response"
 }

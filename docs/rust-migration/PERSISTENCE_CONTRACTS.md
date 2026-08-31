@@ -2,9 +2,8 @@
 
 ## Scope
 
-These formats are compatibility boundaries. Rust may introduce versioned
-formats, but it must read existing records and must not prevent rollback while
-Python remains a supported deployment target.
+These formats are compatibility boundaries. The native application reads all
+records produced before cutover and writes the documented stable formats.
 
 ## PostgreSQL
 
@@ -165,13 +164,10 @@ Canonical task fields currently are:
 Trigger variants are delay seconds, interval seconds, interval days, and cron
 with hour/minute plus optional weekday list or day of month.
 
-Before the Rust scheduler becomes authoritative, this record needs an explicit
-schema version, next-run state for every trigger, claim/lease fields or a separate
-claim key, and an execution idempotency identifier.
-
-The accepted version 1 schema and claim protocol are defined in
-[ADR 0003](decisions/0003-canonical-scheduled-tasks.md). Its new fields are
-additive; legacy trigger fields remain required during rollback compatibility.
+The authoritative version 1 schema adds next-run state, schedule anchors, and
+execution idempotency. The claim protocol is defined in
+[ADR 0003](decisions/0003-canonical-scheduled-tasks.md). Older trigger fields
+remain readable as stored-data compatibility fields.
 
 ### Caches and callback state
 
@@ -189,23 +185,15 @@ Known compatibility key families include:
 - `chat_admin:{chat_id}:{user_id}`
 - `creditless_cap:{chat_id}:{user_id}`
 
-Generic JSON cache records and stale-cache records must preserve their existing
-timestamp/value shapes and TTL semantics during rollback compatibility.
+Generic JSON cache records and stale-cache records preserve their established
+timestamp/value shapes and TTL semantics.
 
 ## Redis database 1
 
-APScheduler's Redis job store currently writes Python-specific executable job
-state to database 1. Rust must not attempt to decode or reproduce this format.
-
-The migration sequence is:
-
-1. Make versioned `task:data:*` records canonical.
-2. Prove all active APScheduler jobs have canonical records.
-3. Make Python reconstruct scheduling exclusively from canonical records.
-4. Verify Rust scheduling decisions without executing them.
-5. Stop the Python scheduler owner.
-6. Start the Rust scheduler owner.
-7. Remove database 1 job state only after rollback support ends.
+The native application does not use Redis database 1. Historical scheduler
+objects in that database are not executable state and may be removed after the
+deployment owner confirms that no rollback image needs them. Canonical tasks in
+database 0 are the only scheduling source of truth.
 
 ## Files and environment
 
@@ -215,7 +203,8 @@ The application reads `workspace/SOUL.md` and `workspace/RULES.md`, or uses
 Configuration includes:
 
 - `TELEGRAM_TOKEN`, `TELEGRAM_USERNAME`
-- `BOT_SYSTEM_PROMPT`, `BOT_HANDLER_WORKERS`
+- `BOT_SYSTEM_PROMPT`, `BOT_TRIGGER_WORDS`, `BOT_INSTANCE_NAME`
+- `TELEGRAM_LONG_POLL_SECONDS`
 - `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`
 - `REDIS_MAXMEMORY`, `REDIS_MAXMEMORY_POLICY`
 - `SUPABASE_POSTGRES_URL`
@@ -225,21 +214,16 @@ Configuration includes:
 - `COINMARKETCAP_KEY`
 - `GIPHY_API_KEY`
 - `ADMIN_CHAT_ID`, `FRIENDLY_INSTANCE_NAME`
-- `AI_RECONCILIATION_INTERVAL_SECONDS`
+- `AI_RECONCILIATION_INTERVAL_SECONDS`, `AI_RECONCILIATION_RETRY_SECONDS`
+- `AI_RECONCILIATION_SAFETY_CREDIT_UNITS`, `AI_RECONCILIATION_STALE_SECONDS`
+- `AI_LEDGER_RETENTION_DAYS`
 
 Rust configuration must distinguish required, optional, and feature-gating
 variables and must redact secret values from errors and logs.
 
 ## External ownership and rollback
 
-During hybrid operation:
-
-- Python remains the Telegram poller until the final polling cutover.
-- Only the selected authoritative implementation performs an HTTP side effect.
-- Only one scheduler executes tasks.
-- Only one billing repository writes PostgreSQL mutations.
-- Shadow comparison is limited to pure logic and safe reads.
-- New Rust-written records remain readable by the rollback Python image.
-
-Compatibility can be retired only after the Rust-only observation period and an
-explicit checkpoint confirming that rollback no longer requires the old format.
+The native process is the only Telegram poller, scheduler, and billing writer.
+Rollback stops the current container before starting one immutable, previously
+verified image. Redis and PostgreSQL stay external and are never duplicated or
+rewound as part of an application rollback.

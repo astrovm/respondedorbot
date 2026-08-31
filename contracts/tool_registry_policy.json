@@ -41,7 +41,7 @@
       "rust_valid": false
     },
     {
-      "name": "Python non-finite JSON uses adapter fallback",
+      "name": "non-standard non-finite JSON is rejected by the adapter",
       "raw": "{\"value\":NaN}",
       "expected_non_finite_key": "value",
       "rust_valid": false

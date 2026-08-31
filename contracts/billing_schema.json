@@ -14,5 +14,5 @@
   "advisory_lock_keys": [48610002, 48610003, 48610004, 48610005],
   "current_credit_scale": 100,
   "transaction_scope": "DDL, data migrations, repair, and migration markers commit atomically",
-  "failure_behavior": "fail closed without starting the Python schema writer"
+  "failure_behavior": "fail closed before starting the application runtime"
 }

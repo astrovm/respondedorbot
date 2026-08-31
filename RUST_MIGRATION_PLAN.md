@@ -3,10 +3,11 @@
 ## Status
 
 - Branch: `codex/rust-migration`
-- Current runtime: Python 3.14
-- Current application size: approximately 34,770 lines under `api/`
-- Baseline verification: 1,015 Python tests passing
-- Final runtime: Rust only, with no Python interpreter, Python sidecar, or embedded Python
+- Status: complete
+- Current runtime: one native Rust `botd` process
+- Compatibility baseline before retirement: 1,298 tests passing
+- Final verification: 692 Rust tests passing, including Redis and PostgreSQL integration tests
+- Runtime image: Rust only, with no Python interpreter, sidecar, bridge, or embedded runtime
 
 ## Objectives
 
@@ -55,7 +56,7 @@ These conditions apply to every migration phase:
 - Existing persistent data remains readable.
 - Data migrations are additive and backward-compatible until rollback support ends.
 - A Rust implementation is not authoritative until parity tests pass.
-- An incomplete Rust path continues through the existing Python implementation.
+- Unsupported or failed paths return an explicit typed failure; no fallback runtime exists.
 - Every release has a tested rollback path.
 - Synthetic, non-identifying data is used in tests and fixtures.
 
@@ -78,9 +79,7 @@ bot-core
 
 Dependency direction must remain `botd -> bot-adapters -> bot-core`.
 
-During the migration, a temporary `python-bridge` crate will expose Rust behavior
-to the running Python application through PyO3. It is not part of the final
-architecture and will be deleted with the Python runtime.
+The temporary bridge used during parity work was removed at the final cutover.
 
 ### Core design rules
 
@@ -152,17 +151,13 @@ Every change must run at least:
 
 ```bash
 cargo fmt --check
-cargo check --all-targets
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all
-uv run --locked ruff check api/ tests/
-uv run --locked mypy api/
-uv run --locked python -m pytest -q
+cargo check --locked --workspace --all-targets --all-features
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-features
 ```
 
-The Python checks remain until the corresponding Python implementation and its
-tests have been replaced. Extended fuzz, mutation, restart, and load suites can
-run outside the fast pull-request path.
+Extended fuzz, mutation, restart, and load suites can run outside the fast
+pull-request path.
 
 ## Migration Phases
 
@@ -375,6 +370,11 @@ After a defined Rust-only production observation period:
 
 **Exit gate:** one Rust binary supplies every bot feature and no Python code,
 runtime, sidecar, bridge, or fallback remains.
+
+**Completed:** the native process is authoritative; the compatibility suite was
+green before retirement; the Rust workspace, integration services, release
+binary, and Rust-only container image passed their gates; retired source,
+bridge, dependencies, entrypoints, and CI tooling were deleted.
 
 ## Per-change Definition of Done
 

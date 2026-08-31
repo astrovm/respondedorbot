@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted for the compatibility migration.
+Accepted and implemented.
 
 ## Context
 
@@ -46,12 +46,9 @@ representation. `next_run_at` is authoritative for all trigger kinds.
 `last_execution_id` records the most recently completed occurrence. Unknown
 fields remain permitted during the compatibility period.
 
-Python dual-writes version 1 while it owns APScheduler. It backfills
-`next_run_at` from `job.next_run_time` for every active legacy record. Startup
-reports records that cannot be matched to a valid job; it does not silently
-invent a recurring schedule. After that backfill, startup rebuilds every Python
-job with the exact canonical `next_run_at` and removes orphaned `task_*` jobs.
-APScheduler is therefore an execution cache rather than the source of truth.
+During cutover, version 1 records were backfilled from the former scheduler's
+next-run state. The native scheduler now treats those records as the only source
+of truth and reports malformed records rather than inventing recurrence.
 
 Rust uses these additional Redis keys:
 
@@ -84,18 +81,17 @@ renew `task:scheduler:owner`, claims every occurrence before execution or skip,
 repairs stale due-index entries, releases claims for retryable execution, and
 advances state only through the compare-and-update Lua operation.
 
-The ownership switch is atomic at deployment level: stop the Python scheduler,
-validate its final canonical-state sync, then start the Rust scheduler. Shadow
-mode computes decisions but never acquires claims or executes tasks.
+The ownership switch was atomic at deployment level. Verification mode still
+computes decisions without acquiring claims, executing tasks, or writing state.
 
 ## Consequences
 
-Task listing no longer depends on Python pickles. Rust can reconstruct jobs from
-Redis database 0, and rollback remains possible while legacy fields are kept.
+Task listing and execution depend only on language-neutral records in Redis
+database 0. Older fields remain readable for stored-data compatibility.
 The claim protocol prevents concurrent workers from executing the same live
 occurrence. As with the existing implementation, a process crash after an
 external Telegram send but before durable completion cannot provide strict
 exactly-once delivery; stable execution and billing identifiers make retries
 detectable and financial mutations idempotent.
 
-Redis database 1 is retained until the Rust-only observation period ends.
+Redis database 1 is not used by the native runtime.
