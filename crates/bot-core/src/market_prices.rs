@@ -169,20 +169,24 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
                 diagnostics.push(format!("CoinMarketCap symbol quotes: {error}"));
                 Vec::new()
             });
+        retain_requested_symbols(&mut fetched, &missing);
         let still_missing = missing_tokens(&fetched, &missing);
         if !still_missing.is_empty() {
             let slugs = still_missing
                 .iter()
+                .filter(|token| token.len() > 3)
                 .map(|token| token.to_lowercase())
                 .collect::<Vec<_>>();
-            fetched.extend(
-                crypto
+            if !slugs.is_empty() {
+                let mut slug_fetched = crypto
                     .quotes(&slugs, target_parameter, true)
                     .unwrap_or_else(|error| {
                         diagnostics.push(format!("CoinMarketCap slug quotes: {error}"));
                         Vec::new()
-                    }),
-            );
+                    });
+                retain_requested_slugs(&mut slug_fetched, &still_missing);
+                fetched.extend(slug_fetched);
+            }
         }
         selection.rows.extend(fetched);
         unique_assets(&mut selection.rows);
@@ -299,8 +303,10 @@ fn select_assets(text: &str, listed: &[CryptoAsset]) -> Selection {
     let mut identities = HashSet::new();
     for (index, coin) in listed.iter().enumerate() {
         let symbol = normalized(&coin.symbol);
-        let name = normalized(&coin.name);
-        if !requested_set.contains(&symbol) && !requested_set.contains(&name) && index >= top_n {
+        let slug = normalized(&coin.slug);
+        let exact_symbol = requested_set.contains(&symbol);
+        let exact_slug = slug.len() > 3 && requested_set.contains(&slug);
+        if !exact_symbol && !exact_slug && index >= top_n {
             continue;
         }
         let identity = if coin.id.is_empty() {
@@ -365,6 +371,16 @@ fn missing_tokens(rows: &[CryptoAsset], requested: &[String]) -> Vec<String> {
         .filter(|token| !matched.contains(*token))
         .cloned()
         .collect()
+}
+
+fn retain_requested_symbols(rows: &mut Vec<CryptoAsset>, requested: &[String]) {
+    let requested = requested.iter().collect::<HashSet<_>>();
+    rows.retain(|asset| requested.contains(&normalized(&asset.symbol)));
+}
+
+fn retain_requested_slugs(rows: &mut Vec<CryptoAsset>, requested: &[String]) {
+    let requested = requested.iter().collect::<HashSet<_>>();
+    rows.retain(|asset| requested.contains(&normalized(&asset.slug)));
 }
 
 fn unique_assets(rows: &mut Vec<CryptoAsset>) {
@@ -880,6 +896,48 @@ mod tests {
         assert!(result.text.contains("BTC:"));
         assert!(result.text.contains("ZZZ:"));
         assert!(result.text.ends_with("no encontré estos activos: YYY"));
+    }
+
+    #[test]
+    fn rejects_provider_results_that_do_not_exactly_match_the_requested_asset() {
+        let mut misleading_usd = coin("xUSD", 1.0);
+        misleading_usd.name = "USD".to_owned();
+        misleading_usd.slug = "usd".to_owned();
+        let result = execute_market_price_command(
+            "btc usd 24h",
+            MarketPriceCommand::CryptoOnly,
+            Locale::Es,
+            &mut Crypto {
+                listings: vec![vec![coin("BTC", 50_000.0), misleading_usd.clone()]],
+                quotes: vec![vec![misleading_usd], Vec::new()],
+            },
+            &mut Stocks::default(),
+        );
+
+        assert_eq!(
+            result.text,
+            "BTC: 50000 USD (+2.5% 24h)\nno encontré estos activos: USD"
+        );
+    }
+
+    #[test]
+    fn accepts_unambiguous_long_asset_slugs() {
+        let mut bitcoin = coin("BTC", 50_000.0);
+        bitcoin.name = "Bitcoin".to_owned();
+        bitcoin.slug = "bitcoin".to_owned();
+
+        let result = execute_market_price_command(
+            "bitcoin",
+            MarketPriceCommand::CryptoOnly,
+            Locale::Es,
+            &mut Crypto {
+                listings: vec![vec![bitcoin]],
+                quotes: Vec::new(),
+            },
+            &mut Stocks::default(),
+        );
+
+        assert_eq!(result.text, "BTC: 50000 USD (+2.5% 24h)");
     }
 
     #[test]

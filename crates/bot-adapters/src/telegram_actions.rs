@@ -73,6 +73,14 @@ fn parse_mode(mode: ParseMode) -> &'static str {
     }
 }
 
+fn multipart_caption(caption: String, parse_mode: Option<ParseMode>) -> String {
+    if parse_mode.is_some() {
+        caption
+    } else {
+        caption.chars().take(1024).collect()
+    }
+}
+
 fn insert_optional<T: serde::Serialize>(
     payload: &mut Map<String, Value>,
     field: &str,
@@ -352,7 +360,7 @@ pub fn execute_with<T: TelegramTransport>(
                 ("chat_id".to_owned(), chat_id.0.to_string()),
                 (
                     "caption".to_owned(),
-                    caption.chars().take(1024).collect::<String>(),
+                    multipart_caption(caption, caption_parse_mode),
                 ),
             ];
             if let Some(reply_to_message_id) = reply_to_message_id {
@@ -394,7 +402,7 @@ pub fn execute_with<T: TelegramTransport>(
                 ("media".to_owned(), json!("attach://photo")),
                 (
                     "caption".to_owned(),
-                    json!(caption.chars().take(1024).collect::<String>()),
+                    json!(multipart_caption(caption, caption_parse_mode)),
                 ),
             ]);
             if let Some(mode) = caption_parse_mode {
@@ -467,7 +475,7 @@ mod tests {
     use bot_core::telegram_input::{ChatId, MessageId};
     use bot_core::{locale::Locale, telegram_commands::telegram_commands};
 
-    use super::{ActionOutcome, execute_with};
+    use super::{ActionOutcome, execute_with, multipart_caption};
     use crate::telegram_http::{
         HttpResponse, TelegramMultipartRequest, TelegramRequest, TelegramTransport,
         TransportFailureKind,
@@ -660,6 +668,20 @@ mod tests {
                 && media.contains("<b>updated</b>")
                 && media.contains("HTML")
         }));
+    }
+
+    #[test]
+    fn html_photo_captions_are_not_truncated_inside_markup() {
+        let caption = format!(
+            "<a href=\"https://example.test/{}\">link</a>",
+            "x".repeat(1_024)
+        );
+        assert!(caption.len() > 1_024);
+        assert_eq!(
+            multipart_caption(caption.clone(), Some(ParseMode::Html)),
+            caption
+        );
+        assert_eq!(multipart_caption("x".repeat(1_100), None).len(), 1_024);
     }
 
     #[test]

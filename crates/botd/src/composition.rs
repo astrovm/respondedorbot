@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bot_adapters::bcra::{
     BcraTransport, ReqwestBcraTransport, TransportFailureKind as BcraTransportFailureKind,
-    load_bcra, load_currency_bands,
+    load_bcra, load_dollar_references,
 };
 use bot_adapters::billing_read::{BillingRepository, ChargeHistoryRow};
 use bot_adapters::chat_config::{ChatConfigRepository, ChatConfigRepositoryError};
@@ -391,7 +391,7 @@ impl<T: DollarTransport, B: BcraTransport, C: DollarCache> DollarMarketSource
         locale: bot_core::locale::Locale,
         now_unix: i64,
     ) -> DollarMarketLoad {
-        let bands = load_currency_bands(&self.bcra_transport, &mut self.cache, now_unix);
+        let references = load_dollar_references(&self.bcra_transport, &mut self.cache, now_unix);
         let mut load = load_dollar_market(
             &self.transport,
             &mut self.cache,
@@ -399,7 +399,7 @@ impl<T: DollarTransport, B: BcraTransport, C: DollarCache> DollarMarketSource
             locale,
             now_unix,
         );
-        load.diagnostics.extend(bands.diagnostics);
+        load.diagnostics.extend(references.diagnostics);
         DollarMarketLoad {
             text: load.text,
             diagnostics: load.diagnostics,

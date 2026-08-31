@@ -117,8 +117,9 @@ pub struct BcraLoad {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct CurrencyBandsLoad {
+pub struct DollarReferencesLoad {
     pub bands: Option<BcraBands>,
+    pub itcrm: Option<ItcrmDetails>,
     pub diagnostics: Vec<String>,
 }
 
@@ -494,16 +495,16 @@ fn bands<T: BcraTransport, C: RequestCache>(
     Some(result)
 }
 
-/// Load the currency-band limits independently from the full BCRA snapshot.
+/// Load the BCRA values consumed by the dollar command independently.
 ///
-/// Dollar commands use this so their output does not depend on `/bcra` having
-/// populated the shared cache first.
+/// Dollar commands use this so currency bands and TCRM do not depend on
+/// `/bcra` having populated the shared cache first.
 #[must_use]
-pub fn load_currency_bands<T: BcraTransport, C: RequestCache>(
+pub fn load_dollar_references<T: BcraTransport, C: RequestCache>(
     transport: &T,
     cache: &mut C,
     now: i64,
-) -> CurrencyBandsLoad {
+) -> DollarReferencesLoad {
     let mut diagnostics = Vec::new();
     let list = request_json(
         transport,
@@ -512,9 +513,16 @@ pub fn load_currency_bands<T: BcraTransport, C: RequestCache>(
         now,
         &mut diagnostics,
     );
-    let vars = list.as_ref().map(items).unwrap_or_default();
-    let bands = bands(transport, cache, &vars, now, &mut diagnostics);
-    CurrencyBandsLoad { bands, diagnostics }
+    let items = list.as_ref().map(items).unwrap_or_default();
+    let variables = latest(&items);
+    let bands = bands(transport, cache, &items, now, &mut diagnostics);
+    let itcrm = itcrm(transport, cache, &mut diagnostics);
+    persist_market(cache, &variables, itcrm.as_ref(), now, &mut diagnostics);
+    DollarReferencesLoad {
+        bands,
+        itcrm,
+        diagnostics,
+    }
 }
 
 fn risk_label(value: &str) -> Option<String> {
@@ -826,8 +834,8 @@ mod tests {
     }
 
     #[test]
-    fn currency_bands_load_without_running_the_full_bcra_command() {
-        let variables = json!({"results":[{"categoria":"Principales Variables","idVariable":1187,"descripcion":"Régimen de bandas cambiarias. Límite inferior","ultFechaInformada":"2025-09-19","ultValorInformado":944.32},{"categoria":"Principales Variables","idVariable":1188,"descripcion":"Régimen de bandas cambiarias. Límite superior","ultFechaInformada":"2025-09-19","ultValorInformado":1481.7}]});
+    fn dollar_references_load_without_running_the_full_bcra_command() {
+        let variables = json!({"results":[{"categoria":"Principales Variables","idVariable":1187,"descripcion":"Régimen de bandas cambiarias. Límite inferior","ultFechaInformada":"2025-09-19","ultValorInformado":944.32},{"categoria":"Principales Variables","idVariable":1188,"descripcion":"Régimen de bandas cambiarias. Límite superior","ultFechaInformada":"2025-09-19","ultValorInformado":1481.7},{"categoria":"Principales Variables","idVariable":5,"descripcion":"Tipo de cambio mayorista","ultFechaInformada":"2025-09-19","ultValorInformado":1450.0}]});
         let lower = json!({"results":[{"detalle":[{"fecha":"2025-09-18","valor":930},{"fecha":"2025-09-19","valor":944.32}]}]});
         let upper = json!({"results":[{"detalle":[{"fecha":"2025-09-18","valor":1470},{"fecha":"2025-09-19","valor":1481.7}]}]});
         let transport = Transport {
@@ -838,12 +846,18 @@ mod tests {
             ])),
         };
         let mut cache = Cache::default();
+        cache.values.insert(
+            "latest_itcrm_details".to_owned(),
+            json!({"value":100.0,"date":"19/09/25"}).to_string(),
+        );
 
-        let load = load_currency_bands(&transport, &mut cache, 1_758_297_600);
+        let load = load_dollar_references(&transport, &mut cache, 1_758_297_600);
 
         assert_eq!(load.bands.as_ref().map(|bands| bands.lower), Some(944.32));
         assert_eq!(load.bands.as_ref().map(|bands| bands.upper), Some(1481.7));
+        assert_eq!(load.itcrm.as_ref().map(|itcrm| itcrm.value), Some(100.0));
         assert!(cache.values.contains_key("bcra_currency_band_limits"));
+        assert!(cache.values.contains_key("tcrm_100"));
     }
     #[test]
     fn stale_survives_failures() {

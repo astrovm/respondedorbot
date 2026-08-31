@@ -122,10 +122,10 @@ pub fn build_system_prompt(
     let tool_instruction = if tools_active {
         match locale {
             Locale::Es => {
-                "\n\nHERRAMIENTAS:\nLlamalas directamente, sin pedir permiso ni narrar antes.\nNo expliques qué vas a hacer antes de usar una herramienta simple.\nUsá las herramientas cuando necesites datos actuales o externos.\n"
+                "\n\nHERRAMIENTAS:\nLlamalas directamente, sin pedir permiso ni narrar antes.\nNo expliques qué vas a hacer antes de usar una herramienta simple.\nSi el usuario pide una herramienta disponible por nombre, usala.\nUsá calculate para toda aritmética; no calcules mentalmente.\nUsá las demás herramientas cuando necesites datos actuales o externos.\n"
             }
             Locale::En => {
-                "\n\nTOOLS:\nCall them directly without asking permission or narrating first.\nDo not explain what you will do before using a simple tool.\nUse tools when you need current or external data.\n"
+                "\n\nTOOLS:\nCall them directly without asking permission or narrating first.\nDo not explain what you will do before using a simple tool.\nIf the user requests an available tool by name, use it.\nUse calculate for all arithmetic; do not calculate mentally.\nUse the other tools when you need current or external data.\n"
             }
         }
     } else {
@@ -339,6 +339,7 @@ mod tests {
         );
         assert!(spanish.starts_with("EJECUTANDO TAREA PROGRAMADA:"));
         assert!(spanish.contains("synthetic persona\n\n\nHERRAMIENTAS:"));
+        assert!(spanish.contains("Usá calculate para toda aritmética"));
         assert!(spanish.contains("FECHA ACTUAL:\nMonday 01/01/2024"));
         assert!(spanish.contains("Respondé en español por defecto"));
 
