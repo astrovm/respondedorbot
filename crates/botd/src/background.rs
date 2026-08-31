@@ -4,7 +4,7 @@ use std::fmt::Display;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 
@@ -12,6 +12,7 @@ use crate::compaction_adapters::production_compaction_worker;
 use crate::compaction_worker::{
     CompactionBilling, CompactionProvider, CompactionQueue, CompactionState, CompactionWorker,
 };
+use crate::operational_reporting::OperationalReporter;
 use crate::price_refresh::production_price_refresh_worker;
 use crate::reconciliation::{
     ActiveOperationRegistry, AiBillingReconciler, GenerationSource, ReconciliationSettings,
@@ -25,6 +26,7 @@ use bot_adapters::redis_connection::RedisEndpoint;
 const TASK_INTERVAL: Duration = Duration::from_secs(1);
 const COMPACTION_INTERVAL: Duration = Duration::from_secs(2);
 const PRICE_REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
+const REPEATED_FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 pub struct ProductionBackgroundOptions<'a> {
     pub redis_endpoint: &'a RedisEndpoint,
@@ -139,34 +141,63 @@ pub struct BackgroundSupervisor {
     stopping: Arc<AtomicBool>,
     wake: Arc<(Mutex<()>, Condvar)>,
     handles: Vec<WorkerHandle>,
+    reporter: Arc<dyn OperationalReporter>,
 }
 
 impl BackgroundSupervisor {
-    pub fn start(specs: Vec<BackgroundWorkerSpec>) -> Result<Self, BackgroundError> {
+    pub fn start(
+        specs: Vec<BackgroundWorkerSpec>,
+        reporter: Arc<dyn OperationalReporter>,
+    ) -> Result<Self, BackgroundError> {
         let stopping = Arc::new(AtomicBool::new(false));
         let wake = Arc::new((Mutex::new(()), Condvar::new()));
         let mut supervisor = Self {
             stopping,
             wake,
             handles: Vec::with_capacity(specs.len()),
+            reporter,
         };
         for spec in specs {
             if spec.interval.is_zero() {
                 supervisor.stop_best_effort();
-                return Err(BackgroundError::InvalidInterval { name: spec.name });
+                let failure = BackgroundError::InvalidInterval { name: spec.name };
+                supervisor.report_failure(&failure.to_string());
+                return Err(failure);
             }
             let name = spec.name.clone();
             let thread_name = name.clone();
             let stopping = supervisor.stopping.clone();
             let wake = supervisor.wake.clone();
+            let reporter = supervisor.reporter.clone();
             let mut worker = spec.worker;
             let interval = spec.interval;
             let handle = thread::Builder::new()
                 .name(thread_name)
                 .spawn(move || {
+                    let mut last_reported_failure: Option<(String, Instant)> = None;
                     while !stopping.load(Ordering::Acquire) {
-                        if let Err(error) = worker.run_once(now_epoch_seconds()) {
-                            eprintln!("background worker {name} failed: {error}");
+                        match worker.run_once(now_epoch_seconds()) {
+                            Ok(()) => last_reported_failure = None,
+                            Err(error) => {
+                                let message = format!("background worker {name} failed: {error}");
+                                eprintln!("{message}");
+                                let now = Instant::now();
+                                let should_report = last_reported_failure.as_ref().is_none_or(
+                                    |(previous, reported_at)| {
+                                        previous != &message
+                                            || now.duration_since(*reported_at)
+                                                >= REPEATED_FAILURE_REPORT_INTERVAL
+                                    },
+                                );
+                                if should_report {
+                                    if let Err(report_error) = reporter.report(&message) {
+                                        eprintln!(
+                                            "could not deliver background failure report: {report_error}"
+                                        );
+                                    }
+                                    last_reported_failure = Some((message, now));
+                                }
+                            }
                         }
                         let (lock, changed) = &*wake;
                         let Ok(guard) = lock.lock() else {
@@ -180,16 +211,27 @@ impl BackgroundSupervisor {
                         }
                     }
                     if let Err(error) = worker.shutdown() {
-                        eprintln!("background worker {name} shutdown failed: {error}");
+                        let message = format!("background worker {name} shutdown failed: {error}");
+                        eprintln!("{message}");
+                        if let Err(report_error) = reporter.report(&message) {
+                            eprintln!(
+                                "could not deliver background shutdown failure report: {report_error}"
+                            );
+                        }
                     }
-                })
-                .map_err(|error| {
+                });
+            let handle = match handle {
+                Ok(handle) => handle,
+                Err(error) => {
                     supervisor.stop_best_effort();
-                    BackgroundError::Spawn {
+                    let failure = BackgroundError::Spawn {
                         name: spec.name.clone(),
                         error: error.to_string(),
-                    }
-                })?;
+                    };
+                    supervisor.report_failure(&failure.to_string());
+                    return Err(failure);
+                }
+            };
             supervisor.handles.push(WorkerHandle {
                 name: spec.name,
                 handle,
@@ -203,7 +245,9 @@ impl BackgroundSupervisor {
         self.wake.1.notify_all();
         while let Some(worker) = self.handles.pop() {
             if worker.handle.join().is_err() {
-                return Err(BackgroundError::Panicked { name: worker.name });
+                let failure = BackgroundError::Panicked { name: worker.name };
+                self.report_failure(&failure.to_string());
+                return Err(failure);
             }
         }
         Ok(())
@@ -213,7 +257,16 @@ impl BackgroundSupervisor {
         self.stopping.store(true, Ordering::Release);
         self.wake.1.notify_all();
         while let Some(worker) = self.handles.pop() {
-            let _joined = worker.handle.join();
+            if worker.handle.join().is_err() {
+                self.report_failure(&BackgroundError::Panicked { name: worker.name }.to_string());
+            }
+        }
+    }
+
+    fn report_failure(&self, message: &str) {
+        eprintln!("{message}");
+        if let Err(report_error) = self.reporter.report(message) {
+            eprintln!("could not deliver operational failure report: {report_error}");
         }
     }
 }
@@ -322,6 +375,7 @@ fn now_epoch_seconds() -> i64 {
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::sync::{Arc, Mutex};
 
     use bot_adapters::redis_connection::RedisEndpoint;
 
@@ -329,6 +383,7 @@ mod tests {
         BackgroundSupervisor, BackgroundWorker, BackgroundWorkerSpec, ProductionBackgroundOptions,
         build_production_background_specs,
     };
+    use crate::operational_reporting::OperationalReporter;
     use crate::reconciliation::{ActiveOperationRegistry, ReconciliationSettings};
     use crate::scheduler::SchedulerMode;
     use std::time::Duration;
@@ -337,6 +392,21 @@ mod tests {
         ran: mpsc::Sender<i64>,
         stopped: mpsc::Sender<()>,
         fail: bool,
+    }
+
+    #[derive(Default)]
+    struct Reporter {
+        messages: Mutex<Vec<String>>,
+    }
+
+    impl OperationalReporter for Reporter {
+        fn report(&self, message: &str) -> Result<(), String> {
+            self.messages
+                .lock()
+                .map_err(|_| "report lock poisoned".to_owned())?
+                .push(message.to_owned());
+            Ok(())
+        }
     }
 
     impl BackgroundWorker for Worker {
@@ -360,15 +430,19 @@ mod tests {
     fn starts_immediately_repeats_failures_and_stops_interruptibly() {
         let (ran_tx, ran_rx) = mpsc::channel();
         let (stopped_tx, stopped_rx) = mpsc::channel();
-        let mut supervisor = BackgroundSupervisor::start(vec![BackgroundWorkerSpec::new(
-            "synthetic-worker",
-            Duration::from_millis(20),
-            Box::new(Worker {
-                ran: ran_tx,
-                stopped: stopped_tx,
-                fail: true,
-            }),
-        )]);
+        let reporter = Arc::new(Reporter::default());
+        let mut supervisor = BackgroundSupervisor::start(
+            vec![BackgroundWorkerSpec::new(
+                "synthetic-worker",
+                Duration::from_millis(20),
+                Box::new(Worker {
+                    ran: ran_tx,
+                    stopped: stopped_tx,
+                    fail: true,
+                }),
+            )],
+            reporter.clone(),
+        );
         assert!(supervisor.is_ok());
         let Some(supervisor) = supervisor.as_mut().ok() else {
             return;
@@ -381,6 +455,8 @@ mod tests {
             ran_rx.recv_timeout(Duration::from_millis(50)),
             Err(RecvTimeoutError::Disconnected)
         );
+        let messages = reporter.messages.lock();
+        assert!(messages.is_ok_and(|messages| messages.len() == 1));
         assert!(supervisor.stop().is_ok());
     }
 
@@ -388,19 +464,29 @@ mod tests {
     fn rejects_zero_intervals_before_starting_a_worker() {
         let (ran_tx, ran_rx) = mpsc::channel();
         let (stopped_tx, _stopped_rx) = mpsc::channel();
-        let result = BackgroundSupervisor::start(vec![BackgroundWorkerSpec::new(
-            "invalid-worker",
-            Duration::ZERO,
-            Box::new(Worker {
-                ran: ran_tx,
-                stopped: stopped_tx,
-                fail: false,
-            }),
-        )]);
+        let reporter = Arc::new(Reporter::default());
+        let result = BackgroundSupervisor::start(
+            vec![BackgroundWorkerSpec::new(
+                "invalid-worker",
+                Duration::ZERO,
+                Box::new(Worker {
+                    ran: ran_tx,
+                    stopped: stopped_tx,
+                    fail: false,
+                }),
+            )],
+            reporter.clone(),
+        );
         assert!(result.is_err());
         assert_eq!(
             ran_rx.recv_timeout(Duration::from_millis(20)),
             Err(RecvTimeoutError::Disconnected)
+        );
+        assert!(
+            reporter
+                .messages
+                .lock()
+                .is_ok_and(|messages| messages.len() == 1)
         );
     }
 

@@ -17,8 +17,11 @@ use crate::background::{
 use crate::composition::{NativeRuntimeOptions, TelegramActionSink, build_native_runtime};
 use crate::config::ProductionConfig;
 use crate::dispatcher::ActionSink;
+use crate::operational_reporting::{
+    NoopOperationalReporter, OperationalReporter, TelegramOperationalReporter,
+};
 use crate::reconciliation::ActiveOperationRegistry;
-use crate::runtime::{PollingRuntime, StepOutcome, UpdateHandler, UpdateSource};
+use crate::runtime::{PollingRuntime, RuntimeError, StepOutcome, UpdateHandler, UpdateSource};
 use crate::scheduler::SchedulerMode;
 
 #[must_use]
@@ -50,10 +53,11 @@ where
     diagnostics
 }
 
-pub fn run_polling_until<Source, Handler, Stop, Wait>(
+pub fn run_polling_until<Source, Handler, Stop, Wait, Report>(
     runtime: &mut PollingRuntime<Source, Handler>,
     mut should_stop: Stop,
     mut wait: Wait,
+    mut report_handler_failure: Report,
 ) -> Result<(), String>
 where
     Source: UpdateSource,
@@ -61,11 +65,21 @@ where
     Handler::Error: Display,
     Stop: FnMut() -> bool,
     Wait: FnMut(Duration),
+    Report: FnMut(i64, &str),
 {
     while !should_stop() {
-        match runtime.step().map_err(|error| error.to_string())? {
-            StepOutcome::Retry(failure) => wait(retry_delay(&failure)),
-            StepOutcome::Idle | StepOutcome::Dispatched { .. } => {}
+        match runtime.step() {
+            Ok(StepOutcome::Retry(failure)) => wait(retry_delay(&failure)),
+            Ok(
+                StepOutcome::Idle
+                | StepOutcome::Synchronized { .. }
+                | StepOutcome::Dispatched { .. },
+            ) => {}
+            Err(RuntimeError::Handler {
+                update_id,
+                handler_error,
+            }) => report_handler_failure(update_id, &handler_error.to_string()),
+            Err(error @ RuntimeError::Poll(_)) => return Err(error.to_string()),
         }
     }
     Ok(())
@@ -82,7 +96,46 @@ fn interruptible_wait(stopping: &AtomicBool, duration: Duration) {
     }
 }
 
+fn build_operational_reporter(
+    config: &ProductionConfig,
+) -> Result<Arc<dyn OperationalReporter>, String> {
+    let Some(admin_chat_id) = config.admin_user_id else {
+        return Ok(Arc::new(NoopOperationalReporter));
+    };
+    let transport = ReqwestTelegramTransport::new()
+        .map_err(|error| format!("could not construct admin reporting transport: {error:?}"))?;
+    let secrets = [
+        Some(config.runtime.telegram_token()),
+        Some(config.database_url()),
+        config.redis_endpoint.password.as_deref(),
+        Some(config.coinmarketcap_key()),
+        config.giphy_api_key(),
+        Some(config.openrouter_api_key()),
+        config.groq_free_api_key(),
+        config.groq_api_key(),
+        config.firecrawl_api_key(),
+        Some(config.system_prompt.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::to_owned);
+    Ok(Arc::new(TelegramOperationalReporter::new(
+        transport,
+        config.runtime.telegram_token(),
+        admin_chat_id,
+        config.instance_name.as_deref(),
+        secrets,
+    )))
+}
+
+fn report_best_effort(reporter: &dyn OperationalReporter, message: &str) {
+    if let Err(error) = reporter.report(message) {
+        eprintln!("could not deliver operational report: {error}");
+    }
+}
+
 pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
+    let reporter = build_operational_reporter(config)?;
     let active_operations = ActiveOperationRegistry::default();
     let openrouter_base_url = config
         .openrouter_base_url
@@ -122,7 +175,8 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
         active_operations,
         coinmarketcap_key: Some(config.coinmarketcap_key()),
     })?;
-    let mut supervisor = BackgroundSupervisor::start(specs).map_err(|error| error.to_string())?;
+    let mut supervisor =
+        BackgroundSupervisor::start(specs, reporter.clone()).map_err(|error| error.to_string())?;
 
     let command_transport = ReqwestTelegramTransport::new()
         .map_err(|error| format!("could not construct command publication transport: {error:?}"))?;
@@ -130,6 +184,7 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
         TelegramActionSink::new(command_transport, config.runtime.telegram_token());
     for diagnostic in publish_commands(&mut command_sink) {
         eprintln!("{diagnostic}");
+        report_best_effort(reporter.as_ref(), &diagnostic);
     }
 
     let stopping = Arc::new(AtomicBool::new(false));
@@ -140,21 +195,38 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
         &mut runtime,
         || stopping.load(Ordering::Acquire),
         |duration| interruptible_wait(&stopping, duration),
+        |update_id, error| {
+            let message = format!("Telegram update {update_id} failed: {error}");
+            eprintln!("{message}");
+            report_best_effort(reporter.as_ref(), &message);
+        },
     );
+    if let Err(error) = &polling_result {
+        report_best_effort(
+            reporter.as_ref(),
+            &format!("Telegram polling runtime failed: {error}"),
+        );
+    }
     let shutdown_result = supervisor.stop().map_err(|error| error.to_string());
     polling_result.and(shutdown_result)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
+    use std::rc::Rc;
     use std::time::Duration;
 
     use bot_adapters::telegram_http::TransportFailureKind;
-    use bot_adapters::telegram_polling::PollFailure;
+    use bot_adapters::telegram_polling::{
+        IncomingEvent, IncomingUpdate, PollFailure, PollOutcome, PollingError,
+    };
     use bot_core::telegram_actions::TelegramAction;
 
-    use super::{publish_commands, retry_delay};
+    use super::{publish_commands, retry_delay, run_polling_until};
     use crate::dispatcher::{ActionReceipt, ActionSink};
+    use crate::runtime::{PollingRuntime, UpdateHandler, UpdateSource};
 
     #[derive(Default)]
     struct Sink {
@@ -228,5 +300,74 @@ mod tests {
             }),
             Duration::from_secs(1)
         );
+    }
+
+    #[test]
+    fn handler_failures_are_reported_acknowledged_and_do_not_stop_polling() {
+        struct Source {
+            outcomes: VecDeque<Result<PollOutcome, PollingError>>,
+            offsets: Rc<RefCell<Vec<Option<i64>>>>,
+        }
+        impl UpdateSource for Source {
+            fn poll(&mut self, offset: Option<i64>) -> Result<PollOutcome, PollingError> {
+                self.offsets.borrow_mut().push(offset);
+                self.outcomes
+                    .pop_front()
+                    .unwrap_or(Ok(PollOutcome::Updates(Vec::new())))
+            }
+        }
+        struct Handler {
+            handled: Rc<RefCell<Vec<i64>>>,
+        }
+        impl UpdateHandler for Handler {
+            type Error = &'static str;
+            fn handle(&mut self, update: IncomingUpdate) -> Result<(), Self::Error> {
+                if update.update_id == 11 {
+                    return Err("synthetic action failure");
+                }
+                self.handled.borrow_mut().push(update.update_id);
+                Ok(())
+            }
+        }
+        let update = |update_id| IncomingUpdate {
+            update_id,
+            event: IncomingEvent::Unsupported,
+        };
+        let offsets = Rc::new(RefCell::new(Vec::new()));
+        let handled = Rc::new(RefCell::new(Vec::new()));
+        let source = Source {
+            outcomes: VecDeque::from([
+                Ok(PollOutcome::Updates(Vec::new())),
+                Ok(PollOutcome::Updates(vec![update(10), update(11)])),
+                Ok(PollOutcome::Updates(vec![update(12)])),
+            ]),
+            offsets: offsets.clone(),
+        };
+        let mut runtime = PollingRuntime::new(
+            source,
+            Handler {
+                handled: handled.clone(),
+            },
+        );
+        let iterations = Cell::new(0);
+        let failures = RefCell::new(Vec::new());
+        let result = run_polling_until(
+            &mut runtime,
+            || {
+                let current = iterations.get();
+                iterations.set(current + 1);
+                current >= 3
+            },
+            |_| {},
+            |update_id, error| failures.borrow_mut().push((update_id, error.to_owned())),
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(*handled.borrow(), [10, 12]);
+        assert_eq!(
+            *failures.borrow(),
+            [(11, "synthetic action failure".to_owned())]
+        );
+        assert_eq!(*offsets.borrow(), [Some(-1), None, Some(12)]);
+        assert_eq!(runtime.offset(), Some(13));
     }
 }

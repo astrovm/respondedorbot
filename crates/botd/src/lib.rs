@@ -22,6 +22,7 @@ pub mod media;
 pub mod media_adapters;
 pub mod native_ai;
 pub mod native_tools;
+pub mod operational_reporting;
 pub mod price_refresh;
 pub mod random_tool;
 pub mod reconciliation;

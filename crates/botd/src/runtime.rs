@@ -1,6 +1,8 @@
 //! Long-poll state ownership and ordered update dispatch.
 
-use bot_adapters::telegram_polling::{IncomingUpdate, PollFailure, PollOutcome, PollingError};
+use bot_adapters::telegram_polling::{
+    IncomingUpdate, PollFailure, PollOutcome, PollingError, next_offset,
+};
 use thiserror::Error;
 
 pub trait UpdateSource {
@@ -16,6 +18,7 @@ pub trait UpdateHandler {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepOutcome {
     Idle,
+    Synchronized { dropped: usize },
     Dispatched { count: usize },
     Retry(PollFailure),
 }
@@ -35,6 +38,7 @@ pub struct PollingRuntime<Source, Handler> {
     source: Source,
     handler: Handler,
     offset: Option<i64>,
+    synchronized: bool,
 }
 
 impl<Source, Handler> PollingRuntime<Source, Handler>
@@ -48,6 +52,7 @@ where
             source,
             handler,
             offset: None,
+            synchronized: false,
         }
     }
 
@@ -57,20 +62,34 @@ where
     }
 
     pub fn step(&mut self) -> Result<StepOutcome, RuntimeError<Handler::Error>> {
-        match self.source.poll(self.offset)? {
+        let poll_offset = if self.synchronized {
+            self.offset
+        } else {
+            // Telegram interprets -1 as "return only the newest queued update and
+            // forget everything before it". The returned update is discarded too,
+            // preserving the retired runtime's drop_pending_updates behavior.
+            Some(-1)
+        };
+        match self.source.poll(poll_offset)? {
             PollOutcome::Retry(failure) => Ok(StepOutcome::Retry(failure)),
+            PollOutcome::Updates(updates) if !self.synchronized => {
+                self.offset = next_offset(&updates, self.offset);
+                self.synchronized = true;
+                Ok(StepOutcome::Synchronized {
+                    dropped: updates.len(),
+                })
+            }
             PollOutcome::Updates(updates) if updates.is_empty() => Ok(StepOutcome::Idle),
             PollOutcome::Updates(updates) => {
                 let mut count = 0;
                 for update in updates {
                     let update_id = update.update_id;
-                    self.handler
-                        .handle(update)
-                        .map_err(|handler_error| RuntimeError::Handler {
-                            update_id,
-                            handler_error,
-                        })?;
+                    let handled = self.handler.handle(update);
                     self.offset = update_id.checked_add(1).or(self.offset);
+                    handled.map_err(|handler_error| RuntimeError::Handler {
+                        update_id,
+                        handler_error,
+                    })?;
                     count += 1;
                 }
                 Ok(StepOutcome::Dispatched { count })
@@ -133,12 +152,15 @@ mod tests {
     }
 
     #[test]
-    fn dispatches_in_order_and_advances_after_each_success() {
+    fn first_poll_discards_pending_updates_and_synchronizes_the_offset() {
         let source = Source {
             outcomes: VecDeque::from([
                 Ok(bot_adapters::telegram_polling::PollOutcome::Updates(vec![
                     update(7),
                     update(8),
+                ])),
+                Ok(bot_adapters::telegram_polling::PollOutcome::Updates(vec![
+                    update(9),
                 ])),
                 Ok(bot_adapters::telegram_polling::PollOutcome::Updates(
                     Vec::new(),
@@ -147,19 +169,28 @@ mod tests {
             offsets: Vec::new(),
         };
         let mut runtime = PollingRuntime::new(source, Handler::default());
-        assert_eq!(runtime.step(), Ok(StepOutcome::Dispatched { count: 2 }));
+        assert_eq!(runtime.step(), Ok(StepOutcome::Synchronized { dropped: 2 }));
         assert_eq!(runtime.offset(), Some(9));
+        assert!(runtime.handler.handled.is_empty());
+        assert_eq!(runtime.step(), Ok(StepOutcome::Dispatched { count: 1 }));
+        assert_eq!(runtime.offset(), Some(10));
         assert_eq!(runtime.step(), Ok(StepOutcome::Idle));
-        assert_eq!(runtime.source.offsets, vec![None, Some(9)]);
-        assert_eq!(runtime.handler.handled, vec![7, 8]);
+        assert_eq!(runtime.source.offsets, vec![Some(-1), Some(9), Some(10)]);
+        assert_eq!(runtime.handler.handled, vec![9]);
     }
 
     #[test]
-    fn failed_update_is_not_acknowledged_or_skipped() {
+    fn failed_update_is_acknowledged_so_later_updates_can_continue() {
         let source = Source {
-            outcomes: VecDeque::from([Ok(bot_adapters::telegram_polling::PollOutcome::Updates(
-                vec![update(10), update(11)],
-            ))]),
+            outcomes: VecDeque::from([
+                Ok(bot_adapters::telegram_polling::PollOutcome::Updates(
+                    Vec::new(),
+                )),
+                Ok(bot_adapters::telegram_polling::PollOutcome::Updates(vec![
+                    update(10),
+                    update(11),
+                ])),
+            ]),
             offsets: Vec::new(),
         };
         let handler = Handler {
@@ -167,11 +198,12 @@ mod tests {
             ..Handler::default()
         };
         let mut runtime = PollingRuntime::new(source, handler);
+        assert_eq!(runtime.step(), Ok(StepOutcome::Synchronized { dropped: 0 }));
         assert!(matches!(
             runtime.step(),
             Err(RuntimeError::Handler { update_id: 11, .. })
         ));
-        assert_eq!(runtime.offset(), Some(11));
+        assert_eq!(runtime.offset(), Some(12));
         assert_eq!(runtime.handler.handled, vec![10]);
     }
 
@@ -193,6 +225,7 @@ mod tests {
         assert_eq!(runtime.step(), Ok(StepOutcome::Retry(retry)));
         assert!(matches!(runtime.step(), Err(RuntimeError::Poll(_))));
         assert_eq!(runtime.offset(), None);
+        assert_eq!(runtime.source.offsets, vec![Some(-1), Some(-1)]);
     }
 
     #[test]
@@ -209,6 +242,6 @@ mod tests {
             offsets: Vec::new(),
         };
         let mut runtime = PollingRuntime::new(source, InfallibleHandler);
-        assert_eq!(runtime.step(), Ok(StepOutcome::Idle));
+        assert_eq!(runtime.step(), Ok(StepOutcome::Synchronized { dropped: 0 }));
     }
 }
