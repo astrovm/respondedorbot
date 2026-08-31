@@ -216,6 +216,22 @@ pub fn task_not_found(locale: Locale) -> &'static str {
 }
 
 #[must_use]
+pub fn task_load_failed(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Es => "no pude leer las tareas, probá de nuevo",
+        Locale::En => "I could not load the tasks, try again",
+    }
+}
+
+#[must_use]
+pub fn task_delete_failed(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Es => "no pude borrar la tarea, probá de nuevo",
+        Locale::En => "I could not delete the task, try again",
+    }
+}
+
+#[must_use]
 pub fn task_delete_forbidden(locale: Locale) -> &'static str {
     match locale {
         Locale::Es => "solo el creador o un admin pueden borrar esta tarea",
@@ -237,7 +253,8 @@ mod tests {
 
     use super::{
         TaskCallbackParse, can_delete_task, format_task_summary, parse_task_callback,
-        render_task_list, task_delete_forbidden, task_deleted, task_not_found,
+        render_task_list, task_delete_failed, task_delete_forbidden, task_deleted,
+        task_load_failed, task_not_found,
     };
     use crate::locale::Locale;
     use crate::scheduled_tasks::{ScheduledTask, TaskId, TaskSchedule, TaskStateError};
@@ -369,6 +386,14 @@ mod tests {
         assert_eq!(
             task_delete_forbidden(Locale::En),
             "only the creator or an admin can delete this task"
+        );
+        assert_eq!(
+            task_load_failed(Locale::Es),
+            "no pude leer las tareas, probá de nuevo"
+        );
+        assert_eq!(
+            task_delete_failed(Locale::En),
+            "I could not delete the task, try again"
         );
         assert_eq!(
             id.as_ref().map(|id| task_deleted(id, Locale::En)),

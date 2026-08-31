@@ -59,8 +59,8 @@ use bot_core::stocks::{
     render_stock_quotes,
 };
 use bot_core::task_commands::{
-    TaskCallbackParse, can_delete_task, parse_task_callback, render_task_list,
-    task_delete_forbidden, task_deleted, task_not_found,
+    TaskCallbackParse, can_delete_task, parse_task_callback, render_task_list, task_delete_failed,
+    task_delete_forbidden, task_deleted, task_load_failed, task_not_found,
 };
 use bot_core::telegram_actions::{ParseMode, SendMessage, TelegramAction};
 use bot_core::telegram_callbacks::{
@@ -791,7 +791,13 @@ where
             .and_then(|chat| chat.get("type"))
             .and_then(Value::as_str)
             .unwrap_or("private");
-        let locale = resolve_locale(None, language_code, chat_type);
+        let payload_locale = message
+            .get("successful_payment")
+            .and_then(Value::as_object)
+            .and_then(|payment| payment.get("invoice_payload"))
+            .and_then(Value::as_str)
+            .and_then(invoice_payload_locale);
+        let locale = resolve_locale(payload_locale, language_code, chat_type);
         let decision = match evaluate_default_successful_payment(
             &Value::Object(message),
             self.billing_available,
@@ -1275,7 +1281,17 @@ where
                     "scheduled task list callback chat_id={}: {error}",
                     context.chat_id
                 ));
-                Vec::new()
+                if let Some(callback_id) = context.callback_id.as_deref() {
+                    let _receipt = self
+                        .actions
+                        .execute(TelegramAction::AnswerCallback {
+                            callback_id: callback_id.to_owned(),
+                            text: Some(task_load_failed(locale).to_owned()),
+                            show_alert: true,
+                        })
+                        .map_err(DispatchError::Action)?;
+                }
+                return Ok(DispatchOutcome::Handled);
             }
         };
         let Some(target) = tasks.iter().find(|task| task.id == task_id).cloned() else {
@@ -1328,12 +1344,39 @@ where
             }
             return Ok(DispatchOutcome::Handled);
         }
-        if let Err(error) = source.cancel(&task_id, &context.chat_id) {
-            self.state_diagnostics.push(format!(
-                "scheduled task cancellation chat_id={} task_id={}: {error}",
-                context.chat_id,
-                task_id.as_str()
-            ));
+        match source.cancel(&task_id, &context.chat_id) {
+            Ok(true) => {}
+            Ok(false) => {
+                if let Some(callback_id) = context.callback_id.as_deref() {
+                    let _receipt = self
+                        .actions
+                        .execute(TelegramAction::AnswerCallback {
+                            callback_id: callback_id.to_owned(),
+                            text: Some(task_not_found(locale).to_owned()),
+                            show_alert: true,
+                        })
+                        .map_err(DispatchError::Action)?;
+                }
+                return Ok(DispatchOutcome::Handled);
+            }
+            Err(error) => {
+                self.state_diagnostics.push(format!(
+                    "scheduled task cancellation chat_id={} task_id={}: {error}",
+                    context.chat_id,
+                    task_id.as_str()
+                ));
+                if let Some(callback_id) = context.callback_id.as_deref() {
+                    let _receipt = self
+                        .actions
+                        .execute(TelegramAction::AnswerCallback {
+                            callback_id: callback_id.to_owned(),
+                            text: Some(task_delete_failed(locale).to_owned()),
+                            show_alert: true,
+                        })
+                        .map_err(DispatchError::Action)?;
+                }
+                return Ok(DispatchOutcome::Handled);
+            }
         }
         if let Some(callback_id) = context.callback_id.as_deref() {
             let _receipt = self
@@ -1345,13 +1388,16 @@ where
                 })
                 .map_err(DispatchError::Action)?;
         }
-        let tasks = source.list(&context.chat_id).unwrap_or_else(|error| {
-            self.state_diagnostics.push(format!(
-                "scheduled task list after cancellation chat_id={}: {error}",
-                context.chat_id
-            ));
-            Vec::new()
-        });
+        let tasks = match source.list(&context.chat_id) {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                self.state_diagnostics.push(format!(
+                    "scheduled task list after cancellation chat_id={}: {error}",
+                    context.chat_id
+                ));
+                return Ok(DispatchOutcome::Handled);
+            }
+        };
         let view = render_task_list(&tasks, locale);
         let Ok(chat_id) = context.chat_id.parse::<i64>() else {
             return Ok(DispatchOutcome::Handled);
@@ -3475,6 +3521,21 @@ mod tests {
                 .borrow_mut()
                 .push((task_id.as_str().to_owned(), chat_id.to_owned()));
             Ok(true)
+        }
+    }
+
+    struct FallibleTasks {
+        list_result: Result<Vec<ScheduledTask>, String>,
+        cancel_result: Result<bool, String>,
+    }
+
+    impl ScheduledTaskSource for FallibleTasks {
+        fn list(&mut self, _chat_id: &str) -> Result<Vec<ScheduledTask>, String> {
+            self.list_result.clone()
+        }
+
+        fn cancel(&mut self, _task_id: &TaskId, _chat_id: &str) -> Result<bool, String> {
+            self.cancel_result.clone()
         }
     }
 
@@ -7090,6 +7151,86 @@ mod tests {
     }
 
     #[test]
+    fn task_callback_reports_list_failure_instead_of_not_found() {
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_scheduled_task_source(Box::new(FallibleTasks {
+            list_result: Err("synthetic list failure".to_owned()),
+            cancel_result: Ok(true),
+        }));
+
+        assert_eq!(
+            dispatcher.dispatch(callback_update("task:del:task0001", "private", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [TelegramAction::AnswerCallback {
+                text: Some(text),
+                show_alert: true,
+                ..
+            }] if text == "no pude leer las tareas, probá de nuevo"
+        ));
+        assert!(dispatcher.state_diagnostics()[0].contains("synthetic list failure"));
+    }
+
+    #[test]
+    fn task_callback_never_claims_failed_cancellation() -> Result<(), TaskStateError> {
+        for (cancel_result, expected, has_diagnostic) in [
+            (Ok(false), "esa tarea no existe", false),
+            (
+                Err("synthetic cancellation failure".to_owned()),
+                "no pude borrar la tarea, probá de nuevo",
+                true,
+            ),
+        ] {
+            let config = Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            };
+            let mut dispatcher = NativeDispatcher::new(
+                config,
+                Actions::default(),
+                State::default(),
+                values(),
+                random(),
+                authorization(),
+                "@mybot",
+            )
+            .with_scheduled_task_source(Box::new(FallibleTasks {
+                list_result: Ok(vec![scheduled_task(88)?]),
+                cancel_result,
+            }));
+
+            assert_eq!(
+                dispatcher.dispatch(callback_update("task:del:task0001", "group", None)),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert!(matches!(
+                dispatcher.actions.0.as_slice(),
+                [TelegramAction::AnswerCallback {
+                    text: Some(text),
+                    show_alert: true,
+                    ..
+                }] if text == expected
+            ));
+            assert_eq!(!dispatcher.state_diagnostics().is_empty(), has_diagnostic);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn charge_history_callback_loads_edits_and_acknowledges_owned_pages() {
         let calls = Rc::new(RefCell::new(Vec::new()));
         let config = Config {
@@ -8003,7 +8144,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_payment_records_once_and_sends_the_localized_balance() {
+    fn successful_payment_uses_invoice_locale_and_records_once() {
         let records = Rc::new(RefCell::new(Vec::new()));
         let config = Config {
             value: Ok(ChatConfig::default()),
@@ -8046,7 +8187,7 @@ mod tests {
         assert_eq!(message.chat_id, ChatId(42));
         assert_eq!(
             message.text,
-            "listo, te cargué 50.00 créditos\nahora te quedaron 53.00\nsi querés mandarle al grupo: /transfer <monto>"
+            "added 50.00 credits\nyour balance is now 53.00\nuse /transfer <amount> to fund a group"
         );
     }
 
@@ -8138,7 +8279,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "el cobro de ia no está andando, avisale al admin"
+            "AI billing is unavailable, please tell the admin"
         );
     }
 
