@@ -379,6 +379,10 @@ pub enum DispatchError<ConfigError, ActionError, RandomError> {
     Action(ActionError),
     #[error("could not obtain a random value")]
     Random(RandomError),
+    #[error("required native service is not configured: {0}")]
+    MissingService(&'static str),
+    #[error("native dispatch invariant failed: {0}")]
+    Invariant(&'static str),
 }
 
 type NativeDispatchResult<Config, Actions, Random> = Result<
@@ -671,7 +675,7 @@ where
             return Ok(DispatchOutcome::LegacyRequired);
         }
         let Some(source) = self.link_replacement_source.as_mut() else {
-            return Ok(DispatchOutcome::LegacyRequired);
+            return Err(DispatchError::MissingService("link replacement"));
         };
         let load = source.load(text, timestamp);
         self.state_diagnostics.extend(load.diagnostics);
@@ -842,7 +846,7 @@ where
                     return Ok(DispatchOutcome::LegacyRequired);
                 };
                 let Some(sink) = self.payment_sink.as_mut() else {
-                    return Ok(DispatchOutcome::LegacyRequired);
+                    return Err(DispatchError::MissingService("payment persistence"));
                 };
                 let text = match sink.record(&payment) {
                     Ok(receipt) => successful_payment_reply(
@@ -926,7 +930,7 @@ where
             return Ok(Some(DispatchOutcome::LegacyRequired));
         };
         let Some(source) = self.token_signal_source.as_mut() else {
-            return Ok(Some(DispatchOutcome::LegacyRequired));
+            return Err(DispatchError::MissingService("token signals"));
         };
         let load = source.load(query);
         self.state_diagnostics.extend(load.diagnostics);
@@ -1020,7 +1024,7 @@ where
         context: &CallbackContext,
     ) -> NativeDispatchResult<Config, Actions, Random> {
         if self.token_signal_source.is_none() {
-            return Ok(DispatchOutcome::LegacyRequired);
+            return Err(DispatchError::MissingService("token signals"));
         }
         let config = self
             .config
@@ -1239,7 +1243,7 @@ where
         context: &CallbackContext,
     ) -> NativeDispatchResult<Config, Actions, Random> {
         if self.scheduled_task_source.is_none() {
-            return Ok(DispatchOutcome::LegacyRequired);
+            return Err(DispatchError::MissingService("scheduled tasks"));
         }
         let config = self
             .config
@@ -1255,7 +1259,7 @@ where
             return Ok(DispatchOutcome::Handled);
         };
         let Some(source) = self.scheduled_task_source.as_mut() else {
-            return Ok(DispatchOutcome::LegacyRequired);
+            return Err(DispatchError::MissingService("scheduled tasks"));
         };
         let tasks = match source.list(&context.chat_id) {
             Ok(tasks) => tasks,
@@ -1473,7 +1477,7 @@ where
             };
             let (owner_id, limit, direction, cursor_id, timezone_minutes) = load;
             let Some(source) = self.charge_history_source.as_mut() else {
-                return Ok(DispatchOutcome::LegacyRequired);
+                return Err(DispatchError::MissingService("charge history"));
             };
             let page = match source.load(owner_id, limit, Some(cursor_id), direction.as_str()) {
                 Ok(page) => page,
@@ -1708,7 +1712,7 @@ where
             return Ok(DispatchOutcome::LegacyRequired);
         };
         if self.ai_conversation_source.is_none() {
-            return Ok(DispatchOutcome::LegacyRequired);
+            return Err(DispatchError::MissingService("AI conversation"));
         }
 
         let bot_username = self.bot_name.trim().trim_start_matches('@');
@@ -1819,7 +1823,7 @@ where
 
         let (preparation, stream_finalize, ignored_edit_failures) = {
             let Some(source) = self.ai_conversation_source.as_mut() else {
-                return Ok(DispatchOutcome::LegacyRequired);
+                return Err(DispatchError::MissingService("AI conversation"));
             };
             let mut stream = TelegramStream::new(&mut self.actions, chat_id, message_id);
             let preparation = source.prepare_streaming(input, &mut |token| {
@@ -1957,7 +1961,7 @@ where
             return Ok(DispatchOutcome::LegacyRequired);
         };
         let Some(source) = self.ai_conversation_source.as_mut() else {
-            return Ok(DispatchOutcome::LegacyRequired);
+            return Err(DispatchError::MissingService("AI conversation"));
         };
         let input = AiConversationInput {
             chat_id,
@@ -2109,7 +2113,7 @@ where
             return Ok(DispatchOutcome::LegacyRequired);
         };
         if self.ai_conversation_source.is_none() {
-            return Ok(DispatchOutcome::LegacyRequired);
+            return Err(DispatchError::MissingService("AI conversation"));
         }
         let input = AiConversationInput {
             chat_id,
@@ -2141,7 +2145,7 @@ where
         };
         let (preparation, stream_finalize, ignored_edit_failures) = {
             let Some(source) = self.ai_conversation_source.as_mut() else {
-                return Ok(DispatchOutcome::LegacyRequired);
+                return Err(DispatchError::MissingService("AI conversation"));
             };
             let mut stream = TelegramStream::new(&mut self.actions, chat_id, message_id);
             let preparation = source.prepare_summary_command_streaming(input, &mut |token| {
@@ -2330,7 +2334,7 @@ where
             }
         }
         if message.has_reply && self.ai_conversation_source.is_none() {
-            return Ok(DispatchOutcome::LegacyRequired);
+            return Err(DispatchError::MissingService("AI conversation"));
         }
         let parsed = parse_command(&content.text, &self.bot_name);
         if matches!(parsed.command.as_str(), "/transcribe" | "/describe") {
@@ -2451,7 +2455,7 @@ where
                 return Ok(DispatchOutcome::LegacyRequired);
             }
             let Some(source) = self.scheduled_task_source.as_mut() else {
-                return Ok(DispatchOutcome::LegacyRequired);
+                return Err(DispatchError::MissingService("scheduled tasks"));
             };
             let tasks = match source.list(&chat_id.0.to_string()) {
                 Ok(tasks) => tasks,
@@ -2488,7 +2492,7 @@ where
                     is_group,
                 } => {
                     let Some(source) = self.balance_source.as_mut() else {
-                        return Ok(DispatchOutcome::LegacyRequired);
+                        return Err(DispatchError::MissingService("billing balances"));
                     };
                     self.state_diagnostics.clear();
                     let balances = source.load(user_id, is_group.then_some(chat_id.0));
@@ -2538,7 +2542,7 @@ where
                     timezone_minutes,
                 } => {
                     let Some(source) = self.charge_history_source.as_mut() else {
-                        return Ok(DispatchOutcome::LegacyRequired);
+                        return Err(DispatchError::MissingService("charge history"));
                     };
                     let (text, keyboard) = match source.load(user_id, limit, None, "older") {
                         Ok(page) => render_charge_history_page(
@@ -2591,7 +2595,7 @@ where
                     amount,
                 } => {
                     let Some(sink) = self.transfer_sink.as_mut() else {
-                        return Ok(DispatchOutcome::LegacyRequired);
+                        return Err(DispatchError::MissingService("credit transfers"));
                     };
                     let text = match sink.transfer(user_id, chat_id, amount) {
                         Ok(result) => transfer_result_reply(amount, result, locale),
@@ -2631,7 +2635,7 @@ where
                 PrintCreditsPlan::Reply(action) => StatelessCommandPlan::Action(action),
                 PrintCreditsPlan::Mint { user_id, amount } => {
                     let Some(sink) = self.admin_credit_sink.as_mut() else {
-                        return Ok(DispatchOutcome::LegacyRequired);
+                        return Err(DispatchError::MissingService("admin credit minting"));
                     };
                     let text = match sink.mint(user_id, amount) {
                         Ok(balance) => printcredits_result_reply(amount, balance, locale),
@@ -2672,7 +2676,7 @@ where
                 CreditLogPlan::Reply(action) => StatelessCommandPlan::Action(action),
                 CreditLogPlan::Load { limit } => {
                     let Some(source) = self.admin_creditlog_source.as_mut() else {
-                        return Ok(DispatchOutcome::LegacyRequired);
+                        return Err(DispatchError::MissingService("admin credit log"));
                     };
                     let text = match source.load(limit) {
                         Ok(entries) if entries.is_empty() => match locale {
@@ -2708,7 +2712,7 @@ where
             }
         } else if classify_bcra_command(&parsed.command) {
             let Some(source) = self.bcra_source.as_mut() else {
-                return Ok(DispatchOutcome::LegacyRequired);
+                return Err(DispatchError::MissingService("BCRA market data"));
             };
             let load = source.load(locale, timestamp);
             self.state_diagnostics.extend(load.diagnostics);
@@ -2734,7 +2738,7 @@ where
                 }
                 DollarCommandPlan::Load { hours_ago } => {
                     let Some(source) = self.dollar_market_source.as_mut() else {
-                        return Ok(DispatchOutcome::LegacyRequired);
+                        return Err(DispatchError::MissingService("dollar market data"));
                     };
                     let load = source.load(hours_ago, locale, timestamp);
                     self.state_diagnostics.extend(load.diagnostics);
@@ -2751,7 +2755,7 @@ where
             }
         } else if classify_election_command(&parsed.command) {
             let Some(source) = self.election_source.as_mut() else {
-                return Ok(DispatchOutcome::LegacyRequired);
+                return Err(DispatchError::MissingService("election markets"));
             };
             let load = source.load(timestamp);
             self.state_diagnostics.extend(load.diagnostics);
@@ -2763,7 +2767,7 @@ where
             StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if let Some(command) = classify_market_price_command(&parsed.command) {
             let Some(source) = self.market_price_source.as_mut() else {
-                return Ok(DispatchOutcome::LegacyRequired);
+                return Err(DispatchError::MissingService("market prices"));
             };
             let load = source.load(&parsed.message_text, command, locale, timestamp);
             self.state_diagnostics.extend(load.diagnostics);
@@ -2772,7 +2776,7 @@ where
             StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if classify_stock_command(&parsed.command) {
             let Some(source) = self.stock_price_source.as_mut() else {
-                return Ok(DispatchOutcome::LegacyRequired);
+                return Err(DispatchError::MissingService("stock prices"));
             };
             let load = source.load(&parsed.message_text, timestamp);
             self.state_diagnostics.extend(load.diagnostics);
@@ -2782,7 +2786,7 @@ where
             StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if classify_oil_command(&parsed.command) {
             let Some(source) = self.oil_price_source.as_mut() else {
-                return Ok(DispatchOutcome::LegacyRequired);
+                return Err(DispatchError::MissingService("oil prices"));
             };
             let load = source.load(timestamp);
             self.state_diagnostics.extend(load.diagnostics);
@@ -2793,7 +2797,7 @@ where
         } else if classify_weather_command(&parsed.command) {
             let location = requested_location(&parsed.message_text);
             let Some(source) = self.weather_source.as_mut() else {
-                return Ok(DispatchOutcome::LegacyRequired);
+                return Err(DispatchError::MissingService("weather"));
             };
             let load = source.load(location, timestamp);
             self.state_diagnostics.extend(load.diagnostics);
@@ -2806,7 +2810,7 @@ where
             StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if let Some(category) = classify_greeting_command(&parsed.command) {
             let Some(source) = self.greeting_pool_source.as_mut() else {
-                return Ok(DispatchOutcome::LegacyRequired);
+                return Err(DispatchError::MissingService("greeting media"));
             };
             let load = source.pool(category);
             self.state_diagnostics.extend(load.diagnostics);
@@ -2820,7 +2824,9 @@ where
                     .choice_index(load.urls.len())
                     .map_err(DispatchError::Random)?;
                 let Some(animation) = load.urls.get(index) else {
-                    return Ok(DispatchOutcome::LegacyRequired);
+                    return Err(DispatchError::Invariant(
+                        "random greeting index out of bounds",
+                    ));
                 };
                 if animation.starts_with("http") {
                     StatelessCommandPlan::Action(TelegramAction::SendAnimation {
@@ -2837,7 +2843,7 @@ where
             }
         } else if parsed.command == "/rulo" {
             let Some(source) = self.rulo_source.as_mut() else {
-                return Ok(DispatchOutcome::LegacyRequired);
+                return Err(DispatchError::MissingService("rulo market data"));
             };
             let text = match source.rulo_input() {
                 Ok(load) => {
@@ -2861,7 +2867,7 @@ where
                 Ok(DevoCommandPlan::Reply(reply)) => render_devo_reply(reply, locale),
                 Ok(DevoCommandPlan::Load { fee, purchase }) => {
                     let Some(source) = self.dollar_quotes_source.as_mut() else {
-                        return Ok(DispatchOutcome::LegacyRequired);
+                        return Err(DispatchError::MissingService("dollar quotes"));
                     };
                     let quotes = source.devo_quotes().unwrap_or_else(|error| {
                         self.state_diagnostics.push(format!(
@@ -2881,7 +2887,7 @@ where
             StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if let Some(bitcoin_command) = classify_bitcoin_command(&parsed.command) {
             let Some(source) = self.bitcoin_price_source.as_mut() else {
-                return Ok(DispatchOutcome::LegacyRequired);
+                return Err(DispatchError::MissingService("bitcoin prices"));
             };
             let mut price = |source: &mut Box<dyn BitcoinPriceSource>, currency: &str| {
                 source.price(currency).unwrap_or_else(|error| {
@@ -2930,7 +2936,7 @@ where
                         .choice_index(values.len())
                         .map_err(DispatchError::Random)?;
                     let Some(text) = values.get(index) else {
-                        return Ok(DispatchOutcome::LegacyRequired);
+                        return Err(DispatchError::Invariant("random reply index out of bounds"));
                     };
                     let mut message = SendMessage::new(chat_id, text);
                     message.reply_to_message_id = Some(message_id);
@@ -3971,7 +3977,7 @@ mod tests {
     }
 
     #[test]
-    fn leaves_unknown_incomplete_and_unicode_messages_for_legacy_runtime() {
+    fn missing_ai_service_is_explicit_for_unknown_unicode_and_reply_messages() {
         let config = Config {
             value: Ok(ChatConfig::default()),
             chat_ids: Vec::new(),
@@ -3987,15 +3993,15 @@ mod tests {
         );
         assert_eq!(
             dispatcher.dispatch(update("/other", None)),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("AI conversation"))
         );
         assert_eq!(
             dispatcher.dispatch(update("/convertbase １２, 10, 2", None)),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("AI conversation"))
         );
         assert_eq!(
             dispatcher.dispatch(update("/random １-３", None)),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("AI conversation"))
         );
         let mut replied = update("/time", None);
         if let IncomingEvent::Message(message) = &mut replied.event {
@@ -4003,7 +4009,7 @@ mod tests {
         }
         assert_eq!(
             dispatcher.dispatch(replied),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("AI conversation"))
         );
         let incomplete = IncomingUpdate {
             update_id: 100,
@@ -4557,7 +4563,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatches_ascii_command_conversion_and_keeps_preprocessing_on_legacy() {
+    fn dispatches_ascii_command_conversion_and_requires_ai_for_unicode_input() {
         let config = Config {
             value: Ok(ChatConfig {
                 language: "en".to_owned(),
@@ -4584,7 +4590,7 @@ mod tests {
         );
         assert_eq!(
             dispatcher.dispatch(update("/command もうすぐです", Some("es"))),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("AI conversation"))
         );
         let texts = dispatcher
             .actions
@@ -4692,7 +4698,7 @@ mod tests {
         );
         assert_eq!(
             missing.dispatch(update("/bcra", None)),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("BCRA market data"))
         );
     }
 
@@ -4809,7 +4815,7 @@ mod tests {
         );
         assert_eq!(
             missing.dispatch(update("/usd", None)),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("dollar market data"))
         );
     }
 
@@ -5005,7 +5011,7 @@ mod tests {
         );
         assert_eq!(
             missing.dispatch(update("/election", None)),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("election markets"))
         );
         assert!(missing.actions.0.is_empty());
     }
@@ -5134,7 +5140,7 @@ mod tests {
         );
         assert_eq!(
             missing.dispatch(update("/crypto btc", None)),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("market prices"))
         );
     }
 
@@ -5188,7 +5194,7 @@ mod tests {
         );
         assert_eq!(
             missing.dispatch(update("/stocks AAPL", None)),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("stock prices"))
         );
         assert!(missing.actions.0.is_empty());
     }
@@ -5294,7 +5300,7 @@ mod tests {
         );
         assert_eq!(
             missing.dispatch(update("/oil", None)),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("oil prices"))
         );
         assert!(missing.actions.0.is_empty());
     }
@@ -5316,7 +5322,7 @@ mod tests {
         );
         assert_eq!(
             dispatcher.dispatch(update("/weather Rosario", None)),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("weather"))
         );
         assert!(dispatcher.actions.0.is_empty());
         assert!(dispatcher.state.incoming.is_empty());
@@ -5493,7 +5499,7 @@ mod tests {
         );
         assert_eq!(
             missing.dispatch(update("/gn", None)),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("greeting media"))
         );
     }
 
@@ -5607,7 +5613,7 @@ mod tests {
         );
         assert_eq!(
             missing.dispatch(update("/rulo", None)),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("rulo market data"))
         );
     }
 
@@ -5723,7 +5729,7 @@ mod tests {
         );
         assert_eq!(
             missing.dispatch(update("/devo 0.5", None)),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("dollar quotes"))
         );
     }
 
@@ -5845,7 +5851,7 @@ mod tests {
         );
         assert_eq!(
             missing.dispatch(update("/sat", None)),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("bitcoin prices"))
         );
     }
 
@@ -5969,7 +5975,7 @@ mod tests {
         .with_admin_user_id(Some(88));
         assert_eq!(
             missing.dispatch(update("/printcredits 1", None)),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("admin credit minting"))
         );
     }
 
@@ -6087,11 +6093,11 @@ mod tests {
         .with_admin_user_id(Some(88));
         assert_eq!(
             missing.dispatch(update("/creditlog", None)),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("admin credit log"))
         );
         assert_eq!(
             missing.dispatch(update("/creditlog ２", None)),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("AI conversation"))
         );
     }
 
@@ -6550,7 +6556,7 @@ mod tests {
         );
         assert_eq!(
             dispatcher.dispatch(callback_update("task:delete:1", "private", None)),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("scheduled tasks"))
         );
         assert!(dispatcher.config.chat_ids.is_empty());
         assert!(dispatcher.actions.0.is_empty());
@@ -7616,7 +7622,7 @@ mod tests {
         );
         assert_eq!(
             shadow.dispatch(update("/balance", Some("es"))),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("billing balances"))
         );
         assert!(shadow.actions.0.is_empty());
     }
@@ -7784,7 +7790,7 @@ mod tests {
         );
         assert_eq!(
             shadow.dispatch(update("/charges", Some("es"))),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("charge history"))
         );
         assert!(shadow.actions.0.is_empty());
     }
@@ -7939,7 +7945,7 @@ mod tests {
         }
         assert_eq!(
             shadow.dispatch(group_update),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("credit transfers"))
         );
         assert!(shadow.actions.0.is_empty());
     }
@@ -8101,7 +8107,7 @@ mod tests {
         );
         assert_eq!(
             dispatcher.dispatch(successful_payment_update("p50", 42, 25, Some("en"))),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("payment persistence"))
         );
         assert!(dispatcher.actions.0.is_empty());
     }
@@ -8364,7 +8370,7 @@ mod tests {
     }
 
     #[test]
-    fn link_mode_off_commands_and_non_plain_replies_remain_legacy_owned() {
+    fn link_cases_outside_replacement_require_the_normal_ai_route() {
         let config = Config {
             value: Ok(ChatConfig {
                 link_mode: "off".to_owned(),
@@ -8384,12 +8390,12 @@ mod tests {
         .with_link_replacement_source(Box::new(links(true)));
         assert_eq!(
             dispatcher.dispatch(update("https://x.com/a/status/1", None)),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("AI conversation"))
         );
         dispatcher.config.value = Ok(ChatConfig::default());
         assert_eq!(
             dispatcher.dispatch(update("/ask https://x.com/a/status/1", None)),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("AI conversation"))
         );
         let mut reply = update("mirá https://x.com/a/status/1", None);
         let IncomingEvent::Message(message) = &mut reply.event else {
@@ -8399,7 +8405,7 @@ mod tests {
         message.replied_message_id = Some(MessageId(3));
         assert_eq!(
             dispatcher.dispatch(reply),
-            Ok(DispatchOutcome::LegacyRequired)
+            Err(DispatchError::MissingService("AI conversation"))
         );
         assert!(dispatcher.actions.0.is_empty());
     }
