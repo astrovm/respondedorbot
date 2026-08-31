@@ -497,13 +497,7 @@ where
             ));
         }
 
-        let (text, segments, diagnostics) = if !input.has_reply {
-            (
-                media_command_reply_required(input.locale).to_owned(),
-                Vec::new(),
-                Vec::new(),
-            )
-        } else if let Some((kind, file_id, duration)) = selected {
+        let (text, segments, diagnostics) = if let Some((kind, file_id, duration)) = selected {
             let prepared = match self
                 .media
                 .as_mut()
@@ -594,7 +588,12 @@ where
             }
         } else {
             (
-                media_command_none(input.locale).to_owned(),
+                if input.has_reply {
+                    media_command_none(input.locale)
+                } else {
+                    media_command_reply_required(input.locale)
+                }
+                .to_owned(),
                 Vec::new(),
                 Vec::new(),
             )
@@ -2017,6 +2016,23 @@ mod tests {
         );
         assert!(service.state.incoming.is_empty());
         assert!(service.state.outgoing.is_empty());
+    }
+
+    #[test]
+    fn explicit_media_command_accepts_media_attached_to_the_command_message() {
+        let mut service = conversation(Vec::new(), Billing::default()).with_media(Box::new(Media));
+        let mut request = input();
+        request.command = "/transcribe".to_owned();
+        request.has_reply = false;
+        request.audio_media_kind = Some("voice".to_owned());
+        request.audio_file_id = Some("attached-audio".to_owned());
+        request.audio_duration_seconds = Some(4.5);
+
+        assert!(matches!(
+            service.prepare_media_command(request),
+            Ok(Some(AiPreparation::Reply { ref text, .. }))
+                if text == "🎵 audio transcription: synthetic transcript"
+        ));
     }
 
     #[test]

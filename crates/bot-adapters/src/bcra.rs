@@ -116,6 +116,12 @@ pub struct BcraLoad {
     pub diagnostics: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CurrencyBandsLoad {
+    pub bands: Option<BcraBands>,
+    pub diagnostics: Vec<String>,
+}
+
 fn norm(value: &str) -> String {
     value
         .nfkd()
@@ -294,19 +300,27 @@ fn items(value: &Value) -> Vec<&Map<String, Value>> {
 }
 
 fn latest(items: &[&Map<String, Value>]) -> Vec<BcraVariable> {
-    items
-        .iter()
-        .filter_map(|v| {
-            let description = v.get("descripcion")?.as_str()?.trim();
-            let raw_date = v.get("ultFechaInformada")?.as_str()?.trim();
-            let value = number(v.get("ultValorInformado"))?;
-            (!description.is_empty() && !raw_date.is_empty()).then(|| BcraVariable {
-                description: description.to_owned(),
-                value: spanish(value),
-                date: parse_date(raw_date).map_or_else(|| raw_date.to_owned(), display),
-            })
+    let mut variables = Vec::<BcraVariable>::new();
+    for variable in items.iter().filter_map(|v| {
+        let description = v.get("descripcion")?.as_str()?.trim();
+        let raw_date = v.get("ultFechaInformada")?.as_str()?.trim();
+        let value = number(v.get("ultValorInformado"))?;
+        (!description.is_empty() && !raw_date.is_empty()).then(|| BcraVariable {
+            description: description.to_owned(),
+            value: spanish(value),
+            date: parse_date(raw_date).map_or_else(|| raw_date.to_owned(), display),
         })
-        .collect()
+    }) {
+        if let Some(existing) = variables
+            .iter_mut()
+            .find(|existing| existing.description == variable.description)
+        {
+            *existing = variable;
+        } else {
+            variables.push(variable);
+        }
+    }
+    variables
 }
 
 fn variables_value(variables: &[BcraVariable]) -> Value {
@@ -478,6 +492,29 @@ fn bands<T: BcraTransport, C: RequestCache>(
         d,
     );
     Some(result)
+}
+
+/// Load the currency-band limits independently from the full BCRA snapshot.
+///
+/// Dollar commands use this so their output does not depend on `/bcra` having
+/// populated the shared cache first.
+#[must_use]
+pub fn load_currency_bands<T: BcraTransport, C: RequestCache>(
+    transport: &T,
+    cache: &mut C,
+    now: i64,
+) -> CurrencyBandsLoad {
+    let mut diagnostics = Vec::new();
+    let list = request_json(
+        transport,
+        cache,
+        &BcraRequest::Variables,
+        now,
+        &mut diagnostics,
+    );
+    let vars = list.as_ref().map(items).unwrap_or_default();
+    let bands = bands(transport, cache, &vars, now, &mut diagnostics);
+    CurrencyBandsLoad { bands, diagnostics }
 }
 
 fn risk_label(value: &str) -> Option<String> {
@@ -752,7 +789,7 @@ mod tests {
     }
     #[test]
     fn loads_all_json_sources_and_writes_compatible_values() {
-        let variables = json!({"results":[{"categoria":"Principales Variables","idVariable":1,"descripcion":"Tipo de cambio mayorista de referencia","ultFechaInformada":"2025-09-19","ultValorInformado":1180.25},{"categoria":"Principales Variables","idVariable":2,"descripcion":"Reservas internacionales","ultFechaInformada":"2025-09-19","ultValorInformado":25000},{"categoria":"Principales Variables","idVariable":1187,"descripcion":"Régimen de bandas cambiarias Límite inferior","ultFechaInformada":"2025-09-19","ultValorInformado":944.32},{"categoria":"Principales Variables","idVariable":1188,"descripcion":"Régimen de bandas cambiarias Límite superior","ultFechaInformada":"2025-09-19","ultValorInformado":1481.7}]});
+        let variables = json!({"results":[{"categoria":"Principales Variables","idVariable":1,"descripcion":"Tipo de cambio mayorista de referencia","ultFechaInformada":"2025-09-19","ultValorInformado":1180.25},{"categoria":"Principales Variables","idVariable":2,"descripcion":"Reservas internacionales","ultFechaInformada":"2025-09-19","ultValorInformado":25000},{"categoria":"Principales Variables","idVariable":7,"descripcion":"Tasa de interés BADLAR de bancos privados","ultFechaInformada":"2025-09-19","ultValorInformado":23.94},{"categoria":"Principales Variables","idVariable":35,"descripcion":"Tasa de interés BADLAR de bancos privados","ultFechaInformada":"2025-09-19","ultValorInformado":26.73},{"categoria":"Principales Variables","idVariable":29,"descripcion":"Mediana de la variación interanual próximos 12 meses del índice de precios al consumidor del relevamiento de expectativas de mercado","ultFechaInformada":"2025-09-19","ultValorInformado":21.8},{"categoria":"Principales Variables","idVariable":1187,"descripcion":"Régimen de bandas cambiarias Límite inferior","ultFechaInformada":"2025-09-19","ultValorInformado":944.32},{"categoria":"Principales Variables","idVariable":1188,"descripcion":"Régimen de bandas cambiarias Límite superior","ultFechaInformada":"2025-09-19","ultValorInformado":1481.7}]});
         let lower = json!({"results":[{"detalle":[{"fecha":"2025-09-18","valor":930},{"fecha":"2025-09-19","valor":944.32}]}]});
         let upper = json!({"results":[{"detalle":[{"fecha":"2025-09-18","valor":1470},{"fecha":"2025-09-19","valor":1481.7}]}]});
         let risk = json!({"weightedSpreadBps":"685.21","deltas":{"oneDay":"-12.3"},"valuationDate":"2025-10-29T15:34:00Z"});
@@ -771,6 +808,8 @@ mod tests {
         for expected in [
             "dólar mayorista: $1.180,25",
             "reservas: USD 25.000 millones",
+            "inflación esperada: 21.8%",
+            "BADLAR: 26.7%",
             "bandas cambiarias: piso $944.32 / techo $1481.7",
             "riesgo país: 685 bps",
         ] {
@@ -784,6 +823,27 @@ mod tests {
         ] {
             assert!(cache.values.contains_key(key), "{key}");
         }
+    }
+
+    #[test]
+    fn currency_bands_load_without_running_the_full_bcra_command() {
+        let variables = json!({"results":[{"categoria":"Principales Variables","idVariable":1187,"descripcion":"Régimen de bandas cambiarias. Límite inferior","ultFechaInformada":"2025-09-19","ultValorInformado":944.32},{"categoria":"Principales Variables","idVariable":1188,"descripcion":"Régimen de bandas cambiarias. Límite superior","ultFechaInformada":"2025-09-19","ultValorInformado":1481.7}]});
+        let lower = json!({"results":[{"detalle":[{"fecha":"2025-09-18","valor":930},{"fecha":"2025-09-19","valor":944.32}]}]});
+        let upper = json!({"results":[{"detalle":[{"fecha":"2025-09-18","valor":1470},{"fecha":"2025-09-19","valor":1481.7}]}]});
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::from([
+                response(variables),
+                response(lower),
+                response(upper),
+            ])),
+        };
+        let mut cache = Cache::default();
+
+        let load = load_currency_bands(&transport, &mut cache, 1_758_297_600);
+
+        assert_eq!(load.bands.as_ref().map(|bands| bands.lower), Some(944.32));
+        assert_eq!(load.bands.as_ref().map(|bands| bands.upper), Some(1481.7));
+        assert!(cache.values.contains_key("bcra_currency_band_limits"));
     }
     #[test]
     fn stale_survives_failures() {

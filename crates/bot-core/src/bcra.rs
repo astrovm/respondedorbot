@@ -143,19 +143,19 @@ fn variable_line(variable: &BcraVariable, locale: Locale) -> Option<String> {
         }
     } else if matches(
         description,
-        r"variacion.*interanual.*indice.*precios.*consumidor|inflacion.*interanual",
-    ) {
-        match locale {
-            Locale::Es => format!("inflación interanual: {}", format_bcra_value(value, true)),
-            Locale::En => format!("yearly inflation: {}", format_bcra_value(value, true)),
-        }
-    } else if matches(
-        description,
         r"mediana.*variacion.*interanual.*(12|doce).*meses.*(relevamiento.*expectativas.*mercado|rem)|inflacion.*esperada",
     ) {
         match locale {
             Locale::Es => format!("inflación esperada: {}", format_bcra_value(value, true)),
             Locale::En => format!("expected inflation: {}", format_bcra_value(value, true)),
+        }
+    } else if matches(
+        description,
+        r"variacion.*interanual.*indice.*precios.*consumidor|inflacion.*interanual",
+    ) {
+        match locale {
+            Locale::Es => format!("inflación interanual: {}", format_bcra_value(value, true)),
+            Locale::En => format!("yearly inflation: {}", format_bcra_value(value, true)),
         }
     } else if matches(description, "tamar") {
         format!("TAMAR: {}", format_bcra_value(value, true))
@@ -399,6 +399,7 @@ mod tests {
             "base monetaria: $5.000 mill. pesos (15/01/25)",
             "inflación mensual: 5.20%",
             "inflación interanual: 150.5%",
+            "inflación esperada: 3.10%",
             "TAMAR: 45.0%",
             "dólar minorista: $1.250,75",
             "reservas: USD 25.000 millones",

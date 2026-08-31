@@ -70,7 +70,7 @@ pub fn plan_feed(
         };
     }
     let buffer = format!("{buffer}{token}");
-    let action = if !has_message_id && !send_attempted {
+    let action = if !has_message_id && !send_attempted && !buffer.trim().is_empty() {
         StreamAction::Send
     } else if should_edit(
         false,
@@ -126,6 +126,20 @@ mod tests {
             plan_feed(false, false, false, "", "", "hi", 0.0, 0.0, 0.3, 15),
             FeedPlan {
                 buffer: "hi".to_owned(),
+                action: StreamAction::Send,
+            }
+        );
+        assert_eq!(
+            plan_feed(false, false, false, "", "", " ", 0.0, 0.0, 0.3, 15),
+            FeedPlan {
+                buffer: " ".to_owned(),
+                action: StreamAction::None,
+            }
+        );
+        assert_eq!(
+            plan_feed(false, false, false, " ", "", "hi", 0.0, 0.0, 0.3, 15),
+            FeedPlan {
+                buffer: " hi".to_owned(),
                 action: StreamAction::Send,
             }
         );

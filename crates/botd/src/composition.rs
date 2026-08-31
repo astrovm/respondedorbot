@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bot_adapters::bcra::{
     BcraTransport, ReqwestBcraTransport, TransportFailureKind as BcraTransportFailureKind,
-    load_bcra,
+    load_bcra, load_currency_bands,
 };
 use bot_adapters::billing_read::{BillingRepository, ChargeHistoryRow};
 use bot_adapters::chat_config::{ChatConfigRepository, ChatConfigRepositoryError};
@@ -361,8 +361,9 @@ struct CriptoYaDollarQuotesSource<T> {
     transport: T,
 }
 
-struct CriptoYaDollarMarketSource<T, C> {
+struct CriptoYaDollarMarketSource<T, B, C> {
     transport: T,
+    bcra_transport: B,
     cache: C,
 }
 
@@ -381,20 +382,24 @@ impl<T: BcraTransport, C: RequestCache> BcraSource for NativeBcraSource<T, C> {
     }
 }
 
-impl<T: DollarTransport, C: DollarCache> DollarMarketSource for CriptoYaDollarMarketSource<T, C> {
+impl<T: DollarTransport, B: BcraTransport, C: DollarCache> DollarMarketSource
+    for CriptoYaDollarMarketSource<T, B, C>
+{
     fn load(
         &mut self,
         hours_ago: i64,
         locale: bot_core::locale::Locale,
         now_unix: i64,
     ) -> DollarMarketLoad {
-        let load = load_dollar_market(
+        let bands = load_currency_bands(&self.bcra_transport, &mut self.cache, now_unix);
+        let mut load = load_dollar_market(
             &self.transport,
             &mut self.cache,
             hours_ago,
             locale,
             now_unix,
         );
+        load.diagnostics.extend(bands.diagnostics);
         DollarMarketLoad {
             text: load.text,
             diagnostics: load.diagnostics,
@@ -1391,6 +1396,8 @@ impl ConversationToolFactory for ProductionToolFactory {
                     CriptoYaDollarMarketSource {
                         transport: ReqwestDollarTransport::new()
                             .map_err(|error| format!("dollar tool transport: {error:?}"))?,
+                        bcra_transport: ReqwestBcraTransport::new()
+                            .map_err(|error| format!("BCRA tool transport: {error:?}"))?,
                         cache: RedisJsonCache::new(&self.redis_endpoint)
                             .map_err(|error| error.to_string())?,
                     },
@@ -1520,6 +1527,8 @@ pub fn build_native_runtime(
         ReqwestCriptoYaTransport::new().map_err(CompositionError::CriptoYaTransport)?;
     let dollar_transport =
         ReqwestDollarTransport::new().map_err(CompositionError::DollarTransport)?;
+    let dollar_bcra_transport =
+        ReqwestBcraTransport::new().map_err(CompositionError::BcraTransport)?;
     let dollar_cache =
         RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::DollarCache)?;
     let bcra_transport = ReqwestBcraTransport::new().map_err(CompositionError::BcraTransport)?;
@@ -1585,6 +1594,7 @@ pub fn build_native_runtime(
     }))
     .with_dollar_market_source(Box::new(CriptoYaDollarMarketSource {
         transport: dollar_transport,
+        bcra_transport: dollar_bcra_transport,
         cache: dollar_cache,
     }))
     .with_bcra_source(Box::new(NativeBcraSource {

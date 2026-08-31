@@ -514,6 +514,31 @@ mod tests {
     }
 
     #[test]
+    fn captioned_media_command_keeps_direct_audio_without_a_reply() {
+        let actual = parse_response(
+            200,
+            r#"{"ok":true,"result":[{"update_id":30,"message":{"message_id":9,"chat":{"id":42,"type":"private"},"from":{"id":88},"caption":" /transcribe ","voice":{"file_id":"direct-voice","duration":4}}}]}"#,
+        );
+        let Ok(PollOutcome::Updates(updates)) = actual else {
+            return;
+        };
+        let IncomingEvent::Message(message) = &updates[0].event else {
+            return;
+        };
+
+        assert!(!message.has_reply);
+        assert_eq!(message.audio_media_kind.as_deref(), Some("voice"));
+        assert_eq!(message.audio_duration_seconds, Some(4));
+        assert_eq!(
+            message
+                .content
+                .as_ref()
+                .map(|content| (content.text.as_str(), content.audio_file_id.as_deref())),
+            Some(("/transcribe", Some("direct-voice")))
+        );
+    }
+
+    #[test]
     fn api_failures_preserve_conflict_rate_limit_and_status_information() {
         assert_eq!(
             parse_response(200, r#"{"ok":false,"error_code":409}"#),
