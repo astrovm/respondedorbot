@@ -8,6 +8,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BOT_CONTAINER_QUADLET = REPO_ROOT / "quadlets" / "respondedorbot.container"
 REDIS_CONTAINER_QUADLET = REPO_ROOT / "quadlets" / "respondedorbot-redis.container"
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "podman.yml"
+MAINTENANCE_SERVICE = REPO_ROOT / "systemd" / "respondedorbot-maintenance.service"
 
 
 class QuadletTests(unittest.TestCase):
@@ -55,6 +56,12 @@ class QuadletTests(unittest.TestCase):
         self.assertIn('TAG_FLAGS="${TAG_FLAGS} --tag ${REPO}:latest"', contents)
         self.assertIn('podman push "${REPO}:sha-${{ github.sha }}"', contents)
         self.assertIn('podman push "${REPO}:latest"', contents)
+
+    def test_maintenance_timer_executes_the_native_entrypoint(self):
+        contents = MAINTENANCE_SERVICE.read_text(encoding="utf-8")
+
+        self.assertIn("/usr/local/bin/botd --maintenance", contents)
+        self.assertNotIn("python /app/run_maintenance.py", contents)
 
 
 if __name__ == "__main__":
