@@ -76,6 +76,11 @@ normalized Python and Rust results.
 - Partial tool arguments across stream chunks.
 - Multiple tools and repeated tool rounds.
 - Unknown tool and invalid arguments.
+- Typed assistant tool-call and tool-result messages across provider rounds.
+- Hard tool-round termination, with completed provider/tool billing segments
+  retained for settlement.
+- Partial text and reconcilable provider usage retained when a later stream or
+  response consumer fails.
 - Firecrawl authorization and usage accounting.
 - Provider rate limit and backoff expiration.
 - Cancellation, timeout, malformed event, and provider disconnect.

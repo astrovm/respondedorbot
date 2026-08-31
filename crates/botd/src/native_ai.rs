@@ -8,11 +8,13 @@ use bot_adapters::openrouter_chat::{
     complete_with,
 };
 use bot_core::ai_pricing::calculate_billing_for_segments;
+use bot_core::ai_prompt::build_system_prompt;
 use bot_core::ai_reserve::{
     EstimatedMessage, TokenEstimateValue, chat_output_token_limit,
     estimate_chat_reserve_credit_units,
 };
 use bot_core::credit_units::{CreditUnits, format_credit_units};
+use bot_core::locale::Locale;
 use bot_core::provider_config::web_search_tool;
 use bot_core::scheduled_tasks::ScheduledTask;
 use bot_core::telegram_actions::{SendMessage, TelegramAction};
@@ -154,26 +156,16 @@ fn task_message_role(role: &str) -> ChatRole {
 }
 
 fn task_system_prompt(persona: &str, task: &ScheduledTask) -> String {
-    let (task_mode, tools, date_header, language_header, language) = if task.locale == "en" {
-        (
-            "RUNNING SCHEDULED TASK:\nAnswer the following instruction and nothing else.\nDo not ask questions, offer follow-ups, or request confirmation.\nGenerate the answer and finish.\n\n",
-            "TOOLS:\nCall them directly without asking permission or narrating first.\nDo not explain what you will do before using a simple tool.\nUse tools when you need current or external data.",
-            "CURRENT DATE:",
-            "RESPONSE LANGUAGE:",
-            "respond in English",
-        )
-    } else {
-        (
-            "EJECUTANDO TAREA PROGRAMADA:\nRespondé la siguiente instrucción y nada más.\nNo hagas preguntas, no ofrezcas seguimientos, no pidas confirmación.\nGenerá tu respuesta y terminá.\n\n",
-            "HERRAMIENTAS:\nLlamalas directamente, sin pedir permiso ni narrar antes.\nNo expliques qué vas a hacer antes de usar una herramienta simple.\nUsá las herramientas cuando necesites datos actuales o externos.",
-            "FECHA ACTUAL:",
-            "IDIOMA DE RESPUESTA:",
-            "respondé en español rioplatense de Argentina",
-        )
-    };
-    format!(
-        "{task_mode}{persona}\n\n{tools}\n\n{date_header}\n{}\n\n{language_header}\n{language}\n",
-        formatted_date(i64::from(task.timezone_offset))
+    build_system_prompt(
+        persona,
+        if task.locale == "en" {
+            Locale::En
+        } else {
+            Locale::Es
+        },
+        &formatted_date(i64::from(task.timezone_offset)),
+        true,
+        true,
     )
 }
 

@@ -55,6 +55,8 @@ crates/
 - Market query parsing, normalization, and formatting.
 - Billing authorization and settlement state machines.
 - AI request, streaming, tool, and fallback state machines.
+- Typed AI prompt, assistant tool-call, and tool-result messages; provider JSON
+  conversion stays at the runtime/adapter boundary.
 - Scheduled-task trigger and recurrence rules.
 - Memory compaction planning.
 - Typed actions and typed subsystem errors.

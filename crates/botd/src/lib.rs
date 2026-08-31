@@ -1,5 +1,7 @@
 //! Application composition and lifecycle for the native bot process.
 
+pub mod chat_provider;
+pub mod chat_tool_loop;
 pub mod composition;
 pub mod config;
 pub mod dispatcher;
