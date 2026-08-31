@@ -7,6 +7,8 @@ use postgres_native_tls::MakeTlsConnector;
 use serde_json::Value;
 use thiserror::Error;
 
+const CHAT_CONFIG_SCHEMA_ADVISORY_LOCK_KEY: i64 = 48_610_006;
+
 const SCHEMA_SQL: &str = "
 CREATE TABLE IF NOT EXISTS chat_configs (
     chat_id TEXT PRIMARY KEY,
@@ -40,13 +42,12 @@ impl ChatConfigRepository {
     }
 
     pub fn ensure_schema(&self) -> Result<(), ChatConfigRepositoryError> {
-        self.connect()?.batch_execute(SCHEMA_SQL)?;
-        Ok(())
+        ensure_schema(&mut self.connect()?)
     }
 
     pub fn get(&self, chat_id: &str) -> Result<Option<ChatConfig>, ChatConfigRepositoryError> {
         let mut client = self.connect()?;
-        client.batch_execute(SCHEMA_SQL)?;
+        ensure_schema(&mut client)?;
         let Some(row) = client.query_opt(
             "SELECT config FROM chat_configs WHERE chat_id = $1",
             &[&chat_id],
@@ -64,7 +65,7 @@ impl ChatConfigRepository {
         config: &ChatConfig,
     ) -> Result<ChatConfig, ChatConfigRepositoryError> {
         let mut client = self.connect()?;
-        client.batch_execute(SCHEMA_SQL)?;
+        ensure_schema(&mut client)?;
         let value = serde_json::to_value(config)?;
         client.execute(
             "INSERT INTO chat_configs (chat_id, config) VALUES ($1, $2) \
@@ -82,6 +83,17 @@ impl ChatConfigRepository {
             MakeTlsConnector::new(connector),
         )?)
     }
+}
+
+fn ensure_schema(client: &mut Client) -> Result<(), ChatConfigRepositoryError> {
+    let mut transaction = client.transaction()?;
+    transaction.query_one(
+        "SELECT pg_advisory_xact_lock($1)",
+        &[&CHAT_CONFIG_SCHEMA_ADVISORY_LOCK_KEY],
+    )?;
+    transaction.batch_execute(SCHEMA_SQL)?;
+    transaction.commit()?;
+    Ok(())
 }
 
 #[cfg(test)]
