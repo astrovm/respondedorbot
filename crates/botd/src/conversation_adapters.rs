@@ -9,17 +9,22 @@ use bot_core::command_state::{
     BOT_MESSAGE_METADATA_TTL_SECONDS, CHAT_HISTORY_WRITE_LIMIT, CHAT_STATE_TTL_SECONDS,
 };
 use bot_core::message_state::{
-    bot_message_metadata_key, chat_compacted_until_key, chat_members_key, chat_summary_key,
-    prepare_chat_member_payload, prepare_message_write,
+    CHAT_HISTORY_MAX_MESSAGES, bot_message_metadata_key, chat_compacted_until_key,
+    chat_members_key, chat_summary_key, prepare_chat_member_payload, prepare_message_write,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::ai_dispatch::{AiConversationInput, AiReplyMetadata};
+use crate::compaction_scheduler::MemoryCompactionPlan;
+use crate::compaction_scheduler::PayerSource;
 use crate::conversation::{
     ConversationBilling, ConversationMemory, ConversationState, ProviderSegmentRequest,
     ReserveDecision, ReserveRequest, SettlementRequest,
 };
+
+const COMPACTION_THRESHOLD: usize = 40;
+const COMPACTION_KEEP: usize = 25;
 
 pub struct RedisConversationState {
     state: RedisMessageState,
@@ -33,7 +38,7 @@ impl RedisConversationState {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct StoredHistoryEntry {
     #[serde(default)]
     id: String,
@@ -84,21 +89,35 @@ impl ConversationState for RedisConversationState {
         chat_id: &str,
         search_text: &str,
         _reply_to_message_id: Option<&str>,
-        max_history_messages: usize,
+        _max_history_messages: usize,
     ) -> Result<ConversationMemory, String> {
-        let limit = i64::try_from(max_history_messages)
+        let limit = i64::try_from(CHAT_HISTORY_MAX_MESSAGES)
             .map_err(|_| "history limit exceeds the Redis range".to_owned())?;
         let entries = self
             .state
             .get_history_entries(chat_id, limit)
             .map_err(|error| error.to_string())?;
         let parsed = decode_history(entries);
-        let recent_ids = parsed
+        let summary = self
+            .state
+            .get_value(&chat_summary_key(chat_id))
+            .map_err(|error| error.to_string())?
+            .filter(|value| !value.is_empty());
+        let marker = if summary.is_some() {
+            self.state
+                .get_value(&chat_compacted_until_key(chat_id))
+                .map_err(|error| error.to_string())?
+                .filter(|value| !value.is_empty())
+        } else {
+            None
+        };
+        let (visible, compaction_plan) = build_compaction_view(&parsed, &summary, &marker, chat_id);
+        let recent_ids = visible
             .iter()
             .map(|entry| entry.id.clone())
             .filter(|id| !id.is_empty())
             .collect::<std::collections::HashSet<_>>();
-        let history = parsed
+        let history = visible
             .into_iter()
             .filter(|entry| !entry.text.is_empty())
             .map(|entry| HistoryMessage {
@@ -118,15 +137,11 @@ impl ConversationState for RedisConversationState {
                 .map(|rows| decode_retrieved(rows, &recent_ids))
                 .unwrap_or_default()
         };
-        let summary = self
-            .state
-            .get_value(&chat_summary_key(chat_id))
-            .map_err(|error| error.to_string())?
-            .filter(|value| !value.is_empty());
         Ok(ConversationMemory {
             summary,
             history,
             retrieved,
+            compaction_plan,
         })
     }
 
@@ -283,11 +298,57 @@ fn decode_summary_memory(
         summary,
         history,
         retrieved: Vec::new(),
+        compaction_plan: None,
     }
+}
+
+fn stored_compaction_message(entry: &StoredHistoryEntry) -> Value {
+    json!({
+        "id": entry.id,
+        "text": entry.text,
+        "timestamp": entry.timestamp,
+        "role": entry.role,
+    })
+}
+
+fn build_compaction_view(
+    history: &[StoredHistoryEntry],
+    summary: &Option<String>,
+    marker: &Option<String>,
+    chat_id: &str,
+) -> (Vec<StoredHistoryEntry>, Option<MemoryCompactionPlan>) {
+    let start_index = marker.as_deref().map_or(0, |marker| {
+        history
+            .iter()
+            .position(|entry| entry.id == marker)
+            .map_or(0, |index| index + 1)
+    });
+    let delta = history.get(start_index..).unwrap_or_default();
+    let dropped_count = delta.len().saturating_sub(COMPACTION_KEEP);
+    let plan = (delta.len() > COMPACTION_THRESHOLD && dropped_count > 0)
+        .then(|| {
+            let dropped = &delta[..dropped_count];
+            let target_marker = dropped.last()?.id.clone();
+            (!target_marker.is_empty()).then(|| MemoryCompactionPlan {
+                chat_id: chat_id.to_owned(),
+                messages: dropped.iter().map(stored_compaction_message).collect(),
+                prior_summary: summary.clone(),
+                expected_marker: marker.clone(),
+                target_marker,
+            })
+        })
+        .flatten();
+    let visible = if plan.is_some() && summary.is_some() {
+        delta[dropped_count..].to_vec()
+    } else {
+        delta.to_vec()
+    };
+    (visible, plan)
 }
 
 pub struct PostgresConversationBilling {
     repository: BillingRepository,
+    payer_by_operation: std::collections::HashMap<String, PayerSource>,
 }
 
 impl PostgresConversationBilling {
@@ -295,6 +356,7 @@ impl PostgresConversationBilling {
     pub fn new(database_url: &str) -> Self {
         Self {
             repository: BillingRepository::new(database_url),
+            payer_by_operation: std::collections::HashMap::new(),
         }
     }
 }
@@ -303,6 +365,14 @@ impl ConversationBilling for PostgresConversationBilling {
     fn reserve(&mut self, request: ReserveRequest) -> Result<ReserveDecision, String> {
         let amount = i32::try_from(request.amount)
             .map_err(|_| "AI reservation exceeds the database range".to_owned())?;
+        let requested_source = self
+            .payer_by_operation
+            .get(&request.operation_id)
+            .copied()
+            .map(|source| match source {
+                PayerSource::User => "user",
+                PayerSource::Chat => "chat",
+            });
         self.repository
             .charge_ai_credits(
                 request.user_id,
@@ -310,14 +380,28 @@ impl ConversationBilling for PostgresConversationBilling {
                 amount,
                 "ai_reserve",
                 &request.metadata,
-                None,
+                requested_source,
                 Some(&request.reservation_id),
                 &request.operation_id,
             )
-            .map(|result| ReserveDecision {
-                authorized: result.ok,
-                user_balance: result.user_balance,
-                chat_balance: result.chat_balance,
+            .map(|result| {
+                let source = match result.source.as_deref() {
+                    Some("user") => Some(PayerSource::User),
+                    Some("chat") => Some(PayerSource::Chat),
+                    _ => None,
+                };
+                if result.ok
+                    && let Some(source) = source
+                {
+                    self.payer_by_operation
+                        .insert(request.operation_id.clone(), source);
+                }
+                ReserveDecision {
+                    authorized: result.ok,
+                    user_balance: result.user_balance,
+                    chat_balance: result.chat_balance,
+                    source,
+                }
             })
             .map_err(|error| error.to_string())
     }
@@ -335,6 +419,7 @@ impl ConversationBilling for PostgresConversationBilling {
     }
 
     fn settle(&mut self, request: SettlementRequest) -> Result<(), String> {
+        self.payer_by_operation.remove(&request.operation_id);
         let metadata = Map::from_iter([
             ("operation_id".to_owned(), json!(request.operation_id)),
             ("reason".to_owned(), json!(request.reason)),
@@ -423,7 +508,10 @@ fn user_identity(input: &AiConversationInput) -> String {
 mod tests {
     use bot_core::ai_prompt::PromptRole;
 
-    use super::{decode_history, decode_summary_memory, history_sort_key, role};
+    use super::{
+        StoredHistoryEntry, build_compaction_view, decode_history, decode_summary_memory,
+        history_sort_key, role,
+    };
 
     #[test]
     fn history_decoder_sorts_user_then_bot_and_preserves_legacy_roles() {
@@ -465,5 +553,41 @@ mod tests {
             Some("missing".to_owned()),
         );
         assert_eq!(missing_marker.history.len(), 3);
+    }
+
+    #[test]
+    fn plans_only_dropped_delta_and_keeps_current_context_rules() -> Result<(), &'static str> {
+        let history = (1..=50)
+            .map(|id| StoredHistoryEntry {
+                id: id.to_string(),
+                text: format!("message {id}"),
+                timestamp: id,
+                role: "user".to_owned(),
+            })
+            .collect::<Vec<_>>();
+        let (first_visible, first_plan) = build_compaction_view(&history, &None, &None, "chat");
+        assert_eq!(first_visible.len(), 50);
+        let Some(first_plan) = first_plan else {
+            return Err("first compaction should be planned");
+        };
+        assert_eq!(first_plan.messages.len(), 25);
+        assert_eq!(first_plan.target_marker, "25");
+        assert_eq!(first_plan.expected_marker, None);
+
+        let (incremental_visible, incremental_plan) = build_compaction_view(
+            &history,
+            &Some("prior".to_owned()),
+            &Some("5".to_owned()),
+            "chat",
+        );
+        assert_eq!(incremental_visible.len(), 25);
+        assert_eq!(incremental_visible[0].id, "26");
+        let Some(incremental_plan) = incremental_plan else {
+            return Err("incremental compaction should be planned");
+        };
+        assert_eq!(incremental_plan.messages.len(), 20);
+        assert_eq!(incremental_plan.target_marker, "25");
+        assert_eq!(incremental_plan.expected_marker.as_deref(), Some("5"));
+        Ok(())
     }
 }

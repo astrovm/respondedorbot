@@ -24,6 +24,9 @@ use crate::ai_dispatch::{
 use crate::chat_tool_loop::{
     ChatRoundStream, ChatToolLoopError, NativeToolRuntime, run_chat_tool_loop,
 };
+use crate::compaction_scheduler::{
+    CompactionScheduleContext, MemoryCompactionPlan, MemoryCompactionScheduler, PayerSource,
+};
 use crate::media::{MediaExecution, MediaKind, MediaPipelineError, MediaRuntime};
 
 const MAX_HISTORY_MESSAGES: usize = 40;
@@ -35,6 +38,7 @@ pub struct ConversationMemory {
     pub summary: Option<String>,
     pub history: Vec<HistoryMessage>,
     pub retrieved: Vec<RetrievedMessage>,
+    pub compaction_plan: Option<MemoryCompactionPlan>,
 }
 
 pub trait ConversationState {
@@ -85,6 +89,7 @@ pub struct ReserveDecision {
     pub authorized: bool,
     pub user_balance: i64,
     pub chat_balance: i64,
+    pub source: Option<PayerSource>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -126,6 +131,8 @@ struct PendingConversation {
     text: String,
     segments: Vec<Value>,
     kind: PendingKind,
+    compaction_plan: Option<MemoryCompactionPlan>,
+    compaction_payer: Option<PayerSource>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -143,6 +150,12 @@ struct PreparedConversationMedia {
     diagnostics: Vec<String>,
 }
 
+struct PreparedPrompt<Tools> {
+    messages: Vec<PromptMessage>,
+    tools: Tools,
+    compaction_plan: Option<MemoryCompactionPlan>,
+}
+
 pub struct NativeConversation<Provider, Tools, State, Billing> {
     provider: Provider,
     tools: Tools,
@@ -152,6 +165,7 @@ pub struct NativeConversation<Provider, Tools, State, Billing> {
     model: String,
     max_tool_rounds: usize,
     media: Option<Box<dyn MediaRuntime>>,
+    compaction_scheduler: Option<Box<dyn MemoryCompactionScheduler>>,
     pending: HashMap<String, PendingConversation>,
 }
 
@@ -175,6 +189,7 @@ impl<Provider, Tools, State, Billing> NativeConversation<Provider, Tools, State,
             model: model.to_owned(),
             max_tool_rounds,
             media: None,
+            compaction_scheduler: None,
             pending: HashMap::new(),
         }
     }
@@ -182,6 +197,15 @@ impl<Provider, Tools, State, Billing> NativeConversation<Provider, Tools, State,
     #[must_use]
     pub fn with_media(mut self, media: Box<dyn MediaRuntime>) -> Self {
         self.media = Some(media);
+        self
+    }
+
+    #[must_use]
+    pub fn with_compaction_scheduler(
+        mut self,
+        scheduler: Box<dyn MemoryCompactionScheduler>,
+    ) -> Self {
+        self.compaction_scheduler = Some(scheduler);
         self
     }
 
@@ -284,7 +308,7 @@ where
         &mut self,
         input: &AiConversationInput,
         media_context: Option<&MediaExecution>,
-    ) -> Result<(Vec<PromptMessage>, ToolFactory::Tools), String> {
+    ) -> Result<PreparedPrompt<ToolFactory::Tools>, String> {
         let tools = self.tools.create(input)?;
         let memory = self.state.load_memory(
             &input.chat_id.0.to_string(),
@@ -319,7 +343,11 @@ where
             append_media_context(&mut conversation, media, input.locale);
         }
         messages.extend(conversation);
-        Ok((messages, tools))
+        Ok(PreparedPrompt {
+            messages,
+            tools,
+            compaction_plan: memory.compaction_plan,
+        })
     }
 
     fn prepare_media(
@@ -475,6 +503,8 @@ where
                             text: text.clone(),
                             segments: Vec::new(),
                             kind: PendingKind::MediaCommand,
+                            compaction_plan: None,
+                            compaction_payer: None,
                         },
                     );
                     return Ok(AiPreparation::Reply {
@@ -554,6 +584,8 @@ where
                 text: text.clone(),
                 segments,
                 kind: PendingKind::MediaCommand,
+                compaction_plan: None,
+                compaction_payer: None,
             },
         );
         Ok(AiPreparation::Reply {
@@ -598,6 +630,7 @@ where
             summary,
             history,
             retrieved: _,
+            compaction_plan: _,
         } = memory;
         if history.is_empty() {
             let text = summary.filter(|summary| !summary.is_empty()).map_or_else(
@@ -614,6 +647,8 @@ where
                     kind: PendingKind::SummaryCommand {
                         provider_failed: false,
                     },
+                    compaction_plan: None,
+                    compaction_payer: None,
                 },
             );
             on_token(&text)?;
@@ -691,6 +726,8 @@ where
                 text: text.clone(),
                 segments,
                 kind: PendingKind::SummaryCommand { provider_failed },
+                compaction_plan: None,
+                compaction_payer: None,
             },
         );
         Ok(AiPreparation::Reply {
@@ -740,7 +777,11 @@ where
             });
         }
 
-        let (messages, mut tools) = match self.prompt(&input, prepared_media.execution.as_ref()) {
+        let PreparedPrompt {
+            messages,
+            mut tools,
+            compaction_plan,
+        } = match self.prompt(&input, prepared_media.execution.as_ref()) {
             Ok(value) => value,
             Err(error) => {
                 let actual = price_segments(&segments)?;
@@ -838,6 +879,8 @@ where
                 text: text.clone(),
                 segments,
                 kind: PendingKind::Conversation { provider_failed },
+                compaction_plan,
+                compaction_payer: base.source,
             },
         );
         Ok(AiPreparation::Reply {
@@ -972,6 +1015,21 @@ where
                 delivery.sent_message_id.map(|id| id.0),
                 &pending.text,
             )?;
+            if let (Some(plan), Some(scheduler)) =
+                (pending.compaction_plan, self.compaction_scheduler.as_mut())
+            {
+                let _scheduled = scheduler.schedule(
+                    plan,
+                    CompactionScheduleContext {
+                        user_id: pending.input.sender_id.0,
+                        group_chat_id: group_chat_id(&pending.input),
+                        origin_chat_id: pending.input.chat_id.0,
+                        message_id: pending.input.message_id.0,
+                        locale: pending.input.locale,
+                        payer_source: pending.compaction_payer,
+                    },
+                );
+            }
         }
         Ok(())
     }
@@ -1298,6 +1356,7 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::convert::Infallible;
+    use std::rc::Rc;
 
     use bot_adapters::openrouter_chat::OpenRouterChatError;
     use bot_core::provider_stream_policy::StreamToolCall;
@@ -1307,6 +1366,19 @@ mod tests {
     use crate::chat_tool_loop::{ChatRoundStream, NativeToolRuntime, ToolExecutionResult};
 
     use super::*;
+
+    struct Scheduler(Rc<RefCell<Vec<(MemoryCompactionPlan, CompactionScheduleContext)>>>);
+
+    impl MemoryCompactionScheduler for Scheduler {
+        fn schedule(
+            &mut self,
+            plan: MemoryCompactionPlan,
+            context: CompactionScheduleContext,
+        ) -> Result<bool, String> {
+            self.0.borrow_mut().push((plan, context));
+            Ok(true)
+        }
+    }
 
     struct Provider {
         rounds: RefCell<VecDeque<Result<ChatRoundResult, ChatRoundError>>>,
@@ -1540,6 +1612,7 @@ mod tests {
                 authorized: true,
                 user_balance: 1_000,
                 chat_balance: 0,
+                source: Some(PayerSource::User),
             }))
         }
 
@@ -1598,6 +1671,7 @@ mod tests {
                         text: "prior answer".to_owned(),
                     }],
                     retrieved: Vec::new(),
+                    compaction_plan: None,
                 },
                 ..State::default()
             },
@@ -1654,6 +1728,43 @@ mod tests {
             Ok(())
         );
         assert_eq!(service.billing.settlements.len(), 1);
+    }
+
+    #[test]
+    fn schedules_background_compaction_only_after_successful_delivery() -> Result<(), String> {
+        let scheduled = Rc::new(RefCell::new(Vec::new()));
+        let mut service = conversation(vec![Ok(round("answer", None))], Billing::default())
+            .with_compaction_scheduler(Box::new(Scheduler(Rc::clone(&scheduled))));
+        service.state.memory.compaction_plan = Some(MemoryCompactionPlan {
+            chat_id: "42".to_owned(),
+            messages: vec![json!({"id":"1","role":"user","text":"old"})],
+            prior_summary: Some("prior summary".to_owned()),
+            expected_marker: Some("0".to_owned()),
+            target_marker: "1".to_owned(),
+        });
+        let prepared = service.prepare(input())?;
+        let AiPreparation::Reply {
+            completion_id: Some(completion_id),
+            ..
+        } = prepared
+        else {
+            return Err("expected a prepared reply".to_owned());
+        };
+        assert!(scheduled.borrow().is_empty());
+        service.complete_delivery(AiDelivery {
+            completion_id,
+            delivered: true,
+            sent_message_id: Some(MessageId(99)),
+        })?;
+        let scheduled = scheduled.borrow();
+        assert_eq!(scheduled.len(), 1);
+        assert_eq!(scheduled[0].0.target_marker, "1");
+        assert_eq!(scheduled[0].1.user_id, 88);
+        assert_eq!(scheduled[0].1.origin_chat_id, 42);
+        assert_eq!(scheduled[0].1.group_chat_id, None);
+        assert_eq!(scheduled[0].1.message_id, 7);
+        assert_eq!(scheduled[0].1.payer_source, Some(PayerSource::User));
+        Ok(())
     }
 
     #[test]
@@ -1977,6 +2088,7 @@ mod tests {
             authorized: false,
             user_balance: 25,
             chat_balance: 50,
+            source: None,
         };
         let mut explicit = conversation(
             vec![Ok(round("must not run", None))],

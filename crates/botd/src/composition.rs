@@ -46,6 +46,7 @@ use bot_adapters::polymarket::{
     TransportFailureKind as PolymarketTransportFailureKind, load_elections,
 };
 use bot_adapters::redis_chat_admin::{cache_chat_admin, get_cached_chat_admin};
+use bot_adapters::redis_compaction_queue::RedisCompactionQueue;
 use bot_adapters::redis_connection::RedisEndpoint;
 use bot_adapters::redis_json_cache::{RedisJsonCache, RedisJsonCacheError};
 use bot_adapters::redis_message_state::{RedisMessageState, RedisMessageStateError};
@@ -89,6 +90,7 @@ use thiserror::Error;
 use crate::chat_members_tool::ChatMembersTool;
 use crate::chat_provider::OpenRouterChatStreamer;
 use crate::chat_tool_loop::DEFAULT_MAX_TOOL_ROUNDS;
+use crate::compaction_scheduler::production_compaction_scheduler;
 use crate::conversation::ConversationToolFactory;
 use crate::conversation::NativeConversation;
 use crate::conversation_adapters::{PostgresConversationBilling, RedisConversationState};
@@ -1611,6 +1613,12 @@ pub fn build_native_runtime(
                 ),
                 crate::native_ai::VISION_MODEL,
             );
+            let compaction_scheduler = production_compaction_scheduler(
+                RedisCompactionQueue::new(options.redis_endpoint)
+                    .map_err(|error| CompositionError::ConversationState(error.to_string()))?,
+                options.database_url,
+                &system_prompt,
+            );
             let conversation = NativeConversation::new(
                 provider,
                 ProductionToolFactory::new(
@@ -1626,7 +1634,8 @@ pub fn build_native_runtime(
                 crate::native_ai::PRIMARY_CHAT_MODEL,
                 DEFAULT_MAX_TOOL_ROUNDS,
             )
-            .with_media(Box::new(media));
+            .with_media(Box::new(media))
+            .with_compaction_scheduler(Box::new(compaction_scheduler));
             dispatcher.with_ai_conversation_source(Box::new(conversation))
         }
         _ => dispatcher,
