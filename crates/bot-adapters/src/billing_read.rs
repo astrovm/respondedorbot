@@ -1674,6 +1674,16 @@ mod tests {
         BillingSchemaRepository::new(&database_url).ensure_schema()?;
         client.batch_execute(
             "DELETE FROM star_payments \
+                WHERE user_id BETWEEN 7000000000001 AND 7000000000999; \
+             DELETE FROM credit_ledger \
+                WHERE user_id BETWEEN 7000000000001 AND 7000000000999 \
+                   OR chat_id BETWEEN 7000000000001 AND 7000000000999; \
+             DELETE FROM onboarding_grants \
+                WHERE user_id BETWEEN 7000000000001 AND 7000000000999 \
+                   OR user_id BETWEEN 8100000000000 AND 8100999999999; \
+             DELETE FROM credit_accounts \
+                WHERE scope_id BETWEEN 7000000000001 AND 7000000000999; \
+             DELETE FROM star_payments \
                 WHERE user_id IN (7000000000043, 7000000000044); \
              DELETE FROM credit_ledger \
                 WHERE user_id IN (7000000000043, 7000000000044) \
