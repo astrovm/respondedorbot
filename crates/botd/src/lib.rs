@@ -16,3 +16,4 @@ pub mod scheduler;
 pub mod task_executor;
 pub mod task_service;
 pub mod tool_requests;
+pub mod web_fetch_tool;

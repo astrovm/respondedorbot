@@ -33,6 +33,7 @@ pub mod telegram_chat_admin;
 pub mod telegram_http;
 pub mod telegram_polling;
 pub mod weather;
+pub mod web_fetch;
 pub mod yahoo_finance;
 
 /// Return the core protocol version used by this adapter build.
