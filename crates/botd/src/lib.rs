@@ -1,5 +1,6 @@
 //! Application composition and lifecycle for the native bot process.
 
+pub mod chat_members_tool;
 pub mod chat_provider;
 pub mod chat_tool_loop;
 pub mod composition;
@@ -15,5 +16,6 @@ pub mod runtime;
 pub mod scheduler;
 pub mod task_executor;
 pub mod task_service;
+pub mod task_tools;
 pub mod tool_requests;
 pub mod web_fetch_tool;

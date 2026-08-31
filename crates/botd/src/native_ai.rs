@@ -26,13 +26,34 @@ use thiserror::Error;
 use crate::dispatcher::ActionSink;
 use crate::task_executor::{
     TaskAiProvider, TaskBilling, TaskMessenger, TaskPromptMessage, TaskProviderReply,
-    TaskReserveOutcome,
+    TaskReserveOutcome, build_task_messages,
 };
 
 pub const PRIMARY_CHAT_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
 const SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE: i64 = 4_000;
 const WEB_SEARCH_MAX_RESULTS: i64 = 5;
 const WEB_SEARCH_MAX_USES: i64 = 3;
+
+pub fn estimate_task_reserve_credit_units(
+    text: &str,
+    locale: &str,
+) -> Result<i64, bot_core::ai_reserve::ReserveEstimateError> {
+    let estimated_messages = build_task_messages(text, locale)
+        .into_iter()
+        .map(|message| EstimatedMessage {
+            role: TokenEstimateValue::Text(message.role.to_owned()),
+            content: TokenEstimateValue::Text(message.content),
+            name: TokenEstimateValue::Empty,
+        })
+        .collect::<Vec<_>>();
+    estimate_chat_reserve_credit_units(
+        None,
+        &estimated_messages,
+        Some(chat_output_token_limit(PRIMARY_CHAT_MODEL)),
+        SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE,
+        PRIMARY_CHAT_MODEL,
+    )
+}
 
 pub struct OpenRouterTaskProvider<Transport> {
     transport: Transport,
