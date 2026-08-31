@@ -27,6 +27,7 @@ use crate::conversation::{
     ConversationBilling, ConversationMemory, ConversationState, ProviderSegmentRequest,
     ReserveDecision, ReserveDenial, ReserveRequest, SettlementRequest,
 };
+use crate::reconciliation::ActiveOperationRegistry;
 
 const COMPACTION_THRESHOLD: usize = 40;
 const COMPACTION_KEEP: usize = 25;
@@ -358,6 +359,8 @@ pub struct PostgresConversationBilling {
     cap_key_by_operation: HashMap<String, String>,
     cap_checked_operations: HashSet<String>,
     onboarding_checked_operations: HashSet<String>,
+    active_operations: Option<ActiveOperationRegistry>,
+    active_marked_operations: HashSet<String>,
 }
 
 impl PostgresConversationBilling {
@@ -370,12 +373,20 @@ impl PostgresConversationBilling {
             cap_key_by_operation: HashMap::new(),
             cap_checked_operations: HashSet::new(),
             onboarding_checked_operations: HashSet::new(),
+            active_operations: None,
+            active_marked_operations: HashSet::new(),
         }
     }
 
     #[must_use]
     pub fn with_creditless_cap(mut self, creditless_cap: RedisCreditlessCap) -> Self {
         self.creditless_cap = Some(creditless_cap);
+        self
+    }
+
+    #[must_use]
+    pub fn with_active_operations(mut self, active_operations: ActiveOperationRegistry) -> Self {
+        self.active_operations = Some(active_operations);
         self
     }
 }
@@ -473,6 +484,13 @@ impl ConversationBilling for PostgresConversationBilling {
         {
             self.payer_by_operation
                 .insert(request.operation_id.clone(), source);
+            if self
+                .active_marked_operations
+                .insert(request.operation_id.clone())
+                && let Some(active_operations) = self.active_operations.as_ref()
+            {
+                active_operations.mark_active(&request.operation_id);
+            }
         }
         Ok(ReserveDecision {
             authorized: result.ok,
@@ -496,10 +514,6 @@ impl ConversationBilling for PostgresConversationBilling {
     }
 
     fn settle(&mut self, request: SettlementRequest) -> Result<(), String> {
-        self.payer_by_operation.remove(&request.operation_id);
-        self.onboarding_checked_operations
-            .remove(&request.operation_id);
-        self.cap_checked_operations.remove(&request.operation_id);
         let operation_id = request.operation_id.clone();
         let metadata = Map::from_iter([
             ("operation_id".to_owned(), json!(operation_id)),
@@ -525,7 +539,15 @@ impl ConversationBilling for PostgresConversationBilling {
                 .decrement(cap_key)
                 .map_err(|error| error.to_string())?;
         }
+        self.payer_by_operation.remove(&operation_id);
+        self.onboarding_checked_operations.remove(&operation_id);
+        self.cap_checked_operations.remove(&operation_id);
         self.cap_key_by_operation.remove(&operation_id);
+        if self.active_marked_operations.remove(&operation_id)
+            && let Some(active_operations) = self.active_operations.as_ref()
+        {
+            active_operations.mark_inactive(&operation_id);
+        }
         Ok(())
     }
 

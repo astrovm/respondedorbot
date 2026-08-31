@@ -20,6 +20,7 @@ pub mod media_adapters;
 pub mod native_ai;
 pub mod native_tools;
 pub mod random_tool;
+pub mod reconciliation;
 pub mod runtime;
 pub mod scheduler;
 pub mod task_executor;

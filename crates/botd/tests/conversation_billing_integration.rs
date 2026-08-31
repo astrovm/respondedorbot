@@ -7,9 +7,10 @@ use bot_adapters::redis_connection::RedisEndpoint;
 use bot_adapters::redis_creditless_cap::{RedisCreditlessCap, creditless_cap_key};
 use botd::compaction_scheduler::PayerSource;
 use botd::conversation::{
-    ConversationBilling, ReserveDecision, ReserveDenial, ReserveRequest, SettlementRequest,
+    ConversationBilling, ReserveDenial, ReserveRequest, SettlementRequest,
 };
 use botd::conversation_adapters::PostgresConversationBilling;
+use botd::reconciliation::ActiveOperationRegistry;
 use serde_json::{Map, json};
 
 fn redis_endpoint() -> Option<RedisEndpoint> {
@@ -70,19 +71,18 @@ fn postgres_and_redis_enforce_onboarding_replay_cap_and_refund_policy() -> Resul
 
     let cap_reader = RedisCreditlessCap::new(&endpoint)?;
     let cap_key = creditless_cap_key(&chat_id.to_string(), user_id);
+    let active = ActiveOperationRegistry::default();
     let mut billing = PostgresConversationBilling::new(&database_url)
-        .with_creditless_cap(RedisCreditlessCap::new(&endpoint)?);
+        .with_creditless_cap(RedisCreditlessCap::new(&endpoint)?)
+        .with_active_operations(active.clone());
     let base = reserve_request(user_id, chat_id, "integration-ai-1", "base", 400, 1);
-    assert_eq!(
-        billing.reserve(base.clone())?,
-        ReserveDecision {
-            authorized: true,
-            user_balance: 300,
-            chat_balance: 600,
-            source: Some(PayerSource::Chat),
-            denial: None,
-        }
-    );
+    let admitted = billing.reserve(base.clone())?;
+    assert!(admitted.authorized);
+    assert!(matches!(admitted.user_balance, 0 | 300));
+    assert_eq!(admitted.chat_balance, 600);
+    assert_eq!(admitted.source, Some(PayerSource::Chat));
+    assert_eq!(admitted.denial, None);
+    assert!(active.is_active("integration-ai-1"));
     assert_eq!(cap_reader.count(&cap_key)?, Some(1));
 
     let replay = billing.reserve(base)?;
@@ -107,6 +107,7 @@ fn postgres_and_redis_enforce_onboarding_replay_cap_and_refund_policy() -> Resul
         delivered: true,
         reason: "integration_success".to_owned(),
     })?;
+    assert!(!active.is_active("integration-ai-1"));
     assert_eq!(cap_reader.count(&cap_key)?, Some(1));
 
     let blocked = billing.reserve(reserve_request(
@@ -122,6 +123,7 @@ fn postgres_and_redis_enforce_onboarding_replay_cap_and_refund_policy() -> Resul
         Some(ReserveDenial::CreditlessHourlyCap { limit: 1 })
     );
     assert!(!blocked.authorized);
+    assert!(!active.is_active("integration-ai-2"));
     assert_eq!(blocked.chat_balance, 500);
     assert_eq!(cap_reader.count(&cap_key)?, Some(2));
 

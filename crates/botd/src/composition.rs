@@ -119,6 +119,7 @@ use crate::media_adapters::{
 };
 use crate::native_tools::{NativeTool, NativeToolRegistry, StandardNativeToolBackend};
 use crate::random_tool::RandomChoiceTool;
+use crate::reconciliation::ActiveOperationRegistry;
 use crate::runtime::{PollingRuntime, UpdateSource};
 use crate::task_tools::{
     RandomTaskIdSource, TaskCancelTool, TaskListTool, TaskSetTool, TaskToolContext,
@@ -1301,6 +1302,7 @@ pub struct NativeRuntimeOptions<'a> {
     pub firecrawl_api_key: Option<String>,
     pub system_prompt: Option<String>,
     pub trigger_words: Option<Vec<String>>,
+    pub active_operations: ActiveOperationRegistry,
 }
 
 pub type ProductionConversationTools =
@@ -1702,11 +1704,11 @@ pub fn build_native_runtime(
                 ),
                 RedisConversationState::new(options.redis_endpoint)
                     .map_err(CompositionError::ConversationState)?,
-                PostgresConversationBilling::new(options.database_url).with_creditless_cap(
-                    RedisCreditlessCap::new(options.redis_endpoint).map_err(|error| {
-                        CompositionError::ConversationBillingPolicy(error.to_string())
-                    })?,
-                ),
+                PostgresConversationBilling::new(options.database_url)
+                    .with_creditless_cap(RedisCreditlessCap::new(options.redis_endpoint).map_err(
+                        |error| CompositionError::ConversationBillingPolicy(error.to_string()),
+                    )?)
+                    .with_active_operations(options.active_operations.clone()),
                 &system_prompt,
                 crate::native_ai::PRIMARY_CHAT_MODEL,
                 DEFAULT_MAX_TOOL_ROUNDS,
@@ -1804,6 +1806,7 @@ mod tests {
         MessageStateSink, OilPriceSource, RandomSource, RuntimeValues, StarPaymentSink,
         StockPriceSource, WeatherSource,
     };
+    use crate::reconciliation::ActiveOperationRegistry;
     use crate::runtime::UpdateSource;
 
     use super::build_charge_history_page;
@@ -2564,6 +2567,7 @@ mod tests {
             firecrawl_api_key: None,
             system_prompt: None,
             trigger_words: None,
+            active_operations: ActiveOperationRegistry::default(),
         });
         assert!(result.is_ok());
         let result = build_native_runtime(NativeRuntimeOptions {
@@ -2583,6 +2587,7 @@ mod tests {
             firecrawl_api_key: None,
             system_prompt: None,
             trigger_words: None,
+            active_operations: ActiveOperationRegistry::default(),
         });
         assert!(result.is_ok());
         let result = build_native_runtime(NativeRuntimeOptions {
@@ -2602,6 +2607,7 @@ mod tests {
             firecrawl_api_key: Some("synthetic-firecrawl-key".to_owned()),
             system_prompt: Some("synthetic persona".to_owned()),
             trigger_words: Some(vec!["synthetic".to_owned()]),
+            active_operations: ActiveOperationRegistry::default(),
         });
         assert!(result.is_ok());
     }
