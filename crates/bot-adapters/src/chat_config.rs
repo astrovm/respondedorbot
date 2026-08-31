@@ -146,8 +146,9 @@ mod tests {
             return;
         };
         let chat_id = "-100900002";
-        cleanup(&database_url, chat_id);
         let repository = ChatConfigRepository::new(&database_url);
+        assert!(repository.ensure_schema().is_ok());
+        cleanup(&database_url, chat_id);
         let config = ChatConfig {
             language: "en".to_owned(),
             timezone_offset: 2,
