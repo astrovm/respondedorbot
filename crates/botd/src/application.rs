@@ -53,11 +53,12 @@ where
     diagnostics
 }
 
-pub fn run_polling_until<Source, Handler, Stop, Wait, Report>(
+pub fn run_polling_until<Source, Handler, Stop, Wait, ReportRetry, ReportHandler>(
     runtime: &mut PollingRuntime<Source, Handler>,
     mut should_stop: Stop,
     mut wait: Wait,
-    mut report_handler_failure: Report,
+    mut report_poll_retry: ReportRetry,
+    mut report_handler_failure: ReportHandler,
 ) -> Result<(), String>
 where
     Source: UpdateSource,
@@ -65,20 +66,31 @@ where
     Handler::Error: Display,
     Stop: FnMut() -> bool,
     Wait: FnMut(Duration),
-    Report: FnMut(i64, &str),
+    ReportRetry: FnMut(&PollFailure),
+    ReportHandler: FnMut(i64, &str),
 {
+    let mut last_poll_failure = None;
     while !should_stop() {
         match runtime.step() {
-            Ok(StepOutcome::Retry(failure)) => wait(retry_delay(&failure)),
+            Ok(StepOutcome::Retry(failure)) => {
+                if last_poll_failure.as_ref() != Some(&failure) {
+                    report_poll_retry(&failure);
+                }
+                last_poll_failure = Some(failure.clone());
+                wait(retry_delay(&failure));
+            }
             Ok(
                 StepOutcome::Idle
                 | StepOutcome::Synchronized { .. }
                 | StepOutcome::Dispatched { .. },
-            ) => {}
+            ) => last_poll_failure = None,
             Err(RuntimeError::Handler {
                 update_id,
                 handler_error,
-            }) => report_handler_failure(update_id, &handler_error.to_string()),
+            }) => {
+                last_poll_failure = None;
+                report_handler_failure(update_id, &handler_error.to_string());
+            }
             Err(error @ RuntimeError::Poll(_)) => return Err(error.to_string()),
         }
     }
@@ -195,6 +207,11 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
         &mut runtime,
         || stopping.load(Ordering::Acquire),
         |duration| interruptible_wait(&stopping, duration),
+        |failure| {
+            let message = format!("Telegram polling retry: {failure:?}");
+            eprintln!("{message}");
+            report_best_effort(reporter.as_ref(), &message);
+        },
         |update_id, error| {
             let message = format!("Telegram update {update_id} failed: {error}");
             eprintln!("{message}");
@@ -359,6 +376,7 @@ mod tests {
                 current >= 3
             },
             |_| {},
+            |_| {},
             |update_id, error| failures.borrow_mut().push((update_id, error.to_owned())),
         );
         assert_eq!(result, Ok(()));
@@ -369,5 +387,59 @@ mod tests {
         );
         assert_eq!(*offsets.borrow(), [Some(-1), None, Some(12)]);
         assert_eq!(runtime.offset(), Some(13));
+    }
+
+    #[test]
+    fn polling_retries_are_reported_once_until_a_success_resets_the_failure() {
+        struct Source {
+            outcomes: VecDeque<Result<PollOutcome, PollingError>>,
+        }
+        impl UpdateSource for Source {
+            fn poll(&mut self, _: Option<i64>) -> Result<PollOutcome, PollingError> {
+                self.outcomes
+                    .pop_front()
+                    .unwrap_or(Ok(PollOutcome::Updates(Vec::new())))
+            }
+        }
+        struct Handler;
+        impl UpdateHandler for Handler {
+            type Error = &'static str;
+            fn handle(&mut self, _: IncomingUpdate) -> Result<(), Self::Error> {
+                Ok(())
+            }
+        }
+
+        let failure = PollFailure::Transport {
+            failure: TransportFailureKind::Request,
+        };
+        let source = Source {
+            outcomes: VecDeque::from([
+                Ok(PollOutcome::Updates(Vec::new())),
+                Ok(PollOutcome::Retry(failure.clone())),
+                Ok(PollOutcome::Retry(failure.clone())),
+                Ok(PollOutcome::Updates(Vec::new())),
+                Ok(PollOutcome::Retry(failure.clone())),
+            ]),
+        };
+        let mut runtime = PollingRuntime::new(source, Handler);
+        let iterations = Cell::new(0);
+        let reports = RefCell::new(Vec::new());
+        let waits = Cell::new(0);
+        assert_eq!(
+            run_polling_until(
+                &mut runtime,
+                || {
+                    let current = iterations.get();
+                    iterations.set(current + 1);
+                    current >= 5
+                },
+                |_| waits.set(waits.get() + 1),
+                |failure| reports.borrow_mut().push(failure.clone()),
+                |_, _| {},
+            ),
+            Ok(())
+        );
+        assert_eq!(*reports.borrow(), [failure.clone(), failure]);
+        assert_eq!(waits.get(), 3);
     }
 }

@@ -2019,9 +2019,9 @@ mod tests {
         assert_eq!(requests[0].timeout, Duration::from_secs(22));
         assert_eq!(
             requests[0]
-                .params
+                .json_payload
                 .as_ref()
-                .and_then(|params| params.get("offset")),
+                .and_then(|payload| payload.get("offset")),
             Some(&serde_json::json!(42))
         );
     }

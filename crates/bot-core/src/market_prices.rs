@@ -14,6 +14,7 @@ const STABLECOINS: [&str; 26] = [
     "NUARS", "PAXG", "PYUSD", "RAI", "SUSD", "TUSD", "USDC", "USDD", "USDM", "USDP", "USDT", "UXD",
     "XAUT", "XSGD",
 ];
+const UNAMBIGUOUS_CRYPTO_SYMBOLS: [&str; 4] = ["BTC", "ETH", "SATS", "XMR"];
 const SUPPORTED_CURRENCIES: [&str; 35] = [
     "ARS", "AUD", "BRL", "BTC", "BUSD", "CAD", "CHF", "CLP", "CNY", "COP", "CZK", "DAI", "DKK",
     "ETH", "EUR", "GBP", "HKD", "ILS", "INR", "ISK", "JPY", "KRW", "MXN", "NZD", "PEN", "SATS",
@@ -147,7 +148,7 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
         Ok(rows) => rows,
         Err(error) => {
             diagnostics.push(format!("CoinMarketCap listings: {error}"));
-            if !crypto_only {
+            if !crypto_only && !contains_unambiguous_crypto_symbol(raw_query) {
                 let stock = stock_only(raw_query, locale, stocks, diagnostics, false);
                 if !stock.is_empty() {
                     if modifiers_unsupported(timeframe, conversion_requested) {
@@ -255,6 +256,18 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
         parts.push(missing_assets(&unresolved, locale));
     }
     parts.join("\n")
+}
+
+fn contains_unambiguous_crypto_symbol(query: &str) -> bool {
+    query
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .filter(|token| !token.is_empty())
+        .map(normalized)
+        .any(|token| {
+            UNAMBIGUOUS_CRYPTO_SYMBOLS.contains(&token.as_str())
+                || STABLECOINS.contains(&token.as_str())
+                || matches!(token.as_str(), "STABLES" | "STABLECOINS")
+        })
 }
 
 struct Selection {
@@ -954,6 +967,15 @@ mod tests {
             Locale::En,
             &mut FailedCrypto,
             &mut Stocks::default(),
+        );
+        assert_eq!(result.text, "I could not load crypto prices");
+
+        let result = execute_market_price_command(
+            "btc",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut FailedCrypto,
+            &mut Stocks(vec![("btc".to_owned(), Some(stock("BTC")))]),
         );
         assert_eq!(result.text, "I could not load crypto prices");
     }

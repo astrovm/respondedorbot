@@ -319,9 +319,9 @@ pub fn poll_once_with<T: TelegramTransport>(
         transport,
         token,
         "getUpdates",
-        "GET",
-        Some(params),
+        "POST",
         None,
+        Some(params),
         request_timeout,
     )? {
         TelegramHttpOutcome::Response { status_code, body } => parse_response(status_code, &body),
@@ -369,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn poll_request_has_stable_offset_allowed_updates_and_timeout_margin() {
+    fn poll_request_uses_post_json_for_nested_allowed_updates() {
         let transport = transport(Ok(HttpResponse {
             status_code: 200,
             body: r#"{"ok":true,"result":[]}"#.to_owned(),
@@ -381,10 +381,11 @@ mod tests {
         let requests = transport.requests.borrow();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].endpoint, "getUpdates");
-        assert_eq!(requests[0].method, Method::GET);
+        assert_eq!(requests[0].method, Method::POST);
         assert_eq!(requests[0].timeout.as_secs(), 35);
+        assert_eq!(requests[0].params, None);
         assert_eq!(
-            requests[0].params,
+            requests[0].json_payload,
             Some(json!({
                 "offset": 42,
                 "timeout": 30,
