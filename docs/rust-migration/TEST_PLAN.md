@@ -100,6 +100,11 @@ normalized Python and Rust results.
 - Missed execution/coalescing behavior.
 - Restart reconstruction.
 - Two scheduler workers competing for one task.
+- Native scheduled-task provider requests, personal-credit reservation replay,
+  durable usage segments, exact-once settlement/refund, and non-repeated side
+  effects after a settled execution.
+- `botd --verify-tasks` against canonical Redis state; verification must perform
+  no ownership, occurrence claim, execution, delivery, or state write.
 - Cancellation during claim and execution.
 - AI fallback/retry and billing idempotency.
 - Existing APScheduler-to-canonical-record migration.

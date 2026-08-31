@@ -4,6 +4,7 @@ use std::fmt;
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
+use bot_adapters::redis_connection::RedisEndpoint;
 use thiserror::Error;
 
 const DEFAULT_HANDLER_WORKERS: usize = 16;
@@ -14,6 +15,27 @@ pub struct RuntimeConfig {
     telegram_token: String,
     pub handler_workers: NonZeroUsize,
     pub long_poll_timeout: Duration,
+}
+
+#[derive(Clone)]
+pub struct TaskVerificationConfig {
+    pub redis_endpoint: RedisEndpoint,
+    pub owner_token: String,
+}
+
+impl fmt::Debug for TaskVerificationConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TaskVerificationConfig")
+            .field("redis_host", &self.redis_endpoint.host)
+            .field("redis_port", &self.redis_endpoint.port)
+            .field(
+                "redis_password",
+                &self.redis_endpoint.password.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("owner_token", &self.owner_token)
+            .finish()
+    }
 }
 
 impl fmt::Debug for RuntimeConfig {
@@ -33,6 +55,45 @@ pub enum ConfigError {
     MissingTelegramToken,
     #[error("TELEGRAM_LONG_POLL_SECONDS must be a positive integer")]
     InvalidLongPollTimeout,
+    #[error("REDIS_PORT must be an integer from 1 through 65535")]
+    InvalidRedisPort,
+}
+
+impl TaskVerificationConfig {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    pub fn from_lookup<F>(lookup: F) -> Result<Self, ConfigError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let host = lookup("REDIS_HOST")
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_owned());
+        let port = lookup("REDIS_PORT").map_or(Ok(6379), |value| {
+            value
+                .parse::<u16>()
+                .ok()
+                .filter(|port| *port > 0)
+                .ok_or(ConfigError::InvalidRedisPort)
+        })?;
+        let password = lookup("REDIS_PASSWORD").filter(|value| !value.is_empty());
+        let owner_token = lookup("BOT_INSTANCE_NAME")
+            .filter(|value| !value.trim().is_empty())
+            .map_or_else(
+                || "botd-verifier".to_owned(),
+                |value| format!("{value}:verify"),
+            );
+        Ok(Self {
+            redis_endpoint: RedisEndpoint {
+                host,
+                port,
+                password,
+            },
+            owner_token,
+        })
+    }
 }
 
 impl RuntimeConfig {
@@ -78,7 +139,7 @@ impl RuntimeConfig {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{ConfigError, DEFAULT_HANDLER_WORKERS, RuntimeConfig};
+    use super::{ConfigError, DEFAULT_HANDLER_WORKERS, RuntimeConfig, TaskVerificationConfig};
 
     fn config(values: &[(&str, &str)]) -> Result<RuntimeConfig, ConfigError> {
         let values = values
@@ -155,5 +216,39 @@ mod tests {
             actual.map(|value| value.telegram_token().to_owned()),
             Ok(" synthetic-token ".to_owned())
         );
+    }
+
+    #[test]
+    fn task_verification_configuration_is_independent_of_telegram_credentials() {
+        let values = HashMap::from([
+            ("REDIS_HOST".to_owned(), "redis.internal".to_owned()),
+            ("REDIS_PORT".to_owned(), "6380".to_owned()),
+            ("REDIS_PASSWORD".to_owned(), "synthetic-secret".to_owned()),
+            ("BOT_INSTANCE_NAME".to_owned(), "worker-a".to_owned()),
+        ]);
+        let config = TaskVerificationConfig::from_lookup(|name| values.get(name).cloned())
+            .map_err(|error| error.to_string());
+        assert!(config.is_ok());
+        let Some(config) = config.ok() else {
+            return;
+        };
+        assert_eq!(config.redis_endpoint.host, "redis.internal");
+        assert_eq!(config.redis_endpoint.port, 6380);
+        assert_eq!(config.owner_token, "worker-a:verify");
+        let debug = format!("{config:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("synthetic-secret"));
+    }
+
+    #[test]
+    fn task_verification_redis_port_is_bounded() {
+        for invalid in ["", "0", "65536", "many"] {
+            assert!(matches!(
+                TaskVerificationConfig::from_lookup(|name| {
+                    (name == "REDIS_PORT").then(|| invalid.to_owned())
+                }),
+                Err(ConfigError::InvalidRedisPort)
+            ));
+        }
     }
 }
