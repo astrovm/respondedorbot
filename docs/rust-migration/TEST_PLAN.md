@@ -105,6 +105,10 @@ normalized Python and Rust results.
   effects after a settled execution.
 - `botd --verify-tasks` against canonical Redis state; verification must perform
   no ownership, occurrence claim, execution, delivery, or state write.
+- OpenRouter SSE boundaries split across arbitrary transport chunks and UTF-8
+  code points, including tool-call fragment accumulation inputs, final usage,
+  explicit provider errors, missing completion markers, transport interruption,
+  and downstream consumer cancellation.
 - Cancellation during claim and execution.
 - AI fallback/retry and billing idempotency.
 - Existing APScheduler-to-canonical-record migration.

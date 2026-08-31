@@ -1,8 +1,10 @@
 //! Typed blocking OpenRouter chat-completion boundary.
 
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::time::Duration;
 
+use bot_core::provider_stream_policy::StreamToolCallFragment;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -135,8 +137,35 @@ pub struct HttpResponse {
     pub headers: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChatStreamChunk {
+    pub generation_id: Option<String>,
+    pub text: String,
+    pub tool_call_fragments: Vec<StreamToolCallFragment>,
+    pub finish_reason: Option<String>,
+    pub model: Option<String>,
+    pub upstream_provider: Option<String>,
+    pub service_tier: Option<String>,
+    pub annotations: Vec<Value>,
+    pub usage: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChatStreamEvent {
+    Chunk(Box<ChatStreamChunk>),
+    Done,
+}
+
 pub trait OpenRouterTransport {
     fn post(&self, request: &HttpRequest) -> Result<HttpResponse, OpenRouterChatError>;
+}
+
+pub trait OpenRouterStreamTransport {
+    fn post_stream(
+        &self,
+        request: &HttpRequest,
+        on_bytes: &mut dyn FnMut(&[u8]) -> Result<(), OpenRouterChatError>,
+    ) -> Result<(), OpenRouterChatError>;
 }
 
 pub struct ReqwestOpenRouterTransport {
@@ -186,6 +215,50 @@ impl OpenRouterTransport for ReqwestOpenRouterTransport {
     }
 }
 
+impl OpenRouterStreamTransport for ReqwestOpenRouterTransport {
+    fn post_stream(
+        &self,
+        request: &HttpRequest,
+        on_bytes: &mut dyn FnMut(&[u8]) -> Result<(), OpenRouterChatError>,
+    ) -> Result<(), OpenRouterChatError> {
+        let mut response = self
+            .client
+            .post(&request.url)
+            .bearer_auth(&request.bearer_token)
+            .header("Content-Type", "application/json")
+            .body(request.body.clone())
+            .send()
+            .map_err(|error| OpenRouterChatError::Transport(error.to_string()))?;
+        let status_code = response.status().as_u16();
+        let headers = response
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|value| (name.as_str().to_ascii_lowercase(), value.to_owned()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        if status_code >= 400 {
+            let body = response
+                .text()
+                .map_err(|error| OpenRouterChatError::Transport(error.to_string()))?;
+            return Err(http_error(status_code, &body, &headers));
+        }
+        let mut buffer = [0_u8; 8_192];
+        loop {
+            let count = response
+                .read(&mut buffer)
+                .map_err(|error| OpenRouterChatError::Transport(error.to_string()))?;
+            if count == 0 {
+                return Ok(());
+            }
+            on_bytes(&buffer[..count])?;
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum OpenRouterChatError {
     #[error("OpenRouter API key is missing")]
@@ -209,6 +282,10 @@ pub enum OpenRouterChatError {
     InvalidJson(String),
     #[error("OpenRouter response did not contain a valid completion")]
     MalformedResponse,
+    #[error("OpenRouter stream ended with an incomplete UTF-8 or SSE frame")]
+    IncompleteStream,
+    #[error("OpenRouter stream returned an error: {0}")]
+    Stream(String),
 }
 
 #[derive(Deserialize)]
@@ -245,6 +322,64 @@ struct RawMessage {
     annotations: Vec<Value>,
 }
 
+#[derive(Deserialize)]
+struct RawStreamEnvelope {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    service_tier: Option<String>,
+    #[serde(default)]
+    choices: Vec<RawStreamChoice>,
+    #[serde(default)]
+    usage: Map<String, Value>,
+    #[serde(default)]
+    error: Option<Value>,
+}
+
+#[derive(Deserialize)]
+struct RawStreamChoice {
+    #[serde(default)]
+    delta: RawStreamDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
+    #[serde(default)]
+    error: Option<Value>,
+}
+
+#[derive(Default, Deserialize)]
+struct RawStreamDelta {
+    #[serde(default)]
+    content: Value,
+    #[serde(default)]
+    tool_calls: Vec<RawStreamToolCall>,
+    #[serde(default)]
+    annotations: Vec<Value>,
+}
+
+#[derive(Deserialize)]
+struct RawStreamToolCall {
+    #[serde(default)]
+    index: Value,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default, rename = "type")]
+    call_type: Option<String>,
+    #[serde(default)]
+    function: Option<RawStreamFunction>,
+}
+
+#[derive(Deserialize)]
+struct RawStreamFunction {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
 fn completion_url(base_url: &str) -> Result<String, OpenRouterChatError> {
     let trimmed = base_url.trim().trim_end_matches('/');
     let parsed = reqwest::Url::parse(trimmed).map_err(|_| OpenRouterChatError::InvalidBaseUrl)?;
@@ -274,6 +409,24 @@ fn retry_after_seconds(headers: &BTreeMap<String, String>) -> Option<u64> {
         .and_then(|value| value.trim().parse::<u64>().ok())
 }
 
+fn http_error(
+    status_code: u16,
+    body: &str,
+    headers: &BTreeMap<String, String>,
+) -> OpenRouterChatError {
+    if status_code == 429 {
+        OpenRouterChatError::RateLimited {
+            retry_after_seconds: retry_after_seconds(headers),
+            message: response_message(body),
+        }
+    } else {
+        OpenRouterChatError::Http {
+            status_code,
+            message: response_message(body),
+        }
+    }
+}
+
 fn content_text(content: &Value) -> Result<String, OpenRouterChatError> {
     match content {
         Value::Null => Ok(String::new()),
@@ -296,17 +449,12 @@ pub fn parse_chat_completion(
     response: HttpResponse,
     requested_model: &str,
 ) -> Result<ChatCompletion, OpenRouterChatError> {
-    if response.status_code == 429 {
-        return Err(OpenRouterChatError::RateLimited {
-            retry_after_seconds: retry_after_seconds(&response.headers),
-            message: response_message(&response.body),
-        });
-    }
     if response.status_code >= 400 {
-        return Err(OpenRouterChatError::Http {
-            status_code: response.status_code,
-            message: response_message(&response.body),
-        });
+        return Err(http_error(
+            response.status_code,
+            &response.body,
+            &response.headers,
+        ));
     }
     let envelope = serde_json::from_str::<RawEnvelope>(&response.body)
         .map_err(|error| OpenRouterChatError::InvalidJson(error.to_string()))?;
@@ -378,6 +526,196 @@ pub fn complete(
     )
 }
 
+#[derive(Debug, Default)]
+struct SseDecoder {
+    pending: Vec<u8>,
+    saw_done: bool,
+}
+
+impl SseDecoder {
+    fn feed(
+        &mut self,
+        bytes: &[u8],
+        on_event: &mut dyn FnMut(ChatStreamEvent) -> Result<(), OpenRouterChatError>,
+    ) -> Result<(), OpenRouterChatError> {
+        self.pending.extend_from_slice(bytes);
+        while let Some((frame_end, delimiter_length)) = next_sse_frame(&self.pending) {
+            let frame = self.pending[..frame_end].to_vec();
+            self.pending.drain(..frame_end + delimiter_length);
+            if let Some(event) = parse_sse_frame(&frame)? {
+                if event == ChatStreamEvent::Done {
+                    self.saw_done = true;
+                }
+                on_event(event)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(
+        &mut self,
+        on_event: &mut dyn FnMut(ChatStreamEvent) -> Result<(), OpenRouterChatError>,
+    ) -> Result<(), OpenRouterChatError> {
+        if !self.pending.iter().all(u8::is_ascii_whitespace) {
+            let frame = std::mem::take(&mut self.pending);
+            if let Some(event) = parse_sse_frame(&frame)? {
+                if event == ChatStreamEvent::Done {
+                    self.saw_done = true;
+                }
+                on_event(event)?;
+            }
+        }
+        if self.pending.iter().all(u8::is_ascii_whitespace) {
+            self.pending.clear();
+        }
+        if self.saw_done {
+            Ok(())
+        } else {
+            Err(OpenRouterChatError::IncompleteStream)
+        }
+    }
+}
+
+fn next_sse_frame(bytes: &[u8]) -> Option<(usize, usize)> {
+    bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|position| (position, 4))
+        .or_else(|| {
+            bytes
+                .windows(2)
+                .position(|window| window == b"\n\n")
+                .map(|position| (position, 2))
+        })
+}
+
+fn parse_sse_frame(frame: &[u8]) -> Result<Option<ChatStreamEvent>, OpenRouterChatError> {
+    let frame = std::str::from_utf8(frame).map_err(|_| OpenRouterChatError::IncompleteStream)?;
+    let data = frame
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(str::trim_start)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if data.is_empty() {
+        return Ok(None);
+    }
+    if data.trim() == "[DONE]" {
+        return Ok(Some(ChatStreamEvent::Done));
+    }
+    let envelope = serde_json::from_str::<RawStreamEnvelope>(&data)
+        .map_err(|error| OpenRouterChatError::InvalidJson(error.to_string()))?;
+    if let Some(error) = envelope.error.as_ref() {
+        return Err(OpenRouterChatError::Stream(stream_error_message(error)));
+    }
+    let choice = envelope.choices.into_iter().next();
+    if let Some(error) = choice.as_ref().and_then(|choice| choice.error.as_ref()) {
+        return Err(OpenRouterChatError::Stream(stream_error_message(error)));
+    }
+    let (text, fragments, finish_reason, annotations) = choice.map_or_else(
+        || Ok::<_, OpenRouterChatError>((String::new(), Vec::new(), None, Vec::new())),
+        |choice| {
+            let text = content_text(&choice.delta.content)?;
+            let fragments = choice
+                .delta
+                .tool_calls
+                .into_iter()
+                .enumerate()
+                .map(|(position, fragment)| {
+                    let function = fragment.function;
+                    StreamToolCallFragment {
+                        position: i64::try_from(position).unwrap_or(i64::MAX),
+                        index: fragment.index,
+                        id: fragment.id,
+                        call_type: fragment.call_type,
+                        name: function.as_ref().and_then(|value| value.name.clone()),
+                        arguments: function.and_then(|value| value.arguments),
+                    }
+                })
+                .collect();
+            Ok::<_, OpenRouterChatError>((
+                text,
+                fragments,
+                choice.finish_reason.filter(|value| !value.is_empty()),
+                choice.delta.annotations,
+            ))
+        },
+    )?;
+    Ok(Some(ChatStreamEvent::Chunk(Box::new(ChatStreamChunk {
+        generation_id: envelope.id.filter(|value| !value.is_empty()),
+        text,
+        tool_call_fragments: fragments,
+        finish_reason,
+        model: envelope.model.filter(|value| !value.is_empty()),
+        upstream_provider: envelope.provider.filter(|value| !value.is_empty()),
+        service_tier: envelope.service_tier.filter(|value| !value.is_empty()),
+        annotations,
+        usage: envelope.usage,
+    }))))
+}
+
+fn stream_error_message(error: &Value) -> String {
+    error
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| error.as_str())
+        .filter(|message| !message.is_empty())
+        .unwrap_or("unknown provider error")
+        .to_owned()
+}
+
+pub fn stream_with<T, F>(
+    transport: &T,
+    api_key: &str,
+    base_url: &str,
+    request: &ChatCompletionRequest,
+    mut on_event: F,
+) -> Result<(), OpenRouterChatError>
+where
+    T: OpenRouterStreamTransport,
+    F: FnMut(ChatStreamEvent) -> Result<(), OpenRouterChatError>,
+{
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        return Err(OpenRouterChatError::MissingApiKey);
+    }
+    if request.model.trim().is_empty() {
+        return Err(OpenRouterChatError::MissingModel);
+    }
+    if !request.stream {
+        return Err(OpenRouterChatError::MalformedResponse);
+    }
+    let body = serde_json::to_string(request)
+        .map_err(|error| OpenRouterChatError::RequestJson(error.to_string()))?;
+    let mut decoder = SseDecoder::default();
+    transport.post_stream(
+        &HttpRequest {
+            url: completion_url(base_url)?,
+            bearer_token: api_key.to_owned(),
+            body,
+        },
+        &mut |bytes| decoder.feed(bytes, &mut on_event),
+    )?;
+    decoder.finish(&mut on_event)
+}
+
+pub fn stream<F>(
+    api_key: &str,
+    request: &ChatCompletionRequest,
+    on_event: F,
+) -> Result<(), OpenRouterChatError>
+where
+    F: FnMut(ChatStreamEvent) -> Result<(), OpenRouterChatError>,
+{
+    stream_with(
+        &ReqwestOpenRouterTransport::new()?,
+        api_key,
+        DEFAULT_OPENROUTER_BASE_URL,
+        request,
+        on_event,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -386,9 +724,9 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        ChatCompletionRequest, ChatMessage, ChatRole, HttpRequest, HttpResponse,
-        OpenRouterChatError, OpenRouterTransport, ToolCall, ToolFunctionCall, complete_with,
-        parse_chat_completion,
+        ChatCompletionRequest, ChatMessage, ChatRole, ChatStreamEvent, HttpRequest, HttpResponse,
+        OpenRouterChatError, OpenRouterStreamTransport, OpenRouterTransport, ToolCall,
+        ToolFunctionCall, complete_with, parse_chat_completion, stream_with,
     };
 
     struct Transport {
@@ -403,6 +741,26 @@ mod tests {
                 .borrow_mut()
                 .take()
                 .unwrap_or_else(|| Err(OpenRouterChatError::Transport("missing response".into())))
+        }
+    }
+
+    struct StreamTransport {
+        chunks: Vec<Vec<u8>>,
+        failure: Option<OpenRouterChatError>,
+        requests: RefCell<Vec<HttpRequest>>,
+    }
+
+    impl OpenRouterStreamTransport for StreamTransport {
+        fn post_stream(
+            &self,
+            request: &HttpRequest,
+            on_bytes: &mut dyn FnMut(&[u8]) -> Result<(), OpenRouterChatError>,
+        ) -> Result<(), OpenRouterChatError> {
+            self.requests.borrow_mut().push(request.clone());
+            for chunk in &self.chunks {
+                on_bytes(chunk)?;
+            }
+            self.failure.clone().map_or(Ok(()), Err)
         }
     }
 
@@ -662,5 +1020,188 @@ mod tests {
             ))
         );
         assert!(!format!("{actual:?}").contains("synthetic-secret"));
+    }
+
+    #[test]
+    fn incremental_sse_preserves_text_tool_fragments_usage_and_metadata() {
+        let body = [
+            ": keepalive\r\n\r\n".to_owned(),
+            format!(
+                "data: {}\r\n\r\n",
+                json!({
+                    "id": "gen-1",
+                    "model": "resolved/model",
+                    "provider": "Synthetic",
+                    "service_tier": "paid",
+                    "choices": [{"delta": {"content": "holá "}}]
+                })
+            ),
+            format!(
+                "data: {}\n\n",
+                json!({
+                    "choices": [{"delta": {
+                        "content": "mundo",
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "wea", "arguments": "{\"city\":"}
+                        }]
+                    }}]
+                })
+            ),
+            format!(
+                "data: {}\n\n",
+                json!({
+                    "choices": [{
+                        "delta": {"tool_calls": [{
+                            "index": "0",
+                            "function": {"name": "ther", "arguments": "\"Synthetic\"}"}
+                        }]},
+                        "finish_reason": "tool_calls"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 4,
+                        "cost": "0.001"
+                    }
+                })
+            ),
+            "data: [DONE]\n\n".to_owned(),
+        ]
+        .concat();
+        let chunks = body
+            .as_bytes()
+            .chunks(7)
+            .map(<[u8]>::to_vec)
+            .collect::<Vec<_>>();
+        let transport = StreamTransport {
+            chunks,
+            failure: None,
+            requests: RefCell::new(Vec::new()),
+        };
+        let mut request = request();
+        request.stream = true;
+        let mut events = Vec::new();
+        let result = stream_with(
+            &transport,
+            " synthetic-key ",
+            "https://openrouter.example/api/v1/",
+            &request,
+            |event| {
+                events.push(event);
+                Ok(())
+            },
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(events.len(), 4);
+        let ChatStreamEvent::Chunk(first) = &events[0] else {
+            return;
+        };
+        assert_eq!(first.text, "holá ");
+        assert_eq!(first.generation_id.as_deref(), Some("gen-1"));
+        assert_eq!(first.model.as_deref(), Some("resolved/model"));
+        let ChatStreamEvent::Chunk(second) = &events[1] else {
+            return;
+        };
+        assert_eq!(second.text, "mundo");
+        assert_eq!(second.tool_call_fragments[0].name.as_deref(), Some("wea"));
+        let ChatStreamEvent::Chunk(final_chunk) = &events[2] else {
+            return;
+        };
+        assert_eq!(
+            final_chunk.tool_call_fragments[0].arguments.as_deref(),
+            Some("\"Synthetic\"}")
+        );
+        assert_eq!(final_chunk.finish_reason.as_deref(), Some("tool_calls"));
+        assert_eq!(final_chunk.usage["cost"], "0.001");
+        assert_eq!(events[3], ChatStreamEvent::Done);
+        let requests = transport.requests.borrow();
+        assert_eq!(
+            requests[0].url,
+            "https://openrouter.example/api/v1/chat/completions"
+        );
+        assert_eq!(requests[0].bearer_token, "synthetic-key");
+        let request_body: Value = serde_json::from_str(&requests[0].body).unwrap_or(Value::Null);
+        assert_eq!(request_body["stream"], true);
+    }
+
+    #[test]
+    fn stream_reports_provider_errors_interruption_and_consumer_failure() {
+        let mut request = request();
+        request.stream = true;
+        for (body, expected) in [
+            (
+                "data: {\"error\":{\"message\":\"provider exploded\"}}\n\n",
+                OpenRouterChatError::Stream("provider exploded".to_owned()),
+            ),
+            (
+                "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+                OpenRouterChatError::IncompleteStream,
+            ),
+        ] {
+            let transport = StreamTransport {
+                chunks: vec![body.as_bytes().to_vec()],
+                failure: None,
+                requests: RefCell::new(Vec::new()),
+            };
+            assert_eq!(
+                stream_with(
+                    &transport,
+                    "key",
+                    "https://example.com",
+                    &request,
+                    |_event| Ok(())
+                ),
+                Err(expected)
+            );
+        }
+
+        let transport = StreamTransport {
+            chunks: vec![b"data: [DONE]\n\n".to_vec()],
+            failure: None,
+            requests: RefCell::new(Vec::new()),
+        };
+        assert_eq!(
+            stream_with(
+                &transport,
+                "key",
+                "https://example.com",
+                &request,
+                |_event| Err(OpenRouterChatError::Stream("consumer stopped".to_owned()))
+            ),
+            Err(OpenRouterChatError::Stream("consumer stopped".to_owned()))
+        );
+    }
+
+    #[test]
+    fn stream_validates_mode_and_propagates_transport_failure() {
+        let transport = StreamTransport {
+            chunks: Vec::new(),
+            failure: Some(OpenRouterChatError::Transport("timeout".to_owned())),
+            requests: RefCell::new(Vec::new()),
+        };
+        assert_eq!(
+            stream_with(
+                &transport,
+                "key",
+                "https://example.com",
+                &request(),
+                |_event| Ok(())
+            ),
+            Err(OpenRouterChatError::MalformedResponse)
+        );
+        let mut streaming = request();
+        streaming.stream = true;
+        assert_eq!(
+            stream_with(
+                &transport,
+                "key",
+                "https://example.com",
+                &streaming,
+                |_event| Ok(())
+            ),
+            Err(OpenRouterChatError::Transport("timeout".to_owned()))
+        );
     }
 }
