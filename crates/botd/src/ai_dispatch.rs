@@ -29,6 +29,9 @@ pub struct AiConversationInput {
     pub command: String,
     pub reply_to_message_id: Option<MessageId>,
     pub reply_context: Option<String>,
+    pub has_reply: bool,
+    pub visual_media_kind: Option<String>,
+    pub audio_media_kind: Option<String>,
     pub photo_file_id: Option<String>,
     pub audio_file_id: Option<String>,
     pub audio_duration_seconds: Option<f64>,
@@ -92,6 +95,13 @@ pub trait AiConversationSource {
         _on_token: &mut dyn FnMut(&str) -> Result<(), String>,
     ) -> Result<AiPreparation, String> {
         self.prepare(input)
+    }
+
+    fn prepare_media_command(
+        &mut self,
+        _input: AiConversationInput,
+    ) -> Result<Option<AiPreparation>, String> {
+        Ok(None)
     }
 
     fn record_ignored(&mut self, _input: AiConversationInput) -> Result<(), String> {

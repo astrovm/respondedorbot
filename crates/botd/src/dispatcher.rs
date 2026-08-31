@@ -1406,6 +1406,9 @@ where
                 message.replied_sender_username.as_deref(),
                 message.replied_text.as_deref(),
             ),
+            has_reply: message.has_reply,
+            visual_media_kind: message.visual_media_kind.clone(),
+            audio_media_kind: message.audio_media_kind.clone(),
             photo_file_id: content.photo_file_id.clone(),
             audio_file_id: content.audio_file_id.clone(),
             audio_duration_seconds: message.audio_duration_seconds.map(|value| value as f64),
@@ -1540,6 +1543,147 @@ where
         }
     }
 
+    fn dispatch_media_command(
+        &mut self,
+        message: &IncomingMessage,
+        config: &ChatConfig,
+        locale: bot_core::locale::Locale,
+        timestamp: i64,
+        command: &str,
+        prompt_text: &str,
+    ) -> NativeDispatchResult<Config, Actions, Random> {
+        let (Some(chat_id), Some(message_id), Some(sender_id), Some(content)) = (
+            message.chat_id,
+            message.message_id,
+            message.sender_id,
+            message.content.as_ref(),
+        ) else {
+            return Ok(DispatchOutcome::LegacyRequired);
+        };
+        let Some(source) = self.ai_conversation_source.as_mut() else {
+            return Ok(DispatchOutcome::LegacyRequired);
+        };
+        let input = AiConversationInput {
+            chat_id,
+            message_id,
+            chat_type: message.chat_type.clone().unwrap_or_default(),
+            chat_title: message.chat_title.clone().unwrap_or_default(),
+            sender_id,
+            sender_first_name: message.sender_first_name.clone().unwrap_or_default(),
+            sender_username: message.sender_username.clone().unwrap_or_default(),
+            message_text: prompt_text.to_owned(),
+            command: command.to_owned(),
+            reply_to_message_id: message.replied_message_id,
+            reply_context: reply_context(
+                message.replied_sender_first_name.as_deref(),
+                message.replied_sender_username.as_deref(),
+                message.replied_text.as_deref(),
+            ),
+            has_reply: message.has_reply,
+            visual_media_kind: message.visual_media_kind.clone(),
+            audio_media_kind: message.audio_media_kind.clone(),
+            photo_file_id: content.photo_file_id.clone(),
+            audio_file_id: content.audio_file_id.clone(),
+            audio_duration_seconds: message.audio_duration_seconds.map(|value| value as f64),
+            locale,
+            timezone_offset_hours: config.timezone_offset,
+            timestamp,
+            spontaneous: false,
+        };
+        let preparation = match source.prepare_media_command(input) {
+            Ok(Some(preparation)) => preparation,
+            Ok(None) => return Ok(DispatchOutcome::LegacyRequired),
+            Err(error) => {
+                self.state_diagnostics
+                    .push(format!("media command: {error}"));
+                return Ok(DispatchOutcome::LegacyRequired);
+            }
+        };
+        let AiPreparation::Reply {
+            text,
+            completion_id,
+            diagnostics,
+        } = preparation
+        else {
+            return Ok(DispatchOutcome::Handled);
+        };
+        self.state_diagnostics.extend(diagnostics);
+
+        let incoming = prepare_incoming_command_state(IncomingCommandState {
+            chat_id,
+            message_id,
+            user_id: sender_id,
+            first_name: message.sender_first_name.as_deref(),
+            username: message.sender_username.as_deref(),
+            text: &content.text,
+            is_group: is_group_chat_type(message.chat_type.as_deref()),
+            timestamp,
+        });
+        match incoming {
+            Ok(incoming) => {
+                if let Err(error) = self.state.record_incoming(&incoming) {
+                    self.state_diagnostics
+                        .push(format!("incoming media command state: {error}"));
+                }
+            }
+            Err(error) => self
+                .state_diagnostics
+                .push(format!("incoming media command state plan: {error}")),
+        }
+
+        let mut response = SendMessage::new(chat_id, &text);
+        response.reply_to_message_id = Some(message_id);
+        let receipt = match self.actions.execute(TelegramAction::SendMessage(response)) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                if let Some(completion_id) = completion_id
+                    && let Some(source) = self.ai_conversation_source.as_mut()
+                    && let Err(finalize_error) = source.complete_delivery(AiDelivery {
+                        completion_id,
+                        delivered: false,
+                        sent_message_id: None,
+                    })
+                {
+                    self.state_diagnostics.push(format!(
+                        "media command delivery failure completion: {finalize_error}"
+                    ));
+                }
+                return Err(DispatchError::Action(error));
+            }
+        };
+        if let Some(completion_id) = completion_id
+            && let Some(source) = self.ai_conversation_source.as_mut()
+            && let Err(error) = source.complete_delivery(AiDelivery {
+                completion_id,
+                delivered: receipt.message_id.is_some(),
+                sent_message_id: receipt.message_id,
+            })
+        {
+            self.state_diagnostics
+                .push(format!("media command delivery completion: {error}"));
+        }
+        let outgoing = prepare_outgoing_command_state(OutgoingCommandState {
+            chat_id,
+            incoming_message_id: message_id,
+            sent_message_id: receipt.message_id,
+            text: &text,
+            command,
+            timestamp,
+        });
+        match outgoing {
+            Ok(outgoing) => {
+                if let Err(error) = self.state.record_outgoing(&outgoing) {
+                    self.state_diagnostics
+                        .push(format!("outgoing media command state: {error}"));
+                }
+            }
+            Err(error) => self
+                .state_diagnostics
+                .push(format!("outgoing media command state plan: {error}")),
+        }
+        Ok(DispatchOutcome::Handled)
+    }
+
     fn dispatch_message(
         &mut self,
         message: &IncomingMessage,
@@ -1570,6 +1714,16 @@ where
             return Ok(DispatchOutcome::LegacyRequired);
         }
         let parsed = parse_command(&content.text, &self.bot_name);
+        if matches!(parsed.command.as_str(), "/transcribe" | "/describe") {
+            return self.dispatch_media_command(
+                message,
+                &config,
+                locale,
+                timestamp,
+                &parsed.command,
+                &parsed.message_text,
+            );
+        }
         let is_group = is_group_chat_type(message.chat_type.as_deref());
         let is_settings_command = matches!(
             parsed.command.as_str(),
@@ -2401,6 +2555,7 @@ mod tests {
     struct AiSource {
         metadata: Option<AiReplyMetadata>,
         preparation: Option<Result<AiPreparation, String>>,
+        media_preparation: Option<Result<AiPreparation, String>>,
         tokens: Vec<String>,
         prepared: Rc<RefCell<Vec<AiConversationInput>>>,
         ignored: Rc<RefCell<Vec<AiConversationInput>>>,
@@ -2437,6 +2592,17 @@ mod tests {
                 .unwrap_or_else(|| Ok(AiPreparation::silent()))
         }
 
+        fn prepare_media_command(
+            &mut self,
+            input: AiConversationInput,
+        ) -> Result<Option<AiPreparation>, String> {
+            let Some(preparation) = self.media_preparation.take() else {
+                return Ok(None);
+            };
+            self.prepared.borrow_mut().push(input);
+            preparation.map(Some)
+        }
+
         fn record_ignored(&mut self, input: AiConversationInput) -> Result<(), String> {
             self.ignored.borrow_mut().push(input);
             Ok(())
@@ -2462,6 +2628,7 @@ mod tests {
             AiSource {
                 metadata: None,
                 preparation: Some(preparation),
+                media_preparation: None,
                 tokens: Vec::new(),
                 prepared: Rc::clone(&prepared),
                 ignored: Rc::clone(&ignored),
@@ -3149,6 +3316,73 @@ mod tests {
             }]
         );
         assert_eq!(dispatcher.state_diagnostics(), ["provider diagnostic"]);
+    }
+
+    #[test]
+    fn explicit_media_command_uses_its_native_transaction_and_command_state() {
+        let (mut source, (prepared, ignored, deliveries)) = ai_source(Ok(AiPreparation::silent()));
+        source.media_preparation = Some(Ok(AiPreparation::Reply {
+            text: "🎵 audio transcription: synthetic transcript".to_owned(),
+            completion_id: Some("media-1".to_owned()),
+            diagnostics: vec!["media diagnostic".to_owned()],
+        }));
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig {
+                    language: "en".to_owned(),
+                    ..ChatConfig::default()
+                }),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_ai_conversation_source(Box::new(source));
+        let mut incoming = update("/transcribe", Some("en"));
+        let IncomingEvent::Message(message) = &mut incoming.event else {
+            return;
+        };
+        message.has_reply = true;
+        message.replied_message_id = Some(MessageId(6));
+        message.audio_media_kind = Some("voice".to_owned());
+        message.audio_duration_seconds = Some(4);
+        if let Some(content) = message.content.as_mut() {
+            content.audio_file_id = Some("voice-1".to_owned());
+        }
+
+        assert_eq!(dispatcher.dispatch(incoming), Ok(DispatchOutcome::Handled));
+        let prepared = prepared.borrow();
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].command, "/transcribe");
+        assert!(prepared[0].has_reply);
+        assert_eq!(prepared[0].audio_file_id.as_deref(), Some("voice-1"));
+        assert_eq!(prepared[0].audio_duration_seconds, Some(4.0));
+        assert!(ignored.borrow().is_empty());
+        assert_eq!(dispatcher.state.incoming.len(), 1);
+        assert_eq!(dispatcher.state.outgoing.len(), 1);
+        assert!(
+            dispatcher.state.outgoing[0]
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.payload.contains("/transcribe"))
+        );
+        let [TelegramAction::SendMessage(message)] = dispatcher.actions.0.as_slice() else {
+            return;
+        };
+        assert_eq!(message.text, "🎵 audio transcription: synthetic transcript");
+        assert_eq!(
+            deliveries.borrow().as_slice(),
+            [AiDelivery {
+                completion_id: "media-1".to_owned(),
+                delivered: true,
+                sent_message_id: Some(MessageId(700)),
+            }]
+        );
+        assert_eq!(dispatcher.state_diagnostics(), ["media diagnostic"]);
     }
 
     #[test]

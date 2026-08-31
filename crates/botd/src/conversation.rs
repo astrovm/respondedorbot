@@ -8,11 +8,13 @@ use bot_core::ai_prompt::{
     RetrievedMessage, build_conversation_prompt, build_system_prompt,
 };
 use bot_core::ai_reserve::{
-    EstimatedMessage, TokenEstimateValue, chat_output_token_limit,
-    estimate_chat_reserve_credit_units,
+    EstimatedMessage, TokenEstimateValue, VISION_OUTPUT_TOKEN_LIMIT, chat_output_token_limit,
+    estimate_chat_reserve_credit_units, estimate_transcription_reserve_credit_units,
+    estimate_vision_reserve_credit_units,
 };
 use bot_core::ai_response_cleanup::cleanup_response;
 use bot_core::locale::Locale;
+use bot_core::text_cleanup::sanitize_summary_text;
 use chrono::{DateTime, FixedOffset, Offset, Utc};
 use serde_json::{Map, Value, json};
 
@@ -22,7 +24,7 @@ use crate::ai_dispatch::{
 use crate::chat_tool_loop::{
     ChatRoundStream, ChatToolLoopError, NativeToolRuntime, run_chat_tool_loop,
 };
-use crate::media::{MediaExecution, MediaKind, MediaRuntime};
+use crate::media::{MediaExecution, MediaKind, MediaPipelineError, MediaRuntime};
 
 const MAX_HISTORY_MESSAGES: usize = 40;
 const SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE: i64 = 4_000;
@@ -114,7 +116,13 @@ struct PendingConversation {
     input: AiConversationInput,
     text: String,
     segments: Vec<Value>,
-    provider_failed: bool,
+    kind: PendingKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PendingKind {
+    Conversation { provider_failed: bool },
+    MediaCommand,
 }
 
 #[derive(Debug, Default)]
@@ -386,6 +394,165 @@ where
         }
     }
 
+    fn prepare_media_command_transaction(
+        &mut self,
+        input: AiConversationInput,
+    ) -> Result<AiPreparation, String> {
+        let operation_id = operation_id(&input);
+        let selected = input
+            .audio_file_id
+            .as_deref()
+            .map(|file_id| (MediaKind::Audio, file_id, input.audio_duration_seconds))
+            .or_else(|| {
+                input
+                    .photo_file_id
+                    .as_deref()
+                    .map(|file_id| (MediaKind::Image, file_id, None))
+            });
+        let admission_kind = selected.map_or(MediaKind::Image, |(kind, _, _)| kind);
+        let admission_amount = match admission_kind {
+            MediaKind::Image => estimate_vision_reserve_credit_units(
+                "Describe what you see in this image in detail.",
+                0,
+                1_200,
+                VISION_OUTPUT_TOKEN_LIMIT,
+                crate::native_ai::VISION_MODEL,
+            ),
+            MediaKind::Audio => estimate_transcription_reserve_credit_units(
+                input.audio_duration_seconds.unwrap_or(1.0),
+            ),
+        }
+        .map_err(|error| error.to_string())?;
+        let admission = self.reserve(
+            &input,
+            &operation_id,
+            "transcribe_command_media",
+            admission_amount,
+            1,
+        )?;
+        if !admission.authorized {
+            return Ok(AiPreparation::reply(
+                Self::insufficient(input.locale, &input, &admission),
+                None,
+            ));
+        }
+
+        let (text, segments, diagnostics) = if !input.has_reply {
+            (
+                media_command_reply_required(input.locale).to_owned(),
+                Vec::new(),
+                Vec::new(),
+            )
+        } else if let Some((kind, file_id, duration)) = selected {
+            let prepared = match self
+                .media
+                .as_mut()
+                .ok_or_else(|| "native media runtime disappeared".to_owned())?
+                .prepare(kind, file_id, duration)
+            {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    let text = media_command_prepare_error(
+                        kind,
+                        input.visual_media_kind.as_deref(),
+                        input.locale,
+                        &error,
+                    );
+                    self.pending.insert(
+                        operation_id.clone(),
+                        PendingConversation {
+                            input,
+                            text: text.clone(),
+                            segments: Vec::new(),
+                            kind: PendingKind::MediaCommand,
+                        },
+                    );
+                    return Ok(AiPreparation::Reply {
+                        text,
+                        completion_id: Some(operation_id),
+                        diagnostics: vec![format!("media command preparation: {error}")],
+                    });
+                }
+            };
+            let required_amount = prepared.reserve_credit_units();
+            if required_amount > admission_amount {
+                let extension = self.reserve(
+                    &input,
+                    &operation_id,
+                    "transcribe_command_media_extension",
+                    required_amount - admission_amount,
+                    1,
+                )?;
+                if !extension.authorized {
+                    self.settle_immediately(
+                        &input,
+                        &operation_id,
+                        "transcribe_command_reserve_adjustment_failed",
+                    )?;
+                    return Ok(AiPreparation::reply(
+                        Self::insufficient(input.locale, &input, &extension),
+                        None,
+                    ));
+                }
+            }
+            let prompt = if input.visual_media_kind.as_deref() == Some("sticker") {
+                sticker_prompt(input.locale)
+            } else {
+                media_prompt(kind, input.locale)
+            };
+            match self
+                .media
+                .as_mut()
+                .ok_or_else(|| "native media runtime disappeared".to_owned())?
+                .execute(prepared, prompt)
+            {
+                Ok(execution) => {
+                    let text = media_command_success(
+                        execution.kind,
+                        input.visual_media_kind.as_deref(),
+                        input.locale,
+                        &execution.text,
+                    );
+                    (
+                        text,
+                        execution.billing_segment.into_iter().collect(),
+                        Vec::new(),
+                    )
+                }
+                Err(error) => (
+                    media_command_provider_error(
+                        kind,
+                        input.visual_media_kind.as_deref(),
+                        input.locale,
+                    )
+                    .to_owned(),
+                    Vec::new(),
+                    vec![format!("media command provider: {error}")],
+                ),
+            }
+        } else {
+            (
+                media_command_none(input.locale).to_owned(),
+                Vec::new(),
+                Vec::new(),
+            )
+        };
+        self.pending.insert(
+            operation_id.clone(),
+            PendingConversation {
+                input,
+                text: text.clone(),
+                segments,
+                kind: PendingKind::MediaCommand,
+            },
+        );
+        Ok(AiPreparation::Reply {
+            text,
+            completion_id: Some(operation_id),
+            diagnostics,
+        })
+    }
+
     fn prepare_transaction(
         &mut self,
         input: AiConversationInput,
@@ -523,7 +690,7 @@ where
                 input,
                 text: text.clone(),
                 segments,
-                provider_failed,
+                kind: PendingKind::Conversation { provider_failed },
             },
         );
         Ok(AiPreparation::Reply {
@@ -562,6 +729,17 @@ where
         self.prepare_transaction(input, on_token)
     }
 
+    fn prepare_media_command(
+        &mut self,
+        input: AiConversationInput,
+    ) -> Result<Option<AiPreparation>, String> {
+        if self.media.is_none() {
+            Ok(None)
+        } else {
+            self.prepare_media_command_transaction(input).map(Some)
+        }
+    }
+
     fn record_ignored(&mut self, input: AiConversationInput) -> Result<(), String> {
         self.state.record_incoming(&input)
     }
@@ -571,16 +749,38 @@ where
             return Ok(());
         };
         let actual = price_segments(&pending.segments)?;
-        let reason = if delivery.delivered {
-            if pending.provider_failed {
-                "ai_response_provider_usage_before_fallback"
-            } else {
-                "ai_response_success"
+        let reason = match (
+            pending.kind,
+            delivery.delivered,
+            pending.segments.is_empty(),
+        ) {
+            (
+                PendingKind::Conversation {
+                    provider_failed: true,
+                },
+                true,
+                _,
+            ) => "ai_response_provider_usage_before_fallback",
+            (
+                PendingKind::Conversation {
+                    provider_failed: false,
+                },
+                true,
+                _,
+            ) => "ai_response_success",
+            (PendingKind::Conversation { .. }, false, true) => {
+                "ai_response_delivery_failure_refund"
             }
-        } else if pending.segments.is_empty() {
-            "ai_response_delivery_failure_refund"
-        } else {
-            "ai_response_provider_usage_before_delivery_failure"
+            (PendingKind::Conversation { .. }, false, false) => {
+                "ai_response_provider_usage_before_delivery_failure"
+            }
+            (PendingKind::MediaCommand, true, _) => "transcribe_command_success",
+            (PendingKind::MediaCommand, false, true) => {
+                "transcribe_command_delivery_failure_refund"
+            }
+            (PendingKind::MediaCommand, false, false) => {
+                "transcribe_command_provider_usage_before_delivery_failure"
+            }
         };
         record_and_settle(
             &mut self.billing,
@@ -591,7 +791,7 @@ where
             delivery.delivered,
             reason,
         )?;
-        if delivery.delivered {
+        if delivery.delivered && matches!(pending.kind, PendingKind::Conversation { .. }) {
             self.state.record_outgoing(
                 &pending.input,
                 delivery.sent_message_id.map(|id| id.0),
@@ -611,6 +811,106 @@ fn media_prompt(kind: MediaKind, locale: Locale) -> &'static str {
             "Describe this image in detail in English, without markdown or emojis."
         }
         (MediaKind::Audio, _) => "Transcribe this audio exactly as spoken.",
+    }
+}
+
+fn sticker_prompt(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Es => {
+            "describí lo que ves en este sticker en detalle, en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino"
+        }
+        Locale::En => "Describe this sticker in detail in English, without markdown or emojis.",
+    }
+}
+
+fn media_command_reply_required(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Es => "respondeme un audio, video, imagen o sticker y te digo qué carajo hay ahí",
+        Locale::En => "reply to an audio, video, image, or sticker and I will process it",
+    }
+}
+
+fn media_command_none(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Es => "ese mensaje no tiene audio, video, imagen ni sticker para laburar",
+        Locale::En => "that message has no audio, video, image, or sticker to process",
+    }
+}
+
+fn media_command_prepare_error(
+    kind: MediaKind,
+    visual_kind: Option<&str>,
+    locale: Locale,
+    error: &str,
+) -> String {
+    if error == MediaPipelineError::Download.to_string() {
+        return match (kind, visual_kind, locale) {
+            (MediaKind::Audio, _, Locale::Es) => {
+                "no pude bajar el audio, mandalo de nuevo".to_owned()
+            }
+            (MediaKind::Audio, _, Locale::En) => {
+                "I could not download the audio, send it again".to_owned()
+            }
+            (MediaKind::Image, Some("sticker"), Locale::Es) => {
+                "no pude bajar el sticker, mandalo de nuevo".to_owned()
+            }
+            (MediaKind::Image, Some("sticker"), Locale::En) => {
+                "I could not download the sticker, send it again".to_owned()
+            }
+            (MediaKind::Image, _, Locale::Es) => {
+                "no pude bajar la imagen, mandala de nuevo".to_owned()
+            }
+            (MediaKind::Image, _, Locale::En) => {
+                "I could not download the image, send it again".to_owned()
+            }
+        };
+    }
+    if kind == MediaKind::Audio && error == MediaPipelineError::InvalidAudio.to_string() {
+        return match locale {
+            Locale::Es => "no pude medir la duración del audio".to_owned(),
+            Locale::En => "I could not measure the audio duration".to_owned(),
+        };
+    }
+    media_command_provider_error(kind, visual_kind, locale).to_owned()
+}
+
+fn media_command_provider_error(
+    kind: MediaKind,
+    visual_kind: Option<&str>,
+    locale: Locale,
+) -> &'static str {
+    match (kind, visual_kind, locale) {
+        (MediaKind::Audio, _, Locale::Es) => "no pude sacar nada de ese audio, probá más tarde",
+        (MediaKind::Audio, _, Locale::En) => "I could not transcribe that audio, try again later",
+        (MediaKind::Image, Some("sticker"), Locale::Es) => {
+            "no pude sacar qué carajo tiene el sticker, probá más tarde"
+        }
+        (MediaKind::Image, Some("sticker"), Locale::En) => {
+            "I could not describe the sticker, try again later"
+        }
+        (MediaKind::Image, _, Locale::Es) => {
+            "no pude sacar qué mierda tiene la imagen, probá más tarde"
+        }
+        (MediaKind::Image, _, Locale::En) => "I could not describe the image, try again later",
+    }
+}
+
+fn media_command_success(
+    kind: MediaKind,
+    visual_kind: Option<&str>,
+    locale: Locale,
+    text: &str,
+) -> String {
+    let text = sanitize_summary_text(text);
+    match (kind, visual_kind, locale) {
+        (MediaKind::Audio, _, Locale::Es) => format!("🎵 te saqué esto del audio: {text}"),
+        (MediaKind::Audio, _, Locale::En) => format!("🎵 audio transcription: {text}"),
+        (MediaKind::Image, Some("sticker"), Locale::Es) => {
+            format!("🎨 en el sticker veo: {text}")
+        }
+        (MediaKind::Image, Some("sticker"), Locale::En) => format!("🎨 sticker: {text}"),
+        (MediaKind::Image, _, Locale::Es) => format!("🖼️ en la imagen veo: {text}"),
+        (MediaKind::Image, _, Locale::En) => format!("🖼️ image: {text}"),
     }
 }
 
@@ -896,6 +1196,61 @@ mod tests {
         }
     }
 
+    struct StickerMedia;
+
+    impl MediaRuntime for StickerMedia {
+        fn prepare(
+            &mut self,
+            kind: MediaKind,
+            file_id: &str,
+            duration_hint_seconds: Option<f64>,
+        ) -> Result<crate::media::PreparedMedia, String> {
+            assert_eq!(kind, MediaKind::Image);
+            assert_eq!(duration_hint_seconds, None);
+            Ok(crate::media::PreparedMedia::Cached {
+                kind,
+                file_id: file_id.to_owned(),
+                text: "ignored by fake execution".to_owned(),
+            })
+        }
+
+        fn execute(
+            &mut self,
+            prepared: crate::media::PreparedMedia,
+            prompt: &str,
+        ) -> Result<MediaExecution, String> {
+            assert!(prompt.starts_with("Describe this sticker"));
+            Ok(MediaExecution {
+                kind: prepared.kind(),
+                file_id: "sticker-1".to_owned(),
+                text: "**synthetic** [sticker](https://example.test)".to_owned(),
+                billing_segment: None,
+                cached: true,
+            })
+        }
+    }
+
+    struct DownloadFailureMedia;
+
+    impl MediaRuntime for DownloadFailureMedia {
+        fn prepare(
+            &mut self,
+            _kind: MediaKind,
+            _file_id: &str,
+            _duration_hint_seconds: Option<f64>,
+        ) -> Result<crate::media::PreparedMedia, String> {
+            Err(MediaPipelineError::Download.to_string())
+        }
+
+        fn execute(
+            &mut self,
+            _prepared: crate::media::PreparedMedia,
+            _prompt: &str,
+        ) -> Result<MediaExecution, String> {
+            Err("must not execute".to_owned())
+        }
+    }
+
     #[derive(Default)]
     struct State {
         memory: ConversationMemory,
@@ -981,6 +1336,9 @@ mod tests {
             command: "what".to_owned(),
             reply_to_message_id: None,
             reply_context: None,
+            has_reply: false,
+            visual_media_kind: None,
+            audio_media_kind: None,
             photo_file_id: None,
             audio_file_id: None,
             audio_duration_seconds: None,
@@ -1132,6 +1490,123 @@ mod tests {
         assert_eq!(service.billing.segments.len(), 2);
         assert_eq!(service.billing.segments[0].segment["kind"], "transcribe");
         assert_eq!(service.billing.segments[1].segment["kind"], "chat");
+    }
+
+    #[test]
+    fn explicit_media_command_transcribes_and_settles_only_after_delivery() {
+        let mut service = conversation(Vec::new(), Billing::default()).with_media(Box::new(Media));
+        let mut request = input();
+        request.command = "/transcribe".to_owned();
+        request.has_reply = true;
+        request.audio_media_kind = Some("voice".to_owned());
+        request.audio_file_id = Some("audio-1".to_owned());
+        request.audio_duration_seconds = Some(4.5);
+        let preparation = service.prepare_media_command(request);
+        let Ok(Some(AiPreparation::Reply {
+            text,
+            completion_id: Some(completion_id),
+            ..
+        })) = preparation
+        else {
+            return;
+        };
+        assert_eq!(text, "🎵 audio transcription: synthetic transcript");
+        assert_eq!(
+            service.billing.reserves[0].metadata["usage_tag"],
+            "transcribe_command_media"
+        );
+        assert!(service.billing.settlements.is_empty());
+
+        assert_eq!(
+            service.complete_delivery(AiDelivery {
+                completion_id,
+                delivered: true,
+                sent_message_id: Some(MessageId(99)),
+            }),
+            Ok(())
+        );
+        assert_eq!(service.billing.segments.len(), 1);
+        assert_eq!(
+            service.billing.settlements[0].reason,
+            "transcribe_command_success"
+        );
+        assert!(service.state.incoming.is_empty());
+        assert!(service.state.outgoing.is_empty());
+    }
+
+    #[test]
+    fn explicit_media_command_preserves_reply_help_and_refunds_after_delivery() {
+        let mut service = conversation(Vec::new(), Billing::default()).with_media(Box::new(Media));
+        let preparation = service.prepare_media_command(input());
+        let Ok(Some(AiPreparation::Reply {
+            text,
+            completion_id: Some(completion_id),
+            ..
+        })) = preparation
+        else {
+            return;
+        };
+        assert_eq!(
+            text,
+            "reply to an audio, video, image, or sticker and I will process it"
+        );
+        assert_eq!(
+            service.complete_delivery(AiDelivery {
+                completion_id,
+                delivered: true,
+                sent_message_id: Some(MessageId(99)),
+            }),
+            Ok(())
+        );
+        assert_eq!(service.billing.settlements[0].actual_credit_units, 0);
+    }
+
+    #[test]
+    fn explicit_sticker_command_uses_sticker_copy_and_sanitizes_cached_text() {
+        let mut service =
+            conversation(Vec::new(), Billing::default()).with_media(Box::new(StickerMedia));
+        let mut request = input();
+        request.command = "/describe".to_owned();
+        request.has_reply = true;
+        request.visual_media_kind = Some("sticker".to_owned());
+        request.photo_file_id = Some("sticker-1".to_owned());
+        let preparation = service.prepare_media_command(request);
+        assert!(matches!(
+            preparation,
+            Ok(Some(AiPreparation::Reply { ref text, .. }))
+                if text == "🎨 sticker: synthetic sticker"
+        ));
+    }
+
+    #[test]
+    fn explicit_media_download_failure_is_localized_and_refundable() {
+        let mut service =
+            conversation(Vec::new(), Billing::default()).with_media(Box::new(DownloadFailureMedia));
+        let mut request = input();
+        request.command = "/transcribe".to_owned();
+        request.has_reply = true;
+        request.audio_file_id = Some("voice-1".to_owned());
+        request.audio_duration_seconds = Some(2.0);
+        let preparation = service.prepare_media_command(request);
+        let Ok(Some(AiPreparation::Reply {
+            text,
+            completion_id: Some(completion_id),
+            diagnostics,
+        })) = preparation
+        else {
+            return;
+        };
+        assert_eq!(text, "I could not download the audio, send it again");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            service.complete_delivery(AiDelivery {
+                completion_id,
+                delivered: true,
+                sent_message_id: Some(MessageId(99)),
+            }),
+            Ok(())
+        );
+        assert_eq!(service.billing.settlements[0].actual_credit_units, 0);
     }
 
     #[test]
