@@ -196,6 +196,7 @@ pub fn render_task_list(tasks: &[ScheduledTask], locale: Locale) -> TaskListView
                     },
                     url: None,
                     callback_data: Some(format!("task:del:{}", task.id.as_str())),
+                    copy_text: None,
                 }]
             })
             .collect(),

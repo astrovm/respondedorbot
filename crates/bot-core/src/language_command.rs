@@ -25,11 +25,13 @@ fn language_keyboard() -> InlineKeyboardMarkup {
                 text: "Español".to_owned(),
                 url: None,
                 callback_data: Some("cfg:language:es".to_owned()),
+                copy_text: None,
             },
             InlineKeyboardButton {
                 text: "English".to_owned(),
                 url: None,
                 callback_data: Some("cfg:language:en".to_owned()),
+                copy_text: None,
             },
         ]],
     }

@@ -22,6 +22,13 @@ pub struct InlineKeyboardButton {
     pub url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub callback_data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copy_text: Option<CopyTextButton>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CopyTextButton {
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -63,6 +70,22 @@ pub enum TelegramAction {
         video: Vec<u8>,
         reply_to_message_id: Option<MessageId>,
         caption: String,
+        reply_markup: Option<InlineKeyboardMarkup>,
+    },
+    SendPhoto {
+        chat_id: ChatId,
+        photo: Vec<u8>,
+        reply_to_message_id: Option<MessageId>,
+        caption: String,
+        parse_mode: Option<ParseMode>,
+        reply_markup: Option<InlineKeyboardMarkup>,
+    },
+    EditMessagePhoto {
+        chat_id: ChatId,
+        message_id: MessageId,
+        photo: Vec<u8>,
+        caption: String,
+        parse_mode: Option<ParseMode>,
         reply_markup: Option<InlineKeyboardMarkup>,
     },
     SendInvoice {
@@ -183,6 +206,7 @@ mod tests {
                 text: "Open".to_owned(),
                 url: Some("https://example.test".to_owned()),
                 callback_data: None,
+                copy_text: None,
             }]],
         };
         let actual = serde_json::to_value(keyboard);

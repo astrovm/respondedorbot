@@ -76,6 +76,7 @@ fn topup_keyboard(locale: Locale) -> InlineKeyboardMarkup {
                     },
                     url: None,
                     callback_data: Some(format!("topup:{id}")),
+                    copy_text: None,
                 }]
             })
             .collect(),

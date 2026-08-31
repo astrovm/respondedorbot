@@ -8,10 +8,13 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ab_glyph.workspace = true
 base64.workspace = true
 bot-core.workspace = true
 calamine.workspace = true
 chrono.workspace = true
+image.workspace = true
+imageproc.workspace = true
 native-tls.workspace = true
 postgres.workspace = true
 postgres-native-tls.workspace = true

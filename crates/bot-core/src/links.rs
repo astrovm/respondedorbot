@@ -301,6 +301,7 @@ pub fn plan_link_actions(
             },
             url: Some(url.clone()),
             callback_data: None,
+            copy_text: None,
         })
         .map(|button| vec![button])
         .collect::<Vec<_>>();

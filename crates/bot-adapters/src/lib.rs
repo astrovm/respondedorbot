@@ -33,6 +33,7 @@ pub mod telegram_actions;
 pub mod telegram_chat_admin;
 pub mod telegram_http;
 pub mod telegram_polling;
+pub mod token_signal;
 pub mod weather;
 pub mod web_fetch;
 pub mod yahoo_finance;

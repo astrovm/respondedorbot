@@ -59,6 +59,9 @@ use bot_adapters::telegram_http::{
     ReqwestTelegramTransport, TelegramTransport, TransportFailureKind,
 };
 use bot_adapters::telegram_polling::{PollOutcome, PollingError, poll_once_with};
+use bot_adapters::token_signal::{
+    ReqwestTokenSignalTransport, TokenSignalAdapter, TokenSignalCache, TokenSignalTransport,
+};
 use bot_adapters::weather::{
     ReqwestWeatherTransport, TransportFailureKind as WeatherTransportFailureKind, WeatherTransport,
     load_weather,
@@ -102,8 +105,8 @@ use crate::dispatcher::{
     GroupAuthorizationDecision, GroupAuthorizer, LinkReplacementLoad, LinkReplacementSource,
     MarketPriceLoad, MarketPriceSource, MessageStateSink, NativeDispatcher, OilPriceSource,
     OilQuoteLoad, RandomSource, RuloInputLoad, RuloSource, RuntimeValues, ScheduledTaskSource,
-    StarPaymentReceipt, StarPaymentSink, StockPriceSource, StockQuotesLoad, WeatherObservationLoad,
-    WeatherSource,
+    StarPaymentReceipt, StarPaymentSink, StockPriceSource, StockQuotesLoad, TokenSignalLoad,
+    TokenSignalSource, WeatherObservationLoad, WeatherSource,
 };
 use crate::firecrawl_tool::FirecrawlTool;
 use crate::hacker_news_tool::HackerNewsTool;
@@ -1136,6 +1139,61 @@ impl<Transport: TelegramTransport> ActionSink for TelegramActionSink<Transport> 
             | ActionOutcome::TransportFailed(_) => None,
         })
     }
+
+    fn try_photo(&mut self, action: TelegramAction) -> Result<Option<ActionReceipt>, Self::Error> {
+        Ok(match execute_with(&self.transport, &self.token, action)? {
+            ActionOutcome::Completed { message_id } => Some(ActionReceipt {
+                message_id: message_id.map(bot_core::telegram_input::MessageId),
+            }),
+            ActionOutcome::RateLimited { .. }
+            | ActionOutcome::Failed { .. }
+            | ActionOutcome::TransportFailed(_) => None,
+        })
+    }
+}
+
+impl<Transport, Cache> TokenSignalSource for TokenSignalAdapter<Transport, Cache>
+where
+    Transport: TokenSignalTransport,
+    Cache: TokenSignalCache,
+{
+    fn load(&mut self, query: &bot_core::token_signals::SignalQuery) -> TokenSignalLoad {
+        let load = self.load_query(query);
+        TokenSignalLoad {
+            signal: load.signal,
+            diagnostics: load.diagnostics,
+        }
+    }
+
+    fn load_token(&mut self, token: &bot_core::token_signals::TokenAddress) -> TokenSignalLoad {
+        let load = TokenSignalAdapter::load_token(self, token);
+        TokenSignalLoad {
+            signal: load.signal,
+            diagnostics: load.diagnostics,
+        }
+    }
+
+    fn render_photo(
+        &mut self,
+        signal: &bot_core::token_signals::TokenSignal,
+    ) -> Result<Vec<u8>, String> {
+        TokenSignalAdapter::render_photo(self, signal)
+    }
+
+    fn load_state(
+        &mut self,
+        signal_id: &str,
+    ) -> Result<Option<bot_core::token_signals::SignalState>, String> {
+        TokenSignalAdapter::load_state(self, signal_id)
+    }
+
+    fn save_state(
+        &mut self,
+        signal_id: &str,
+        state: &bot_core::token_signals::SignalState,
+    ) -> Result<(), String> {
+        TokenSignalAdapter::save_state(self, signal_id, state)
+    }
 }
 
 pub fn publish_telegram_commands<Actions: ActionSink>(
@@ -1207,6 +1265,10 @@ pub enum CompositionError {
     PolymarketTransport(PolymarketTransportFailureKind),
     #[error("could not construct Polymarket Redis cache: {0}")]
     PolymarketCache(RedisJsonCacheError),
+    #[error("could not construct token-signal transport: {0}")]
+    TokenSignalTransport(String),
+    #[error("could not construct token-signal Redis cache: {0}")]
+    TokenSignalCache(RedisJsonCacheError),
     #[error("could not construct Redis command state: {0}")]
     RedisState(#[from] RedisMessageStateError),
     #[error("could not construct Redis scheduled-task state: {0}")]
@@ -1483,6 +1545,10 @@ pub fn build_native_runtime(
         ReqwestPolymarketTransport::new().map_err(CompositionError::PolymarketTransport)?;
     let polymarket_cache =
         RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::PolymarketCache)?;
+    let token_signal_transport =
+        ReqwestTokenSignalTransport::new().map_err(CompositionError::TokenSignalTransport)?;
+    let token_signal_cache =
+        RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::TokenSignalCache)?;
     let source =
         TelegramUpdateSource::new(polling_transport, options.token, options.long_poll_timeout);
     let config = ChatConfigRepository::new(options.database_url);
@@ -1548,7 +1614,11 @@ pub fn build_native_runtime(
     .with_link_replacement_source(Box::new(NativeLinkReplacementSource {
         transport: link_preview_transport,
     }))
-    .with_scheduled_task_source(Box::new(task_source));
+    .with_scheduled_task_source(Box::new(task_source))
+    .with_token_signal_source(Box::new(TokenSignalAdapter::new(
+        token_signal_transport,
+        token_signal_cache,
+    )));
     let dispatcher = if let Some(words) = options.trigger_words.filter(|words| !words.is_empty()) {
         dispatcher.with_trigger_words(words)
     } else {

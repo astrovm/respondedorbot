@@ -153,7 +153,9 @@ fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
                 Some(Value::Object(payload)),
             )
         }
-        TelegramAction::SendVideo { .. } => return Err(ActionError::InvalidAction),
+        TelegramAction::SendVideo { .. }
+        | TelegramAction::SendPhoto { .. }
+        | TelegramAction::EditMessagePhoto { .. } => return Err(ActionError::InvalidAction),
         TelegramAction::SendInvoice {
             chat_id,
             title,
@@ -299,60 +301,158 @@ pub fn execute_with<T: TelegramTransport>(
     token: &str,
     action: TelegramAction,
 ) -> Result<ActionOutcome, ActionError> {
-    if let TelegramAction::SendVideo {
-        chat_id,
-        video,
-        reply_to_message_id,
-        caption,
-        reply_markup,
-    } = action
-    {
-        let caption = caption.chars().take(1024).collect::<String>();
-        let mut fields = vec![
-            ("chat_id".to_owned(), chat_id.0.to_string()),
-            ("caption".to_owned(), caption),
-            ("supports_streaming".to_owned(), "true".to_owned()),
-        ];
-        if let Some(reply_to_message_id) = reply_to_message_id {
-            fields.push((
-                "reply_to_message_id".to_owned(),
-                reply_to_message_id.0.to_string(),
-            ));
+    let multipart = match action {
+        TelegramAction::SendVideo {
+            chat_id,
+            video,
+            reply_to_message_id,
+            caption,
+            reply_markup,
+        } => {
+            let mut fields = vec![
+                ("chat_id".to_owned(), chat_id.0.to_string()),
+                (
+                    "caption".to_owned(),
+                    caption.chars().take(1024).collect::<String>(),
+                ),
+                ("supports_streaming".to_owned(), "true".to_owned()),
+            ];
+            if let Some(reply_to_message_id) = reply_to_message_id {
+                fields.push((
+                    "reply_to_message_id".to_owned(),
+                    reply_to_message_id.0.to_string(),
+                ));
+            }
+            if let Some(reply_markup) = reply_markup {
+                fields.push((
+                    "reply_markup".to_owned(),
+                    serde_json::to_string(&reply_markup).map_err(|_| ActionError::InvalidAction)?,
+                ));
+            }
+            Some(TelegramMultipartRequest {
+                token: token.to_owned(),
+                endpoint: "sendVideo".to_owned(),
+                fields,
+                file_field: "video".to_owned(),
+                file_name: "instagram.mp4".to_owned(),
+                file_bytes: video,
+                content_type: "video/mp4".to_owned(),
+                timeout: Duration::from_secs(60),
+            })
         }
-        if let Some(reply_markup) = reply_markup {
-            fields.push((
-                "reply_markup".to_owned(),
-                serde_json::to_string(&reply_markup).map_err(|_| ActionError::InvalidAction)?,
-            ));
+        TelegramAction::SendPhoto {
+            chat_id,
+            photo,
+            reply_to_message_id,
+            caption,
+            parse_mode: caption_parse_mode,
+            reply_markup,
+        } => {
+            let mut fields = vec![
+                ("chat_id".to_owned(), chat_id.0.to_string()),
+                (
+                    "caption".to_owned(),
+                    caption.chars().take(1024).collect::<String>(),
+                ),
+            ];
+            if let Some(reply_to_message_id) = reply_to_message_id {
+                fields.push((
+                    "reply_to_message_id".to_owned(),
+                    reply_to_message_id.0.to_string(),
+                ));
+            }
+            if let Some(mode) = caption_parse_mode {
+                fields.push(("parse_mode".to_owned(), parse_mode(mode).to_owned()));
+            }
+            if let Some(reply_markup) = reply_markup {
+                fields.push((
+                    "reply_markup".to_owned(),
+                    serde_json::to_string(&reply_markup).map_err(|_| ActionError::InvalidAction)?,
+                ));
+            }
+            Some(TelegramMultipartRequest {
+                token: token.to_owned(),
+                endpoint: "sendPhoto".to_owned(),
+                fields,
+                file_field: "photo".to_owned(),
+                file_name: "signal.png".to_owned(),
+                file_bytes: photo,
+                content_type: "image/png".to_owned(),
+                timeout: Duration::from_secs(60),
+            })
         }
-        let request = TelegramMultipartRequest {
-            token: token.to_owned(),
-            endpoint: "sendVideo".to_owned(),
-            fields,
-            file_field: "video".to_owned(),
-            file_name: "instagram.mp4".to_owned(),
-            file_bytes: video,
-            content_type: "video/mp4".to_owned(),
-            timeout: Duration::from_secs(60),
-        };
+        TelegramAction::EditMessagePhoto {
+            chat_id,
+            message_id,
+            photo,
+            caption,
+            parse_mode: caption_parse_mode,
+            reply_markup,
+        } => {
+            let mut media = Map::from_iter([
+                ("type".to_owned(), json!("photo")),
+                ("media".to_owned(), json!("attach://photo")),
+                (
+                    "caption".to_owned(),
+                    json!(caption.chars().take(1024).collect::<String>()),
+                ),
+            ]);
+            if let Some(mode) = caption_parse_mode {
+                media.insert("parse_mode".to_owned(), json!(parse_mode(mode)));
+            }
+            let mut fields = vec![
+                ("chat_id".to_owned(), chat_id.0.to_string()),
+                ("message_id".to_owned(), message_id.0.to_string()),
+                (
+                    "media".to_owned(),
+                    serde_json::to_string(&Value::Object(media))
+                        .map_err(|_| ActionError::InvalidAction)?,
+                ),
+            ];
+            if let Some(reply_markup) = reply_markup {
+                fields.push((
+                    "reply_markup".to_owned(),
+                    serde_json::to_string(&reply_markup).map_err(|_| ActionError::InvalidAction)?,
+                ));
+            }
+            Some(TelegramMultipartRequest {
+                token: token.to_owned(),
+                endpoint: "editMessageMedia".to_owned(),
+                fields,
+                file_field: "photo".to_owned(),
+                file_name: "signal.png".to_owned(),
+                file_bytes: photo,
+                content_type: "image/png".to_owned(),
+                timeout: Duration::from_secs(60),
+            })
+        }
+        action => {
+            let prepared = prepare(action)?;
+            return match request_with(
+                transport,
+                token,
+                prepared.endpoint,
+                prepared.method.as_str(),
+                prepared.params,
+                prepared.json_payload,
+                ACTION_TIMEOUT_SECONDS,
+            )? {
+                TelegramHttpOutcome::Response { status_code, body } => {
+                    parse_response(status_code, &body)
+                }
+                TelegramHttpOutcome::TransportError { kind } => {
+                    Ok(ActionOutcome::TransportFailed(kind))
+                }
+            };
+        }
+    };
+    if let Some(request) = multipart {
         return match transport.send_action_multipart(&request) {
             Ok(response) => parse_response(response.status_code, &response.body),
             Err(kind) => Ok(ActionOutcome::TransportFailed(kind)),
         };
     }
-    let prepared = prepare(action)?;
-    match request_with(
-        transport,
-        token,
-        prepared.endpoint,
-        prepared.method.as_str(),
-        prepared.params,
-        prepared.json_payload,
-        ACTION_TIMEOUT_SECONDS,
-    )? {
-        TelegramHttpOutcome::Response { status_code, body } => parse_response(status_code, &body),
-        TelegramHttpOutcome::TransportError { kind } => Ok(ActionOutcome::TransportFailed(kind)),
-    }
+    Err(ActionError::InvalidAction)
 }
 
 #[cfg(test)]
@@ -434,6 +534,7 @@ mod tests {
                 text: "Original".to_owned(),
                 url: Some("https://instagram.com/reel/a".to_owned()),
                 callback_data: None,
+                copy_text: None,
             }]],
         };
         assert_eq!(
@@ -478,6 +579,90 @@ mod tests {
     }
 
     #[test]
+    fn photo_send_and_refresh_use_png_multipart_and_typed_media() {
+        struct PhotoTransport {
+            requests: RefCell<Vec<TelegramMultipartRequest>>,
+        }
+        impl TelegramTransport for PhotoTransport {
+            fn send(
+                &self,
+                _request: &TelegramRequest,
+            ) -> Result<HttpResponse, TransportFailureKind> {
+                Err(TransportFailureKind::Request)
+            }
+
+            fn send_action_multipart(
+                &self,
+                request: &TelegramMultipartRequest,
+            ) -> Result<HttpResponse, TransportFailureKind> {
+                self.requests.borrow_mut().push(request.clone());
+                Ok(HttpResponse {
+                    status_code: 200,
+                    body: r#"{"ok":true,"result":{"message_id":55}}"#.to_owned(),
+                })
+            }
+        }
+        let transport = PhotoTransport {
+            requests: RefCell::new(Vec::new()),
+        };
+        assert_eq!(
+            execute_with(
+                &transport,
+                "synthetic-token",
+                TelegramAction::SendPhoto {
+                    chat_id: ChatId(42),
+                    photo: vec![1, 2, 3],
+                    reply_to_message_id: Some(MessageId(7)),
+                    caption: "<b>signal</b>".to_owned(),
+                    parse_mode: Some(ParseMode::Html),
+                    reply_markup: None,
+                },
+            ),
+            Ok(ActionOutcome::Completed {
+                message_id: Some(55)
+            })
+        );
+        assert_eq!(
+            execute_with(
+                &transport,
+                "synthetic-token",
+                TelegramAction::EditMessagePhoto {
+                    chat_id: ChatId(42),
+                    message_id: MessageId(55),
+                    photo: vec![4, 5, 6],
+                    caption: "<b>updated</b>".to_owned(),
+                    parse_mode: Some(ParseMode::Html),
+                    reply_markup: None,
+                },
+            ),
+            Ok(ActionOutcome::Completed {
+                message_id: Some(55)
+            })
+        );
+        let requests = transport.requests.borrow();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].endpoint, "sendPhoto");
+        assert_eq!(requests[0].file_field, "photo");
+        assert_eq!(requests[0].file_bytes, vec![1, 2, 3]);
+        assert!(
+            requests[0]
+                .fields
+                .contains(&("parse_mode".to_owned(), "HTML".to_owned()))
+        );
+        assert_eq!(requests[1].endpoint, "editMessageMedia");
+        let media = requests[1]
+            .fields
+            .iter()
+            .find(|(key, _value)| key == "media")
+            .map(|(_key, value)| value.as_str());
+        assert!(media.is_some_and(|media| {
+            media.contains("attach://photo")
+                && media.contains("<b>updated</b>")
+                && media.contains("HTML")
+        }));
+    }
+
+    #[test]
     fn send_message_preserves_typed_options_and_returns_message_id() {
         let transport = transport(r#"{"ok":true,"result":{"message_id":77}}"#);
         let action = TelegramAction::SendMessage(SendMessage {
@@ -491,6 +676,7 @@ mod tests {
                     text: "Open".to_owned(),
                     url: Some("https://example.test".to_owned()),
                     callback_data: None,
+                    copy_text: None,
                 }]],
             }),
         });

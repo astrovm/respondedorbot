@@ -708,6 +708,7 @@ pub fn render_charge_history_page(
             callback_data: Some(format!(
                 "chg:{user_id}:{limit}:n:{cursor}:{timezone_minutes}"
             )),
+            copy_text: None,
         });
     }
     if page.has_older
@@ -719,6 +720,7 @@ pub fn render_charge_history_page(
             callback_data: Some(format!(
                 "chg:{user_id}:{limit}:o:{cursor}:{timezone_minutes}"
             )),
+            copy_text: None,
         });
     }
     let keyboard = (!buttons.is_empty()).then_some(InlineKeyboardMarkup {

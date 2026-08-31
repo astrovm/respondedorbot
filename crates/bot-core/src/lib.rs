@@ -67,6 +67,7 @@ pub mod telegram_input;
 pub mod telegram_payments;
 pub mod telegram_streaming;
 pub mod text_cleanup;
+pub mod token_signals;
 pub mod tool_execution;
 pub mod tool_registry;
 pub mod weather;

@@ -81,6 +81,7 @@ fn button(text: String, callback_data: String) -> InlineKeyboardButton {
         text,
         url: None,
         callback_data: Some(callback_data),
+        copy_text: None,
     }
 }
 

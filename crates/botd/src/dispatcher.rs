@@ -74,6 +74,11 @@ use bot_core::telegram_payments::{
     payment_record, plan_balance_command, plan_pre_checkout, plan_topup_callback,
     plan_topup_command, successful_payment_reply,
 };
+use bot_core::token_signals::{
+    SIGNAL_REFRESH_COOLDOWN_SECONDS, SignalQuery, SignalState, TokenAddress, TokenSignal,
+    build_signal_keyboard, callback_text as signal_callback_text, detect_signal_query,
+    format_signal_caption, stable_signal_id,
+};
 use bot_core::weather::{
     WeatherObservation, classify_weather_command, render_weather, requested_location,
     weather_load_error,
@@ -114,6 +119,10 @@ pub trait ActionSink {
     }
 
     fn try_video(&mut self, action: TelegramAction) -> Result<Option<ActionReceipt>, Self::Error> {
+        self.execute(action).map(Some)
+    }
+
+    fn try_photo(&mut self, action: TelegramAction) -> Result<Option<ActionReceipt>, Self::Error> {
         self.execute(action).map(Some)
     }
 }
@@ -327,6 +336,24 @@ pub trait ScheduledTaskSource {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct TokenSignalLoad {
+    pub signal: Option<TokenSignal>,
+    pub diagnostics: Vec<String>,
+}
+
+pub trait TokenSignalSource {
+    fn load(&mut self, query: &SignalQuery) -> TokenSignalLoad;
+
+    fn load_token(&mut self, token: &TokenAddress) -> TokenSignalLoad;
+
+    fn render_photo(&mut self, signal: &TokenSignal) -> Result<Vec<u8>, String>;
+
+    fn load_state(&mut self, signal_id: &str) -> Result<Option<SignalState>, String>;
+
+    fn save_state(&mut self, signal_id: &str, state: &SignalState) -> Result<(), String>;
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ElectionLoad {
     pub events: Vec<ElectionEvent>,
     pub live_prices: std::collections::HashMap<String, f64>,
@@ -363,6 +390,15 @@ type NativeDispatchResult<Config, Actions, Random> = Result<
     >,
 >;
 
+type OptionalNativeDispatchResult<Config, Actions, Random> = Result<
+    Option<DispatchOutcome>,
+    DispatchError<
+        <Config as ChatConfigSource>::Error,
+        <Actions as ActionSink>::Error,
+        <Random as RandomSource>::Error,
+    >,
+>;
+
 pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorization> {
     config: Config,
     actions: Actions,
@@ -392,6 +428,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     election_source: Option<Box<dyn ElectionSource>>,
     link_replacement_source: Option<Box<dyn LinkReplacementSource>>,
     scheduled_task_source: Option<Box<dyn ScheduledTaskSource>>,
+    token_signal_source: Option<Box<dyn TokenSignalSource>>,
     ai_conversation_source: Option<Box<dyn AiConversationSource>>,
     trigger_words: Vec<String>,
     last_outcome: Option<DispatchOutcome>,
@@ -447,6 +484,7 @@ where
             election_source: None,
             link_replacement_source: None,
             scheduled_task_source: None,
+            token_signal_source: None,
             ai_conversation_source: None,
             trigger_words: vec!["bot".to_owned(), "assistant".to_owned()],
             last_outcome: None,
@@ -579,6 +617,12 @@ where
     #[must_use]
     pub fn with_scheduled_task_source(mut self, source: Box<dyn ScheduledTaskSource>) -> Self {
         self.scheduled_task_source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub fn with_token_signal_source(mut self, source: Box<dyn TokenSignalSource>) -> Self {
+        self.token_signal_source = Some(source);
         self
     }
 
@@ -854,6 +898,327 @@ where
         }
     }
 
+    fn dispatch_token_signal_message(
+        &mut self,
+        message: &IncomingMessage,
+        query: &SignalQuery,
+        locale: bot_core::locale::Locale,
+        timestamp: i64,
+    ) -> OptionalNativeDispatchResult<Config, Actions, Random> {
+        let (Some(chat_id), Some(message_id), Some(sender_id)) =
+            (message.chat_id, message.message_id, message.sender_id)
+        else {
+            return Ok(Some(DispatchOutcome::LegacyRequired));
+        };
+        let Some(source) = self.token_signal_source.as_mut() else {
+            return Ok(Some(DispatchOutcome::LegacyRequired));
+        };
+        let load = source.load(query);
+        self.state_diagnostics.extend(load.diagnostics);
+        let Some(signal) = load.signal else {
+            if let SignalQuery::Symbol(symbol) = query
+                && let Some(source) = self.market_price_source.as_mut()
+            {
+                let load = source.load(symbol, MarketPriceCommand::Unified, locale, timestamp);
+                self.state_diagnostics.extend(load.diagnostics);
+                let mut reply = SendMessage::new(chat_id, &load.text);
+                reply.reply_to_message_id = Some(message_id);
+                let _receipt = self
+                    .actions
+                    .execute(TelegramAction::SendMessage(reply))
+                    .map_err(DispatchError::Action)?;
+                return Ok(Some(DispatchOutcome::Handled));
+            }
+            return Ok(None);
+        };
+        let photo = match self
+            .token_signal_source
+            .as_mut()
+            .and_then(|source| source.render_photo(&signal).ok())
+        {
+            Some(photo) => photo,
+            None => {
+                self.state_diagnostics.push(format!(
+                    "token signal photo failed chat_id={} query={}",
+                    chat_id.0,
+                    match query {
+                        SignalQuery::Address(token) => token.address.as_str(),
+                        SignalQuery::Symbol(symbol) => symbol,
+                    }
+                ));
+                return Ok(None);
+            }
+        };
+        let signal_id = stable_signal_id(chat_id.0, message_id.0, sender_id.0, timestamp);
+        let receipt = match self.actions.try_photo(TelegramAction::SendPhoto {
+            chat_id,
+            photo,
+            reply_to_message_id: Some(message_id),
+            caption: format_signal_caption(&signal, timestamp),
+            parse_mode: Some(ParseMode::Html),
+            reply_markup: Some(build_signal_keyboard(
+                &signal_id,
+                &signal.token,
+                &signal.pair,
+            )),
+        }) {
+            Ok(Some(receipt)) => receipt,
+            Ok(None) | Err(_) => {
+                self.state_diagnostics.push(format!(
+                    "token signal photo delivery failed chat_id={} signal_id={signal_id}",
+                    chat_id.0
+                ));
+                return Ok(None);
+            }
+        };
+        let Some(sent_message_id) = receipt.message_id else {
+            self.state_diagnostics.push(format!(
+                "token signal photo delivery was unconfirmed chat_id={} signal_id={signal_id}",
+                chat_id.0
+            ));
+            return Ok(None);
+        };
+        let state = SignalState {
+            chat_id: chat_id.0.to_string(),
+            message_id: sent_message_id.0,
+            source_message_id: message_id.0,
+            requester_id: sender_id.0.to_string(),
+            chain_id: signal.token.chain_id.clone(),
+            network: signal.token.network.clone(),
+            tag: signal.token.tag.clone(),
+            address: signal.token.address.clone(),
+            last_refresh_at: None,
+        };
+        if let Some(source) = self.token_signal_source.as_mut()
+            && let Err(error) = source.save_state(&signal_id, &state)
+        {
+            self.state_diagnostics.push(format!(
+                "token signal state write failed chat_id={} signal_id={signal_id}: {error}",
+                chat_id.0
+            ));
+        }
+        Ok(Some(DispatchOutcome::Handled))
+    }
+
+    fn dispatch_token_signal_callback(
+        &mut self,
+        context: &CallbackContext,
+    ) -> NativeDispatchResult<Config, Actions, Random> {
+        if self.token_signal_source.is_none() {
+            return Ok(DispatchOutcome::LegacyRequired);
+        }
+        let config = self
+            .config
+            .get(&context.chat_id)
+            .map_err(DispatchError::Config)?;
+        let locale = resolve_locale(
+            Some(&config.language),
+            context.user_language_code.as_deref(),
+            &context.chat_type,
+        );
+        let mut parts = context.data.splitn(3, ':');
+        let valid_prefix = parts.next() == Some("sig");
+        let action = parts.next().unwrap_or_default();
+        let signal_id = parts.next().unwrap_or_default();
+        if !valid_prefix || signal_id.is_empty() {
+            self.answer_callback_best_effort(context.callback_id.as_deref());
+            return Ok(DispatchOutcome::Handled);
+        }
+        let state_load = self
+            .token_signal_source
+            .as_mut()
+            .map_or(Ok(None), |source| source.load_state(signal_id));
+        let state = match state_load {
+            Ok(Some(state)) => state,
+            Err(error) => {
+                self.state_diagnostics.push(format!(
+                    "token signal state read failed chat_id={} signal_id={signal_id}: {error}",
+                    context.chat_id
+                ));
+                if let Some(callback_id) = context.callback_id.as_deref() {
+                    let _receipt = self
+                        .actions
+                        .execute(TelegramAction::AnswerCallback {
+                            callback_id: callback_id.to_owned(),
+                            text: Some(signal_callback_text("expired", locale).to_owned()),
+                            show_alert: true,
+                        })
+                        .map_err(DispatchError::Action)?;
+                }
+                return Ok(DispatchOutcome::Handled);
+            }
+            Ok(None) => {
+                if let Some(callback_id) = context.callback_id.as_deref() {
+                    let _receipt = self
+                        .actions
+                        .execute(TelegramAction::AnswerCallback {
+                            callback_id: callback_id.to_owned(),
+                            text: Some(signal_callback_text("expired", locale).to_owned()),
+                            show_alert: true,
+                        })
+                        .map_err(DispatchError::Action)?;
+                }
+                return Ok(DispatchOutcome::Handled);
+            }
+        };
+        let user_id = context.user_id.map(|value| value.to_string());
+        let mut allowed = user_id.as_deref() == Some(state.requester_id.as_str());
+        if !allowed && is_group_chat_type(Some(&context.chat_type)) {
+            let authorization = user_id.as_deref().map_or(
+                GroupAuthorizationDecision {
+                    is_admin: false,
+                    diagnostics: Vec::new(),
+                },
+                |user_id| self.authorization.authorize(&context.chat_id, user_id),
+            );
+            self.state_diagnostics.extend(authorization.diagnostics);
+            allowed = authorization.is_admin;
+        }
+        if !allowed {
+            if let Some(callback_id) = context.callback_id.as_deref() {
+                let _receipt = self
+                    .actions
+                    .execute(TelegramAction::AnswerCallback {
+                        callback_id: callback_id.to_owned(),
+                        text: Some(signal_callback_text("owner_only", locale).to_owned()),
+                        show_alert: true,
+                    })
+                    .map_err(DispatchError::Action)?;
+            }
+            return Ok(DispatchOutcome::Handled);
+        }
+        let Ok(chat_id) = context.chat_id.parse::<i64>() else {
+            self.answer_callback_best_effort(context.callback_id.as_deref());
+            return Ok(DispatchOutcome::Handled);
+        };
+        if action == "del" {
+            let _receipt = self
+                .actions
+                .execute(TelegramAction::DeleteMessage {
+                    chat_id: ChatId(chat_id),
+                    message_id: MessageId(context.message_id),
+                })
+                .map_err(DispatchError::Action)?;
+            if let Some(callback_id) = context.callback_id.as_deref() {
+                let _receipt = self
+                    .actions
+                    .execute(TelegramAction::AnswerCallback {
+                        callback_id: callback_id.to_owned(),
+                        text: Some(signal_callback_text("deleted", locale).to_owned()),
+                        show_alert: false,
+                    })
+                    .map_err(DispatchError::Action)?;
+            }
+            return Ok(DispatchOutcome::Handled);
+        }
+        if action != "ref" {
+            self.answer_callback_best_effort(context.callback_id.as_deref());
+            return Ok(DispatchOutcome::Handled);
+        }
+        let timestamp = self.runtime_values.unix_timestamp();
+        if state.last_refresh_at.is_some_and(|last_refresh_at| {
+            timestamp.saturating_sub(last_refresh_at) < SIGNAL_REFRESH_COOLDOWN_SECONDS
+        }) {
+            if let Some(callback_id) = context.callback_id.as_deref() {
+                let _receipt = self
+                    .actions
+                    .execute(TelegramAction::AnswerCallback {
+                        callback_id: callback_id.to_owned(),
+                        text: Some(signal_callback_text("cooldown", locale).to_owned()),
+                        show_alert: true,
+                    })
+                    .map_err(DispatchError::Action)?;
+            }
+            return Ok(DispatchOutcome::Handled);
+        }
+        let load = self.token_signal_source.as_mut().map_or(
+            TokenSignalLoad {
+                signal: None,
+                diagnostics: Vec::new(),
+            },
+            |source| source.load_token(&state.token()),
+        );
+        self.state_diagnostics.extend(load.diagnostics);
+        let Some(signal) = load.signal else {
+            if let Some(callback_id) = context.callback_id.as_deref() {
+                let _receipt = self
+                    .actions
+                    .execute(TelegramAction::AnswerCallback {
+                        callback_id: callback_id.to_owned(),
+                        text: Some(signal_callback_text("no_data", locale).to_owned()),
+                        show_alert: true,
+                    })
+                    .map_err(DispatchError::Action)?;
+            }
+            return Ok(DispatchOutcome::Handled);
+        };
+        let photo = self.token_signal_source.as_mut().map_or_else(
+            || Err("native token-signal source disappeared".to_owned()),
+            |source| source.render_photo(&signal),
+        );
+        let edited = match photo {
+            Ok(photo) => match self.actions.try_edit(TelegramAction::EditMessagePhoto {
+                chat_id: ChatId(chat_id),
+                message_id: MessageId(context.message_id),
+                photo,
+                caption: format_signal_caption(&signal, timestamp),
+                parse_mode: Some(ParseMode::Html),
+                reply_markup: Some(build_signal_keyboard(
+                    signal_id,
+                    &signal.token,
+                    &signal.pair,
+                )),
+            }) {
+                Ok(edited) => edited,
+                Err(_) => {
+                    self.state_diagnostics.push(format!(
+                        "token signal Telegram refresh failed chat_id={chat_id} signal_id={signal_id}"
+                    ));
+                    false
+                }
+            },
+            Err(error) => {
+                self.state_diagnostics.push(format!(
+                    "token signal photo refresh failed chat_id={chat_id} signal_id={signal_id}: {error}"
+                ));
+                false
+            }
+        };
+        if !edited {
+            if let Some(callback_id) = context.callback_id.as_deref() {
+                let _receipt = self
+                    .actions
+                    .execute(TelegramAction::AnswerCallback {
+                        callback_id: callback_id.to_owned(),
+                        text: Some(signal_callback_text("refresh_failed", locale).to_owned()),
+                        show_alert: true,
+                    })
+                    .map_err(DispatchError::Action)?;
+            }
+            return Ok(DispatchOutcome::Handled);
+        }
+        let mut refreshed_state = state;
+        refreshed_state.last_refresh_at = Some(timestamp);
+        if let Some(source) = self.token_signal_source.as_mut()
+            && let Err(error) = source.save_state(signal_id, &refreshed_state)
+        {
+            self.state_diagnostics.push(format!(
+                "token signal refresh state write failed chat_id={chat_id} signal_id={signal_id}: {error}"
+            ));
+        }
+        if let Some(callback_id) = context.callback_id.as_deref() {
+            let _receipt = self
+                .actions
+                .execute(TelegramAction::AnswerCallback {
+                    callback_id: callback_id.to_owned(),
+                    text: Some(signal_callback_text("refreshed", locale).to_owned()),
+                    show_alert: false,
+                })
+                .map_err(DispatchError::Action)?;
+        }
+        Ok(DispatchOutcome::Handled)
+    }
+
     fn dispatch_task_callback(
         &mut self,
         context: &CallbackContext,
@@ -999,6 +1364,9 @@ where
         };
         if context.route == CallbackRoute::Task {
             return self.dispatch_task_callback(&context);
+        }
+        if context.route == CallbackRoute::Signal {
+            return self.dispatch_token_signal_callback(&context);
         }
         if context.route == CallbackRoute::Topup {
             let Ok(chat_id) = context.chat_id.parse::<i64>() else {
@@ -1899,6 +2267,12 @@ where
             message.chat_type.as_deref().unwrap_or_default(),
         );
         let timestamp = self.runtime_values.unix_timestamp();
+        if let Some(query) = detect_signal_query(&content.text)
+            && let Some(outcome) =
+                self.dispatch_token_signal_message(message, &query, locale, timestamp)?
+        {
+            return Ok(outcome);
+        }
         if !content.text.starts_with('/') && has_replaceable_link(&content.text) {
             return self.dispatch_link_replacement(message, &config, locale, timestamp);
         }
@@ -2685,6 +3059,10 @@ mod tests {
     use bot_core::telegram_actions::TelegramAction;
     use bot_core::telegram_input::{ChatId, MessageContent, MessageId, UserId};
     use bot_core::telegram_payments::StarPaymentRecord;
+    use bot_core::token_signals::{
+        PairLiquidity, PairPriceChange, PairToken, PairTransactionWindows, PairTransactions,
+        PairVolume, SignalQuery, SignalState, TokenAddress, TokenPair, TokenSignal,
+    };
     use num_bigint::BigInt;
     use serde_json::{Map, json};
 
@@ -2701,8 +3079,8 @@ mod tests {
         LinkReplacementLoad, LinkReplacementSource, MarketPriceLoad, MarketPriceSource,
         MessageStateSink, NativeDispatcher, OilPriceSource, OilQuoteLoad, RandomSource,
         RuloInputLoad, RuloSource, RuntimeValues, ScheduledTaskSource, StarPaymentReceipt,
-        StarPaymentSink, StockPriceSource, StockQuotesLoad, TransferResult, WeatherObservationLoad,
-        WeatherSource,
+        StarPaymentSink, StockPriceSource, StockQuotesLoad, TokenSignalLoad, TokenSignalSource,
+        TransferResult, WeatherObservationLoad, WeatherSource,
     };
     use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup};
     use bot_core::devo::DevoQuotes;
@@ -3347,6 +3725,90 @@ mod tests {
                 .borrow_mut()
                 .push((query.to_owned(), command, locale, now_unix));
             self.result.clone()
+        }
+    }
+
+    struct Signals {
+        query_load: TokenSignalLoad,
+        token_load: TokenSignalLoad,
+        photo: Result<Vec<u8>, String>,
+        state: Option<SignalState>,
+        queries: Rc<RefCell<Vec<SignalQuery>>>,
+        saved: Rc<RefCell<Vec<(String, SignalState)>>>,
+    }
+
+    impl TokenSignalSource for Signals {
+        fn load(&mut self, query: &SignalQuery) -> TokenSignalLoad {
+            self.queries.borrow_mut().push(query.clone());
+            self.query_load.clone()
+        }
+
+        fn load_token(&mut self, _token: &TokenAddress) -> TokenSignalLoad {
+            self.token_load.clone()
+        }
+
+        fn render_photo(&mut self, _signal: &TokenSignal) -> Result<Vec<u8>, String> {
+            self.photo.clone()
+        }
+
+        fn load_state(&mut self, _signal_id: &str) -> Result<Option<SignalState>, String> {
+            Ok(self.state.clone())
+        }
+
+        fn save_state(&mut self, signal_id: &str, state: &SignalState) -> Result<(), String> {
+            self.saved
+                .borrow_mut()
+                .push((signal_id.to_owned(), state.clone()));
+            Ok(())
+        }
+    }
+
+    fn token_signal() -> TokenSignal {
+        TokenSignal {
+            token: TokenAddress {
+                chain_id: "solana".to_owned(),
+                network: "solana".to_owned(),
+                tag: "SOL".to_owned(),
+                address: "J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump".to_owned(),
+            },
+            pair: TokenPair {
+                chain_id: "solana".to_owned(),
+                url: "https://dexscreener.com/solana/pair".to_owned(),
+                pair_address: "pair1".to_owned(),
+                base_token: PairToken {
+                    address: "J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump".to_owned(),
+                    name: "Synthetic Token".to_owned(),
+                    symbol: "SYN".to_owned(),
+                },
+                price_usd: json!("0.01"),
+                price_change: PairPriceChange {
+                    h1: json!(1),
+                    h24: json!(2),
+                },
+                market_cap: json!(1_000_000),
+                volume: PairVolume {
+                    h24: json!(100_000),
+                },
+                liquidity: PairLiquidity { usd: json!(50_000) },
+                txns: PairTransactionWindows {
+                    h1: PairTransactions {
+                        buys: json!(10),
+                        sells: json!(5),
+                    },
+                },
+                ..TokenPair::default()
+            },
+            candles: vec![
+                vec![1.0, 1.0, 2.0, 0.8, 1.5],
+                vec![2.0, 1.5, 2.5, 1.2, 1.3],
+                vec![3.0, 1.3, 1.8, 1.0, 1.7],
+                vec![4.0, 1.7, 2.2, 1.4, 2.0],
+                vec![5.0, 2.0, 2.4, 1.8, 2.1],
+            ],
+            supply: None,
+            token_image_url: None,
+            socials: std::collections::BTreeMap::new(),
+            pump: None,
         }
     }
 
@@ -5990,6 +6452,279 @@ mod tests {
             Some(TelegramAction::SendMessage(message)) if message.text == "task scheduled"
         ));
         Ok(())
+    }
+
+    #[test]
+    fn token_address_sends_native_photo_card_and_persists_requester_bound_state() {
+        let signal = token_signal();
+        let queries = Rc::new(RefCell::new(Vec::new()));
+        let saved = Rc::new(RefCell::new(Vec::new()));
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_token_signal_source(Box::new(Signals {
+            query_load: TokenSignalLoad {
+                signal: Some(signal.clone()),
+                diagnostics: vec!["synthetic token diagnostic".to_owned()],
+            },
+            token_load: TokenSignalLoad {
+                signal: Some(signal),
+                diagnostics: Vec::new(),
+            },
+            photo: Ok(b"synthetic-png".to_vec()),
+            state: None,
+            queries: Rc::clone(&queries),
+            saved: Rc::clone(&saved),
+        }));
+
+        assert_eq!(
+            dispatcher.dispatch(update(
+                "J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump",
+                Some("es")
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            queries.borrow().as_slice(),
+            [SignalQuery::Address(TokenAddress { chain_id, .. })] if chain_id == "solana"
+        ));
+        let [
+            TelegramAction::SendPhoto {
+                photo,
+                reply_to_message_id,
+                caption,
+                parse_mode,
+                reply_markup: Some(keyboard),
+                ..
+            },
+        ] = dispatcher.actions.0.as_slice()
+        else {
+            return;
+        };
+        assert_eq!(photo, b"synthetic-png");
+        assert_eq!(*reply_to_message_id, Some(MessageId(7)));
+        assert_eq!(
+            *parse_mode,
+            Some(bot_core::telegram_actions::ParseMode::Html)
+        );
+        assert!(caption.contains("Synthetic Token"));
+        assert_eq!(
+            keyboard.inline_keyboard[0][2]
+                .copy_text
+                .as_ref()
+                .map(|copy| copy.text.as_str()),
+            Some("J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump")
+        );
+        let saved = saved.borrow();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].0.len(), 12);
+        assert_eq!(saved[0].1.message_id, 700);
+        assert_eq!(saved[0].1.source_message_id, 7);
+        assert_eq!(saved[0].1.requester_id, "88");
+        assert_eq!(
+            dispatcher.state_diagnostics(),
+            ["synthetic token diagnostic"]
+        );
+    }
+
+    #[test]
+    fn unresolved_cashtag_uses_the_existing_unified_market_fallback() {
+        let queries = Rc::new(RefCell::new(Vec::new()));
+        let saved = Rc::new(RefCell::new(Vec::new()));
+        let market_calls = Rc::new(RefCell::new(Vec::new()));
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_token_signal_source(Box::new(Signals {
+            query_load: TokenSignalLoad {
+                signal: None,
+                diagnostics: Vec::new(),
+            },
+            token_load: TokenSignalLoad {
+                signal: None,
+                diagnostics: Vec::new(),
+            },
+            photo: Err("unused".to_owned()),
+            state: None,
+            queries,
+            saved,
+        }))
+        .with_market_price_source(Box::new(MarketPrices {
+            result: MarketPriceLoad {
+                text: "NVDA: 123.45 USD (+1.25% 24h)".to_owned(),
+                diagnostics: Vec::new(),
+            },
+            calls: Rc::clone(&market_calls),
+        }));
+
+        assert_eq!(
+            dispatcher.dispatch(update("$NVDA", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            market_calls.borrow().as_slice(),
+            [(
+                query,
+                bot_core::market_prices::MarketPriceCommand::Unified,
+                bot_core::locale::Locale::En,
+                _
+            )]
+                if query == "nvda"
+        ));
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [TelegramAction::SendMessage(message)]
+                if message.text == "NVDA: 123.45 USD (+1.25% 24h)"
+                    && message.reply_to_message_id == Some(MessageId(7))
+        ));
+    }
+
+    #[test]
+    fn token_signal_refresh_edits_photo_updates_cooldown_state_and_answers() {
+        let signal = token_signal();
+        let saved = Rc::new(RefCell::new(Vec::new()));
+        let state = SignalState {
+            chat_id: "-42".to_owned(),
+            message_id: 7,
+            source_message_id: 6,
+            requester_id: "88".to_owned(),
+            chain_id: signal.token.chain_id.clone(),
+            network: signal.token.network.clone(),
+            tag: signal.token.tag.clone(),
+            address: signal.token.address.clone(),
+            last_refresh_at: None,
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_token_signal_source(Box::new(Signals {
+            query_load: TokenSignalLoad {
+                signal: None,
+                diagnostics: Vec::new(),
+            },
+            token_load: TokenSignalLoad {
+                signal: Some(signal),
+                diagnostics: vec!["refresh diagnostic".to_owned()],
+            },
+            photo: Ok(b"refreshed-png".to_vec()),
+            state: Some(state),
+            queries: Rc::new(RefCell::new(Vec::new())),
+            saved: Rc::clone(&saved),
+        }));
+
+        assert_eq!(
+            dispatcher.dispatch(callback_update("sig:ref:abc", "group", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [
+                TelegramAction::EditMessagePhoto { photo, message_id: MessageId(7), .. },
+                TelegramAction::AnswerCallback { text: Some(text), show_alert: false, .. },
+            ] if photo == b"refreshed-png" && text == "tarjeta actualizada"
+        ));
+        let saved = saved.borrow();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].0, "abc");
+        assert_eq!(saved[0].1.last_refresh_at, Some(1_672_531_200));
+        assert_eq!(dispatcher.state_diagnostics(), ["refresh diagnostic"]);
+    }
+
+    #[test]
+    fn token_signal_callback_enforces_owner_and_refresh_cooldown() {
+        let signal = token_signal();
+        let base_state = SignalState {
+            chat_id: "-42".to_owned(),
+            message_id: 7,
+            source_message_id: 6,
+            requester_id: "7".to_owned(),
+            chain_id: signal.token.chain_id.clone(),
+            network: signal.token.network.clone(),
+            tag: signal.token.tag.clone(),
+            address: signal.token.address.clone(),
+            last_refresh_at: None,
+        };
+        let build = |state: SignalState, authorization: Authorization| {
+            NativeDispatcher::new(
+                Config {
+                    value: Ok(ChatConfig::default()),
+                    chat_ids: Vec::new(),
+                },
+                Actions::default(),
+                State::default(),
+                values(),
+                random(),
+                authorization,
+                "@mybot",
+            )
+            .with_token_signal_source(Box::new(Signals {
+                query_load: TokenSignalLoad {
+                    signal: None,
+                    diagnostics: Vec::new(),
+                },
+                token_load: TokenSignalLoad {
+                    signal: Some(signal.clone()),
+                    diagnostics: Vec::new(),
+                },
+                photo: Ok(b"unused".to_vec()),
+                state: Some(state),
+                queries: Rc::new(RefCell::new(Vec::new())),
+                saved: Rc::new(RefCell::new(Vec::new())),
+            }))
+        };
+        let mut denied_authorization = authorization();
+        denied_authorization.is_admin = false;
+        let mut denied = build(base_state.clone(), denied_authorization);
+        assert_eq!(
+            denied.dispatch(callback_update("sig:del:abc", "group", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            denied.actions.0.as_slice(),
+            [TelegramAction::AnswerCallback { text: Some(text), show_alert: true, .. }]
+                if text == "solo quien pidió la tarjeta o un admin puede hacer eso"
+        ));
+
+        let mut cooldown_state = base_state;
+        cooldown_state.requester_id = "88".to_owned();
+        cooldown_state.last_refresh_at = Some(1_672_531_195);
+        let mut cooldown = build(cooldown_state, authorization());
+        assert_eq!(
+            cooldown.dispatch(callback_update("sig:ref:abc", "private", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            cooldown.actions.0.as_slice(),
+            [TelegramAction::AnswerCallback { text: Some(text), show_alert: true, .. }]
+                if text == "Podés actualizar cada 15s"
+        ));
     }
 
     #[test]
