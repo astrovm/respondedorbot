@@ -1347,7 +1347,7 @@ fn normalize_command_text(message_text: &str) -> Option<String> {
 #[pyfunction]
 fn convert_base(message_text: &str) -> PyResult<String> {
     let result = convert_base_core(message_text)
-        .map_err(|_| PyValueError::new_err("Unicode input requires the legacy converter"))?;
+        .map_err(|_| PyValueError::new_err("unsupported numeric input"))?;
     serde_json::to_string(&BaseConversionDto::from(result))
         .map_err(|error| PyValueError::new_err(format!("cannot encode base conversion: {error}")))
 }
@@ -1356,7 +1356,7 @@ fn convert_base(message_text: &str) -> PyResult<String> {
 #[pyfunction]
 fn parse_random_selection(message_text: &str) -> PyResult<String> {
     let result = parse_random_selection_core(message_text)
-        .map_err(|_| PyValueError::new_err("Unicode range requires the legacy parser"))?;
+        .map_err(|_| PyValueError::new_err("unsupported numeric range"))?;
     serde_json::to_string(&RandomSelectionDto::from(result))
         .map_err(|error| PyValueError::new_err(format!("cannot encode random selection: {error}")))
 }
@@ -1452,7 +1452,7 @@ fn format_satoshi_quote(price_usd: f64, price_ars: f64) -> PyResult<String> {
 #[pyfunction]
 fn parse_devo_input(message_text: &str) -> PyResult<(String, f64, f64)> {
     let result = parse_devo_input_core(message_text)
-        .map_err(|_| PyValueError::new_err("Unicode input requires the legacy parser"))?;
+        .map_err(|_| PyValueError::new_err("unsupported numeric input"))?;
     Ok(match result {
         DevoInput::Valid { fee, purchase } => ("valid".to_owned(), fee, purchase),
         DevoInput::Usage => ("usage".to_owned(), 0.0, 0.0),
@@ -1604,9 +1604,9 @@ fn parse_creditlog_limit(message_text: &str) -> PyResult<Option<usize>> {
     match parse_creditlog_limit_core(message_text) {
         CreditLogLimit::Valid(limit) => Ok(Some(limit)),
         CreditLogLimit::Invalid => Ok(None),
-        CreditLogLimit::NeedsLegacyParser => Err(PyValueError::new_err(
-            "Unicode or underscored input requires the legacy parser",
-        )),
+        CreditLogLimit::UnsupportedNumericInput => {
+            Err(PyValueError::new_err("unsupported numeric input"))
+        }
     }
 }
 

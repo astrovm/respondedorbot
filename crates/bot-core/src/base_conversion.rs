@@ -23,12 +23,12 @@ pub enum BaseConversion {
     NumbersRequired,
 }
 
-/// Boundary incompatibility that should use the legacy implementation.
+/// Numeric text that cannot be represented by the native parser.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UnsupportedUnicodeInput;
+pub struct UnsupportedNumericInput;
 
-/// Parse and execute the legacy base-conversion command.
-pub fn convert_base(input: &str) -> Result<BaseConversion, UnsupportedUnicodeInput> {
+/// Parse and execute the base-conversion command.
+pub fn convert_base(input: &str) -> Result<BaseConversion, UnsupportedNumericInput> {
     let parts: Vec<_> = input.split(',').collect();
     if parts.len() != 3 {
         return Ok(BaseConversion::Usage);
@@ -43,7 +43,7 @@ pub fn convert_base(input: &str) -> Result<BaseConversion, UnsupportedUnicodeInp
         || !normalized_source.is_ascii()
         || !normalized_target.is_ascii()
     {
-        return Err(UnsupportedUnicodeInput);
+        return Err(UnsupportedNumericInput);
     }
 
     let Some(source_integer) = BigInt::parse_bytes(normalized_source.as_bytes(), 10) else {

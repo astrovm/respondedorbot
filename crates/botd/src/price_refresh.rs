@@ -1,4 +1,4 @@
-//! Periodic refresh of the market caches shared with the legacy runtime.
+//! Periodic refresh of the persistent market caches.
 
 use bot_adapters::coinmarketcap::{ReqwestCoinMarketCapTransport, refresh_market_snapshot};
 use bot_adapters::dollar::{ReqwestDollarTransport, refresh_dollar_snapshot};

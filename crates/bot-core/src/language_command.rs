@@ -11,7 +11,7 @@ use crate::telegram_input::{ChatId, MessageId};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LanguageCommandPlan {
     NotHandled,
-    LegacyGroupRequired,
+    GroupAuthorizationRequired,
     Action {
         action: TelegramAction,
         updated_config: Option<ChatConfig>,
@@ -52,7 +52,7 @@ pub fn plan_language_command(
         return LanguageCommandPlan::NotHandled;
     }
     if is_group {
-        return LanguageCommandPlan::LegacyGroupRequired;
+        return LanguageCommandPlan::GroupAuthorizationRequired;
     }
 
     let requested = parsed.message_text.trim().to_lowercase();
@@ -163,7 +163,7 @@ mod tests {
     fn leaves_groups_and_other_commands_for_their_owners() {
         assert_eq!(
             plan("/language en", Locale::Es, true),
-            LanguageCommandPlan::LegacyGroupRequired
+            LanguageCommandPlan::GroupAuthorizationRequired
         );
         assert_eq!(
             plan("/other", Locale::Es, false),

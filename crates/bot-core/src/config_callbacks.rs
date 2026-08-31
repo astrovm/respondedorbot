@@ -43,7 +43,6 @@ pub enum ConfigCallbackDiagnostic {
 
 pub enum ConfigCallbackOutcome {
     NotHandled,
-    LegacyRequired,
     Guard,
     Render {
         changed: bool,
@@ -154,7 +153,7 @@ pub fn plan_config_callback(
             ) && value.parse::<BigInt>().is_ok()
                 && value.parse::<i64>().is_err()))
     {
-        return (ConfigCallbackOutcome::LegacyRequired, current.clone());
+        return (ConfigCallbackOutcome::Guard, current.clone());
     }
     let numeric_value = if action == "timezone" {
         parsed_timezone(value)
@@ -271,12 +270,7 @@ mod tests {
                     && changed == expected_changed
                     && diagnostic_name(diagnostic) == expected_diagnostic
             }
-            (
-                ConfigCallbackOutcome::NotHandled
-                | ConfigCallbackOutcome::LegacyRequired
-                | ConfigCallbackOutcome::Guard,
-                _,
-            ) => false,
+            (ConfigCallbackOutcome::NotHandled | ConfigCallbackOutcome::Guard, _) => false,
         }
     }
 
@@ -419,7 +413,7 @@ mod tests {
                 "cfg:creditless:999999999999999999999999999999999999",
                 &current,
             ),
-            (ConfigCallbackOutcome::LegacyRequired, _)
+            (ConfigCallbackOutcome::Guard, _)
         ));
     }
 
@@ -508,7 +502,7 @@ mod tests {
         };
         assert!(matches!(
             plan_config_callback("cfg:creditless:increase", &maximum),
-            (ConfigCallbackOutcome::LegacyRequired, _)
+            (ConfigCallbackOutcome::Guard, _)
         ));
     }
 

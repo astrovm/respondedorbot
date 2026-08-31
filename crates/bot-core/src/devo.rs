@@ -10,7 +10,7 @@ pub enum DevoInput {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UnsupportedUnicodeInput;
+pub struct UnsupportedNumericInput;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DevoQuotes {
@@ -67,9 +67,9 @@ fn parse_python_float(input: &str) -> Option<f64> {
     }
 }
 
-pub fn parse_devo_input(input: &str) -> Result<DevoInput, UnsupportedUnicodeInput> {
+pub fn parse_devo_input(input: &str) -> Result<DevoInput, UnsupportedNumericInput> {
     if !input.is_ascii() || input.contains('_') {
-        return Err(UnsupportedUnicodeInput);
+        return Err(UnsupportedNumericInput);
     }
     let (fee, purchase) = if input.contains(',') {
         let compact = input.replace(' ', "");
@@ -136,7 +136,7 @@ pub fn calculate_devo(
     })
 }
 
-pub fn plan_devo_command(input: &str) -> Result<DevoCommandPlan, UnsupportedUnicodeInput> {
+pub fn plan_devo_command(input: &str) -> Result<DevoCommandPlan, UnsupportedNumericInput> {
     Ok(match parse_devo_input(input)? {
         DevoInput::Valid { fee, purchase } => DevoCommandPlan::Load { fee, purchase },
         DevoInput::Usage => DevoCommandPlan::Reply(DevoReply::Usage),

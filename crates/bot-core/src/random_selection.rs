@@ -11,12 +11,12 @@ pub enum RandomSelection {
     Invalid,
 }
 
-/// Boundary incompatibility that should use the legacy implementation.
+/// Numeric text that cannot be represented by the native parser.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UnsupportedUnicodeRange;
+pub struct UnsupportedNumericRange;
 
-/// Parse one legacy random-selection request without consuming randomness.
-pub fn parse_random_selection(input: &str) -> Result<RandomSelection, UnsupportedUnicodeRange> {
+/// Parse one random-selection request without consuming randomness.
+pub fn parse_random_selection(input: &str) -> Result<RandomSelection, UnsupportedNumericRange> {
     let values: Vec<_> = input
         .split(',')
         .map(|value| value.trim().to_owned())
@@ -27,7 +27,7 @@ pub fn parse_random_selection(input: &str) -> Result<RandomSelection, Unsupporte
 
     let normalized = input.nfkc().collect::<String>();
     if !normalized.is_ascii() {
-        return Err(UnsupportedUnicodeRange);
+        return Err(UnsupportedNumericRange);
     }
     let range: Vec<_> = normalized.split('-').map(str::trim).collect();
     if range.len() != 2 {

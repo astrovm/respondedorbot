@@ -127,5 +127,5 @@ fn public_config_callback_planner_covers_every_transition_family() {
         ..current
     };
     let (outcome, _updated) = plan_config_callback("cfg:creditless:increase", &maximum);
-    assert!(matches!(outcome, ConfigCallbackOutcome::LegacyRequired));
+    assert!(matches!(outcome, ConfigCallbackOutcome::Guard));
 }

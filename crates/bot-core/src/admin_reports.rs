@@ -7,7 +7,7 @@ use unicode_normalization::UnicodeNormalization;
 pub enum CreditLogLimit {
     Valid(usize),
     Invalid,
-    NeedsLegacyParser,
+    UnsupportedNumericInput,
 }
 
 /// Parse `/creditlog [limit]` and clamp it to the database query bounds.
@@ -20,7 +20,7 @@ pub fn parse_creditlog_limit(message_text: &str) -> CreditLogLimit {
     let token = raw.split_once(' ').map_or(raw, |(token, _)| token).trim();
     let normalized = token.nfkc().collect::<String>();
     if !normalized.is_ascii() {
-        return CreditLogLimit::NeedsLegacyParser;
+        return CreditLogLimit::UnsupportedNumericInput;
     }
     let bytes = normalized.as_bytes();
     let underscores_are_valid = bytes.iter().enumerate().all(|(index, byte)| {

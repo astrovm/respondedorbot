@@ -36,7 +36,7 @@ where
         };
         let selection = match parse_random_selection(&request) {
             Ok(selection) => selection,
-            Err(_) => return ToolExecutionResult::output(invalid(self.locale)),
+            Err(_) => RandomSelection::Invalid,
         };
         let output = match selection {
             RandomSelection::Invalid => invalid(self.locale),
@@ -125,7 +125,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_unicode_out_of_range_and_random_failures_are_safe() {
+    fn invalid_out_of_range_compatibility_digits_and_random_failures_are_safe() {
         let mut tool = RandomChoiceTool::new(
             Random {
                 choice: Ok(99),
@@ -139,7 +139,7 @@ mod tests {
         );
         assert_eq!(
             tool.execute(request("１-３"), "call").output,
-            invalid(Locale::Es)
+            "Tool 'random_choice' error: synthetic random failure"
         );
         assert_eq!(
             tool.execute(request("a,b"), "call").output,

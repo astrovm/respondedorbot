@@ -30,7 +30,6 @@ pub struct CreditLogEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreditLogPlan {
     NotHandled,
-    LegacyRequired,
     Reply(TelegramAction),
     Load { limit: usize },
 }
@@ -154,7 +153,10 @@ pub fn plan_creditlog_command(
             Locale::Es => "mandalo bien: /creditlog [límite]",
             Locale::En => "usage: /creditlog [limit]",
         }),
-        CreditLogLimit::NeedsLegacyParser => CreditLogPlan::LegacyRequired,
+        CreditLogLimit::UnsupportedNumericInput => reply(match context.locale {
+            Locale::Es => "mandalo bien: /creditlog [límite]",
+            Locale::En => "usage: /creditlog [limit]",
+        }),
     }
 }
 

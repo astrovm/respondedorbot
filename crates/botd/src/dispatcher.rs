@@ -1649,7 +1649,7 @@ where
                 self.answer_callback_best_effort(context.callback_id.as_deref());
                 return Ok(DispatchOutcome::Handled);
             }
-            ConfigCallbackOutcome::NotHandled | ConfigCallbackOutcome::LegacyRequired => {
+            ConfigCallbackOutcome::NotHandled => {
                 self.answer_callback_best_effort(context.callback_id.as_deref());
                 return Ok(DispatchOutcome::Handled);
             }
@@ -2434,7 +2434,7 @@ where
             language_needs_legacy_group,
         );
         let (plan, updated_config) = match language_plan {
-            LanguageCommandPlan::LegacyGroupRequired => {
+            LanguageCommandPlan::GroupAuthorizationRequired => {
                 return Err(DispatchError::Invariant(
                     "authorized group language command was not unlocked",
                 ));
@@ -2730,7 +2730,6 @@ where
                     StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
                 }
                 CreditLogPlan::NotHandled => StatelessCommandPlan::NotHandled,
-                CreditLogPlan::LegacyRequired => StatelessCommandPlan::NotHandled,
             }
         } else if classify_bcra_command(&parsed.command) {
             let Some(source) = self.bcra_source.as_mut() else {
@@ -2938,7 +2937,19 @@ where
             StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if parsed.command == "/random" {
             match parse_random_selection(&parsed.message_text) {
-                Err(_) => StatelessCommandPlan::NotHandled,
+                Err(_) => {
+                    let text = match locale {
+                        bot_core::locale::Locale::Es => {
+                            "mandate algo como 'pizza, carne, sushi' o '1-10' boludo, no me hagas laburar al pedo"
+                        }
+                        bot_core::locale::Locale::En => {
+                            "send options like 'pizza, steak, sushi' or a range like '1-10'"
+                        }
+                    };
+                    let mut message = SendMessage::new(chat_id, text);
+                    message.reply_to_message_id = Some(message_id);
+                    StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+                }
                 Ok(RandomSelection::Invalid) => {
                     let text = match locale {
                         bot_core::locale::Locale::Es => {
