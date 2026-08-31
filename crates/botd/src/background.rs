@@ -12,6 +12,7 @@ use crate::compaction_adapters::production_compaction_worker;
 use crate::compaction_worker::{
     CompactionBilling, CompactionProvider, CompactionQueue, CompactionState, CompactionWorker,
 };
+use crate::price_refresh::production_price_refresh_worker;
 use crate::reconciliation::{
     ActiveOperationRegistry, AiBillingReconciler, GenerationSource, ReconciliationSettings,
     ReconciliationStore, production_reconciler,
@@ -23,6 +24,7 @@ use bot_adapters::redis_connection::RedisEndpoint;
 
 const TASK_INTERVAL: Duration = Duration::from_secs(1);
 const COMPACTION_INTERVAL: Duration = Duration::from_secs(2);
+const PRICE_REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
 pub struct ProductionBackgroundOptions<'a> {
     pub redis_endpoint: &'a RedisEndpoint,
@@ -36,6 +38,7 @@ pub struct ProductionBackgroundOptions<'a> {
     pub reconciliation_interval: Duration,
     pub reconciliation_settings: ReconciliationSettings,
     pub active_operations: ActiveOperationRegistry,
+    pub coinmarketcap_key: Option<&'a str>,
 }
 
 pub fn build_production_background_specs(
@@ -66,6 +69,8 @@ pub fn build_production_background_specs(
         options.active_operations,
         options.reconciliation_settings,
     )?;
+    let price_refresh =
+        production_price_refresh_worker(options.redis_endpoint, options.coinmarketcap_key)?;
     Ok(vec![
         BackgroundWorkerSpec::new("task-scheduler", TASK_INTERVAL, Box::new(scheduler)),
         BackgroundWorkerSpec::new(
@@ -77,6 +82,11 @@ pub fn build_production_background_specs(
             "ai-billing-reconciliation",
             options.reconciliation_interval,
             Box::new(reconciliation),
+        ),
+        BackgroundWorkerSpec::new(
+            "price-cache-refresh",
+            PRICE_REFRESH_INTERVAL,
+            Box::new(price_refresh),
         ),
     ])
 }
@@ -412,8 +422,9 @@ mod tests {
             reconciliation_interval: Duration::from_secs(60),
             reconciliation_settings: ReconciliationSettings::default(),
             active_operations: ActiveOperationRegistry::default(),
+            coinmarketcap_key: Some("synthetic-coinmarketcap-key"),
         });
         assert!(result.is_ok());
-        assert_eq!(result.map(|specs| specs.len()), Ok(3));
+        assert_eq!(result.map(|specs| specs.len()), Ok(4));
     }
 }

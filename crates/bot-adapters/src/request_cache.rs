@@ -37,6 +37,8 @@ impl RequestCache for RedisJsonCache {
 pub struct CachedJsonLoad {
     pub data: Option<Value>,
     pub diagnostics: Vec<String>,
+    /// True only when this call fetched and persisted a new provider response.
+    pub refreshed: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,6 +112,7 @@ where
                 return CachedJsonLoad {
                     data: None,
                     diagnostics,
+                    refreshed: false,
                 };
             }
         },
@@ -119,6 +122,7 @@ where
             return CachedJsonLoad {
                 data: None,
                 diagnostics,
+                refreshed: false,
             };
         }
     };
@@ -128,6 +132,7 @@ where
         return CachedJsonLoad {
             data: Some(cached.data.clone()),
             diagnostics,
+            refreshed: false,
         };
     }
 
@@ -152,6 +157,7 @@ where
                         return CachedJsonLoad {
                             data: cached.map(|cached| cached.data),
                             diagnostics,
+                            refreshed: false,
                         };
                     }
                 };
@@ -160,6 +166,7 @@ where
                         return CachedJsonLoad {
                             data: value.get("data").cloned(),
                             diagnostics,
+                            refreshed: true,
                         };
                     }
                     Err(error) => diagnostics.push(format!(
@@ -180,6 +187,7 @@ where
     CachedJsonLoad {
         data: cached.map(|cached| cached.data),
         diagnostics,
+        refreshed: false,
     }
 }
 

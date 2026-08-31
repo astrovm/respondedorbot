@@ -109,6 +109,46 @@ pub struct DollarMarketLoad {
     pub diagnostics: Vec<String>,
 }
 
+/// Refresh the raw dollar response and persist the same hourly snapshot used
+/// by the Python cache service. Provider failures remain diagnostic-only so
+/// the other independent market refreshes can still run.
+pub fn refresh_dollar_snapshot<T: DollarTransport, C: DollarCache>(
+    transport: &T,
+    cache: &mut C,
+    now_unix: i64,
+) -> Vec<String> {
+    let load = load_cached_json(
+        cache,
+        &request_key(),
+        REQUEST_TTL_SECONDS,
+        now_unix,
+        "CriptoYa dollar refresh",
+        || {
+            transport
+                .get()
+                .map(|response| JsonHttpResponse {
+                    status_code: response.status_code,
+                    body: response.body,
+                })
+                .map_err(|error| format!("transport {error:?}"))
+        },
+        || transport.before_retry(),
+    );
+    let mut diagnostics = load.diagnostics;
+    if let (true, Some(current)) = (load.refreshed, load.data) {
+        let hourly_value = json!({"timestamp": now_unix, "data": current}).to_string();
+        let current_history_key = request_cache_history_key(&hour_key(now_unix), request_hash());
+        if let Err(error) =
+            cache.set_if_absent(&current_history_key, &hourly_value, HISTORY_TTL_SECONDS)
+        {
+            diagnostics.push(format!(
+                "could not write dollar history key {current_history_key}: {error}"
+            ));
+        }
+    }
+    diagnostics
+}
+
 fn request_hash() -> &'static str {
     "e566a0454c06bb8e67fb679a5d285cecc3edac67b888df87021dcfa94971b49b"
 }
@@ -380,20 +420,23 @@ pub fn load_dollar_market<T: DollarTransport, C: DollarCache>(
         || transport.before_retry(),
     );
     diagnostics.extend(load.diagnostics);
+    let refreshed = load.refreshed;
     let Some(current) = load.data else {
         return DollarMarketLoad {
             text: None,
             diagnostics,
         };
     };
-    let hourly_value = json!({"timestamp": now_unix, "data": current}).to_string();
-    let current_history_key = request_cache_history_key(&hour_key(now_unix), request_hash());
-    if let Err(error) =
-        cache.set_if_absent(&current_history_key, &hourly_value, HISTORY_TTL_SECONDS)
-    {
-        diagnostics.push(format!(
-            "could not write dollar history key {current_history_key}: {error}"
-        ));
+    if refreshed {
+        let hourly_value = json!({"timestamp": now_unix, "data": current}).to_string();
+        let current_history_key = request_cache_history_key(&hour_key(now_unix), request_hash());
+        if let Err(error) =
+            cache.set_if_absent(&current_history_key, &hourly_value, HISTORY_TTL_SECONDS)
+        {
+            diagnostics.push(format!(
+                "could not write dollar history key {current_history_key}: {error}"
+            ));
+        }
     }
     let mut rates = parse_rates(&current, history.as_ref().map(unwrap_data), hours_ago);
     if let Some(tcrm) = tcrm(cache, hours_ago, now_unix, &mut diagnostics) {
@@ -413,8 +456,8 @@ mod tests {
     use std::collections::{HashMap, VecDeque};
 
     use super::{
-        DollarCache, DollarTransport, HttpResponse, TransportFailureKind, hour_key,
-        load_dollar_market, request_key,
+        DollarCache, DollarTransport, HISTORY_TTL_SECONDS, HttpResponse, TransportFailureKind,
+        hour_key, load_dollar_market, refresh_dollar_snapshot, request_key,
     };
     use crate::request_cache::RequestCache;
     use bot_core::locale::Locale;
@@ -605,5 +648,39 @@ mod tests {
                 .iter()
                 .any(|item| item.contains("Connection"))
         );
+    }
+
+    #[test]
+    fn dedicated_refresh_writes_history_only_for_a_new_provider_response() {
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::from([Ok(HttpResponse {
+                status_code: 200,
+                body: body(),
+            })])),
+            calls: RefCell::new(0),
+        };
+        let mut cache = Cache::default();
+        let diagnostics = refresh_dollar_snapshot(&transport, &mut cache, 1_725_000_000);
+        assert!(diagnostics.is_empty());
+        assert_eq!(*transport.calls.borrow(), 1);
+        assert!(cache.writes.iter().any(|write| {
+            write.0.starts_with("request_cache_history:2024-08-30-06:")
+                && write.2 == HISTORY_TTL_SECONDS
+                && write.3
+        }));
+
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::new()),
+            calls: RefCell::new(0),
+        };
+        let mut cache = Cache::default();
+        cache.values.insert(
+            request_key(),
+            format!(r#"{{"timestamp":1725000000,"data":{}}}"#, body()),
+        );
+        let diagnostics = refresh_dollar_snapshot(&transport, &mut cache, 1_725_000_001);
+        assert!(diagnostics.is_empty());
+        assert_eq!(*transport.calls.borrow(), 0);
+        assert!(cache.writes.is_empty());
     }
 }

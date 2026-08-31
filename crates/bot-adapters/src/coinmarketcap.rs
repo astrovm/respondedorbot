@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::thread;
 use std::time::Duration;
 
+use bot_core::cache_policy::request_cache_history_key;
 use bot_core::market_prices::{CryptoAsset, CryptoQuote};
+use chrono::{DateTime, Utc};
 use reqwest::blocking::Client;
 use serde_json::Value;
 
@@ -16,6 +18,7 @@ const LISTINGS_URL: &str = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/
 const QUOTES_URL: &str = "https://pro-api.coinmarketcap.com/v2/cryptocurrency/quotes/latest";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const MARKET_CACHE_TTL_SECONDS: i64 = 300;
+const MARKET_HISTORY_TTL_SECONDS: i64 = 3 * 24 * 60 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BitcoinPriceRequest {
@@ -179,6 +182,18 @@ fn market_cache_arguments(request: &MarketRequest) -> String {
     )
 }
 
+fn market_cache_hash(arguments: &str) -> String {
+    python_request_cache_key(arguments)
+        .strip_prefix("request_cache:")
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn hour_key(timestamp: i64) -> Option<String> {
+    DateTime::<Utc>::from_timestamp(timestamp, 0)
+        .map(|value| value.format("%Y-%m-%d-%H").to_string())
+}
+
 fn number(value: Option<&Value>) -> Option<f64> {
     match value {
         Some(Value::Number(value)) => value.as_f64(),
@@ -288,6 +303,69 @@ pub fn load_market_assets<T: CoinMarketCapMarketTransport, C: RequestCache>(
     }
 }
 
+/// Refresh one listings cache and, only after a provider fetch, persist the
+/// language-neutral hourly snapshot used by timeframe comparisons.
+pub fn refresh_market_snapshot<T: CoinMarketCapMarketTransport, C: RequestCache>(
+    transport: &T,
+    cache: &mut C,
+    api_key: &str,
+    currency: &str,
+    now_unix: i64,
+) -> Vec<String> {
+    let request = MarketRequest {
+        api_key: api_key.to_owned(),
+        currency: currency.to_owned(),
+        kind: MarketRequestKind::Listings,
+    };
+    let arguments = market_cache_arguments(&request);
+    let key = python_request_cache_key(&arguments);
+    let load = load_cached_json(
+        cache,
+        &key,
+        MARKET_CACHE_TTL_SECONDS,
+        now_unix,
+        "CoinMarketCap market refresh",
+        || {
+            transport
+                .get_market(&request)
+                .map(|response| JsonHttpResponse {
+                    status_code: response.status_code,
+                    body: response.body,
+                })
+                .map_err(|error| format!("{error:?}"))
+        },
+        || transport.before_retry(),
+    );
+    let mut diagnostics = load.diagnostics;
+    if !load.refreshed {
+        return diagnostics;
+    }
+    let Some(data) = load.data else {
+        return diagnostics;
+    };
+    let Some(hour) = hour_key(now_unix) else {
+        diagnostics
+            .push("CoinMarketCap refresh timestamp is outside the supported range".to_owned());
+        return diagnostics;
+    };
+    let history_key = request_cache_history_key(&hour, &market_cache_hash(&arguments));
+    match cache.get(&history_key) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            let value = serde_json::json!({"timestamp": now_unix, "data": data}).to_string();
+            if let Err(error) = cache.set(&history_key, &value, MARKET_HISTORY_TTL_SECONDS) {
+                diagnostics.push(format!(
+                    "could not write CoinMarketCap history key {history_key}: {error}"
+                ));
+            }
+        }
+        Err(error) => diagnostics.push(format!(
+            "could not read CoinMarketCap history key {history_key}: {error}"
+        )),
+    }
+    diagnostics
+}
+
 fn classify_error(error: reqwest::Error) -> TransportFailureKind {
     if error.is_timeout() {
         TransportFailureKind::Timeout
@@ -352,7 +430,7 @@ mod tests {
         BitcoinPriceOutcome, BitcoinPriceRequest, CoinMarketCapMarketTransport,
         CoinMarketCapTransport, HttpResponse, MarketRequest, MarketRequestKind,
         TransportFailureKind, fetch_bitcoin_price, load_market_assets, market_cache_arguments,
-        parse_bitcoin_price,
+        parse_bitcoin_price, refresh_market_snapshot,
     };
 
     struct Transport {
@@ -534,5 +612,58 @@ mod tests {
         };
         assert_eq!(assets[0].symbol, "BTC");
         assert_eq!(load.diagnostics.len(), 2);
+    }
+
+    #[test]
+    fn refresh_writes_python_compatible_hourly_snapshot_only_after_fetch() {
+        let response = Ok(HttpResponse {
+            status_code: 200,
+            body: r#"{"data":[{"id":1,"symbol":"BTC","name":"Bitcoin","slug":"bitcoin","quote":{"ARS":{"price":42}}}]}"#
+                .to_owned(),
+        });
+        let transport = MarketTransport {
+            responses: RefCell::new(VecDeque::from([response])),
+            requests: RefCell::new(Vec::new()),
+        };
+        let mut cache = Cache {
+            reads: VecDeque::from([Ok(None), Ok(None)]),
+            ..Cache::default()
+        };
+        let diagnostics = refresh_market_snapshot(
+            &transport,
+            &mut cache,
+            "synthetic-secret",
+            "ARS",
+            1_725_000_000,
+        );
+        assert!(diagnostics.is_empty());
+        assert_eq!(cache.writes.len(), 2);
+        assert_eq!(cache.writes[0].2, 300);
+        assert!(
+            cache.writes[1]
+                .0
+                .starts_with("request_cache_history:2024-08-30-06:")
+        );
+        assert_eq!(cache.writes[1].2, 3 * 24 * 60 * 60);
+
+        let transport = MarketTransport {
+            responses: RefCell::new(VecDeque::new()),
+            requests: RefCell::new(Vec::new()),
+        };
+        let mut cache = Cache {
+            reads: VecDeque::from([Ok(Some(
+                r#"{"timestamp":1725000000,"data":{"data":[]}}"#.to_owned(),
+            ))]),
+            ..Cache::default()
+        };
+        let diagnostics = refresh_market_snapshot(
+            &transport,
+            &mut cache,
+            "synthetic-secret",
+            "ARS",
+            1_725_000_001,
+        );
+        assert!(diagnostics.is_empty());
+        assert!(cache.writes.is_empty());
     }
 }
