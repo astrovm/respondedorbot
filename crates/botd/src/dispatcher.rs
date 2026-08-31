@@ -1408,6 +1408,7 @@ where
             ),
             photo_file_id: content.photo_file_id.clone(),
             audio_file_id: content.audio_file_id.clone(),
+            audio_duration_seconds: message.audio_duration_seconds.map(|value| value as f64),
             locale,
             timezone_offset_hours: config.timezone_offset,
             timestamp,
@@ -2644,6 +2645,9 @@ mod tests {
                 replied_sender_first_name: None,
                 replied_sender_username: None,
                 replied_text: None,
+                visual_media_kind: None,
+                audio_media_kind: None,
+                audio_duration_seconds: None,
                 content: Some(MessageContent {
                     text: text.to_owned(),
                     photo_file_id: None,
@@ -3081,6 +3085,9 @@ mod tests {
                 replied_sender_first_name: None,
                 replied_sender_username: None,
                 replied_text: None,
+                visual_media_kind: None,
+                audio_media_kind: None,
+                audio_duration_seconds: None,
                 content: None,
             })),
         };

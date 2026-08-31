@@ -30,6 +30,9 @@ use crate::task_executor::{
 };
 
 pub const PRIMARY_CHAT_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
+pub const VISION_MODEL: &str = "google/gemini-3.1-flash-lite-preview";
+pub const GROQ_TRANSCRIPTION_MODEL: &str = "whisper-large-v3";
+pub const OPENROUTER_TRANSCRIPTION_MODEL: &str = "google/gemini-3.1-flash-lite-preview";
 const SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE: i64 = 4_000;
 const WEB_SEARCH_MAX_RESULTS: i64 = 5;
 const WEB_SEARCH_MAX_USES: i64 = 3;

@@ -16,7 +16,7 @@ impl AiReplyMetadata {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AiConversationInput {
     pub chat_id: ChatId,
     pub message_id: MessageId,
@@ -31,6 +31,7 @@ pub struct AiConversationInput {
     pub reply_context: Option<String>,
     pub photo_file_id: Option<String>,
     pub audio_file_id: Option<String>,
+    pub audio_duration_seconds: Option<f64>,
     pub locale: Locale,
     pub timezone_offset_hours: i64,
     pub timestamp: i64,

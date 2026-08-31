@@ -49,6 +49,9 @@ pub struct IncomingMessage {
     pub replied_sender_first_name: Option<String>,
     pub replied_sender_username: Option<String>,
     pub replied_text: Option<String>,
+    pub visual_media_kind: Option<String>,
+    pub audio_media_kind: Option<String>,
+    pub audio_duration_seconds: Option<u64>,
     pub content: Option<MessageContent>,
 }
 
@@ -193,6 +196,17 @@ fn parse_message(payload: &Map<String, Value>) -> IncomingMessage {
         .and_then(|reply| extract_message_content(&Value::Object(reply.clone())).ok())
         .map(|content| content.text)
         .filter(|text| !text.is_empty());
+    let visual_media_kind = media_kind(payload, &["photo", "sticker"]);
+    let audio_media_kind = media_kind(payload, &["voice", "audio", "video", "video_note"]);
+    let audio_duration_seconds = media_object(payload, &["voice", "audio", "video", "video_note"])
+        .and_then(|media| media.get("duration"))
+        .and_then(|duration| match duration {
+            Value::Number(value) => value
+                .as_u64()
+                .or_else(|| value.as_f64().map(|value| value.max(0.0) as u64)),
+            Value::String(value) => value.parse::<f64>().ok().map(|value| value.max(0.0) as u64),
+            _ => None,
+        });
     IncomingMessage {
         message_id,
         chat_id,
@@ -208,8 +222,39 @@ fn parse_message(payload: &Map<String, Value>) -> IncomingMessage {
         replied_sender_first_name,
         replied_sender_username,
         replied_text,
+        visual_media_kind,
+        audio_media_kind,
+        audio_duration_seconds,
         content: extract_message_content(&Value::Object(payload.clone())).ok(),
     }
+}
+
+fn media_object<'a>(
+    payload: &'a Map<String, Value>,
+    kinds: &[&str],
+) -> Option<&'a Map<String, Value>> {
+    kinds
+        .iter()
+        .find_map(|kind| payload.get(*kind).and_then(Value::as_object))
+        .or_else(|| {
+            let replied = payload.get("reply_to_message")?.as_object()?;
+            kinds
+                .iter()
+                .find_map(|kind| replied.get(*kind).and_then(Value::as_object))
+        })
+}
+
+fn media_kind(payload: &Map<String, Value>, kinds: &[&str]) -> Option<String> {
+    kinds
+        .iter()
+        .find(|kind| payload.get(**kind).is_some_and(|value| !value.is_null()))
+        .or_else(|| {
+            let replied = payload.get("reply_to_message")?.as_object()?;
+            kinds
+                .iter()
+                .find(|kind| replied.get(**kind).is_some_and(|value| !value.is_null()))
+        })
+        .map(|kind| (*kind).to_owned())
 }
 
 fn parse_update(value: Value) -> Result<IncomingUpdate, PollingError> {
@@ -419,7 +464,7 @@ mod tests {
                     "message_id":"7",
                     "chat":{"id":"-42","type":"private"},
                     "from":{"id":"88","first_name":"Synthetic","username":"tester","language_code":"en-US"},
-                    "reply_to_message":{"message_id":6},
+                    "reply_to_message":{"message_id":6,"voice":{"file_id":"voice-1","duration":12}},
                     "caption":"  /convertbase 101, 2, 10  ",
                     "photo":[{"file_id":"small"},{"file_id":"large"}]
                 }},
@@ -448,12 +493,16 @@ mod tests {
         assert_eq!(first.sender_username.as_deref(), Some("tester"));
         assert!(first.has_reply);
         assert_eq!(first.sender_language_code.as_deref(), Some("en-US"));
+        assert_eq!(first.visual_media_kind.as_deref(), Some("photo"));
+        assert_eq!(first.audio_media_kind.as_deref(), Some("voice"));
+        assert_eq!(first.audio_duration_seconds, Some(12));
         assert_eq!(
-            first
-                .content
-                .as_ref()
-                .map(|content| (content.text.as_str(), content.photo_file_id.as_deref())),
-            Some(("/convertbase 101, 2, 10", Some("large")))
+            first.content.as_ref().map(|content| (
+                content.text.as_str(),
+                content.photo_file_id.as_deref(),
+                content.audio_file_id.as_deref()
+            )),
+            Some(("/convertbase 101, 2, 10", Some("large"), Some("voice-1")))
         );
         let IncomingEvent::Message(second) = &updates[1].event else {
             return;

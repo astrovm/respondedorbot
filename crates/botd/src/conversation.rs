@@ -22,6 +22,7 @@ use crate::ai_dispatch::{
 use crate::chat_tool_loop::{
     ChatRoundStream, ChatToolLoopError, NativeToolRuntime, run_chat_tool_loop,
 };
+use crate::media::{MediaExecution, MediaKind, MediaRuntime};
 
 const MAX_HISTORY_MESSAGES: usize = 40;
 const SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE: i64 = 4_000;
@@ -116,6 +117,14 @@ struct PendingConversation {
     provider_failed: bool,
 }
 
+#[derive(Debug, Default)]
+struct PreparedConversationMedia {
+    execution: Option<MediaExecution>,
+    segments: Vec<Value>,
+    reserve_decision: Option<ReserveDecision>,
+    diagnostics: Vec<String>,
+}
+
 pub struct NativeConversation<Provider, Tools, State, Billing> {
     provider: Provider,
     tools: Tools,
@@ -124,6 +133,7 @@ pub struct NativeConversation<Provider, Tools, State, Billing> {
     persona: String,
     model: String,
     max_tool_rounds: usize,
+    media: Option<Box<dyn MediaRuntime>>,
     pending: HashMap<String, PendingConversation>,
 }
 
@@ -146,8 +156,15 @@ impl<Provider, Tools, State, Billing> NativeConversation<Provider, Tools, State,
             persona: persona.to_owned(),
             model: model.to_owned(),
             max_tool_rounds,
+            media: None,
             pending: HashMap::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_media(mut self, media: Box<dyn MediaRuntime>) -> Self {
+        self.media = Some(media);
+        self
     }
 
     fn preparation_error(locale: Locale) -> &'static str {
@@ -248,6 +265,7 @@ where
     fn prompt(
         &mut self,
         input: &AiConversationInput,
+        media_context: Option<&MediaExecution>,
     ) -> Result<(Vec<PromptMessage>, ToolFactory::Tools), String> {
         let tools = self.tools.create(input)?;
         let memory = self.state.load_memory(
@@ -264,7 +282,7 @@ where
             PromptRole::System,
             build_system_prompt(&self.persona, input.locale, &date, true, false),
         )];
-        messages.extend(build_conversation_prompt(&ConversationPromptInput {
+        let mut conversation = build_conversation_prompt(&ConversationPromptInput {
             locale: input.locale,
             chat_type: input.chat_type.clone(),
             chat_title: input.chat_title.clone(),
@@ -278,8 +296,94 @@ where
             summary: memory.summary,
             history: memory.history,
             retrieved: memory.retrieved,
-        }));
+        });
+        if let Some(media) = media_context {
+            append_media_context(&mut conversation, media, input.locale);
+        }
+        messages.extend(conversation);
         Ok((messages, tools))
+    }
+
+    fn prepare_media(
+        &mut self,
+        input: &AiConversationInput,
+        operation_id: &str,
+    ) -> Result<PreparedConversationMedia, String> {
+        if self.media.is_none() {
+            return Ok(PreparedConversationMedia::default());
+        }
+        let selected = input
+            .audio_file_id
+            .as_deref()
+            .map(|file_id| (MediaKind::Audio, file_id, input.audio_duration_seconds))
+            .or_else(|| {
+                input
+                    .photo_file_id
+                    .as_deref()
+                    .map(|file_id| (MediaKind::Image, file_id, None))
+            });
+        let Some((kind, file_id, duration)) = selected else {
+            return Ok(PreparedConversationMedia::default());
+        };
+        let prepared = match self
+            .media
+            .as_mut()
+            .ok_or_else(|| "native media runtime disappeared".to_owned())?
+            .prepare(kind, file_id, duration)
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Ok(PreparedConversationMedia {
+                    diagnostics: vec![format!("AI media preparation: {error}")],
+                    ..PreparedConversationMedia::default()
+                });
+            }
+        };
+        let reserve_amount = prepared.reserve_credit_units();
+        let reservation_kind = match kind {
+            MediaKind::Image => "image_context_media",
+            MediaKind::Audio => "auto_audio_media",
+        };
+        let decision = if reserve_amount > 0 {
+            Some(self.reserve(input, operation_id, reservation_kind, reserve_amount, 1)?)
+        } else {
+            None
+        };
+        if decision
+            .as_ref()
+            .is_some_and(|decision| !decision.authorized)
+        {
+            return Ok(PreparedConversationMedia {
+                reserve_decision: decision,
+                ..PreparedConversationMedia::default()
+            });
+        }
+        let prompt = media_prompt(kind, input.locale);
+        match self
+            .media
+            .as_mut()
+            .ok_or_else(|| "native media runtime disappeared".to_owned())?
+            .execute(prepared, prompt)
+        {
+            Ok(execution) => {
+                let segments = execution
+                    .billing_segment
+                    .clone()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                Ok(PreparedConversationMedia {
+                    execution: Some(execution),
+                    segments,
+                    reserve_decision: decision,
+                    diagnostics: Vec::new(),
+                })
+            }
+            Err(error) => Ok(PreparedConversationMedia {
+                reserve_decision: decision,
+                diagnostics: vec![format!("AI media provider: {error}")],
+                ..PreparedConversationMedia::default()
+            }),
+        }
     }
 
     fn prepare_transaction(
@@ -306,10 +410,35 @@ where
             });
         }
 
-        let (messages, mut tools) = match self.prompt(&input) {
+        let prepared_media = self.prepare_media(&input, &operation_id)?;
+        let mut segments = prepared_media.segments;
+        let mut diagnostics = prepared_media.diagnostics;
+        if let Some(decision) = prepared_media
+            .reserve_decision
+            .as_ref()
+            .filter(|decision| !decision.authorized)
+        {
+            self.settle_immediately(&input, &operation_id, "ai_response_media_reserve_failed")?;
+            return Ok(if input.spontaneous {
+                AiPreparation::silent()
+            } else {
+                AiPreparation::reply(Self::insufficient(input.locale, &input, decision), None)
+            });
+        }
+
+        let (messages, mut tools) = match self.prompt(&input, prepared_media.execution.as_ref()) {
             Ok(value) => value,
             Err(error) => {
-                self.settle_immediately(&input, &operation_id, "ai_request_preparation_failed")?;
+                let actual = price_segments(&segments)?;
+                record_and_settle(
+                    &mut self.billing,
+                    &input,
+                    &operation_id,
+                    &segments,
+                    actual,
+                    false,
+                    "ai_request_preparation_failed",
+                )?;
                 return Err(error);
             }
         };
@@ -323,9 +452,14 @@ where
                 messages.len(),
             )?;
             if !extension.authorized {
-                self.settle_immediately(
+                let actual = price_segments(&segments)?;
+                record_and_settle(
+                    &mut self.billing,
                     &input,
                     &operation_id,
+                    &segments,
+                    actual,
+                    false,
                     "ai_response_reserve_adjustment_failed",
                 )?;
                 return Ok(if input.spontaneous {
@@ -346,7 +480,7 @@ where
                 on_token(token).map_err(bot_adapters::openrouter_chat::OpenRouterChatError::Stream)
             },
         );
-        let (raw_text, segments, diagnostics, provider_failed) = match loop_result {
+        let (raw_text, chat_segments, chat_diagnostics, provider_failed) = match loop_result {
             Ok(result) => (
                 result.text,
                 result.billing_segments,
@@ -355,6 +489,8 @@ where
             ),
             Err(error) => partial_failure(error),
         };
+        segments.extend(chat_segments);
+        diagnostics.extend(chat_diagnostics);
         let identity = user_identity(&input);
         let cleaned = cleanup_response(
             &raw_text,
@@ -463,6 +599,35 @@ where
             )?;
         }
         Ok(())
+    }
+}
+
+fn media_prompt(kind: MediaKind, locale: Locale) -> &'static str {
+    match (kind, locale) {
+        (MediaKind::Image, Locale::Es) => {
+            "describí lo que ves en esta imagen en detalle, en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino"
+        }
+        (MediaKind::Image, Locale::En) => {
+            "Describe this image in detail in English, without markdown or emojis."
+        }
+        (MediaKind::Audio, _) => "Transcribe this audio exactly as spoken.",
+    }
+}
+
+fn append_media_context(messages: &mut [PromptMessage], media: &MediaExecution, locale: Locale) {
+    let context = match (media.kind, locale) {
+        (MediaKind::Image, Locale::Es) => format!("[Imagen: {}]", media.text),
+        (MediaKind::Image, Locale::En) => format!("[Image: {}]", media.text),
+        (MediaKind::Audio, Locale::Es) => format!("[Transcripción de audio: {}]", media.text),
+        (MediaKind::Audio, Locale::En) => format!("[Audio transcription: {}]", media.text),
+    };
+    let Some(last) = messages.last_mut() else {
+        return;
+    };
+    match &mut last.content {
+        PromptContent::Text(text) => text.push_str(&format!("\n\n{context}")),
+        PromptContent::TextParts(parts) => parts.push(context),
+        PromptContent::Empty => last.content = PromptContent::Text(context),
     }
 }
 
@@ -687,6 +852,50 @@ mod tests {
         }
     }
 
+    struct Media;
+
+    impl MediaRuntime for Media {
+        fn prepare(
+            &mut self,
+            kind: MediaKind,
+            file_id: &str,
+            duration_hint_seconds: Option<f64>,
+        ) -> Result<crate::media::PreparedMedia, String> {
+            assert_eq!(kind, MediaKind::Audio);
+            assert_eq!(duration_hint_seconds, Some(4.5));
+            Ok(crate::media::PreparedMedia::Audio {
+                file_id: file_id.to_owned(),
+                bytes: b"audio".to_vec(),
+                duration_seconds: 4.5,
+                reserve_credit_units: 7,
+            })
+        }
+
+        fn execute(
+            &mut self,
+            prepared: crate::media::PreparedMedia,
+            _prompt: &str,
+        ) -> Result<MediaExecution, String> {
+            let crate::media::PreparedMedia::Audio { file_id, .. } = prepared else {
+                return Err("unexpected media".to_owned());
+            };
+            Ok(MediaExecution {
+                kind: MediaKind::Audio,
+                file_id,
+                text: "synthetic transcript".to_owned(),
+                billing_segment: Some(json!({
+                    "kind": "transcribe",
+                    "model": "whisper-large-v3",
+                    "usage": {},
+                    "audio_seconds": 4.5,
+                    "source": "groq",
+                    "metadata": {"provider": "groq"}
+                })),
+                cached: false,
+            })
+        }
+    }
+
     #[derive(Default)]
     struct State {
         memory: ConversationMemory,
@@ -774,6 +983,7 @@ mod tests {
             reply_context: None,
             photo_file_id: None,
             audio_file_id: None,
+            audio_duration_seconds: None,
             locale: Locale::En,
             timezone_offset_hours: -3,
             timestamp: 1_672_531_200,
@@ -875,6 +1085,53 @@ mod tests {
             Ok(AiPreparation::Reply { text, .. }) if text == "answer"
         ));
         assert!(service.billing.settlements.is_empty());
+    }
+
+    #[test]
+    fn audio_is_reserved_transcribed_added_to_context_and_settled_with_chat_usage() {
+        let mut service = conversation(vec![Ok(round("answer", None))], Billing::default())
+            .with_media(Box::new(Media));
+        let mut request = input();
+        request.audio_file_id = Some("audio-1".to_owned());
+        request.audio_duration_seconds = Some(4.5);
+        let preparation = service.prepare(request);
+        let Ok(AiPreparation::Reply {
+            completion_id: Some(completion_id),
+            ..
+        }) = preparation
+        else {
+            return;
+        };
+        assert!(
+            service
+                .billing
+                .reserves
+                .iter()
+                .any(|reserve| reserve.metadata["usage_tag"] == "auto_audio_media")
+        );
+        let prompts = service.provider.prompts.borrow();
+        let prompt_text = prompts[0]
+            .iter()
+            .filter_map(|message| match &message.content {
+                PromptContent::Text(text) => Some(text.as_str()),
+                PromptContent::TextParts(_) | PromptContent::Empty => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(prompt_text.contains("[Audio transcription: synthetic transcript]"));
+        drop(prompts);
+
+        assert_eq!(
+            service.complete_delivery(AiDelivery {
+                completion_id,
+                delivered: true,
+                sent_message_id: Some(MessageId(99)),
+            }),
+            Ok(())
+        );
+        assert_eq!(service.billing.segments.len(), 2);
+        assert_eq!(service.billing.segments[0].segment["kind"], "transcribe");
+        assert_eq!(service.billing.segments[1].segment["kind"], "chat");
     }
 
     #[test]

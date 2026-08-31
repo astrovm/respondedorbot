@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+base64.workspace = true
 bot-core.workspace = true
 calamine.workspace = true
 chrono.workspace = true

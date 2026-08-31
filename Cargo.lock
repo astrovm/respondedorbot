@@ -90,6 +90,7 @@ dependencies = [
 name = "bot-adapters"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "bot-core",
  "calamine",
  "chrono",

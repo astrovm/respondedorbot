@@ -37,6 +37,7 @@ use bot_adapters::link_preview::{
     LinkPreviewTransport, ReqwestLinkPreviewTransport, download_oversized_video,
     inspect_with as inspect_link_preview,
 };
+use bot_adapters::media_provider::ReqwestGroqTranscriptionTransport;
 use bot_adapters::openrouter_chat::{
     DEFAULT_OPENROUTER_BASE_URL, OpenRouterChatError, ReqwestOpenRouterTransport,
 };
@@ -66,6 +67,7 @@ use bot_adapters::yahoo_finance::{
     ReqwestYahooFinanceTransport, TransportFailureKind as YahooTransportFailureKind,
     YahooFinanceTransport, load_quote as load_yahoo_quote, load_symbol as load_yahoo_symbol,
 };
+use bot_core::ai_reserve::VISION_OUTPUT_TOKEN_LIMIT;
 use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup, ChargeHistoryPage};
 use bot_core::chat_config::ChatConfig;
 use bot_core::command_state::{
@@ -104,6 +106,11 @@ use crate::dispatcher::{
 use crate::firecrawl_tool::FirecrawlTool;
 use crate::hacker_news_tool::HackerNewsTool;
 use crate::market_tools::{CryptoPricesTool, DollarRatesTool, StockPricesTool, WeatherTool};
+use crate::media::NativeMedia;
+use crate::media_adapters::{
+    FallbackTranscriptionProvider, FfmpegMediaProcessor, OpenRouterVisionProvider, RedisMediaCache,
+    TelegramMediaFiles, TranscriptionProviderConfig,
+};
 use crate::native_tools::{NativeTool, NativeToolRegistry, StandardNativeToolBackend};
 use crate::random_tool::RandomChoiceTool;
 use crate::runtime::{PollingRuntime, UpdateSource};
@@ -1158,6 +1165,8 @@ pub enum CompositionError {
     ActionTransport(TransportFailureKind),
     #[error("could not construct Telegram chat-admin transport: {0:?}")]
     AdminTransport(TransportFailureKind),
+    #[error("could not construct Telegram media transport: {0:?}")]
+    MediaTransport(TransportFailureKind),
     #[error("could not construct CoinMarketCap transport: {0:?}")]
     CoinMarketCapTransport(CoinMarketCapTransportFailureKind),
     #[error("could not construct CoinMarketCap Redis cache: {0}")]
@@ -1202,6 +1211,8 @@ pub enum CompositionError {
     RedisTasks(#[from] RedisTaskStoreError),
     #[error("could not construct OpenRouter chat transport: {0}")]
     OpenRouterChatTransport(OpenRouterChatError),
+    #[error("could not construct media provider transport: {0}")]
+    MediaProviderTransport(String),
     #[error("could not construct Redis AI conversation state: {0}")]
     ConversationState(String),
 }
@@ -1218,6 +1229,8 @@ pub struct NativeRuntimeOptions<'a> {
     pub giphy_api_key: Option<String>,
     pub openrouter_api_key: Option<String>,
     pub openrouter_base_url: Option<String>,
+    pub groq_free_api_key: Option<String>,
+    pub groq_api_key: Option<String>,
     pub firecrawl_api_key: Option<String>,
     pub system_prompt: Option<String>,
     pub trigger_words: Option<Vec<String>>,
@@ -1426,6 +1439,8 @@ pub fn build_native_runtime(
 ) -> Result<ConcreteNativeRuntime, CompositionError> {
     let conversation_coinmarketcap_key = options.coinmarketcap_key.clone();
     let conversation_firecrawl_key = options.firecrawl_api_key.clone();
+    let groq_free_api_key = options.groq_free_api_key.clone();
+    let groq_api_key = options.groq_api_key.clone();
     let polling_transport =
         ReqwestTelegramTransport::new().map_err(CompositionError::PollingTransport)?;
     let action_transport =
@@ -1542,16 +1557,59 @@ pub fn build_native_runtime(
         options.system_prompt.filter(|prompt| !prompt.is_empty()),
     ) {
         (Some(api_key), Some(system_prompt)) => {
+            let openrouter_base_url = options
+                .openrouter_base_url
+                .as_deref()
+                .filter(|url| !url.is_empty())
+                .unwrap_or(DEFAULT_OPENROUTER_BASE_URL)
+                .to_owned();
             let provider = OpenRouterChatStreamer::new(
                 ReqwestOpenRouterTransport::new()
                     .map_err(CompositionError::OpenRouterChatTransport)?,
                 &api_key,
-                options
-                    .openrouter_base_url
-                    .as_deref()
-                    .filter(|url| !url.is_empty())
-                    .unwrap_or(DEFAULT_OPENROUTER_BASE_URL),
+                &openrouter_base_url,
                 crate::native_ai::PRIMARY_CHAT_MODEL,
+            );
+            let groq_accounts = [("free", groq_free_api_key), ("paid", groq_api_key)]
+                .into_iter()
+                .filter_map(|(account, api_key)| {
+                    api_key
+                        .filter(|key| !key.is_empty())
+                        .map(|key| (account.to_owned(), key))
+                })
+                .collect();
+            let media = NativeMedia::new(
+                TelegramMediaFiles::new(
+                    ReqwestTelegramTransport::new().map_err(CompositionError::MediaTransport)?,
+                    options.token,
+                ),
+                RedisMediaCache::new(options.redis_endpoint.clone()),
+                FfmpegMediaProcessor::default(),
+                OpenRouterVisionProvider::new(
+                    ReqwestOpenRouterTransport::new()
+                        .map_err(CompositionError::OpenRouterChatTransport)?,
+                    &api_key,
+                    &openrouter_base_url,
+                    crate::native_ai::VISION_MODEL,
+                    u64::try_from(VISION_OUTPUT_TOKEN_LIMIT).unwrap_or(512),
+                ),
+                FallbackTranscriptionProvider::new(
+                    ReqwestGroqTranscriptionTransport::new().map_err(|error| {
+                        CompositionError::MediaProviderTransport(error.to_string())
+                    })?,
+                    ReqwestOpenRouterTransport::new()
+                        .map_err(CompositionError::OpenRouterChatTransport)?,
+                    TranscriptionProviderConfig {
+                        groq_accounts,
+                        openrouter_api_key: Some(api_key.clone()),
+                        openrouter_base_url: openrouter_base_url.clone(),
+                        groq_model: crate::native_ai::GROQ_TRANSCRIPTION_MODEL.to_owned(),
+                        openrouter_model: crate::native_ai::OPENROUTER_TRANSCRIPTION_MODEL
+                            .to_owned(),
+                        default_backoff_seconds: 60,
+                    },
+                ),
+                crate::native_ai::VISION_MODEL,
             );
             let conversation = NativeConversation::new(
                 provider,
@@ -1567,7 +1625,8 @@ pub fn build_native_runtime(
                 &system_prompt,
                 crate::native_ai::PRIMARY_CHAT_MODEL,
                 DEFAULT_MAX_TOOL_ROUNDS,
-            );
+            )
+            .with_media(Box::new(media));
             dispatcher.with_ai_conversation_source(Box::new(conversation))
         }
         _ => dispatcher,
@@ -2414,6 +2473,8 @@ mod tests {
             giphy_api_key: None,
             openrouter_api_key: None,
             openrouter_base_url: None,
+            groq_free_api_key: None,
+            groq_api_key: None,
             firecrawl_api_key: None,
             system_prompt: None,
             trigger_words: None,
@@ -2431,6 +2492,8 @@ mod tests {
             giphy_api_key: None,
             openrouter_api_key: None,
             openrouter_base_url: None,
+            groq_free_api_key: None,
+            groq_api_key: None,
             firecrawl_api_key: None,
             system_prompt: None,
             trigger_words: None,
@@ -2448,6 +2511,8 @@ mod tests {
             giphy_api_key: None,
             openrouter_api_key: Some("synthetic-openrouter-key".to_owned()),
             openrouter_base_url: Some("https://openrouter.example.test/v1".to_owned()),
+            groq_free_api_key: Some("synthetic-groq-free-key".to_owned()),
+            groq_api_key: Some("synthetic-groq-paid-key".to_owned()),
             firecrawl_api_key: Some("synthetic-firecrawl-key".to_owned()),
             system_prompt: Some("synthetic persona".to_owned()),
             trigger_words: Some(vec!["synthetic".to_owned()]),
