@@ -42,9 +42,9 @@ pub struct ProductionConfig {
     pub instance_name: Option<String>,
     pub redis_endpoint: RedisEndpoint,
     pub admin_user_id: Option<i64>,
-    coinmarketcap_key: Option<String>,
+    coinmarketcap_key: String,
     giphy_api_key: Option<String>,
-    openrouter_api_key: Option<String>,
+    openrouter_api_key: String,
     pub openrouter_base_url: Option<String>,
     groq_free_api_key: Option<String>,
     groq_api_key: Option<String>,
@@ -111,12 +111,9 @@ impl fmt::Debug for ProductionConfig {
                 &self.redis_endpoint.password.as_ref().map(|_| "[REDACTED]"),
             )
             .field("admin_user_id", &self.admin_user_id)
-            .field(
-                "coinmarketcap_configured",
-                &self.coinmarketcap_key.is_some(),
-            )
+            .field("coinmarketcap_configured", &true)
             .field("giphy_configured", &self.giphy_api_key.is_some())
-            .field("openrouter_configured", &self.openrouter_api_key.is_some())
+            .field("openrouter_configured", &true)
             .field("groq_free_configured", &self.groq_free_api_key.is_some())
             .field("groq_configured", &self.groq_api_key.is_some())
             .field("firecrawl_configured", &self.firecrawl_api_key.is_some())
@@ -163,6 +160,10 @@ pub enum ConfigError {
     MissingDatabaseUrl,
     #[error("TELEGRAM_USERNAME not set")]
     MissingTelegramUsername,
+    #[error("COINMARKETCAP_KEY not set")]
+    MissingCoinMarketCapKey,
+    #[error("OPENROUTER_API_KEY not set")]
+    MissingOpenRouterApiKey,
     #[error("ADMIN_CHAT_ID must be an integer")]
     InvalidAdminUserId,
     #[error("BOT_SYSTEM_PROMPT not set and workspace/SOUL.md or workspace/RULES.md is missing")]
@@ -356,6 +357,10 @@ impl ProductionConfig {
                     .map_err(|_| ConfigError::InvalidAdminUserId)
             })
             .transpose()?;
+        let coinmarketcap_key = optional_trimmed(&lookup, "COINMARKETCAP_KEY")
+            .ok_or(ConfigError::MissingCoinMarketCapKey)?;
+        let openrouter_api_key = optional_trimmed(&lookup, "OPENROUTER_API_KEY")
+            .ok_or(ConfigError::MissingOpenRouterApiKey)?;
         let system_prompt = match optional_trimmed(&lookup, "BOT_SYSTEM_PROMPT") {
             Some(value) => value,
             None => prompt()?.ok_or(ConfigError::MissingSystemPrompt)?,
@@ -405,9 +410,9 @@ impl ProductionConfig {
             instance_name: optional_trimmed(&lookup, "FRIENDLY_INSTANCE_NAME"),
             redis_endpoint,
             admin_user_id,
-            coinmarketcap_key: optional_trimmed(&lookup, "COINMARKETCAP_KEY"),
+            coinmarketcap_key,
             giphy_api_key: optional_trimmed(&lookup, "GIPHY_API_KEY"),
-            openrouter_api_key: optional_trimmed(&lookup, "OPENROUTER_API_KEY"),
+            openrouter_api_key,
             openrouter_base_url: optional_trimmed(&lookup, "OPENROUTER_BASE_URL"),
             groq_free_api_key: optional_trimmed(&lookup, "GROQ_FREE_API_KEY"),
             groq_api_key: optional_trimmed(&lookup, "GROQ_API_KEY"),
@@ -425,8 +430,8 @@ impl ProductionConfig {
     }
 
     #[must_use]
-    pub fn coinmarketcap_key(&self) -> Option<&str> {
-        self.coinmarketcap_key.as_deref()
+    pub fn coinmarketcap_key(&self) -> &str {
+        &self.coinmarketcap_key
     }
 
     #[must_use]
@@ -435,8 +440,8 @@ impl ProductionConfig {
     }
 
     #[must_use]
-    pub fn openrouter_api_key(&self) -> Option<&str> {
-        self.openrouter_api_key.as_deref()
+    pub fn openrouter_api_key(&self) -> &str {
+        &self.openrouter_api_key
     }
 
     #[must_use]
@@ -665,6 +670,8 @@ mod tests {
                 "SUPABASE_POSTGRES_URL",
                 "postgresql://synthetic-database-secret",
             ),
+            ("COINMARKETCAP_KEY", "synthetic-cmc-secret"),
+            ("OPENROUTER_API_KEY", "synthetic-openrouter-secret"),
         ];
         assert_eq!(
             production(&[], Some("prompt")).map(|_| ()),
@@ -760,6 +767,8 @@ mod tests {
             ("TELEGRAM_USERNAME", "bot"),
             ("SUPABASE_POSTGRES_URL", "database"),
             ("BOT_SYSTEM_PROMPT", "prompt"),
+            ("COINMARKETCAP_KEY", "cmc"),
+            ("OPENROUTER_API_KEY", "openrouter"),
             ("ADMIN_CHAT_ID", "not-a-number"),
         ];
         assert_eq!(
@@ -772,6 +781,8 @@ mod tests {
                 ("TELEGRAM_USERNAME", "bot"),
                 ("SUPABASE_POSTGRES_URL", "database"),
                 ("BOT_SYSTEM_PROMPT", "prompt"),
+                ("COINMARKETCAP_KEY", "cmc"),
+                ("OPENROUTER_API_KEY", "openrouter"),
                 ("AI_RECONCILIATION_INTERVAL_SECONDS", "invalid"),
                 ("AI_RECONCILIATION_RETRY_SECONDS", "invalid"),
             ],

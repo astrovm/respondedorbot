@@ -11,6 +11,7 @@ repository.workspace = true
 bot-adapters.workspace = true
 bot-core.workspace = true
 chrono.workspace = true
+ctrlc.workspace = true
 num-bigint.workspace = true
 rand.workspace = true
 regex.workspace = true

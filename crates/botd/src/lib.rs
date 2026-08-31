@@ -1,6 +1,7 @@
 //! Application composition and lifecycle for the native bot process.
 
 pub mod ai_dispatch;
+pub mod application;
 pub mod background;
 pub mod chat_members_tool;
 pub mod chat_provider;
