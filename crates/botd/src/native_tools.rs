@@ -3,11 +3,12 @@
 use serde_json::{Value, json};
 
 use bot_core::ai_calculator::calculate_expression;
+use bot_core::ai_capabilities::render_ai_capabilities;
 use bot_core::locale::Locale;
 
 use crate::chat_tool_loop::{NativeToolRuntime, ToolExecutionResult};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum NativeTool {
     CryptoPrices,
     Calculate,
@@ -115,7 +116,8 @@ impl<Ports> StandardNativeToolBackend<Ports> {
 
 impl<Ports: NativeToolPorts> NativeToolBackend for StandardNativeToolBackend<Ports> {
     fn is_available(&self, tool: NativeTool) -> bool {
-        tool == NativeTool::Calculate || self.ports.is_available(tool)
+        matches!(tool, NativeTool::Calculate | NativeTool::BotCapabilities)
+            || self.ports.is_available(tool)
     }
 
     fn execute(
@@ -130,6 +132,9 @@ impl<Ports: NativeToolPorts> NativeToolBackend for StandardNativeToolBackend<Por
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             return ToolExecutionResult::output(calculate_expression(expression, self.locale));
+        }
+        if tool == NativeTool::BotCapabilities {
+            return ToolExecutionResult::output(render_ai_capabilities(self.locale));
         }
         self.ports.execute_external(tool, arguments, tool_call_id)
     }
@@ -434,9 +439,10 @@ mod tests {
         let backend = StandardNativeToolBackend::new(Ports { calls: Vec::new() }, Locale::En);
         let mut registry = NativeToolRegistry::new(backend);
         let schemas = registry.schemas(false);
-        assert_eq!(schemas.len(), 2);
+        assert_eq!(schemas.len(), 3);
         assert!(registry.contains("calculate", false));
         assert!(registry.contains("weather", false));
+        assert!(registry.contains("bot_capabilities", false));
         assert!(!registry.contains("web_fetch", false));
 
         assert_eq!(
@@ -444,6 +450,12 @@ mod tests {
                 .execute("calculate", &json!({"expression": "2 ** 10"}), "call-1")
                 .output,
             "1024"
+        );
+        assert!(
+            registry
+                .execute("bot_capabilities", &json!({}), "call-3")
+                .output
+                .starts_with("BOT CAPABILITIES:")
         );
         assert!(registry.backend().ports().calls.is_empty());
         assert_eq!(

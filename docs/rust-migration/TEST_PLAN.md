@@ -85,6 +85,10 @@ normalized Python and Rust results.
 - Partial text and reconcilable provider usage retained when a later stream or
   response consumer fails.
 - Firecrawl authorization and usage accounting.
+- Typed provider-argument validation before external tool execution, including
+  bounds, defaults, missing values, and incompatible request types.
+- Injected random choice/range results and failures without global randomness.
+- Capability catalog parity and exact Firecrawl source/result serialization.
 - Provider rate limit and backoff expiration.
 - Cancellation, timeout, malformed event, and provider disconnect.
 - Usage received before/after text completion and duplicate usage events.
