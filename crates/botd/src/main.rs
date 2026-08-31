@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use botd::application::run_production;
-use botd::config::{MaintenanceConfig, ProductionConfig, RuntimeConfig, TaskVerificationConfig};
+use botd::config::{MaintenanceConfig, ProductionConfig, TaskVerificationConfig};
 use botd::maintenance::{MaintenanceOptions, run_maintenance};
 use botd::task_service::verify_tasks_once;
 
@@ -15,22 +15,10 @@ fn main() -> ExitCode {
     if std::env::args().any(|argument| argument == "--verify-tasks") {
         return verify_tasks();
     }
-    if std::env::args().any(|argument| argument == "--run-native") {
-        return native_runtime();
-    }
     if std::env::args().any(|argument| argument == "--check-config") {
         return check_config();
     }
-    match RuntimeConfig::from_env() {
-        Ok(_) => {
-            eprintln!("native dispatcher is not authoritative; use --check-config");
-            ExitCode::FAILURE
-        }
-        Err(error) => {
-            eprintln!("FATAL: {error}");
-            ExitCode::FAILURE
-        }
-    }
+    native_runtime()
 }
 
 fn check_config() -> ExitCode {
