@@ -852,11 +852,14 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        PairLiquidity, PairPriceChange, PairToken, PairTransactionWindows, PairTransactions,
-        PairVolume, PumpMetadata, SignalQuery, TokenAddress, TokenPair, TokenSignal,
-        build_signal_keyboard, choose_best_pair, choose_symbol_pair, detect_signal_query,
-        format_signal_caption, has_usable_chart,
+        PairInfo, PairLiquidity, PairPriceChange, PairSocial, PairToken, PairTransactionWindows,
+        PairTransactions, PairVolume, PairWebsite, PumpMetadata, SignalQuery, SignalState,
+        TokenAddress, TokenPair, TokenSignal, age_text, build_signal_keyboard, callback_text,
+        choose_best_pair, choose_symbol_pair, detect_signal_query, format_money,
+        format_signal_caption, has_usable_chart, pair_rank, signal_state_key, stable_signal_id,
+        token_from_pair, token_image_url, token_socials,
     };
+    use crate::locale::Locale;
 
     const SOL_MINT: &str = "J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump";
     const EVM: &str = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
@@ -1010,5 +1013,255 @@ mod tests {
         assert!(!has_usable_chart(&signal));
         signal.candles = [candles(), candles()].concat();
         assert!(has_usable_chart(&signal));
+    }
+
+    #[test]
+    fn signal_identity_state_and_pair_boundaries_are_stable() {
+        let state = SignalState {
+            chat_id: "-1001".to_owned(),
+            message_id: 20,
+            source_message_id: 19,
+            requester_id: "42".to_owned(),
+            chain_id: "ethereum".to_owned(),
+            network: "eth".to_owned(),
+            tag: "ETH".to_owned(),
+            address: EVM.to_ascii_uppercase(),
+            last_refresh_at: Some(100),
+        };
+        assert_eq!(state.token().chain_id, "ethereum");
+        assert_eq!(signal_state_key("abc123"), "token_signal:abc123");
+        let first = stable_signal_id(-1001, 20, 42, 1_720_000_000);
+        assert_eq!(first.len(), 12);
+        assert_eq!(first, stable_signal_id(-1001, 20, 42, 1_720_000_000));
+        assert_ne!(first, stable_signal_id(-1001, 21, 42, 1_720_000_000));
+
+        assert_eq!(choose_best_pair(&[]), None);
+        let mut liquid = pair();
+        liquid.liquidity.usd = json!("100");
+        liquid.volume.h24 = json!(10);
+        assert_eq!(pair_rank(&liquid), (100.0, 10.0));
+        let mut volume_winner = liquid.clone();
+        volume_winner.volume.h24 = json!(11);
+        assert_eq!(
+            choose_best_pair(&[liquid, volume_winner.clone()]),
+            Some(volume_winner)
+        );
+
+        let mut ethereum = pair();
+        ethereum.chain_id = "ethereum".to_owned();
+        ethereum.base_token.address = EVM.to_ascii_uppercase();
+        assert_eq!(
+            token_from_pair(&ethereum),
+            Some(TokenAddress {
+                chain_id: "ethereum".to_owned(),
+                network: "eth".to_owned(),
+                tag: "ETH".to_owned(),
+                address: EVM.to_owned(),
+            })
+        );
+        ethereum.base_token.address.clear();
+        assert_eq!(token_from_pair(&ethereum), None);
+        ethereum.chain_id = "unsupported".to_owned();
+        ethereum.base_token.address = "value".to_owned();
+        assert_eq!(token_from_pair(&ethereum), None);
+        assert_eq!(choose_symbol_pair(&[ethereum], "$unknown"), None);
+    }
+
+    #[test]
+    fn image_and_social_selection_cover_provider_precedence_and_labels() {
+        let mut pair = pair();
+        pair.info = PairInfo {
+            header: "https://img.test/header.png".to_owned(),
+            image_url: "https://img.test/image.png".to_owned(),
+            open_graph: "https://img.test/og.png".to_owned(),
+            websites: vec![
+                PairWebsite {
+                    label: String::new(),
+                    url: String::new(),
+                },
+                PairWebsite {
+                    label: "Official website with long label".to_owned(),
+                    url: "https://pair.test".to_owned(),
+                },
+                PairWebsite {
+                    label: "Docs and more".to_owned(),
+                    url: "https://docs.test".to_owned(),
+                },
+            ],
+            socials: vec![
+                PairSocial {
+                    kind: "twitter".to_owned(),
+                    url: "https://x.com/pair".to_owned(),
+                },
+                PairSocial {
+                    kind: "telegram".to_owned(),
+                    url: "https://t.me/pair".to_owned(),
+                },
+                PairSocial {
+                    kind: "tiktok".to_owned(),
+                    url: "https://tiktok.test/pair".to_owned(),
+                },
+                PairSocial {
+                    kind: "discord".to_owned(),
+                    url: "https://discord.test/pair".to_owned(),
+                },
+                PairSocial {
+                    kind: String::new(),
+                    url: "https://link.test".to_owned(),
+                },
+                PairSocial {
+                    kind: "VeryLongCommunityName".to_owned(),
+                    url: "https://other.test".to_owned(),
+                },
+                PairSocial {
+                    kind: "ignored".to_owned(),
+                    url: String::new(),
+                },
+            ],
+        };
+        assert_eq!(
+            token_image_url(&pair, None).as_deref(),
+            Some("https://img.test/header.png")
+        );
+        pair.info.header.clear();
+        assert_eq!(
+            token_image_url(&pair, None).as_deref(),
+            Some("https://img.test/image.png")
+        );
+        pair.info.image_url.clear();
+        assert_eq!(
+            token_image_url(&pair, None).as_deref(),
+            Some("https://img.test/og.png")
+        );
+
+        let pump = PumpMetadata {
+            image_uri: "https://pump.test/image.png".to_owned(),
+            twitter: " https://x.com/pump ".to_owned(),
+            telegram: "https://t.me/pump".to_owned(),
+            website: "https://pump.test".to_owned(),
+            ..PumpMetadata::default()
+        };
+        assert_eq!(
+            token_image_url(&pair, Some(&pump)).as_deref(),
+            Some("https://pump.test/image.png")
+        );
+        let socials = token_socials(&pair, Some(&pump));
+        assert_eq!(
+            socials.get("X").map(String::as_str),
+            Some("https://x.com/pump")
+        );
+        assert_eq!(
+            socials.get("TG").map(String::as_str),
+            Some("https://t.me/pump")
+        );
+        assert_eq!(
+            socials.get("Web").map(String::as_str),
+            Some("https://pump.test")
+        );
+        assert!(socials.contains_key("Docs and mor"));
+        assert!(socials.contains_key("TikTok"));
+        assert!(socials.contains_key("Discord"));
+        assert!(socials.contains_key("Link"));
+        assert!(socials.contains_key("verylongcomm"));
+    }
+
+    #[test]
+    fn caption_formats_empty_evm_data_and_all_numeric_bands_safely() {
+        assert_eq!(format_money(1.2345, true), "$1.234");
+        assert_eq!(format_money(0.125, true), "$0.125");
+        assert_eq!(format_money(0.000_012_34, true), "$0.00001234");
+        assert_eq!(format_money(2_000_000_000.0, false), "$2B");
+        assert_eq!(format_money(2_500_000.0, false), "$2.50M");
+        assert_eq!(format_money(-1_500.0, false), "$-1.5K");
+        assert_eq!(format_money(-999.0, false), "$-999");
+        assert_eq!(age_text(400 * 86_400), "1y");
+        assert_eq!(age_text(2 * 86_400), "2d");
+        assert_eq!(age_text(7_200), "2h");
+        assert_eq!(age_text(-1), "1m");
+
+        let token = TokenAddress {
+            chain_id: "ethereum".to_owned(),
+            network: "eth".to_owned(),
+            tag: "ETH".to_owned(),
+            address: EVM.to_owned(),
+        };
+        let pair = TokenPair {
+            chain_id: "ethereum".to_owned(),
+            base_token: PairToken {
+                address: EVM.to_owned(),
+                ..PairToken::default()
+            },
+            price_usd: json!(2),
+            market_cap: json!(0),
+            fdv: json!(900),
+            liquidity: PairLiquidity { usd: json!(1_000) },
+            price_change: PairPriceChange {
+                h1: json!(0.01),
+                h24: json!(-3.25),
+            },
+            pair_created_at: json!(0),
+            ..TokenPair::default()
+        };
+        let signal = TokenSignal {
+            token,
+            pair,
+            candles: Vec::new(),
+            supply: Some(0.0),
+            token_image_url: None,
+            socials: BTreeMap::from([(
+                "Custom<&".to_owned(),
+                "https://social.test/?a=1&b=2".to_owned(),
+            )]),
+            pump: Some(PumpMetadata {
+                complete: true,
+                ..PumpMetadata::default()
+            }),
+        };
+        let caption = format_signal_caption(&signal, 1_720_000_000);
+        assert!(caption.contains("💊 <b>Token</b> ($TOKEN)"));
+        assert!(caption.contains("#ETH | <i>?</i>"));
+        assert!(caption.contains("MC    <b>$900</b>"));
+        assert!(caption.contains("ATH   <b>?</b>"));
+        assert!(caption.contains("etherscan.io"));
+        assert!(caption.contains("gmgn.ai/eth"));
+        assert!(caption.contains("Custom&lt;&amp;"));
+        let keyboard = build_signal_keyboard("fallback", &signal.token, &signal.pair);
+        assert_eq!(
+            keyboard.inline_keyboard[0][3].url.as_deref(),
+            Some("https://www.defined.fi/eth/0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
+        );
+    }
+
+    #[test]
+    fn callback_copy_covers_every_localized_result() {
+        for (key, spanish, english) in [
+            ("expired", "card vencida", "card expired"),
+            (
+                "owner_only",
+                "solo quien pidió la tarjeta o un admin puede hacer eso",
+                "only the requester or an admin can do that",
+            ),
+            ("deleted", "tarjeta borrada", "card deleted"),
+            (
+                "cooldown",
+                "Podés actualizar cada 15s",
+                "You can refresh every 15s",
+            ),
+            (
+                "no_data",
+                "no encontré datos nuevos",
+                "I could not find new data",
+            ),
+            (
+                "refresh_failed",
+                "no pude actualizar la tarjeta",
+                "I could not refresh the card",
+            ),
+            ("refreshed", "tarjeta actualizada", "card refreshed"),
+        ] {
+            assert_eq!(callback_text(key, Locale::Es), spanish);
+            assert_eq!(callback_text(key, Locale::En), english);
+        }
+        assert_eq!(callback_text("unknown", Locale::Es), "card expired");
     }
 }
