@@ -1,6 +1,7 @@
 //! Arbitrary-precision base conversion for the `/convertbase` command.
 
 use num_bigint::{BigInt, BigUint};
+use unicode_normalization::UnicodeNormalization;
 
 /// A localized validation outcome or successful conversion.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -35,17 +36,23 @@ pub fn convert_base(input: &str) -> Result<BaseConversion, UnsupportedUnicodeInp
     let number = parts[0].trim();
     let source_input = parts[1].trim();
     let target_input = parts[2].trim();
-    if !number.is_ascii() || !source_input.is_ascii() || !target_input.is_ascii() {
+    let normalized_number = number.nfkc().collect::<String>();
+    let normalized_source = source_input.nfkc().collect::<String>();
+    let normalized_target = target_input.nfkc().collect::<String>();
+    if !normalized_number.is_ascii()
+        || !normalized_source.is_ascii()
+        || !normalized_target.is_ascii()
+    {
         return Err(UnsupportedUnicodeInput);
     }
 
-    let Some(source_integer) = BigInt::parse_bytes(source_input.as_bytes(), 10) else {
+    let Some(source_integer) = BigInt::parse_bytes(normalized_source.as_bytes(), 10) else {
         return Ok(BaseConversion::NumbersRequired);
     };
-    let Some(target_integer) = BigInt::parse_bytes(target_input.as_bytes(), 10) else {
+    let Some(target_integer) = BigInt::parse_bytes(normalized_target.as_bytes(), 10) else {
         return Ok(BaseConversion::NumbersRequired);
     };
-    if !number
+    if !normalized_number
         .chars()
         .all(|character| character.is_ascii_alphanumeric())
     {
@@ -72,7 +79,7 @@ pub fn convert_base(input: &str) -> Result<BaseConversion, UnsupportedUnicodeInp
     };
 
     let mut value = BigUint::from(0_u8);
-    for character in number.chars() {
+    for character in normalized_number.chars() {
         let Some(digit) = character.to_digit(36) else {
             return Ok(BaseConversion::AlphanumericRequired);
         };
@@ -105,7 +112,7 @@ pub fn convert_base(input: &str) -> Result<BaseConversion, UnsupportedUnicodeInp
 
 #[cfg(test)]
 mod tests {
-    use super::{BaseConversion, UnsupportedUnicodeInput, convert_base};
+    use super::{BaseConversion, convert_base};
 
     #[test]
     fn converts_without_machine_integer_limits() {
@@ -172,7 +179,15 @@ mod tests {
     }
 
     #[test]
-    fn asks_the_adapter_to_preserve_unicode_legacy_semantics() {
-        assert_eq!(convert_base("１２,10,2"), Err(UnsupportedUnicodeInput));
+    fn accepts_compatibility_decimal_digits_without_changing_display_text() {
+        assert_eq!(
+            convert_base("１２,10,16"),
+            Ok(BaseConversion::Success {
+                number: "１２".to_owned(),
+                source: 10,
+                result: "C".to_owned(),
+                target: 16,
+            })
+        );
     }
 }

@@ -296,20 +296,20 @@ mod tests {
     }
 
     #[test]
-    fn unknown_commands_are_ignored_and_unicode_uses_legacy_fallback() {
+    fn unknown_commands_are_ignored_and_compatibility_digits_are_native() {
         assert_eq!(
             plan_stateless_command(ChatId(1), MessageId(2), "/other value", "@bot", Locale::Es,),
             StatelessCommandPlan::NotHandled
         );
         assert_eq!(
-            plan_stateless_command(
+            message_text(plan_stateless_command(
                 ChatId(1),
                 MessageId(2),
                 "/convertbase １２, 10, 2",
                 "@bot",
                 Locale::Es,
-            ),
-            StatelessCommandPlan::LegacyFallbackRequired
+            )),
+            Some("ahi tenes boludo, １２ en base 10 es 1100 en base 2".to_owned())
         );
     }
 

@@ -1,6 +1,7 @@
 //! Parsing and bounded-output rules for administrative reports.
 
 use num_bigint::BigInt;
+use unicode_normalization::UnicodeNormalization;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CreditLogLimit {
@@ -17,10 +18,23 @@ pub fn parse_creditlog_limit(message_text: &str) -> CreditLogLimit {
         return CreditLogLimit::Valid(10);
     }
     let token = raw.split_once(' ').map_or(raw, |(token, _)| token).trim();
-    if !token.is_ascii() || token.contains('_') {
+    let normalized = token.nfkc().collect::<String>();
+    if !normalized.is_ascii() {
         return CreditLogLimit::NeedsLegacyParser;
     }
-    let Some(value) = BigInt::parse_bytes(token.as_bytes(), 10) else {
+    let bytes = normalized.as_bytes();
+    let underscores_are_valid = bytes.iter().enumerate().all(|(index, byte)| {
+        *byte != b'_'
+            || (index > 0
+                && index + 1 < bytes.len()
+                && bytes[index - 1].is_ascii_digit()
+                && bytes[index + 1].is_ascii_digit())
+    });
+    if !underscores_are_valid {
+        return CreditLogLimit::Invalid;
+    }
+    let compact = normalized.replace('_', "");
+    let Some(value) = BigInt::parse_bytes(compact.as_bytes(), 10) else {
         return CreditLogLimit::Invalid;
     };
     let minimum = BigInt::from(1_u8);
@@ -68,8 +82,9 @@ mod tests {
             ("0", CreditLogLimit::Valid(1)),
             ("999999999999999999999", CreditLogLimit::Valid(25)),
             ("invalid", CreditLogLimit::Invalid),
-            ("１", CreditLogLimit::NeedsLegacyParser),
-            ("1_0", CreditLogLimit::NeedsLegacyParser),
+            ("１", CreditLogLimit::Valid(1)),
+            ("1_0", CreditLogLimit::Valid(10)),
+            ("1__0", CreditLogLimit::Invalid),
         ] {
             assert_eq!(parse_creditlog_limit(input), expected, "{input}");
         }

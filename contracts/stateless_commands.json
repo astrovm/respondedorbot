@@ -67,13 +67,18 @@
       "expected": {"kind": "not_handled"}
     },
     {
-      "name": "unicode_legacy_fallback",
+      "name": "unicode_compatibility_digits",
       "chat_id": 42,
       "message_id": 10,
       "message_text": "/convertbase １２, 10, 2",
       "bot_name": "@mybot",
       "locale": "es",
-      "expected": {"kind": "legacy_fallback_required"}
+      "expected": {
+        "kind": "send_message",
+        "chat_id": 42,
+        "text": "ahi tenes boludo, １２ en base 10 es 1100 en base 2",
+        "reply_to_message_id": 10
+      }
     }
   ]
 }

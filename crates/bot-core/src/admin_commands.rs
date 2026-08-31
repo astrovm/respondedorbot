@@ -588,7 +588,7 @@ mod tests {
         ));
         assert_eq!(
             plan_creditlog_command("/creditlog ２", "@bot", context(Some(99), true, Locale::Es)),
-            CreditLogPlan::LegacyRequired
+            CreditLogPlan::Load { limit: 2 }
         );
         assert_eq!(
             plan_creditlog_command(

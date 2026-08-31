@@ -1,6 +1,7 @@
 //! Parsing for the `/random` command, with randomness supplied by an adapter.
 
 use num_bigint::BigInt;
+use unicode_normalization::UnicodeNormalization;
 
 /// A validated random operation for an outer adapter to execute.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -24,10 +25,11 @@ pub fn parse_random_selection(input: &str) -> Result<RandomSelection, Unsupporte
         return Ok(RandomSelection::Choices { values });
     }
 
-    if !input.is_ascii() {
+    let normalized = input.nfkc().collect::<String>();
+    if !normalized.is_ascii() {
         return Err(UnsupportedUnicodeRange);
     }
-    let range: Vec<_> = input.split('-').map(str::trim).collect();
+    let range: Vec<_> = normalized.split('-').map(str::trim).collect();
     if range.len() != 2 {
         return Ok(RandomSelection::Invalid);
     }
@@ -47,7 +49,7 @@ pub fn parse_random_selection(input: &str) -> Result<RandomSelection, Unsupporte
 mod tests {
     use num_bigint::BigInt;
 
-    use super::{RandomSelection, UnsupportedUnicodeRange, parse_random_selection};
+    use super::{RandomSelection, parse_random_selection};
 
     #[test]
     fn parses_comma_choices_with_legacy_whitespace_and_empty_values() {
@@ -84,10 +86,13 @@ mod tests {
     }
 
     #[test]
-    fn asks_the_adapter_to_preserve_unicode_integer_semantics() {
+    fn accepts_compatibility_decimal_digits() {
         assert_eq!(
             parse_random_selection("１-３"),
-            Err(UnsupportedUnicodeRange)
+            Ok(RandomSelection::InclusiveRange {
+                start: BigInt::from(1_u8),
+                end: BigInt::from(3_u8),
+            })
         );
     }
 }

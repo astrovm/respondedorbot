@@ -3999,7 +3999,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_ai_service_is_explicit_for_unknown_unicode_and_reply_messages() {
+    fn compatibility_digits_are_native_and_missing_ai_is_explicit() {
         let config = Config {
             value: Ok(ChatConfig::default()),
             chat_ids: Vec::new(),
@@ -4019,11 +4019,11 @@ mod tests {
         );
         assert_eq!(
             dispatcher.dispatch(update("/convertbase １２, 10, 2", None)),
-            Err(DispatchError::MissingService("AI conversation"))
+            Ok(DispatchOutcome::Handled)
         );
         assert_eq!(
             dispatcher.dispatch(update("/random １-３", None)),
-            Err(DispatchError::MissingService("AI conversation"))
+            Ok(DispatchOutcome::Handled)
         );
         let mut replied = update("/time", None);
         if let IncomingEvent::Message(message) = &mut replied.event {
@@ -4060,7 +4060,19 @@ mod tests {
             dispatcher.dispatch(incomplete),
             Ok(DispatchOutcome::Unsupported)
         );
-        assert!(dispatcher.actions.0.is_empty());
+        let texts = dispatcher
+            .actions
+            .0
+            .iter()
+            .filter_map(|action| match action {
+                TelegramAction::SendMessage(message) => Some(message.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            texts,
+            ["ahi tenes boludo, １２ en base 10 es 1100 en base 2", "2"]
+        );
     }
 
     #[test]
@@ -6126,7 +6138,7 @@ mod tests {
         );
         assert_eq!(
             missing.dispatch(update("/creditlog ２", None)),
-            Err(DispatchError::MissingService("AI conversation"))
+            Err(DispatchError::MissingService("admin credit log"))
         );
     }
 
