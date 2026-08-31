@@ -2,8 +2,10 @@
 
 use bot_adapters::billing_read::BillingRepository;
 use bot_adapters::openrouter_chat::{
-    ChatCompletionRequest, ChatMessage, ChatRole, OpenRouterTransport, complete_with,
+    ChatCompletionRequest, ChatMessage, ChatRole, OpenRouterTransport, ReqwestOpenRouterTransport,
+    complete_with,
 };
+use bot_adapters::redis_compaction_queue::RedisCompactionQueue;
 use bot_adapters::redis_connection::RedisEndpoint;
 use bot_adapters::redis_message_state::RedisMessageState;
 use bot_core::ai_pricing::calculate_billing_for_segments;
@@ -17,11 +19,50 @@ use serde_json::{Map, Value, json};
 
 use crate::compaction_worker::{
     CompactionBilling, CompactionProvider, CompactionProviderResult, CompactionState,
-    SettlementRequest,
+    CompactionWorker, SettlementRequest,
 };
 
 pub const COMPACTION_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
 const MAX_SUMMARY_MESSAGES: usize = 200;
+const PRODUCTION_LOCK_TTL_SECONDS: i64 = 3_600;
+
+pub type ProductionCompactionWorker = CompactionWorker<
+    RedisCompactionQueue,
+    RedisCompactionState,
+    OpenRouterCompactionProvider<ReqwestOpenRouterTransport>,
+    PostgresCompactionBilling,
+    Box<dyn FnMut() -> String + Send>,
+>;
+
+pub fn production_compaction_worker(
+    endpoint: &RedisEndpoint,
+    database_url: &str,
+    openrouter_api_key: &str,
+    openrouter_base_url: &str,
+    system_prompt: &str,
+    owner_prefix: &str,
+) -> Result<ProductionCompactionWorker, String> {
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let owner_prefix = owner_prefix.to_owned();
+    let token: Box<dyn FnMut() -> String + Send> = Box::new(move || {
+        let sequence = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!("{owner_prefix}:compaction:{sequence}")
+    });
+    Ok(CompactionWorker::new(
+        RedisCompactionQueue::new(endpoint).map_err(|error| error.to_string())?,
+        RedisCompactionState::new(endpoint)?,
+        OpenRouterCompactionProvider::new(
+            ReqwestOpenRouterTransport::new().map_err(|error| error.to_string())?,
+            openrouter_api_key,
+            openrouter_base_url,
+            COMPACTION_MODEL,
+            system_prompt,
+        ),
+        PostgresCompactionBilling::new(database_url),
+        token,
+    )
+    .with_lock_ttl_seconds(PRODUCTION_LOCK_TTL_SECONDS))
+}
 
 pub struct RedisCompactionState {
     state: RedisMessageState,
@@ -491,13 +532,33 @@ mod tests {
     use bot_adapters::openrouter_chat::{
         HttpRequest, HttpResponse, OpenRouterChatError, OpenRouterTransport,
     };
+    use bot_adapters::redis_connection::RedisEndpoint;
     use serde_json::{Value, json};
 
-    use super::{OpenRouterCompactionProvider, ceil_decimal, stable_segment_id};
+    use super::{
+        OpenRouterCompactionProvider, ceil_decimal, production_compaction_worker, stable_segment_id,
+    };
     use crate::compaction_worker::CompactionProvider;
 
     struct Transport {
         request: RefCell<Option<HttpRequest>>,
+    }
+
+    #[test]
+    fn production_worker_composition_is_side_effect_free() {
+        let result = production_compaction_worker(
+            &RedisEndpoint {
+                host: "synthetic.invalid".to_owned(),
+                port: 6379,
+                password: Some("synthetic-password".to_owned()),
+            },
+            "postgresql://synthetic.invalid/database",
+            "synthetic-openrouter-key",
+            "https://openrouter.example.test/api/v1",
+            "synthetic persona",
+            "synthetic-owner",
+        );
+        assert!(result.is_ok());
     }
 
     impl OpenRouterTransport for Transport {
