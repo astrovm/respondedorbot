@@ -37,7 +37,7 @@ Scheduled tasks use canonical JSON records plus atomic Redis ownership and occur
 
 ## Process lifecycle
 
-Startup validates all required configuration before contacting Telegram. The runtime constructs adapters, starts supervised background workers, publishes the command menu, and then polls. Poll offsets advance only after successful handling. Polling failures retain the offset and use bounded retry delays. Shutdown stops polling and joins background workers.
+Startup validates all required configuration before contacting Telegram. The runtime constructs adapters, starts supervised background workers, publishes the command menu, and then polls. The first poll discards queued updates. Each later update advances the offset after its handling attempt so one failed update cannot block the queue; the failure is reported before polling continues. Polling transport and API failures retain the offset and use bounded retry delays. Shutdown stops polling and joins background workers.
 
 Maintenance and task verification use the same binary:
 

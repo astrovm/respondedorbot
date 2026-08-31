@@ -6,7 +6,7 @@
 - Status: complete
 - Current runtime: one native Rust `botd` process
 - Compatibility baseline before retirement: 1,298 tests passing
-- Final verification: 692 Rust tests passing, including Redis and PostgreSQL integration tests
+- Final verification: 697 Rust tests passing, including Redis and PostgreSQL integration tests
 - Runtime image: Rust only, with no Python interpreter, sidecar, bridge, or embedded runtime
 
 ## Objectives

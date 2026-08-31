@@ -30,7 +30,7 @@ CI supplies PostgreSQL and Redis Stack and sets `TEST_POSTGRES_URL`, `TEST_DATAB
 
 ## Critical scenarios
 
-- Telegram: malformed updates, unsupported events, callbacks, pre-checkout, payments, 429, conflict, timeouts, and file limits.
+- Telegram: malformed updates, unsupported events, callbacks, pre-checkout, payments, captioned and replied media commands, 429, conflict, timeouts, and file limits.
 - AI: streaming fragmentation, partial tool calls, repeated rounds, provider fallback, malformed payloads, cancellation, usage reconciliation, and delivery failure.
 - Billing: payer choice, concurrent reservations/transfers, replay, exact settlement, refunds, debt, interrupted work, and retention.
 - Memory: ordering, TTL repair, search, compaction thresholds, lease contention, retries, dead letters, and stale markers.
@@ -39,4 +39,4 @@ CI supplies PostgreSQL and Redis Stack and sets `TEST_POSTGRES_URL`, `TEST_DATAB
 
 ## Release record
 
-Before retirement, the complete compatibility suite passed 1,298 tests. After cutover, the native workspace passed 692 tests with Redis and PostgreSQL integrations, formatting, check, Clippy, release compilation, and Rust-only image inspection. Measured line coverage is 95.30% for `bot-core`, 85.70% for `bot-adapters`, and 82.94% for `botd`. CI retains floors of 95%, 85%, and 80% respectively.
+Before retirement, the complete compatibility suite passed 1,298 tests. After cutover, the native workspace passed 697 tests with Redis and PostgreSQL integrations, formatting, check, Clippy, release compilation, and Rust-only image inspection. Measured line coverage is 95.31% for `bot-core`, 85.75% for `bot-adapters`, and 82.88% for `botd`. CI retains floors of 95%, 85%, and 80% respectively.

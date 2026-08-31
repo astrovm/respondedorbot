@@ -8,7 +8,7 @@ Status for every row is **Rust authoritative**. The compatibility baseline passe
 | Routing and commands | All commands, aliases, bot suffixes, localized validation, Unicode command conversion | `bot-core::command_*`, `botd::dispatcher`; parser properties and dispatcher matrices |
 | AI chat | Private/group routing, trigger words, streaming, cleanup, tool rounds, provider fallback | `botd::conversation`, `native_ai`, `telegram_stream`; success, interruption, cancellation, and failure tests |
 | AI tools | Calculator, markets, weather, web fetch, Hacker News, random, tasks, capabilities | `bot-core::native_tools`, `botd::tool_requests`; schema, bounds, missing-service, and adapter tests |
-| Media | Image context, audio transcription, Groq/OpenRouter fallback, FFmpeg, media cache | `botd::media*`, `bot-adapters::media_provider`; real FFmpeg and provider-failure tests |
+| Media | Direct and replied image context, captioned and replied audio transcription, Groq/OpenRouter fallback, FFmpeg, media cache | `botd::media*`, `bot-adapters::media_provider`; polling-normalization, direct-caption, real FFmpeg, and provider-failure tests |
 | Links | URL validation, SSRF protection, page previews, social replacement, video upload limits | `bot-core::links`, `bot-adapters::link_preview`, `web_fetch`; redirect and private-network tests |
 | Markets | CoinMarketCap, Yahoo Finance, CriptoYa, BCRA, oil, Devo, rulo, token signals, Polymarket | Market modules in all three crates; cache, malformed payload, stale fallback, and rendering tests |
 | Chat settings | PostgreSQL settings, locale changes, group-admin authorization, callbacks | `chat_config`, `config_command`, dispatcher callbacks; database round trips and authorization tests |
