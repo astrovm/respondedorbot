@@ -29,7 +29,7 @@ impl ToolExecutionResult {
 pub trait NativeToolRuntime {
     fn schemas(&self, task_mode: bool) -> Vec<Value>;
 
-    fn contains(&self, name: &str) -> bool;
+    fn contains(&self, name: &str, task_mode: bool) -> bool;
 
     fn execute(&mut self, name: &str, arguments: &Value, tool_call_id: &str)
     -> ToolExecutionResult;
@@ -121,7 +121,7 @@ where
         let known_calls = round
             .tool_calls
             .iter()
-            .filter(|call| tools.contains(&call.name))
+            .filter(|call| tools.contains(&call.name, task_mode))
             .cloned()
             .collect::<Vec<_>>();
         if known_calls.is_empty() {
@@ -214,7 +214,7 @@ mod tests {
             vec![json!({"task_mode": task_mode})]
         }
 
-        fn contains(&self, name: &str) -> bool {
+        fn contains(&self, name: &str, _task_mode: bool) -> bool {
             name == "calculate"
         }
 

@@ -76,6 +76,9 @@ normalized Python and Rust results.
 - Partial tool arguments across stream chunks.
 - Multiple tools and repeated tool rounds.
 - Unknown tool and invalid arguments.
+- Exact tool names, JSON schemas, runtime availability, and task-mode filtering.
+- Calculator precedence, exact integers, float rounding, floor/modulo semantics,
+  forbidden syntax, zero division, and bounded complexity.
 - Typed assistant tool-call and tool-result messages across provider rounds.
 - Hard tool-round termination, with completed provider/tool billing segments
   retained for settlement.

@@ -2,6 +2,7 @@
 
 pub mod admin_commands;
 pub mod admin_reports;
+pub mod ai_calculator;
 pub mod ai_image_context;
 pub mod ai_pricing;
 pub mod ai_prompt;

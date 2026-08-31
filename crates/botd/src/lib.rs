@@ -6,6 +6,7 @@ pub mod composition;
 pub mod config;
 pub mod dispatcher;
 pub mod native_ai;
+pub mod native_tools;
 pub mod runtime;
 pub mod scheduler;
 pub mod task_executor;
