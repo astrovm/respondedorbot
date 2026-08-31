@@ -156,7 +156,7 @@ where
             Ok(required) => required.max(1),
             Err(error) => {
                 return ToolExecutionResult::with_diagnostics(
-                    cost_error(self.context.locale),
+                    task_cost_error(self.context.locale),
                     vec![format!("task reserve estimate failed: {error}")],
                 );
             }
@@ -165,13 +165,13 @@ where
             Ok(balance) => balance,
             Err(error) => {
                 return ToolExecutionResult::with_diagnostics(
-                    credit_check(self.context.locale),
+                    task_credit_check(self.context.locale),
                     vec![format!("task credit check failed: {error}")],
                 );
             }
         };
         if balance < required {
-            return ToolExecutionResult::output(insufficient(
+            return ToolExecutionResult::output(task_credit_insufficient(
                 balance,
                 required,
                 self.context.locale,
@@ -564,14 +564,14 @@ fn credit_user(locale: Locale) -> &'static str {
         "no pude identificar tu usuario para cobrar la tarea"
     }
 }
-fn credit_check(locale: Locale) -> &'static str {
+pub fn task_credit_check(locale: Locale) -> &'static str {
     if locale == Locale::En {
         "I could not check your personal credits, try again"
     } else {
         "no pude verificar tus créditos personales, probá de nuevo"
     }
 }
-fn cost_error(locale: Locale) -> &'static str {
+pub fn task_cost_error(locale: Locale) -> &'static str {
     if locale == Locale::En {
         "I could not calculate the task cost, try again"
     } else {
@@ -593,7 +593,7 @@ fn task_not_found(locale: Locale) -> &'static str {
     }
 }
 
-fn insufficient(balance: i64, required: i64, locale: Locale) -> String {
+pub fn task_credit_insufficient(balance: i64, required: i64, locale: Locale) -> String {
     let balance = format_credit_units(CreditUnits::new(balance));
     let required = format_credit_units(CreditUnits::new(required));
     match locale {

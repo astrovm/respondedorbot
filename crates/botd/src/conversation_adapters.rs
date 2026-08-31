@@ -439,6 +439,13 @@ impl ConversationBilling for PostgresConversationBilling {
             .map(|_result| ())
             .map_err(|error| error.to_string())
     }
+
+    fn personal_balance(&mut self, user_id: i64) -> Result<Option<i64>, String> {
+        self.repository
+            .get_balance("user", user_id)
+            .map(Some)
+            .map_err(|error| error.to_string())
+    }
 }
 
 fn decode_history(entries: Vec<String>) -> Vec<StoredHistoryEntry> {

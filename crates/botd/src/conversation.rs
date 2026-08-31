@@ -117,6 +117,10 @@ pub trait ConversationBilling {
     fn record_segment(&mut self, request: ProviderSegmentRequest) -> Result<(), String>;
 
     fn settle(&mut self, request: SettlementRequest) -> Result<(), String>;
+
+    fn personal_balance(&mut self, _user_id: i64) -> Result<Option<i64>, String> {
+        Ok(None)
+    }
 }
 
 pub trait ConversationToolFactory {
@@ -743,8 +747,71 @@ where
         on_token: &mut dyn FnMut(&str) -> Result<(), String>,
     ) -> Result<AiPreparation, String> {
         self.state.record_incoming(&input)?;
+        let task_command = matches!(
+            input.command.as_str(),
+            "/tarea" | "/tareas" | "/task" | "/tasks"
+        ) && !input.message_text.trim().is_empty();
+        let mut provider_input = input.clone();
+        if task_command {
+            let required = match crate::native_ai::estimate_task_reserve_credit_units(
+                &input.message_text,
+                match input.locale {
+                    Locale::Es => "es",
+                    Locale::En => "en",
+                },
+            ) {
+                Ok(required) => required.max(1),
+                Err(_) => {
+                    return Ok(AiPreparation::reply(
+                        crate::task_tools::task_cost_error(input.locale),
+                        None,
+                    ));
+                }
+            };
+            match self.billing.personal_balance(input.sender_id.0) {
+                Ok(Some(balance)) if balance < required => {
+                    return Ok(AiPreparation::reply(
+                        crate::task_tools::task_credit_insufficient(
+                            balance,
+                            required,
+                            input.locale,
+                        ),
+                        None,
+                    ));
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    return Ok(AiPreparation::reply(
+                        match input.locale {
+                            Locale::Es => "el cobro de ia no está andando, avisale al admin",
+                            Locale::En => "AI billing is unavailable, please tell the admin",
+                        },
+                        None,
+                    ));
+                }
+                Err(_) => {
+                    return Ok(AiPreparation::reply(
+                        crate::task_tools::task_credit_check(input.locale),
+                        None,
+                    ));
+                }
+            }
+            provider_input.message_text = match input.locale {
+                Locale::Es => format!(
+                    "creá una tarea programada para esta solicitud usando la herramienta task_set: {}",
+                    input.message_text
+                ),
+                Locale::En => format!(
+                    "create a scheduled task for this request using the task_set tool: {}",
+                    input.message_text
+                ),
+            };
+        }
         let operation_id = operation_id(&input);
-        let admission = vec![PromptMessage::text(PromptRole::User, &input.message_text)];
+        let admission = vec![PromptMessage::text(
+            PromptRole::User,
+            &provider_input.message_text,
+        )];
         let base_amount = estimate_reserve(&admission, &self.model)?;
         let base = self.reserve(
             &input,
@@ -781,7 +848,7 @@ where
             messages,
             mut tools,
             compaction_plan,
-        } = match self.prompt(&input, prepared_media.execution.as_ref()) {
+        } = match self.prompt(&provider_input, prepared_media.execution.as_ref()) {
             Ok(value) => value,
             Err(error) => {
                 let actual = price_segments(&segments)?;
@@ -1603,6 +1670,7 @@ mod tests {
         reserves: Vec<ReserveRequest>,
         segments: Vec<ProviderSegmentRequest>,
         settlements: Vec<SettlementRequest>,
+        personal_balance: Option<i64>,
     }
 
     impl ConversationBilling for Billing {
@@ -1624,6 +1692,10 @@ mod tests {
         fn settle(&mut self, request: SettlementRequest) -> Result<(), String> {
             self.settlements.push(request);
             Ok(())
+        }
+
+        fn personal_balance(&mut self, _user_id: i64) -> Result<Option<i64>, String> {
+            Ok(self.personal_balance)
         }
     }
 
@@ -1764,6 +1836,57 @@ mod tests {
         assert_eq!(scheduled[0].1.group_chat_id, None);
         assert_eq!(scheduled[0].1.message_id, 7);
         assert_eq!(scheduled[0].1.payer_source, Some(PayerSource::User));
+        Ok(())
+    }
+
+    #[test]
+    fn direct_task_command_checks_future_credits_and_prompts_the_task_tool() -> Result<(), String> {
+        let mut task_input = input();
+        task_input.command = "/task".to_owned();
+        task_input.message_text = "remind me tomorrow at nine".to_owned();
+        let mut service = conversation(
+            vec![Ok(round("task scheduled", None))],
+            Billing {
+                personal_balance: Some(10_000),
+                ..Billing::default()
+            },
+        );
+        let prepared = service.prepare(task_input.clone())?;
+        assert!(matches!(prepared, AiPreparation::Reply { .. }));
+        let prompts = service.provider.prompts.borrow();
+        let prompt_text = prompts[0]
+            .iter()
+            .filter_map(|message| match &message.content {
+                PromptContent::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(prompt_text.iter().any(|text| {
+            text.contains(
+                "create a scheduled task for this request using the task_set tool: remind me tomorrow at nine",
+            )
+        }));
+        drop(prompts);
+        assert_eq!(
+            service.state.incoming[0].message_text,
+            task_input.message_text
+        );
+
+        let mut denied = conversation(
+            vec![Ok(round("must not run", None))],
+            Billing {
+                personal_balance: Some(0),
+                ..Billing::default()
+            },
+        );
+        let denied_reply = denied.prepare(task_input)?;
+        assert!(matches!(
+            denied_reply,
+            AiPreparation::Reply { ref text, completion_id: None, .. }
+                if text.starts_with("you do not have enough personal credits")
+        ));
+        assert!(denied.provider.prompts.borrow().is_empty());
+        assert!(denied.billing.reserves.is_empty());
         Ok(())
     }
 

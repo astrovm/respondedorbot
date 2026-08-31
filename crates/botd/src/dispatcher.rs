@@ -1926,6 +1926,20 @@ where
                 &parsed.message_text,
             );
         }
+        if matches!(
+            parsed.command.as_str(),
+            "/tarea" | "/tareas" | "/task" | "/tasks"
+        ) && !parsed.message_text.is_empty()
+        {
+            return self.dispatch_ai_message(
+                message,
+                &config,
+                locale,
+                timestamp,
+                &parsed.command,
+                &parsed.message_text,
+            );
+        }
         let is_group = is_group_chat_type(message.chat_type.as_deref());
         let is_settings_command = matches!(
             parsed.command.as_str(),
@@ -5907,9 +5921,14 @@ mod tests {
     }
 
     #[test]
-    fn task_list_aliases_render_native_keyboard_but_creation_stays_legacy()
+    fn task_list_aliases_render_native_keyboard_and_creation_uses_ai_transaction()
     -> Result<(), TaskStateError> {
         let cancellations = Rc::new(RefCell::new(Vec::new()));
+        let (ai, (prepared, ignored, deliveries)) = ai_source(Ok(AiPreparation::Reply {
+            text: "task scheduled".to_owned(),
+            completion_id: Some("task-command-1".to_owned()),
+            diagnostics: Vec::new(),
+        }));
         let config = Config {
             value: Ok(ChatConfig::default()),
             chat_ids: Vec::new(),
@@ -5926,7 +5945,8 @@ mod tests {
         .with_scheduled_task_source(Box::new(Tasks {
             lists: vec![vec![scheduled_task(88)?]],
             cancellations,
-        }));
+        }))
+        .with_ai_conversation_source(Box::new(ai));
 
         assert_eq!(
             dispatcher.dispatch(update("/tasks", None)),
@@ -5948,12 +5968,27 @@ mod tests {
             assert_eq!(callback, Some("task:del:task0001"));
         }
 
-        let before = dispatcher.actions.0.len();
         assert_eq!(
             dispatcher.dispatch(update("/tarea create something", None)),
-            Ok(DispatchOutcome::LegacyRequired)
+            Ok(DispatchOutcome::Handled)
         );
-        assert_eq!(dispatcher.actions.0.len(), before);
+        let prepared = prepared.borrow();
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].command, "/tarea");
+        assert_eq!(prepared[0].message_text, "create something");
+        assert!(ignored.borrow().is_empty());
+        assert_eq!(
+            deliveries.borrow().as_slice(),
+            [AiDelivery {
+                completion_id: "task-command-1".to_owned(),
+                delivered: true,
+                sent_message_id: Some(MessageId(700)),
+            }]
+        );
+        assert!(matches!(
+            dispatcher.actions.0.last(),
+            Some(TelegramAction::SendMessage(message)) if message.text == "task scheduled"
+        ));
         Ok(())
     }
 
