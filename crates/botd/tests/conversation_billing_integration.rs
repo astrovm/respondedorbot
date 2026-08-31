@@ -6,9 +6,7 @@ use bot_adapters::billing_schema::BillingSchemaRepository;
 use bot_adapters::redis_connection::RedisEndpoint;
 use bot_adapters::redis_creditless_cap::{RedisCreditlessCap, creditless_cap_key};
 use botd::compaction_scheduler::PayerSource;
-use botd::conversation::{
-    ConversationBilling, ReserveDenial, ReserveRequest, SettlementRequest,
-};
+use botd::conversation::{ConversationBilling, ReserveDenial, ReserveRequest, SettlementRequest};
 use botd::conversation_adapters::PostgresConversationBilling;
 use botd::reconciliation::ActiveOperationRegistry;
 use serde_json::{Map, json};
