@@ -367,7 +367,6 @@ pub trait ElectionSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchOutcome {
     Handled,
-    LegacyRequired,
     Unsupported,
 }
 
@@ -648,19 +647,19 @@ where
         config: &ChatConfig,
         locale: bot_core::locale::Locale,
         timestamp: i64,
-    ) -> NativeDispatchResult<Config, Actions, Random> {
+    ) -> OptionalNativeDispatchResult<Config, Actions, Random> {
         let (Some(chat_id), Some(message_id), Some(sender_id), Some(content)) = (
             message.chat_id,
             message.message_id,
             message.sender_id,
             message.content.as_ref(),
         ) else {
-            return Ok(DispatchOutcome::Unsupported);
+            return Ok(Some(DispatchOutcome::Unsupported));
         };
         let text = content.text.as_str();
         let mode = LinkMode::parse(&config.link_mode);
         if mode == LinkMode::Off || text.is_empty() || text.starts_with('/') {
-            return Ok(DispatchOutcome::LegacyRequired);
+            return Ok(None);
         }
         if message.has_reply {
             let without_links = regex::Regex::new(r"https?://[^\s]+").ok().map_or_else(
@@ -668,11 +667,11 @@ where
                 |pattern| pattern.replace_all(text, "").into_owned(),
             );
             if !without_links.trim().is_empty() {
-                return Ok(DispatchOutcome::LegacyRequired);
+                return Ok(None);
             }
         }
         if !has_replaceable_link(text) {
-            return Ok(DispatchOutcome::LegacyRequired);
+            return Ok(None);
         }
         let Some(source) = self.link_replacement_source.as_mut() else {
             return Err(DispatchError::MissingService("link replacement"));
@@ -696,7 +695,7 @@ where
                 self.state_diagnostics
                     .push(format!("unreplaced link state: {error}"));
             }
-            return Ok(DispatchOutcome::Handled);
+            return Ok(Some(DispatchOutcome::Handled));
         }
         let shared_by = message.sender_username.as_deref().map_or_else(
             || {
@@ -723,7 +722,7 @@ where
                 link_context: load.context.as_deref(),
             },
         ) else {
-            return Ok(DispatchOutcome::LegacyRequired);
+            return Ok(None);
         };
         let video_action = load.oversized_video.map(|video| {
             let TelegramAction::SendMessage(message) = &plan.send else {
@@ -774,7 +773,7 @@ where
             self.state_diagnostics
                 .push(format!("fixed link state: {error}"));
         }
-        Ok(DispatchOutcome::Handled)
+        Ok(Some(DispatchOutcome::Handled))
     }
 
     fn dispatch_successful_payment(
@@ -798,7 +797,11 @@ where
             self.billing_available,
         ) {
             Ok(decision) => decision,
-            Err(_) => return Ok(DispatchOutcome::LegacyRequired),
+            Err(error) => {
+                self.state_diagnostics
+                    .push(format!("invalid successful payment: {error}"));
+                return Ok(DispatchOutcome::Handled);
+            }
         };
         self.state_diagnostics.clear();
         let (chat_id, text) = match &decision {
@@ -843,7 +846,9 @@ where
                 ..
             } => {
                 let Some(payment) = payment_record(&decision) else {
-                    return Ok(DispatchOutcome::LegacyRequired);
+                    return Err(DispatchError::Invariant(
+                        "recordable payment did not produce a ledger record",
+                    ));
                 };
                 let Some(sink) = self.payment_sink.as_mut() else {
                     return Err(DispatchError::MissingService("payment persistence"));
@@ -870,7 +875,9 @@ where
             }
         };
         let Ok(chat_id) = chat_id.parse::<i64>() else {
-            return Ok(DispatchOutcome::LegacyRequired);
+            return Err(DispatchError::Invariant(
+                "validated payment chat id was not numeric",
+            ));
         };
         let _receipt = self
             .actions
@@ -927,7 +934,7 @@ where
         let (Some(chat_id), Some(message_id), Some(sender_id)) =
             (message.chat_id, message.message_id, message.sender_id)
         else {
-            return Ok(Some(DispatchOutcome::LegacyRequired));
+            return Ok(Some(DispatchOutcome::Unsupported));
         };
         let Some(source) = self.token_signal_source.as_mut() else {
             return Err(DispatchError::MissingService("token signals"));
@@ -1394,7 +1401,10 @@ where
         }
         if context.route == CallbackRoute::Topup {
             let Ok(chat_id) = context.chat_id.parse::<i64>() else {
-                return Ok(DispatchOutcome::LegacyRequired);
+                self.answer_callback_best_effort(context.callback_id.as_deref());
+                self.state_diagnostics
+                    .push("invalid top-up callback chat id".to_owned());
+                return Ok(DispatchOutcome::Handled);
             };
             let locale = resolve_locale(
                 None,
@@ -1441,7 +1451,10 @@ where
         }
         if context.route == CallbackRoute::Charges {
             let Ok(chat_id_value) = context.chat_id.parse::<i64>() else {
-                return Ok(DispatchOutcome::LegacyRequired);
+                self.answer_callback_best_effort(context.callback_id.as_deref());
+                self.state_diagnostics
+                    .push("invalid charge-history callback chat id".to_owned());
+                return Ok(DispatchOutcome::Handled);
             };
             let config = self
                 .config
@@ -1573,7 +1586,10 @@ where
             return Ok(DispatchOutcome::Handled);
         }
         let Ok(chat_id_value) = context.chat_id.parse::<i64>() else {
-            return Ok(DispatchOutcome::LegacyRequired);
+            self.answer_callback_best_effort(context.callback_id.as_deref());
+            self.state_diagnostics
+                .push("invalid configuration callback chat id".to_owned());
+            return Ok(DispatchOutcome::Handled);
         };
         let chat_id = ChatId(chat_id_value);
         let message_id = MessageId(context.message_id);
@@ -1634,7 +1650,8 @@ where
                 return Ok(DispatchOutcome::Handled);
             }
             ConfigCallbackOutcome::NotHandled | ConfigCallbackOutcome::LegacyRequired => {
-                return Ok(DispatchOutcome::LegacyRequired);
+                self.answer_callback_best_effort(context.callback_id.as_deref());
+                return Ok(DispatchOutcome::Handled);
             }
         };
         if let Some(diagnostic) = diagnostic {
@@ -1709,7 +1726,7 @@ where
             message.sender_id,
             message.content.as_ref(),
         ) else {
-            return Ok(DispatchOutcome::LegacyRequired);
+            return Ok(DispatchOutcome::Unsupported);
         };
         if self.ai_conversation_source.is_none() {
             return Err(DispatchError::MissingService("AI conversation"));
@@ -1958,7 +1975,7 @@ where
             message.sender_id,
             message.content.as_ref(),
         ) else {
-            return Ok(DispatchOutcome::LegacyRequired);
+            return Ok(DispatchOutcome::Unsupported);
         };
         let Some(source) = self.ai_conversation_source.as_mut() else {
             return Err(DispatchError::MissingService("AI conversation"));
@@ -2110,7 +2127,7 @@ where
             message.sender_id,
             message.content.as_ref(),
         ) else {
-            return Ok(DispatchOutcome::LegacyRequired);
+            return Ok(DispatchOutcome::Unsupported);
         };
         if self.ai_conversation_source.is_none() {
             return Err(DispatchError::MissingService("AI conversation"));
@@ -2327,11 +2344,12 @@ where
         {
             return Ok(outcome);
         }
-        if !content.text.starts_with('/') && has_replaceable_link(&content.text) {
-            let outcome = self.dispatch_link_replacement(message, &config, locale, timestamp)?;
-            if outcome != DispatchOutcome::LegacyRequired {
-                return Ok(outcome);
-            }
+        if !content.text.starts_with('/')
+            && has_replaceable_link(&content.text)
+            && let Some(outcome) =
+                self.dispatch_link_replacement(message, &config, locale, timestamp)?
+        {
+            return Ok(outcome);
         }
         if message.has_reply && self.ai_conversation_source.is_none() {
             return Err(DispatchError::MissingService("AI conversation"));
@@ -2417,7 +2435,9 @@ where
         );
         let (plan, updated_config) = match language_plan {
             LanguageCommandPlan::LegacyGroupRequired => {
-                return Ok(DispatchOutcome::LegacyRequired);
+                return Err(DispatchError::Invariant(
+                    "authorized group language command was not unlocked",
+                ));
             }
             LanguageCommandPlan::Action {
                 action,
@@ -2452,7 +2472,9 @@ where
             "/tarea" | "/tareas" | "/task" | "/tasks"
         ) {
             if !parsed.message_text.is_empty() {
-                return Ok(DispatchOutcome::LegacyRequired);
+                return Err(DispatchError::Invariant(
+                    "task prompt bypassed the AI routing branch",
+                ));
             }
             let Some(source) = self.scheduled_task_source.as_mut() else {
                 return Err(DispatchError::MissingService("scheduled tasks"));
@@ -2863,7 +2885,7 @@ where
             StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if parsed.command == "/devo" {
             let text = match plan_devo_command(&parsed.message_text) {
-                Err(_) => return Ok(DispatchOutcome::LegacyRequired),
+                Err(_) => render_devo_reply(DevoReply::Usage, locale),
                 Ok(DevoCommandPlan::Reply(reply)) => render_devo_reply(reply, locale),
                 Ok(DevoCommandPlan::Load { fee, purchase }) => {
                     let Some(source) = self.dollar_quotes_source.as_mut() else {
@@ -5711,7 +5733,14 @@ mod tests {
         );
         assert_eq!(
             dispatcher.dispatch(update("/devo ０.５", None)),
-            Ok(DispatchOutcome::LegacyRequired)
+            Ok(DispatchOutcome::Handled)
+        );
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.last() else {
+            return;
+        };
+        assert_eq!(
+            message.text,
+            "uso: /devo <fee_porcentaje>[, <monto_compra>]"
         );
 
         let config = Config {
