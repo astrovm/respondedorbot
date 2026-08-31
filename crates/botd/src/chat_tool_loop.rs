@@ -14,6 +14,7 @@ pub const DEFAULT_MAX_TOOL_ROUNDS: usize = 5;
 pub struct ToolExecutionResult {
     pub output: String,
     pub billing_segment: Option<Value>,
+    pub diagnostics: Vec<String>,
 }
 
 impl ToolExecutionResult {
@@ -22,6 +23,16 @@ impl ToolExecutionResult {
         Self {
             output: output.into(),
             billing_segment: None,
+            diagnostics: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_diagnostics(output: impl Into<String>, diagnostics: Vec<String>) -> Self {
+        Self {
+            output: output.into(),
+            billing_segment: None,
+            diagnostics,
         }
     }
 }
@@ -62,6 +73,7 @@ pub struct ChatToolLoopResult {
     pub billing_segments: Vec<Value>,
     pub provider_rounds: usize,
     pub tool_calls_executed: usize,
+    pub diagnostics: Vec<String>,
     pub stopped_at_limit: bool,
 }
 
@@ -73,6 +85,7 @@ impl ChatToolLoopResult {
             billing_segments: Vec::new(),
             provider_rounds: 0,
             tool_calls_executed: 0,
+            diagnostics: Vec::new(),
             stopped_at_limit: false,
         }
     }
@@ -139,6 +152,7 @@ where
             if let Some(segment) = tool_result.billing_segment {
                 result.billing_segments.push(segment);
             }
+            result.diagnostics.extend(tool_result.diagnostics);
             result
                 .messages
                 .push(PromptMessage::tool_result(&call.id, tool_result.output));
@@ -229,6 +243,7 @@ mod tests {
             ToolExecutionResult {
                 output: "4".to_owned(),
                 billing_segment: Some(json!({"kind": "tool"})),
+                diagnostics: vec!["synthetic tool diagnostic".to_owned()],
             }
         }
     }

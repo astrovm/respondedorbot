@@ -6,6 +6,8 @@ pub mod composition;
 pub mod config;
 pub mod dispatcher;
 pub mod firecrawl_tool;
+pub mod hacker_news_tool;
+pub mod market_tools;
 pub mod native_ai;
 pub mod native_tools;
 pub mod random_tool;

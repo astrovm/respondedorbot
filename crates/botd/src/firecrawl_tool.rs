@@ -74,6 +74,7 @@ fn outcome_result(
             ToolExecutionResult {
                 output: json!({"query": query, "results": results}).to_string(),
                 billing_segment,
+                diagnostics: Vec::new(),
             }
         }
         SearchOutcome::Timeout => ToolExecutionResult::output(localized(

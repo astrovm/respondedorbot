@@ -96,6 +96,7 @@ dependencies = [
  "native-tls",
  "postgres",
  "postgres-native-tls",
+ "quick-xml",
  "redis",
  "regex",
  "reqwest",

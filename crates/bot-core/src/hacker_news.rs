@@ -1,9 +1,10 @@
 //! Hacker News feed normalization and deterministic list formatting.
 
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HackerNewsItem {
     pub title: String,
     pub url: String,
