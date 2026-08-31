@@ -651,7 +651,7 @@ where
             message.sender_id,
             message.content.as_ref(),
         ) else {
-            return Ok(DispatchOutcome::LegacyRequired);
+            return Ok(DispatchOutcome::Unsupported);
         };
         let text = content.text.as_str();
         let mode = LinkMode::parse(&config.link_mode);
@@ -886,6 +886,21 @@ where
     #[must_use]
     pub fn state_diagnostics(&self) -> &[String] {
         &self.state_diagnostics
+    }
+
+    fn send_failure_reply(
+        &mut self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        text: &str,
+    ) -> NativeDispatchResult<Config, Actions, Random> {
+        let mut reply = SendMessage::new(chat_id, text);
+        reply.reply_to_message_id = Some(message_id);
+        let _receipt = self
+            .actions
+            .execute(TelegramAction::SendMessage(reply))
+            .map_err(DispatchError::Action)?;
+        Ok(DispatchOutcome::Handled)
     }
 
     fn answer_callback_best_effort(&mut self, callback_id: Option<&str>) {
@@ -1360,7 +1375,12 @@ where
             .unwrap_or_default();
         let parsed = parse_callback_context(&Value::Object(callback.clone()));
         let Ok(CallbackContextOutcome::Context { context }) = parsed else {
-            return Ok(DispatchOutcome::LegacyRequired);
+            self.answer_callback_best_effort(callback.get("id").and_then(Value::as_str));
+            if let Err(error) = parsed {
+                self.state_diagnostics
+                    .push(format!("invalid callback query: {error}"));
+            }
+            return Ok(DispatchOutcome::Handled);
         };
         if context.route == CallbackRoute::Task {
             return self.dispatch_task_callback(&context);
@@ -1545,7 +1565,8 @@ where
             return Ok(DispatchOutcome::Handled);
         }
         if context.route != CallbackRoute::Config {
-            return Ok(DispatchOutcome::LegacyRequired);
+            self.answer_callback_best_effort(context.callback_id.as_deref());
+            return Ok(DispatchOutcome::Handled);
         }
         let Ok(chat_id_value) = context.chat_id.parse::<i64>() else {
             return Ok(DispatchOutcome::LegacyRequired);
@@ -1846,7 +1867,13 @@ where
             Err(error) => {
                 self.state_diagnostics
                     .push(format!("AI conversation: {error}"));
-                return Ok(DispatchOutcome::LegacyRequired);
+                let text = match locale {
+                    bot_core::locale::Locale::Es => {
+                        "me quedé reculando y no te pude responder, probá de nuevo"
+                    }
+                    bot_core::locale::Locale::En => "I could not answer, try again",
+                };
+                return self.send_failure_reply(chat_id, message_id, text);
             }
         };
         let (completion_id, diagnostics) = match preparation {
@@ -1962,11 +1989,21 @@ where
         };
         let preparation = match source.prepare_media_command(input) {
             Ok(Some(preparation)) => preparation,
-            Ok(None) => return Ok(DispatchOutcome::LegacyRequired),
+            Ok(None) => {
+                let text = match locale {
+                    bot_core::locale::Locale::Es => "se trabó el /transcribe, probá más tarde",
+                    bot_core::locale::Locale::En => "/transcribe failed, try again later",
+                };
+                return self.send_failure_reply(chat_id, message_id, text);
+            }
             Err(error) => {
                 self.state_diagnostics
                     .push(format!("media command: {error}"));
-                return Ok(DispatchOutcome::LegacyRequired);
+                let text = match locale {
+                    bot_core::locale::Locale::Es => "se trabó el /transcribe, probá más tarde",
+                    bot_core::locale::Locale::En => "/transcribe failed, try again later",
+                };
+                return self.send_failure_reply(chat_id, message_id, text);
             }
         };
         let AiPreparation::Reply {
@@ -2158,11 +2195,21 @@ where
         }
         let preparation = match preparation {
             Ok(Some(preparation)) => preparation,
-            Ok(None) => return Ok(DispatchOutcome::LegacyRequired),
+            Ok(None) => {
+                let text = match locale {
+                    bot_core::locale::Locale::Es => "no pude generar el resumen",
+                    bot_core::locale::Locale::En => "I could not generate the summary",
+                };
+                return self.send_failure_reply(chat_id, message_id, text);
+            }
             Err(error) => {
                 self.state_diagnostics
                     .push(format!("summary command: {error}"));
-                return Ok(DispatchOutcome::LegacyRequired);
+                let text = match locale {
+                    bot_core::locale::Locale::Es => "no pude generar el resumen",
+                    bot_core::locale::Locale::En => "I could not generate the summary",
+                };
+                return self.send_failure_reply(chat_id, message_id, text);
             }
         };
         let AiPreparation::Reply {
@@ -2257,7 +2304,7 @@ where
             message.sender_id,
             message.content.as_ref(),
         ) else {
-            return Ok(DispatchOutcome::LegacyRequired);
+            return Ok(DispatchOutcome::Unsupported);
         };
         self.state_diagnostics.clear();
         let config = self
@@ -2277,7 +2324,10 @@ where
             return Ok(outcome);
         }
         if !content.text.starts_with('/') && has_replaceable_link(&content.text) {
-            return self.dispatch_link_replacement(message, &config, locale, timestamp);
+            let outcome = self.dispatch_link_replacement(message, &config, locale, timestamp)?;
+            if outcome != DispatchOutcome::LegacyRequired {
+                return Ok(outcome);
+            }
         }
         if message.has_reply && self.ai_conversation_source.is_none() {
             return Ok(DispatchOutcome::LegacyRequired);
@@ -3013,6 +3063,7 @@ where
                     .and_then(Value::as_str)
                     .and_then(invoice_payload_locale);
                 let locale = resolve_locale(payload_locale, language_code, "private");
+                let query_id = query.get("id").and_then(Value::as_str).map(str::to_owned);
                 match plan_pre_checkout(&Value::Object(query), self.billing_available, locale) {
                     Ok(Some(action)) => {
                         let _receipt = self
@@ -3022,7 +3073,28 @@ where
                         DispatchOutcome::Handled
                     }
                     Ok(None) => DispatchOutcome::Handled,
-                    Err(_) => DispatchOutcome::LegacyRequired,
+                    Err(error) => {
+                        self.state_diagnostics
+                            .push(format!("invalid pre-checkout query: {error}"));
+                        if let Some(query_id) = query_id {
+                            let _receipt = self
+                                .actions
+                                .execute(TelegramAction::AnswerPreCheckout {
+                                    query_id,
+                                    ok: false,
+                                    error_message: Some(match locale {
+                                        bot_core::locale::Locale::Es => {
+                                            "ese pago vino raro y no te lo pude validar".to_owned()
+                                        }
+                                        bot_core::locale::Locale::En => {
+                                            "I could not validate this payment".to_owned()
+                                        }
+                                    }),
+                                })
+                                .map_err(DispatchError::Action)?;
+                        }
+                        DispatchOutcome::Handled
+                    }
                 }
             }
             IncomingEvent::Unsupported => DispatchOutcome::Unsupported,
@@ -3958,7 +4030,7 @@ mod tests {
         };
         assert_eq!(
             dispatcher.dispatch(incomplete),
-            Ok(DispatchOutcome::LegacyRequired)
+            Ok(DispatchOutcome::Unsupported)
         );
         assert!(dispatcher.actions.0.is_empty());
     }
@@ -4014,6 +4086,40 @@ mod tests {
             }]
         );
         assert_eq!(dispatcher.state_diagnostics(), ["provider diagnostic"]);
+    }
+
+    #[test]
+    fn native_ai_failure_sends_the_localized_retry_reply() {
+        let (source, _observations) = ai_source(Err("synthetic provider failure".to_owned()));
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig {
+                    language: "en".to_owned(),
+                    ..ChatConfig::default()
+                }),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_ai_conversation_source(Box::new(source));
+        assert_eq!(
+            dispatcher.dispatch(update("answer me", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let [TelegramAction::SendMessage(message)] = dispatcher.actions.0.as_slice() else {
+            return;
+        };
+        assert_eq!(message.text, "I could not answer, try again");
+        assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
+        assert_eq!(
+            dispatcher.state_diagnostics(),
+            ["AI conversation: synthetic provider failure"]
+        );
     }
 
     #[test]
@@ -4084,6 +4190,37 @@ mod tests {
     }
 
     #[test]
+    fn media_command_failure_sends_the_exact_localized_error() {
+        let (mut source, _observations) = ai_source(Ok(AiPreparation::silent()));
+        source.media_preparation = Some(Err("synthetic media failure".to_owned()));
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_ai_conversation_source(Box::new(source));
+        assert_eq!(
+            dispatcher.dispatch(update("/transcribe", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        let [TelegramAction::SendMessage(message)] = dispatcher.actions.0.as_slice() else {
+            return;
+        };
+        assert_eq!(message.text, "se trabó el /transcribe, probá más tarde");
+        assert_eq!(
+            dispatcher.state_diagnostics(),
+            ["media command: synthetic media failure"]
+        );
+    }
+
+    #[test]
     fn summary_command_uses_native_stream_delivery_and_command_state() {
         let (mut source, (prepared, ignored, deliveries)) = ai_source(Ok(AiPreparation::silent()));
         source.tokens = vec!["raw summary".to_owned()];
@@ -4138,6 +4275,40 @@ mod tests {
             }]
         );
         assert_eq!(dispatcher.state_diagnostics(), ["summary diagnostic"]);
+    }
+
+    #[test]
+    fn summary_failure_sends_the_exact_localized_error() {
+        let (mut source, _observations) = ai_source(Ok(AiPreparation::silent()));
+        source.summary_preparation = Some(Err("synthetic summary failure".to_owned()));
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig {
+                    language: "en".to_owned(),
+                    ..ChatConfig::default()
+                }),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_ai_conversation_source(Box::new(source));
+        assert_eq!(
+            dispatcher.dispatch(update("/summary", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let [TelegramAction::SendMessage(message)] = dispatcher.actions.0.as_slice() else {
+            return;
+        };
+        assert_eq!(message.text, "I could not generate the summary");
+        assert_eq!(
+            dispatcher.state_diagnostics(),
+            ["summary command: synthetic summary failure"]
+        );
     }
 
     #[test]
@@ -6386,6 +6557,52 @@ mod tests {
     }
 
     #[test]
+    fn malformed_and_unknown_callbacks_are_acknowledged_natively() {
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        let malformed = Map::from_iter([
+            ("id".to_owned(), json!("malformed-callback")),
+            ("data".to_owned(), json!("cfg:language:en")),
+            ("message".to_owned(), json!("invalid")),
+        ]);
+        assert_eq!(
+            dispatcher.dispatch(IncomingUpdate {
+                update_id: 101,
+                event: IncomingEvent::CallbackQuery(malformed),
+            }),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            dispatcher.dispatch(callback_update("unknown:value", "private", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(dispatcher.actions.0.len(), 2);
+        assert!(
+            dispatcher
+                .actions
+                .0
+                .iter()
+                .all(|action| matches!(action, TelegramAction::AnswerCallback { .. }))
+        );
+        assert!(
+            dispatcher
+                .state_diagnostics()
+                .iter()
+                .any(|value| value.starts_with("invalid callback query:"))
+        );
+    }
+
+    #[test]
     fn task_list_aliases_render_native_keyboard_and_creation_uses_ai_transaction()
     -> Result<(), TaskStateError> {
         let cancellations = Rc::new(RefCell::new(Vec::new()));
@@ -7081,7 +7298,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_pre_checkout_sender_remains_legacy_owned_during_shadowing() {
+    fn malformed_pre_checkout_sender_is_rejected_natively() {
         let config = Config {
             value: Ok(ChatConfig::default()),
             chat_ids: Vec::new(),
@@ -7107,9 +7324,22 @@ mod tests {
                 update_id: 101,
                 event: IncomingEvent::PreCheckoutQuery(query),
             }),
-            Ok(DispatchOutcome::LegacyRequired)
+            Ok(DispatchOutcome::Handled)
         );
-        assert!(dispatcher.actions.0.is_empty());
+        assert_eq!(
+            dispatcher.actions.0,
+            [TelegramAction::AnswerPreCheckout {
+                query_id: "checkout-malformed".to_owned(),
+                ok: false,
+                error_message: Some("I could not validate this payment".to_owned()),
+            }]
+        );
+        assert!(
+            dispatcher
+                .state_diagnostics()
+                .iter()
+                .any(|value| value.starts_with("invalid pre-checkout query:"))
+        );
     }
 
     #[test]
@@ -8172,6 +8402,33 @@ mod tests {
             Ok(DispatchOutcome::LegacyRequired)
         );
         assert!(dispatcher.actions.0.is_empty());
+    }
+
+    #[test]
+    fn link_cases_not_owned_by_replacement_fall_through_to_native_ai() {
+        let (source, (prepared, _ignored, _deliveries)) = ai_source(Ok(AiPreparation::silent()));
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig {
+                    link_mode: "off".to_owned(),
+                    ..ChatConfig::default()
+                }),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_link_replacement_source(Box::new(links(true)))
+        .with_ai_conversation_source(Box::new(source));
+        assert_eq!(
+            dispatcher.dispatch(update("https://x.com/a/status/1", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(prepared.borrow().len(), 1);
     }
 
     #[test]
