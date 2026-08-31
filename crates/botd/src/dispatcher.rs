@@ -1782,6 +1782,7 @@ where
             audio_duration_seconds: message.audio_duration_seconds.map(|value| value as f64),
             locale,
             timezone_offset_hours: config.timezone_offset,
+            creditless_user_hourly_limit: config.creditless_user_hourly_limit,
             timestamp,
             spontaneous,
         };
@@ -1955,6 +1956,7 @@ where
             audio_duration_seconds: message.audio_duration_seconds.map(|value| value as f64),
             locale,
             timezone_offset_hours: config.timezone_offset,
+            creditless_user_hourly_limit: config.creditless_user_hourly_limit,
             timestamp,
             spontaneous: false,
         };
@@ -2096,6 +2098,7 @@ where
             audio_duration_seconds: message.audio_duration_seconds.map(|value| value as f64),
             locale,
             timezone_offset_hours: config.timezone_offset,
+            creditless_user_hourly_limit: config.creditless_user_hourly_limit,
             timestamp,
             spontaneous: false,
         };

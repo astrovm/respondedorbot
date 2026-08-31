@@ -48,6 +48,7 @@ use bot_adapters::polymarket::{
 use bot_adapters::redis_chat_admin::{cache_chat_admin, get_cached_chat_admin};
 use bot_adapters::redis_compaction_queue::RedisCompactionQueue;
 use bot_adapters::redis_connection::RedisEndpoint;
+use bot_adapters::redis_creditless_cap::RedisCreditlessCap;
 use bot_adapters::redis_json_cache::{RedisJsonCache, RedisJsonCacheError};
 use bot_adapters::redis_message_state::{RedisMessageState, RedisMessageStateError};
 use bot_adapters::redis_task_store::{RedisTaskStore, RedisTaskStoreError};
@@ -1279,6 +1280,8 @@ pub enum CompositionError {
     MediaProviderTransport(String),
     #[error("could not construct Redis AI conversation state: {0}")]
     ConversationState(String),
+    #[error("could not construct Redis AI credit policy: {0}")]
+    ConversationBillingPolicy(String),
 }
 
 pub struct NativeRuntimeOptions<'a> {
@@ -1699,7 +1702,11 @@ pub fn build_native_runtime(
                 ),
                 RedisConversationState::new(options.redis_endpoint)
                     .map_err(CompositionError::ConversationState)?,
-                PostgresConversationBilling::new(options.database_url),
+                PostgresConversationBilling::new(options.database_url).with_creditless_cap(
+                    RedisCreditlessCap::new(options.redis_endpoint).map_err(|error| {
+                        CompositionError::ConversationBillingPolicy(error.to_string())
+                    })?,
+                ),
                 &system_prompt,
                 crate::native_ai::PRIMARY_CHAT_MODEL,
                 DEFAULT_MAX_TOOL_ROUNDS,

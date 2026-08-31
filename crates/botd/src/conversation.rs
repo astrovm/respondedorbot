@@ -81,7 +81,13 @@ pub struct ReserveRequest {
     pub operation_id: String,
     pub reservation_id: String,
     pub amount: i64,
+    pub creditless_user_hourly_limit: i64,
     pub metadata: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReserveDenial {
+    CreditlessHourlyCap { limit: i64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +96,7 @@ pub struct ReserveDecision {
     pub user_balance: i64,
     pub chat_balance: i64,
     pub source: Option<PayerSource>,
+    pub denial: Option<ReserveDenial>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -225,6 +232,16 @@ impl<Provider, Tools, State, Billing> NativeConversation<Provider, Tools, State,
         input: &AiConversationInput,
         decision: &ReserveDecision,
     ) -> String {
+        if let Some(ReserveDenial::CreditlessHourlyCap { limit }) = decision.denial {
+            return match locale {
+                Locale::Es => format!(
+                    "llegaste al limite de {limit} mensajes de ia pagados por el grupo por hora, boludo. cargá créditos con /topup si querés seguir"
+                ),
+                Locale::En => format!(
+                    "you reached the limit of {limit} group-funded AI messages per hour. use /topup to continue"
+                ),
+            };
+        }
         if matches!(input.chat_type.as_str(), "group" | "supergroup") {
             match locale {
                 Locale::Es => format!(
@@ -288,6 +305,7 @@ where
             operation_id: operation_id.to_owned(),
             reservation_id: format!("{operation_id}:{reservation_kind}"),
             amount,
+            creditless_user_hourly_limit: input.creditless_user_hourly_limit,
             metadata,
         })
     }
@@ -1681,6 +1699,7 @@ mod tests {
                 user_balance: 1_000,
                 chat_balance: 0,
                 source: Some(PayerSource::User),
+                denial: None,
             }))
         }
 
@@ -1720,6 +1739,7 @@ mod tests {
             audio_duration_seconds: None,
             locale: Locale::En,
             timezone_offset_hours: -3,
+            creditless_user_hourly_limit: 5,
             timestamp: 1_672_531_200,
             spontaneous: false,
         }
@@ -2212,6 +2232,7 @@ mod tests {
             user_balance: 25,
             chat_balance: 50,
             source: None,
+            denial: None,
         };
         let mut explicit = conversation(
             vec![Ok(round("must not run", None))],
@@ -2246,6 +2267,34 @@ mod tests {
             Ok(AiPreparation::silent())
         );
         assert!(spontaneous.provider.prompts.borrow().is_empty());
+    }
+
+    #[test]
+    fn creditless_hourly_cap_denial_uses_the_specific_localized_reply() {
+        let denial = ReserveDecision {
+            authorized: false,
+            user_balance: 0,
+            chat_balance: 5_000,
+            source: Some(PayerSource::Chat),
+            denial: Some(ReserveDenial::CreditlessHourlyCap { limit: 3 }),
+        };
+        let mut service = conversation(
+            vec![Ok(round("must not run", None))],
+            Billing {
+                decisions: VecDeque::from([denial]),
+                ..Billing::default()
+            },
+        );
+        let mut request = input();
+        request.chat_type = "supergroup".to_owned();
+        assert_eq!(
+            service.prepare(request),
+            Ok(AiPreparation::reply(
+                "you reached the limit of 3 group-funded AI messages per hour. use /topup to continue",
+                None,
+            ))
+        );
+        assert!(service.provider.prompts.borrow().is_empty());
     }
 
     #[test]

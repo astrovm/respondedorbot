@@ -1,7 +1,12 @@
 //! Redis and PostgreSQL adapters for foreground native AI conversations.
 
+use std::collections::{HashMap, HashSet};
+
 use bot_adapters::billing_read::BillingRepository;
 use bot_adapters::redis_connection::RedisEndpoint;
+use bot_adapters::redis_creditless_cap::{
+    CREDITLESS_CAP_TTL_SECONDS, RedisCreditlessCap, creditless_cap_key,
+};
 use bot_adapters::redis_message_state::{RedisMessageState, SearchRow};
 use bot_core::ai_prompt::{HistoryMessage, PromptRole, RetrievedMessage};
 use bot_core::ai_request::sanitize_assistant_text;
@@ -20,7 +25,7 @@ use crate::compaction_scheduler::MemoryCompactionPlan;
 use crate::compaction_scheduler::PayerSource;
 use crate::conversation::{
     ConversationBilling, ConversationMemory, ConversationState, ProviderSegmentRequest,
-    ReserveDecision, ReserveRequest, SettlementRequest,
+    ReserveDecision, ReserveDenial, ReserveRequest, SettlementRequest,
 };
 
 const COMPACTION_THRESHOLD: usize = 40;
@@ -348,7 +353,11 @@ fn build_compaction_view(
 
 pub struct PostgresConversationBilling {
     repository: BillingRepository,
-    payer_by_operation: std::collections::HashMap<String, PayerSource>,
+    creditless_cap: Option<RedisCreditlessCap>,
+    payer_by_operation: HashMap<String, PayerSource>,
+    cap_key_by_operation: HashMap<String, String>,
+    cap_checked_operations: HashSet<String>,
+    onboarding_checked_operations: HashSet<String>,
 }
 
 impl PostgresConversationBilling {
@@ -356,13 +365,31 @@ impl PostgresConversationBilling {
     pub fn new(database_url: &str) -> Self {
         Self {
             repository: BillingRepository::new(database_url),
-            payer_by_operation: std::collections::HashMap::new(),
+            creditless_cap: None,
+            payer_by_operation: HashMap::new(),
+            cap_key_by_operation: HashMap::new(),
+            cap_checked_operations: HashSet::new(),
+            onboarding_checked_operations: HashSet::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_creditless_cap(mut self, creditless_cap: RedisCreditlessCap) -> Self {
+        self.creditless_cap = Some(creditless_cap);
+        self
     }
 }
 
 impl ConversationBilling for PostgresConversationBilling {
     fn reserve(&mut self, request: ReserveRequest) -> Result<ReserveDecision, String> {
+        if self
+            .onboarding_checked_operations
+            .insert(request.operation_id.clone())
+        {
+            let _grant = self
+                .repository
+                .grant_onboarding_if_needed(request.user_id, 300);
+        }
         let amount = i32::try_from(request.amount)
             .map_err(|_| "AI reservation exceeds the database range".to_owned())?;
         let requested_source = self
@@ -373,7 +400,8 @@ impl ConversationBilling for PostgresConversationBilling {
                 PayerSource::User => "user",
                 PayerSource::Chat => "chat",
             });
-        self.repository
+        let result = self
+            .repository
             .charge_ai_credits(
                 request.user_id,
                 request.chat_id,
@@ -384,26 +412,75 @@ impl ConversationBilling for PostgresConversationBilling {
                 Some(&request.reservation_id),
                 &request.operation_id,
             )
-            .map(|result| {
-                let source = match result.source.as_deref() {
-                    Some("user") => Some(PayerSource::User),
-                    Some("chat") => Some(PayerSource::Chat),
-                    _ => None,
-                };
-                if result.ok
-                    && let Some(source) = source
-                {
-                    self.payer_by_operation
-                        .insert(request.operation_id.clone(), source);
-                }
-                ReserveDecision {
-                    authorized: result.ok,
-                    user_balance: result.user_balance,
-                    chat_balance: result.chat_balance,
+            .map_err(|error| error.to_string())?;
+        let source = match result.source.as_deref() {
+            Some("user") => Some(PayerSource::User),
+            Some("chat") => Some(PayerSource::Chat),
+            _ => None,
+        };
+
+        if result.ok
+            && source == Some(PayerSource::Chat)
+            && request.creditless_user_hourly_limit >= 0
+            && let Some(chat_id) = request.chat_id
+            && let Some(creditless_cap) = self.creditless_cap.as_ref()
+            && self
+                .cap_checked_operations
+                .insert(request.operation_id.clone())
+            && result.applied
+        {
+            let origin_chat_id = request
+                .metadata
+                .get("origin_chat_id")
+                .map_or_else(|| chat_id.to_string(), value_as_key_component);
+            let cap_key = creditless_cap_key(&origin_chat_id, request.user_id);
+            let count = creditless_cap
+                .increment(&cap_key, CREDITLESS_CAP_TTL_SECONDS)
+                .map_err(|error| error.to_string())?;
+            if count > request.creditless_user_hourly_limit {
+                let mut refund_metadata = request.metadata.clone();
+                refund_metadata.insert("reason".to_owned(), json!("creditless_hourly_cap"));
+                let refund_id = format!("{}:creditless_cap_refund", request.reservation_id);
+                let refund = self
+                    .repository
+                    .refund_ai_charge(
+                        request.user_id,
+                        request.chat_id,
+                        amount,
+                        "chat",
+                        "ai_refund",
+                        &refund_metadata,
+                        Some(&refund_id),
+                        &request.operation_id,
+                    )
+                    .map_err(|error| error.to_string())?;
+                return Ok(ReserveDecision {
+                    authorized: false,
+                    user_balance: refund.user_balance,
+                    chat_balance: refund.chat_balance,
                     source,
-                }
-            })
-            .map_err(|error| error.to_string())
+                    denial: Some(ReserveDenial::CreditlessHourlyCap {
+                        limit: request.creditless_user_hourly_limit,
+                    }),
+                });
+            }
+            self.cap_key_by_operation
+                .insert(request.operation_id.clone(), cap_key);
+        }
+
+        if result.ok
+            && let Some(source) = source
+        {
+            self.payer_by_operation
+                .insert(request.operation_id.clone(), source);
+        }
+        Ok(ReserveDecision {
+            authorized: result.ok,
+            user_balance: result.user_balance,
+            chat_balance: result.chat_balance,
+            source,
+            denial: None,
+        })
     }
 
     fn record_segment(&mut self, request: ProviderSegmentRequest) -> Result<(), String> {
@@ -420,24 +497,36 @@ impl ConversationBilling for PostgresConversationBilling {
 
     fn settle(&mut self, request: SettlementRequest) -> Result<(), String> {
         self.payer_by_operation.remove(&request.operation_id);
+        self.onboarding_checked_operations
+            .remove(&request.operation_id);
+        self.cap_checked_operations.remove(&request.operation_id);
+        let operation_id = request.operation_id.clone();
         let metadata = Map::from_iter([
-            ("operation_id".to_owned(), json!(request.operation_id)),
+            ("operation_id".to_owned(), json!(operation_id)),
             ("reason".to_owned(), json!(request.reason)),
             ("delivered".to_owned(), json!(request.delivered)),
         ]);
-        self.repository
+        let result = self
+            .repository
             .settle_ai_operation_once(
                 request.user_id,
                 request.chat_id,
-                metadata
-                    .get("operation_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
+                &operation_id,
                 request.actual_credit_units,
                 &metadata,
             )
-            .map(|_result| ())
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        if result.applied
+            && request.actual_credit_units == 0
+            && let Some(cap_key) = self.cap_key_by_operation.get(&operation_id)
+            && let Some(creditless_cap) = self.creditless_cap.as_ref()
+        {
+            creditless_cap
+                .decrement(cap_key)
+                .map_err(|error| error.to_string())?;
+        }
+        self.cap_key_by_operation.remove(&operation_id);
+        Ok(())
     }
 
     fn personal_balance(&mut self, user_id: i64) -> Result<Option<i64>, String> {
@@ -446,6 +535,12 @@ impl ConversationBilling for PostgresConversationBilling {
             .map(Some)
             .map_err(|error| error.to_string())
     }
+}
+
+fn value_as_key_component(value: &Value) -> String {
+    value
+        .as_str()
+        .map_or_else(|| value.to_string(), ToOwned::to_owned)
 }
 
 fn decode_history(entries: Vec<String>) -> Vec<StoredHistoryEntry> {

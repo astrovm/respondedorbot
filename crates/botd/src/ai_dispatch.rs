@@ -37,6 +37,7 @@ pub struct AiConversationInput {
     pub audio_duration_seconds: Option<f64>,
     pub locale: Locale,
     pub timezone_offset_hours: i64,
+    pub creditless_user_hourly_limit: i64,
     pub timestamp: i64,
     pub spontaneous: bool,
 }

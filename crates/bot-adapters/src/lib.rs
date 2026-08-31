@@ -21,6 +21,7 @@ pub mod polymarket;
 pub mod redis_chat_admin;
 pub mod redis_compaction_queue;
 pub mod redis_connection;
+pub mod redis_creditless_cap;
 pub mod redis_json_cache;
 pub mod redis_maintenance;
 pub mod redis_media_cache;
