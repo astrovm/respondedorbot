@@ -1684,6 +1684,198 @@ where
         Ok(DispatchOutcome::Handled)
     }
 
+    fn dispatch_summary_command(
+        &mut self,
+        message: &IncomingMessage,
+        config: &ChatConfig,
+        locale: bot_core::locale::Locale,
+        timestamp: i64,
+        command: &str,
+        prompt_text: &str,
+    ) -> NativeDispatchResult<Config, Actions, Random> {
+        let (Some(chat_id), Some(message_id), Some(sender_id), Some(content)) = (
+            message.chat_id,
+            message.message_id,
+            message.sender_id,
+            message.content.as_ref(),
+        ) else {
+            return Ok(DispatchOutcome::LegacyRequired);
+        };
+        if self.ai_conversation_source.is_none() {
+            return Ok(DispatchOutcome::LegacyRequired);
+        }
+        let input = AiConversationInput {
+            chat_id,
+            message_id,
+            chat_type: message.chat_type.clone().unwrap_or_default(),
+            chat_title: message.chat_title.clone().unwrap_or_default(),
+            sender_id,
+            sender_first_name: message.sender_first_name.clone().unwrap_or_default(),
+            sender_username: message.sender_username.clone().unwrap_or_default(),
+            message_text: prompt_text.to_owned(),
+            command: command.to_owned(),
+            reply_to_message_id: message.replied_message_id,
+            reply_context: reply_context(
+                message.replied_sender_first_name.as_deref(),
+                message.replied_sender_username.as_deref(),
+                message.replied_text.as_deref(),
+            ),
+            has_reply: message.has_reply,
+            visual_media_kind: message.visual_media_kind.clone(),
+            audio_media_kind: message.audio_media_kind.clone(),
+            photo_file_id: content.photo_file_id.clone(),
+            audio_file_id: content.audio_file_id.clone(),
+            audio_duration_seconds: message.audio_duration_seconds.map(|value| value as f64),
+            locale,
+            timezone_offset_hours: config.timezone_offset,
+            timestamp,
+            spontaneous: false,
+        };
+        let (preparation, stream_finalize, ignored_edit_failures) = {
+            let Some(source) = self.ai_conversation_source.as_mut() else {
+                return Ok(DispatchOutcome::LegacyRequired);
+            };
+            let mut stream = TelegramStream::new(&mut self.actions, chat_id, message_id);
+            let preparation = source.prepare_summary_command_streaming(input, &mut |token| {
+                stream
+                    .feed(token)
+                    .map_err(|_error| "Telegram rejected the initial summary stream".to_owned())
+            });
+            match preparation {
+                Err(error) => {
+                    stream.cancel();
+                    let ignored = stream.ignored_edit_failures();
+                    (Err(error), None, ignored)
+                }
+                Ok(None) => {
+                    stream.cancel();
+                    let ignored = stream.ignored_edit_failures();
+                    (Ok(None), None, ignored)
+                }
+                Ok(Some(AiPreparation::Silent { diagnostics })) => {
+                    stream.cancel();
+                    let ignored = stream.ignored_edit_failures();
+                    (
+                        Ok(Some(AiPreparation::Silent { diagnostics })),
+                        None,
+                        ignored,
+                    )
+                }
+                Ok(Some(AiPreparation::Reply {
+                    text,
+                    completion_id,
+                    diagnostics,
+                })) => {
+                    let finalized = stream.finalize(&text);
+                    let ignored = stream.ignored_edit_failures();
+                    (
+                        Ok(Some(AiPreparation::Reply {
+                            text,
+                            completion_id,
+                            diagnostics,
+                        })),
+                        Some(finalized),
+                        ignored,
+                    )
+                }
+            }
+        };
+        if ignored_edit_failures > 0 {
+            self.state_diagnostics.push(format!(
+                "summary Telegram stream ignored {ignored_edit_failures} intermediate edit failures"
+            ));
+        }
+        let preparation = match preparation {
+            Ok(Some(preparation)) => preparation,
+            Ok(None) => return Ok(DispatchOutcome::LegacyRequired),
+            Err(error) => {
+                self.state_diagnostics
+                    .push(format!("summary command: {error}"));
+                return Ok(DispatchOutcome::LegacyRequired);
+            }
+        };
+        let AiPreparation::Reply {
+            text,
+            completion_id,
+            diagnostics,
+        } = preparation
+        else {
+            return Ok(DispatchOutcome::Handled);
+        };
+        self.state_diagnostics.extend(diagnostics);
+
+        if let Ok(incoming) = prepare_incoming_command_state(IncomingCommandState {
+            chat_id,
+            message_id,
+            user_id: sender_id,
+            first_name: message.sender_first_name.as_deref(),
+            username: message.sender_username.as_deref(),
+            text: &content.text,
+            is_group: is_group_chat_type(message.chat_type.as_deref()),
+            timestamp,
+        }) && let Err(error) = self.state.record_incoming(&incoming)
+        {
+            self.state_diagnostics
+                .push(format!("incoming summary command state: {error}"));
+        }
+        let Some(stream_finalize) = stream_finalize else {
+            return Ok(DispatchOutcome::Handled);
+        };
+        let receipt = match stream_finalize {
+            Ok(receipt) => receipt,
+            Err(StreamFinalizeError::MissingMessageId) => {
+                if let Some(completion_id) = completion_id
+                    && let Some(source) = self.ai_conversation_source.as_mut()
+                {
+                    let _result = source.complete_delivery(AiDelivery {
+                        completion_id,
+                        delivered: false,
+                        sent_message_id: None,
+                    });
+                }
+                self.state_diagnostics
+                    .push("summary Telegram send returned no message identifier".to_owned());
+                return Ok(DispatchOutcome::Handled);
+            }
+            Err(StreamFinalizeError::Action(error)) => {
+                if let Some(completion_id) = completion_id
+                    && let Some(source) = self.ai_conversation_source.as_mut()
+                {
+                    let _result = source.complete_delivery(AiDelivery {
+                        completion_id,
+                        delivered: false,
+                        sent_message_id: None,
+                    });
+                }
+                return Err(DispatchError::Action(error));
+            }
+        };
+        if let Some(completion_id) = completion_id
+            && let Some(source) = self.ai_conversation_source.as_mut()
+            && let Err(error) = source.complete_delivery(AiDelivery {
+                completion_id,
+                delivered: true,
+                sent_message_id: Some(receipt.message_id),
+            })
+        {
+            self.state_diagnostics
+                .push(format!("summary delivery completion: {error}"));
+        }
+        if let Ok(outgoing) = prepare_outgoing_command_state(OutgoingCommandState {
+            chat_id,
+            incoming_message_id: message_id,
+            sent_message_id: Some(receipt.message_id),
+            text: &text,
+            command,
+            timestamp,
+        }) && let Err(error) = self.state.record_outgoing(&outgoing)
+        {
+            self.state_diagnostics
+                .push(format!("outgoing summary command state: {error}"));
+        }
+        Ok(DispatchOutcome::Handled)
+    }
+
     fn dispatch_message(
         &mut self,
         message: &IncomingMessage,
@@ -1716,6 +1908,16 @@ where
         let parsed = parse_command(&content.text, &self.bot_name);
         if matches!(parsed.command.as_str(), "/transcribe" | "/describe") {
             return self.dispatch_media_command(
+                message,
+                &config,
+                locale,
+                timestamp,
+                &parsed.command,
+                &parsed.message_text,
+            );
+        }
+        if matches!(parsed.command.as_str(), "/resumen" | "/summary" | "/tldr") {
+            return self.dispatch_summary_command(
                 message,
                 &config,
                 locale,
@@ -2556,6 +2758,7 @@ mod tests {
         metadata: Option<AiReplyMetadata>,
         preparation: Option<Result<AiPreparation, String>>,
         media_preparation: Option<Result<AiPreparation, String>>,
+        summary_preparation: Option<Result<AiPreparation, String>>,
         tokens: Vec<String>,
         prepared: Rc<RefCell<Vec<AiConversationInput>>>,
         ignored: Rc<RefCell<Vec<AiConversationInput>>>,
@@ -2603,6 +2806,21 @@ mod tests {
             preparation.map(Some)
         }
 
+        fn prepare_summary_command_streaming(
+            &mut self,
+            input: AiConversationInput,
+            on_token: &mut dyn FnMut(&str) -> Result<(), String>,
+        ) -> Result<Option<AiPreparation>, String> {
+            let Some(preparation) = self.summary_preparation.take() else {
+                return Ok(None);
+            };
+            self.prepared.borrow_mut().push(input);
+            for token in &self.tokens {
+                on_token(token)?;
+            }
+            preparation.map(Some)
+        }
+
         fn record_ignored(&mut self, input: AiConversationInput) -> Result<(), String> {
             self.ignored.borrow_mut().push(input);
             Ok(())
@@ -2629,6 +2847,7 @@ mod tests {
                 metadata: None,
                 preparation: Some(preparation),
                 media_preparation: None,
+                summary_preparation: None,
                 tokens: Vec::new(),
                 prepared: Rc::clone(&prepared),
                 ignored: Rc::clone(&ignored),
@@ -3383,6 +3602,63 @@ mod tests {
             }]
         );
         assert_eq!(dispatcher.state_diagnostics(), ["media diagnostic"]);
+    }
+
+    #[test]
+    fn summary_command_uses_native_stream_delivery_and_command_state() {
+        let (mut source, (prepared, ignored, deliveries)) = ai_source(Ok(AiPreparation::silent()));
+        source.tokens = vec!["raw summary".to_owned()];
+        source.summary_preparation = Some(Ok(AiPreparation::Reply {
+            text: "clean summary".to_owned(),
+            completion_id: Some("summary-1".to_owned()),
+            diagnostics: vec!["summary diagnostic".to_owned()],
+        }));
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig {
+                    language: "en".to_owned(),
+                    ..ChatConfig::default()
+                }),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_ai_conversation_source(Box::new(source));
+
+        assert_eq!(
+            dispatcher.dispatch(update("/summary focus on decisions", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let prepared = prepared.borrow();
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].command, "/summary");
+        assert_eq!(prepared[0].message_text, "focus on decisions");
+        assert!(ignored.borrow().is_empty());
+        assert_eq!(dispatcher.state.incoming.len(), 1);
+        assert_eq!(dispatcher.state.outgoing.len(), 1);
+        assert_eq!(dispatcher.actions.0.len(), 2);
+        assert!(matches!(
+            &dispatcher.actions.0[0],
+            TelegramAction::SendMessage(message) if message.text == "raw summary"
+        ));
+        assert!(matches!(
+            &dispatcher.actions.0[1],
+            TelegramAction::EditMessage { text, .. } if text == "clean summary"
+        ));
+        assert_eq!(
+            deliveries.borrow().as_slice(),
+            [AiDelivery {
+                completion_id: "summary-1".to_owned(),
+                delivered: true,
+                sent_message_id: Some(MessageId(700)),
+            }]
+        );
+        assert_eq!(dispatcher.state_diagnostics(), ["summary diagnostic"]);
     }
 
     #[test]

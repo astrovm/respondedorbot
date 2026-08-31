@@ -27,6 +27,7 @@ use crate::chat_tool_loop::{
 use crate::media::{MediaExecution, MediaKind, MediaPipelineError, MediaRuntime};
 
 const MAX_HISTORY_MESSAGES: usize = 40;
+const MAX_SUMMARY_MESSAGES: usize = 200;
 const SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE: i64 = 4_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -59,6 +60,14 @@ pub trait ConversationState {
         sent_message_id: Option<i64>,
         text: &str,
     ) -> Result<(), String>;
+
+    fn load_summary_memory(
+        &mut self,
+        chat_id: &str,
+        max_history_messages: usize,
+    ) -> Result<ConversationMemory, String> {
+        self.load_memory(chat_id, "", None, max_history_messages)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,6 +132,7 @@ struct PendingConversation {
 enum PendingKind {
     Conversation { provider_failed: bool },
     MediaCommand,
+    SummaryCommand { provider_failed: bool },
 }
 
 #[derive(Debug, Default)]
@@ -553,6 +563,143 @@ where
         })
     }
 
+    fn prepare_summary_command_transaction(
+        &mut self,
+        input: AiConversationInput,
+        on_token: &mut dyn FnMut(&str) -> Result<(), String>,
+    ) -> Result<AiPreparation, String> {
+        let operation_id = summary_operation_id(&input);
+        let admission = vec![PromptMessage::text(PromptRole::User, "summary")];
+        let base_amount = estimate_reserve(&admission, &self.model)?;
+        let base = self.reserve(
+            &input,
+            &operation_id,
+            "summary_command_base",
+            base_amount,
+            admission.len(),
+        )?;
+        if !base.authorized {
+            return Ok(AiPreparation::reply(
+                Self::insufficient(input.locale, &input, &base),
+                None,
+            ));
+        }
+        let memory = match self
+            .state
+            .load_summary_memory(&input.chat_id.0.to_string(), MAX_SUMMARY_MESSAGES)
+        {
+            Ok(memory) => memory,
+            Err(error) => {
+                self.settle_immediately(&input, &operation_id, "summary_preparation_failed")?;
+                return Err(error);
+            }
+        };
+        let ConversationMemory {
+            summary,
+            history,
+            retrieved: _,
+        } = memory;
+        if history.is_empty() {
+            let text = summary.filter(|summary| !summary.is_empty()).map_or_else(
+                || summary_empty(input.locale).to_owned(),
+                |summary| sanitize_summary_text(&summary),
+            );
+            let segments = vec![internal_summary_cache_segment(&text)];
+            self.pending.insert(
+                operation_id.clone(),
+                PendingConversation {
+                    input,
+                    text: text.clone(),
+                    segments,
+                    kind: PendingKind::SummaryCommand {
+                        provider_failed: false,
+                    },
+                },
+            );
+            on_token(&text)?;
+            return Ok(AiPreparation::reply(text, Some(operation_id)));
+        }
+
+        let prompt = summary_prompt(&input.message_text, input.locale);
+        let mut messages = vec![PromptMessage::text(PromptRole::System, &self.persona)];
+        if let Some(summary) = summary.filter(|summary| !summary.is_empty()) {
+            messages.push(PromptMessage::text(PromptRole::Assistant, summary));
+        }
+        messages.extend(
+            history
+                .into_iter()
+                .map(|message| PromptMessage::text(message.role, message.text)),
+        );
+        messages.push(PromptMessage::text(PromptRole::User, prompt));
+        let full_amount = estimate_reserve(&messages, &self.model)?;
+        if full_amount > base_amount {
+            let extension = self.reserve(
+                &input,
+                &operation_id,
+                "summary_command_context_extension",
+                full_amount - base_amount,
+                messages.len(),
+            )?;
+            if !extension.authorized {
+                self.settle_immediately(
+                    &input,
+                    &operation_id,
+                    "summary_reserve_adjustment_failed",
+                )?;
+                return Ok(AiPreparation::reply(
+                    Self::insufficient(input.locale, &input, &extension),
+                    None,
+                ));
+            }
+        }
+
+        let (raw_text, mut segments, diagnostics, provider_failed) =
+            match self.provider.stream_round(&messages, &[], &mut |token| {
+                on_token(token).map_err(bot_adapters::openrouter_chat::OpenRouterChatError::Stream)
+            }) {
+                Ok(result) => (
+                    result.text,
+                    result.billing_segment.into_iter().collect::<Vec<_>>(),
+                    Vec::new(),
+                    false,
+                ),
+                Err(error) => {
+                    let partial = *error.partial;
+                    (
+                        partial.text,
+                        partial.billing_segment.into_iter().collect::<Vec<_>>(),
+                        vec![format!("summary provider stream: {}", error.source)],
+                        true,
+                    )
+                }
+            };
+        for segment in &mut segments {
+            if let Some(segment) = segment.as_object_mut() {
+                segment.insert("kind".to_owned(), json!("summary"));
+            }
+        }
+        let cleaned = sanitize_summary_text(&raw_text);
+        let text = if provider_failed || cleaned.is_empty() {
+            summary_error(input.locale).to_owned()
+        } else {
+            cleaned
+        };
+        self.pending.insert(
+            operation_id.clone(),
+            PendingConversation {
+                input,
+                text: text.clone(),
+                segments,
+                kind: PendingKind::SummaryCommand { provider_failed },
+            },
+        );
+        Ok(AiPreparation::Reply {
+            text,
+            completion_id: Some(operation_id),
+            diagnostics,
+        })
+    }
+
     fn prepare_transaction(
         &mut self,
         input: AiConversationInput,
@@ -740,6 +887,15 @@ where
         }
     }
 
+    fn prepare_summary_command_streaming(
+        &mut self,
+        input: AiConversationInput,
+        on_token: &mut dyn FnMut(&str) -> Result<(), String>,
+    ) -> Result<Option<AiPreparation>, String> {
+        self.prepare_summary_command_transaction(input, on_token)
+            .map(Some)
+    }
+
     fn record_ignored(&mut self, input: AiConversationInput) -> Result<(), String> {
         self.state.record_incoming(&input)
     }
@@ -780,6 +936,25 @@ where
             }
             (PendingKind::MediaCommand, false, false) => {
                 "transcribe_command_provider_usage_before_delivery_failure"
+            }
+            (
+                PendingKind::SummaryCommand {
+                    provider_failed: true,
+                },
+                true,
+                false,
+            ) => "summary_stream_provider_usage_before_fallback",
+            (
+                PendingKind::SummaryCommand {
+                    provider_failed: true,
+                },
+                true,
+                true,
+            ) => "summary_stream_fallback",
+            (PendingKind::SummaryCommand { .. }, true, _) => "summary_command_stream_success",
+            (PendingKind::SummaryCommand { .. }, false, true) => "summary_stream_failed",
+            (PendingKind::SummaryCommand { .. }, false, false) => {
+                "summary_stream_provider_usage_before_delivery_failure"
             }
         };
         record_and_settle(
@@ -914,6 +1089,55 @@ fn media_command_success(
     }
 }
 
+fn summary_prompt(custom: &str, locale: Locale) -> String {
+    let custom = custom.trim();
+    let custom = custom
+        .split_once(char::is_whitespace)
+        .filter(|(first, _)| first.chars().all(|character| character.is_ascii_digit()))
+        .map_or_else(
+            || {
+                (!custom.is_empty() && !custom.chars().all(|character| character.is_ascii_digit()))
+                    .then_some(custom)
+            },
+            |(_, remaining)| Some(remaining.trim()),
+        )
+        .filter(|value| !value.is_empty());
+    let base = match locale {
+        Locale::Es => {
+            "actualizá el resumen anterior con los mensajes nuevos. entre 10 y 20 items cortos y concretos si hay material suficiente, uno por línea. incluí solo hechos relevantes: tema, decisiones, pendientes y datos clave. evitá relleno, repetición, contexto innecesario y frases largas. NUNCA uses markdown: no negritas, no headers, no tablas. usá solo guiones (-) al inicio de cada item."
+        }
+        Locale::En => {
+            "update the previous summary with the new messages. use 10 to 20 short, concrete items when there is enough material, one per line. include only relevant facts: topic, decisions, pending work, and key data. avoid filler, repetition, unnecessary context, and long sentences. NEVER use markdown: no bold text, headings, or tables. use only hyphens (-) at the start of each item."
+        }
+    };
+    custom.map_or_else(|| base.to_owned(), |custom| format!("{custom}. {base}"))
+}
+
+fn summary_empty(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Es => "no hay mensajes para resumir",
+        Locale::En => "there are no messages to summarize",
+    }
+}
+
+fn summary_error(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Es => "no pude generar el resumen",
+        Locale::En => "I could not generate the summary",
+    }
+}
+
+fn internal_summary_cache_segment(text: &str) -> Value {
+    json!({
+        "kind": "summary",
+        "text": text,
+        "model": crate::native_ai::PRIMARY_CHAT_MODEL,
+        "source": "cache",
+        "cached": true,
+        "metadata": {"pricing_basis": "internal_cache"}
+    })
+}
+
 fn append_media_context(messages: &mut [PromptMessage], media: &MediaExecution, locale: Locale) {
     let context = match (media.kind, locale) {
         (MediaKind::Image, Locale::Es) => format!("[Imagen: {}]", media.text),
@@ -945,6 +1169,13 @@ fn partial_failure(error: ChatToolLoopError) -> (String, Vec<Value>, Vec<String>
 fn operation_id(input: &AiConversationInput) -> String {
     format!(
         "ai:{}:{}:{}",
+        input.chat_id.0, input.message_id.0, input.sender_id.0
+    )
+}
+
+fn summary_operation_id(input: &AiConversationInput) -> String {
+    format!(
+        "summary:{}:{}:{}",
         input.chat_id.0, input.message_id.0, input.sender_id.0
     )
 }
@@ -1607,6 +1838,137 @@ mod tests {
             Ok(())
         );
         assert_eq!(service.billing.settlements[0].actual_credit_units, 0);
+    }
+
+    #[test]
+    fn summary_command_streams_custom_prompt_and_settles_summary_usage() {
+        let mut service = conversation(
+            vec![Ok(round("**synthetic summary**", None))],
+            Billing::default(),
+        );
+        let mut request = input();
+        request.command = "/summary".to_owned();
+        request.message_text = "25 focus on decisions".to_owned();
+        let mut streamed = String::new();
+        let preparation = service.prepare_summary_command_streaming(request, &mut |token| {
+            streamed.push_str(token);
+            Ok(())
+        });
+        let Ok(Some(AiPreparation::Reply {
+            text,
+            completion_id: Some(completion_id),
+            ..
+        })) = preparation
+        else {
+            return;
+        };
+        assert_eq!(streamed, "**synthetic summary**");
+        assert_eq!(text, "synthetic summary");
+        let prompts = service.provider.prompts.borrow();
+        let PromptContent::Text(prompt) =
+            &prompts[0].last().unwrap_or_else(|| unreachable!()).content
+        else {
+            return;
+        };
+        assert!(prompt.starts_with("focus on decisions. update the previous summary"));
+        drop(prompts);
+
+        assert_eq!(
+            service.complete_delivery(AiDelivery {
+                completion_id,
+                delivered: true,
+                sent_message_id: Some(MessageId(99)),
+            }),
+            Ok(())
+        );
+        assert_eq!(service.billing.segments[0].segment["kind"], "summary");
+        assert_eq!(
+            service.billing.settlements[0].reason,
+            "summary_command_stream_success"
+        );
+        assert!(service.state.outgoing.is_empty());
+    }
+
+    #[test]
+    fn summary_command_returns_cached_or_empty_text_without_provider_io() {
+        let mut cached = conversation(Vec::new(), Billing::default());
+        cached.state.memory.history.clear();
+        cached.state.memory.summary = Some("**cached summary**".to_owned());
+        let mut cached_tokens = String::new();
+        let cached_result = cached.prepare_summary_command_streaming(input(), &mut |token| {
+            cached_tokens.push_str(token);
+            Ok(())
+        });
+        let Ok(Some(AiPreparation::Reply {
+            text,
+            completion_id: Some(completion_id),
+            ..
+        })) = cached_result
+        else {
+            return;
+        };
+        assert_eq!(text, "cached summary");
+        assert_eq!(cached_tokens, "cached summary");
+        assert!(cached.provider.prompts.borrow().is_empty());
+        assert_eq!(
+            cached.complete_delivery(AiDelivery {
+                completion_id,
+                delivered: true,
+                sent_message_id: Some(MessageId(99)),
+            }),
+            Ok(())
+        );
+        assert_eq!(cached.billing.settlements[0].actual_credit_units, 0);
+
+        let mut empty = conversation(Vec::new(), Billing::default());
+        empty.state.memory.history.clear();
+        empty.state.memory.summary = None;
+        let empty_result = empty.prepare_summary_command_streaming(input(), &mut |_token| Ok(()));
+        assert!(matches!(
+            empty_result,
+            Ok(Some(AiPreparation::Reply { ref text, .. }))
+                if text == "there are no messages to summarize"
+        ));
+        assert!(empty.provider.prompts.borrow().is_empty());
+    }
+
+    #[test]
+    fn summary_provider_failure_refunds_empty_usage_after_delivery() {
+        let mut service = conversation(
+            vec![Err(ChatRoundError {
+                source: OpenRouterChatError::IncompleteStream,
+                partial: Box::new(ChatRoundResult {
+                    text: String::new(),
+                    tool_calls: Vec::new(),
+                    finish_reason: None,
+                    billing_segment: None,
+                }),
+            })],
+            Billing::default(),
+        );
+        let preparation = service.prepare_summary_command_streaming(input(), &mut |_token| Ok(()));
+        let Ok(Some(AiPreparation::Reply {
+            text,
+            completion_id: Some(completion_id),
+            ..
+        })) = preparation
+        else {
+            return;
+        };
+        assert_eq!(text, "I could not generate the summary");
+        assert_eq!(
+            service.complete_delivery(AiDelivery {
+                completion_id,
+                delivered: true,
+                sent_message_id: Some(MessageId(99)),
+            }),
+            Ok(())
+        );
+        assert_eq!(service.billing.settlements[0].actual_credit_units, 0);
+        assert_eq!(
+            service.billing.settlements[0].reason,
+            "summary_stream_fallback"
+        );
     }
 
     #[test]

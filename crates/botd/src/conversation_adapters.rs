@@ -9,8 +9,8 @@ use bot_core::command_state::{
     BOT_MESSAGE_METADATA_TTL_SECONDS, CHAT_HISTORY_WRITE_LIMIT, CHAT_STATE_TTL_SECONDS,
 };
 use bot_core::message_state::{
-    bot_message_metadata_key, chat_members_key, chat_summary_key, prepare_chat_member_payload,
-    prepare_message_write,
+    bot_message_metadata_key, chat_compacted_until_key, chat_members_key, chat_summary_key,
+    prepare_chat_member_payload, prepare_message_write,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -192,6 +192,33 @@ impl ConversationState for RedisConversationState {
         Ok(())
     }
 
+    fn load_summary_memory(
+        &mut self,
+        chat_id: &str,
+        max_history_messages: usize,
+    ) -> Result<ConversationMemory, String> {
+        let limit = i64::try_from(max_history_messages)
+            .map_err(|_| "summary history limit exceeds the Redis range".to_owned())?;
+        let entries = self
+            .state
+            .get_history_entries(chat_id, limit)
+            .map_err(|error| error.to_string())?;
+        let summary = self
+            .state
+            .get_value(&chat_summary_key(chat_id))
+            .map_err(|error| error.to_string())?
+            .filter(|value| !value.is_empty());
+        let marker = if summary.is_some() {
+            self.state
+                .get_value(&chat_compacted_until_key(chat_id))
+                .map_err(|error| error.to_string())?
+                .filter(|value| !value.is_empty())
+        } else {
+            None
+        };
+        Ok(decode_summary_memory(entries, summary, marker))
+    }
+
     fn record_outgoing(
         &mut self,
         input: &AiConversationInput,
@@ -226,6 +253,36 @@ impl ConversationState for RedisConversationState {
                 .map_err(|error| error.to_string())?;
         }
         Ok(())
+    }
+}
+
+fn decode_summary_memory(
+    entries: Vec<String>,
+    summary: Option<String>,
+    marker: Option<String>,
+) -> ConversationMemory {
+    let mut parsed = decode_history(entries);
+    if let Some(marker) = marker
+        && let Some(index) = parsed.iter().position(|entry| entry.id == marker)
+    {
+        parsed.drain(..=index);
+    }
+    let history = parsed
+        .into_iter()
+        .filter(|entry| !entry.text.is_empty())
+        .map(|entry| HistoryMessage {
+            role: role(&entry.role, &entry.id),
+            text: if role(&entry.role, &entry.id) == PromptRole::Assistant {
+                sanitize_assistant_text(&entry.text)
+            } else {
+                entry.text
+            },
+        })
+        .collect();
+    ConversationMemory {
+        summary,
+        history,
+        retrieved: Vec::new(),
     }
 }
 
@@ -366,7 +423,7 @@ fn user_identity(input: &AiConversationInput) -> String {
 mod tests {
     use bot_core::ai_prompt::PromptRole;
 
-    use super::{decode_history, history_sort_key, role};
+    use super::{decode_history, decode_summary_memory, history_sort_key, role};
 
     #[test]
     fn history_decoder_sorts_user_then_bot_and_preserves_legacy_roles() {
@@ -385,5 +442,28 @@ mod tests {
             PromptRole::Assistant
         );
         assert!(history_sort_key(&entries[0]) < history_sort_key(&entries[1]));
+    }
+
+    #[test]
+    fn summary_memory_uses_only_entries_after_a_valid_marker() {
+        let entries = vec![
+            r#"{"id":"1","text":"old","timestamp":1,"role":"user"}"#.to_owned(),
+            r#"{"id":"2","text":"marker","timestamp":2,"role":"assistant"}"#.to_owned(),
+            r#"{"id":"3","text":"new","timestamp":3,"role":"user"}"#.to_owned(),
+        ];
+        let compacted = decode_summary_memory(
+            entries.clone(),
+            Some("prior summary".to_owned()),
+            Some("2".to_owned()),
+        );
+        assert_eq!(compacted.history.len(), 1);
+        assert_eq!(compacted.history[0].text, "new");
+
+        let missing_marker = decode_summary_memory(
+            entries,
+            Some("prior summary".to_owned()),
+            Some("missing".to_owned()),
+        );
+        assert_eq!(missing_marker.history.len(), 3);
     }
 }

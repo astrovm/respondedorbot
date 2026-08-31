@@ -104,6 +104,14 @@ pub trait AiConversationSource {
         Ok(None)
     }
 
+    fn prepare_summary_command_streaming(
+        &mut self,
+        _input: AiConversationInput,
+        _on_token: &mut dyn FnMut(&str) -> Result<(), String>,
+    ) -> Result<Option<AiPreparation>, String> {
+        Ok(None)
+    }
+
     fn record_ignored(&mut self, _input: AiConversationInput) -> Result<(), String> {
         Ok(())
     }
