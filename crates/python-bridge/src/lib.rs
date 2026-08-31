@@ -3180,9 +3180,6 @@ fn plan_native_stateless_command(
         locale,
     ) {
         StatelessCommandPlan::NotHandled => serde_json::json!({"kind":"not_handled"}),
-        StatelessCommandPlan::LegacyFallbackRequired => {
-            serde_json::json!({"kind":"legacy_fallback_required"})
-        }
         StatelessCommandPlan::Action(bot_core::telegram_actions::TelegramAction::SendMessage(
             message,
         )) => serde_json::json!({

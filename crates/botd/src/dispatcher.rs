@@ -2730,7 +2730,7 @@ where
                     StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
                 }
                 CreditLogPlan::NotHandled => StatelessCommandPlan::NotHandled,
-                CreditLogPlan::LegacyRequired => StatelessCommandPlan::LegacyFallbackRequired,
+                CreditLogPlan::LegacyRequired => StatelessCommandPlan::NotHandled,
             }
         } else if classify_bcra_command(&parsed.command) {
             let Some(source) = self.bcra_source.as_mut() else {
@@ -2938,7 +2938,7 @@ where
             StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if parsed.command == "/random" {
             match parse_random_selection(&parsed.message_text) {
-                Err(_) => StatelessCommandPlan::LegacyFallbackRequired,
+                Err(_) => StatelessCommandPlan::NotHandled,
                 Ok(RandomSelection::Invalid) => {
                     let text = match locale {
                         bot_core::locale::Locale::Es => {
@@ -3058,15 +3058,14 @@ where
                 }
                 Ok(DispatchOutcome::Handled)
             }
-            StatelessCommandPlan::NotHandled | StatelessCommandPlan::LegacyFallbackRequired => self
-                .dispatch_ai_message(
-                    message,
-                    &config,
-                    locale,
-                    timestamp,
-                    &parsed.command,
-                    &parsed.message_text,
-                ),
+            StatelessCommandPlan::NotHandled => self.dispatch_ai_message(
+                message,
+                &config,
+                locale,
+                timestamp,
+                &parsed.command,
+                &parsed.message_text,
+            ),
         }
     }
 
@@ -4597,7 +4596,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatches_ascii_command_conversion_and_requires_ai_for_unicode_input() {
+    fn dispatches_ascii_emoji_and_japanese_command_conversion_natively() {
         let config = Config {
             value: Ok(ChatConfig {
                 language: "en".to_owned(),
@@ -4624,7 +4623,7 @@ mod tests {
         );
         assert_eq!(
             dispatcher.dispatch(update("/command もうすぐです", Some("es"))),
-            Err(DispatchError::MissingService("AI conversation"))
+            Ok(DispatchOutcome::Handled)
         );
         let texts = dispatcher
             .actions
@@ -4639,11 +4638,12 @@ mod tests {
             texts,
             vec![
                 "/HELLO_SIGNODEEXCLAMACION_WORLD",
-                "send the text you want to convert"
+                "send the text you want to convert",
+                "/MOUSUGUDESU"
             ]
         );
-        assert_eq!(dispatcher.state.incoming.len(), 2);
-        assert_eq!(dispatcher.state.outgoing.len(), 2);
+        assert_eq!(dispatcher.state.incoming.len(), 3);
+        assert_eq!(dispatcher.state.outgoing.len(), 3);
     }
 
     #[test]

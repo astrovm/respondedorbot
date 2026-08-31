@@ -1,7 +1,7 @@
 //! Native plans for commands that require no external state.
 
 use crate::base_conversion::{BaseConversion, convert_base};
-use crate::command_normalization::normalize_command_text;
+use crate::command_normalization::{normalize_command_text, preprocess_command_text};
 use crate::command_parsing::parse_command;
 use crate::help_catalog::render_help_text;
 use crate::locale::Locale;
@@ -11,7 +11,6 @@ use crate::telegram_input::{ChatId, MessageId};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatelessCommandPlan {
     NotHandled,
-    LegacyFallbackRequired,
     Action(TelegramAction),
 }
 
@@ -97,13 +96,8 @@ pub fn plan_stateless_command(
             message.reply_to_message_id = Some(message_id);
             return StatelessCommandPlan::Action(TelegramAction::SendMessage(message));
         }
-        // The legacy adapter first expands emoji with locale-specific names and
-        // romanizes Japanese text. Keep non-ASCII input on that path until those
-        // preprocessing contracts have native implementations.
-        if !parsed.message_text.is_ascii() {
-            return StatelessCommandPlan::LegacyFallbackRequired;
-        }
-        let text = normalize_command_text(&parsed.message_text).unwrap_or_else(|| match locale {
+        let preprocessed = preprocess_command_text(&parsed.message_text, locale);
+        let text = normalize_command_text(&preprocessed).unwrap_or_else(|| match locale {
             Locale::Es => {
                 "no me mandes giladas boludo, tiene que tener letras o numeros".to_owned()
             }
@@ -117,7 +111,7 @@ pub fn plan_stateless_command(
         return StatelessCommandPlan::NotHandled;
     }
     let Ok(result) = convert_base(&parsed.message_text) else {
-        return StatelessCommandPlan::LegacyFallbackRequired;
+        return StatelessCommandPlan::NotHandled;
     };
     let mut message = SendMessage::new(chat_id, &render_base_conversion(&result, locale));
     message.reply_to_message_id = Some(message_id);
@@ -168,9 +162,7 @@ mod tests {
             StatelessCommandPlan::Action(TelegramAction::SendMessage(message)) => {
                 Some(message.text)
             }
-            StatelessCommandPlan::NotHandled
-            | StatelessCommandPlan::LegacyFallbackRequired
-            | StatelessCommandPlan::Action(_) => None,
+            StatelessCommandPlan::NotHandled | StatelessCommandPlan::Action(_) => None,
         }
     }
 
@@ -255,7 +247,17 @@ mod tests {
                 "@bot",
                 Locale::En,
             )),
-            None
+            Some("/COLLISION".to_owned())
+        );
+        assert_eq!(
+            message_text(plan_stateless_command(
+                ChatId(1),
+                MessageId(2),
+                "/comando 💥",
+                "@bot",
+                Locale::Es,
+            )),
+            Some("/COLISION".to_owned())
         );
         assert_eq!(
             message_text(plan_stateless_command(
