@@ -4,6 +4,8 @@ pub mod ai_dispatch;
 pub mod chat_members_tool;
 pub mod chat_provider;
 pub mod chat_tool_loop;
+pub mod compaction_adapters;
+pub mod compaction_worker;
 pub mod composition;
 pub mod config;
 pub mod conversation;
