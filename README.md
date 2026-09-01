@@ -1,88 +1,125 @@
-# respondedorbot
+# Respondedorbot
 
-An AI Telegram bot that plays "el gordo", a blunt Argentine character that replies in lowercase using Argentine slang. The application is one native Rust binary.
+An AI Telegram bot with an Argentine personality.
 
-**[t.me/respondedorbot](https://t.me/respondedorbot)**
+It streams replies, remembers conversations, understands media, tracks markets,
+manages AI credits, and runs scheduled tasks.
 
-## Features
+**Try it:** [t.me/respondedorbot](https://t.me/respondedorbot)
 
-- Streaming AI chat with conversation memory, web search, tools, and provider fallback
-- Crypto, stock, ETF, index, fund, futures, dollar, BCRA, weather, Polymarket, and Hacker News data
-- Audio transcription, image description, summaries, and memory compaction
-- Telegram Stars billing, shared group credits, transfers, charge history, and reconciliation
-- Durable scheduled tasks with leases, recurrence, cancellation, and restart recovery
-- Telegram callbacks, payments, media, command localization, and supported-link repair
+## What it can do
 
-## Build and run
+- Chat with AI, memory, web search, tools, and provider fallback
+- Transcribe audio and describe images
+- Summarize conversations
+- Show crypto, market, dollar, BCRA, weather, and Polymarket data
+- Manage Telegram Stars, AI credits, transfers, and charge history
+- Create recurring or one-time scheduled tasks
+- Repair supported links and handle localized Telegram commands
 
-Requirements: Rust 1.98, PostgreSQL, Redis Stack with RediSearch, and FFmpeg.
+## Run it locally
+
+### 1. Install the requirements
+
+- Rust 1.98
+- PostgreSQL
+- Redis Stack with RediSearch
+- FFmpeg
+
+### 2. Create the configuration
 
 ```bash
 cp .env.example .env
-# Configure the required secrets and either BOT_SYSTEM_PROMPT or workspace/SOUL.md.
+```
+
+Edit `.env` and set these values:
+
+| Variable | What it is for |
+| --- | --- |
+| `TELEGRAM_TOKEN` | Telegram bot token from BotFather |
+| `TELEGRAM_USERNAME` | Bot username, with or without `@` |
+| `SUPABASE_POSTGRES_URL` | PostgreSQL database URL |
+| `COINMARKETCAP_KEY` | Crypto market data |
+| `OPENROUTER_API_KEY` | AI chat, vision, summaries, and fallback |
+
+The bot also needs a personality prompt. Choose one option:
+
+- Set `BOT_SYSTEM_PROMPT` in `.env`.
+- Create `workspace/SOUL.md` and, optionally, `workspace/RULES.md`.
+
+Redis uses `localhost:6379` by default. See [.env.example](.env.example) for
+optional providers, monitoring, polling, and maintenance settings.
+
+### 3. Build and check the configuration
+
+```bash
 cargo build --locked --release -p botd
+
 set -a
 . ./.env
 set +a
+
 ./target/release/botd --check-config
+```
+
+### 4. Start the bot
+
+```bash
 ./target/release/botd
 ```
 
-The process owns Telegram polling, background price refresh, memory compaction, billing reconciliation, and scheduled-task execution. Stop it with `SIGINT` or `SIGTERM`; shutdown waits for background workers.
+Stop it with `Ctrl+C`. The bot waits for background work to finish before it
+exits.
 
-## Configuration
+> [!IMPORTANT]
+> For Supabase, use the session pooler on port `5432` with `sslmode=require`.
+> Do not use the transaction pooler on port `6543`.
 
-| Required variable | Purpose |
+## Main commands
+
+### AI and media
+
+| Command | Purpose |
 | --- | --- |
-| `TELEGRAM_TOKEN` | Bot token from BotFather |
-| `TELEGRAM_USERNAME` | Bot username, with or without `@` |
-| `SUPABASE_POSTGRES_URL` | PostgreSQL billing and chat-configuration database |
-| `COINMARKETCAP_KEY` | CoinMarketCap API key |
-| `OPENROUTER_API_KEY` | OpenRouter chat, vision, summary, and fallback key |
-| `BOT_SYSTEM_PROMPT` | Complete personality prompt; may instead come from `workspace/SOUL.md` and `workspace/RULES.md` |
+| `/ask`, `/pregunta`, `/che`, `/gordo` | Chat with AI |
+| `/resumen`, `/summary`, `/tldr` | Summarize the conversation |
+| `/transcribe`, `/describe` | Transcribe audio or describe images |
 
-Redis defaults to `localhost:6379`. Optional provider, reconciliation, polling, maintenance, and monitoring settings are documented in [.env.example](.env.example).
+### Data
 
-For a long-running Supabase deployment, use the session pooler on port `5432`. The transaction pooler on port `6543` does not support the prepared statements used by this process. Keep `sslmode=require` and do not append connection options that the PostgreSQL driver does not recognize. PostgreSQL connections trust the bundled public Supabase Root 2021 CA without adding it to the image-wide trust store; its SHA-256 fingerprint is `80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA`. Verify certificate rotations against the [Supabase dashboard and SSL documentation](https://supabase.com/docs/guides/database/connecting-to-postgres#connecting-with-ssl) before updating the bundled certificate.
+| Command | Purpose |
+| --- | --- |
+| `/prices`, `/precios`, `/c` | Crypto and traditional markets |
+| `/crypto`, `/criptos` | Crypto prices and conversions |
+| `/clima`, `/weather` | Current weather |
+| `/dolar`, `/dollar`, `/usd` | Dollar rates |
+| `/acciones`, `/stocks` | Stock prices |
+| `/petroleo`, `/oil` | Oil prices |
+| `/eleccion`, `/elections` | Polymarket elections |
+| `/bcra`, `/variables` | BCRA variables |
+| `/devo`, `/rulo` | Arbitrage calculations |
+| `/powerlaw`, `/rainbow`, `/satoshi` | Bitcoin reference models |
 
-## Commands
+### Bot tools
 
-| Command | Main aliases | Description |
-| --- | --- | --- |
-| `/ask` | `/pregunta`, `/che`, `/gordo` | AI chat |
-| `/resumen` | `/summary`, `/tldr` | Conversation summary |
-| `/transcribe` | `/describe` | Audio transcription or image description |
-| `/prices` | `/price`, `/precios`, `/precio`, `/c` | Crypto and traditional-market prices |
-| `/crypto` | `/criptos` | Crypto-only prices and conversions |
-| `/clima` | `/weather` | Current weather |
-| `/dolar` | `/dollar`, `/usd` | Dollar rates |
-| `/petroleo` | `/oil` | Oil prices |
-| `/acciones` | `/stocks` | Stock prices |
-| `/eleccion` | `/elections` | Polymarket elections |
-| `/devo`, `/rulo` |  | Arbitrage calculations |
-| `/powerlaw`, `/rainbow`, `/satoshi` | `/sat`, `/sats` | Bitcoin reference models |
-| `/bcra` | `/variables` | BCRA variables |
-| `/random`, `/convertbase`, `/comando`, `/time` | `/command` | Utilities |
-| `/config`, `/language` | `/settings`, `/idioma` | Chat settings and language |
-| `/topup`, `/balance`, `/charges`, `/transfer` | `/history`, `/gastos` | Credits and billing |
-| `/tarea`, `/tareas` | `/task`, `/tasks` | Create, list, and cancel tasks |
-| `/gm`, `/gn`, `/help`, `/instance` |  | Greetings and bot information |
+| Command | Purpose |
+| --- | --- |
+| `/config`, `/settings` | Chat settings |
+| `/language`, `/idioma` | Language settings |
+| `/topup`, `/balance` | Add or check AI credits |
+| `/charges`, `/history`, `/gastos` | Credit history |
+| `/transfer` | Move credits to a group |
+| `/tarea`, `/task`, `/tareas`, `/tasks` | Manage scheduled tasks |
+| `/random`, `/convertbase`, `/comando`, `/time` | Utilities |
+| `/gm`, `/gn`, `/help`, `/instance` | Greetings and bot information |
 
-`/prices` resolves crypto through CoinMarketCap, then unresolved symbols and company names through Yahoo Finance. Full Solana/EVM addresses and `$ticker` messages use token cards where available.
+`/prices` checks CoinMarketCap first, then Yahoo Finance for unresolved symbols
+and company names. Full Solana/EVM addresses and `$ticker` messages use token
+cards when available.
 
-## Architecture
+## Test it
 
-```text
-botd             composition, polling, workers, scheduling, orchestration
-  -> bot-adapters Telegram, HTTP, Redis, PostgreSQL, providers, media
-       -> bot-core deterministic domain types, parsing, routing, and state machines
-```
-
-The dependency direction is enforced by the Cargo workspace. Untrusted payloads are decoded at adapter boundaries. Core routing, billing, AI, and scheduling behavior uses typed states and actions.
-
-Detailed design and operational contracts are in [Architecture](docs/ARCHITECTURE.md), [Billing](docs/BILLING.md), [Persistence](docs/PERSISTENCE.md), and [Testing](docs/TESTING.md).
-
-## Tests and quality gates
+Run the same checks used by pull requests:
 
 ```bash
 cargo fmt --all -- --check
@@ -91,34 +128,81 @@ cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
 ```
 
-Integration tests use synthetic data. Set `TEST_REDIS_URL`, `TEST_POSTGRES_URL`, and `TEST_DATABASE_URL` to exercise Redis Stack and PostgreSQL paths. CI enforces line coverage of 95% for `bot-core`, 85% for `bot-adapters`, and 80% for the I/O-heavy `botd` composition crate.
+Integration tests use synthetic data. Set `TEST_REDIS_URL`,
+`TEST_POSTGRES_URL`, and `TEST_DATABASE_URL` to include Redis Stack and
+PostgreSQL tests.
 
-## Container and deployment
+Coverage requirements:
+
+- `bot-core`: 95%
+- `bot-adapters`: 85%
+- `botd`: 80%
+
+More detail: [Testing](docs/TESTING.md)
+
+## How the code is organized
+
+```text
+botd          Starts the app and connects all services
+  |
+  +-- bot-adapters   Telegram, HTTP, Redis, PostgreSQL, AI, and media
+        |
+        +-- bot-core   Parsing, routing, state machines, and domain rules
+```
+
+Dependencies point toward `bot-core`. External payloads are decoded in
+`bot-adapters`, while deterministic behavior stays in `bot-core`.
+
+| Path | Contents |
+| --- | --- |
+| `crates/bot-core` | Domain behavior and state machines |
+| `crates/bot-adapters` | External service implementations |
+| `crates/botd` | Executable and composition root |
+| `docs` | Architecture, persistence, billing, and testing |
+| `quadlets`, `systemd` | Deployment and maintenance units |
+| `Containerfile` | Rust-only production image |
+
+Read more: [Architecture](docs/ARCHITECTURE.md) ·
+[Billing](docs/BILLING.md) · [Persistence](docs/PERSISTENCE.md)
+
+## Deploy with Podman
+
+<details>
+<summary>Show deployment commands</summary>
 
 ```bash
 podman build --tag respondedorbot:local .
-mkdir -p ~/.config/containers/systemd ~/.config/systemd/user ~/respondedorbot/workspace
+
+mkdir -p ~/.config/containers/systemd
+mkdir -p ~/.config/systemd/user
+mkdir -p ~/respondedorbot/workspace
+
 cp quadlets/* ~/.config/containers/systemd/
-cp systemd/respondedorbot-maintenance.* systemd/respondedorbot-podman-prune.* ~/.config/systemd/user/
+cp systemd/respondedorbot-maintenance.* ~/.config/systemd/user/
+cp systemd/respondedorbot-podman-prune.* ~/.config/systemd/user/
 cp .env.example ~/respondedorbot/.env
-# Create ~/respondedorbot/workspace/SOUL.md and RULES.md, or set BOT_SYSTEM_PROMPT.
+
 podman run --rm --env-file ~/respondedorbot/.env \
   -v ~/respondedorbot/workspace:/app/workspace:ro \
   respondedorbot:local /usr/local/bin/botd --check-config
+
 systemctl --user daemon-reload
-systemctl --user enable --now respondedorbot-maintenance.timer respondedorbot-podman-prune.timer
-systemctl --user start respondedorbot-redis.service respondedorbot.service
+systemctl --user enable --now respondedorbot-maintenance.timer
+systemctl --user enable --now respondedorbot-podman-prune.timer
+systemctl --user start respondedorbot-redis.service
+systemctl --user start respondedorbot.service
 ```
 
-The runtime image contains `/usr/local/bin/botd`, FFmpeg, and native shared libraries. It contains no scripting-language runtime. The binary scopes its bundled public Supabase root CA to PostgreSQL connections. Run maintenance with `podman exec systemd-respondedorbot /usr/local/bin/botd --maintenance`. The Quadlet gives the process up to 600 seconds to finish interruptible background work before Podman forces termination; systemd retains a 30-second margin around that deadline.
+Before starting, edit `~/respondedorbot/.env` and add the personality files to
+`~/respondedorbot/workspace`, or set `BOT_SYSTEM_PROMPT`.
 
-CI publishes `latest` and immutable `sha-<full-commit-sha>` images. Roll back by pinning the Quadlet `Image=` line to a previously verified SHA tag, reloading user units, and restarting the service. Never run two pollers with the same Telegram token.
+</details>
 
-## Repository layout
+The runtime image contains `botd`, FFmpeg, and native shared libraries. CI
+publishes `latest` and immutable `sha-<full-commit-sha>` images.
 
-- `crates/bot-core` — deterministic application and domain behavior
-- `crates/bot-adapters` — external-system implementations
-- `crates/botd` — native executable and composition root
-- `docs` — architecture, persistence, billing, testing, and accepted decisions
-- `quadlets`, `systemd` — deployment and maintenance units
-- `Containerfile` — Rust-only production image
+To roll back, pin the Quadlet `Image=` setting to a verified SHA tag, reload
+the user units, and restart the service.
+
+> [!WARNING]
+> Never run two pollers with the same Telegram token.
