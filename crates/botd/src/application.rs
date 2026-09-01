@@ -15,7 +15,9 @@ use bot_core::telegram_commands::command_publication_actions;
 use crate::background::{
     BackgroundSupervisor, ProductionBackgroundOptions, build_production_background_specs,
 };
-use crate::composition::{NativeRuntimeOptions, TelegramActionSink, build_native_runtime};
+use crate::composition::{
+    NativeRuntimeOptions, TelegramActionSink, TelegramDeliveryCoordinator, build_native_runtime,
+};
 use crate::config::ProductionConfig;
 use crate::dispatcher::ActionSink;
 use crate::operational_reporting::{
@@ -161,6 +163,7 @@ fn report_best_effort(reporter: &dyn OperationalReporter, report: &OperationalRe
 pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
     let reporter = build_operational_reporter(config)?;
     let active_operations = ActiveOperationRegistry::default();
+    let telegram_delivery = TelegramDeliveryCoordinator::default();
     let openrouter_base_url = config
         .openrouter_base_url
         .as_deref()
@@ -183,6 +186,7 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
         system_prompt: Some(config.system_prompt.clone()),
         trigger_words: Some(config.trigger_words.clone()),
         active_operations: active_operations.clone(),
+        telegram_delivery: telegram_delivery.clone(),
     })
     .map_err(|error| error.to_string())?;
     let specs = build_production_background_specs(ProductionBackgroundOptions {
@@ -198,6 +202,7 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
         reconciliation_settings: config.reconciliation_settings,
         active_operations,
         coinmarketcap_key: Some(config.coinmarketcap_key()),
+        telegram_delivery: telegram_delivery.clone(),
     })?;
     let mut supervisor =
         BackgroundSupervisor::start(specs, reporter.clone()).map_err(|error| error.to_string())?;
@@ -205,7 +210,8 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
     let command_transport = ReqwestTelegramTransport::new()
         .map_err(|error| format!("could not construct command publication transport: {error:?}"))?;
     let mut command_sink =
-        TelegramActionSink::new(command_transport, config.runtime.telegram_token());
+        TelegramActionSink::new(command_transport, config.runtime.telegram_token())
+            .with_delivery_coordinator(telegram_delivery);
     for diagnostic in publish_commands(&mut command_sink) {
         eprintln!("{}", diagnostic.english());
         report_best_effort(reporter.as_ref(), &diagnostic);

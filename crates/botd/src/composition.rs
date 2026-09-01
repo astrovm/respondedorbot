@@ -1,5 +1,7 @@
 //! Concrete adapter composition for the native Telegram runtime.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bot_adapters::bcra::{
@@ -876,6 +878,56 @@ pub enum TelegramActionSinkError {
 pub struct TelegramActionSink<Transport> {
     transport: Transport,
     token: String,
+    wait: Box<dyn FnMut(Duration) + Send>,
+    delivery: TelegramDeliveryCoordinator,
+}
+
+const TELEGRAM_ACTION_MAX_ATTEMPTS: usize = 3;
+const TELEGRAM_ACTION_DEFAULT_RETRY_SECONDS: u64 = 1;
+const TELEGRAM_DELIVERY_LOCK_CLEANUP_THRESHOLD: usize = 1_024;
+
+#[derive(Clone, Default)]
+pub struct TelegramDeliveryCoordinator {
+    locks: Arc<Mutex<HashMap<i64, Weak<Mutex<()>>>>>,
+}
+
+impl TelegramDeliveryCoordinator {
+    fn delivery_lock(&self, chat_id: i64) -> Arc<Mutex<()>> {
+        let mut locks = lock_unpoisoned(&self.locks);
+        if let Some(lock) = locks.get(&chat_id).and_then(Weak::upgrade) {
+            return lock;
+        }
+        if locks.len() >= TELEGRAM_DELIVERY_LOCK_CLEANUP_THRESHOLD {
+            locks.retain(|_, lock| lock.strong_count() > 0);
+        }
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(chat_id, Arc::downgrade(&lock));
+        lock
+    }
+}
+
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn telegram_action_chat_id(action: &TelegramAction) -> Option<i64> {
+    match action {
+        TelegramAction::SendMessage(message) => Some(message.chat_id.0),
+        TelegramAction::SendAnimation { chat_id, .. }
+        | TelegramAction::SendVideo { chat_id, .. }
+        | TelegramAction::SendPhoto { chat_id, .. }
+        | TelegramAction::EditMessagePhoto { chat_id, .. }
+        | TelegramAction::SendInvoice { chat_id, .. }
+        | TelegramAction::SendTyping { chat_id }
+        | TelegramAction::EditMessage { chat_id, .. }
+        | TelegramAction::DeleteMessage { chat_id, .. } => Some(chat_id.0),
+        TelegramAction::SetCommands { .. }
+        | TelegramAction::AnswerCallback { .. }
+        | TelegramAction::AnswerPreCheckout { .. } => None,
+    }
 }
 
 pub struct SystemRuntimeValues {
@@ -1094,6 +1146,47 @@ impl<Transport> TelegramActionSink<Transport> {
         Self {
             transport,
             token: token.to_owned(),
+            wait: Box::new(std::thread::sleep),
+            delivery: TelegramDeliveryCoordinator::default(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_delivery_coordinator(mut self, delivery: TelegramDeliveryCoordinator) -> Self {
+        self.delivery = delivery;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_wait<Wait>(mut self, wait: Wait) -> Self
+    where
+        Wait: FnMut(Duration) + Send + 'static,
+    {
+        self.wait = Box::new(wait);
+        self
+    }
+}
+
+impl<Transport: TelegramTransport> TelegramActionSink<Transport> {
+    fn execute_with_retry(&mut self, action: TelegramAction) -> Result<ActionOutcome, ActionError> {
+        let delivery_lock =
+            telegram_action_chat_id(&action).map(|chat_id| self.delivery.delivery_lock(chat_id));
+        let _delivery_guard = delivery_lock.as_deref().map(lock_unpoisoned);
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            let outcome = execute_with(&self.transport, &self.token, action.clone())?;
+            match outcome {
+                ActionOutcome::RateLimited {
+                    retry_after_seconds,
+                } if attempts < TELEGRAM_ACTION_MAX_ATTEMPTS => {
+                    let seconds = retry_after_seconds
+                        .unwrap_or(TELEGRAM_ACTION_DEFAULT_RETRY_SECONDS)
+                        .max(1);
+                    (self.wait)(Duration::from_secs(seconds));
+                }
+                outcome => return Ok(outcome),
+            }
         }
     }
 }
@@ -1102,7 +1195,7 @@ impl<Transport: TelegramTransport> ActionSink for TelegramActionSink<Transport> 
     type Error = TelegramActionSinkError;
 
     fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
-        match execute_with(&self.transport, &self.token, action)? {
+        match self.execute_with_retry(action)? {
             ActionOutcome::Completed { message_id } => Ok(ActionReceipt {
                 message_id: message_id.map(bot_core::telegram_input::MessageId),
             }),
@@ -1126,27 +1219,27 @@ impl<Transport: TelegramTransport> ActionSink for TelegramActionSink<Transport> 
 
     fn try_edit(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
         Ok(matches!(
-            execute_with(&self.transport, &self.token, action)?,
+            self.execute_with_retry(action)?,
             ActionOutcome::Completed { .. }
         ))
     }
 
     fn try_invoice(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
         Ok(matches!(
-            execute_with(&self.transport, &self.token, action)?,
+            self.execute_with_retry(action)?,
             ActionOutcome::Completed { .. }
         ))
     }
 
     fn try_animation(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
         Ok(matches!(
-            execute_with(&self.transport, &self.token, action)?,
+            self.execute_with_retry(action)?,
             ActionOutcome::Completed { .. }
         ))
     }
 
     fn try_video(&mut self, action: TelegramAction) -> Result<Option<ActionReceipt>, Self::Error> {
-        Ok(match execute_with(&self.transport, &self.token, action)? {
+        Ok(match self.execute_with_retry(action)? {
             ActionOutcome::Completed { message_id } => Some(ActionReceipt {
                 message_id: message_id.map(bot_core::telegram_input::MessageId),
             }),
@@ -1157,7 +1250,7 @@ impl<Transport: TelegramTransport> ActionSink for TelegramActionSink<Transport> 
     }
 
     fn try_photo(&mut self, action: TelegramAction) -> Result<Option<ActionReceipt>, Self::Error> {
-        Ok(match execute_with(&self.transport, &self.token, action)? {
+        Ok(match self.execute_with_retry(action)? {
             ActionOutcome::Completed { message_id } => Some(ActionReceipt {
                 message_id: message_id.map(bot_core::telegram_input::MessageId),
             }),
@@ -1325,6 +1418,7 @@ pub struct NativeRuntimeOptions<'a> {
     pub system_prompt: Option<String>,
     pub trigger_words: Option<Vec<String>>,
     pub active_operations: ActiveOperationRegistry,
+    pub telegram_delivery: TelegramDeliveryCoordinator,
 }
 
 #[derive(Clone)]
@@ -1346,6 +1440,7 @@ struct OwnedNativeRuntimeOptions {
     system_prompt: Option<String>,
     trigger_words: Option<Vec<String>>,
     active_operations: ActiveOperationRegistry,
+    telegram_delivery: TelegramDeliveryCoordinator,
 }
 
 impl OwnedNativeRuntimeOptions {
@@ -1368,6 +1463,7 @@ impl OwnedNativeRuntimeOptions {
             system_prompt: options.system_prompt,
             trigger_words: options.trigger_words,
             active_operations: options.active_operations,
+            telegram_delivery: options.telegram_delivery,
         }
     }
 
@@ -1390,6 +1486,7 @@ impl OwnedNativeRuntimeOptions {
             system_prompt: self.system_prompt.clone(),
             trigger_words: self.trigger_words.clone(),
             active_operations: self.active_operations.clone(),
+            telegram_delivery: self.telegram_delivery.clone(),
         }
     }
 }
@@ -1647,7 +1744,8 @@ fn build_native_dispatcher(
     let token_signal_cache =
         RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::TokenSignalCache)?;
     let config = ChatConfigRepository::new(options.database_url);
-    let actions = TelegramActionSink::new(action_transport, options.token);
+    let actions = TelegramActionSink::new(action_transport, options.token)
+        .with_delivery_coordinator(options.telegram_delivery);
     let state = RedisCommandState::new(options.redis_endpoint)?;
     let task_source = RedisScheduledTaskSource {
         store: RedisTaskStore::new(options.redis_endpoint)?,
@@ -1867,6 +1965,9 @@ mod tests {
     use std::cell::RefCell;
     use std::io::{BufRead, BufReader, Write};
     use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::sync::{Arc, Condvar, Mutex};
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -1922,15 +2023,28 @@ mod tests {
     use super::{
         CriptoYaRuloSource, NativeRuntimeOptions, OpenMeteoWeatherSource, PolymarketElectionSource,
         RedisCommandState, SystemRandomError, SystemRandomSource, SystemRuntimeValues,
-        TelegramActionSink, TelegramActionSinkError, TelegramGroupAuthorizer, TelegramUpdateSource,
-        YahooOilPriceSource, YahooStockPriceSource, build_native_runtime,
-        publish_telegram_commands,
+        TelegramActionSink, TelegramActionSinkError, TelegramDeliveryCoordinator,
+        TelegramGroupAuthorizer, TelegramUpdateSource, YahooOilPriceSource, YahooStockPriceSource,
+        build_native_runtime, publish_telegram_commands,
     };
     use crate::dispatcher::RuloSource;
 
     struct Transport {
         response: RefCell<Option<Result<HttpResponse, TransportFailureKind>>>,
         requests: RefCell<Vec<TelegramRequest>>,
+    }
+
+    struct SequenceTransport {
+        responses: RefCell<Vec<Result<HttpResponse, TransportFailureKind>>>,
+        requests: RefCell<Vec<TelegramRequest>>,
+    }
+
+    #[derive(Clone)]
+    struct BlockingTelegramTransport {
+        active: Arc<AtomicUsize>,
+        maximum: Arc<AtomicUsize>,
+        entered: mpsc::Sender<()>,
+        release: Arc<(Mutex<bool>, Condvar)>,
     }
 
     struct CriptoTransport {
@@ -2081,6 +2195,33 @@ mod tests {
         }
     }
 
+    impl TelegramTransport for SequenceTransport {
+        fn send(&self, request: &TelegramRequest) -> Result<HttpResponse, TransportFailureKind> {
+            self.requests.borrow_mut().push(request.clone());
+            if self.responses.borrow().is_empty() {
+                return Err(TransportFailureKind::Request);
+            }
+            self.responses.borrow_mut().remove(0)
+        }
+    }
+
+    impl TelegramTransport for BlockingTelegramTransport {
+        fn send(&self, _request: &TelegramRequest) -> Result<HttpResponse, TransportFailureKind> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.maximum.fetch_max(active, Ordering::SeqCst);
+            let _ = self.entered.send(());
+            let (released, wake) = &*self.release;
+            if let Ok(guard) = released.lock() {
+                let _guard = wake.wait_while(guard, |released| !*released);
+            }
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(HttpResponse {
+                status_code: 200,
+                body: r#"{"ok":true,"result":{"message_id":9}}"#.to_owned(),
+            })
+        }
+    }
+
     fn transport(status_code: u16, body: &str) -> Transport {
         Transport {
             response: RefCell::new(Some(Ok(HttpResponse {
@@ -2089,6 +2230,16 @@ mod tests {
             }))),
             requests: RefCell::new(Vec::new()),
         }
+    }
+
+    fn telegram_response(
+        status_code: u16,
+        body: &str,
+    ) -> Result<HttpResponse, TransportFailureKind> {
+        Ok(HttpResponse {
+            status_code,
+            body: body.to_owned(),
+        })
     }
 
     fn read_command(reader: &mut BufReader<TcpStream>) -> std::io::Result<Vec<String>> {
@@ -2165,13 +2316,22 @@ mod tests {
             })
         );
 
-        let mut sink = TelegramActionSink::new(
-            transport(
-                429,
-                r#"{"ok":false,"error_code":429,"parameters":{"retry_after":4}}"#,
-            ),
-            "token",
-        );
+        let rate_limit = r#"{"ok":false,"error_code":429,"parameters":{"retry_after":4}}"#;
+        let transport = SequenceTransport {
+            responses: RefCell::new(vec![
+                telegram_response(429, rate_limit),
+                telegram_response(429, rate_limit),
+                telegram_response(429, rate_limit),
+            ]),
+            requests: RefCell::new(Vec::new()),
+        };
+        let waits = Arc::new(Mutex::new(Vec::new()));
+        let recorded_waits = waits.clone();
+        let mut sink = TelegramActionSink::new(transport, "token").with_wait(move |duration| {
+            if let Ok(mut waits) = recorded_waits.lock() {
+                waits.push(duration);
+            }
+        });
         assert_eq!(
             sink.execute(TelegramAction::SendMessage(SendMessage::new(
                 ChatId(1),
@@ -2181,6 +2341,94 @@ mod tests {
                 retry_after_seconds: Some(4)
             })
         );
+        assert_eq!(sink.transport.requests.borrow().len(), 3);
+        assert!(waits.lock().is_ok_and(|waits| {
+            waits.as_slice() == [Duration::from_secs(4), Duration::from_secs(4)]
+        }));
+    }
+
+    #[test]
+    fn action_sink_retries_rate_limits_and_delivers_the_original_action() {
+        let transport = SequenceTransport {
+            responses: RefCell::new(vec![
+                telegram_response(
+                    429,
+                    r#"{"ok":false,"error_code":429,"parameters":{"retry_after":2}}"#,
+                ),
+                telegram_response(200, r#"{"ok":true,"result":{"message_id":9}}"#),
+            ]),
+            requests: RefCell::new(Vec::new()),
+        };
+        let waits = Arc::new(Mutex::new(Vec::new()));
+        let recorded_waits = waits.clone();
+        let mut sink = TelegramActionSink::new(transport, "token").with_wait(move |duration| {
+            if let Ok(mut waits) = recorded_waits.lock() {
+                waits.push(duration);
+            }
+        });
+        let action = TelegramAction::SendMessage(SendMessage::new(ChatId(1), "hello"));
+
+        assert_eq!(
+            sink.execute(action),
+            Ok(ActionReceipt {
+                message_id: Some(MessageId(9))
+            })
+        );
+        assert_eq!(sink.transport.requests.borrow().len(), 2);
+        assert!(
+            waits
+                .lock()
+                .is_ok_and(|waits| waits.as_slice() == [Duration::from_secs(2)])
+        );
+    }
+
+    #[test]
+    fn action_sinks_coordinate_delivery_to_the_same_chat() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let (entered_sender, entered_receiver) = mpsc::channel();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let transport = BlockingTelegramTransport {
+            active: active.clone(),
+            maximum: maximum.clone(),
+            entered: entered_sender,
+            release: release.clone(),
+        };
+        let delivery = TelegramDeliveryCoordinator::default();
+        let mut first = TelegramActionSink::new(transport.clone(), "token")
+            .with_delivery_coordinator(delivery.clone());
+        let mut second =
+            TelegramActionSink::new(transport, "token").with_delivery_coordinator(delivery);
+
+        let first_send = thread::spawn(move || {
+            first.execute(TelegramAction::SendMessage(SendMessage::new(
+                ChatId(777),
+                "first",
+            )))
+        });
+        assert_eq!(
+            entered_receiver.recv_timeout(Duration::from_secs(1)),
+            Ok(())
+        );
+        let second_send = thread::spawn(move || {
+            second.execute(TelegramAction::SendMessage(SendMessage::new(
+                ChatId(777),
+                "second",
+            )))
+        });
+        assert!(
+            entered_receiver
+                .recv_timeout(Duration::from_millis(20))
+                .is_err()
+        );
+
+        if let Ok(mut released) = release.0.lock() {
+            *released = true;
+            release.1.notify_all();
+        }
+        assert!(first_send.join().is_ok_and(|result| result.is_ok()));
+        assert!(second_send.join().is_ok_and(|result| result.is_ok()));
+        assert_eq!(maximum.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -2676,6 +2924,7 @@ mod tests {
             system_prompt: None,
             trigger_words: None,
             active_operations: ActiveOperationRegistry::default(),
+            telegram_delivery: TelegramDeliveryCoordinator::default(),
         });
         assert!(result.is_ok());
         let result = build_native_runtime(NativeRuntimeOptions {
@@ -2696,6 +2945,7 @@ mod tests {
             system_prompt: None,
             trigger_words: None,
             active_operations: ActiveOperationRegistry::default(),
+            telegram_delivery: TelegramDeliveryCoordinator::default(),
         });
         assert!(result.is_ok());
         let result = build_native_runtime(NativeRuntimeOptions {
@@ -2716,6 +2966,7 @@ mod tests {
             system_prompt: Some("synthetic persona".to_owned()),
             trigger_words: Some(vec!["synthetic".to_owned()]),
             active_operations: ActiveOperationRegistry::default(),
+            telegram_delivery: TelegramDeliveryCoordinator::default(),
         });
         assert!(result.is_ok());
     }

@@ -2,6 +2,7 @@
 
 use std::fmt::Display;
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -53,6 +54,7 @@ pub struct ParallelUpdateHandler<Handler> {
     updates: Option<SyncSender<IncomingUpdate>>,
     failures: Receiver<UpdateFailure>,
     workers: Vec<JoinHandle<()>>,
+    stopping: Arc<AtomicBool>,
     handler: PhantomData<fn() -> Handler>,
 }
 
@@ -80,6 +82,7 @@ impl<Handler> ParallelUpdateHandler<Handler> {
         let (failure_sender, failure_receiver) = mpsc::channel();
         let (startup_sender, startup_receiver) = mpsc::channel();
         let factory = Arc::new(factory);
+        let stopping = Arc::new(AtomicBool::new(false));
         let mut workers = Vec::with_capacity(worker_count);
 
         for worker in 0..worker_count {
@@ -87,6 +90,7 @@ impl<Handler> ParallelUpdateHandler<Handler> {
             let failure_sender = failure_sender.clone();
             let startup_sender = startup_sender.clone();
             let factory = factory.clone();
+            let stopping = stopping.clone();
             workers.push(thread::spawn(move || {
                 let mut handler = match factory() {
                     Ok(handler) => {
@@ -99,6 +103,9 @@ impl<Handler> ParallelUpdateHandler<Handler> {
                     }
                 };
                 loop {
+                    if stopping.load(Ordering::Acquire) {
+                        return;
+                    }
                     let update = match update_receiver.lock() {
                         Ok(receiver) => receiver.recv(),
                         Err(_) => return,
@@ -106,6 +113,9 @@ impl<Handler> ParallelUpdateHandler<Handler> {
                     let Ok(update) = update else {
                         return;
                     };
+                    if stopping.load(Ordering::Acquire) {
+                        return;
+                    }
                     let update_id = update.update_id;
                     if let Err(error) = handler.handle(update) {
                         let _ = failure_sender.send(UpdateFailure {
@@ -142,11 +152,13 @@ impl<Handler> ParallelUpdateHandler<Handler> {
             updates: Some(update_sender),
             failures: failure_receiver,
             workers,
+            stopping,
             handler: PhantomData,
         })
     }
 
     fn stop(&mut self) {
+        self.stopping.store(true, Ordering::Release);
         self.updates.take();
         join_workers(&mut self.workers);
     }
@@ -563,8 +575,62 @@ mod tests {
         for update_id in 1..=12 {
             assert!(handler.handle(update(update_id)).is_ok());
         }
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while maximum.load(Ordering::SeqCst) < 3 && Instant::now() < deadline {
+            thread::yield_now();
+        }
         handler.shutdown();
         assert_eq!(maximum.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn shutdown_finishes_active_work_without_draining_the_backlog() {
+        struct BlockingHandler {
+            started: mpsc::Sender<i64>,
+            release: Arc<(Mutex<bool>, Condvar)>,
+        }
+        impl UpdateHandler for BlockingHandler {
+            type Error = Infallible;
+
+            fn handle(&mut self, update: IncomingUpdate) -> Result<(), Self::Error> {
+                let _ = self.started.send(update.update_id);
+                let (released, wake) = &*self.release;
+                if let Ok(guard) = released.lock() {
+                    let _guard = wake.wait_while(guard, |released| !*released);
+                }
+                Ok(())
+            }
+        }
+
+        let (started_sender, started_receiver) = mpsc::channel();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let factory_release = release.clone();
+        let handler = ParallelUpdateHandler::start(1, 3, move || {
+            Ok::<_, Infallible>(BlockingHandler {
+                started: started_sender.clone(),
+                release: factory_release.clone(),
+            })
+        });
+        assert!(handler.is_ok());
+        let Ok(mut handler) = handler else { return };
+        assert!(handler.handle(update(1)).is_ok());
+        assert_eq!(started_receiver.recv_timeout(Duration::from_secs(1)), Ok(1));
+        assert!(handler.handle(update(2)).is_ok());
+        assert!(handler.handle(update(3)).is_ok());
+
+        let stopping = handler.stopping.clone();
+        let shutdown = thread::spawn(move || handler.shutdown());
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !stopping.load(Ordering::Acquire) && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(stopping.load(Ordering::Acquire));
+        if let Ok(mut released) = release.0.lock() {
+            *released = true;
+            release.1.notify_all();
+        }
+        assert!(shutdown.join().is_ok());
+        assert!(started_receiver.try_recv().is_err());
     }
 
     #[test]
