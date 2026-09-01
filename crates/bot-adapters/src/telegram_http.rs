@@ -1,6 +1,8 @@
 //! Blocking Telegram Bot API transport.
 
+use std::io::Cursor;
 use std::io::Read;
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::Method;
@@ -43,7 +45,7 @@ pub struct TelegramMultipartRequest {
     pub fields: Vec<(String, String)>,
     pub file_field: String,
     pub file_name: String,
-    pub file_bytes: Vec<u8>,
+    pub file_bytes: Arc<[u8]>,
     pub content_type: String,
     pub timeout: Duration,
 }
@@ -179,7 +181,9 @@ impl TelegramMultipartTransport for ReqwestTelegramTransport {
         for (name, value) in &request.fields {
             form = form.text(name.clone(), value.clone());
         }
-        let part = Part::bytes(request.file_bytes.clone())
+        let length =
+            u64::try_from(request.file_bytes.len()).map_err(|_| TransportFailureKind::Request)?;
+        let part = Part::reader_with_length(Cursor::new(request.file_bytes.clone()), length)
             .file_name(request.file_name.clone())
             .mime_str(&request.content_type)
             .map_err(|_| TransportFailureKind::Request)?;
@@ -342,7 +346,7 @@ pub fn multipart_request_with<T: TelegramMultipartTransport>(
         fields: form_fields(upload.data_payload)?,
         file_field: upload.file_field,
         file_name: upload.file_name,
-        file_bytes: upload.file_bytes,
+        file_bytes: upload.file_bytes.into(),
         content_type: upload.content_type,
         timeout: upload.timeout,
     };
@@ -601,7 +605,7 @@ mod tests {
         );
         assert_eq!(requests[0].file_field, "photo");
         assert_eq!(requests[0].file_name, "chart.png");
-        assert_eq!(requests[0].file_bytes, vec![1, 2, 3]);
+        assert_eq!(requests[0].file_bytes.as_ref(), [1, 2, 3]);
         assert_eq!(requests[0].content_type, "image/png");
         assert_eq!(requests[0].timeout.as_secs(), 30);
     }

@@ -2,18 +2,19 @@
 
 use thiserror::Error;
 
-use crate::redis_connection::{RedisEndpoint, client};
+use crate::redis_connection::{RedisEndpoint, RedisPool, pool};
 use crate::task_record::{
     TaskRecordDocument, TaskRecordError, decode_task_record, encode_task_record,
 };
 
 pub const TASK_DUE_INDEX_KEY: &str = "task:due";
 pub const TASK_SCHEDULER_OWNER_KEY: &str = "task:scheduler:owner";
+const TASK_EXECUTION_PREFIX: &str = "task:execution:";
 
 const RENEW_LEASE_SCRIPT: &str = "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('EXPIRE', KEYS[1], ARGV[2]) else return 0 end";
 const RELEASE_LEASE_SCRIPT: &str = "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end";
 const UPSERT_TASK_SCRIPT: &str = "redis.call('SETEX', KEYS[1], ARGV[1], ARGV[2]); redis.call('ZADD', KEYS[2], ARGV[3], ARGV[4]); redis.call('EXPIRE', KEYS[2], ARGV[1]); redis.call('SETEX', KEYS[3], ARGV[1], '1'); redis.call('ZADD', KEYS[4], ARGV[3], ARGV[4]); return 1";
-const COMPLETE_TASK_SCRIPT: &str = "if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end; if redis.call('EXISTS', KEYS[2]) == 0 then redis.call('DEL', KEYS[1]); return 0 end; if ARGV[2] == '' then redis.call('DEL', KEYS[2]); redis.call('ZREM', KEYS[3], ARGV[3]); redis.call('ZREM', KEYS[4], ARGV[3]); else redis.call('SETEX', KEYS[2], ARGV[4], ARGV[2]); redis.call('ZADD', KEYS[3], ARGV[5], ARGV[3]); redis.call('EXPIRE', KEYS[3], ARGV[4]); redis.call('ZADD', KEYS[4], ARGV[5], ARGV[3]); end; redis.call('DEL', KEYS[1]); return 1";
+const COMPLETE_TASK_SCRIPT: &str = "if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end; if redis.call('EXISTS', KEYS[2]) == 0 then redis.call('DEL', KEYS[1], KEYS[5]); return 0 end; if ARGV[2] == '' then redis.call('DEL', KEYS[2]); redis.call('ZREM', KEYS[3], ARGV[3]); redis.call('ZREM', KEYS[4], ARGV[3]); else redis.call('SETEX', KEYS[2], ARGV[4], ARGV[2]); redis.call('ZADD', KEYS[3], ARGV[5], ARGV[3]); redis.call('EXPIRE', KEYS[3], ARGV[4]); redis.call('ZADD', KEYS[4], ARGV[5], ARGV[3]); end; redis.call('DEL', KEYS[1], KEYS[5]); return 1";
 const CANCEL_TASK_SCRIPT: &str = "local removed = redis.call('DEL', KEYS[1]); redis.call('ZREM', KEYS[2], ARGV[1]); redis.call('ZREM', KEYS[3], ARGV[1]); return removed";
 
 #[derive(Debug, Error)]
@@ -32,14 +33,15 @@ pub enum RedisTaskStoreError {
     Record(#[from] TaskRecordError),
 }
 
+#[derive(Clone)]
 pub struct RedisTaskStore {
-    client: redis::Client,
+    client: RedisPool,
 }
 
 impl RedisTaskStore {
     pub fn new(endpoint: &RedisEndpoint) -> Result<Self, RedisTaskStoreError> {
         Ok(Self {
-            client: client(endpoint)?,
+            client: pool(endpoint)?,
         })
     }
 
@@ -242,15 +244,17 @@ impl RedisTaskStore {
         let claim_key = task_claim_key(occurrence.task_id, occurrence.execution_id);
         let data_key = format!("task:data:{}", occurrence.task_id);
         let chat_key = format!("task:chat:{}", occurrence.chat_id);
+        let execution_key = task_execution_key(occurrence.execution_id);
         let payload = occurrence.next_payload.unwrap_or_default();
         let mut connection = self.client.get_connection()?;
         Ok(redis::cmd("EVAL")
             .arg(COMPLETE_TASK_SCRIPT)
-            .arg(4)
+            .arg(5)
             .arg(claim_key)
             .arg(data_key)
             .arg(chat_key)
             .arg(TASK_DUE_INDEX_KEY)
+            .arg(execution_key)
             .arg(occurrence.claim_token)
             .arg(payload)
             .arg(occurrence.task_id)
@@ -380,6 +384,11 @@ pub fn task_claim_key(task_id: &str, execution_id: &str) -> String {
     format!("task:claim:{task_id}:{execution_id}")
 }
 
+#[must_use]
+pub fn task_execution_key(execution_id: &str) -> String {
+    format!("{TASK_EXECUTION_PREFIX}{execution_id}")
+}
+
 #[cfg(test)]
 mod tests {
     use std::{error::Error, io::Write, net::TcpListener, thread, time::Duration};
@@ -387,7 +396,7 @@ mod tests {
     use super::{
         CANCEL_TASK_SCRIPT, COMPLETE_TASK_SCRIPT, RELEASE_LEASE_SCRIPT, RENEW_LEASE_SCRIPT,
         RedisTaskStore, RedisTaskStoreError, TASK_DUE_INDEX_KEY, TaskOccurrenceCompletion,
-        UPSERT_TASK_SCRIPT, task_claim_key,
+        UPSERT_TASK_SCRIPT, task_claim_key, task_execution_key,
     };
     use crate::redis_connection::{RedisEndpoint, test_support::read_command};
 
@@ -462,9 +471,9 @@ mod tests {
                     "*2\r\n$2\r\n{}\r\n$-1\r\n",
                 ),
             ];
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(2)))?;
             for (expected, response) in exchanges {
-                let (mut stream, _) = listener.accept()?;
-                stream.set_read_timeout(Some(Duration::from_secs(2)))?;
                 assert_eq!(read_command(&mut stream)?, expected);
                 stream.write_all(response.as_bytes())?;
             }
@@ -500,6 +509,10 @@ mod tests {
         assert_eq!(
             task_claim_key("t1", "t1:1700000000"),
             "task:claim:t1:t1:1700000000"
+        );
+        assert_eq!(
+            task_execution_key("t1:1700000000"),
+            "task:execution:t1:1700000000"
         );
     }
 
@@ -566,11 +579,12 @@ mod tests {
                     vec![
                         "EVAL",
                         COMPLETE_TASK_SCRIPT,
-                        "4",
+                        "5",
                         "task:claim:t1:t1:42",
                         "task:data:t1",
                         "task:chat:c1",
                         TASK_DUE_INDEX_KEY,
+                        "task:execution:t1:42",
                         "claim",
                         "{\"next\":true}",
                         "t1",
@@ -603,9 +617,9 @@ mod tests {
                     ":1\r\n",
                 ),
             ];
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(2)))?;
             for (expected, response) in exchanges {
-                let (mut stream, _) = listener.accept()?;
-                stream.set_read_timeout(Some(Duration::from_secs(2)))?;
                 assert_eq!(read_command(&mut stream)?, expected);
                 stream.write_all(response.as_bytes())?;
             }

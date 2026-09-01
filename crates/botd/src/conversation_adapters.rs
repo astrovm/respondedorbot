@@ -390,6 +390,29 @@ impl PostgresConversationBilling {
         self.active_operations = Some(active_operations);
         self
     }
+
+    fn release_operation_state(&mut self, operation_id: &str) {
+        self.payer_by_operation.remove(operation_id);
+        self.onboarding_checked_operations.remove(operation_id);
+        self.cap_checked_operations.remove(operation_id);
+        self.cap_key_by_operation.remove(operation_id);
+        if self.active_marked_operations.remove(operation_id)
+            && let Some(active_operations) = self.active_operations.as_ref()
+        {
+            active_operations.mark_inactive(operation_id);
+        }
+    }
+
+    fn refund_creditless_cap(&self, operation_id: &str) -> Result<(), String> {
+        if let Some(cap_key) = self.cap_key_by_operation.get(operation_id)
+            && let Some(creditless_cap) = self.creditless_cap.as_ref()
+        {
+            creditless_cap
+                .refund_once(cap_key, operation_id)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
 }
 
 impl ConversationBilling for PostgresConversationBilling {
@@ -439,15 +462,16 @@ impl ConversationBilling for PostgresConversationBilling {
             && self
                 .cap_checked_operations
                 .insert(request.operation_id.clone())
-            && result.applied
         {
             let origin_chat_id = request
                 .metadata
                 .get("origin_chat_id")
                 .map_or_else(|| chat_id.to_string(), value_as_key_component);
             let cap_key = creditless_cap_key(&origin_chat_id, request.user_id);
+            self.cap_key_by_operation
+                .insert(request.operation_id.clone(), cap_key.clone());
             let count = creditless_cap
-                .increment(&cap_key, CREDITLESS_CAP_TTL_SECONDS)
+                .admit_once(&cap_key, &request.operation_id, CREDITLESS_CAP_TTL_SECONDS)
                 .map_err(|error| error.to_string())?;
             if count > request.creditless_user_hourly_limit {
                 let mut refund_metadata = request.metadata.clone();
@@ -467,6 +491,7 @@ impl ConversationBilling for PostgresConversationBilling {
                         &request.operation_id,
                     )
                     .map_err(|error| error.to_string())?;
+                self.release_operation_state(&request.operation_id);
                 return Ok(ReserveDecision {
                     authorized: false,
                     user_balance: refund.user_balance,
@@ -477,8 +502,6 @@ impl ConversationBilling for PostgresConversationBilling {
                     }),
                 });
             }
-            self.cap_key_by_operation
-                .insert(request.operation_id.clone(), cap_key);
         }
 
         if result.ok
@@ -517,57 +540,61 @@ impl ConversationBilling for PostgresConversationBilling {
 
     fn settle(&mut self, request: SettlementRequest) -> Result<(), String> {
         let operation_id = request.operation_id.clone();
-        let mut metadata = Map::from_iter([
-            ("operation_id".to_owned(), json!(operation_id)),
-            ("reason".to_owned(), json!(request.reason)),
-            ("delivered".to_owned(), json!(request.delivered)),
-        ]);
-        let mut pricing_complete = true;
-        if !request.billing_segments.is_empty() {
-            let pricing =
-                calculate_billing_for_segments(&Value::Array(request.billing_segments.clone()))
+        let result = (|| {
+            let mut metadata = Map::from_iter([
+                ("operation_id".to_owned(), json!(operation_id)),
+                ("reason".to_owned(), json!(request.reason)),
+                ("delivered".to_owned(), json!(request.delivered)),
+            ]);
+            let mut pricing_complete = true;
+            if !request.billing_segments.is_empty() {
+                let pricing =
+                    calculate_billing_for_segments(&Value::Array(request.billing_segments.clone()))
+                        .map_err(|error| error.to_string())?;
+                pricing_complete =
+                    pricing.get("pricing_complete").and_then(Value::as_bool) == Some(true);
+                metadata.insert(
+                    "billing_segments".to_owned(),
+                    Value::Array(request.billing_segments),
+                );
+                copy_pricing_metadata(&mut metadata, &pricing);
+            }
+            if pricing_complete {
+                // Refund the ephemeral hourly allowance before committing the
+                // durable zero-cost settlement. A Redis failure then leaves the
+                // database operation replayable, and the Redis operation marker
+                // makes a successful refund safe to retry.
+                if request.actual_credit_units == 0 {
+                    self.refund_creditless_cap(&operation_id)?;
+                }
+                self.repository
+                    .settle_ai_operation_once(
+                        request.user_id,
+                        request.chat_id,
+                        &operation_id,
+                        request.actual_credit_units,
+                        &metadata,
+                    )
                     .map_err(|error| error.to_string())?;
-            pricing_complete =
-                pricing.get("pricing_complete").and_then(Value::as_bool) == Some(true);
-            metadata.insert(
-                "billing_segments".to_owned(),
-                Value::Array(request.billing_segments),
-            );
-            copy_pricing_metadata(&mut metadata, &pricing);
-        }
-        let settlement_applied = if pricing_complete {
-            self.repository
-                .settle_ai_operation_once(
-                    request.user_id,
-                    request.chat_id,
-                    &operation_id,
-                    request.actual_credit_units,
-                    &metadata,
-                )
-                .map_err(|error| error.to_string())?
-                .applied
-        } else {
-            false
-        };
-        if settlement_applied
-            && request.actual_credit_units == 0
-            && let Some(cap_key) = self.cap_key_by_operation.get(&operation_id)
-            && let Some(creditless_cap) = self.creditless_cap.as_ref()
-        {
-            creditless_cap
-                .decrement(cap_key)
-                .map_err(|error| error.to_string())?;
-        }
-        self.payer_by_operation.remove(&operation_id);
-        self.onboarding_checked_operations.remove(&operation_id);
-        self.cap_checked_operations.remove(&operation_id);
-        self.cap_key_by_operation.remove(&operation_id);
-        if self.active_marked_operations.remove(&operation_id)
-            && let Some(active_operations) = self.active_operations.as_ref()
-        {
-            active_operations.mark_inactive(&operation_id);
-        }
-        Ok(())
+            }
+            Ok(())
+        })();
+
+        // In-memory admission state is only a guard around the live provider
+        // operation. Always release it, including pricing, database, and Redis
+        // failures, so the durable reconciler can repair an unsettled reserve.
+        self.release_operation_state(&operation_id);
+        result
+    }
+
+    fn abort_operation(&mut self, operation_id: &str) -> Result<(), String> {
+        let cap_refund = self.refund_creditless_cap(operation_id);
+        self.release_operation_state(operation_id);
+        cap_refund
+    }
+
+    fn release_operation(&mut self, operation_id: &str) {
+        self.release_operation_state(operation_id);
     }
 
     fn personal_balance(&mut self, user_id: i64) -> Result<Option<i64>, String> {
@@ -666,11 +693,47 @@ fn user_identity(input: &AiConversationInput) -> String {
 #[cfg(test)]
 mod tests {
     use bot_core::ai_prompt::PromptRole;
+    use serde_json::json;
 
     use super::{
-        StoredHistoryEntry, build_compaction_view, decode_history, decode_summary_memory,
-        history_sort_key, role,
+        PayerSource, PostgresConversationBilling, StoredHistoryEntry, build_compaction_view,
+        decode_history, decode_summary_memory, history_sort_key, role,
     };
+    use crate::conversation::{ConversationBilling, SettlementRequest};
+    use crate::reconciliation::ActiveOperationRegistry;
+
+    #[test]
+    fn settlement_releases_all_ephemeral_guards_when_pricing_fails() {
+        let operation_id = "ai:42:7:88";
+        let active = ActiveOperationRegistry::default();
+        active.mark_active(operation_id);
+        let mut billing = PostgresConversationBilling::new("postgresql://synthetic.invalid/db")
+            .with_active_operations(active.clone());
+        billing
+            .payer_by_operation
+            .insert(operation_id.to_owned(), PayerSource::User);
+        billing
+            .active_marked_operations
+            .insert(operation_id.to_owned());
+        billing
+            .cap_key_by_operation
+            .insert(operation_id.to_owned(), "cap-key".to_owned());
+
+        let result = billing.settle(SettlementRequest {
+            user_id: 88,
+            chat_id: None,
+            operation_id: operation_id.to_owned(),
+            actual_credit_units: 1,
+            delivered: true,
+            reason: "synthetic".to_owned(),
+            billing_segments: vec![json!("invalid segment")],
+        });
+
+        assert!(result.is_err());
+        assert!(!active.is_active(operation_id));
+        assert!(!billing.payer_by_operation.contains_key(operation_id));
+        assert!(!billing.cap_key_by_operation.contains_key(operation_id));
+    }
 
     #[test]
     fn history_decoder_sorts_user_then_bot_and_preserves_legacy_roles() {

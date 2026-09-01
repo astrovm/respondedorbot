@@ -2771,23 +2771,19 @@ mod tests {
         let port = listener.local_addr()?.port();
         let server = thread::spawn(
             move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-                let (index, _) = listener.accept()?;
-                let mut reader = BufReader::new(index);
+                let (stream, _) = listener.accept()?;
+                let mut reader = BufReader::new(stream);
                 assert_eq!(
                     read_command(&mut reader)?.first().map(String::as_str),
                     Some("FT.CREATE")
                 );
                 reader.get_mut().write_all(b"-Index already exists\r\n")?;
 
-                let (incoming, _) = listener.accept()?;
-                let mut reader = BufReader::new(incoming);
                 let command = read_command(&mut reader)?;
                 assert_eq!(command.first().map(String::as_str), Some("EVAL"));
                 assert!(command.iter().any(|value| value == "chat_history:-42"));
                 reader.get_mut().write_all(b":1\r\n")?;
 
-                let (member, _) = listener.accept()?;
-                let mut reader = BufReader::new(member);
                 assert_eq!(read_command(&mut reader)?, ["MULTI"]);
                 reader.get_mut().write_all(b"+OK\r\n")?;
                 assert_eq!(
@@ -2803,15 +2799,11 @@ mod tests {
                 assert_eq!(read_command(&mut reader)?, ["EXEC"]);
                 reader.get_mut().write_all(b"*2\r\n:1\r\n:1\r\n")?;
 
-                let (outgoing, _) = listener.accept()?;
-                let mut reader = BufReader::new(outgoing);
                 let command = read_command(&mut reader)?;
                 assert_eq!(command.first().map(String::as_str), Some("EVAL"));
                 assert!(command.iter().any(|value| value == "bot_99"));
                 reader.get_mut().write_all(b":1\r\n")?;
 
-                let (metadata, _) = listener.accept()?;
-                let mut reader = BufReader::new(metadata);
                 let command = read_command(&mut reader)?;
                 assert_eq!(command.first().map(String::as_str), Some("SETEX"));
                 assert_eq!(

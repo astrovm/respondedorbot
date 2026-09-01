@@ -25,6 +25,7 @@ use crate::task_service::{TaskServiceOptions, build_task_scheduler};
 use bot_adapters::redis_connection::RedisEndpoint;
 
 const TASK_INTERVAL: Duration = Duration::from_secs(1);
+const TASK_WORKER_COUNT: usize = 4;
 const COMPACTION_INTERVAL: Duration = Duration::from_secs(2);
 const PRICE_REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const REPEATED_FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(15 * 60);
@@ -49,19 +50,28 @@ pub struct ProductionBackgroundOptions<'a> {
 pub fn build_production_background_specs(
     options: ProductionBackgroundOptions<'_>,
 ) -> Result<Vec<BackgroundWorkerSpec>, String> {
-    let scheduler = build_task_scheduler(TaskServiceOptions {
-        redis_endpoint: options.redis_endpoint,
-        database_url: options.database_url,
-        telegram_token: options.telegram_token,
-        openrouter_api_key: options.openrouter_api_key,
-        openrouter_base_url: options.openrouter_base_url,
-        firecrawl_api_key: options.firecrawl_api_key,
-        system_prompt: options.system_prompt,
-        owner_token: options.owner_token,
-        mode: options.scheduler_mode,
-        telegram_delivery: options.telegram_delivery,
-    })
-    .map_err(|error| error.to_string())?;
+    let mut task_workers = Vec::with_capacity(TASK_WORKER_COUNT);
+    for worker in 0..TASK_WORKER_COUNT {
+        let scheduler = build_task_scheduler(TaskServiceOptions {
+            redis_endpoint: options.redis_endpoint,
+            database_url: options.database_url,
+            telegram_token: options.telegram_token,
+            openrouter_api_key: options.openrouter_api_key,
+            openrouter_base_url: options.openrouter_base_url,
+            firecrawl_api_key: options.firecrawl_api_key,
+            system_prompt: options.system_prompt,
+            owner_token: options.owner_token,
+            mode: options.scheduler_mode,
+            telegram_delivery: options.telegram_delivery.clone(),
+        })
+        .map_err(|error| error.to_string())?
+        .with_claim_token(format!("{}:worker-{worker}", options.owner_token));
+        task_workers.push(BackgroundWorkerSpec::new(
+            format!("task-scheduler-{}", worker + 1),
+            TASK_INTERVAL,
+            Box::new(scheduler),
+        ));
+    }
     let compaction = production_compaction_worker(
         options.redis_endpoint,
         options.database_url,
@@ -78,8 +88,7 @@ pub fn build_production_background_specs(
     )?;
     let price_refresh =
         production_price_refresh_worker(options.redis_endpoint, options.coinmarketcap_key)?;
-    Ok(vec![
-        BackgroundWorkerSpec::new("task-scheduler", TASK_INTERVAL, Box::new(scheduler)),
+    task_workers.extend([
         BackgroundWorkerSpec::new(
             "memory-compaction",
             COMPACTION_INTERVAL,
@@ -95,7 +104,8 @@ pub fn build_production_background_specs(
             PRICE_REFRESH_INTERVAL,
             Box::new(price_refresh),
         ),
-    ])
+    ]);
+    Ok(task_workers)
 }
 
 pub trait BackgroundWorker: Send + 'static {
@@ -127,13 +137,13 @@ impl BackgroundWorkerSpec {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum BackgroundError {
     #[error("background worker {name} has a zero interval")]
     InvalidInterval { name: String },
     #[error("could not start background worker {name}: {error}")]
     Spawn { name: String, error: String },
-    #[error("background worker {name} panicked during shutdown")]
+    #[error("background worker {name} panicked")]
     Panicked { name: String },
 }
 
@@ -149,7 +159,7 @@ impl BackgroundError {
                 self.to_string(),
             ),
             Self::Panicked { name } => OperationalReport::new(
-                format!("el proceso en segundo plano {name} falló durante el apagado"),
+                format!("el proceso en segundo plano {name} entró en pánico"),
                 self.to_string(),
             ),
         }
@@ -166,6 +176,7 @@ pub struct BackgroundSupervisor {
     wake: Arc<(Mutex<()>, Condvar)>,
     handles: Vec<WorkerHandle>,
     reporter: Arc<dyn OperationalReporter>,
+    failure: Arc<Mutex<Option<BackgroundError>>>,
 }
 
 impl BackgroundSupervisor {
@@ -180,6 +191,7 @@ impl BackgroundSupervisor {
             wake,
             handles: Vec::with_capacity(specs.len()),
             reporter,
+            failure: Arc::new(Mutex::new(None)),
         };
         for spec in specs {
             if spec.interval.is_zero() {
@@ -193,6 +205,7 @@ impl BackgroundSupervisor {
             let stopping = supervisor.stopping.clone();
             let wake = supervisor.wake.clone();
             let reporter = supervisor.reporter.clone();
+            let failure = supervisor.failure.clone();
             let mut worker = spec.worker;
             let interval = spec.interval;
             let handle = thread::Builder::new()
@@ -200,7 +213,29 @@ impl BackgroundSupervisor {
                 .spawn(move || {
                     let mut last_reported_failure: Option<(String, Instant)> = None;
                     while !stopping.load(Ordering::Acquire) {
-                        match worker.run_once(now_epoch_seconds()) {
+                        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            worker.run_once(now_epoch_seconds())
+                        }));
+                        let run = match run {
+                            Ok(run) => run,
+                            Err(_) => {
+                                let fatal = BackgroundError::Panicked { name: name.clone() };
+                                if let Ok(mut recorded) = failure.lock() {
+                                    *recorded = Some(fatal.clone());
+                                }
+                                let report = fatal.operational_report();
+                                eprintln!("{fatal}");
+                                if let Err(report_error) = reporter.report(&report) {
+                                    eprintln!(
+                                        "could not deliver background panic report: {report_error}"
+                                    );
+                                }
+                                stopping.store(true, Ordering::Release);
+                                wake.1.notify_all();
+                                break;
+                            }
+                        };
+                        match run {
                             Ok(()) => last_reported_failure = None,
                             Err(error) => {
                                 let report = OperationalReport::new(
@@ -285,7 +320,20 @@ impl BackgroundSupervisor {
                 return Err(failure);
             }
         }
+        if let Ok(mut failure) = self.failure.lock()
+            && let Some(failure) = failure.take()
+        {
+            return Err(failure);
+        }
         Ok(())
+    }
+
+    #[must_use]
+    pub fn has_failed(&self) -> bool {
+        self.failure
+            .lock()
+            .map(|failure| failure.is_some())
+            .unwrap_or(true)
     }
 
     fn stop_best_effort(&mut self) {
@@ -408,6 +456,7 @@ fn now_epoch_seconds() -> i64 {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use std::sync::mpsc::{self, RecvTimeoutError};
     use std::sync::{Arc, Mutex};
@@ -503,6 +552,33 @@ mod tests {
     }
 
     #[test]
+    fn worker_panics_fail_the_live_supervisor_immediately() {
+        struct PanicWorker;
+        impl BackgroundWorker for PanicWorker {
+            fn run_once(&mut self, _now_epoch_seconds: i64) -> Result<(), String> {
+                panic!("synthetic worker panic")
+            }
+        }
+
+        let reporter = Arc::new(Reporter::default());
+        let mut supervisor = BackgroundSupervisor::start(
+            vec![BackgroundWorkerSpec::new(
+                "panic-worker",
+                Duration::from_secs(60),
+                Box::new(PanicWorker),
+            )],
+            reporter,
+        )
+        .unwrap_or_else(|error| panic!("supervisor startup: {error}"));
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !supervisor.has_failed() && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(supervisor.has_failed());
+        assert!(supervisor.stop().is_err());
+    }
+
+    #[test]
     fn rejects_zero_intervals_before_starting_a_worker() {
         let (ran_tx, ran_rx) = mpsc::channel();
         let (stopped_tx, _stopped_rx) = mpsc::channel();
@@ -555,6 +631,6 @@ mod tests {
             telegram_delivery: TelegramDeliveryCoordinator::default(),
         });
         assert!(result.is_ok());
-        assert_eq!(result.map(|specs| specs.len()), Ok(4));
+        assert_eq!(result.map(|specs| specs.len()), Ok(7));
     }
 }

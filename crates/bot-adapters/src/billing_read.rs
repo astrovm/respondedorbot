@@ -1,11 +1,11 @@
 //! PostgreSQL billing repository.
 
-use postgres::{Client, Transaction, error::SqlState};
+use postgres::{Transaction, error::SqlState};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use thiserror::Error;
 
-use crate::postgres_connection::postgres_tls_connector;
+use crate::postgres_pool::{PooledPostgresClient, PostgresPool, PostgresPoolError};
 
 const ONBOARDING_MAX_GRANTS_PER_HOUR: i64 = 4;
 const ONBOARDING_MAX_GRANTS_PER_DAY: i64 = 16;
@@ -53,6 +53,8 @@ pub enum BillingError {
     ChatIdRequired,
     #[error("chat-funded settlement requires chat_id")]
     LegacyChatIdRequired,
+    #[error(transparent)]
+    Pool(#[from] PostgresPoolError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -178,13 +180,13 @@ pub struct ChargeHistoryRow {
 }
 
 pub struct BillingRepository {
-    database_url: String,
+    pool: PostgresPool,
 }
 
 impl BillingRepository {
     pub fn new(database_url: &str) -> Self {
         Self {
-            database_url: database_url.to_owned(),
+            pool: PostgresPool::shared(database_url),
         }
     }
 
@@ -1613,11 +1615,8 @@ impl BillingRepository {
         })
     }
 
-    fn connect(&self) -> Result<Client, BillingError> {
-        Ok(Client::connect(
-            &self.database_url,
-            postgres_tls_connector(&self.database_url)?,
-        )?)
+    fn connect(&self) -> Result<PooledPostgresClient, BillingError> {
+        Ok(self.pool.get()?)
     }
 }
 

@@ -1,6 +1,7 @@
 //! Periodic Redis and PostgreSQL maintenance entrypoint.
 
 use bot_adapters::billing_read::BillingRepository;
+use bot_adapters::billing_schema::BillingSchemaRepository;
 use bot_adapters::redis_connection::RedisEndpoint;
 use bot_adapters::redis_maintenance::{RedisMaintenanceResult, run_redis_maintenance};
 use serde::Serialize;
@@ -30,6 +31,8 @@ pub enum MaintenanceError {
     InvalidRetention,
     #[error("AI ledger maintenance failed: {0}")]
     Ledger(#[from] bot_adapters::billing_read::BillingError),
+    #[error("billing schema maintenance failed: {0}")]
+    Schema(#[from] bot_adapters::billing_schema::BillingSchemaError),
 }
 
 pub fn run_maintenance(
@@ -44,6 +47,7 @@ pub fn run_maintenance(
         options.redis_maxmemory_policy,
     )?;
     let ledger = if let Some(database_url) = options.database_url {
+        BillingSchemaRepository::new(database_url).ensure_schema()?;
         serde_json::to_value(
             BillingRepository::new(database_url)
                 .purge_expired_ai_ledger_events(options.ai_ledger_retention_days)?,

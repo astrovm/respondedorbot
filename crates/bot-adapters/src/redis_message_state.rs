@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use bot_core::message_state::{MessageWritePlan, escape_search_tag, escape_search_text};
 
-use crate::redis_connection::{RedisEndpoint, client};
+use crate::redis_connection::{RedisEndpoint, RedisPool, pool};
 
 const CHAT_SEARCH_INDEX: &str = "idx:chat_messages";
 
@@ -75,14 +75,14 @@ pub struct SearchRow {
 }
 
 pub struct RedisMessageState {
-    client: redis::Client,
+    client: RedisPool,
     search_index_ready: AtomicBool,
 }
 
 impl RedisMessageState {
     pub fn new(endpoint: &RedisEndpoint) -> Result<Self, RedisMessageStateError> {
         Ok(Self {
-            client: client(endpoint)?,
+            client: pool(endpoint)?,
             search_index_ready: AtomicBool::new(false),
         })
     }
@@ -361,62 +361,50 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let port = listener.local_addr()?.port();
         let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
-            let (mut get_stream, _) = listener.accept()?;
-            get_stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-            assert_eq!(read_command(&mut get_stream)?, ["GET", "chat_summary:1"]);
-            get_stream.write_all(b"$7\r\nsummary\r\n")?;
-
-            let (mut set_stream, _) = listener.accept()?;
-            set_stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+            let (stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+            let mut reader = BufReader::new(stream);
+            assert_eq!(read_command_from(&mut reader)?, ["GET", "chat_summary:1"]);
+            reader.get_mut().write_all(b"$7\r\nsummary\r\n")?;
             assert_eq!(
-                read_command(&mut set_stream)?,
+                read_command_from(&mut reader)?,
                 ["SETEX", "chat_summary:1", "300", "fresh"]
             );
-            set_stream.write_all(b"+OK\r\n")?;
-
-            let (pair_stream, _) = listener.accept()?;
-            pair_stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-            let mut pair_reader = BufReader::new(pair_stream);
-            assert_eq!(read_command_from(&mut pair_reader)?, ["MULTI"]);
-            pair_reader.get_mut().write_all(b"+OK\r\n")?;
+            reader.get_mut().write_all(b"+OK\r\n")?;
+            assert_eq!(read_command_from(&mut reader)?, ["MULTI"]);
+            reader.get_mut().write_all(b"+OK\r\n")?;
             assert_eq!(
-                read_command_from(&mut pair_reader)?,
+                read_command_from(&mut reader)?,
                 ["SETEX", "chat_summary:1", "300", "summary"]
             );
-            pair_reader.get_mut().write_all(b"+QUEUED\r\n")?;
+            reader.get_mut().write_all(b"+QUEUED\r\n")?;
             assert_eq!(
-                read_command_from(&mut pair_reader)?,
+                read_command_from(&mut reader)?,
                 ["SETEX", "chat_compacted_until:1", "300", "42"]
             );
-            pair_reader.get_mut().write_all(b"+QUEUED\r\n")?;
-            assert_eq!(read_command_from(&mut pair_reader)?, ["EXEC"]);
-            pair_reader.get_mut().write_all(b"*2\r\n+OK\r\n+OK\r\n")?;
-
-            let (member_stream, _) = listener.accept()?;
-            member_stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-            let mut member_reader = BufReader::new(member_stream);
-            assert_eq!(read_command_from(&mut member_reader)?, ["MULTI"]);
-            member_reader.get_mut().write_all(b"+OK\r\n")?;
+            reader.get_mut().write_all(b"+QUEUED\r\n")?;
+            assert_eq!(read_command_from(&mut reader)?, ["EXEC"]);
+            reader.get_mut().write_all(b"*2\r\n+OK\r\n+OK\r\n")?;
+            assert_eq!(read_command_from(&mut reader)?, ["MULTI"]);
+            reader.get_mut().write_all(b"+OK\r\n")?;
             assert_eq!(
-                read_command_from(&mut member_reader)?,
+                read_command_from(&mut reader)?,
                 ["HSET", "chat_members:1", "7", "member-json"]
             );
-            member_reader.get_mut().write_all(b"+QUEUED\r\n")?;
+            reader.get_mut().write_all(b"+QUEUED\r\n")?;
             assert_eq!(
-                read_command_from(&mut member_reader)?,
+                read_command_from(&mut reader)?,
                 ["EXPIRE", "chat_members:1", "300"]
             );
-            member_reader.get_mut().write_all(b"+QUEUED\r\n")?;
-            assert_eq!(read_command_from(&mut member_reader)?, ["EXEC"]);
-            member_reader.get_mut().write_all(b"*2\r\n:1\r\n:1\r\n")?;
-
-            let (mut members_stream, _) = listener.accept()?;
-            members_stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+            reader.get_mut().write_all(b"+QUEUED\r\n")?;
+            assert_eq!(read_command_from(&mut reader)?, ["EXEC"]);
+            reader.get_mut().write_all(b"*2\r\n:1\r\n:1\r\n")?;
             assert_eq!(
-                read_command(&mut members_stream)?,
+                read_command_from(&mut reader)?,
                 ["HGETALL", "chat_members:1"]
             );
-            members_stream
+            reader
+                .get_mut()
                 .write_all(b"*4\r\n$1\r\n8\r\n$8\r\nmember-8\r\n$1\r\n7\r\n$8\r\nmember-7\r\n")?;
             Ok(())
         });
@@ -484,45 +472,34 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let port = listener.local_addr()?.port();
         let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
-            let (mut index_stream, _) = listener.accept()?;
-            index_stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-            let create = read_command(&mut index_stream)?;
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+            let create = read_command(&mut stream)?;
             assert_eq!(create.first().map(String::as_str), Some("FT.CREATE"));
-            index_stream.write_all(b"-Index already exists\r\n")?;
-
-            let (mut write_stream, _) = listener.accept()?;
-            write_stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-            let write = read_command(&mut write_stream)?;
+            stream.write_all(b"-Index already exists\r\n")?;
+            let write = read_command(&mut stream)?;
             assert_eq!(write.first().map(String::as_str), Some("EVAL"));
             assert!(write.iter().any(|value| value == "chat_history:1"));
             assert!(write.iter().any(|value| value == "chatmsg:1:1"));
-            write_stream.write_all(b":1\r\n")?;
-
-            let (mut history_stream, _) = listener.accept()?;
-            history_stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+            stream.write_all(b":1\r\n")?;
             assert_eq!(
-                read_command(&mut history_stream)?,
+                read_command(&mut stream)?,
                 ["LRANGE", "chat_history:1", "0", "1"]
             );
-            history_stream.write_all(b"*2\r\n$3\r\none\r\n$3\r\ntwo\r\n")?;
+            stream.write_all(b"*2\r\n$3\r\none\r\n$3\r\ntwo\r\n")?;
 
             let search_response = b"*3\r\n:1\r\n$11\r\nchatmsg:1:1\r\n*6\r\n$10\r\nmessage_id\r\n$1\r\n1\r\n$4\r\ntext\r\n$5\r\nhello\r\n$9\r\ntimestamp\r\n$2\r\n10\r\n";
-            let (mut fetch_stream, _) = listener.accept()?;
-            fetch_stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-            let fetch = read_command(&mut fetch_stream)?;
+            let fetch = read_command(&mut stream)?;
             assert_eq!(fetch.first().map(String::as_str), Some("FT.SEARCH"));
             assert_eq!(fetch.get(2).map(String::as_str), Some("@chat_id:{1}"));
-            fetch_stream.write_all(search_response)?;
-
-            let (mut search_stream, _) = listener.accept()?;
-            search_stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-            let search = read_command(&mut search_stream)?;
+            stream.write_all(search_response)?;
+            let search = read_command(&mut stream)?;
             assert_eq!(search.first().map(String::as_str), Some("FT.SEARCH"));
             assert_eq!(
                 search.get(2).map(String::as_str),
                 Some("@chat_id:{1} wallet")
             );
-            search_stream.write_all(search_response)?;
+            stream.write_all(search_response)?;
             Ok(())
         });
         let state = RedisMessageState::new(&RedisEndpoint {

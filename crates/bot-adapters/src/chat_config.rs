@@ -5,7 +5,7 @@ use postgres::Client;
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-use crate::postgres_connection::postgres_tls_connector;
+use crate::postgres_pool::{PooledPostgresClient, PostgresPool, PostgresPoolError};
 
 const CHAT_CONFIG_SCHEMA_ADVISORY_LOCK_KEY: i64 = 48_610_006;
 
@@ -27,22 +27,25 @@ pub enum ChatConfigRepositoryError {
     InvalidConfig(#[from] ChatConfigError),
     #[error("could not encode chat configuration: {0}")]
     Serialization(#[from] serde_json::Error),
+    #[error(transparent)]
+    Pool(#[from] PostgresPoolError),
 }
 
 pub struct ChatConfigRepository {
-    database_url: String,
+    pool: PostgresPool,
 }
 
 impl ChatConfigRepository {
     #[must_use]
     pub fn new(database_url: &str) -> Self {
         Self {
-            database_url: database_url.to_owned(),
+            pool: PostgresPool::shared(database_url),
         }
     }
 
     pub fn ensure_schema(&self) -> Result<(), ChatConfigRepositoryError> {
-        ensure_schema(&mut self.connect()?)
+        let mut client = self.connect()?;
+        ensure_schema(&mut client)
     }
 
     pub fn get(&self, chat_id: &str) -> Result<Option<ChatConfig>, ChatConfigRepositoryError> {
@@ -94,11 +97,8 @@ impl ChatConfigRepository {
         Ok(())
     }
 
-    fn connect(&self) -> Result<Client, ChatConfigRepositoryError> {
-        Ok(Client::connect(
-            &self.database_url,
-            postgres_tls_connector(&self.database_url)?,
-        )?)
+    fn connect(&self) -> Result<PooledPostgresClient, ChatConfigRepositoryError> {
+        Ok(self.pool.get()?)
     }
 }
 

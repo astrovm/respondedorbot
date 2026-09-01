@@ -6,6 +6,7 @@ use std::time::Duration;
 use reqwest::blocking::Client;
 use serde::Serialize;
 use serde_json::{Value, json};
+use std::sync::OnceLock;
 use thiserror::Error;
 
 const SEARCH_URL: &str = "https://api.firecrawl.dev/v2/search";
@@ -74,12 +75,15 @@ pub struct ReqwestFirecrawlTransport {
 
 impl ReqwestFirecrawlTransport {
     pub fn new() -> Result<Self, TransportError> {
-        Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(75))
-            .build()
-            .map(|client| Self { client })
-            .map_err(|error| TransportError::Other(error.to_string()))
+        static CLIENT: OnceLock<Client> = OnceLock::new();
+        crate::http_client::shared_client(&CLIENT, || {
+            Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(75))
+                .build()
+        })
+        .map(|client| Self { client })
+        .map_err(|error| TransportError::Other(error.to_string()))
     }
 }
 

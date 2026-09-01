@@ -9,6 +9,7 @@ use bot_core::weather::{
 };
 use reqwest::blocking::Client;
 use serde_json::Value;
+use std::sync::OnceLock;
 
 use crate::request_cache::{
     JsonHttpResponse, RequestCache, load_cached_json, python_json_string, python_request_cache_key,
@@ -50,11 +51,12 @@ pub struct ReqwestWeatherTransport {
 
 impl ReqwestWeatherTransport {
     pub fn new() -> Result<Self, TransportFailureKind> {
-        Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .map(|client| Self { client })
-            .map_err(|_| TransportFailureKind::Request)
+        static CLIENT: OnceLock<Client> = OnceLock::new();
+        crate::http_client::shared_client(&CLIENT, || {
+            Client::builder().timeout(REQUEST_TIMEOUT).build()
+        })
+        .map(|client| Self { client })
+        .map_err(|_| TransportFailureKind::Request)
     }
 }
 
