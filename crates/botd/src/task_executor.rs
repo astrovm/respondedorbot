@@ -103,6 +103,8 @@ pub trait TaskMessenger {
     fn send(&mut self, chat_id: &str, text: &str) -> Result<(), Self::Error>;
 }
 
+const MAX_DELIVERY_ATTEMPTS: u8 = 3;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskExecutionState {
     response: Option<String>,
@@ -110,6 +112,8 @@ pub struct TaskExecutionState {
     kind: TaskExecutionKind,
     billing_finalized: bool,
     delivered: bool,
+    #[serde(default)]
+    delivery_attempts: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,15 +283,37 @@ where
         if !state.delivered
             && let Some(response) = state.response.as_deref()
         {
+            if state.delivery_attempts >= MAX_DELIVERY_ATTEMPTS {
+                self.diagnostics.record(
+                    task.id.as_str(),
+                    "delivery_abandoned",
+                    "scheduled-task result reached its delivery retry limit",
+                );
+                return Ok(TaskExecutionDisposition::Complete);
+            }
             if let Err(error) = self
                 .messenger
                 .send(&task.chat_id, &task_result(task, response))
             {
-                self.diagnostics
-                    .record(task.id.as_str(), "delivery", &error.to_string());
-                return Err(NativeTaskExecutorError::Delivery {
-                    message: error.to_string(),
-                });
+                let message = error.to_string();
+                state.delivery_attempts = state.delivery_attempts.saturating_add(1);
+                self.journal
+                    .save(execution_id, &state)
+                    .map_err(|error| Self::journal_error("save_delivery_failure", error))?;
+                let exhausted = state.delivery_attempts >= MAX_DELIVERY_ATTEMPTS;
+                self.diagnostics.record(
+                    task.id.as_str(),
+                    if exhausted {
+                        "delivery_abandoned"
+                    } else {
+                        "delivery"
+                    },
+                    &message,
+                );
+                if exhausted {
+                    return Ok(TaskExecutionDisposition::Complete);
+                }
+                return Err(NativeTaskExecutorError::Delivery { message });
             }
             state.delivered = true;
             self.journal
@@ -358,6 +384,7 @@ where
                         kind: TaskExecutionKind::ProviderError,
                         billing_finalized: false,
                         delivered: true,
+                        delivery_attempts: 0,
                     };
                     self.journal
                         .save(execution_id, &state)
@@ -381,6 +408,7 @@ where
                     kind: TaskExecutionKind::Empty,
                     billing_finalized: false,
                     delivered: true,
+                    delivery_attempts: 0,
                 };
                 self.journal
                     .save(execution_id, &state)
@@ -406,6 +434,7 @@ where
                 },
                 billing_finalized: false,
                 delivered: false,
+                delivery_attempts: 0,
             };
             self.journal
                 .save(execution_id, &state)
@@ -777,6 +806,7 @@ mod tests {
                 kind: TaskExecutionKind::Success,
                 billing_finalized: true,
                 delivered: false,
+                delivery_attempts: 0,
             },
         );
         let mut executor = NativeTaskExecutor::new(
@@ -798,6 +828,48 @@ mod tests {
         assert_eq!(
             messenger.messages[0].1,
             "synthetic-user, task “synthetic task”:\nsaved answer"
+        );
+    }
+
+    #[test]
+    fn delivery_failures_stop_after_the_persisted_retry_budget() {
+        let execution_id = "task123:1000";
+        let messenger = Messenger {
+            fail: true,
+            ..Messenger::default()
+        };
+        let mut executor = executor(Provider::default(), Billing::default(), messenger);
+
+        for _ in 0..2 {
+            assert_eq!(
+                executor.execute(&task("es"), execution_id),
+                Err(NativeTaskExecutorError::Delivery {
+                    message: "delivery failed".to_owned(),
+                })
+            );
+        }
+        assert_eq!(
+            executor.execute(&task("es"), execution_id),
+            Ok(TaskExecutionDisposition::Complete)
+        );
+        // A crash after persisting the final failed attempt must not send again.
+        assert_eq!(
+            executor.execute(&task("es"), execution_id),
+            Ok(TaskExecutionDisposition::Complete)
+        );
+
+        let (provider, billing, messenger, diagnostics) = executor.parts();
+        assert_eq!(provider.execution_ids, [execution_id]);
+        assert_eq!(billing.reserve_ids, [execution_id]);
+        assert_eq!(billing.settlements.len(), 1);
+        assert_eq!(messenger.messages.len(), 3);
+        assert_eq!(
+            diagnostics
+                .0
+                .iter()
+                .filter(|(_, stage, _)| *stage == "delivery_abandoned")
+                .count(),
+            2
         );
     }
 
