@@ -95,6 +95,13 @@ where
                 last_poll_failure = None;
                 report_handler_failure(update_id, &handler_error.to_string());
             }
+            Err(RuntimeError::BackgroundHandler {
+                update_id,
+                handler_error,
+            }) => {
+                last_poll_failure = None;
+                report_handler_failure(update_id, &handler_error);
+            }
             Err(error @ RuntimeError::Poll(_)) => return Err(error.to_string()),
         }
     }
@@ -236,6 +243,7 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
         );
         report_best_effort(reporter.as_ref(), &report);
     }
+    runtime.shutdown();
     let shutdown_result = supervisor.stop().map_err(|error| error.to_string());
     polling_result.and(shutdown_result)
 }

@@ -120,7 +120,7 @@ use crate::media_adapters::{
 use crate::native_tools::{NativeTool, NativeToolRegistry, StandardNativeToolBackend};
 use crate::random_tool::RandomChoiceTool;
 use crate::reconciliation::ActiveOperationRegistry;
-use crate::runtime::{PollingRuntime, UpdateSource};
+use crate::runtime::{ParallelUpdateHandler, PollingRuntime, UpdateSource};
 use crate::task_tools::{
     RandomTaskIdSource, TaskCancelTool, TaskListTool, TaskSetTool, TaskToolContext,
 };
@@ -693,6 +693,15 @@ impl ChatConfigSource for ChatConfigRepository {
     fn set(&mut self, chat_id: &str, config: &ChatConfig) -> Result<ChatConfig, Self::Error> {
         ChatConfigRepository::set(self, chat_id, config)
     }
+
+    fn set_changed(
+        &mut self,
+        chat_id: &str,
+        previous: &ChatConfig,
+        config: &ChatConfig,
+    ) -> Result<ChatConfig, Self::Error> {
+        ChatConfigRepository::set_changed(self, chat_id, previous, config)
+    }
 }
 
 impl StarPaymentSink for BillingRepository {
@@ -1212,16 +1221,21 @@ pub fn publish_telegram_commands<Actions: ActionSink>(
     Ok(())
 }
 
+pub const UPDATE_WORKER_COUNT: usize = 8;
+pub const UPDATE_QUEUE_CAPACITY: usize = 100;
+
+pub type ConcreteNativeDispatcher = NativeDispatcher<
+    ChatConfigRepository,
+    TelegramActionSink<ReqwestTelegramTransport>,
+    RedisCommandState,
+    SystemRuntimeValues,
+    SystemRandomSource,
+    TelegramGroupAuthorizer<ReqwestTelegramTransport>,
+>;
+
 pub type ConcreteNativeRuntime = PollingRuntime<
     TelegramUpdateSource<ReqwestTelegramTransport>,
-    NativeDispatcher<
-        ChatConfigRepository,
-        TelegramActionSink<ReqwestTelegramTransport>,
-        RedisCommandState,
-        SystemRuntimeValues,
-        SystemRandomSource,
-        TelegramGroupAuthorizer<ReqwestTelegramTransport>,
-    >,
+    ParallelUpdateHandler<ConcreteNativeDispatcher>,
 >;
 
 #[derive(Debug, Error)]
@@ -1288,8 +1302,11 @@ pub enum CompositionError {
     ConversationState(String),
     #[error("could not construct Redis AI credit policy: {0}")]
     ConversationBillingPolicy(String),
+    #[error("could not start parallel update workers: {0}")]
+    UpdateWorkers(String),
 }
 
+#[derive(Clone)]
 pub struct NativeRuntimeOptions<'a> {
     pub token: &'a str,
     pub database_url: &'a str,
@@ -1308,6 +1325,73 @@ pub struct NativeRuntimeOptions<'a> {
     pub system_prompt: Option<String>,
     pub trigger_words: Option<Vec<String>>,
     pub active_operations: ActiveOperationRegistry,
+}
+
+#[derive(Clone)]
+struct OwnedNativeRuntimeOptions {
+    token: String,
+    database_url: String,
+    bot_name: String,
+    instance_name: Option<String>,
+    redis_endpoint: RedisEndpoint,
+    long_poll_timeout: Duration,
+    admin_user_id: Option<i64>,
+    coinmarketcap_key: Option<String>,
+    giphy_api_key: Option<String>,
+    openrouter_api_key: Option<String>,
+    openrouter_base_url: Option<String>,
+    groq_free_api_key: Option<String>,
+    groq_api_key: Option<String>,
+    firecrawl_api_key: Option<String>,
+    system_prompt: Option<String>,
+    trigger_words: Option<Vec<String>>,
+    active_operations: ActiveOperationRegistry,
+}
+
+impl OwnedNativeRuntimeOptions {
+    fn new(options: NativeRuntimeOptions<'_>) -> Self {
+        Self {
+            token: options.token.to_owned(),
+            database_url: options.database_url.to_owned(),
+            bot_name: options.bot_name.to_owned(),
+            instance_name: options.instance_name,
+            redis_endpoint: options.redis_endpoint.clone(),
+            long_poll_timeout: options.long_poll_timeout,
+            admin_user_id: options.admin_user_id,
+            coinmarketcap_key: options.coinmarketcap_key,
+            giphy_api_key: options.giphy_api_key,
+            openrouter_api_key: options.openrouter_api_key,
+            openrouter_base_url: options.openrouter_base_url,
+            groq_free_api_key: options.groq_free_api_key,
+            groq_api_key: options.groq_api_key,
+            firecrawl_api_key: options.firecrawl_api_key,
+            system_prompt: options.system_prompt,
+            trigger_words: options.trigger_words,
+            active_operations: options.active_operations,
+        }
+    }
+
+    fn borrowed(&self) -> NativeRuntimeOptions<'_> {
+        NativeRuntimeOptions {
+            token: &self.token,
+            database_url: &self.database_url,
+            bot_name: &self.bot_name,
+            instance_name: self.instance_name.clone(),
+            redis_endpoint: &self.redis_endpoint,
+            long_poll_timeout: self.long_poll_timeout,
+            admin_user_id: self.admin_user_id,
+            coinmarketcap_key: self.coinmarketcap_key.clone(),
+            giphy_api_key: self.giphy_api_key.clone(),
+            openrouter_api_key: self.openrouter_api_key.clone(),
+            openrouter_base_url: self.openrouter_base_url.clone(),
+            groq_free_api_key: self.groq_free_api_key.clone(),
+            groq_api_key: self.groq_api_key.clone(),
+            firecrawl_api_key: self.firecrawl_api_key.clone(),
+            system_prompt: self.system_prompt.clone(),
+            trigger_words: self.trigger_words.clone(),
+            active_operations: self.active_operations.clone(),
+        }
+    }
 }
 
 pub type ProductionConversationTools =
@@ -1511,15 +1595,13 @@ fn current_unix_timestamp() -> i64 {
         .map_or(0, |duration| duration.as_secs().min(i64::MAX as u64) as i64)
 }
 
-pub fn build_native_runtime(
+fn build_native_dispatcher(
     options: NativeRuntimeOptions<'_>,
-) -> Result<ConcreteNativeRuntime, CompositionError> {
+) -> Result<ConcreteNativeDispatcher, CompositionError> {
     let conversation_coinmarketcap_key = options.coinmarketcap_key.clone();
     let conversation_firecrawl_key = options.firecrawl_api_key.clone();
     let groq_free_api_key = options.groq_free_api_key.clone();
     let groq_api_key = options.groq_api_key.clone();
-    let polling_transport =
-        ReqwestTelegramTransport::new().map_err(CompositionError::PollingTransport)?;
     let action_transport =
         ReqwestTelegramTransport::new().map_err(CompositionError::ActionTransport)?;
     let admin_transport =
@@ -1564,8 +1646,6 @@ pub fn build_native_runtime(
         ReqwestTokenSignalTransport::new().map_err(CompositionError::TokenSignalTransport)?;
     let token_signal_cache =
         RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::TokenSignalCache)?;
-    let source =
-        TelegramUpdateSource::new(polling_transport, options.token, options.long_poll_timeout);
     let config = ChatConfigRepository::new(options.database_url);
     let actions = TelegramActionSink::new(action_transport, options.token);
     let state = RedisCommandState::new(options.redis_endpoint)?;
@@ -1762,7 +1842,24 @@ pub fn build_native_runtime(
     } else {
         dispatcher
     };
-    Ok(PollingRuntime::new(source, dispatcher))
+    Ok(dispatcher)
+}
+
+pub fn build_native_runtime(
+    options: NativeRuntimeOptions<'_>,
+) -> Result<ConcreteNativeRuntime, CompositionError> {
+    let options = OwnedNativeRuntimeOptions::new(options);
+    let polling_transport =
+        ReqwestTelegramTransport::new().map_err(CompositionError::PollingTransport)?;
+    let source =
+        TelegramUpdateSource::new(polling_transport, &options.token, options.long_poll_timeout);
+    let worker_options = options.clone();
+    let handler =
+        ParallelUpdateHandler::start(UPDATE_WORKER_COUNT, UPDATE_QUEUE_CAPACITY, move || {
+            build_native_dispatcher(worker_options.borrowed())
+        })
+        .map_err(|error| CompositionError::UpdateWorkers(error.to_string()))?;
+    Ok(PollingRuntime::new(source, handler))
 }
 
 #[cfg(test)]
