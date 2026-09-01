@@ -111,7 +111,7 @@ fn outcome_result(
         SearchOutcome::Success {
             results,
             credits_used,
-            request_id: _,
+            request_id,
             query: _,
         } => {
             let billing_segment = positive_credits(&credits_used).map(|credits_used| {
@@ -122,6 +122,7 @@ fn outcome_result(
                     "source": "firecrawl",
                     "metadata": {
                         "provider": "firecrawl",
+                        "provider_request_id": request_id,
                         "tool_call_id": tool_call_id,
                         "web_search_requests": 1,
                         "firecrawl_credits_used": credits_used,
@@ -246,8 +247,37 @@ mod tests {
         assert_eq!(output["results"][0]["url"], "https://example.test");
         let segment = result.billing_segment.unwrap_or(Value::Null);
         assert_eq!(segment["kind"], "web_search");
+        assert_eq!(segment["metadata"]["provider_request_id"], "request-1");
         assert_eq!(segment["metadata"]["tool_call_id"], "call-1");
         assert_eq!(segment["metadata"]["firecrawl_credits_used"], 2);
+        assert_eq!(
+            bot_core::ai_usage::stable_provider_segment_id(&segment),
+            "firecrawl:request-1"
+        );
+    }
+
+    #[test]
+    fn firecrawl_request_ids_distinguish_retried_tool_calls() {
+        let segment = |request_id: &str| {
+            outcome_result(
+                SearchOutcome::Success {
+                    query: "synthetic query".to_owned(),
+                    results: Vec::new(),
+                    credits_used: json!(2),
+                    request_id: json!(request_id),
+                },
+                "synthetic query",
+                "reused-call-id",
+                Locale::En,
+            )
+            .billing_segment
+            .unwrap_or(Value::Null)
+        };
+
+        assert_ne!(
+            bot_core::ai_usage::stable_provider_segment_id(&segment("request-1")),
+            bot_core::ai_usage::stable_provider_segment_id(&segment("request-2"))
+        );
     }
 
     #[test]
