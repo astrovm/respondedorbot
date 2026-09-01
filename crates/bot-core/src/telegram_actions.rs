@@ -1,5 +1,7 @@
 //! Typed outbound Telegram actions produced by application logic.
 
+use std::sync::Arc;
+
 use serde::Serialize;
 
 use crate::telegram_commands::TelegramCommand;
@@ -67,14 +69,14 @@ pub enum TelegramAction {
     },
     SendVideo {
         chat_id: ChatId,
-        video: Vec<u8>,
+        video: Arc<[u8]>,
         reply_to_message_id: Option<MessageId>,
         caption: String,
         reply_markup: Option<InlineKeyboardMarkup>,
     },
     SendPhoto {
         chat_id: ChatId,
-        photo: Vec<u8>,
+        photo: Arc<[u8]>,
         reply_to_message_id: Option<MessageId>,
         caption: String,
         parse_mode: Option<ParseMode>,
@@ -83,7 +85,7 @@ pub enum TelegramAction {
     EditMessagePhoto {
         chat_id: ChatId,
         message_id: MessageId,
-        photo: Vec<u8>,
+        photo: Arc<[u8]>,
         caption: String,
         parse_mode: Option<ParseMode>,
         reply_markup: Option<InlineKeyboardMarkup>,

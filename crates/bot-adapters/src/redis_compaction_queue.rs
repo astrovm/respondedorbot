@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::redis_connection::{RedisEndpoint, client};
+use crate::redis_connection::{RedisEndpoint, RedisPool, pool};
 
 const JOBS_KEY: &str = "memory:compaction:jobs";
 const DEAD_JOBS_KEY: &str = "memory:compaction:dead_jobs";
@@ -39,13 +39,13 @@ pub struct QueueJob {
 }
 
 pub struct RedisCompactionQueue {
-    client: redis::Client,
+    client: RedisPool,
 }
 
 impl RedisCompactionQueue {
     pub fn new(endpoint: &RedisEndpoint) -> Result<Self, RedisCompactionQueueError> {
         Ok(Self {
-            client: client(endpoint)?,
+            client: pool(endpoint)?,
         })
     }
 
@@ -188,9 +188,9 @@ mod tests {
                 ("EVAL", b":1\r\n".as_slice()),
                 ("EVAL", b":1\r\n".as_slice()),
             ];
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(2)))?;
             for (expected, response) in exchanges {
-                let (mut stream, _) = listener.accept()?;
-                stream.set_read_timeout(Some(Duration::from_secs(2)))?;
                 let command = read_command(&mut stream)?;
                 assert_eq!(command.first().map(String::as_str), Some(expected));
                 stream.write_all(response)?;

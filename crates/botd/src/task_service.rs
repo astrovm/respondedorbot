@@ -21,7 +21,32 @@ use crate::scheduler::{
     ScheduledTaskExecutor, SchedulerMode, SchedulerSettings, SchedulerStep,
     TaskExecutionDisposition, TaskScheduler,
 };
-use crate::task_executor::{NativeTaskExecutor, StderrTaskDiagnostics};
+use crate::task_executor::{
+    NativeTaskExecutor, StderrTaskDiagnostics, TaskExecutionJournal, TaskExecutionState,
+};
+
+const TASK_EXECUTION_TTL_SECONDS: i64 = 86_400 * 3_650;
+const TASK_EXECUTION_PREFIX: &str = "task:execution:";
+
+impl TaskExecutionJournal for RedisTaskStore {
+    type Error = String;
+
+    fn load(&mut self, execution_id: &str) -> Result<Option<TaskExecutionState>, Self::Error> {
+        let key = format!("{TASK_EXECUTION_PREFIX}{execution_id}");
+        self.get(&key)
+            .map_err(|error| error.to_string())?
+            .map(|payload| serde_json::from_str(&payload).map_err(|error| error.to_string()))
+            .transpose()
+    }
+
+    fn save(&mut self, execution_id: &str, state: &TaskExecutionState) -> Result<(), Self::Error> {
+        let key = format!("{TASK_EXECUTION_PREFIX}{execution_id}");
+        let payload = serde_json::to_string(state).map_err(|error| error.to_string())?;
+        self.setex(&key, TASK_EXECUTION_TTL_SECONDS, &payload)
+            .map(|_saved| ())
+            .map_err(|error| error.to_string())
+    }
+}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct VerificationExecutor;
@@ -44,6 +69,7 @@ type ConcreteExecutor = NativeTaskExecutor<
     OpenRouterTaskProvider<ReqwestOpenRouterTransport>,
     PostgresTaskBilling<BillingRepository>,
     ActionTaskMessenger<TelegramActionSink<ReqwestTelegramTransport>>,
+    RedisTaskStore,
     StderrTaskDiagnostics,
 >;
 
@@ -125,7 +151,9 @@ pub fn build_task_scheduler(
         TelegramActionSink::new(action_transport, options.telegram_token)
             .with_delivery_coordinator(options.telegram_delivery),
     );
-    let executor = NativeTaskExecutor::new(provider, billing, messenger, StderrTaskDiagnostics);
+    let journal = RedisTaskStore::new(options.redis_endpoint)?;
+    let executor =
+        NativeTaskExecutor::new(provider, billing, messenger, journal, StderrTaskDiagnostics);
     Ok(TaskScheduler::new(
         RedisTaskStore::new(options.redis_endpoint)?,
         executor,

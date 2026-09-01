@@ -8,6 +8,8 @@ use bot_adapters::yahoo_finance::{ReqwestYahooFinanceTransport, load_quote};
 
 use crate::background::BackgroundWorker;
 
+const FAILURE_REPORT_THRESHOLD: usize = 3;
+
 trait PriceRefreshJob: Send {
     fn refresh(&mut self, now_epoch_seconds: i64) -> Result<(), String>;
 }
@@ -31,11 +33,15 @@ struct NamedJob {
 /// Runs every refresh even when an earlier provider or cache fails.
 pub struct PriceCacheRefreshWorker {
     jobs: Vec<NamedJob>,
+    consecutive_failed_cycles: usize,
 }
 
 impl PriceCacheRefreshWorker {
     fn new(jobs: Vec<NamedJob>) -> Self {
-        Self { jobs }
+        Self {
+            jobs,
+            consecutive_failed_cycles: 0,
+        }
     }
 }
 
@@ -52,9 +58,23 @@ impl BackgroundWorker for PriceCacheRefreshWorker {
             })
             .collect::<Vec<_>>();
         if failures.is_empty() {
+            self.consecutive_failed_cycles = 0;
             Ok(())
         } else {
-            Err(failures.join("; "))
+            self.consecutive_failed_cycles = self.consecutive_failed_cycles.saturating_add(1);
+            let message = failures.join("; ");
+            if self.consecutive_failed_cycles >= FAILURE_REPORT_THRESHOLD {
+                Err(format!(
+                    "{} consecutive refresh cycles failed: {message}",
+                    self.consecutive_failed_cycles
+                ))
+            } else {
+                eprintln!(
+                    "transient price-cache refresh failure ({}/{}): {message}",
+                    self.consecutive_failed_cycles, FAILURE_REPORT_THRESHOLD
+                );
+                Ok(())
+            }
         }
     }
 }
@@ -164,11 +184,14 @@ mod tests {
         })
         .collect();
         let mut worker = PriceCacheRefreshWorker::new(jobs);
+        assert!(worker.run_once(121).is_ok());
+        assert!(worker.run_once(122).is_ok());
         let result = worker.run_once(123);
         let recorded = calls.lock().map(|calls| calls.clone()).unwrap_or_default();
+        assert_eq!(recorded.len(), 12);
         assert_eq!(
-            recorded,
-            vec![
+            &recorded[8..],
+            [
                 ("first", 123),
                 ("second", 123),
                 ("third", 123),

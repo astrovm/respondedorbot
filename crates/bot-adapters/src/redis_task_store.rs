@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use crate::redis_connection::{RedisEndpoint, client};
+use crate::redis_connection::{RedisEndpoint, RedisPool, pool};
 use crate::task_record::{
     TaskRecordDocument, TaskRecordError, decode_task_record, encode_task_record,
 };
@@ -32,14 +32,15 @@ pub enum RedisTaskStoreError {
     Record(#[from] TaskRecordError),
 }
 
+#[derive(Clone)]
 pub struct RedisTaskStore {
-    client: redis::Client,
+    client: RedisPool,
 }
 
 impl RedisTaskStore {
     pub fn new(endpoint: &RedisEndpoint) -> Result<Self, RedisTaskStoreError> {
         Ok(Self {
-            client: client(endpoint)?,
+            client: pool(endpoint)?,
         })
     }
 
@@ -462,9 +463,9 @@ mod tests {
                     "*2\r\n$2\r\n{}\r\n$-1\r\n",
                 ),
             ];
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(2)))?;
             for (expected, response) in exchanges {
-                let (mut stream, _) = listener.accept()?;
-                stream.set_read_timeout(Some(Duration::from_secs(2)))?;
                 assert_eq!(read_command(&mut stream)?, expected);
                 stream.write_all(response.as_bytes())?;
             }
@@ -603,9 +604,9 @@ mod tests {
                     ":1\r\n",
                 ),
             ];
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(2)))?;
             for (expected, response) in exchanges {
-                let (mut stream, _) = listener.accept()?;
-                stream.set_read_timeout(Some(Duration::from_secs(2)))?;
                 assert_eq!(read_command(&mut stream)?, expected);
                 stream.write_all(response.as_bytes())?;
             }

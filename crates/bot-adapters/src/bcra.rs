@@ -10,6 +10,7 @@ use bot_core::{
 use calamine::{Data, Reader, Xlsx};
 use reqwest::blocking::Client;
 use serde_json::{Map, Value, json};
+use std::sync::OnceLock;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::request_cache::{
@@ -54,12 +55,15 @@ pub struct ReqwestBcraTransport {
 
 impl ReqwestBcraTransport {
     pub fn new() -> Result<Self, TransportFailureKind> {
-        Client::builder()
-            .timeout(Duration::from_secs(10))
-            .danger_accept_invalid_certs(true)
-            .build()
-            .map(|client| Self { client })
-            .map_err(|_| TransportFailureKind::Request)
+        static CLIENT: OnceLock<Client> = OnceLock::new();
+        crate::http_client::shared_client(&CLIENT, || {
+            Client::builder()
+                .timeout(Duration::from_secs(10))
+                .danger_accept_invalid_certs(true)
+                .build()
+        })
+        .map(|client| Self { client })
+        .map_err(|_| TransportFailureKind::Request)
     }
 }
 

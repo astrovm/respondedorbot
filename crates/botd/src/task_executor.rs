@@ -4,6 +4,7 @@ use bot_core::ai_response_cleanup::{
     clean_duplicate_response, remove_gordo_prefix, strip_markdown_formatting,
 };
 use bot_core::scheduled_tasks::ScheduledTask;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -102,6 +103,31 @@ pub trait TaskMessenger {
     fn send(&mut self, chat_id: &str, text: &str) -> Result<(), Self::Error>;
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskExecutionState {
+    response: Option<String>,
+    billing_segments: Vec<Value>,
+    kind: TaskExecutionKind,
+    billing_finalized: bool,
+    delivered: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TaskExecutionKind {
+    Success,
+    Fallback,
+    ProviderError,
+    Empty,
+}
+
+pub trait TaskExecutionJournal {
+    type Error: std::fmt::Display;
+
+    fn load(&mut self, execution_id: &str) -> Result<Option<TaskExecutionState>, Self::Error>;
+    fn save(&mut self, execution_id: &str, state: &TaskExecutionState) -> Result<(), Self::Error>;
+}
+
 pub trait TaskDiagnostics {
     fn record(&mut self, task_id: &str, stage: &'static str, message: &str);
 }
@@ -122,21 +148,30 @@ pub enum NativeTaskExecutorError {
         stage: &'static str,
         message: String,
     },
+    #[error("scheduled-task delivery failed: {message}")]
+    Delivery { message: String },
+    #[error("scheduled-task journal failed during {stage}: {message}")]
+    Journal {
+        stage: &'static str,
+        message: String,
+    },
 }
 
-pub struct NativeTaskExecutor<Provider, Billing, Messenger, Diagnostics> {
+pub struct NativeTaskExecutor<Provider, Billing, Messenger, Journal, Diagnostics> {
     provider: Provider,
     billing: Billing,
     messenger: Messenger,
+    journal: Journal,
     diagnostics: Diagnostics,
 }
 
-impl<Provider, Billing, Messenger, Diagnostics>
-    NativeTaskExecutor<Provider, Billing, Messenger, Diagnostics>
+impl<Provider, Billing, Messenger, Journal, Diagnostics>
+    NativeTaskExecutor<Provider, Billing, Messenger, Journal, Diagnostics>
 where
     Provider: TaskAiProvider,
     Billing: TaskBilling,
     Messenger: TaskMessenger,
+    Journal: TaskExecutionJournal,
     Diagnostics: TaskDiagnostics,
 {
     #[must_use]
@@ -144,12 +179,14 @@ where
         provider: Provider,
         billing: Billing,
         messenger: Messenger,
+        journal: Journal,
         diagnostics: Diagnostics,
     ) -> Self {
         Self {
             provider,
             billing,
             messenger,
+            journal,
             diagnostics,
         }
     }
@@ -190,6 +227,76 @@ where
         }
     }
 
+    fn journal_error(
+        stage: &'static str,
+        error: impl std::fmt::Display,
+    ) -> NativeTaskExecutorError {
+        NativeTaskExecutorError::Journal {
+            stage,
+            message: error.to_string(),
+        }
+    }
+
+    fn finish_saved_result(
+        &mut self,
+        task: &ScheduledTask,
+        execution_id: &str,
+        mut state: TaskExecutionState,
+    ) -> Result<TaskExecutionDisposition, NativeTaskExecutorError> {
+        if !state.billing_finalized {
+            match state.kind {
+                TaskExecutionKind::Success => self
+                    .billing
+                    .settle(task, execution_id, &state.billing_segments, "task_success")
+                    .map_err(|error| Self::billing_error("settle", error))?,
+                TaskExecutionKind::Fallback => self.settle_or_refund(
+                    task,
+                    execution_id,
+                    &state.billing_segments,
+                    "task_fallback_provider_usage",
+                    "task_fallback",
+                )?,
+                TaskExecutionKind::ProviderError => self.settle_or_refund(
+                    task,
+                    execution_id,
+                    &state.billing_segments,
+                    "task_error_provider_usage",
+                    "task_error",
+                )?,
+                TaskExecutionKind::Empty => self.settle_or_refund(
+                    task,
+                    execution_id,
+                    &state.billing_segments,
+                    "task_empty_provider_usage",
+                    "task_empty",
+                )?,
+            }
+            state.billing_finalized = true;
+            self.journal
+                .save(execution_id, &state)
+                .map_err(|error| Self::journal_error("save_billing", error))?;
+        }
+        if !state.delivered
+            && let Some(response) = state.response.as_deref()
+        {
+            if let Err(error) = self
+                .messenger
+                .send(&task.chat_id, &task_result(task, response))
+            {
+                self.diagnostics
+                    .record(task.id.as_str(), "delivery", &error.to_string());
+                return Err(NativeTaskExecutorError::Delivery {
+                    message: error.to_string(),
+                });
+            }
+            state.delivered = true;
+            self.journal
+                .save(execution_id, &state)
+                .map_err(|error| Self::journal_error("save_delivery", error))?;
+        }
+        Ok(TaskExecutionDisposition::Complete)
+    }
+
     fn execute_task(
         &mut self,
         task: &ScheduledTask,
@@ -202,6 +309,13 @@ where
                 "chat, text, and user name are required",
             );
             return Ok(TaskExecutionDisposition::Retry);
+        }
+        if let Some(state) = self
+            .journal
+            .load(execution_id)
+            .map_err(|error| Self::journal_error("load", error))?
+        {
+            return self.finish_saved_result(task, execution_id, state);
         }
         if task.user_id.is_none() {
             self.send_nonfatal(
@@ -238,14 +352,17 @@ where
                     segments.extend(error.billing_segments);
                     self.diagnostics
                         .record(task.id.as_str(), "provider", &message);
-                    self.settle_or_refund(
-                        task,
-                        execution_id,
-                        &segments,
-                        "task_error_provider_usage",
-                        "task_error",
-                    )?;
-                    return Ok(TaskExecutionDisposition::Complete);
+                    let state = TaskExecutionState {
+                        response: None,
+                        billing_segments: segments,
+                        kind: TaskExecutionKind::ProviderError,
+                        billing_finalized: false,
+                        delivered: true,
+                    };
+                    self.journal
+                        .save(execution_id, &state)
+                        .map_err(|error| Self::journal_error("save_provider_failure", error))?;
+                    return self.finish_saved_result(task, execution_id, state);
                 }
             };
             segments.extend(reply.billing_segments);
@@ -258,14 +375,17 @@ where
                     });
                     continue;
                 }
-                self.settle_or_refund(
-                    task,
-                    execution_id,
-                    &segments,
-                    "task_empty_provider_usage",
-                    "task_empty",
-                )?;
-                return Ok(TaskExecutionDisposition::Complete);
+                let state = TaskExecutionState {
+                    response: None,
+                    billing_segments: segments,
+                    kind: TaskExecutionKind::Empty,
+                    billing_finalized: false,
+                    delivered: true,
+                };
+                self.journal
+                    .save(execution_id, &state)
+                    .map_err(|error| Self::journal_error("save_empty_result", error))?;
+                return self.finish_saved_result(task, execution_id, state);
             }
             if reply.fallback && fallback_retries < MAX_FALLBACK_RETRIES {
                 fallback_retries += 1;
@@ -276,22 +396,21 @@ where
                 continue;
             }
 
-            let cleaned = clean_task_response(&reply.text);
-            self.send_nonfatal(task, &task_result(task, &cleaned));
-            if reply.fallback {
-                self.settle_or_refund(
-                    task,
-                    execution_id,
-                    &segments,
-                    "task_fallback_provider_usage",
-                    "task_fallback",
-                )?;
-            } else {
-                self.billing
-                    .settle(task, execution_id, &segments, "task_success")
-                    .map_err(|error| Self::billing_error("settle", error))?;
-            }
-            return Ok(TaskExecutionDisposition::Complete);
+            let state = TaskExecutionState {
+                response: Some(clean_task_response(&reply.text)),
+                billing_segments: segments,
+                kind: if reply.fallback {
+                    TaskExecutionKind::Fallback
+                } else {
+                    TaskExecutionKind::Success
+                },
+                billing_finalized: false,
+                delivered: false,
+            };
+            self.journal
+                .save(execution_id, &state)
+                .map_err(|error| Self::journal_error("save_provider_result", error))?;
+            return self.finish_saved_result(task, execution_id, state);
         }
     }
 
@@ -306,12 +425,13 @@ where
     }
 }
 
-impl<Provider, Billing, Messenger, Diagnostics> ScheduledTaskExecutor
-    for NativeTaskExecutor<Provider, Billing, Messenger, Diagnostics>
+impl<Provider, Billing, Messenger, Journal, Diagnostics> ScheduledTaskExecutor
+    for NativeTaskExecutor<Provider, Billing, Messenger, Journal, Diagnostics>
 where
     Provider: TaskAiProvider,
     Billing: TaskBilling,
     Messenger: TaskMessenger,
+    Journal: TaskExecutionJournal,
     Diagnostics: TaskDiagnostics,
 {
     type Error = NativeTaskExecutorError;
@@ -410,15 +530,17 @@ fn clean_task_response(response: &str) -> String {
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, VecDeque};
 
     use bot_core::scheduled_tasks::{ScheduledTask, TaskId, TaskSchedule};
     use serde_json::{Value, json};
 
     use super::{
-        NativeTaskExecutor, ScheduledTaskExecutor, TaskAiProvider, TaskBilling, TaskDiagnostics,
-        TaskExecutionDisposition, TaskMessenger, TaskPromptMessage, TaskProviderFailure,
-        TaskProviderReply, TaskReserveOutcome, build_task_messages, clean_task_response,
+        NativeTaskExecutor, NativeTaskExecutorError, ScheduledTaskExecutor, TaskAiProvider,
+        TaskBilling, TaskDiagnostics, TaskExecutionDisposition, TaskExecutionJournal,
+        TaskExecutionKind, TaskExecutionState, TaskMessenger, TaskPromptMessage,
+        TaskProviderFailure, TaskProviderReply, TaskReserveOutcome, build_task_messages,
+        clean_task_response,
     };
 
     #[derive(Default)]
@@ -517,6 +639,26 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct Journal(HashMap<String, TaskExecutionState>);
+
+    impl TaskExecutionJournal for Journal {
+        type Error = &'static str;
+
+        fn load(&mut self, execution_id: &str) -> Result<Option<TaskExecutionState>, Self::Error> {
+            Ok(self.0.get(execution_id).cloned())
+        }
+
+        fn save(
+            &mut self,
+            execution_id: &str,
+            state: &TaskExecutionState,
+        ) -> Result<(), Self::Error> {
+            self.0.insert(execution_id.to_owned(), state.clone());
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
     struct Diagnostics(Vec<(String, &'static str, String)>);
 
     impl TaskDiagnostics for Diagnostics {
@@ -545,8 +687,14 @@ mod tests {
         provider: Provider,
         billing: Billing,
         messenger: Messenger,
-    ) -> NativeTaskExecutor<Provider, Billing, Messenger, Diagnostics> {
-        NativeTaskExecutor::new(provider, billing, messenger, Diagnostics::default())
+    ) -> NativeTaskExecutor<Provider, Billing, Messenger, Journal, Diagnostics> {
+        NativeTaskExecutor::new(
+            provider,
+            billing,
+            messenger,
+            Journal::default(),
+            Diagnostics::default(),
+        )
     }
 
     #[test]
@@ -615,6 +763,42 @@ mod tests {
         assert!(billing.settlements.is_empty());
         assert!(billing.refunds.is_empty());
         assert!(messenger.messages.is_empty());
+    }
+
+    #[test]
+    fn saved_result_retries_delivery_without_repeating_provider_or_billing() {
+        let execution_id = "task123:1000";
+        let mut journal = Journal::default();
+        journal.0.insert(
+            execution_id.to_owned(),
+            TaskExecutionState {
+                response: Some("saved answer".to_owned()),
+                billing_segments: vec![json!({"kind": "chat"})],
+                kind: TaskExecutionKind::Success,
+                billing_finalized: true,
+                delivered: false,
+            },
+        );
+        let mut executor = NativeTaskExecutor::new(
+            Provider::default(),
+            Billing::default(),
+            Messenger::default(),
+            journal,
+            Diagnostics::default(),
+        );
+
+        assert_eq!(
+            executor.execute(&task("en"), execution_id),
+            Ok(TaskExecutionDisposition::Complete)
+        );
+        let (provider, billing, messenger, _) = executor.parts();
+        assert!(provider.prompts.is_empty());
+        assert!(billing.reserve_ids.is_empty());
+        assert!(billing.settlements.is_empty());
+        assert_eq!(
+            messenger.messages[0].1,
+            "synthetic-user, task “synthetic task”:\nsaved answer"
+        );
     }
 
     #[test]
@@ -772,7 +956,9 @@ mod tests {
         let mut delivery = executor(Provider::default(), Billing::default(), messenger);
         assert_eq!(
             delivery.execute(&task("es"), "task123:1000"),
-            Ok(TaskExecutionDisposition::Complete)
+            Err(NativeTaskExecutorError::Delivery {
+                message: "delivery failed".to_owned()
+            })
         );
         assert_eq!(delivery.parts().3.0[0].1, "delivery");
 

@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use crate::redis_connection::{RedisEndpoint, client};
+use crate::redis_connection::{RedisEndpoint, RedisPool, pool};
 
 pub const CREDITLESS_CAP_TTL_SECONDS: i64 = 3_600;
 
@@ -15,13 +15,13 @@ pub enum RedisCreditlessCapError {
 }
 
 pub struct RedisCreditlessCap {
-    client: redis::Client,
+    client: RedisPool,
 }
 
 impl RedisCreditlessCap {
     pub fn new(endpoint: &RedisEndpoint) -> Result<Self, RedisCreditlessCapError> {
         Ok(Self {
-            client: client(endpoint)?,
+            client: pool(endpoint)?,
         })
     }
 
@@ -82,30 +82,21 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let port = listener.local_addr()?.port();
         let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
-            let (mut first, _) = listener.accept()?;
-            first.set_read_timeout(Some(Duration::from_secs(2)))?;
-            assert_eq!(read_command(&mut first)?, ["INCR", "creditless_cap:-42:7"]);
-            first.write_all(b":1\r\n")?;
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+            assert_eq!(read_command(&mut stream)?, ["INCR", "creditless_cap:-42:7"]);
+            stream.write_all(b":1\r\n")?;
             assert_eq!(
-                read_command(&mut first)?,
+                read_command(&mut stream)?,
                 ["EXPIRE", "creditless_cap:-42:7", "3600"]
             );
-            first.write_all(b":1\r\n")?;
-
-            let (mut second, _) = listener.accept()?;
-            second.set_read_timeout(Some(Duration::from_secs(2)))?;
-            assert_eq!(read_command(&mut second)?, ["INCR", "creditless_cap:-42:7"]);
-            second.write_all(b":2\r\n")?;
-
-            let (mut third, _) = listener.accept()?;
-            third.set_read_timeout(Some(Duration::from_secs(2)))?;
-            assert_eq!(read_command(&mut third)?, ["DECR", "creditless_cap:-42:7"]);
-            third.write_all(b":1\r\n")?;
-
-            let (mut fourth, _) = listener.accept()?;
-            fourth.set_read_timeout(Some(Duration::from_secs(2)))?;
-            assert_eq!(read_command(&mut fourth)?, ["GET", "creditless_cap:-42:7"]);
-            fourth.write_all(b"$1\r\n1\r\n")?;
+            stream.write_all(b":1\r\n")?;
+            assert_eq!(read_command(&mut stream)?, ["INCR", "creditless_cap:-42:7"]);
+            stream.write_all(b":2\r\n")?;
+            assert_eq!(read_command(&mut stream)?, ["DECR", "creditless_cap:-42:7"]);
+            stream.write_all(b":1\r\n")?;
+            assert_eq!(read_command(&mut stream)?, ["GET", "creditless_cap:-42:7"]);
+            stream.write_all(b"$1\r\n1\r\n")?;
             Ok(())
         });
         let cap = RedisCreditlessCap::new(&RedisEndpoint {

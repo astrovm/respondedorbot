@@ -1031,7 +1031,7 @@ where
     }
 
     fn complete_delivery(&mut self, delivery: AiDelivery) -> Result<(), String> {
-        let Some(pending) = self.pending.remove(&delivery.completion_id) else {
+        let Some(pending) = self.pending.get(&delivery.completion_id).cloned() else {
             return Ok(());
         };
         let actual = price_segments(&pending.segments)?;
@@ -1096,6 +1096,7 @@ where
             delivery.delivered,
             reason,
         )?;
+        self.pending.remove(&delivery.completion_id);
         if delivery.delivered && matches!(pending.kind, PendingKind::Conversation { .. }) {
             self.state.record_outgoing(
                 &pending.input,
@@ -1395,16 +1396,19 @@ fn record_and_settle<Billing: ConversationBilling>(
     delivered: bool,
     reason: &str,
 ) -> Result<(), String> {
+    let mut segment_error = None;
     for segment in segments {
-        billing.record_segment(ProviderSegmentRequest {
+        if let Err(error) = billing.record_segment(ProviderSegmentRequest {
             user_id: input.sender_id.0,
             chat_id: group_chat_id(input),
             operation_id: operation_id.to_owned(),
             segment_id: stable_provider_segment_id(segment),
             segment: segment.clone(),
-        })?;
+        }) {
+            segment_error.get_or_insert(error);
+        }
     }
-    billing.settle(SettlementRequest {
+    let settlement = billing.settle(SettlementRequest {
         user_id: input.sender_id.0,
         chat_id: group_chat_id(input),
         operation_id: operation_id.to_owned(),
@@ -1412,7 +1416,14 @@ fn record_and_settle<Billing: ConversationBilling>(
         delivered,
         reason: reason.to_owned(),
         billing_segments: segments.to_vec(),
-    })
+    });
+    match (segment_error, settlement) {
+        (Some(segment_error), Err(settlement_error)) => Err(format!(
+            "provider usage recording failed: {segment_error}; settlement failed: {settlement_error}"
+        )),
+        (Some(error), Ok(())) => Err(format!("provider usage recording failed: {error}")),
+        (None, result) => result,
+    }
 }
 
 fn formatted_date(timestamp: i64, timezone_offset_hours: i64, locale: Locale) -> String {
@@ -1694,6 +1705,8 @@ mod tests {
         segments: Vec<ProviderSegmentRequest>,
         settlements: Vec<SettlementRequest>,
         personal_balance: Option<i64>,
+        record_failure: bool,
+        settlement_failure: bool,
     }
 
     impl ConversationBilling for Billing {
@@ -1710,12 +1723,20 @@ mod tests {
 
         fn record_segment(&mut self, request: ProviderSegmentRequest) -> Result<(), String> {
             self.segments.push(request);
-            Ok(())
+            if self.record_failure {
+                Err("synthetic segment failure".to_owned())
+            } else {
+                Ok(())
+            }
         }
 
         fn settle(&mut self, request: SettlementRequest) -> Result<(), String> {
             self.settlements.push(request);
-            Ok(())
+            if self.settlement_failure {
+                Err("synthetic settlement failure".to_owned())
+            } else {
+                Ok(())
+            }
         }
 
         fn personal_balance(&mut self, _user_id: i64) -> Result<Option<i64>, String> {
@@ -1825,6 +1846,49 @@ mod tests {
             Ok(())
         );
         assert_eq!(service.billing.settlements.len(), 1);
+    }
+
+    #[test]
+    fn delivery_finalization_keeps_pending_state_and_still_attempts_settlement_on_segment_failure()
+    {
+        let mut service = conversation(
+            vec![Ok(round("answer", None))],
+            Billing {
+                record_failure: true,
+                ..Billing::default()
+            },
+        );
+        let Ok(AiPreparation::Reply {
+            completion_id: Some(completion_id),
+            ..
+        }) = service.prepare(input())
+        else {
+            return;
+        };
+
+        assert!(
+            service
+                .complete_delivery(AiDelivery {
+                    completion_id: completion_id.clone(),
+                    delivered: true,
+                    sent_message_id: Some(MessageId(99)),
+                })
+                .is_err()
+        );
+        assert_eq!(service.billing.settlements.len(), 1);
+        assert!(service.pending.contains_key(&completion_id));
+
+        service.billing.record_failure = false;
+        assert!(
+            service
+                .complete_delivery(AiDelivery {
+                    completion_id: completion_id.clone(),
+                    delivered: true,
+                    sent_message_id: Some(MessageId(99)),
+                })
+                .is_ok()
+        );
+        assert!(!service.pending.contains_key(&completion_id));
     }
 
     #[test]
