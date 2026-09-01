@@ -1031,7 +1031,7 @@ where
     }
 
     fn complete_delivery(&mut self, delivery: AiDelivery) -> Result<(), String> {
-        let Some(pending) = self.pending.get(&delivery.completion_id).cloned() else {
+        let Some(pending) = self.pending.remove(&delivery.completion_id) else {
             return Ok(());
         };
         let actual = price_segments(&pending.segments)?;
@@ -1096,7 +1096,6 @@ where
             delivery.delivered,
             reason,
         )?;
-        self.pending.remove(&delivery.completion_id);
         if delivery.delivered && matches!(pending.kind, PendingKind::Conversation { .. }) {
             self.state.record_outgoing(
                 &pending.input,
@@ -1849,8 +1848,7 @@ mod tests {
     }
 
     #[test]
-    fn delivery_finalization_keeps_pending_state_and_still_attempts_settlement_on_segment_failure()
-    {
+    fn delivery_finalization_releases_pending_state_after_attempting_failed_segments() {
         let mut service = conversation(
             vec![Ok(round("answer", None))],
             Billing {
@@ -1876,7 +1874,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(service.billing.settlements.len(), 1);
-        assert!(service.pending.contains_key(&completion_id));
+        assert!(!service.pending.contains_key(&completion_id));
 
         service.billing.record_failure = false;
         assert!(
@@ -1888,6 +1886,7 @@ mod tests {
                 })
                 .is_ok()
         );
+        assert_eq!(service.billing.settlements.len(), 1);
         assert!(!service.pending.contains_key(&completion_id));
     }
 
