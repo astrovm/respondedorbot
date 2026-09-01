@@ -3,7 +3,7 @@
 use chrono::{DateTime, Datelike, FixedOffset, TimeZone, Utc, Weekday};
 use thiserror::Error;
 
-/// Canonical task payload version written during the compatibility migration.
+/// Canonical task payload version.
 pub const TASK_SCHEMA_VERSION: u8 = 1;
 /// APScheduler's existing late-execution allowance.
 pub const MISFIRE_GRACE_SECONDS: i64 = 300;
@@ -33,7 +33,7 @@ impl TaskId {
     }
 }
 
-/// Language-neutral schedule reconstructed from the legacy trigger fields.
+/// Schedule reconstructed from stored trigger fields.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TaskSchedule {
     Once,

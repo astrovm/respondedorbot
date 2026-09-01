@@ -159,7 +159,7 @@ mod tests {
     }
 
     #[test]
-    fn action_names_are_stable_at_the_bridge_boundary() {
+    fn serialized_action_names_are_stable() {
         for (action, expected) in [
             (SettlementAction::Noop, "noop"),
             (SettlementAction::SettleSuccess, "settle_success"),

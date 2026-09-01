@@ -1,4 +1,4 @@
-# Rust Architecture
+# Architecture
 
 ## Runtime
 
@@ -31,7 +31,7 @@ The dependency direction is `botd -> bot-adapters -> bot-core`.
 
 ## State ownership
 
-Redis stores caches, conversation history and metadata, compaction jobs, callback state, and canonical task records. PostgreSQL stores chat configuration, credit accounts, payments, provider usage, and the billing ledger. Stored formats remain compatible with data written before the native cutover.
+Redis stores caches, conversation history and metadata, compaction jobs, callback state, and canonical task records. PostgreSQL stores chat configuration, credit accounts, payments, provider usage, and the billing ledger. Stored formats remain backward compatible.
 
 Scheduled tasks use canonical JSON records plus atomic Redis ownership and occurrence leases. Billing mutations use PostgreSQL transactions, stable operation identifiers, idempotent provider segments, and exact-once settlement guards.
 
@@ -49,4 +49,4 @@ botd --check-config
 
 ## Deployment safety
 
-The container includes only the release binary, native shared libraries, CA certificates, and FFmpeg. Persistent Redis and PostgreSQL data are external to the image. Every CI release also has an immutable SHA tag, which is the rollback unit after retirement of the former implementation.
+The container includes only the release binary, native shared libraries, CA certificates, and FFmpeg. Persistent Redis and PostgreSQL data are external to the image. Every CI release also has an immutable SHA tag, which is the rollback unit.

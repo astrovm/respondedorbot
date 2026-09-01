@@ -1,5 +1,0 @@
-{
-  "ttl_validation": [
-    { "name": "negative request-cache TTL", "ttl": -1 }
-  ]
-}

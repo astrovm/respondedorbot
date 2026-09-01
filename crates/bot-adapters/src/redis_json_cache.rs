@@ -1,4 +1,4 @@
-//! Redis string operations used by JSON request caches during migration.
+//! Redis string operations used by JSON request caches.
 
 use thiserror::Error;
 

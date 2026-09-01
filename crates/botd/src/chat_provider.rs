@@ -1,4 +1,4 @@
-//! Native OpenRouter streaming rounds with partial-usage preservation.
+//! OpenRouter streaming rounds with partial-usage preservation.
 
 use bot_adapters::openrouter_chat::{
     ChatCompletionRequest, ChatMessage, ChatRole, ChatStreamEvent, OpenRouterChatError,

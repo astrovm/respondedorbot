@@ -49,41 +49,37 @@ pub fn parse_command(message_text: &str, bot_name: &str) -> ParsedCommand {
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
-    use serde::Deserialize;
 
     use super::{ParsedCommand, parse_command};
 
-    #[derive(Debug, Deserialize)]
-    struct Contract {
-        cases: Vec<Case>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct Case {
-        input: String,
-        bot_name: String,
-        command: String,
-        message_text: String,
-    }
-
-    fn contract() -> Result<Contract, serde_json::Error> {
-        serde_json::from_str(include_str!("../../../contracts/command_parsing.json"))
-    }
-
     #[test]
-    fn matches_shared_contract() -> Result<(), serde_json::Error> {
-        for case in contract()?.cases {
+    fn parses_commands_and_message_text() {
+        let cases = [
+            ("", "@gordo", "", ""),
+            ("   ", "@gordo", "", ""),
+            ("/ASK hola", "@gordo", "/ask", "hola"),
+            ("/ask@gordo   che", "@gordo", "/ask", "che"),
+            ("/ask@gordo@gordo x", "@gordo", "/ask", "x"),
+            ("/ㅤ hola", "@gordo", "/ask", "hola"),
+            ("/ㅤㅤ   hola", "@gordo", "/ask", "hola"),
+            ("/unknown", "@gordo", "/unknown", ""),
+            ("hello world", "@gordo", "hello", "world"),
+            ("/ask\tquestion", "@gordo", "/ask\tquestion", ""),
+            ("/ask\nquestion", "@gordo", "/ask\nquestion", ""),
+            ("/ASK@GORDO hi", "@gordo", "/ask", "hi"),
+        ];
+
+        for (input, bot_name, command, message_text) in cases {
             assert_eq!(
-                parse_command(&case.input, &case.bot_name),
+                parse_command(input, bot_name),
                 ParsedCommand {
-                    command: case.command,
-                    message_text: case.message_text,
+                    command: command.to_owned(),
+                    message_text: message_text.to_owned(),
                 },
                 "input={:?}",
-                case.input
+                input
             );
         }
-        Ok(())
     }
 
     proptest! {

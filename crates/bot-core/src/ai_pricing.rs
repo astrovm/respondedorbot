@@ -657,9 +657,9 @@ mod tests {
     use super::{AiPricingError, ExactDecimal, calculate_billing_for_segments};
 
     #[test]
-    fn matches_shared_pricing_contract() -> Result<(), Box<dyn std::error::Error>> {
+    fn prices_external_provider_payload_fixtures() -> Result<(), Box<dyn std::error::Error>> {
         let contract: Value =
-            serde_json::from_str(include_str!("../../../contracts/ai_pricing.json"))?;
+            serde_json::from_str(include_str!("../tests/fixtures/ai_pricing.json"))?;
         let cases = contract["cases"]
             .as_array()
             .ok_or_else(|| std::io::Error::other("pricing contract cases must be an array"))?;

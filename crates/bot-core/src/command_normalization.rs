@@ -207,23 +207,33 @@ mod tests {
     use crate::locale::Locale;
 
     #[test]
-    fn matches_normalization_contract() -> Result<(), serde_json::Error> {
-        #[derive(serde::Deserialize)]
-        struct Contract {
-            normalization: Vec<Case>,
+    fn normalizes_supported_command_text() {
+        let cases = [
+            ("h3llo W0RLD", Some("/H3LLO_W0RLD")),
+            (
+                "hello! world? or... mmm ...bye.",
+                Some(
+                    "/HELLO_SIGNODEEXCLAMACION_WORLD_SIGNODEPREGUNTA_OR_PUNTOSSUSPENSIVOS_MMM_PUNTOSSUSPENSIVOS_BYE_PUNTO",
+                ),
+            ),
+            ("  hello   world ", Some("/HELLO_WORLD")),
+            (
+                "_cara_sonriendo_con_ojos_sonrientes_hello _cara_sonriendo_con_ojos_sonrientes_ world",
+                Some(
+                    "/CARA_SONRIENDO_CON_OJOS_SONRIENTES_HELLO_CARA_SONRIENDO_CON_OJOS_SONRIENTES_WORLD",
+                ),
+            ),
+            ("hola ñandú ñ", Some("/HOLA_NIANDU_ENIE")),
+            ("hola\nlinea\n", Some("/HOLA_LINEA")),
+            ("mousugudesu", Some("/MOUSUGUDESU")),
+            ("katakana", Some("/KATAKANA")),
+            ("💥", None),
+            ("", None),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(normalize_command_text(input).as_deref(), expected);
         }
-        #[derive(serde::Deserialize)]
-        struct Case {
-            input: String,
-            expected: Option<String>,
-        }
-        let contract: Contract = serde_json::from_str(include_str!(
-            "../../../contracts/command_normalization.json"
-        ))?;
-        for case in contract.normalization {
-            assert_eq!(normalize_command_text(&case.input), case.expected);
-        }
-        Ok(())
     }
 
     #[test]

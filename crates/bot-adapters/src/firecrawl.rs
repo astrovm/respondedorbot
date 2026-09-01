@@ -1,4 +1,4 @@
-//! Blocking Firecrawl search adapter for the synchronous migration runtime.
+//! Blocking Firecrawl search adapter.
 
 use std::thread;
 use std::time::Duration;

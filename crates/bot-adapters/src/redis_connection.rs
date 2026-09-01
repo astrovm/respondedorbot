@@ -1,4 +1,4 @@
-//! Shared synchronous Redis connection boundary for temporary migration adapters.
+//! Shared synchronous Redis connection boundary.
 
 use redis::{Commands, IntoConnectionInfo, RedisConnectionInfo};
 

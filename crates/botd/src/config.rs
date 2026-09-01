@@ -1,4 +1,4 @@
-//! Environment configuration for the native runtime.
+//! Environment configuration for `botd`.
 
 use std::fmt;
 use std::fs;

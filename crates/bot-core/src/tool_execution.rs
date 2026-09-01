@@ -51,7 +51,7 @@ mod tests {
     }
 
     #[test]
-    fn action_names_are_stable_for_the_python_bridge() {
+    fn serialized_action_names_are_stable() {
         assert_eq!(
             ToolCallAction::SkipMissingFunction.as_str(),
             "skip_missing_function",

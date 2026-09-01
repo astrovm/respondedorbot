@@ -1,7 +1,5 @@
 # Rust build output
 target/
-__pycache__/
-*.pyc
 
 # Local configuration and runtime state
 .env

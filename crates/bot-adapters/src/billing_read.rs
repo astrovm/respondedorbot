@@ -1,4 +1,4 @@
-//! PostgreSQL billing repository used during the incremental writer cutover.
+//! PostgreSQL billing repository.
 
 use native_tls::TlsConnector;
 use postgres::{Client, Transaction, error::SqlState};

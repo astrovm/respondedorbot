@@ -1,4 +1,4 @@
-//! Native process composition and graceful lifecycle.
+//! Process composition and graceful lifecycle.
 
 use std::fmt::Display;
 use std::sync::Arc;

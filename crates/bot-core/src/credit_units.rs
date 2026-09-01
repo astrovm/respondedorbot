@@ -154,108 +154,100 @@ pub fn format_credit_units(units: CreditUnits) -> String {
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
-    use serde::Deserialize;
 
     use super::{
         CreditUnitError, CreditUnits, format_credit_units, parse_credit_units,
         rescale_credit_units, whole_credits_to_units,
     };
 
-    #[derive(Debug, Deserialize)]
-    struct Contract {
-        parse: Vec<ParseCase>,
-        format: Vec<FormatCase>,
-        rescale: Vec<RescaleCase>,
-        whole: Vec<WholeCase>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct ParseCase {
-        input: String,
-        expected: Option<i64>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct FormatCase {
-        units: i64,
-        expected: String,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct RescaleCase {
-        units: i64,
-        source_scale: Option<i64>,
-        expected: Option<i64>,
-        error: Option<String>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct WholeCase {
-        credits: i64,
-        expected: i64,
-    }
-
-    fn contract() -> Result<Contract, serde_json::Error> {
-        let raw = include_str!("../../../contracts/credit_units.json");
-        serde_json::from_str(raw)
-    }
-
     #[test]
-    fn matches_parse_contract() -> Result<(), serde_json::Error> {
-        for case in contract()?.parse {
+    fn parses_valid_credit_values_and_rejects_invalid_values() {
+        let cases = [
+            ("", None),
+            ("   ", None),
+            ("invalid", None),
+            ("NaN", None),
+            ("Infinity", None),
+            ("0", Some(0)),
+            ("-0", Some(0)),
+            ("0.01", Some(1)),
+            (".01", Some(1)),
+            ("1.", Some(100)),
+            ("+1.55", Some(155)),
+            ("-1.55", Some(-155)),
+            ("0.001", None),
+            ("1.230", Some(123)),
+            ("1e2", Some(10_000)),
+            ("1e-2", Some(1)),
+            ("1e-3", None),
+            ("1_000.25", Some(100_025)),
+        ];
+
+        for (input, expected) in cases {
             assert_eq!(
-                parse_credit_units(&case.input).map(CreditUnits::value),
-                case.expected,
+                parse_credit_units(input).map(CreditUnits::value),
+                expected,
                 "input={:?}",
-                case.input
+                input
             );
         }
-        Ok(())
     }
 
     #[test]
-    fn matches_format_contract() -> Result<(), serde_json::Error> {
-        for case in contract()?.format {
+    fn formats_credit_units() {
+        let cases = [
+            (0, "0.00"),
+            (1, "0.01"),
+            (100, "1.00"),
+            (155, "1.55"),
+            (-1, "-0.01"),
+            (-155, "-1.55"),
+            (i64::MIN, "-92233720368547758.08"),
+        ];
+
+        for (units, expected) in cases {
             assert_eq!(
-                format_credit_units(CreditUnits::new(case.units)),
-                case.expected,
+                format_credit_units(CreditUnits::new(units)),
+                expected,
                 "units={}",
-                case.units
+                units
             );
         }
-        Ok(())
     }
 
     #[test]
-    fn matches_rescale_contract() -> Result<(), serde_json::Error> {
-        for case in contract()?.rescale {
-            let result = rescale_credit_units(case.units, case.source_scale);
-            assert_ne!(
-                case.expected.is_some(),
-                case.error.is_some(),
-                "rescale contract case must define exactly one result"
-            );
-            if let Some(expected) = case.expected {
-                assert_eq!(result.map(CreditUnits::value), Ok(expected));
-            } else {
-                assert_eq!(
-                    result.map_err(|error| error.to_string()),
-                    Err(case.error.unwrap_or_default())
-                );
-            }
-        }
-        Ok(())
-    }
+    fn rescales_supported_credit_units() {
+        let cases = [
+            (15, Some(10), 150),
+            (150, Some(100), 150),
+            (-15, Some(10), -150),
+            (15, None, 150),
+            (15, Some(0), 150),
+        ];
 
-    #[test]
-    fn matches_whole_credit_contract() -> Result<(), serde_json::Error> {
-        for case in contract()?.whole {
+        for (units, source_scale, expected) in cases {
             assert_eq!(
-                whole_credits_to_units(case.credits).map(CreditUnits::value),
-                Ok(case.expected)
+                rescale_credit_units(units, source_scale).map(CreditUnits::value),
+                Ok(expected)
             );
         }
-        Ok(())
+
+        for source_scale in [-10, 3] {
+            assert_eq!(
+                rescale_credit_units(15, Some(source_scale)),
+                Err(CreditUnitError::UnsupportedScale)
+            );
+        }
+    }
+
+    #[test]
+    fn converts_whole_credits_to_units() {
+        for (credits, expected) in [(0, 0), (3, 300), (-3, -300)] {
+            assert_eq!(
+                whole_credits_to_units(credits).map(CreditUnits::value),
+                Ok(expected)
+            );
+        }
     }
 
     #[test]

@@ -7,9 +7,9 @@ pub enum IntegerInput {
     Missing,
     /// The value was present but was not an integer.
     Invalid,
-    /// The integer was below the bridge's representable range.
+    /// The integer was below the supported range.
     BelowRange,
-    /// The integer was above the bridge's representable range.
+    /// The integer was above the supported range.
     AboveRange,
     /// A representable integer value.
     Value(i64),

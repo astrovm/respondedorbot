@@ -1,6 +1,6 @@
 # Billing Ownership
 
-## Final state
+## Ownership
 
 Rust is the sole billing reader and writer. PostgreSQL remains the system of record for accounts, Stars payments, onboarding grants, ledger entries, AI operations, provider usage segments, settlements, refunds, debts, transfers, and audit history.
 
@@ -18,7 +18,7 @@ Rust is the sole billing reader and writer. PostgreSQL remains the system of rec
 
 ## Compatibility
 
-Schema creation and upgrades are additive and idempotent. Existing account scopes, ledger metadata, timestamps, usage tags, and payment identifiers remain readable. The rollback mechanism is an immutable previously verified container image; it never permits two billing writers at once.
+Schema creation and upgrades are additive and idempotent. Existing account scopes, ledger metadata, timestamps, usage tags, and payment identifiers remain readable. Rollbacks use an immutable previously verified container image and never permit two billing writers at once.
 
 ## Verification
 

@@ -1,8 +1,0 @@
-{
-  "idempotency_key": ["user_id", "metadata.settlement_id"],
-  "idempotency_event": "ai_settlement_result",
-  "conflict_behavior": "ignore duplicate",
-  "amount": 0,
-  "transaction_attempts": 3,
-  "uncertain_failure": "fail closed"
-}

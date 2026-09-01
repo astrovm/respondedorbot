@@ -1,6 +1,0 @@
-{
-  "keys": [
-    { "name": "audio transcription", "prefix": "audio_transcription", "file_id": "audio_file", "expected": "audio_transcription:audio_file" },
-    { "name": "image description", "prefix": "image_description", "file_id": "image_file", "expected": "image_description:image_file" }
-  ]
-}

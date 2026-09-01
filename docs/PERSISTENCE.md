@@ -2,8 +2,8 @@
 
 ## Scope
 
-These formats are compatibility boundaries. The native application reads all
-records produced before cutover and writes the documented stable formats.
+These formats are compatibility boundaries. The application reads existing
+records and writes the documented stable formats.
 
 ## PostgreSQL
 
@@ -109,7 +109,7 @@ database and values are decoded as UTF-8 strings.
 | `chat_history:{chat_id}` | List of JSON message records, newest first | 30 days |
 | `chat_message_order:{chat_id}` | Sorted set of message IDs by per-chat sequence | 30 days |
 | `chat_message_sequence:{chat_id}` | Integer sequence counter | 30 days |
-| `chat_message_ids:{chat_id}` | Legacy deduplication set; still read during migration | maintenance repairs TTL |
+| `chat_message_ids:{chat_id}` | Legacy deduplication set retained for stored-data compatibility | maintenance repairs TTL |
 | `chatmsg:{chat_id}:{message_id}` | RediSearch hash with chat, role, user, reply, mention, text, and timestamp fields | 30 days |
 | `chat_summary:{chat_id}` | Summary text | 30 days |
 | `chat_user_summary:{chat_id}` | User-specific summary text | 30 days |
@@ -125,7 +125,7 @@ username/text, and a sortable numeric timestamp. Redis Stack and `FT.CREATE` /
 
 Message save is atomic through a Lua script. It deduplicates, assigns a
 sequence, trims history and the sorted index, writes the search hash, and sets
-TTLs. Rust must preserve the atomic outcome.
+TTLs. The application must preserve the atomic outcome.
 
 ### Memory compaction
 
@@ -166,7 +166,7 @@ with hour/minute plus optional weekday list or day of month.
 
 The authoritative version 1 schema adds next-run state, schedule anchors, and
 execution idempotency. The claim protocol is defined in
-[ADR 0003](decisions/0003-canonical-scheduled-tasks.md). Older trigger fields
+[ADR 0001](decisions/0001-canonical-scheduled-tasks.md). Older trigger fields
 remain readable as stored-data compatibility fields.
 
 ### Caches and callback state
@@ -218,7 +218,7 @@ Configuration includes:
 - `AI_RECONCILIATION_SAFETY_CREDIT_UNITS`, `AI_RECONCILIATION_STALE_SECONDS`
 - `AI_LEDGER_RETENTION_DAYS`
 
-Rust configuration must distinguish required, optional, and feature-gating
+Configuration must distinguish required, optional, and feature-gating
 variables and must redact secret values from errors and logs.
 
 ## External ownership and rollback

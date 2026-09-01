@@ -309,8 +309,8 @@ pub fn encode_task_record(document: &TaskRecordDocument) -> Result<String, TaskR
 }
 
 /// Upgrade a readable record to canonical version 1 without changing its
-/// schedule. A recurring legacy record may still need its APScheduler next run
-/// injected before it is safe for cutover.
+/// schedule. An unversioned recurring record without a next run remains
+/// incomplete and is rejected.
 pub fn normalize_task_record(payload: &str) -> Result<String, TaskRecordError> {
     encode_task_record(&decode_task_record(payload)?)
 }
@@ -423,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn contract_examples_normalize_to_their_expected_values()
+    fn fixture_examples_normalize_to_their_expected_values()
     -> Result<(), Box<dyn std::error::Error>> {
         #[derive(Deserialize)]
         struct Contract {
@@ -436,7 +436,7 @@ mod tests {
         }
 
         let contract: Contract =
-            serde_json::from_str(include_str!("../../../contracts/task_records.json"))?;
+            serde_json::from_str(include_str!("../tests/fixtures/task_records.json"))?;
         for case in contract.cases {
             let normalized = normalize_task_record(&case.input.to_string())?;
             let value: Value = serde_json::from_str(&normalized)?;

@@ -1,9 +1,0 @@
-{
-  "default_event": "ai_settlement_debt",
-  "lock_order": ["user", "chat"],
-  "source_fallback": "user",
-  "negative_balance": true,
-  "ledger_actor": "user",
-  "transaction_attempts": 3,
-  "uncertain_failure": "fail closed"
-}

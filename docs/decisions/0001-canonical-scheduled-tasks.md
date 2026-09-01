@@ -1,4 +1,4 @@
-# ADR 0003: Canonical Scheduled Tasks and Single-Owner Claims
+# ADR 0001: Canonical Scheduled Tasks and Single-Owner Claims
 
 ## Status
 
@@ -6,20 +6,16 @@ Accepted and implemented.
 
 ## Context
 
-APScheduler stores executable Python objects in Redis database 1. Rust cannot
-safely decode that state. The existing `task:data:*` JSON record is readable by
-both runtimes, but recurring records do not contain their next run. Reading the
-APScheduler job store is therefore still required to list or reconstruct them.
-
-The migration must preserve existing jobs, coalescing, the five-minute misfire
-grace period, cancellation, AI billing, and the invariant that only one
-scheduler executes tasks.
+Scheduled tasks must be reconstructable from application data rather than
+runtime-specific executable objects. Recurring records therefore need durable
+next-run state in addition to their trigger definition. The scheduler must also
+preserve coalescing, the five-minute misfire grace period, cancellation, AI
+billing, and single-owner execution.
 
 ## Decision
 
-`task:data:{task_id}` becomes the canonical, language-neutral record. Version 1
-is additive and keeps every legacy field so the current Python image can read a
-Rust-compatible record:
+`task:data:{task_id}` is the canonical record. Version 1 retains the established
+trigger fields for stored-data compatibility:
 
 ```json
 {
@@ -40,17 +36,15 @@ Rust-compatible record:
 }
 ```
 
-`run_date`, `interval_seconds`, and `trigger_config` remain the rollback trigger
+`run_date`, `interval_seconds`, and `trigger_config` remain the stored trigger
 representation. `next_run_at` is authoritative for all trigger kinds.
 `schedule_anchor_at` preserves interval alignment across restarts.
 `last_execution_id` records the most recently completed occurrence. Unknown
-fields remain permitted during the compatibility period.
+fields remain permitted for forward compatibility. The scheduler treats these
+records as the only source of truth and reports malformed records rather than
+inventing recurrence.
 
-During cutover, version 1 records were backfilled from the former scheduler's
-next-run state. The native scheduler now treats those records as the only source
-of truth and reports malformed records rather than inventing recurrence.
-
-Rust uses these additional Redis keys:
+The scheduler uses these additional Redis keys:
 
 | Key | Purpose |
 | --- | --- |
@@ -64,7 +58,7 @@ the lease token and expected execution ID, records completion, advances or
 deletes the canonical record, updates indexes, and releases the claim. A stale
 worker cannot advance a newer occurrence.
 
-The Rust scheduler preserves APScheduler policy:
+The scheduler follows these execution rules:
 
 - coalesce multiple due occurrences into one execution;
 - allow an occurrence up to 300 seconds late;
@@ -75,19 +69,19 @@ The Rust scheduler preserves APScheduler policy:
   executor;
 - remove successful one-shot tasks.
 
-The native engine has two explicit modes. Verification mode reads and evaluates
+The engine has two explicit modes. Verification mode reads and evaluates
 due tasks without leases, claims, execution, or writes. Authoritative mode must
 renew `task:scheduler:owner`, claims every occurrence before execution or skip,
 repairs stale due-index entries, releases claims for retryable execution, and
 advances state only through the compare-and-update Lua operation.
 
-The ownership switch was atomic at deployment level. Verification mode still
-computes decisions without acquiring claims, executing tasks, or writing state.
+Verification mode computes decisions without acquiring claims, executing tasks,
+or writing state.
 
 ## Consequences
 
-Task listing and execution depend only on language-neutral records in Redis
-database 0. Older fields remain readable for stored-data compatibility.
+Task listing and execution depend only on canonical records in Redis database 0.
+Older fields remain readable for stored-data compatibility.
 The claim protocol prevents concurrent workers from executing the same live
 occurrence. As with the existing implementation, a process crash after an
 external Telegram send but before durable completion cannot provide strict

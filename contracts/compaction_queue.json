@@ -1,6 +1,0 @@
-{
-  "lock_ttl_validation": [
-    { "name": "zero TTL", "ttl": 0 },
-    { "name": "negative TTL", "ttl": -1 }
-  ]
-}

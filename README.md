@@ -78,6 +78,8 @@ botd             composition, polling, workers, scheduling, orchestration
 
 The dependency direction is enforced by the Cargo workspace. Untrusted payloads are decoded at adapter boundaries. Core routing, billing, AI, and scheduling behavior uses typed states and actions.
 
+Detailed design and operational contracts are in [Architecture](docs/ARCHITECTURE.md), [Billing](docs/BILLING.md), [Persistence](docs/PERSISTENCE.md), and [Testing](docs/TESTING.md).
+
 ## Tests and quality gates
 
 ```bash
@@ -112,7 +114,6 @@ CI publishes `latest` and immutable `sha-<full-commit-sha>` images. Roll back by
 - `crates/bot-core` — deterministic application and domain behavior
 - `crates/bot-adapters` — external-system implementations
 - `crates/botd` — native executable and composition root
-- `contracts` — language-neutral compatibility and persistence fixtures
-- `docs/rust-migration` — migration decisions and final verification record
+- `docs` — architecture, persistence, billing, testing, and accepted decisions
 - `quadlets`, `systemd` — deployment and maintenance units
 - `Containerfile` — Rust-only production image

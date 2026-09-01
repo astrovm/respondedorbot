@@ -1,4 +1,4 @@
-//! Native update dispatch for feature-complete command vertical slices.
+//! Update dispatch for commands, callbacks, payments, media, and AI messages.
 
 use bot_adapters::telegram_polling::{IncomingEvent, IncomingMessage, IncomingUpdate};
 use bot_core::admin_commands::{
@@ -2440,7 +2440,7 @@ where
             parsed.command.as_str(),
             "/language" | "/idioma" | "/config" | "/configs" | "/settings"
         );
-        let mut language_needs_legacy_group = is_group;
+        let mut language_requires_group_authorization = is_group;
         if is_group && is_settings_command {
             let authorization = self
                 .authorization
@@ -2468,7 +2468,7 @@ where
                     .map_err(DispatchError::Action)?;
                 return Ok(DispatchOutcome::Handled);
             }
-            language_needs_legacy_group = false;
+            language_requires_group_authorization = false;
         }
         let language_plan = plan_language_command(
             chat_id,
@@ -2477,7 +2477,7 @@ where
             &self.bot_name,
             locale,
             &config,
-            language_needs_legacy_group,
+            language_requires_group_authorization,
         );
         let (plan, updated_config) = match language_plan {
             LanguageCommandPlan::GroupAuthorizationRequired => {
