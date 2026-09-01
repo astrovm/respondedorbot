@@ -114,8 +114,6 @@ jobs:
         run: |
           REPO="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           IMAGE="${REPO}:sha-${{ github.sha }}"
-          podman run --rm --entrypoint /bin/sh "${IMAGE}" \
-            -c 'test -L /etc/ssl/certs/supabase-root-2021-ca.pem'
           podman run --rm \
             --env TELEGRAM_TOKEN=synthetic-telegram-token \
             --env TELEGRAM_USERNAME=synthetic_test_bot \

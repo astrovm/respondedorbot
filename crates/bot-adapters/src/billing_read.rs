@@ -1,11 +1,11 @@
 //! PostgreSQL billing repository.
 
-use native_tls::TlsConnector;
 use postgres::{Client, Transaction, error::SqlState};
-use postgres_native_tls::MakeTlsConnector;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use thiserror::Error;
+
+use crate::postgres_connection::postgres_tls_connector;
 
 const ONBOARDING_MAX_GRANTS_PER_HOUR: i64 = 4;
 const ONBOARDING_MAX_GRANTS_PER_DAY: i64 = 16;
@@ -1549,10 +1549,9 @@ impl BillingRepository {
     }
 
     fn connect(&self) -> Result<Client, BillingError> {
-        let connector = TlsConnector::builder().build()?;
         Ok(Client::connect(
             &self.database_url,
-            MakeTlsConnector::new(connector),
+            postgres_tls_connector(&self.database_url)?,
         )?)
     }
 }

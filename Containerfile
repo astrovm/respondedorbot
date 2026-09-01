@@ -22,10 +22,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-COPY deploy/certificates/supabase-root-2021-ca.crt /usr/local/share/ca-certificates/supabase-root-2021-ca.crt
-RUN update-ca-certificates \
-    && test -L /etc/ssl/certs/supabase-root-2021-ca.pem
-
 COPY --from=rust-builder /app/target/release/botd /usr/local/bin/botd
 
 RUN useradd -m -u 1000 botuser && chown -R botuser:botuser /app
