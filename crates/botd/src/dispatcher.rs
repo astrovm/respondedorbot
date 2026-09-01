@@ -739,7 +739,7 @@ where
             };
             TelegramAction::SendVideo {
                 chat_id: message.chat_id,
-                video,
+                video: video.into(),
                 reply_to_message_id: message.reply_to_message_id,
                 caption: message.text.clone(),
                 reply_markup: message.reply_markup.clone(),
@@ -993,7 +993,7 @@ where
         let signal_id = stable_signal_id(chat_id.0, message_id.0, sender_id.0, timestamp);
         let receipt = match self.actions.try_photo(TelegramAction::SendPhoto {
             chat_id,
-            photo,
+            photo: photo.into(),
             reply_to_message_id: Some(message_id),
             caption: format_signal_caption(&signal, timestamp),
             parse_mode: Some(ParseMode::Html),
@@ -1201,7 +1201,7 @@ where
             Ok(photo) => match self.actions.try_edit(TelegramAction::EditMessagePhoto {
                 chat_id: ChatId(chat_id),
                 message_id: MessageId(context.message_id),
-                photo,
+                photo: photo.into(),
                 caption: format_signal_caption(&signal, timestamp),
                 parse_mode: Some(ParseMode::Html),
                 reply_markup: Some(build_signal_keyboard(
@@ -6910,7 +6910,7 @@ mod tests {
         else {
             return;
         };
-        assert_eq!(photo, b"synthetic-png");
+        assert_eq!(photo.as_ref(), b"synthetic-png");
         assert_eq!(*reply_to_message_id, Some(MessageId(7)));
         assert_eq!(
             *parse_mode,
@@ -7048,7 +7048,7 @@ mod tests {
             [
                 TelegramAction::EditMessagePhoto { photo, message_id: MessageId(7), .. },
                 TelegramAction::AnswerCallback { text: Some(text), show_alert: false, .. },
-            ] if photo == b"refreshed-png" && text == "tarjeta actualizada"
+            ] if photo.as_ref() == b"refreshed-png" && text == "tarjeta actualizada"
         ));
         let saved = saved.borrow();
         assert_eq!(saved.len(), 1);
@@ -8501,7 +8501,7 @@ mod tests {
         else {
             return;
         };
-        assert_eq!(video, &[1, 2, 3]);
+        assert_eq!(video.as_ref(), &[1, 2, 3]);
         assert!(caption.contains("compartido por @tester"));
         assert_eq!(*reply_to_message_id, Some(MessageId(7)));
 

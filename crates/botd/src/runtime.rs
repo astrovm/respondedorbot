@@ -1,8 +1,9 @@
 //! Long-poll state ownership and update dispatch.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -11,6 +12,8 @@ use bot_adapters::telegram_polling::{
     IncomingUpdate, PollFailure, PollOutcome, PollingError, next_offset,
 };
 use thiserror::Error;
+
+const MAX_UPDATE_ATTEMPTS: usize = 3;
 
 pub trait UpdateSource {
     fn poll(&mut self, offset: Option<i64>) -> Result<PollOutcome, PollingError>;
@@ -21,8 +24,8 @@ pub trait UpdateHandler {
 
     fn handle(&mut self, update: IncomingUpdate) -> Result<(), Self::Error>;
 
-    fn take_failure(&mut self) -> Option<UpdateFailure> {
-        None
+    fn finish_batch(&mut self) -> Vec<UpdateFailure> {
+        Vec::new()
     }
 
     fn shutdown(&mut self) {}
@@ -52,10 +55,15 @@ pub enum ParallelHandlerBuildError {
 
 pub struct ParallelUpdateHandler<Handler> {
     updates: Option<SyncSender<IncomingUpdate>>,
-    failures: Receiver<UpdateFailure>,
     workers: Vec<JoinHandle<()>>,
-    stopping: Arc<AtomicBool>,
+    completions: Receiver<UpdateCompletion>,
+    pending: Vec<i64>,
     handler: PhantomData<fn() -> Handler>,
+}
+
+struct UpdateCompletion {
+    update_id: i64,
+    error: Option<String>,
 }
 
 impl<Handler> ParallelUpdateHandler<Handler> {
@@ -79,33 +87,33 @@ impl<Handler> ParallelUpdateHandler<Handler> {
 
         let (update_sender, update_receiver) = mpsc::sync_channel::<IncomingUpdate>(queue_capacity);
         let update_receiver = Arc::new(Mutex::new(update_receiver));
-        let (failure_sender, failure_receiver) = mpsc::channel();
         let (startup_sender, startup_receiver) = mpsc::channel();
         let factory = Arc::new(factory);
-        let stopping = Arc::new(AtomicBool::new(false));
+        let (completion_sender, completion_receiver) = mpsc::channel();
         let mut workers = Vec::with_capacity(worker_count);
 
         for worker in 0..worker_count {
             let update_receiver = update_receiver.clone();
-            let failure_sender = failure_sender.clone();
             let startup_sender = startup_sender.clone();
             let factory = factory.clone();
-            let stopping = stopping.clone();
+            let completion_sender = completion_sender.clone();
             workers.push(thread::spawn(move || {
-                let mut handler = match factory() {
-                    Ok(handler) => {
+                let mut handler = match panic::catch_unwind(AssertUnwindSafe(|| factory())) {
+                    Ok(Ok(handler)) => {
                         let _ = startup_sender.send((worker, None));
                         handler
                     }
-                    Err(error) => {
+                    Ok(Err(error)) => {
                         let _ = startup_sender.send((worker, Some(error.to_string())));
+                        return;
+                    }
+                    Err(_) => {
+                        let _ = startup_sender
+                            .send((worker, Some("worker factory panicked".to_owned())));
                         return;
                     }
                 };
                 loop {
-                    if stopping.load(Ordering::Acquire) {
-                        return;
-                    }
                     let update = match update_receiver.lock() {
                         Ok(receiver) => receiver.recv(),
                         Err(_) => return,
@@ -113,21 +121,21 @@ impl<Handler> ParallelUpdateHandler<Handler> {
                     let Ok(update) = update else {
                         return;
                     };
-                    if stopping.load(Ordering::Acquire) {
-                        return;
-                    }
                     let update_id = update.update_id;
-                    if let Err(error) = handler.handle(update) {
-                        let _ = failure_sender.send(UpdateFailure {
-                            update_id,
-                            error: error.to_string(),
-                        });
+                    let (error, panicked) =
+                        match panic::catch_unwind(AssertUnwindSafe(|| handler.handle(update))) {
+                            Ok(result) => (result.err().map(|error| error.to_string()), false),
+                            Err(_) => (Some("update handler panicked".to_owned()), true),
+                        };
+                    let _ = completion_sender.send(UpdateCompletion { update_id, error });
+                    if panicked {
+                        return;
                     }
                 }
             }));
         }
         drop(startup_sender);
-        drop(failure_sender);
+        drop(completion_sender);
 
         for _ in 0..worker_count {
             match startup_receiver.recv() {
@@ -150,15 +158,16 @@ impl<Handler> ParallelUpdateHandler<Handler> {
 
         Ok(Self {
             updates: Some(update_sender),
-            failures: failure_receiver,
             workers,
-            stopping,
+            completions: completion_receiver,
+            pending: Vec::new(),
             handler: PhantomData,
         })
     }
 
     fn stop(&mut self) {
-        self.stopping.store(true, Ordering::Release);
+        // Closing the queue lets workers drain every accepted update before they
+        // exit. Telegram updates must never disappear during a graceful deploy.
         self.updates.take();
         join_workers(&mut self.workers);
     }
@@ -168,15 +177,44 @@ impl<Handler> UpdateHandler for ParallelUpdateHandler<Handler> {
     type Error = ParallelHandlerError;
 
     fn handle(&mut self, update: IncomingUpdate) -> Result<(), Self::Error> {
+        let update_id = update.update_id;
         self.updates
             .as_ref()
             .ok_or(ParallelHandlerError::QueueUnavailable)?
             .send(update)
-            .map_err(|_| ParallelHandlerError::QueueUnavailable)
+            .map_err(|_| ParallelHandlerError::QueueUnavailable)?;
+        self.pending.push(update_id);
+        Ok(())
     }
 
-    fn take_failure(&mut self) -> Option<UpdateFailure> {
-        self.failures.try_recv().ok()
+    fn finish_batch(&mut self) -> Vec<UpdateFailure> {
+        let expected = self.pending.len();
+        let mut failures = Vec::new();
+        for _ in 0..expected {
+            match self.completions.recv() {
+                Ok(completion) => {
+                    if let Some(position) = self
+                        .pending
+                        .iter()
+                        .position(|update_id| *update_id == completion.update_id)
+                    {
+                        self.pending.swap_remove(position);
+                    }
+                    if let Some(error) = completion.error {
+                        failures.push(UpdateFailure {
+                            update_id: completion.update_id,
+                            error,
+                        });
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        failures.extend(self.pending.drain(..).map(|update_id| UpdateFailure {
+            update_id,
+            error: "parallel update worker stopped before completing its batch".to_owned(),
+        }));
+        failures
     }
 
     fn shutdown(&mut self) {
@@ -199,46 +237,46 @@ fn join_workers(workers: &mut Vec<JoinHandle<()>>) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepOutcome {
     Idle,
-    Synchronized { dropped: usize },
-    Dispatched { count: usize },
+    Dispatched {
+        count: usize,
+    },
+    HandlerFailures {
+        retrying: Vec<UpdateFailure>,
+        quarantined: Vec<UpdateFailure>,
+    },
     Retry(PollFailure),
 }
 
 #[derive(Debug, PartialEq, Eq, Error)]
-pub enum RuntimeError<HandlerError> {
+pub enum RuntimeError {
     #[error(transparent)]
     Poll(#[from] PollingError),
-    #[error("update handler failed for update {update_id}")]
-    Handler {
-        update_id: i64,
-        handler_error: HandlerError,
-    },
-    #[error("update handler failed for update {update_id}: {handler_error}")]
-    BackgroundHandler {
-        update_id: i64,
-        handler_error: String,
-    },
 }
 
 pub struct PollingRuntime<Source, Handler> {
     source: Source,
     handler: Handler,
     offset: Option<i64>,
-    synchronized: bool,
+    pending_offset: Option<i64>,
+    completed_updates: HashSet<i64>,
+    failure_attempts: HashMap<i64, usize>,
 }
 
 impl<Source, Handler> PollingRuntime<Source, Handler>
 where
     Source: UpdateSource,
     Handler: UpdateHandler,
+    Handler::Error: Display,
 {
     #[must_use]
-    pub const fn new(source: Source, handler: Handler) -> Self {
+    pub fn new(source: Source, handler: Handler) -> Self {
         Self {
             source,
             handler,
             offset: None,
-            synchronized: false,
+            pending_offset: None,
+            completed_updates: HashSet::new(),
+            failure_attempts: HashMap::new(),
         }
     }
 
@@ -247,44 +285,71 @@ where
         self.offset
     }
 
-    pub fn step(&mut self) -> Result<StepOutcome, RuntimeError<Handler::Error>> {
-        if let Some(failure) = self.handler.take_failure() {
-            return Err(RuntimeError::BackgroundHandler {
-                update_id: failure.update_id,
-                handler_error: failure.error,
-            });
-        }
-        let poll_offset = if self.synchronized {
-            self.offset
-        } else {
-            // Telegram interprets -1 as "return only the newest queued update and
-            // forget everything before it". The returned update is discarded too,
-            // preserving the retired runtime's drop_pending_updates behavior.
-            Some(-1)
-        };
-        match self.source.poll(poll_offset)? {
+    pub fn step(&mut self) -> Result<StepOutcome, RuntimeError> {
+        match self.source.poll(self.offset)? {
             PollOutcome::Retry(failure) => Ok(StepOutcome::Retry(failure)),
-            PollOutcome::Updates(updates) if !self.synchronized => {
-                self.offset = next_offset(&updates, self.offset);
-                self.synchronized = true;
-                Ok(StepOutcome::Synchronized {
-                    dropped: updates.len(),
-                })
-            }
             PollOutcome::Updates(updates) if updates.is_empty() => Ok(StepOutcome::Idle),
             PollOutcome::Updates(updates) => {
+                if let Some(next) = next_offset(&updates, self.offset) {
+                    self.pending_offset = Some(
+                        self.pending_offset
+                            .map_or(next, |pending| pending.max(next)),
+                    );
+                }
                 let mut count = 0;
+                let mut attempted = Vec::new();
+                let mut failures = Vec::new();
                 for update in updates {
                     let update_id = update.update_id;
-                    let handled = self.handler.handle(update);
-                    self.offset = update_id.checked_add(1).or(self.offset);
-                    handled.map_err(|handler_error| RuntimeError::Handler {
-                        update_id,
-                        handler_error,
-                    })?;
-                    count += 1;
+                    if self.completed_updates.contains(&update_id) {
+                        continue;
+                    }
+                    attempted.push(update_id);
+                    match self.handler.handle(update) {
+                        Ok(()) => count += 1,
+                        Err(handler_error) => failures.push(UpdateFailure {
+                            update_id,
+                            error: handler_error.to_string(),
+                        }),
+                    }
                 }
-                Ok(StepOutcome::Dispatched { count })
+                failures.extend(self.handler.finish_batch());
+                let failed_ids = failures
+                    .iter()
+                    .map(|failure| failure.update_id)
+                    .collect::<HashSet<_>>();
+                for update_id in attempted {
+                    if !failed_ids.contains(&update_id) {
+                        self.completed_updates.insert(update_id);
+                        self.failure_attempts.remove(&update_id);
+                    }
+                }
+                let mut retrying = Vec::new();
+                let mut quarantined = Vec::new();
+                for failure in failures {
+                    let attempts = self.failure_attempts.entry(failure.update_id).or_default();
+                    *attempts = attempts.saturating_add(1);
+                    if *attempts >= MAX_UPDATE_ATTEMPTS {
+                        self.failure_attempts.remove(&failure.update_id);
+                        self.completed_updates.insert(failure.update_id);
+                        quarantined.push(failure);
+                    } else {
+                        retrying.push(failure);
+                    }
+                }
+                if self.failure_attempts.is_empty() {
+                    self.offset = self.pending_offset;
+                    self.pending_offset = None;
+                    self.completed_updates.clear();
+                }
+                if retrying.is_empty() && quarantined.is_empty() {
+                    Ok(StepOutcome::Dispatched { count })
+                } else {
+                    Ok(StepOutcome::HandlerFailures {
+                        retrying,
+                        quarantined,
+                    })
+                }
             }
         }
     }
@@ -295,6 +360,7 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use std::collections::VecDeque;
     use std::convert::Infallible;
@@ -311,8 +377,8 @@ mod tests {
     use bot_core::telegram_input::ChatId;
 
     use super::{
-        ParallelUpdateHandler, PollingRuntime, RuntimeError, StepOutcome, UpdateHandler,
-        UpdateSource,
+        ParallelHandlerBuildError, ParallelUpdateHandler, PollingRuntime, RuntimeError,
+        StepOutcome, UpdateFailure, UpdateHandler, UpdateSource,
     };
 
     struct Source {
@@ -385,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn first_poll_discards_pending_updates_and_synchronizes_the_offset() {
+    fn first_poll_processes_pending_updates_before_advancing_the_offset() {
         let source = Source {
             outcomes: VecDeque::from([
                 Ok(bot_adapters::telegram_polling::PollOutcome::Updates(vec![
@@ -402,26 +468,33 @@ mod tests {
             offsets: Vec::new(),
         };
         let mut runtime = PollingRuntime::new(source, Handler::default());
-        assert_eq!(runtime.step(), Ok(StepOutcome::Synchronized { dropped: 2 }));
+        assert_eq!(runtime.step(), Ok(StepOutcome::Dispatched { count: 2 }));
         assert_eq!(runtime.offset(), Some(9));
-        assert!(runtime.handler.handled.is_empty());
+        assert_eq!(runtime.handler.handled, vec![7, 8]);
         assert_eq!(runtime.step(), Ok(StepOutcome::Dispatched { count: 1 }));
         assert_eq!(runtime.offset(), Some(10));
         assert_eq!(runtime.step(), Ok(StepOutcome::Idle));
-        assert_eq!(runtime.source.offsets, vec![Some(-1), Some(9), Some(10)]);
-        assert_eq!(runtime.handler.handled, vec![9]);
+        assert_eq!(runtime.source.offsets, vec![None, Some(9), Some(10)]);
+        assert_eq!(runtime.handler.handled, vec![7, 8, 9]);
     }
 
     #[test]
-    fn failed_update_is_acknowledged_so_later_updates_can_continue() {
+    fn failed_update_is_retried_without_repeating_successes_then_quarantined() {
         let source = Source {
             outcomes: VecDeque::from([
-                Ok(bot_adapters::telegram_polling::PollOutcome::Updates(
-                    Vec::new(),
-                )),
                 Ok(bot_adapters::telegram_polling::PollOutcome::Updates(vec![
                     update(10),
                     update(11),
+                    update(12),
+                ])),
+                Ok(bot_adapters::telegram_polling::PollOutcome::Updates(vec![
+                    update(11),
+                ])),
+                Ok(bot_adapters::telegram_polling::PollOutcome::Updates(vec![
+                    update(11),
+                ])),
+                Ok(bot_adapters::telegram_polling::PollOutcome::Updates(vec![
+                    update(13),
                 ])),
             ]),
             offsets: Vec::new(),
@@ -431,13 +504,28 @@ mod tests {
             ..Handler::default()
         };
         let mut runtime = PollingRuntime::new(source, handler);
-        assert_eq!(runtime.step(), Ok(StepOutcome::Synchronized { dropped: 0 }));
         assert!(matches!(
             runtime.step(),
-            Err(RuntimeError::Handler { update_id: 11, .. })
+            Ok(StepOutcome::HandlerFailures { retrying, quarantined })
+                if retrying.len() == 1 && quarantined.is_empty()
         ));
-        assert_eq!(runtime.offset(), Some(12));
-        assert_eq!(runtime.handler.handled, vec![10]);
+        assert_eq!(runtime.offset(), None);
+        assert_eq!(runtime.handler.handled, vec![10, 12]);
+        assert!(matches!(
+            runtime.step(),
+            Ok(StepOutcome::HandlerFailures { retrying, quarantined })
+                if retrying.len() == 1 && quarantined.is_empty()
+        ));
+        assert!(matches!(
+            runtime.step(),
+            Ok(StepOutcome::HandlerFailures { retrying, quarantined })
+                if retrying.is_empty() && quarantined.len() == 1
+        ));
+        assert_eq!(runtime.offset(), Some(13));
+        assert_eq!(runtime.handler.handled, vec![10, 12]);
+        assert_eq!(runtime.step(), Ok(StepOutcome::Dispatched { count: 1 }));
+        assert_eq!(runtime.handler.handled, vec![10, 12, 13]);
+        assert_eq!(runtime.source.offsets, [None, None, None, Some(13)]);
     }
 
     #[test]
@@ -458,7 +546,7 @@ mod tests {
         assert_eq!(runtime.step(), Ok(StepOutcome::Retry(retry)));
         assert!(matches!(runtime.step(), Err(RuntimeError::Poll(_))));
         assert_eq!(runtime.offset(), None);
-        assert_eq!(runtime.source.offsets, vec![Some(-1), Some(-1)]);
+        assert_eq!(runtime.source.offsets, vec![None, None]);
     }
 
     #[test]
@@ -475,7 +563,7 @@ mod tests {
             offsets: Vec::new(),
         };
         let mut runtime = PollingRuntime::new(source, InfallibleHandler);
-        assert_eq!(runtime.step(), Ok(StepOutcome::Synchronized { dropped: 0 }));
+        assert_eq!(runtime.step(), Ok(StepOutcome::Idle));
     }
 
     #[test]
@@ -584,7 +672,7 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_finishes_active_work_without_draining_the_backlog() {
+    fn shutdown_finishes_active_work_and_drains_the_backlog() {
         struct BlockingHandler {
             started: mpsc::Sender<i64>,
             release: Arc<(Mutex<bool>, Condvar)>,
@@ -618,19 +706,14 @@ mod tests {
         assert!(handler.handle(update(2)).is_ok());
         assert!(handler.handle(update(3)).is_ok());
 
-        let stopping = handler.stopping.clone();
         let shutdown = thread::spawn(move || handler.shutdown());
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while !stopping.load(Ordering::Acquire) && Instant::now() < deadline {
-            thread::yield_now();
-        }
-        assert!(stopping.load(Ordering::Acquire));
         if let Ok(mut released) = release.0.lock() {
             *released = true;
             release.1.notify_all();
         }
         assert!(shutdown.join().is_ok());
-        assert!(started_receiver.try_recv().is_err());
+        assert_eq!(started_receiver.recv_timeout(Duration::from_secs(1)), Ok(2));
+        assert_eq!(started_receiver.recv_timeout(Duration::from_secs(1)), Ok(3));
     }
 
     #[test]
@@ -648,19 +731,58 @@ mod tests {
         assert!(handler.is_ok());
         let Ok(mut handler) = handler else { return };
         assert!(handler.handle(update(42)).is_ok());
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let failure = loop {
-            if let Some(failure) = handler.take_failure() {
-                break Some(failure);
-            }
-            if Instant::now() >= deadline {
-                break None;
-            }
-            thread::yield_now();
-        };
+        let failures = handler.finish_batch();
         handler.shutdown();
-        assert!(failure.is_some_and(|failure| {
+        assert!(failures.first().is_some_and(|failure| {
             failure.update_id == 42 && failure.error == "synthetic parallel failure"
         }));
+    }
+
+    #[test]
+    fn parallel_handler_converts_panics_into_completions() {
+        struct PanickingHandler;
+        impl UpdateHandler for PanickingHandler {
+            type Error = Infallible;
+
+            fn handle(&mut self, _update: IncomingUpdate) -> Result<(), Self::Error> {
+                panic!("synthetic handler panic")
+            }
+        }
+
+        let handler = ParallelUpdateHandler::start(1, 1, || Ok::<_, Infallible>(PanickingHandler));
+        assert!(handler.is_ok());
+        let Ok(mut handler) = handler else { return };
+        assert!(handler.handle(update(42)).is_ok());
+        assert_eq!(
+            handler.finish_batch(),
+            [UpdateFailure {
+                update_id: 42,
+                error: "update handler panicked".to_owned(),
+            }]
+        );
+        handler.shutdown();
+    }
+
+    #[test]
+    fn parallel_handler_reports_factory_panics_without_hanging_startup() {
+        struct FactoryHandler;
+        impl UpdateHandler for FactoryHandler {
+            type Error = Infallible;
+
+            fn handle(&mut self, _update: IncomingUpdate) -> Result<(), Self::Error> {
+                Ok(())
+            }
+        }
+
+        let handler = ParallelUpdateHandler::<FactoryHandler>::start(2, 2, || {
+            panic!("synthetic factory panic");
+            #[allow(unreachable_code)]
+            Ok::<_, Infallible>(FactoryHandler)
+        });
+        assert!(matches!(
+            handler,
+            Err(ParallelHandlerBuildError::WorkerStartup { error, .. })
+                if error == "worker factory panicked"
+        ));
     }
 }

@@ -8,6 +8,7 @@ use bot_core::dollar::{CurrencyBands, DollarRate, render_dollar_rates};
 use bot_core::locale::Locale;
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
+use std::sync::OnceLock;
 
 use crate::redis_json_cache::{RedisJsonCache, RedisJsonCacheError};
 use crate::request_cache::{
@@ -70,11 +71,12 @@ pub struct ReqwestDollarTransport {
 
 impl ReqwestDollarTransport {
     pub fn new() -> Result<Self, TransportFailureKind> {
-        Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .map(|client| Self { client })
-            .map_err(|_| TransportFailureKind::Request)
+        static CLIENT: OnceLock<Client> = OnceLock::new();
+        crate::http_client::shared_client(&CLIENT, || {
+            Client::builder().timeout(REQUEST_TIMEOUT).build()
+        })
+        .map(|client| Self { client })
+        .map_err(|_| TransportFailureKind::Request)
     }
 }
 

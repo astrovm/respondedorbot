@@ -6,6 +6,7 @@ use bot_core::hacker_news::{HackerNewsItem, normalize_feed_item};
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use reqwest::blocking::Client;
+use std::sync::OnceLock;
 use thiserror::Error;
 
 use crate::redis_json_cache::RedisJsonCache;
@@ -59,11 +60,12 @@ pub struct ReqwestHackerNewsTransport {
 
 impl ReqwestHackerNewsTransport {
     pub fn new() -> Result<Self, HackerNewsTransportError> {
-        Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .map(|client| Self { client })
-            .map_err(|error| HackerNewsTransportError::Other(error.to_string()))
+        static CLIENT: OnceLock<Client> = OnceLock::new();
+        crate::http_client::shared_client(&CLIENT, || {
+            Client::builder().timeout(Duration::from_secs(10)).build()
+        })
+        .map(|client| Self { client })
+        .map_err(|error| HackerNewsTransportError::Other(error.to_string()))
     }
 }
 

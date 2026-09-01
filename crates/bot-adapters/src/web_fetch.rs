@@ -9,6 +9,7 @@ use reqwest::blocking::Client;
 use reqwest::header::{CONTENT_TYPE, LOCATION, USER_AGENT};
 use reqwest::redirect::Policy;
 use serde_json::Value;
+use std::sync::OnceLock;
 use thiserror::Error;
 use url::{Host, Url};
 
@@ -62,12 +63,15 @@ pub struct ReqwestWebFetchTransport {
 
 impl ReqwestWebFetchTransport {
     pub fn new() -> Result<Self, WebFetchTransportError> {
-        Client::builder()
-            .timeout(Duration::from_secs(8))
-            .redirect(Policy::none())
-            .build()
-            .map(|client| Self { client })
-            .map_err(|error| WebFetchTransportError::Other(error.to_string()))
+        static CLIENT: OnceLock<Client> = OnceLock::new();
+        crate::http_client::shared_client(&CLIENT, || {
+            Client::builder()
+                .timeout(Duration::from_secs(8))
+                .redirect(Policy::none())
+                .build()
+        })
+        .map(|client| Self { client })
+        .map_err(|error| WebFetchTransportError::Other(error.to_string()))
     }
 }
 

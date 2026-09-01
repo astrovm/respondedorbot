@@ -134,7 +134,13 @@ impl SchedulerStore for RedisTaskStore {
     }
 
     fn acquire_owner(&mut self, token: &str, ttl_seconds: i64) -> Result<bool, Self::Error> {
-        self.acquire_lease(TASK_SCHEDULER_OWNER_KEY, token, ttl_seconds)
+        if self.acquire_lease(TASK_SCHEDULER_OWNER_KEY, token, ttl_seconds)? {
+            return Ok(true);
+        }
+        // Several bounded workers in the same process share one owner identity.
+        // They may join that lease, while a different deployment token remains
+        // excluded.
+        self.renew_lease(TASK_SCHEDULER_OWNER_KEY, token, ttl_seconds)
     }
 
     fn renew_owner(&mut self, token: &str, ttl_seconds: i64) -> Result<bool, Self::Error> {
@@ -242,6 +248,7 @@ pub struct TaskScheduler<Store, Executor> {
     mode: SchedulerMode,
     settings: SchedulerSettings,
     owner_token: String,
+    claim_token: String,
     owns_lease: bool,
 }
 
@@ -267,8 +274,21 @@ where
             mode,
             settings: settings.validate()?,
             owner_token,
+            claim_token: String::new(),
             owns_lease: false,
-        })
+        }
+        .with_default_claim_token())
+    }
+
+    fn with_default_claim_token(mut self) -> Self {
+        self.claim_token.clone_from(&self.owner_token);
+        self
+    }
+
+    #[must_use]
+    pub fn with_claim_token(mut self, claim_token: impl Into<String>) -> Self {
+        self.claim_token = claim_token.into();
+        self
     }
 
     fn store_error(error: impl Display) -> SchedulerError {
@@ -424,7 +444,7 @@ where
             let claimed = match self.store.claim_occurrence(
                 document.task.id.as_str(),
                 &execution_id,
-                &self.owner_token,
+                &self.claim_token,
                 self.settings.claim_ttl_seconds,
             ) {
                 Ok(claimed) => claimed,
@@ -452,7 +472,7 @@ where
                         if let Err(error) = self.store.release_occurrence(
                             document.task.id.as_str(),
                             &execution_id,
-                            &self.owner_token,
+                            &self.claim_token,
                         ) {
                             failures.push(TaskFailure {
                                 task_id,
@@ -473,7 +493,7 @@ where
                             .release_occurrence(
                                 document.task.id.as_str(),
                                 &execution_id,
-                                &self.owner_token,
+                                &self.claim_token,
                             )
                             .err()
                             .map(|release| format!("; claim release failed: {release}"))
@@ -503,7 +523,7 @@ where
                 task_id: document.task.id.as_str(),
                 chat_id: &document.task.chat_id,
                 execution_id: &execution_id,
-                claim_token: &self.owner_token,
+                claim_token: &self.claim_token,
                 next_document: next_document.as_ref(),
                 record_ttl_seconds: self.settings.record_ttl_seconds,
             }) {

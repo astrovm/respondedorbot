@@ -2,7 +2,9 @@ use std::error::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bot_adapters::redis_connection::RedisEndpoint;
-use bot_adapters::redis_task_store::{RedisTaskStore, TaskOccurrenceCompletion};
+use bot_adapters::redis_task_store::{
+    RedisTaskStore, TaskOccurrenceCompletion, task_execution_key,
+};
 use bot_adapters::task_record::TaskRecordDocument;
 use bot_core::scheduled_tasks::{ScheduledTask, TaskId, TaskSchedule};
 
@@ -68,6 +70,8 @@ fn canonical_task_claim_advance_and_cancel_are_atomic() -> Result<(), Box<dyn Er
 
     assert!(store.claim_occurrence(&task_id, &execution_id, &claim_token, 30,)?);
     assert!(!store.claim_occurrence(&task_id, &execution_id, "other-claim", 30)?);
+    let execution_key = task_execution_key(&execution_id);
+    assert!(store.setex(&execution_key, TASK_TTL_SECONDS, "{}")?);
     document.task.last_execution_id = Some(execution_id.clone());
     document.task.next_run_at = Some(scheduled_for + 600);
     let next_payload = bot_adapters::task_record::encode_task_record(&document)?;
@@ -95,6 +99,7 @@ fn canonical_task_claim_advance_and_cancel_are_atomic() -> Result<(), Box<dyn Er
             .and_then(|loaded| loaded.task.last_execution_id),
         Some(execution_id)
     );
+    assert!(store.get(&execution_key)?.is_none());
 
     assert!(store.cancel_task(&task_id, &chat_id)?);
     assert!(store.load_task(&task_id)?.is_none());

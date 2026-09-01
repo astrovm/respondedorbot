@@ -551,7 +551,7 @@ mod tests {
                 "synthetic-token",
                 TelegramAction::SendVideo {
                     chat_id: ChatId(42),
-                    video: vec![1, 2, 3],
+                    video: vec![1, 2, 3].into(),
                     reply_to_message_id: Some(MessageId(7)),
                     caption: "fixed".to_owned(),
                     reply_markup: Some(markup),
@@ -566,7 +566,7 @@ mod tests {
         assert_eq!(requests[0].endpoint, "sendVideo");
         assert_eq!(requests[0].file_field, "video");
         assert_eq!(requests[0].file_name, "instagram.mp4");
-        assert_eq!(requests[0].file_bytes, vec![1, 2, 3]);
+        assert_eq!(requests[0].file_bytes.as_ref(), [1, 2, 3]);
         assert_eq!(requests[0].content_type, "video/mp4");
         assert!(
             requests[0]
@@ -619,7 +619,7 @@ mod tests {
                 "synthetic-token",
                 TelegramAction::SendPhoto {
                     chat_id: ChatId(42),
-                    photo: vec![1, 2, 3],
+                    photo: vec![1, 2, 3].into(),
                     reply_to_message_id: Some(MessageId(7)),
                     caption: "<b>signal</b>".to_owned(),
                     parse_mode: Some(ParseMode::Html),
@@ -637,7 +637,7 @@ mod tests {
                 TelegramAction::EditMessagePhoto {
                     chat_id: ChatId(42),
                     message_id: MessageId(55),
-                    photo: vec![4, 5, 6],
+                    photo: vec![4, 5, 6].into(),
                     caption: "<b>updated</b>".to_owned(),
                     parse_mode: Some(ParseMode::Html),
                     reply_markup: None,
@@ -651,7 +651,7 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].endpoint, "sendPhoto");
         assert_eq!(requests[0].file_field, "photo");
-        assert_eq!(requests[0].file_bytes, vec![1, 2, 3]);
+        assert_eq!(requests[0].file_bytes.as_ref(), [1, 2, 3]);
         assert!(
             requests[0]
                 .fields

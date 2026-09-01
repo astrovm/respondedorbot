@@ -127,6 +127,10 @@ pub trait ConversationBilling {
 
     fn settle(&mut self, request: SettlementRequest) -> Result<(), String>;
 
+    fn abort_operation(&mut self, operation_id: &str) -> Result<(), String>;
+
+    fn release_operation(&mut self, operation_id: &str);
+
     fn personal_balance(&mut self, _user_id: i64) -> Result<Option<i64>, String> {
         Ok(None)
     }
@@ -327,6 +331,25 @@ where
             reason: reason.to_owned(),
             billing_segments: Vec::new(),
         })
+    }
+
+    fn finish_preparation<T>(
+        &mut self,
+        operation_id: &str,
+        result: Result<T, String>,
+    ) -> Result<T, String> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                self.pending.remove(operation_id);
+                self.billing
+                    .abort_operation(operation_id)
+                    .map_err(|abort_error| {
+                        format!("{error}; operation abort failed: {abort_error}")
+                    })?;
+                Err(error)
+            }
+        }
     }
 
     fn prompt(
@@ -871,13 +894,11 @@ where
         } = match self.prompt(&provider_input, prepared_media.execution.as_ref()) {
             Ok(value) => value,
             Err(error) => {
-                let actual = price_segments(&segments)?;
                 record_and_settle(
                     &mut self.billing,
                     &input,
                     &operation_id,
                     &segments,
-                    actual,
                     false,
                     "ai_request_preparation_failed",
                 )?;
@@ -894,13 +915,11 @@ where
                 messages.len(),
             )?;
             if !extension.authorized {
-                let actual = price_segments(&segments)?;
                 record_and_settle(
                     &mut self.billing,
                     &input,
                     &operation_id,
                     &segments,
-                    actual,
                     false,
                     "ai_response_reserve_adjustment_failed",
                 )?;
@@ -947,13 +966,11 @@ where
             cleaned
         };
         if input.spontaneous && fallback {
-            let actual = price_segments(&segments)?;
             record_and_settle(
                 &mut self.billing,
                 &input,
                 &operation_id,
                 &segments,
-                actual,
                 false,
                 "ai_response_provider_usage_before_fallback",
             )?;
@@ -995,7 +1012,9 @@ where
     }
 
     fn prepare(&mut self, input: AiConversationInput) -> Result<AiPreparation, String> {
-        self.prepare_transaction(input, &mut |_token| Ok(()))
+        let operation_id = operation_id(&input);
+        let result = self.prepare_transaction(input, &mut |_token| Ok(()));
+        self.finish_preparation(&operation_id, result)
     }
 
     fn prepare_streaming(
@@ -1003,7 +1022,9 @@ where
         input: AiConversationInput,
         on_token: &mut dyn FnMut(&str) -> Result<(), String>,
     ) -> Result<AiPreparation, String> {
-        self.prepare_transaction(input, on_token)
+        let operation_id = operation_id(&input);
+        let result = self.prepare_transaction(input, on_token);
+        self.finish_preparation(&operation_id, result)
     }
 
     fn prepare_media_command(
@@ -1013,7 +1034,9 @@ where
         if self.media.is_none() {
             Ok(None)
         } else {
-            self.prepare_media_command_transaction(input).map(Some)
+            let operation_id = operation_id(&input);
+            let result = self.prepare_media_command_transaction(input).map(Some);
+            self.finish_preparation(&operation_id, result)
         }
     }
 
@@ -1022,8 +1045,11 @@ where
         input: AiConversationInput,
         on_token: &mut dyn FnMut(&str) -> Result<(), String>,
     ) -> Result<Option<AiPreparation>, String> {
-        self.prepare_summary_command_transaction(input, on_token)
-            .map(Some)
+        let operation_id = summary_operation_id(&input);
+        let result = self
+            .prepare_summary_command_transaction(input, on_token)
+            .map(Some);
+        self.finish_preparation(&operation_id, result)
     }
 
     fn record_ignored(&mut self, input: AiConversationInput) -> Result<(), String> {
@@ -1034,7 +1060,6 @@ where
         let Some(pending) = self.pending.remove(&delivery.completion_id) else {
             return Ok(());
         };
-        let actual = price_segments(&pending.segments)?;
         let reason = match (
             pending.kind,
             delivery.delivered,
@@ -1092,7 +1117,6 @@ where
             &pending.input,
             &delivery.completion_id,
             &pending.segments,
-            actual,
             delivery.delivered,
             reason,
         )?;
@@ -1391,20 +1415,29 @@ fn record_and_settle<Billing: ConversationBilling>(
     input: &AiConversationInput,
     operation_id: &str,
     segments: &[Value],
-    actual_credit_units: i64,
     delivered: bool,
     reason: &str,
 ) -> Result<(), String> {
+    let actual_credit_units = match price_segments(segments) {
+        Ok(actual_credit_units) => actual_credit_units,
+        Err(error) => {
+            billing.release_operation(operation_id);
+            return Err(error);
+        }
+    };
+    let mut segment_error = None;
     for segment in segments {
-        billing.record_segment(ProviderSegmentRequest {
+        if let Err(error) = billing.record_segment(ProviderSegmentRequest {
             user_id: input.sender_id.0,
             chat_id: group_chat_id(input),
             operation_id: operation_id.to_owned(),
             segment_id: stable_provider_segment_id(segment),
             segment: segment.clone(),
-        })?;
+        }) {
+            segment_error.get_or_insert(error);
+        }
     }
-    billing.settle(SettlementRequest {
+    let settlement = billing.settle(SettlementRequest {
         user_id: input.sender_id.0,
         chat_id: group_chat_id(input),
         operation_id: operation_id.to_owned(),
@@ -1412,7 +1445,14 @@ fn record_and_settle<Billing: ConversationBilling>(
         delivered,
         reason: reason.to_owned(),
         billing_segments: segments.to_vec(),
-    })
+    });
+    match (segment_error, settlement) {
+        (Some(segment_error), Err(settlement_error)) => Err(format!(
+            "provider usage recording failed: {segment_error}; settlement failed: {settlement_error}"
+        )),
+        (Some(error), Ok(())) => Err(format!("provider usage recording failed: {error}")),
+        (None, result) => result,
+    }
 }
 
 fn formatted_date(timestamp: i64, timezone_offset_hours: i64, locale: Locale) -> String {
@@ -1693,7 +1733,10 @@ mod tests {
         reserves: Vec<ReserveRequest>,
         segments: Vec<ProviderSegmentRequest>,
         settlements: Vec<SettlementRequest>,
+        released_operations: Vec<String>,
         personal_balance: Option<i64>,
+        record_failure: bool,
+        settlement_failure: bool,
     }
 
     impl ConversationBilling for Billing {
@@ -1710,12 +1753,29 @@ mod tests {
 
         fn record_segment(&mut self, request: ProviderSegmentRequest) -> Result<(), String> {
             self.segments.push(request);
-            Ok(())
+            if self.record_failure {
+                Err("synthetic segment failure".to_owned())
+            } else {
+                Ok(())
+            }
         }
 
         fn settle(&mut self, request: SettlementRequest) -> Result<(), String> {
             self.settlements.push(request);
+            if self.settlement_failure {
+                Err("synthetic settlement failure".to_owned())
+            } else {
+                Ok(())
+            }
+        }
+
+        fn abort_operation(&mut self, operation_id: &str) -> Result<(), String> {
+            self.released_operations.push(operation_id.to_owned());
             Ok(())
+        }
+
+        fn release_operation(&mut self, operation_id: &str) {
+            self.released_operations.push(operation_id.to_owned());
         }
 
         fn personal_balance(&mut self, _user_id: i64) -> Result<Option<i64>, String> {
@@ -1825,6 +1885,78 @@ mod tests {
             Ok(())
         );
         assert_eq!(service.billing.settlements.len(), 1);
+    }
+
+    #[test]
+    fn delivery_finalization_releases_pending_state_after_attempting_failed_segments() {
+        let mut service = conversation(
+            vec![Ok(round("answer", None))],
+            Billing {
+                record_failure: true,
+                ..Billing::default()
+            },
+        );
+        let Ok(AiPreparation::Reply {
+            completion_id: Some(completion_id),
+            ..
+        }) = service.prepare(input())
+        else {
+            return;
+        };
+
+        assert!(
+            service
+                .complete_delivery(AiDelivery {
+                    completion_id: completion_id.clone(),
+                    delivered: true,
+                    sent_message_id: Some(MessageId(99)),
+                })
+                .is_err()
+        );
+        assert_eq!(service.billing.settlements.len(), 1);
+        assert!(!service.pending.contains_key(&completion_id));
+
+        service.billing.record_failure = false;
+        assert!(
+            service
+                .complete_delivery(AiDelivery {
+                    completion_id: completion_id.clone(),
+                    delivered: true,
+                    sent_message_id: Some(MessageId(99)),
+                })
+                .is_ok()
+        );
+        assert_eq!(service.billing.settlements.len(), 1);
+        assert!(!service.pending.contains_key(&completion_id));
+    }
+
+    #[test]
+    fn malformed_delivery_pricing_releases_the_active_operation() {
+        let mut service = conversation(vec![Ok(round("answer", None))], Billing::default());
+        let Ok(AiPreparation::Reply {
+            completion_id: Some(completion_id),
+            ..
+        }) = service.prepare(input())
+        else {
+            return;
+        };
+        let Some(pending) = service.pending.get_mut(&completion_id) else {
+            return;
+        };
+        pending.segments = vec![json!("invalid segment")];
+
+        assert!(
+            service
+                .complete_delivery(AiDelivery {
+                    completion_id: completion_id.clone(),
+                    delivered: true,
+                    sent_message_id: Some(MessageId(99)),
+                })
+                .is_err()
+        );
+        assert!(!service.pending.contains_key(&completion_id));
+        assert_eq!(service.billing.released_operations, [completion_id]);
+        assert!(service.billing.settlements.is_empty());
     }
 
     #[test]

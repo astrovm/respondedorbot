@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use crate::redis_connection::{RedisEndpoint, client};
+use crate::redis_connection::{RedisEndpoint, RedisPool, pool};
 
 #[derive(Debug, Error)]
 pub enum RedisJsonCacheError {
@@ -15,13 +15,13 @@ pub enum RedisJsonCacheError {
 }
 
 pub struct RedisJsonCache {
-    client: redis::Client,
+    client: RedisPool,
 }
 
 impl RedisJsonCache {
     pub fn new(endpoint: &RedisEndpoint) -> Result<Self, RedisJsonCacheError> {
         Ok(Self {
-            client: client(endpoint)?,
+            client: pool(endpoint)?,
         })
     }
 
@@ -101,9 +101,9 @@ mod tests {
                     b"+OK\r\n".as_slice(),
                 ),
             ];
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(2)))?;
             for (expected, response) in exchanges {
-                let (mut stream, _) = listener.accept()?;
-                stream.set_read_timeout(Some(Duration::from_secs(2)))?;
                 assert_eq!(read_command(&mut stream)?, expected);
                 stream.write_all(response)?;
             }
@@ -158,9 +158,9 @@ mod tests {
                     b"$-1\r\n".as_slice(),
                 ),
             ];
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(2)))?;
             for (expected, response) in exchanges {
-                let (mut stream, _) = listener.accept()?;
-                stream.set_read_timeout(Some(Duration::from_secs(2)))?;
                 assert_eq!(read_command(&mut stream)?, expected);
                 stream.write_all(response)?;
             }

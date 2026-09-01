@@ -46,11 +46,12 @@ pub struct ReqwestFinvizTransport {
 
 impl ReqwestFinvizTransport {
     pub fn new() -> Result<Self, TransportFailureKind> {
-        Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .map(|client| Self { client })
-            .map_err(|_| TransportFailureKind::Request)
+        static CLIENT: OnceLock<Client> = OnceLock::new();
+        crate::http_client::shared_client(&CLIENT, || {
+            Client::builder().timeout(Duration::from_secs(10)).build()
+        })
+        .map(|client| Self { client })
+        .map_err(|_| TransportFailureKind::Request)
     }
 }
 

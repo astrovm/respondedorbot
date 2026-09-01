@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use bot_adapters::billing_schema::BillingSchemaRepository;
 use bot_adapters::openrouter_chat::DEFAULT_OPENROUTER_BASE_URL;
 use bot_adapters::telegram_http::ReqwestTelegramTransport;
 use bot_adapters::telegram_polling::PollFailure;
@@ -85,25 +86,22 @@ where
                 last_poll_failure = Some(failure.clone());
                 wait(retry_delay(&failure));
             }
-            Ok(
-                StepOutcome::Idle
-                | StepOutcome::Synchronized { .. }
-                | StepOutcome::Dispatched { .. },
-            ) => last_poll_failure = None,
-            Err(RuntimeError::Handler {
-                update_id,
-                handler_error,
+            Ok(StepOutcome::HandlerFailures {
+                retrying,
+                quarantined,
             }) => {
                 last_poll_failure = None;
-                report_handler_failure(update_id, &handler_error.to_string());
+                for failure in retrying {
+                    report_handler_failure(failure.update_id, &failure.error);
+                }
+                for failure in quarantined {
+                    report_handler_failure(
+                        failure.update_id,
+                        &format!("quarantined after repeated failures: {}", failure.error),
+                    );
+                }
             }
-            Err(RuntimeError::BackgroundHandler {
-                update_id,
-                handler_error,
-            }) => {
-                last_poll_failure = None;
-                report_handler_failure(update_id, &handler_error);
-            }
+            Ok(StepOutcome::Idle | StepOutcome::Dispatched { .. }) => last_poll_failure = None,
             Err(error @ RuntimeError::Poll(_)) => return Err(error.to_string()),
         }
     }
@@ -161,6 +159,9 @@ fn report_best_effort(reporter: &dyn OperationalReporter, report: &OperationalRe
 }
 
 pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
+    BillingSchemaRepository::new(config.database_url())
+        .ensure_schema()
+        .map_err(|error| format!("could not initialize billing schema: {error}"))?;
     let reporter = build_operational_reporter(config)?;
     let active_operations = ActiveOperationRegistry::default();
     let telegram_delivery = TelegramDeliveryCoordinator::default();
@@ -224,7 +225,7 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
         .map_err(|error| format!("could not install shutdown signal handler: {error}"))?;
     let polling_result = run_polling_until(
         &mut runtime,
-        || stopping.load(Ordering::Acquire),
+        || stopping.load(Ordering::Acquire) || supervisor.has_failed(),
         |duration| interruptible_wait(&stopping, duration),
         |failure| {
             let report = OperationalReport::new(
@@ -357,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn handler_failures_are_reported_acknowledged_and_do_not_stop_polling() {
+    fn handler_failures_are_reported_unacknowledged_and_do_not_stop_polling() {
         struct Source {
             outcomes: VecDeque<Result<PollOutcome, PollingError>>,
             offsets: Rc<RefCell<Vec<Option<i64>>>>,
@@ -391,7 +392,8 @@ mod tests {
         let handled = Rc::new(RefCell::new(Vec::new()));
         let source = Source {
             outcomes: VecDeque::from([
-                Ok(PollOutcome::Updates(Vec::new())),
+                Ok(PollOutcome::Updates(vec![update(10), update(11)])),
+                Ok(PollOutcome::Updates(vec![update(10), update(11)])),
                 Ok(PollOutcome::Updates(vec![update(10), update(11)])),
                 Ok(PollOutcome::Updates(vec![update(12)])),
             ]),
@@ -410,7 +412,7 @@ mod tests {
             || {
                 let current = iterations.get();
                 iterations.set(current + 1);
-                current >= 3
+                current >= 4
             },
             |_| {},
             |_| {},
@@ -420,9 +422,16 @@ mod tests {
         assert_eq!(*handled.borrow(), [10, 12]);
         assert_eq!(
             *failures.borrow(),
-            [(11, "synthetic action failure".to_owned())]
+            [
+                (11, "synthetic action failure".to_owned()),
+                (11, "synthetic action failure".to_owned()),
+                (
+                    11,
+                    "quarantined after repeated failures: synthetic action failure".to_owned()
+                ),
+            ]
         );
-        assert_eq!(*offsets.borrow(), [Some(-1), None, Some(12)]);
+        assert_eq!(*offsets.borrow(), [None, None, None, Some(12)]);
         assert_eq!(runtime.offset(), Some(13));
     }
 
