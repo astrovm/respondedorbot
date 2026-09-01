@@ -1789,16 +1789,14 @@ where
                 .to_lowercase()
                 .contains(&format!("@{}", bot_username.to_lowercase()));
         let reply_to_bot = message.replied_sender_username.as_deref() == Some(bot_username);
-        let command_name = command
-            .trim_start_matches('/')
-            .split('@')
-            .next()
-            .unwrap_or_default();
         let command_starts_with_slash = command.starts_with('/');
-        let known_command = command_starts_with_slash
-            && telegram_commands(locale)
-                .iter()
-                .any(|candidate| candidate.command == command_name);
+        let command_name = command.strip_prefix('/').filter(|name| !name.contains('@'));
+        let known_command = command_name.is_some_and(|command_name| {
+            command_starts_with_slash
+                && telegram_commands(locale)
+                    .iter()
+                    .any(|candidate| candidate.command == command_name)
+        });
         let reply_metadata = if reply_to_bot {
             message.replied_message_id.and_then(|reply_id| {
                 let source = self.ai_conversation_source.as_mut()?;
@@ -4560,8 +4558,16 @@ mod tests {
         message.chat_type = Some("group".to_owned());
         assert_eq!(dispatcher.dispatch(command), Ok(DispatchOutcome::Handled));
 
-        assert_eq!(ignored.borrow().len(), 1);
+        let mut other_bot = update("/balance@playtimbabot", None);
+        let IncomingEvent::Message(message) = &mut other_bot.event else {
+            return;
+        };
+        message.chat_type = Some("group".to_owned());
+        assert_eq!(dispatcher.dispatch(other_bot), Ok(DispatchOutcome::Handled));
+
+        assert_eq!(ignored.borrow().len(), 2);
         assert_eq!(ignored.borrow()[0].message_text, "che");
+        assert_eq!(ignored.borrow()[1].command, "/balance@playtimbabot");
         assert_eq!(prepared.borrow().len(), 1);
         assert_eq!(prepared.borrow()[0].command, "/che");
         assert_eq!(prepared.borrow()[0].message_text, "seguís ahí?");
