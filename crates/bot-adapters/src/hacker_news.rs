@@ -198,21 +198,20 @@ pub fn parse_feed(body: &str, max_items: usize) -> Result<Vec<HackerNewsItem>, S
     loop {
         match reader.read_event() {
             Ok(Event::Start(start)) => match start.local_name().as_ref() {
-                b"item" => {
+                "item" => {
                     in_item = true;
                     title.clear();
                     link.clear();
                     description.clear();
                 }
-                b"title" | b"link" | b"description" if in_item => {
-                    field = Some(start.local_name().as_ref().to_vec());
+                "title" | "link" | "description" if in_item => {
+                    field = Some(start.local_name().as_ref().to_owned());
                 }
                 _ => {}
             },
             Ok(Event::Text(text)) if in_item => {
-                let decoded = text.decode().map_err(|error| error.to_string())?;
                 let decoded =
-                    quick_xml::escape::unescape(&decoded).map_err(|error| error.to_string())?;
+                    quick_xml::escape::unescape(&text).map_err(|error| error.to_string())?;
                 append_field(
                     field.as_deref(),
                     &decoded,
@@ -222,10 +221,9 @@ pub fn parse_feed(body: &str, max_items: usize) -> Result<Vec<HackerNewsItem>, S
                 );
             }
             Ok(Event::CData(text)) if in_item => {
-                let decoded = text.decode().map_err(|error| error.to_string())?;
                 append_field(
                     field.as_deref(),
-                    &decoded,
+                    &text,
                     &mut title,
                     &mut link,
                     &mut description,
@@ -238,8 +236,8 @@ pub fn parse_feed(body: &str, max_items: usize) -> Result<Vec<HackerNewsItem>, S
                 {
                     character.to_string()
                 } else {
-                    let name = reference.decode().map_err(|error| error.to_string())?;
-                    quick_xml::escape::resolve_predefined_entity(&name)
+                    let name = reference.as_ref();
+                    quick_xml::escape::resolve_predefined_entity(name)
                         .ok_or_else(|| format!("unknown XML entity: &{name};"))?
                         .to_owned()
                 };
@@ -252,7 +250,7 @@ pub fn parse_feed(body: &str, max_items: usize) -> Result<Vec<HackerNewsItem>, S
                 );
             }
             Ok(Event::End(end)) => match end.local_name().as_ref() {
-                b"item" if in_item => {
+                "item" if in_item => {
                     if let Some(item) = normalize_feed_item(&title, &link, &description)
                         .map_err(|error| error.to_string())?
                     {
@@ -264,7 +262,7 @@ pub fn parse_feed(body: &str, max_items: usize) -> Result<Vec<HackerNewsItem>, S
                         break;
                     }
                 }
-                b"title" | b"link" | b"description" => field = None,
+                "title" | "link" | "description" => field = None,
                 _ => {}
             },
             Ok(Event::Eof) => break,
@@ -276,16 +274,16 @@ pub fn parse_feed(body: &str, max_items: usize) -> Result<Vec<HackerNewsItem>, S
 }
 
 fn append_field(
-    field: Option<&[u8]>,
+    field: Option<&str>,
     value: &str,
     title: &mut String,
     link: &mut String,
     description: &mut String,
 ) {
     match field {
-        Some(b"title") => title.push_str(value),
-        Some(b"link") => link.push_str(value),
-        Some(b"description") => description.push_str(value),
+        Some("title") => title.push_str(value),
+        Some("link") => link.push_str(value),
+        Some("description") => description.push_str(value),
         _ => {}
     }
 }
