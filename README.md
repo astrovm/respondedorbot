@@ -43,6 +43,8 @@ The process owns Telegram polling, background price refresh, memory compaction, 
 
 Redis defaults to `localhost:6379`. Optional provider, reconciliation, polling, maintenance, and monitoring settings are documented in [.env.example](.env.example).
 
+For a long-running Supabase deployment, use the session pooler on port `5432`. The transaction pooler on port `6543` does not support the prepared statements used by this process. Keep `sslmode=require` and do not append connection options that the PostgreSQL driver does not recognize. The production image trusts the public Supabase Root 2021 CA; its SHA-256 fingerprint is `80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA`. Verify certificate rotations against the [Supabase dashboard and SSL documentation](https://supabase.com/docs/guides/database/connecting-to-postgres#connecting-with-ssl) before updating the bundled certificate.
+
 ## Commands
 
 | Command | Main aliases | Description |
@@ -100,12 +102,15 @@ cp quadlets/* ~/.config/containers/systemd/
 cp systemd/respondedorbot-maintenance.* systemd/respondedorbot-podman-prune.* ~/.config/systemd/user/
 cp .env.example ~/respondedorbot/.env
 # Create ~/respondedorbot/workspace/SOUL.md and RULES.md, or set BOT_SYSTEM_PROMPT.
+podman run --rm --env-file ~/respondedorbot/.env \
+  -v ~/respondedorbot/workspace:/app/workspace:ro \
+  respondedorbot:local /usr/local/bin/botd --check-config
 systemctl --user daemon-reload
 systemctl --user enable --now respondedorbot-maintenance.timer respondedorbot-podman-prune.timer
 systemctl --user start respondedorbot-redis.service respondedorbot.service
 ```
 
-The runtime image contains `/usr/local/bin/botd`, FFmpeg, and native shared libraries. It contains no scripting-language runtime. Run maintenance with `podman exec systemd-respondedorbot /usr/local/bin/botd --maintenance`.
+The runtime image contains `/usr/local/bin/botd`, FFmpeg, native shared libraries, and the public Supabase root CA. It contains no scripting-language runtime. Run maintenance with `podman exec systemd-respondedorbot /usr/local/bin/botd --maintenance`. The Quadlet gives the process up to 600 seconds to finish interruptible background work before Podman forces termination; systemd retains a 30-second margin around that deadline.
 
 CI publishes `latest` and immutable `sha-<full-commit-sha>` images. Roll back by pinning the Quadlet `Image=` line to a previously verified SHA tag, reloading user units, and restarting the service. Never run two pollers with the same Telegram token.
 
