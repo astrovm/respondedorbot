@@ -12,6 +12,7 @@ use thiserror::Error;
 
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 const MAX_RESPONSE_BYTES: u64 = 1_048_576;
+pub const TELEGRAM_FILE_MAX_BYTES: u64 = 20_000_000;
 
 #[derive(Clone, PartialEq)]
 pub struct TelegramRequest {
@@ -52,6 +53,7 @@ pub struct TelegramFileRequest {
     pub token: String,
     pub file_path: String,
     pub timeout: Duration,
+    pub max_bytes: u64,
 }
 
 #[derive(Clone, PartialEq)]
@@ -209,23 +211,28 @@ impl TelegramFileTransport for ReqwestTelegramTransport {
             .send()
             .map_err(classify_error)?;
         let status_code = response.status().as_u16();
-        let body = response.bytes().map_err(classify_error)?.to_vec();
+        let body = read_limited(response, request.max_bytes)?;
         Ok(BinaryHttpResponse { status_code, body })
     }
+}
+
+fn read_limited(reader: impl Read, max_bytes: u64) -> Result<Vec<u8>, TransportFailureKind> {
+    let mut body = Vec::new();
+    reader
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut body)
+        .map_err(|_| TransportFailureKind::Request)?;
+    if body.len() as u64 > max_bytes {
+        return Err(TransportFailureKind::ResponseTooLarge);
+    }
+    Ok(body)
 }
 
 fn read_response(
     response: reqwest::blocking::Response,
 ) -> Result<HttpResponse, TransportFailureKind> {
     let status_code = response.status().as_u16();
-    let mut body = Vec::new();
-    response
-        .take(MAX_RESPONSE_BYTES + 1)
-        .read_to_end(&mut body)
-        .map_err(|_| TransportFailureKind::Request)?;
-    if body.len() as u64 > MAX_RESPONSE_BYTES {
-        return Err(TransportFailureKind::ResponseTooLarge);
-    }
+    let body = read_limited(response, MAX_RESPONSE_BYTES)?;
     Ok(HttpResponse {
         status_code,
         body: String::from_utf8_lossy(&body).into_owned(),
@@ -367,6 +374,7 @@ pub fn download_file_with<T: TelegramFileTransport>(
         token: token.to_owned(),
         file_path: file_path.to_owned(),
         timeout: Duration::from_secs(timeout_seconds),
+        max_bytes: TELEGRAM_FILE_MAX_BYTES,
     };
     match transport.download(&request) {
         Ok(response) if (200..300).contains(&response.status_code) => {
@@ -399,11 +407,11 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        BinaryHttpResponse, HttpResponse, MultipartUpload, TelegramFileOutcome,
-        TelegramFileRequest, TelegramFileTransport, TelegramHttpError, TelegramHttpOutcome,
-        TelegramMultipartRequest, TelegramMultipartTransport, TelegramRequest, TelegramTransport,
-        TransportFailureKind, download_file_with, multipart_request_with, request_with,
-        response_outcome,
+        BinaryHttpResponse, HttpResponse, MultipartUpload, TELEGRAM_FILE_MAX_BYTES,
+        TelegramFileOutcome, TelegramFileRequest, TelegramFileTransport, TelegramHttpError,
+        TelegramHttpOutcome, TelegramMultipartRequest, TelegramMultipartTransport, TelegramRequest,
+        TelegramTransport, TransportFailureKind, download_file_with, multipart_request_with,
+        read_limited, request_with, response_outcome,
     };
 
     struct FakeTransport {
@@ -641,6 +649,19 @@ mod tests {
         assert_eq!(requests[0].token, "synthetic-token");
         assert_eq!(requests[0].file_path, "photos/file_123.jpg");
         assert_eq!(requests[0].timeout.as_secs(), 30);
+        assert_eq!(requests[0].max_bytes, TELEGRAM_FILE_MAX_BYTES);
+    }
+
+    #[test]
+    fn bounded_reader_rejects_oversized_responses() {
+        assert_eq!(
+            read_limited(std::io::Cursor::new(vec![1, 2, 3]), 3),
+            Ok(vec![1, 2, 3])
+        );
+        assert_eq!(
+            read_limited(std::io::Cursor::new(vec![1, 2, 3, 4]), 3),
+            Err(TransportFailureKind::ResponseTooLarge)
+        );
     }
 
     #[test]
