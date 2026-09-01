@@ -581,6 +581,22 @@ impl ConversationBilling for PostgresConversationBilling {
         result
     }
 
+    fn abort_operation(&mut self, operation_id: &str) -> Result<(), String> {
+        let cap_refund = self
+            .cap_key_by_operation
+            .get(operation_id)
+            .and_then(|cap_key| {
+                self.creditless_cap
+                    .as_ref()
+                    .map(|creditless_cap| creditless_cap.decrement(cap_key))
+            })
+            .transpose()
+            .map(|_count| ())
+            .map_err(|error| error.to_string());
+        self.release_operation_state(operation_id);
+        cap_refund
+    }
+
     fn release_operation(&mut self, operation_id: &str) {
         self.release_operation_state(operation_id);
     }

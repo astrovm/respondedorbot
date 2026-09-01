@@ -127,6 +127,8 @@ pub trait ConversationBilling {
 
     fn settle(&mut self, request: SettlementRequest) -> Result<(), String>;
 
+    fn abort_operation(&mut self, operation_id: &str) -> Result<(), String>;
+
     fn release_operation(&mut self, operation_id: &str);
 
     fn personal_balance(&mut self, _user_id: i64) -> Result<Option<i64>, String> {
@@ -336,11 +338,18 @@ where
         operation_id: &str,
         result: Result<T, String>,
     ) -> Result<T, String> {
-        if result.is_err() {
-            self.pending.remove(operation_id);
-            self.billing.release_operation(operation_id);
+        match result {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                self.pending.remove(operation_id);
+                self.billing
+                    .abort_operation(operation_id)
+                    .map_err(|abort_error| {
+                        format!("{error}; operation abort failed: {abort_error}")
+                    })?;
+                Err(error)
+            }
         }
-        result
     }
 
     fn prompt(
@@ -1758,6 +1767,11 @@ mod tests {
             } else {
                 Ok(())
             }
+        }
+
+        fn abort_operation(&mut self, operation_id: &str) -> Result<(), String> {
+            self.released_operations.push(operation_id.to_owned());
+            Ok(())
         }
 
         fn release_operation(&mut self, operation_id: &str) {
