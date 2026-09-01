@@ -390,6 +390,18 @@ impl PostgresConversationBilling {
         self.active_operations = Some(active_operations);
         self
     }
+
+    fn release_operation_state(&mut self, operation_id: &str) {
+        self.payer_by_operation.remove(operation_id);
+        self.onboarding_checked_operations.remove(operation_id);
+        self.cap_checked_operations.remove(operation_id);
+        self.cap_key_by_operation.remove(operation_id);
+        if self.active_marked_operations.remove(operation_id)
+            && let Some(active_operations) = self.active_operations.as_ref()
+        {
+            active_operations.mark_inactive(operation_id);
+        }
+    }
 }
 
 impl ConversationBilling for PostgresConversationBilling {
@@ -565,16 +577,12 @@ impl ConversationBilling for PostgresConversationBilling {
         // In-memory admission state is only a guard around the live provider
         // operation. Always release it, including pricing, database, and Redis
         // failures, so the durable reconciler can repair an unsettled reserve.
-        self.payer_by_operation.remove(&operation_id);
-        self.onboarding_checked_operations.remove(&operation_id);
-        self.cap_checked_operations.remove(&operation_id);
-        self.cap_key_by_operation.remove(&operation_id);
-        if self.active_marked_operations.remove(&operation_id)
-            && let Some(active_operations) = self.active_operations.as_ref()
-        {
-            active_operations.mark_inactive(&operation_id);
-        }
+        self.release_operation_state(&operation_id);
         result
+    }
+
+    fn release_operation(&mut self, operation_id: &str) {
+        self.release_operation_state(operation_id);
     }
 
     fn personal_balance(&mut self, user_id: i64) -> Result<Option<i64>, String> {
