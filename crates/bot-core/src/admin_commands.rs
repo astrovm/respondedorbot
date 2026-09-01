@@ -631,7 +631,7 @@ mod tests {
         };
         assert_eq!(
             render_creditlog(&[entry], Locale::Es),
-            "últimas liquidaciones IA:\n\n2026-03-11 17:35:10 | cmd=/ask | estado=ok\nchat=202 user=99 reservado=2.00 cobrado=1.00 refund=1.00 extra=0.00 deuda=0.00\nusd_micros=390\nrequests: chat=3\ncache_hits: chat=1\ncacheados=900 ahorro_cache=20\nmodelos: deepseek/deepseek-v4-flash-0731=390\ntools: web_search=8000 (2x), python=500 (1x)"
+            "últimas liquidaciones IA:\n\n2026-03-11 17:35:10 | cmd=/ask | estado=ok\nchat=202 user=99 reservado=2.00 cobrado=1.00 refund=1.00 extra=0.00 deuda=0.00\nusd_micros=390\nrequests: chat=3\ncache_hits: chat=1\ncacheados=900 ahorro_cache=32\nmodelos: deepseek/deepseek-v4-flash-0731=390\ntools: web_search=8000 (2x), python=500 (1x)"
         );
     }
 

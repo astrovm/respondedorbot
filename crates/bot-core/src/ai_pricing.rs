@@ -3,11 +3,11 @@
 use serde_json::{Map, Value, json};
 use thiserror::Error;
 
-const PRICING_VERSION: &str = "2026-08-28";
-const CREDIT_UNIT_USD_MICROS: i128 = 50;
-const FIRECRAWL_USD_MICROS_PER_CREDIT: i128 = 830;
-const DEEPSEEK_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
-const GEMINI_MODEL: &str = "google/gemini-3.1-flash-lite-preview";
+use crate::provider_pricing::{
+    CREDIT_UNIT_USD_MICROS, FIRECRAWL_STANDARD_USD_MICROS_PER_CREDIT,
+    GROQ_TRANSCRIPTION_MIN_SECONDS, GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR, PRICING_VERSION,
+    published_token_pricing,
+};
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum AiPricingError {
@@ -200,15 +200,6 @@ impl TokenUsage {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct TokenPricing {
-    input_per_million: i128,
-    cached_input_per_million: Option<i128>,
-    cache_write_per_million: Option<i128>,
-    audio_input_per_million: Option<i128>,
-    output_per_million: i128,
-}
-
 struct ModelCost {
     usd_micros: i64,
     exact: ExactDecimal,
@@ -310,58 +301,31 @@ fn token_usage(usage: &Map<String, Value>) -> Result<TokenUsage, AiPricingError>
 }
 
 fn reported_cost(usage: &Map<String, Value>) -> Result<Option<ExactDecimal>, AiPricingError> {
-    if let Some(cost_details) = object(usage.get("cost_details"))
+    let gateway_cost = usage
+        .get("cost")
+        .and_then(ExactDecimal::parse)
+        .map(|cost| cost.multiply_integer(1_000_000))
+        .transpose()?
+        .filter(|cost| cost.is_positive());
+    if gateway_cost.is_some() {
+        return Ok(gateway_cost);
+    }
+    let upstream_cost = if let Some(cost_details) = object(usage.get("cost_details"))
         && let Some(raw_cost) = cost_details.get("upstream_inference_cost")
         && let Some(cost) = ExactDecimal::parse(raw_cost)
     {
         let cost = cost.multiply_integer(1_000_000)?;
-        if cost.is_positive() {
-            return Ok(Some(cost));
-        }
-    }
-    let Some(raw_cost) = usage.get("cost") else {
-        return Ok(None);
+        cost.is_positive().then_some(cost)
+    } else {
+        None
     };
-    let Some(cost) = ExactDecimal::parse(raw_cost) else {
-        return Ok(None);
-    };
-    let cost = cost.multiply_integer(1_000_000)?;
-    Ok(cost.is_positive().then_some(cost))
-}
-
-fn pricing(provider: &str, model: &str) -> Option<TokenPricing> {
-    if provider == "groq" && model == "openai/gpt-oss-120b" {
-        return Some(TokenPricing {
-            input_per_million: 150_000,
-            cached_input_per_million: Some(75_000),
-            cache_write_per_million: None,
-            audio_input_per_million: None,
-            output_per_million: 600_000,
-        });
-    }
-    match model {
-        GEMINI_MODEL => Some(TokenPricing {
-            input_per_million: 250_000,
-            cached_input_per_million: Some(25_000),
-            cache_write_per_million: Some(83_333),
-            audio_input_per_million: Some(500_000),
-            output_per_million: 1_500_000,
-        }),
-        DEEPSEEK_MODEL => Some(TokenPricing {
-            input_per_million: 30_000,
-            cached_input_per_million: Some(7_000),
-            cache_write_per_million: None,
-            audio_input_per_million: None,
-            output_per_million: 100_000,
-        }),
-        _ => None,
-    }
+    Ok(upstream_cost)
 }
 
 /// Return the local input and cached-input rates used by admin cache reports.
 #[must_use]
 pub fn model_cache_input_rates(model: &str) -> Option<(i64, i64)> {
-    let pricing = pricing("", model)?;
+    let pricing = published_token_pricing("", model)?;
     let input = i64::try_from(pricing.input_per_million).ok()?;
     let cached = i64::try_from(
         pricing
@@ -395,7 +359,7 @@ fn model_cost(
         });
     }
     let local_pricing = (provider != "openrouter")
-        .then(|| pricing(provider, model))
+        .then(|| published_token_pricing(provider, model))
         .flatten();
     let Some(pricing) = local_pricing else {
         return Ok(ModelCost {
@@ -465,7 +429,7 @@ fn firecrawl_cost(metadata: &Map<String, Value>) -> Result<(i64, Option<Value>),
         return Ok((0, None));
     }
     let usd_micros = i128::from(credits)
-        .checked_mul(FIRECRAWL_USD_MICROS_PER_CREDIT)
+        .checked_mul(FIRECRAWL_STANDARD_USD_MICROS_PER_CREDIT)
         .and_then(|value| i64::try_from(value).ok())
         .ok_or(AiPricingError::Overflow)?;
     Ok((
@@ -483,7 +447,10 @@ fn transcription_cost(audio_seconds: f64) -> Result<i64, AiPricingError> {
     if seconds <= 0.0 {
         return Ok(0);
     }
-    let value = (seconds.max(10.0) * 111_000.0 / 3_600.0).ceil();
+    let value = (seconds.max(GROQ_TRANSCRIPTION_MIN_SECONDS)
+        * GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR
+        / 3_600.0)
+        .ceil();
     if value > i64::MAX as f64 {
         return Err(AiPricingError::Overflow);
     }
@@ -761,7 +728,7 @@ mod tests {
             },
             {
                 "kind": "vision",
-                "model": "google/gemini-3.1-flash-lite-preview",
+                "model": "google/gemini-3.1-flash-lite",
                 "usage": {
                     "prompt_tokens": 1000,
                     "completion_tokens": 100,

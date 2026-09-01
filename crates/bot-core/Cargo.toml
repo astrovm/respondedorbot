@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 chrono.workspace = true
+deunicode.workspace = true
 emojis.workspace = true
 ib-romaji.workspace = true
 num-bigint.workspace = true

@@ -1155,11 +1155,6 @@ impl BillingRepository {
                           AND usage.metadata->>'operation_id' = pending.operation_id \
                     ), '[]'::jsonb) AS segments \
                 FROM pending \
-                WHERE pending.authorized > 0 OR EXISTS ( \
-                    SELECT 1 FROM credit_ledger AS usage \
-                    WHERE usage.event_type = 'ai_provider_usage' \
-                      AND usage.metadata->>'operation_id' = pending.operation_id \
-                ) \
                 ORDER BY pending.created_at LIMIT $1",
                 &[&limit],
             )?
@@ -2705,6 +2700,19 @@ mod tests {
             Some(7_000_000_000_023),
             &provider_metadata,
         )?);
+        client.execute(
+            "INSERT INTO credit_ledger \
+                (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
+             VALUES ('ai_reserve', $1, $1, NULL, 0, $2)",
+            &[
+                &7_000_000_000_045_i64,
+                &json!({
+                    "operation_id": "synthetic-zero-unsettled-operation",
+                    "usage_tag": "synthetic-zero-unsettled-usage",
+                    "source": "user"
+                }),
+            ],
+        )?;
         assert!(!repository.record_ai_provider_usage(
             7_000_000_000_025,
             Some(7_000_000_000_023),
@@ -3272,6 +3280,14 @@ mod tests {
         assert_eq!(unsettled.segments[0]["segment_id"], "unsettled-segment");
         assert!(!unsettled.created_at.is_empty());
         assert!(!unsettled.last_activity_at.is_empty());
+        let zero_unsettled = unsettled_operations
+            .iter()
+            .find(|operation| operation.operation_id == "synthetic-zero-unsettled-operation")
+            .ok_or_else(|| {
+                std::io::Error::other("zero-cost unsettled operation must be returned")
+            })?;
+        assert_eq!(zero_unsettled.authorized_credit_units, 0);
+        assert!(zero_unsettled.segments.is_empty());
         assert!(
             !unsettled_operations.iter().any(|operation| {
                 operation.operation_id == "synthetic-legacy-excluded-operation"

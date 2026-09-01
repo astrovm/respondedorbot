@@ -21,6 +21,7 @@ bot-core = { path = "crates/bot-core" }
 calamine = "0.36.1"
 chrono = { version = "0.4.42", default-features = false, features = ["serde", "std"] }
 ctrlc = { version = "3.5.2", features = ["termination"] }
+deunicode = "1.6.2"
 image = { version = "0.25.9", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 imageproc = { version = "0.27.0", default-features = false, features = ["text"] }
 ib-romaji = "0.2.1"
