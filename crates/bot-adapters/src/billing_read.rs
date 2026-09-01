@@ -1287,17 +1287,17 @@ impl BillingRepository {
                         settlement.chat_id, settlement.amount, settlement.metadata, \
                         COALESCE(( \
                             SELECT MIN(reserve.created_at) FROM user_ledger AS reserve \
-                            WHERE reserve.event_type = 'ai_reserve' AND ( \
-                                (NULLIF(settlement.metadata->>'operation_id', '') IS NOT NULL \
-                                    AND reserve.metadata->>'operation_id' \
-                                        = settlement.metadata->>'operation_id') \
-                                OR (NULLIF(settlement.metadata->>'settlement_id', '') IS NOT NULL \
-                                    AND reserve.metadata->>'settlement_id' \
-                                        = settlement.metadata->>'settlement_id') \
-                                OR (NULLIF(settlement.metadata->>'usage_tag', '') IS NOT NULL \
+                            WHERE reserve.event_type = 'ai_reserve' AND CASE \
+                                WHEN NULLIF(settlement.metadata->>'operation_id', '') IS NOT NULL \
+                                    THEN reserve.metadata->>'operation_id' \
+                                        = settlement.metadata->>'operation_id' \
+                                WHEN NULLIF(settlement.metadata->>'settlement_id', '') IS NOT NULL \
+                                    THEN reserve.metadata->>'settlement_id' \
+                                        = settlement.metadata->>'settlement_id' \
+                                ELSE NULLIF(settlement.metadata->>'usage_tag', '') IS NOT NULL \
                                     AND reserve.metadata->>'usage_tag' \
-                                        = settlement.metadata->>'usage_tag') \
-                            ) \
+                                        = settlement.metadata->>'usage_tag' \
+                            END \
                         ), settlement.created_at) AS created_at \
                     FROM user_ledger AS settlement \
                     WHERE event_type IN ( \
@@ -3515,6 +3515,73 @@ mod tests {
         );
         assert!(!finalized_charge_rows[0].created_at.is_empty());
         assert!(!finalized_charge_rows[0].group_created_at.is_empty());
+
+        let history_user_id = 7_000_000_000_043_i64;
+        let earlier_reserve = json!({
+            "operation_id": "synthetic-history-earlier",
+            "settlement_id": "synthetic-history-earlier:reserve",
+            "usage_tag": "ai_response_base",
+            "origin_chat_id": "404",
+            "message_id": "1",
+            "source": "user"
+        });
+        let later_reserve = json!({
+            "operation_id": "synthetic-history-later",
+            "settlement_id": "synthetic-history-later:reserve",
+            "usage_tag": "ai_response_base",
+            "origin_chat_id": "404",
+            "message_id": "2",
+            "source": "user"
+        });
+        let earlier_settlement = json!({
+            "operation_id": "synthetic-history-earlier",
+            "settlement_id": "synthetic-history-earlier:reserve",
+            "usage_tag": "ai_response_base",
+            "origin_chat_id": "404",
+            "message_id": "1",
+            "charged_credit_units_total": 1
+        });
+        let later_settlement = json!({
+            "operation_id": "synthetic-history-later",
+            "settlement_id": "synthetic-history-later:reserve",
+            "usage_tag": "ai_response_base",
+            "origin_chat_id": "404",
+            "message_id": "2",
+            "charged_credit_units_total": 1
+        });
+        client.execute(
+            "INSERT INTO credit_ledger \
+                (event_type, actor_user_id, user_id, chat_id, amount, metadata, created_at) \
+             VALUES \
+                ('ai_reserve', $1, $1, 404, -1, $2, NOW() - INTERVAL '2 hours'), \
+                ('ai_reserve', $1, $1, 404, -1, $3, NOW() - INTERVAL '1 hour'), \
+                ('ai_settlement_result', $1, $1, 404, 0, $4, NOW()), \
+                ('ai_settlement_result', $1, $1, 404, 0, $5, NOW())",
+            &[
+                &history_user_id,
+                &earlier_reserve,
+                &later_reserve,
+                &earlier_settlement,
+                &later_settlement,
+            ],
+        )?;
+        let reserve_times = client.query(
+            "SELECT metadata->>'operation_id', created_at::text FROM credit_ledger \
+             WHERE user_id = $1 AND event_type = 'ai_reserve' ORDER BY id",
+            &[&history_user_id],
+        )?;
+        let history_rows =
+            repository.list_user_ai_charge_rows(history_user_id, None, "older", 21)?;
+        assert_eq!(history_rows.len(), 2);
+        for reserve in reserve_times {
+            let operation_id = reserve.get::<_, String>(0);
+            let reserve_time = reserve.get::<_, String>(1);
+            let history = history_rows
+                .iter()
+                .find(|row| row.metadata["operation_id"] == operation_id)
+                .ok_or_else(|| std::io::Error::other("history operation must exist"))?;
+            assert_eq!(history.group_created_at, reserve_time);
+        }
 
         client.execute(
             "INSERT INTO credit_ledger \

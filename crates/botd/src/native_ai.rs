@@ -302,6 +302,8 @@ pub trait TaskCreditStore {
 
     fn record_segment(&self, user_id: i64, metadata: &Value) -> Result<bool, Self::Error>;
 
+    fn list_segments(&self, user_id: i64, operation_id: &str) -> Result<Vec<Value>, Self::Error>;
+
     fn settle_once(
         &self,
         user_id: i64,
@@ -336,6 +338,10 @@ impl TaskCreditStore for BillingRepository {
 
     fn record_segment(&self, user_id: i64, metadata: &Value) -> Result<bool, Self::Error> {
         self.record_ai_provider_usage(user_id, None, metadata)
+    }
+
+    fn list_segments(&self, user_id: i64, operation_id: &str) -> Result<Vec<Value>, Self::Error> {
+        self.list_ai_provider_segments(user_id, operation_id)
     }
 
     fn settle_once(
@@ -400,18 +406,6 @@ impl<Store> PostgresTaskBilling<Store> {
     {
         let user_id = task.user_id.ok_or(NativeTaskBillingError::MissingUser)?;
         let operation_id = operation_id(execution_id);
-        for segment in segments {
-            let metadata = json!({
-                "operation_id": operation_id,
-                "segment_id": stable_provider_segment_id(segment),
-                "task_id": task.id.as_str(),
-                "execution_id": execution_id,
-                "segment": segment,
-            });
-            self.store
-                .record_segment(user_id, &metadata)
-                .map_err(|error| NativeTaskBillingError::Store(error.to_string()))?;
-        }
         let mut settlement = Map::new();
         settlement.insert("reason".to_owned(), json!(reason));
         settlement.insert("task_id".to_owned(), json!(task.id.as_str()));
@@ -523,13 +517,38 @@ impl<Store: TaskCreditStore> TaskBilling for PostgresTaskBilling<Store> {
         segments: &[Value],
         reason: &'static str,
     ) -> Result<(), Self::Error> {
-        let pricing = calculate_billing_for_segments(&json!(segments))
+        let user_id = task.user_id.ok_or(NativeTaskBillingError::MissingUser)?;
+        let operation_id = operation_id(execution_id);
+        for segment in segments {
+            let metadata = json!({
+                "operation_id": operation_id,
+                "segment_id": stable_provider_segment_id(segment),
+                "task_id": task.id.as_str(),
+                "execution_id": execution_id,
+                "segment": segment,
+            });
+            self.store
+                .record_segment(user_id, &metadata)
+                .map_err(|error| NativeTaskBillingError::Store(error.to_string()))?;
+        }
+        let durable_segments = self
+            .store
+            .list_segments(user_id, &operation_id)
+            .map_err(|error| NativeTaskBillingError::Store(error.to_string()))?;
+        let pricing = calculate_billing_for_segments(&json!(durable_segments))
             .map_err(|error| NativeTaskBillingError::Pricing(error.to_string()))?;
         let amount = pricing
             .get("charged_credit_units")
             .and_then(Value::as_i64)
             .ok_or_else(|| NativeTaskBillingError::Pricing("missing charge total".to_owned()))?;
-        self.settle_amount(task, execution_id, segments, reason, amount, Some(&pricing))
+        self.settle_amount(
+            task,
+            execution_id,
+            &durable_segments,
+            reason,
+            amount,
+            Some(&pricing),
+        )
     }
 
     fn refund(
@@ -934,6 +953,20 @@ mod tests {
             Ok(true)
         }
 
+        fn list_segments(
+            &self,
+            _user_id: i64,
+            operation_id: &str,
+        ) -> Result<Vec<Value>, Self::Error> {
+            Ok(self
+                .segments
+                .borrow()
+                .iter()
+                .filter(|metadata| metadata["operation_id"] == operation_id)
+                .filter_map(|metadata| metadata.get("segment").cloned())
+                .collect())
+        }
+
         fn settle_once(
             &self,
             user_id: i64,
@@ -998,6 +1031,56 @@ mod tests {
         assert_eq!(settlement.3["reason"], "task_success");
         assert_eq!(settlement.3["pricing_complete"], true);
         assert_eq!(settlement.3["billing_segments"][0]["kind"], "chat");
+    }
+
+    #[test]
+    fn task_settlement_includes_usage_persisted_by_an_earlier_attempt() {
+        let earlier_segment = json!({
+            "kind": "chat",
+            "model": "deepseek/deepseek-v4-flash-0731",
+            "usage": {"cost": "0.001"},
+            "source": "openrouter",
+            "metadata": {
+                "provider": "openrouter",
+                "provider_generation_id": "generation-earlier"
+            }
+        });
+        let current_segment = json!({
+            "kind": "chat",
+            "model": "deepseek/deepseek-v4-flash-0731",
+            "usage": {"cost": "0.002"},
+            "source": "openrouter",
+            "metadata": {
+                "provider": "openrouter",
+                "provider_generation_id": "generation-current"
+            }
+        });
+        let store = Store {
+            segments: RefCell::new(vec![json!({
+                "operation_id": "task:task123:1000",
+                "segment_id": "openrouter:generation-earlier",
+                "segment": earlier_segment,
+            })]),
+            ..Store::default()
+        };
+        let mut billing = PostgresTaskBilling::new(store, "deepseek/deepseek-v4-flash-0731");
+
+        billing
+            .settle(
+                &task("en"),
+                "task123:1000",
+                &[current_segment],
+                "task_success",
+            )
+            .unwrap_or_else(|error| panic!("settlement: {error}"));
+
+        let settlements = billing.store.settlements.borrow();
+        let settlement = &settlements[0];
+        assert_eq!(
+            settlement.3["billing_segments"].as_array().map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(settlement.2, 60);
     }
 
     #[test]
