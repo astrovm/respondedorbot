@@ -5,6 +5,9 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
+use bot_adapters::postgres_connection::{
+    PostgresConnectionStringError, validate_connection_string,
+};
 use bot_adapters::redis_connection::RedisEndpoint;
 use thiserror::Error;
 
@@ -154,6 +157,8 @@ pub enum ConfigError {
     InvalidLedgerRetention,
     #[error("SUPABASE_POSTGRES_URL not set")]
     MissingDatabaseUrl,
+    #[error("SUPABASE_POSTGRES_URL {0}")]
+    InvalidDatabaseUrl(#[from] PostgresConnectionStringError),
     #[error("TELEGRAM_USERNAME not set")]
     MissingTelegramUsername,
     #[error("COINMARKETCAP_KEY not set")]
@@ -224,6 +229,9 @@ impl MaintenanceConfig {
     {
         let redis_endpoint = redis_endpoint_from_lookup(&lookup)?;
         let database_url = lookup("SUPABASE_POSTGRES_URL").filter(|value| !value.trim().is_empty());
+        if let Some(database_url) = &database_url {
+            validate_connection_string(database_url)?;
+        }
         let redis_maxmemory = lookup("REDIS_MAXMEMORY")
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "256mb".to_owned());
@@ -337,6 +345,7 @@ impl ProductionConfig {
         let redis_endpoint = redis_endpoint_from_lookup(&lookup)?;
         let database_url = optional_trimmed(&lookup, "SUPABASE_POSTGRES_URL")
             .ok_or(ConfigError::MissingDatabaseUrl)?;
+        validate_connection_string(&database_url)?;
         let bot_name = optional_trimmed(&lookup, "TELEGRAM_USERNAME")
             .map(|value| value.trim_start_matches('@').to_owned())
             .filter(|value| !value.is_empty())
@@ -464,9 +473,13 @@ impl ProductionConfig {
 mod tests {
     use std::collections::HashMap;
 
+    use bot_adapters::postgres_connection::PostgresConnectionStringError;
+
     use super::{
         ConfigError, MaintenanceConfig, ProductionConfig, RuntimeConfig, TaskVerificationConfig,
     };
+
+    const SYNTHETIC_DATABASE_URL: &str = "postgresql://synthetic-user:synthetic-password@db.synthetic.invalid:5432/postgres?sslmode=require";
 
     fn config(values: &[(&str, &str)]) -> Result<RuntimeConfig, ConfigError> {
         let values = values
@@ -580,7 +593,7 @@ mod tests {
             ("REDIS_PASSWORD".to_owned(), "redis-secret".to_owned()),
             (
                 "SUPABASE_POSTGRES_URL".to_owned(),
-                "postgresql://database-secret".to_owned(),
+                SYNTHETIC_DATABASE_URL.to_owned(),
             ),
             ("REDIS_MAXMEMORY".to_owned(), "512mb".to_owned()),
             (
@@ -596,7 +609,7 @@ mod tests {
         };
         assert_eq!(config.redis_endpoint.host, "redis.internal");
         assert_eq!(config.redis_endpoint.port, 6380);
-        assert_eq!(config.database_url(), Some("postgresql://database-secret"));
+        assert_eq!(config.database_url(), Some(SYNTHETIC_DATABASE_URL));
         assert_eq!(config.redis_maxmemory, "512mb");
         assert_eq!(config.redis_maxmemory_policy, "volatile-lru");
         assert_eq!(config.ai_ledger_retention_days, 45);
@@ -635,10 +648,7 @@ mod tests {
         let base = [
             ("TELEGRAM_TOKEN", "synthetic-telegram-secret"),
             ("TELEGRAM_USERNAME", " @test_bot "),
-            (
-                "SUPABASE_POSTGRES_URL",
-                "postgresql://synthetic-database-secret",
-            ),
+            ("SUPABASE_POSTGRES_URL", SYNTHETIC_DATABASE_URL),
             ("COINMARKETCAP_KEY", "synthetic-cmc-secret"),
             ("OPENROUTER_API_KEY", "synthetic-openrouter-secret"),
         ];
@@ -677,12 +687,60 @@ mod tests {
     }
 
     #[test]
+    fn database_connection_validation_is_early_specific_and_redacted() {
+        let secret = "synthetic-database-secret";
+        let invalid_url = format!(
+            "postgresql://synthetic-user:{secret}@db.synthetic.invalid:5432/postgres?sslmode=require&supa=unsupported"
+        );
+        let production_result = production(
+            &[
+                ("TELEGRAM_TOKEN", "token"),
+                ("TELEGRAM_USERNAME", "bot"),
+                ("SUPABASE_POSTGRES_URL", &invalid_url),
+                ("BOT_SYSTEM_PROMPT", "prompt"),
+                ("COINMARKETCAP_KEY", "cmc"),
+                ("OPENROUTER_API_KEY", "openrouter"),
+            ],
+            None,
+        );
+        assert_eq!(
+            production_result.map(|_| ()),
+            Err(ConfigError::InvalidDatabaseUrl(
+                PostgresConnectionStringError::Invalid
+            ))
+        );
+
+        let maintenance_result = MaintenanceConfig::from_lookup(|name| {
+            (name == "SUPABASE_POSTGRES_URL").then(|| invalid_url.clone())
+        });
+        let rendered = format!("{maintenance_result:?}");
+        assert_eq!(
+            maintenance_result.map(|_| ()),
+            Err(ConfigError::InvalidDatabaseUrl(
+                PostgresConnectionStringError::Invalid
+            ))
+        );
+        assert!(!rendered.contains(secret));
+
+        let transaction_pooler = "postgres://postgres.synthetic-project:synthetic-password@aws-0-synthetic.pooler.supabase.com:6543/postgres?sslmode=require";
+        let result = MaintenanceConfig::from_lookup(|name| {
+            (name == "SUPABASE_POSTGRES_URL").then(|| transaction_pooler.to_owned())
+        });
+        assert_eq!(
+            result.map(|_| ()),
+            Err(ConfigError::InvalidDatabaseUrl(
+                PostgresConnectionStringError::SupabaseTransactionPooler
+            ))
+        );
+    }
+
+    #[test]
     fn production_configuration_parses_optional_services_and_redacts_all_secrets() {
         let config = production(
             &[
                 ("TELEGRAM_TOKEN", "telegram-secret"),
                 ("TELEGRAM_USERNAME", "test_bot"),
-                ("SUPABASE_POSTGRES_URL", "database-secret"),
+                ("SUPABASE_POSTGRES_URL", SYNTHETIC_DATABASE_URL),
                 ("REDIS_PASSWORD", "redis-secret"),
                 ("ADMIN_CHAT_ID", "99"),
                 ("COINMARKETCAP_KEY", "cmc-secret"),
@@ -715,7 +773,7 @@ mod tests {
         let debug = format!("{config:?}");
         for secret in [
             "telegram-secret",
-            "database-secret",
+            "synthetic-password",
             "redis-secret",
             "cmc-secret",
             "giphy-secret",
@@ -734,7 +792,7 @@ mod tests {
         let base = [
             ("TELEGRAM_TOKEN", "token"),
             ("TELEGRAM_USERNAME", "bot"),
-            ("SUPABASE_POSTGRES_URL", "database"),
+            ("SUPABASE_POSTGRES_URL", SYNTHETIC_DATABASE_URL),
             ("BOT_SYSTEM_PROMPT", "prompt"),
             ("COINMARKETCAP_KEY", "cmc"),
             ("OPENROUTER_API_KEY", "openrouter"),
@@ -748,7 +806,7 @@ mod tests {
             &[
                 ("TELEGRAM_TOKEN", "token"),
                 ("TELEGRAM_USERNAME", "bot"),
-                ("SUPABASE_POSTGRES_URL", "database"),
+                ("SUPABASE_POSTGRES_URL", SYNTHETIC_DATABASE_URL),
                 ("BOT_SYSTEM_PROMPT", "prompt"),
                 ("COINMARKETCAP_KEY", "cmc"),
                 ("OPENROUTER_API_KEY", "openrouter"),

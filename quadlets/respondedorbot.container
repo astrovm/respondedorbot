@@ -11,6 +11,7 @@ Environment=REDIS_PORT=6379
 Network=respondedorbot.network
 Volume=%h/respondedorbot/workspace:/app/workspace:ro
 AutoUpdate=registry
+StopTimeout=600
 
 [Service]
 Restart=always
