@@ -111,6 +111,7 @@ pub struct SettlementRequest<'a> {
 pub trait CompactionBilling {
     type Error: Display;
 
+    fn is_settled(&mut self, job: &CompactionJobRecord) -> Result<bool, Self::Error>;
     fn list_provider_segments(
         &mut self,
         user_id: i64,
@@ -384,6 +385,13 @@ where
         mut job: CompactionJobRecord,
         _now: f64,
     ) -> Result<(), Box<(CompactionJobRecord, &'static str, String)>> {
+        if self
+            .billing
+            .is_settled(&job)
+            .map_err(|error| Box::new((job.clone(), "check_settlement", error.to_string())))?
+        {
+            return Ok(());
+        }
         let (current_summary, current_marker) = self
             .state
             .load(&job.chat_id)
@@ -684,6 +692,7 @@ mod tests {
 
     #[derive(Default)]
     struct Billing {
+        settled: bool,
         durable: Vec<Value>,
         recorded: Vec<Value>,
         settlements: Vec<(String, Option<i64>, Vec<Value>)>,
@@ -693,6 +702,9 @@ mod tests {
     impl CompactionBilling for Billing {
         type Error = Infallible;
 
+        fn is_settled(&mut self, _job: &CompactionJobRecord) -> Result<bool, Self::Error> {
+            Ok(self.settled)
+        }
         fn list_provider_segments(
             &mut self,
             _user_id: i64,
@@ -806,6 +818,30 @@ mod tests {
             Some("dense summary")
         );
         assert_eq!(queue.releases, 1);
+    }
+
+    #[test]
+    fn deletes_already_settled_jobs_without_repeating_provider_work() {
+        let provider = Provider {
+            replies: VecDeque::new(),
+            calls: 0,
+        };
+        let mut worker = worker(
+            job(),
+            provider,
+            Billing {
+                settled: true,
+                ..Billing::default()
+            },
+        );
+
+        assert_eq!(worker.run_once(100.0).unwrap_or_default().completed, 1);
+
+        let (queue, state, provider, billing, _) = worker.into_parts();
+        assert_eq!(provider.calls, 0);
+        assert!(state.saved.is_empty());
+        assert!(billing.settlements.is_empty());
+        assert!(queue.jobs.is_empty());
     }
 
     #[test]

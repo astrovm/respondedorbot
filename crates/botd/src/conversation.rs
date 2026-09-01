@@ -13,6 +13,7 @@ use bot_core::ai_reserve::{
     estimate_vision_reserve_credit_units,
 };
 use bot_core::ai_response_cleanup::cleanup_response;
+use bot_core::ai_usage::stable_provider_segment_id;
 use bot_core::locale::{Locale, format_date};
 use bot_core::text_cleanup::sanitize_summary_text;
 use chrono::{DateTime, FixedOffset, Offset, Utc};
@@ -116,6 +117,7 @@ pub struct SettlementRequest {
     pub actual_credit_units: i64,
     pub delivered: bool,
     pub reason: String,
+    pub billing_segments: Vec<Value>,
 }
 
 pub trait ConversationBilling {
@@ -323,6 +325,7 @@ where
             actual_credit_units: 0,
             delivered: false,
             reason: reason.to_owned(),
+            billing_segments: Vec::new(),
         })
     }
 
@@ -1392,12 +1395,12 @@ fn record_and_settle<Billing: ConversationBilling>(
     delivered: bool,
     reason: &str,
 ) -> Result<(), String> {
-    for (index, segment) in segments.iter().enumerate() {
+    for segment in segments {
         billing.record_segment(ProviderSegmentRequest {
             user_id: input.sender_id.0,
             chat_id: group_chat_id(input),
             operation_id: operation_id.to_owned(),
-            segment_id: format!("{operation_id}:{index}"),
+            segment_id: stable_provider_segment_id(segment),
             segment: segment.clone(),
         })?;
     }
@@ -1408,6 +1411,7 @@ fn record_and_settle<Billing: ConversationBilling>(
         actual_credit_units,
         delivered,
         reason: reason.to_owned(),
+        billing_segments: segments.to_vec(),
     })
 }
 

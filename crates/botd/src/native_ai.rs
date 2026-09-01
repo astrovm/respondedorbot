@@ -4,18 +4,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bot_adapters::billing_read::{AiChargeResult, BillingRepository};
 use bot_adapters::openrouter_chat::{
-    ChatCompletionRequest, ChatMessage, ChatRole, OpenRouterChatError, OpenRouterTransport,
-    complete_with,
+    ChatCompletion, ChatCompletionRequest, ChatMessage, ChatRole, OpenRouterChatError,
+    OpenRouterTransport, complete_with,
 };
 use bot_core::ai_pricing::calculate_billing_for_segments;
 use bot_core::ai_prompt::build_system_prompt;
 use bot_core::ai_reserve::{
-    EstimatedMessage, TokenEstimateValue, chat_output_token_limit,
-    estimate_chat_reserve_credit_units,
+    EstimatedMessage, ReserveEstimateError, TokenEstimateValue, chat_output_token_limit,
+    estimate_chat_reserve_credit_units, estimate_firecrawl_reserve_credit_units,
 };
+use bot_core::ai_usage::stable_provider_segment_id;
 use bot_core::credit_units::{CreditUnits, format_credit_units};
 use bot_core::locale::{Locale, format_date};
-use bot_core::provider_config::web_search_tool;
 use bot_core::provider_pricing::{DEEPSEEK_MODEL, GEMINI_FLASH_LITE_MODEL};
 use bot_core::scheduled_tasks::ScheduledTask;
 use bot_core::telegram_actions::{SendMessage, TelegramAction};
@@ -25,18 +25,20 @@ use serde_json::{Map, Value, json};
 use thiserror::Error;
 
 use crate::dispatcher::ActionSink;
+use crate::firecrawl_tool::ScheduledWebSearch;
+use crate::native_tools::{NativeTool, tool_schema};
 use crate::task_executor::{
-    TaskAiProvider, TaskBilling, TaskMessenger, TaskPromptMessage, TaskProviderReply,
-    TaskReserveOutcome, build_task_messages,
+    TaskAiProvider, TaskBilling, TaskMessenger, TaskPromptMessage, TaskProviderFailure,
+    TaskProviderReply, TaskReserveOutcome, build_task_messages,
 };
+use crate::tool_requests::validate_request;
 
 pub const PRIMARY_CHAT_MODEL: &str = DEEPSEEK_MODEL;
 pub const VISION_MODEL: &str = GEMINI_FLASH_LITE_MODEL;
 pub const GROQ_TRANSCRIPTION_MODEL: &str = "whisper-large-v3";
 pub const OPENROUTER_TRANSCRIPTION_MODEL: &str = GEMINI_FLASH_LITE_MODEL;
 const SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE: i64 = 4_000;
-const WEB_SEARCH_MAX_RESULTS: i64 = 5;
-const WEB_SEARCH_MAX_USES: i64 = 3;
+const TASK_WEB_SEARCH_MAX_USES: usize = 3;
 
 pub fn estimate_task_reserve_credit_units(
     text: &str,
@@ -59,12 +61,22 @@ pub fn estimate_task_reserve_credit_units(
     )
 }
 
+fn add_task_web_search_reserve(chat: i64) -> Result<i64, ReserveEstimateError> {
+    let search = estimate_firecrawl_reserve_credit_units()?;
+    let searches = search
+        .checked_mul(TASK_WEB_SEARCH_MAX_USES as i64)
+        .ok_or(ReserveEstimateError::Overflow)?;
+    chat.checked_add(searches)
+        .ok_or(ReserveEstimateError::Overflow)
+}
+
 pub struct OpenRouterTaskProvider<Transport> {
     transport: Transport,
     api_key: String,
     base_url: String,
     model: String,
     persona: String,
+    web_search: Option<Box<dyn ScheduledWebSearch>>,
 }
 
 impl<Transport> OpenRouterTaskProvider<Transport> {
@@ -82,7 +94,14 @@ impl<Transport> OpenRouterTaskProvider<Transport> {
             base_url: base_url.to_owned(),
             model: model.to_owned(),
             persona: persona.to_owned(),
+            web_search: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_web_search(mut self, web_search: Box<dyn ScheduledWebSearch>) -> Self {
+        self.web_search = Some(web_search);
+        self
     }
 
     fn request(
@@ -100,10 +119,9 @@ impl<Transport> OpenRouterTaskProvider<Transport> {
         }));
         let mut request = ChatCompletionRequest::new(&self.model, request_messages);
         request.max_tokens = u64::try_from(chat_output_token_limit(&self.model)).ok();
-        request.tools = vec![
-            serde_json::to_value(web_search_tool(WEB_SEARCH_MAX_RESULTS, WEB_SEARCH_MAX_USES))
-                .unwrap_or_else(|_| json!({})),
-        ];
+        if self.web_search.is_some() {
+            request.tools = vec![tool_schema(NativeTool::WebSearch)];
+        }
         request
     }
 }
@@ -116,53 +134,114 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
         messages: &[TaskPromptMessage],
         task: &ScheduledTask,
         _execution_id: &str,
-    ) -> Result<TaskProviderReply, Self::Error> {
-        let completion = complete_with(
-            &self.transport,
-            &self.api_key,
-            &self.base_url,
-            &self.request(messages, task),
-        )?;
-        let annotation_types = completion
-            .annotations
-            .iter()
-            .filter_map(|annotation| annotation.get("type").and_then(Value::as_str))
-            .collect::<Vec<_>>();
-        let mut metadata = Map::from_iter([("provider".to_owned(), json!("openrouter"))]);
-        optional_string(
-            &mut metadata,
-            "upstream_provider",
-            completion.upstream_provider,
-        );
-        optional_string(&mut metadata, "service_tier", completion.service_tier);
-        optional_string(
-            &mut metadata,
-            "provider_generation_id",
-            completion.generation_id,
-        );
-        if !annotation_types.is_empty() {
-            metadata.insert(
-                "web_search_citation_count".to_owned(),
-                json!(
-                    annotation_types
-                        .iter()
-                        .filter(|kind| **kind == "url_citation")
-                        .count()
-                ),
-            );
+    ) -> Result<TaskProviderReply, TaskProviderFailure<Self::Error>> {
+        let mut request = self.request(messages, task);
+        let mut billing_segments = Vec::new();
+        let mut text = String::new();
+        let mut search_uses = 0_usize;
+        let locale = if task.locale == "en" {
+            Locale::En
+        } else {
+            Locale::Es
+        };
+        for _ in 0..crate::chat_tool_loop::DEFAULT_MAX_TOOL_ROUNDS {
+            let completion =
+                complete_with(&self.transport, &self.api_key, &self.base_url, &request)
+                    .map_err(|source| TaskProviderFailure::new(source, billing_segments.clone()))?;
+            billing_segments.push(task_completion_segment(&completion));
+            text = completion.text.clone();
+            let calls = completion
+                .tool_calls
+                .into_iter()
+                .filter(|call| call.function.name == NativeTool::WebSearch.name())
+                .collect::<Vec<_>>();
+            if calls.is_empty() {
+                break;
+            }
+            request
+                .messages
+                .push(ChatMessage::assistant_tool_calls(calls.clone()));
+            for call in calls {
+                let arguments = serde_json::from_str(&call.function.arguments)
+                    .ok()
+                    .filter(Value::is_object)
+                    .unwrap_or_else(|| json!({}));
+                let result = if search_uses >= TASK_WEB_SEARCH_MAX_USES {
+                    crate::chat_tool_loop::ToolExecutionResult::output(
+                        "web_search usage limit reached",
+                    )
+                } else {
+                    search_uses += 1;
+                    validate_request(NativeTool::WebSearch, &arguments, locale).map_or_else(
+                        crate::chat_tool_loop::ToolExecutionResult::output,
+                        |tool_request| {
+                            self.web_search.as_mut().map_or_else(
+                                || {
+                                    crate::chat_tool_loop::ToolExecutionResult::output(
+                                        "web_search is unavailable",
+                                    )
+                                },
+                                |search| search.execute(tool_request, &call.id, locale),
+                            )
+                        },
+                    )
+                };
+                if let Some(segment) = result.billing_segment {
+                    billing_segments.push(segment);
+                }
+                request
+                    .messages
+                    .push(ChatMessage::tool_result(call.id, result.output));
+            }
         }
         Ok(TaskProviderReply {
-            text: completion.text,
+            text,
             fallback: false,
-            billing_segments: vec![json!({
-                "kind": "chat",
-                "model": completion.model,
-                "usage": completion.usage,
-                "source": "openrouter",
-                "metadata": metadata,
-            })],
+            billing_segments,
         })
     }
+}
+
+fn task_completion_segment(completion: &ChatCompletion) -> Value {
+    let annotation_types = completion
+        .annotations
+        .iter()
+        .filter_map(|annotation| annotation.get("type").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    let mut metadata = Map::from_iter([("provider".to_owned(), json!("openrouter"))]);
+    optional_string(
+        &mut metadata,
+        "upstream_provider",
+        completion.upstream_provider.clone(),
+    );
+    optional_string(
+        &mut metadata,
+        "service_tier",
+        completion.service_tier.clone(),
+    );
+    optional_string(
+        &mut metadata,
+        "provider_generation_id",
+        completion.generation_id.clone(),
+    );
+    if !annotation_types.is_empty() {
+        metadata.insert(
+            "web_search_citation_count".to_owned(),
+            json!(
+                annotation_types
+                    .iter()
+                    .filter(|kind| **kind == "url_citation")
+                    .count()
+            ),
+        );
+    }
+    json!({
+        "kind": "chat",
+        "model": completion.model,
+        "usage": completion.usage,
+        "source": "openrouter",
+        "metadata": metadata,
+    })
 }
 
 fn optional_string(metadata: &mut Map<String, Value>, key: &str, value: Option<String>) {
@@ -223,6 +302,8 @@ pub trait TaskCreditStore {
 
     fn record_segment(&self, user_id: i64, metadata: &Value) -> Result<bool, Self::Error>;
 
+    fn list_segments(&self, user_id: i64, operation_id: &str) -> Result<Vec<Value>, Self::Error>;
+
     fn settle_once(
         &self,
         user_id: i64,
@@ -259,6 +340,10 @@ impl TaskCreditStore for BillingRepository {
         self.record_ai_provider_usage(user_id, None, metadata)
     }
 
+    fn list_segments(&self, user_id: i64, operation_id: &str) -> Result<Vec<Value>, Self::Error> {
+        self.list_ai_provider_segments(user_id, operation_id)
+    }
+
     fn settle_once(
         &self,
         user_id: i64,
@@ -288,6 +373,7 @@ pub enum NativeTaskBillingError {
 pub struct PostgresTaskBilling<Store> {
     store: Store,
     model: String,
+    web_search_enabled: bool,
 }
 
 impl<Store> PostgresTaskBilling<Store> {
@@ -296,7 +382,14 @@ impl<Store> PostgresTaskBilling<Store> {
         Self {
             store,
             model: model.to_owned(),
+            web_search_enabled: false,
         }
+    }
+
+    #[must_use]
+    pub const fn with_web_search(mut self, enabled: bool) -> Self {
+        self.web_search_enabled = enabled;
+        self
     }
 
     fn settle_amount(
@@ -306,16 +399,46 @@ impl<Store> PostgresTaskBilling<Store> {
         segments: &[Value],
         reason: &'static str,
         amount: i64,
+        pricing: Option<&Value>,
     ) -> Result<(), NativeTaskBillingError>
     where
         Store: TaskCreditStore,
     {
         let user_id = task.user_id.ok_or(NativeTaskBillingError::MissingUser)?;
         let operation_id = operation_id(execution_id);
-        for (index, segment) in segments.iter().enumerate() {
+        let mut settlement = Map::new();
+        settlement.insert("reason".to_owned(), json!(reason));
+        settlement.insert("task_id".to_owned(), json!(task.id.as_str()));
+        settlement.insert("execution_id".to_owned(), json!(execution_id));
+        settlement.insert("operation_id".to_owned(), json!(operation_id));
+        if !segments.is_empty() {
+            settlement.insert("billing_segments".to_owned(), json!(segments));
+        }
+        if let Some(pricing) = pricing {
+            copy_task_pricing_metadata(&mut settlement, pricing);
+        }
+        self.store
+            .settle_once(user_id, &operation_id, amount, &settlement)
+            .map_err(|error| NativeTaskBillingError::Store(error.to_string()))?;
+        Ok(())
+    }
+
+    fn finalize(
+        &self,
+        task: &ScheduledTask,
+        execution_id: &str,
+        new_segments: &[Value],
+        reason: &'static str,
+    ) -> Result<(), NativeTaskBillingError>
+    where
+        Store: TaskCreditStore,
+    {
+        let user_id = task.user_id.ok_or(NativeTaskBillingError::MissingUser)?;
+        let operation_id = operation_id(execution_id);
+        for segment in new_segments {
             let metadata = json!({
                 "operation_id": operation_id,
-                "segment_id": format!("{execution_id}:{index}"),
+                "segment_id": stable_provider_segment_id(segment),
                 "task_id": task.id.as_str(),
                 "execution_id": execution_id,
                 "segment": segment,
@@ -324,15 +447,46 @@ impl<Store> PostgresTaskBilling<Store> {
                 .record_segment(user_id, &metadata)
                 .map_err(|error| NativeTaskBillingError::Store(error.to_string()))?;
         }
-        let mut settlement = Map::new();
-        settlement.insert("reason".to_owned(), json!(reason));
-        settlement.insert("task_id".to_owned(), json!(task.id.as_str()));
-        settlement.insert("execution_id".to_owned(), json!(execution_id));
-        settlement.insert("operation_id".to_owned(), json!(operation_id));
-        self.store
-            .settle_once(user_id, &operation_id, amount, &settlement)
+        let durable_segments = self
+            .store
+            .list_segments(user_id, &operation_id)
             .map_err(|error| NativeTaskBillingError::Store(error.to_string()))?;
-        Ok(())
+        if durable_segments.is_empty() {
+            return self.settle_amount(task, execution_id, &[], reason, 0, None);
+        }
+        let pricing = calculate_billing_for_segments(&json!(durable_segments))
+            .map_err(|error| NativeTaskBillingError::Pricing(error.to_string()))?;
+        if pricing.get("pricing_complete").and_then(Value::as_bool) != Some(true) {
+            return Ok(());
+        }
+        let amount = pricing
+            .get("charged_credit_units")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| NativeTaskBillingError::Pricing("missing charge total".to_owned()))?;
+        self.settle_amount(
+            task,
+            execution_id,
+            &durable_segments,
+            reason,
+            amount,
+            Some(&pricing),
+        )
+    }
+}
+
+fn copy_task_pricing_metadata(metadata: &mut Map<String, Value>, pricing: &Value) {
+    for key in [
+        "pricing_version",
+        "raw_usd_micros",
+        "markup_multiplier",
+        "model_breakdown",
+        "tool_breakdown",
+        "segment_breakdown",
+        "pricing_complete",
+    ] {
+        if let Some(value) = pricing.get(key) {
+            metadata.insert(key.to_owned(), value.clone());
+        }
     }
 }
 
@@ -354,7 +508,7 @@ impl<Store: TaskCreditStore> TaskBilling for PostgresTaskBilling<Store> {
                 name: TokenEstimateValue::Empty,
             })
             .collect::<Vec<_>>();
-        let amount = estimate_chat_reserve_credit_units(
+        let chat_amount = estimate_chat_reserve_credit_units(
             None,
             &estimated_messages,
             Some(chat_output_token_limit(&self.model)),
@@ -362,6 +516,12 @@ impl<Store: TaskCreditStore> TaskBilling for PostgresTaskBilling<Store> {
             &self.model,
         )
         .map_err(|error| NativeTaskBillingError::Estimate(error.to_string()))?;
+        let amount = if self.web_search_enabled {
+            add_task_web_search_reserve(chat_amount)
+                .map_err(|error| NativeTaskBillingError::Estimate(error.to_string()))?
+        } else {
+            chat_amount
+        };
         let amount_i32 = i32::try_from(amount).map_err(|_| NativeTaskBillingError::AmountRange)?;
         let operation_id = operation_id(execution_id);
         let idempotency_key = format!("{operation_id}:reserve");
@@ -407,13 +567,7 @@ impl<Store: TaskCreditStore> TaskBilling for PostgresTaskBilling<Store> {
         segments: &[Value],
         reason: &'static str,
     ) -> Result<(), Self::Error> {
-        let pricing = calculate_billing_for_segments(&json!(segments))
-            .map_err(|error| NativeTaskBillingError::Pricing(error.to_string()))?;
-        let amount = pricing
-            .get("charged_credit_units")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| NativeTaskBillingError::Pricing("missing charge total".to_owned()))?;
-        self.settle_amount(task, execution_id, segments, reason, amount)
+        self.finalize(task, execution_id, segments, reason)
     }
 
     fn refund(
@@ -422,7 +576,7 @@ impl<Store: TaskCreditStore> TaskBilling for PostgresTaskBilling<Store> {
         execution_id: &str,
         reason: &'static str,
     ) -> Result<(), Self::Error> {
-        self.settle_amount(task, execution_id, &[], reason, 0)
+        self.finalize(task, execution_id, &[], reason)
     }
 }
 
@@ -477,12 +631,13 @@ where
 #[allow(clippy::panic)]
 mod tests {
     use std::cell::RefCell;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, VecDeque};
 
     use bot_adapters::billing_read::AiChargeResult;
     use bot_adapters::openrouter_chat::{
         HttpRequest, HttpResponse, OpenRouterChatError, OpenRouterTransport,
     };
+    use bot_core::locale::Locale;
     use bot_core::scheduled_tasks::{ScheduledTask, TaskId, TaskSchedule};
     use bot_core::telegram_actions::TelegramAction;
     use serde_json::{Map, Value, json};
@@ -491,19 +646,48 @@ mod tests {
         ActionTaskMessenger, OpenRouterTaskProvider, PostgresTaskBilling, TaskAiProvider,
         TaskBilling, TaskCreditStore, TaskMessenger, TaskPromptMessage, TaskReserveOutcome,
     };
+    use crate::chat_tool_loop::ToolExecutionResult;
     use crate::dispatcher::{ActionReceipt, ActionSink};
+    use crate::firecrawl_tool::ScheduledWebSearch;
+    use crate::tool_requests::ExternalToolRequest;
+
+    struct Search;
+
+    impl ScheduledWebSearch for Search {
+        fn execute(
+            &mut self,
+            _request: ExternalToolRequest,
+            _tool_call_id: &str,
+            _locale: Locale,
+        ) -> ToolExecutionResult {
+            ToolExecutionResult {
+                output: "synthetic search".to_owned(),
+                billing_segment: Some(json!({
+                    "kind": "web_search",
+                    "model": "",
+                    "usage": {},
+                    "source": "firecrawl",
+                    "metadata": {
+                        "tool_call_id": "call-1",
+                        "firecrawl_credits_used": 2
+                    }
+                })),
+                diagnostics: Vec::new(),
+            }
+        }
+    }
 
     struct Transport {
         requests: RefCell<Vec<HttpRequest>>,
-        response: RefCell<Option<HttpResponse>>,
+        responses: RefCell<VecDeque<HttpResponse>>,
     }
 
     impl OpenRouterTransport for Transport {
         fn post(&self, request: &HttpRequest) -> Result<HttpResponse, OpenRouterChatError> {
             self.requests.borrow_mut().push(request.clone());
-            self.response
+            self.responses
                 .borrow_mut()
-                .take()
+                .pop_front()
                 .ok_or_else(|| OpenRouterChatError::Transport("missing response".to_owned()))
         }
     }
@@ -528,7 +712,7 @@ mod tests {
     fn openrouter_task_request_preserves_system_tool_usage_and_billing_contract() {
         let transport = Transport {
             requests: RefCell::new(Vec::new()),
-            response: RefCell::new(Some(HttpResponse {
+            responses: RefCell::new(VecDeque::from([HttpResponse {
                 status_code: 200,
                 body: json!({
                     "id": "generation-1",
@@ -546,7 +730,7 @@ mod tests {
                 })
                 .to_string(),
                 headers: BTreeMap::new(),
-            })),
+            }])),
         };
         let mut provider = OpenRouterTaskProvider::new(
             transport,
@@ -554,7 +738,8 @@ mod tests {
             "https://synthetic.invalid/api/v1",
             "deepseek/deepseek-v4-flash-0731",
             "synthetic persona",
-        );
+        )
+        .with_web_search(Box::new(Search));
         let reply = provider
             .complete(
                 &[TaskPromptMessage {
@@ -581,8 +766,8 @@ mod tests {
         let body: Value = serde_json::from_str(&request.body)
             .unwrap_or_else(|error| panic!("request json: {error}"));
         assert_eq!(body["max_tokens"], 8_192);
-        assert_eq!(body["tools"][0]["type"], "openrouter:web_search");
-        assert_eq!(body["tools"][0]["parameters"]["max_uses"], 3);
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["function"]["name"], "web_search");
         assert!(
             body["messages"][0]["content"]
                 .as_str()
@@ -594,6 +779,148 @@ mod tests {
                 .is_some_and(|content| content.contains("synthetic persona"))
         );
         assert_eq!(body["messages"][1]["content"], "do it");
+    }
+
+    #[test]
+    fn scheduled_web_search_records_exact_firecrawl_usage_and_continues_the_tool_loop() {
+        let transport = Transport {
+            requests: RefCell::new(Vec::new()),
+            responses: RefCell::new(VecDeque::from([
+                HttpResponse {
+                    status_code: 200,
+                    body: json!({
+                        "id": "generation-tool",
+                        "model": "resolved/model",
+                        "choices": [{
+                            "message": {
+                                "content": null,
+                                "tool_calls": [{
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "web_search",
+                                        "arguments": "{\"query\":\"synthetic query\"}"
+                                    }
+                                }]
+                            },
+                            "finish_reason": "tool_calls"
+                        }],
+                        "usage": {"cost": 0.0001}
+                    })
+                    .to_string(),
+                    headers: BTreeMap::new(),
+                },
+                HttpResponse {
+                    status_code: 200,
+                    body: json!({
+                        "id": "generation-final",
+                        "model": "resolved/model",
+                        "choices": [{
+                            "message": {"content": "final answer"},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"cost": 0.0002}
+                    })
+                    .to_string(),
+                    headers: BTreeMap::new(),
+                },
+            ])),
+        };
+        let mut provider = OpenRouterTaskProvider::new(
+            transport,
+            "synthetic-key",
+            "https://synthetic.invalid/api/v1",
+            "deepseek/deepseek-v4-flash-0731",
+            "synthetic persona",
+        )
+        .with_web_search(Box::new(Search));
+
+        let reply = provider
+            .complete(
+                &[TaskPromptMessage {
+                    role: "user",
+                    content: "search".to_owned(),
+                }],
+                &task("en"),
+                "task123:1000",
+            )
+            .unwrap_or_else(|error| panic!("provider response: {error}"));
+
+        assert_eq!(reply.text, "final answer");
+        assert_eq!(reply.billing_segments.len(), 3);
+        assert_eq!(reply.billing_segments[1]["source"], "firecrawl");
+        assert_eq!(
+            reply.billing_segments[1]["metadata"]["firecrawl_credits_used"],
+            2
+        );
+        let requests = provider.transport.requests.borrow();
+        assert_eq!(requests.len(), 2);
+        let followup: Value = serde_json::from_str(&requests[1].body)
+            .unwrap_or_else(|error| panic!("followup json: {error}"));
+        assert_eq!(followup["messages"][2]["tool_calls"][0]["id"], "call-1");
+        assert_eq!(followup["messages"][3]["tool_call_id"], "call-1");
+    }
+
+    #[test]
+    fn scheduled_tool_loop_returns_incurred_usage_when_a_later_round_fails() {
+        let transport = Transport {
+            requests: RefCell::new(Vec::new()),
+            responses: RefCell::new(VecDeque::from([
+                HttpResponse {
+                    status_code: 200,
+                    body: json!({
+                        "id": "generation-tool",
+                        "model": "resolved/model",
+                        "choices": [{
+                            "message": {
+                                "content": null,
+                                "tool_calls": [{
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "web_search",
+                                        "arguments": "{\"query\":\"synthetic query\"}"
+                                    }
+                                }]
+                            },
+                            "finish_reason": "tool_calls"
+                        }],
+                        "usage": {"cost": 0.0001}
+                    })
+                    .to_string(),
+                    headers: BTreeMap::new(),
+                },
+                HttpResponse {
+                    status_code: 503,
+                    body: json!({"error": {"message": "synthetic unavailable"}}).to_string(),
+                    headers: BTreeMap::new(),
+                },
+            ])),
+        };
+        let mut provider = OpenRouterTaskProvider::new(
+            transport,
+            "synthetic-key",
+            "https://synthetic.invalid/api/v1",
+            "deepseek/deepseek-v4-flash-0731",
+            "synthetic persona",
+        )
+        .with_web_search(Box::new(Search));
+
+        let failure = match provider.complete(
+            &[TaskPromptMessage {
+                role: "user",
+                content: "search".to_owned(),
+            }],
+            &task("en"),
+            "task123:1000",
+        ) {
+            Ok(reply) => panic!("the second provider round must fail: {reply:?}"),
+            Err(failure) => failure,
+        };
+
+        assert_eq!(failure.billing_segments.len(), 2);
+        assert_eq!(failure.billing_segments[0]["source"], "openrouter");
+        assert_eq!(failure.billing_segments[1]["source"], "firecrawl");
     }
 
     type CapturedCharge = (i64, i32, String, String, Map<String, Value>);
@@ -645,6 +972,20 @@ mod tests {
             Ok(true)
         }
 
+        fn list_segments(
+            &self,
+            _user_id: i64,
+            operation_id: &str,
+        ) -> Result<Vec<Value>, Self::Error> {
+            Ok(self
+                .segments
+                .borrow()
+                .iter()
+                .filter(|metadata| metadata["operation_id"] == operation_id)
+                .filter_map(|metadata| metadata.get("segment").cloned())
+                .collect())
+        }
+
         fn settle_once(
             &self,
             user_id: i64,
@@ -690,20 +1031,159 @@ mod tests {
                 "cost": "0.001"
             },
             "source": "openrouter",
-            "metadata": {"provider": "openrouter"}
+            "metadata": {
+                "provider": "openrouter",
+                "provider_generation_id": "generation-1"
+            }
         });
         billing
             .settle(&task("es"), "task123:1000", &[segment], "task_success")
             .unwrap_or_else(|error| panic!("settlement: {error}"));
         assert_eq!(
             billing.store.segments.borrow()[0]["segment_id"],
-            "task123:1000:0"
+            "openrouter:generation-1"
         );
         let settlement = &billing.store.settlements.borrow()[0];
         assert_eq!(settlement.0, 42);
         assert_eq!(settlement.1, "task:task123:1000");
         assert!(settlement.2 > 0);
         assert_eq!(settlement.3["reason"], "task_success");
+        assert_eq!(settlement.3["pricing_complete"], true);
+        assert_eq!(settlement.3["billing_segments"][0]["kind"], "chat");
+    }
+
+    #[test]
+    fn task_settlement_includes_usage_persisted_by_an_earlier_attempt() {
+        let earlier_segment = json!({
+            "kind": "chat",
+            "model": "deepseek/deepseek-v4-flash-0731",
+            "usage": {"cost": "0.001"},
+            "source": "openrouter",
+            "metadata": {
+                "provider": "openrouter",
+                "provider_generation_id": "generation-earlier"
+            }
+        });
+        let current_segment = json!({
+            "kind": "chat",
+            "model": "deepseek/deepseek-v4-flash-0731",
+            "usage": {"cost": "0.002"},
+            "source": "openrouter",
+            "metadata": {
+                "provider": "openrouter",
+                "provider_generation_id": "generation-current"
+            }
+        });
+        let store = Store {
+            segments: RefCell::new(vec![json!({
+                "operation_id": "task:task123:1000",
+                "segment_id": "openrouter:generation-earlier",
+                "segment": earlier_segment,
+            })]),
+            ..Store::default()
+        };
+        let mut billing = PostgresTaskBilling::new(store, "deepseek/deepseek-v4-flash-0731");
+
+        billing
+            .settle(
+                &task("en"),
+                "task123:1000",
+                &[current_segment],
+                "task_success",
+            )
+            .unwrap_or_else(|error| panic!("settlement: {error}"));
+
+        let settlements = billing.store.settlements.borrow();
+        let settlement = &settlements[0];
+        assert_eq!(
+            settlement.3["billing_segments"].as_array().map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(settlement.2, 60);
+    }
+
+    #[test]
+    fn task_refund_charges_usage_persisted_by_an_earlier_attempt() {
+        let earlier_segment = json!({
+            "kind": "chat",
+            "model": "deepseek/deepseek-v4-flash-0731",
+            "usage": {"cost": "0.001"},
+            "source": "openrouter",
+            "metadata": {
+                "provider": "openrouter",
+                "provider_generation_id": "generation-earlier"
+            }
+        });
+        let store = Store {
+            segments: RefCell::new(vec![json!({
+                "operation_id": "task:task123:1000",
+                "segment_id": "openrouter:generation-earlier",
+                "segment": earlier_segment,
+            })]),
+            ..Store::default()
+        };
+        let mut billing = PostgresTaskBilling::new(store, "deepseek/deepseek-v4-flash-0731");
+
+        billing
+            .refund(&task("en"), "task123:1000", "task_error")
+            .unwrap_or_else(|error| panic!("finalization: {error}"));
+
+        let settlements = billing.store.settlements.borrow();
+        let settlement = &settlements[0];
+        assert_eq!(settlement.2, 20);
+        assert_eq!(
+            settlement.3["billing_segments"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(settlement.3["pricing_complete"], true);
+    }
+
+    #[test]
+    fn task_keeps_reservation_open_until_provider_cost_is_reconciled() {
+        let segment = json!({
+            "kind": "chat",
+            "model": "deepseek/deepseek-v4-flash-0731",
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            "source": "openrouter",
+            "metadata": {
+                "provider": "openrouter",
+                "provider_generation_id": "generation-pending",
+                "provider_usage_pending": true
+            }
+        });
+        let mut billing =
+            PostgresTaskBilling::new(Store::default(), "deepseek/deepseek-v4-flash-0731");
+
+        billing
+            .settle(&task("en"), "task123:1000", &[segment], "task_success")
+            .unwrap_or_else(|error| panic!("pending settlement: {error}"));
+
+        assert_eq!(billing.store.segments.borrow().len(), 1);
+        assert!(billing.store.settlements.borrow().is_empty());
+    }
+
+    #[test]
+    fn task_reserve_adds_firecrawl_capacity_only_when_search_is_enabled() {
+        let prompt = [TaskPromptMessage {
+            role: "user",
+            content: "synthetic prompt".to_owned(),
+        }];
+        let mut without_search =
+            PostgresTaskBilling::new(Store::default(), "deepseek/deepseek-v4-flash-0731");
+        without_search
+            .reserve(&task("en"), "without-search", &prompt)
+            .unwrap_or_else(|error| panic!("reserve without search: {error}"));
+        let without_search_amount = without_search.store.charges.borrow()[0].1;
+
+        let mut with_search =
+            PostgresTaskBilling::new(Store::default(), "deepseek/deepseek-v4-flash-0731")
+                .with_web_search(true);
+        with_search
+            .reserve(&task("en"), "with-search", &prompt)
+            .unwrap_or_else(|error| panic!("reserve with search: {error}"));
+        let with_search_amount = with_search.store.charges.borrow()[0].1;
+
+        assert!(with_search_amount > without_search_amount);
     }
 
     #[test]
