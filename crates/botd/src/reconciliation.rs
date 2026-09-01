@@ -9,7 +9,9 @@ use bot_adapters::openrouter_generation::{
     GenerationOutcome, GenerationTransport, ReqwestGenerationTransport, fetch_with,
 };
 use bot_core::ai_pricing::calculate_billing_for_segments;
-use bot_core::ai_usage::{ProviderUsageStatus, needs_reconciliation};
+use bot_core::ai_usage::{
+    ProviderUsageStatus, needs_reconciliation, provider_reported_cost_is_positive,
+};
 use chrono::DateTime;
 use serde_json::{Map, Value, json};
 
@@ -208,6 +210,14 @@ where
         operation: &UnsettledAiOperation,
         now_epoch_seconds: i64,
     ) -> Result<OperationOutcome, String> {
+        if operation
+            .reserve_metadata
+            .get("background")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            return Ok(OperationOutcome::Pending);
+        }
         if self.active.is_active(&operation.operation_id) {
             return Ok(OperationOutcome::Pending);
         }
@@ -433,24 +443,15 @@ pub fn production_reconciler(
 }
 
 fn segment_needs_reconciliation(segment: &Value) -> bool {
-    let metadata = segment.get("metadata").and_then(Value::as_object);
     needs_reconciliation(ProviderUsageStatus {
         source: segment
             .get("source")
             .and_then(Value::as_str)
             .unwrap_or_default(),
-        stream_interrupted: metadata
-            .and_then(|value| value.get("stream_interrupted"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        provider_usage_pending: metadata
-            .and_then(|value| value.get("provider_usage_pending"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
         cost_is_positive: segment
             .get("usage")
-            .and_then(|usage| usage.get("cost"))
-            .is_some_and(positive_number),
+            .and_then(Value::as_object)
+            .is_some_and(provider_reported_cost_is_positive),
     })
 }
 
@@ -658,6 +659,29 @@ mod tests {
     }
 
     #[test]
+    fn positive_upstream_cost_details_do_not_need_reconciliation() {
+        let mut segment = pending_segment();
+        segment["usage"] = json!({
+            "cost_details": {"upstream_inference_cost": "0.001"}
+        });
+
+        assert!(!segment_needs_reconciliation(&segment));
+    }
+
+    #[test]
+    fn unpriced_openrouter_media_does_not_require_producer_flags() {
+        let segment = json!({
+            "kind": "vision",
+            "model": "synthetic/model",
+            "source": "openrouter",
+            "usage": {"prompt_tokens": 10},
+            "metadata": {"provider_generation_id": "generation-1"}
+        });
+
+        assert!(segment_needs_reconciliation(&segment));
+    }
+
+    #[test]
     fn active_and_fresh_operations_remain_pending_without_provider_io() {
         let active = ActiveOperationRegistry::default();
         active.mark_active("active");
@@ -685,6 +709,33 @@ mod tests {
         assert!(store.settlements.is_empty());
         active.mark_inactive("active");
         assert!(!active.is_active("active"));
+    }
+
+    #[test]
+    fn background_operations_are_left_for_their_own_worker() {
+        let mut background = operation(
+            "background",
+            "2026-08-31T00:00:00Z",
+            Some(pending_segment()),
+        );
+        background.reserve_metadata["background"] = json!(true);
+        let store = Store {
+            operations: vec![background],
+            ..Store::default()
+        };
+        let mut reconciler = AiBillingReconciler::new(
+            store,
+            Generations::default(),
+            ActiveOperationRegistry::default(),
+            ReconciliationSettings::default(),
+        );
+
+        let report = reconciler.run_once(1_788_138_000).unwrap_or_default();
+
+        assert_eq!(report.pending, 1);
+        let (store, _, _) = reconciler.into_parts();
+        assert!(store.updates.is_empty());
+        assert!(store.settlements.is_empty());
     }
 
     #[test]

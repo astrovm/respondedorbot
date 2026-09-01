@@ -188,7 +188,7 @@ impl<Backend: NativeToolBackend> NativeToolRuntime for NativeToolRegistry<Backen
     }
 }
 
-fn tool_schema(tool: NativeTool) -> Value {
+pub(crate) fn tool_schema(tool: NativeTool) -> Value {
     let (description, parameters) = match tool {
         NativeTool::CryptoPrices => (
             "Get cryptocurrency prices from CoinMarketCap by symbol or slug, with a quote currency and change timeframe.",

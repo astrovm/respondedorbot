@@ -104,6 +104,7 @@ fn postgres_and_redis_enforce_onboarding_replay_cap_and_refund_policy() -> Resul
         actual_credit_units: 500,
         delivered: true,
         reason: "integration_success".to_owned(),
+        billing_segments: Vec::new(),
     })?;
     assert!(!active.is_active("integration-ai-1"));
     assert_eq!(cap_reader.count(&cap_key)?, Some(1));
@@ -158,6 +159,7 @@ fn postgres_and_redis_enforce_onboarding_replay_cap_and_refund_policy() -> Resul
         actual_credit_units: 0,
         delivered: false,
         reason: "integration_refund".to_owned(),
+        billing_segments: Vec::new(),
     })?;
     assert_eq!(cap_reader.count(&refund_key)?, Some(0));
     assert_eq!(repository.get_balance("chat", refund_chat_id)?, 1_000);
