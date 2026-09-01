@@ -208,6 +208,14 @@ where
         operation: &UnsettledAiOperation,
         now_epoch_seconds: i64,
     ) -> Result<OperationOutcome, String> {
+        if operation
+            .reserve_metadata
+            .get("background")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            return Ok(OperationOutcome::Pending);
+        }
         if self.active.is_active(&operation.operation_id) {
             return Ok(OperationOutcome::Pending);
         }
@@ -685,6 +693,33 @@ mod tests {
         assert!(store.settlements.is_empty());
         active.mark_inactive("active");
         assert!(!active.is_active("active"));
+    }
+
+    #[test]
+    fn background_operations_are_left_for_their_own_worker() {
+        let mut background = operation(
+            "background",
+            "2026-08-31T00:00:00Z",
+            Some(pending_segment()),
+        );
+        background.reserve_metadata["background"] = json!(true);
+        let store = Store {
+            operations: vec![background],
+            ..Store::default()
+        };
+        let mut reconciler = AiBillingReconciler::new(
+            store,
+            Generations::default(),
+            ActiveOperationRegistry::default(),
+            ReconciliationSettings::default(),
+        );
+
+        let report = reconciler.run_once(1_788_138_000).unwrap_or_default();
+
+        assert_eq!(report.pending, 1);
+        let (store, _, _) = reconciler.into_parts();
+        assert!(store.updates.is_empty());
+        assert!(store.settlements.is_empty());
     }
 
     #[test]

@@ -195,6 +195,7 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
         telegram_token: config.runtime.telegram_token(),
         openrouter_api_key: config.openrouter_api_key(),
         openrouter_base_url,
+        firecrawl_api_key: config.firecrawl_api_key(),
         system_prompt: &config.system_prompt,
         owner_token: &config.owner_token(),
         scheduler_mode: SchedulerMode::Authoritative,

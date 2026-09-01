@@ -512,6 +512,7 @@ impl BillingRepository {
         idempotency_key: Option<&str>,
         operation_id: &str,
     ) -> Result<AiRefundResult, BillingError> {
+        let metadata = ai_mutation_metadata(metadata, idempotency_key, operation_id);
         self.run_transaction(|transaction| {
             let user_balance = Self::balance_for_update(transaction, BillingScope::User, user_id)?;
             let chat_balance = match chat_id {
@@ -580,7 +581,7 @@ impl BillingRepository {
                     )?;
                     (updated_user_balance, chat_balance, "user")
                 };
-            let metadata = billing_metadata(ledger_source, metadata);
+            let metadata = billing_metadata(ledger_source, &metadata);
             transaction.execute(
                 "INSERT INTO credit_ledger \
                     (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
@@ -608,6 +609,7 @@ impl BillingRepository {
         idempotency_key: Option<&str>,
         operation_id: &str,
     ) -> Result<AiChargeResult, BillingError> {
+        let metadata = ai_mutation_metadata(metadata, idempotency_key, operation_id);
         self.run_transaction(|transaction| {
             let user_balance = Self::balance_for_update(transaction, BillingScope::User, user_id)?;
             let chat_balance = match chat_id {
@@ -694,7 +696,7 @@ impl BillingRepository {
                     chat_id,
                     ledger_amount,
                     "user",
-                    metadata,
+                    &metadata,
                 )?;
                 return Ok(AiChargeResult {
                     ok: true,
@@ -726,7 +728,7 @@ impl BillingRepository {
                     chat_id,
                     ledger_amount,
                     "chat",
-                    metadata,
+                    &metadata,
                 )?;
                 return Ok(AiChargeResult {
                     ok: true,
@@ -808,6 +810,28 @@ impl BillingRepository {
         })
     }
 
+    pub fn compaction_reservation_settled(
+        &self,
+        user_id: i64,
+        operation_id: &str,
+        usage_tag: &str,
+    ) -> Result<bool, BillingError> {
+        let mut client = self.connect()?;
+        Ok(client
+            .query_opt(
+                "SELECT 1 FROM credit_ledger WHERE user_id = $1 AND ( \
+                    (event_type = 'ai_settlement_result' \
+                        AND NULLIF($2, '') IS NOT NULL \
+                        AND metadata->>'operation_id' = $2) \
+                    OR (event_type = 'memory_compaction_settlement' \
+                        AND NULLIF($3, '') IS NOT NULL \
+                        AND metadata->>'usage_tag' = $3) \
+                 ) LIMIT 1",
+                &[&user_id, &operation_id, &usage_tag],
+            )?
+            .is_some())
+    }
+
     pub fn settle_ai_operation_once(
         &self,
         user_id: i64,
@@ -840,7 +864,14 @@ impl BillingRepository {
 
             let hold = transaction.query_one(
                 "SELECT COALESCE(SUM(-amount), 0), \
-                    COUNT(DISTINCT metadata->>'source'), MIN(metadata->>'source') \
+                    COUNT(DISTINCT metadata->>'source'), MIN(metadata->>'source'), \
+                    COALESCE( \
+                        (ARRAY_AGG(metadata ORDER BY id) FILTER ( \
+                            WHERE event_type = 'ai_reserve' \
+                        ))[1], '{}'::jsonb \
+                    ), COALESCE(TO_JSONB(ARRAY_AGG(DISTINCT metadata->>'settlement_id') \
+                        FILTER (WHERE event_type = 'ai_reserve' \
+                            AND NULLIF(metadata->>'settlement_id', '') IS NOT NULL)), '[]'::jsonb) \
                  FROM credit_ledger WHERE user_id = $1 \
                    AND event_type IN ('ai_reserve', 'ai_refund') \
                    AND metadata->>'operation_id' = $2",
@@ -900,8 +931,18 @@ impl BillingRepository {
             } else {
                 0
             };
+            let mut merged_metadata = hold
+                .get::<_, Value>(3)
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+            merged_metadata.extend(metadata.clone());
+            let settlement_ids = hold.get::<_, Value>(4);
+            if settlement_ids.as_array().is_some_and(|ids| !ids.is_empty()) {
+                merged_metadata.insert("settlement_ids".to_owned(), settlement_ids);
+            }
             let settlement_metadata = settlement_metadata(
-                metadata,
+                &merged_metadata,
                 operation_id,
                 payer,
                 authorized,
@@ -1123,6 +1164,13 @@ impl BillingRepository {
                       AND ledger.user_id IS NOT NULL \
                       AND ledger.metadata ? 'operation_id' \
                       AND NOT EXISTS ( \
+                          SELECT 1 FROM credit_ledger AS background \
+                          WHERE background.event_type = 'ai_reserve' \
+                            AND background.metadata->>'operation_id' \
+                                = ledger.metadata->>'operation_id' \
+                            AND background.metadata->>'background' = 'true' \
+                      ) \
+                      AND NOT EXISTS ( \
                           SELECT 1 FROM credit_ledger AS settled WHERE ( \
                               settled.event_type = 'ai_settlement_result' \
                               AND settled.metadata->>'operation_id' \
@@ -1234,9 +1282,24 @@ impl BillingRepository {
                     ) AS settlement_id(value) \
                     WHERE event_type = 'ai_settlement_result' \
                 ), finalized_operations AS ( \
-                    SELECT id, event_type, actor_user_id, user_id, chat_id, \
-                        amount, metadata, created_at \
-                    FROM user_ledger \
+                    SELECT settlement.id, settlement.event_type, \
+                        settlement.actor_user_id, settlement.user_id, \
+                        settlement.chat_id, settlement.amount, settlement.metadata, \
+                        COALESCE(( \
+                            SELECT MIN(reserve.created_at) FROM user_ledger AS reserve \
+                            WHERE reserve.event_type = 'ai_reserve' AND ( \
+                                (NULLIF(settlement.metadata->>'operation_id', '') IS NOT NULL \
+                                    AND reserve.metadata->>'operation_id' \
+                                        = settlement.metadata->>'operation_id') \
+                                OR (NULLIF(settlement.metadata->>'settlement_id', '') IS NOT NULL \
+                                    AND reserve.metadata->>'settlement_id' \
+                                        = settlement.metadata->>'settlement_id') \
+                                OR (NULLIF(settlement.metadata->>'usage_tag', '') IS NOT NULL \
+                                    AND reserve.metadata->>'usage_tag' \
+                                        = settlement.metadata->>'usage_tag') \
+                            ) \
+                        ), settlement.created_at) AS created_at \
+                    FROM user_ledger AS settlement \
                     WHERE event_type IN ( \
                         'ai_settlement_result', 'memory_compaction_settlement' \
                     ) AND NOT ( \
@@ -1244,7 +1307,7 @@ impl BillingRepository {
                             SELECT 1 FROM user_ledger AS legacy \
                             WHERE legacy.event_type = 'memory_compaction_settlement' \
                               AND legacy.metadata->>'usage_tag' \
-                                  = user_ledger.metadata->>'usage_tag' \
+                                  = settlement.metadata->>'usage_tag' \
                         ) \
                     ) \
                 ), pending_reservations AS ( \
@@ -1298,8 +1361,15 @@ impl BillingRepository {
                 ), operations AS ( \
                     SELECT * FROM finalized_operations \
                     UNION ALL SELECT * FROM pending_operations \
+                ), billable_operations AS ( \
+                    SELECT * FROM operations WHERE COALESCE( \
+                        (metadata->>'charged_credit_units_total')::bigint, \
+                        (metadata->>'actual_credit_units')::bigint, \
+                        (metadata->>'settled_credit_units')::bigint, \
+                        GREATEST(0, -amount::bigint), 0 \
+                    ) > 0 \
                 ), grouped_operations AS ( \
-                    SELECT operations.*, CONCAT( \
+                    SELECT billable_operations.*, CONCAT( \
                         COALESCE( \
                             NULLIF(metadata->>'origin_chat_id', ''), \
                             NULLIF(SPLIT_PART(metadata->>'settlement_id', ':', 2), ''), \
@@ -1307,7 +1377,7 @@ impl BillingRepository {
                         ), ':', COALESCE( \
                             NULLIF(metadata->>'message_id', ''), 'ledger:' || id::text \
                         ) \
-                    ) AS group_key FROM operations \
+                    ) AS group_key FROM billable_operations \
                 ), charge_groups AS ( \
                     SELECT group_key, MIN(id) AS group_cursor, \
                         MIN(created_at) AS group_created_at \
@@ -1568,6 +1638,30 @@ fn billing_metadata(source: &str, metadata: &Map<String, Value>) -> Value {
     Value::Object(merged)
 }
 
+fn ai_mutation_metadata(
+    metadata: &Map<String, Value>,
+    idempotency_key: Option<&str>,
+    operation_id: &str,
+) -> Map<String, Value> {
+    let mut merged = metadata.clone();
+    if let Some(idempotency_key) = idempotency_key.filter(|key| !key.is_empty()) {
+        merged.insert(
+            "idempotency_key".to_owned(),
+            Value::String(idempotency_key.to_owned()),
+        );
+        merged
+            .entry("settlement_id".to_owned())
+            .or_insert_with(|| Value::String(idempotency_key.to_owned()));
+    }
+    if !operation_id.is_empty() {
+        merged.insert(
+            "operation_id".to_owned(),
+            Value::String(operation_id.to_owned()),
+        );
+    }
+    merged
+}
+
 #[allow(clippy::too_many_arguments)]
 fn settlement_metadata(
     metadata: &Map<String, Value>,
@@ -1639,6 +1733,7 @@ mod tests {
         AiChargeResult, AiRefundResult, AiSettlementResult, BalancePairResult, BillingError,
         BillingRepository, BillingScope, ChatAiChargeResult, LegacySettlementResult,
         OnboardingGrantResult, PurgeResult, StarPaymentResult, TransferResult,
+        ai_mutation_metadata,
     };
     use crate::billing_schema::{BillingSchemaRepository, BillingSchemaResult};
 
@@ -1655,6 +1750,24 @@ mod tests {
             repository.get_or_create_balance("group", 1),
             Err(BillingError::InvalidScope(scope)) if scope == "group"
         ));
+    }
+
+    #[test]
+    fn ai_mutations_persist_one_key_for_replay_and_settlement_identity() {
+        let metadata = serde_json::Map::from_iter([("trace_id".to_owned(), json!("trace"))]);
+        let enriched = ai_mutation_metadata(&metadata, Some("reservation-1"), "operation-1");
+        assert_eq!(enriched["idempotency_key"], "reservation-1");
+        assert_eq!(enriched["settlement_id"], "reservation-1");
+        assert_eq!(enriched["operation_id"], "operation-1");
+        assert_eq!(enriched["trace_id"], "trace");
+
+        let explicit_settlement = serde_json::Map::from_iter([(
+            "settlement_id".to_owned(),
+            json!("original-reservation"),
+        )]);
+        let refund = ai_mutation_metadata(&explicit_settlement, Some("refund-1"), "operation-1");
+        assert_eq!(refund["idempotency_key"], "refund-1");
+        assert_eq!(refund["settlement_id"], "original-reservation");
     }
 
     #[test]
@@ -2808,8 +2921,13 @@ mod tests {
              ON CONFLICT (scope_type, scope_id) DO UPDATE SET balance = EXCLUDED.balance;",
         )?;
         let user_settlement_operation = "synthetic-user-settlement";
-        let user_settlement_hold =
+        let mut user_settlement_hold =
             charge_metadata("synthetic-user-settlement-hold", user_settlement_operation);
+        user_settlement_hold.extend(serde_json::Map::from_iter([
+            ("origin_chat_id".to_owned(), json!("synthetic-chat")),
+            ("message_id".to_owned(), json!("synthetic-message")),
+            ("usage_tag".to_owned(), json!("ai_response")),
+        ]));
         assert!(
             repository
                 .charge_ai_credits(
@@ -2879,7 +2997,11 @@ mod tests {
                 COUNT(*) FILTER (WHERE metadata->>'source' = 'user'), \
                 COUNT(*) FILTER (WHERE metadata->>'trace_id' = 'synthetic-trace'), \
                 COUNT(*) FILTER (WHERE metadata->>'reserved_credit_units_total' = '300' \
-                    AND metadata->>'settled_credit_units' = '100') \
+                    AND metadata->>'settled_credit_units' = '100'), \
+                COUNT(*) FILTER (WHERE event_type = 'ai_settlement_result' \
+                    AND metadata->>'origin_chat_id' = 'synthetic-chat' \
+                    AND metadata->>'message_id' = 'synthetic-message' \
+                    AND metadata->>'usage_tag' = 'ai_response') \
              FROM credit_ledger WHERE user_id = $1 \
                AND metadata->>'operation_id' = $2",
             &[&7_000_000_000_026_i64, &user_settlement_operation],
@@ -2889,6 +3011,7 @@ mod tests {
         assert_eq!(user_settlement_evidence.get::<_, i64>(2), 3);
         assert_eq!(user_settlement_evidence.get::<_, i64>(3), 2);
         assert_eq!(user_settlement_evidence.get::<_, i64>(4), 2);
+        assert_eq!(user_settlement_evidence.get::<_, i64>(5), 1);
 
         let chat_settlement_operation = "synthetic-chat-settlement";
         let chat_settlement_hold =
@@ -3246,6 +3369,20 @@ mod tests {
                 (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
              VALUES ('ai_reserve', $1, $1, NULL, -100, $2)",
             &[
+                &7_000_000_000_038_i64,
+                &json!({
+                    "operation_id": "synthetic-background-operation",
+                    "usage_tag": "memory_compaction:synthetic",
+                    "source": "user",
+                    "background": true
+                }),
+            ],
+        )?;
+        client.execute(
+            "INSERT INTO credit_ledger \
+                (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
+             VALUES ('ai_reserve', $1, $1, NULL, -100, $2)",
+            &[
                 &7_000_000_000_039_i64,
                 &json!({
                     "operation_id": "synthetic-legacy-excluded-operation",
@@ -3298,6 +3435,11 @@ mod tests {
                 .iter()
                 .any(|operation| operation.operation_id == "synthetic-chat-automation")
         );
+        assert!(
+            !unsettled_operations
+                .iter()
+                .any(|operation| { operation.operation_id == "synthetic-background-operation" })
+        );
 
         client.execute(
             "INSERT INTO credit_ledger \
@@ -3344,6 +3486,24 @@ mod tests {
             7_000_000_000_041,
             "ai_settlement_result",
             &charge_history_metadata,
+        )?);
+        assert!(repository.record_ai_settlement_result(
+            7_000_000_000_041,
+            Some(202),
+            7_000_000_000_041,
+            "ai_settlement_result",
+            &serde_json::Map::from_iter([
+                (
+                    "settlement_id".to_owned(),
+                    Value::String("synthetic:202:98:audio".to_owned()),
+                ),
+                ("origin_chat_id".to_owned(), Value::String("202".to_owned())),
+                ("message_id".to_owned(), Value::String("98".to_owned())),
+                (
+                    "charged_credit_units_total".to_owned(),
+                    Value::Number(0.into()),
+                ),
+            ]),
         )?);
         let finalized_charge_rows =
             repository.list_user_ai_charge_rows(7_000_000_000_041, None, "older", 21)?;

@@ -17,6 +17,56 @@ pub struct FirecrawlTool<Transport, Sleep> {
     locale: Locale,
 }
 
+pub trait ScheduledWebSearch: Send {
+    fn execute(
+        &mut self,
+        request: ExternalToolRequest,
+        tool_call_id: &str,
+        locale: Locale,
+    ) -> ToolExecutionResult;
+}
+
+pub struct FirecrawlScheduledWebSearch<Transport, Sleep> {
+    transport: Transport,
+    sleep: Sleep,
+    api_key: String,
+}
+
+impl<Transport, Sleep> FirecrawlScheduledWebSearch<Transport, Sleep> {
+    #[must_use]
+    pub fn new(transport: Transport, sleep: Sleep, api_key: &str) -> Self {
+        Self {
+            transport,
+            sleep,
+            api_key: api_key.to_owned(),
+        }
+    }
+}
+
+impl<Transport, Sleep> ScheduledWebSearch for FirecrawlScheduledWebSearch<Transport, Sleep>
+where
+    Transport: FirecrawlTransport + Send,
+    Sleep: Fn(Duration) + Send,
+{
+    fn execute(
+        &mut self,
+        request: ExternalToolRequest,
+        tool_call_id: &str,
+        locale: Locale,
+    ) -> ToolExecutionResult {
+        let ExternalToolRequest::WebSearch { query } = request else {
+            return ToolExecutionResult::output(tool_output::incompatible(locale, "web_search"));
+        };
+        match search_with(&self.transport, &self.api_key, &query, &self.sleep) {
+            Ok(outcome) => outcome_result(outcome, &query, tool_call_id, locale),
+            Err(error) => ToolExecutionResult::with_diagnostics(
+                tool_output::failed(locale, "web_search"),
+                vec![format!("web_search transport failed: {error}")],
+            ),
+        }
+    }
+}
+
 impl<Transport, Sleep> FirecrawlTool<Transport, Sleep> {
     #[must_use]
     pub fn new(transport: Transport, sleep: Sleep, api_key: &str, locale: Locale) -> Self {

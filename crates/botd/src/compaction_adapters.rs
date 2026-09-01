@@ -10,7 +10,7 @@ use bot_adapters::redis_connection::RedisEndpoint;
 use bot_adapters::redis_message_state::RedisMessageState;
 use bot_core::ai_pricing::calculate_billing_for_segments;
 use bot_core::ai_reserve::{chat_output_token_limit, credit_units_from_usd_micros};
-use bot_core::ai_usage::{ProviderSegmentIdentity, provider_segment_id};
+use bot_core::ai_usage::stable_provider_segment_id;
 use bot_core::command_state::CHAT_STATE_TTL_SECONDS;
 use bot_core::credit_units::{CREDIT_SCALE, rescale_credit_units};
 use bot_core::message_state::{chat_compacted_until_key, chat_summary_key};
@@ -262,6 +262,17 @@ impl PostgresCompactionBilling {
 impl CompactionBilling for PostgresCompactionBilling {
     type Error = String;
 
+    fn is_settled(
+        &mut self,
+        job: &bot_adapters::compaction_job::CompactionJobRecord,
+    ) -> Result<bool, Self::Error> {
+        let operation_id = reservation_nested_string(&job.reservation, "operation_id");
+        let usage_tag = reservation_nested_string(&job.reservation, "usage_tag");
+        self.repository
+            .compaction_reservation_settled(job.user_id, &operation_id, &usage_tag)
+            .map_err(|error| error.to_string())
+    }
+
     fn list_provider_segments(
         &mut self,
         user_id: i64,
@@ -280,7 +291,7 @@ impl CompactionBilling for PostgresCompactionBilling {
     ) -> Result<(), Self::Error> {
         let metadata = json!({
             "operation_id": operation_id,
-            "segment_id": stable_segment_id(segment),
+            "segment_id": stable_provider_segment_id(segment),
             "segment": segment,
         });
         self.repository
@@ -357,20 +368,31 @@ impl CompactionBilling for PostgresCompactionBilling {
                 }
             }
         }
+        if operation_id.is_empty() {
+            let usage_tag = reservation_nested_string(reservation, "usage_tag");
+            return self
+                .repository
+                .settle_legacy_ai_reservation_once(
+                    request.job.user_id,
+                    reservation_chat_id(reservation),
+                    reservation
+                        .get("source")
+                        .and_then(Value::as_str)
+                        .unwrap_or("user"),
+                    reserved,
+                    actual,
+                    &usage_tag,
+                    &metadata,
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+        }
         self.repository
-            .settle_legacy_ai_reservation_once(
+            .settle_ai_operation_once(
                 request.job.user_id,
                 reservation_chat_id(reservation),
-                reservation
-                    .get("source")
-                    .and_then(Value::as_str)
-                    .unwrap_or("user"),
-                reserved,
+                &operation_id,
                 actual,
-                reservation
-                    .get("usage_tag")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
                 &metadata,
             )
             .map(|_| ())
@@ -489,41 +511,6 @@ fn reservation_nested_string(reservation: &Value, key: &str) -> String {
         .to_owned()
 }
 
-fn stable_segment_id(segment: &Value) -> String {
-    let metadata = segment.get("metadata").and_then(Value::as_object);
-    let source = segment
-        .get("source")
-        .and_then(Value::as_str)
-        .unwrap_or("provider");
-    let kind = segment
-        .get("kind")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let model = segment
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let canonical = serde_json::to_string(segment).unwrap_or_default();
-    provider_segment_id(
-        &ProviderSegmentIdentity {
-            source_with_default: source,
-            source_or_provider: source,
-            kind_or_unknown: kind,
-            model_or_unknown: model,
-            provider_generation_id: metadata
-                .and_then(|value| value.get("provider_generation_id"))
-                .and_then(Value::as_str),
-            provider_request_id: metadata
-                .and_then(|value| value.get("provider_request_id"))
-                .and_then(Value::as_str),
-            tool_rounds: metadata
-                .and_then(|value| value.get("tool_rounds"))
-                .and_then(Value::as_str),
-        },
-        &canonical,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -535,9 +522,7 @@ mod tests {
     use bot_adapters::redis_connection::RedisEndpoint;
     use serde_json::{Value, json};
 
-    use super::{
-        OpenRouterCompactionProvider, ceil_decimal, production_compaction_worker, stable_segment_id,
-    };
+    use super::{OpenRouterCompactionProvider, ceil_decimal, production_compaction_worker};
     use crate::compaction_worker::CompactionProvider;
 
     struct Transport {
@@ -605,7 +590,10 @@ mod tests {
             segment["metadata"]["provider_generation_id"],
             "generation-1"
         );
-        assert_eq!(stable_segment_id(&segment), "openrouter:generation-1");
+        assert_eq!(
+            bot_core::ai_usage::stable_provider_segment_id(&segment),
+            "openrouter:generation-1"
+        );
         let body: Value = serde_json::from_str(
             &provider
                 .transport

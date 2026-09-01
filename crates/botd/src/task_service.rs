@@ -1,8 +1,10 @@
 //! Composition for native scheduled-task verification and execution.
 
 use std::convert::Infallible;
+use std::thread;
 
 use bot_adapters::billing_read::BillingRepository;
+use bot_adapters::firecrawl::ReqwestFirecrawlTransport;
 use bot_adapters::openrouter_chat::ReqwestOpenRouterTransport;
 use bot_adapters::redis_connection::RedisEndpoint;
 use bot_adapters::redis_task_store::RedisTaskStore;
@@ -11,6 +13,7 @@ use bot_core::scheduled_tasks::ScheduledTask;
 use thiserror::Error;
 
 use crate::composition::{TelegramActionSink, TelegramDeliveryCoordinator};
+use crate::firecrawl_tool::FirecrawlScheduledWebSearch;
 use crate::native_ai::{
     ActionTaskMessenger, OpenRouterTaskProvider, PRIMARY_CHAT_MODEL, PostgresTaskBilling,
 };
@@ -52,6 +55,7 @@ pub struct TaskServiceOptions<'a> {
     pub telegram_token: &'a str,
     pub openrouter_api_key: &'a str,
     pub openrouter_base_url: &'a str,
+    pub firecrawl_api_key: Option<&'a str>,
     pub system_prompt: &'a str,
     pub owner_token: &'a str,
     pub mode: SchedulerMode,
@@ -64,6 +68,8 @@ pub enum TaskServiceError {
     Redis(#[from] bot_adapters::redis_task_store::RedisTaskStoreError),
     #[error("could not construct the OpenRouter transport: {0}")]
     OpenRouter(#[from] bot_adapters::openrouter_chat::OpenRouterChatError),
+    #[error("could not construct the Firecrawl transport: {0}")]
+    Firecrawl(#[from] bot_adapters::firecrawl::TransportError),
     #[error("could not construct the Telegram transport: {0:?}")]
     Telegram(bot_adapters::telegram_http::TransportFailureKind),
     #[error("could not construct the scheduled-task engine: {0}")]
@@ -94,13 +100,20 @@ pub fn verify_tasks_once(
 pub fn build_task_scheduler(
     options: TaskServiceOptions<'_>,
 ) -> Result<ConcreteTaskScheduler, TaskServiceError> {
-    let provider = OpenRouterTaskProvider::new(
+    let mut provider = OpenRouterTaskProvider::new(
         ReqwestOpenRouterTransport::new()?,
         options.openrouter_api_key,
         options.openrouter_base_url,
         PRIMARY_CHAT_MODEL,
         options.system_prompt,
     );
+    if let Some(api_key) = options.firecrawl_api_key.filter(|key| !key.is_empty()) {
+        provider = provider.with_web_search(Box::new(FirecrawlScheduledWebSearch::new(
+            ReqwestFirecrawlTransport::new()?,
+            thread::sleep,
+            api_key,
+        )));
+    }
     let billing = PostgresTaskBilling::new(
         BillingRepository::new(options.database_url),
         PRIMARY_CHAT_MODEL,
@@ -140,6 +153,7 @@ mod tests {
             telegram_token: "synthetic-token",
             openrouter_api_key: "synthetic-key",
             openrouter_base_url: "https://synthetic.invalid/api/v1",
+            firecrawl_api_key: None,
             system_prompt: "synthetic persona",
             owner_token: "synthetic-owner",
             mode: SchedulerMode::Authoritative,

@@ -1,5 +1,6 @@
 //! Durable provider-call identity and interrupted-usage policy.
 
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +51,43 @@ pub fn provider_segment_id(
         .collect()
 }
 
+/// Derive the durable identity for one normalized provider-usage segment.
+#[must_use]
+pub fn stable_provider_segment_id(segment: &Value) -> String {
+    let metadata = segment.get("metadata").and_then(Value::as_object);
+    let source = segment
+        .get("source")
+        .and_then(Value::as_str)
+        .unwrap_or("provider");
+    let kind = segment
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let model = segment
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let canonical = serde_json::to_string(segment).unwrap_or_default();
+    provider_segment_id(
+        &ProviderSegmentIdentity {
+            source_with_default: source,
+            source_or_provider: source,
+            kind_or_unknown: kind,
+            model_or_unknown: model,
+            provider_generation_id: metadata
+                .and_then(|value| value.get("provider_generation_id"))
+                .and_then(Value::as_str),
+            provider_request_id: metadata
+                .and_then(|value| value.get("provider_request_id"))
+                .and_then(Value::as_str),
+            tool_rounds: metadata
+                .and_then(|value| value.get("tool_rounds"))
+                .and_then(Value::as_str),
+        },
+        &canonical,
+    )
+}
+
 /// Interrupted OpenRouter calls need reconciliation until positive cost arrives.
 #[must_use]
 pub fn needs_reconciliation(status: ProviderUsageStatus<'_>) -> bool {
@@ -62,6 +100,7 @@ pub fn needs_reconciliation(status: ProviderUsageStatus<'_>) -> bool {
 mod tests {
     use super::{
         ProviderSegmentIdentity, ProviderUsageStatus, needs_reconciliation, provider_segment_id,
+        stable_provider_segment_id,
     };
 
     fn identity<'a>() -> ProviderSegmentIdentity<'a> {
@@ -102,6 +141,30 @@ mod tests {
             provider_segment_id(&identity(), canonical),
             "9720f6f861361d9e0abf8de652c4438e8872c5b593d0fda29dbcaf678b5240ad"
         );
+    }
+
+    #[test]
+    fn stable_segment_identity_prefers_provider_ids_and_hashes_tool_segments() {
+        assert_eq!(
+            stable_provider_segment_id(&serde_json::json!({
+                "kind": "chat",
+                "model": "test/model",
+                "source": "openrouter",
+                "metadata": {"provider_generation_id": "generation-1"}
+            })),
+            "openrouter:generation-1"
+        );
+        let first = stable_provider_segment_id(&serde_json::json!({
+            "kind": "web_search",
+            "source": "firecrawl",
+            "metadata": {"tool_call_id": "call-1", "firecrawl_credits_used": 2}
+        }));
+        let second = stable_provider_segment_id(&serde_json::json!({
+            "kind": "web_search",
+            "source": "firecrawl",
+            "metadata": {"tool_call_id": "call-2", "firecrawl_credits_used": 2}
+        }));
+        assert_ne!(first, second);
     }
 
     #[test]

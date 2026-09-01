@@ -154,7 +154,7 @@ impl<Services: ExternalToolServices> NativeToolPorts for ValidatedNativeToolPort
     }
 }
 
-fn validate_request(
+pub(crate) fn validate_request(
     tool: NativeTool,
     arguments: &Value,
     locale: Locale,

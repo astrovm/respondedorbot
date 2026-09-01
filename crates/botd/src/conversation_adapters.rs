@@ -8,6 +8,7 @@ use bot_adapters::redis_creditless_cap::{
     CREDITLESS_CAP_TTL_SECONDS, RedisCreditlessCap, creditless_cap_key,
 };
 use bot_adapters::redis_message_state::{RedisMessageState, SearchRow};
+use bot_core::ai_pricing::calculate_billing_for_segments;
 use bot_core::ai_prompt::{HistoryMessage, PromptRole, RetrievedMessage};
 use bot_core::ai_request::sanitize_assistant_text;
 use bot_core::command_state::{
@@ -451,6 +452,7 @@ impl ConversationBilling for PostgresConversationBilling {
             if count > request.creditless_user_hourly_limit {
                 let mut refund_metadata = request.metadata.clone();
                 refund_metadata.insert("reason".to_owned(), json!("creditless_hourly_cap"));
+                refund_metadata.insert("settlement_id".to_owned(), json!(&request.reservation_id));
                 let refund_id = format!("{}:creditless_cap_refund", request.reservation_id);
                 let refund = self
                     .repository
@@ -515,11 +517,21 @@ impl ConversationBilling for PostgresConversationBilling {
 
     fn settle(&mut self, request: SettlementRequest) -> Result<(), String> {
         let operation_id = request.operation_id.clone();
-        let metadata = Map::from_iter([
+        let mut metadata = Map::from_iter([
             ("operation_id".to_owned(), json!(operation_id)),
             ("reason".to_owned(), json!(request.reason)),
             ("delivered".to_owned(), json!(request.delivered)),
         ]);
+        if !request.billing_segments.is_empty() {
+            let pricing =
+                calculate_billing_for_segments(&Value::Array(request.billing_segments.clone()))
+                    .map_err(|error| error.to_string())?;
+            metadata.insert(
+                "billing_segments".to_owned(),
+                Value::Array(request.billing_segments),
+            );
+            copy_pricing_metadata(&mut metadata, &pricing);
+        }
         let result = self
             .repository
             .settle_ai_operation_once(
@@ -556,6 +568,22 @@ impl ConversationBilling for PostgresConversationBilling {
             .get_balance("user", user_id)
             .map(Some)
             .map_err(|error| error.to_string())
+    }
+}
+
+fn copy_pricing_metadata(metadata: &mut Map<String, Value>, pricing: &Value) {
+    for key in [
+        "pricing_version",
+        "raw_usd_micros",
+        "markup_multiplier",
+        "model_breakdown",
+        "tool_breakdown",
+        "segment_breakdown",
+        "pricing_complete",
+    ] {
+        if let Some(value) = pricing.get(key) {
+            metadata.insert(key.to_owned(), value.clone());
+        }
     }
 }
 
