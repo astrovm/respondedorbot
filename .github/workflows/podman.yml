@@ -110,6 +110,19 @@ jobs:
             --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             .
 
+      - name: Verify image
+        run: |
+          REPO="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          IMAGE="${REPO}:sha-${{ github.sha }}"
+          podman run --rm \
+            --env TELEGRAM_TOKEN=synthetic-telegram-token \
+            --env TELEGRAM_USERNAME=synthetic_test_bot \
+            --env SUPABASE_POSTGRES_URL=postgresql://synthetic-user:synthetic-password@db.synthetic.invalid:5432/postgres?sslmode=require \
+            --env COINMARKETCAP_KEY=synthetic-coinmarketcap-key \
+            --env OPENROUTER_API_KEY=synthetic-openrouter-key \
+            --env BOT_SYSTEM_PROMPT=synthetic-system-prompt \
+            "${IMAGE}" /usr/local/bin/botd --check-config
+
       - name: Push image
         if: github.event_name != 'pull_request'
         run: |

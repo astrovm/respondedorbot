@@ -18,6 +18,7 @@ pub mod media_provider;
 pub mod openrouter_chat;
 pub mod openrouter_generation;
 pub mod polymarket;
+pub mod postgres_connection;
 pub mod redis_chat_admin;
 pub mod redis_compaction_queue;
 pub mod redis_connection;

@@ -1,11 +1,11 @@
 //! PostgreSQL chat configuration repository compatible with the Python schema.
 
 use bot_core::chat_config::{ChatConfig, ChatConfigError};
-use native_tls::TlsConnector;
 use postgres::Client;
-use postgres_native_tls::MakeTlsConnector;
 use serde_json::Value;
 use thiserror::Error;
+
+use crate::postgres_connection::postgres_tls_connector;
 
 const CHAT_CONFIG_SCHEMA_ADVISORY_LOCK_KEY: i64 = 48_610_006;
 
@@ -77,10 +77,9 @@ impl ChatConfigRepository {
     }
 
     fn connect(&self) -> Result<Client, ChatConfigRepositoryError> {
-        let connector = TlsConnector::builder().build()?;
         Ok(Client::connect(
             &self.database_url,
-            MakeTlsConnector::new(connector),
+            postgres_tls_connector(&self.database_url)?,
         )?)
     }
 }

@@ -1,12 +1,12 @@
 //! Additive PostgreSQL billing schema and data migrations.
 
 use bot_core::credit_units::CREDIT_SCALE;
-use native_tls::TlsConnector;
 use postgres::{Client, Transaction};
-use postgres_native_tls::MakeTlsConnector;
 use serde::Serialize;
 use serde_json::json;
 use thiserror::Error;
+
+use crate::postgres_connection::postgres_tls_connector;
 
 const CREDIT_UNITS_MIGRATION_ADVISORY_LOCK_KEY: i64 = 48_610_002;
 const CREDIT_UNITS_MIGRATION_NAME: &str = "credit_amounts_scaled_to_tenths_v1";
@@ -137,10 +137,9 @@ impl BillingSchemaRepository {
     }
 
     fn connect(&self) -> Result<Client, BillingSchemaError> {
-        let connector = TlsConnector::builder().build()?;
         Ok(Client::connect(
             &self.database_url,
-            MakeTlsConnector::new(connector),
+            postgres_tls_connector(&self.database_url)?,
         )?)
     }
 }
