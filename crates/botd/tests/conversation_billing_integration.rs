@@ -55,14 +55,13 @@ fn postgres_and_redis_enforce_onboarding_replay_cap_and_refund_policy() -> Resul
         return Ok(());
     };
     BillingSchemaRepository::new(&database_url).ensure_schema()?;
-    let suffix = i64::try_from(
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() % 1_000_000_000_000,
-    )?;
-    let base_operation = format!("integration-ai-1:{suffix}");
-    let blocked_operation = format!("integration-ai-2:{suffix}");
-    let refund_operation = format!("integration-ai-refund:{suffix}");
-    let abort_operation = format!("integration-ai-abort:{suffix}");
-    let crash_operation = format!("integration-ai-crash-window:{suffix}");
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let suffix = i64::try_from(nonce % 100_000_000)?;
+    let base_operation = format!("integration-ai-1:{nonce}");
+    let blocked_operation = format!("integration-ai-2:{nonce}");
+    let refund_operation = format!("integration-ai-refund:{nonce}");
+    let abort_operation = format!("integration-ai-abort:{nonce}");
+    let crash_operation = format!("integration-ai-crash-window:{nonce}");
     let user_id = 8_100_000_000_000_i64 + suffix;
     let chat_id = -8_200_000_000_000_i64 - suffix;
     let repository = BillingRepository::new(&database_url);
