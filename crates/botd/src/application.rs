@@ -19,7 +19,7 @@ use crate::composition::{NativeRuntimeOptions, TelegramActionSink, build_native_
 use crate::config::ProductionConfig;
 use crate::dispatcher::ActionSink;
 use crate::operational_reporting::{
-    NoopOperationalReporter, OperationalReporter, TelegramOperationalReporter,
+    NoopOperationalReporter, OperationalReport, OperationalReporter, TelegramOperationalReporter,
 };
 use crate::reconciliation::ActiveOperationRegistry;
 use crate::runtime::{PollingRuntime, RuntimeError, StepOutcome, UpdateHandler, UpdateSource};
@@ -39,7 +39,7 @@ pub fn retry_delay(failure: &PollFailure) -> Duration {
     }
 }
 
-pub fn publish_commands<S>(sink: &mut S) -> Vec<String>
+pub fn publish_commands<S>(sink: &mut S) -> Vec<OperationalReport>
 where
     S: ActionSink,
     S::Error: Display,
@@ -47,7 +47,10 @@ where
     let mut diagnostics = Vec::new();
     for action in command_publication_actions() {
         if let Err(error) = sink.execute(action) {
-            diagnostics.push(format!("Telegram command publication failed: {error}"));
+            diagnostics.push(OperationalReport::new(
+                format!("falló la publicación de comandos de Telegram: {error}"),
+                format!("Telegram command publication failed: {error}"),
+            ));
             break;
         }
     }
@@ -142,8 +145,8 @@ fn build_operational_reporter(
     )))
 }
 
-fn report_best_effort(reporter: &dyn OperationalReporter, message: &str) {
-    if let Err(error) = reporter.report(message) {
+fn report_best_effort(reporter: &dyn OperationalReporter, report: &OperationalReport) {
+    if let Err(error) = reporter.report(report) {
         eprintln!("could not deliver operational report: {error}");
     }
 }
@@ -197,7 +200,7 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
     let mut command_sink =
         TelegramActionSink::new(command_transport, config.runtime.telegram_token());
     for diagnostic in publish_commands(&mut command_sink) {
-        eprintln!("{diagnostic}");
+        eprintln!("{}", diagnostic.english());
         report_best_effort(reporter.as_ref(), &diagnostic);
     }
 
@@ -210,21 +213,28 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
         || stopping.load(Ordering::Acquire),
         |duration| interruptible_wait(&stopping, duration),
         |failure| {
-            let message = format!("Telegram polling retry: {failure:?}");
-            eprintln!("{message}");
-            report_best_effort(reporter.as_ref(), &message);
+            let report = OperationalReport::new(
+                format!("reintento del sondeo de Telegram: {failure:?}"),
+                format!("Telegram polling retry: {failure:?}"),
+            );
+            eprintln!("{}", report.english());
+            report_best_effort(reporter.as_ref(), &report);
         },
         |update_id, error| {
-            let message = format!("Telegram update {update_id} failed: {error}");
-            eprintln!("{message}");
-            report_best_effort(reporter.as_ref(), &message);
+            let report = OperationalReport::new(
+                format!("falló la actualización {update_id} de Telegram: {error}"),
+                format!("Telegram update {update_id} failed: {error}"),
+            );
+            eprintln!("{}", report.english());
+            report_best_effort(reporter.as_ref(), &report);
         },
     );
     if let Err(error) = &polling_result {
-        report_best_effort(
-            reporter.as_ref(),
-            &format!("Telegram polling runtime failed: {error}"),
+        let report = OperationalReport::new(
+            format!("falló el proceso de sondeo de Telegram: {error}"),
+            format!("Telegram polling runtime failed: {error}"),
         );
+        report_best_effort(reporter.as_ref(), &report);
     }
     let shutdown_result = supervisor.stop().map_err(|error| error.to_string());
     polling_result.and(shutdown_result)
@@ -241,6 +251,7 @@ mod tests {
     use bot_adapters::telegram_polling::{
         IncomingEvent, IncomingUpdate, PollFailure, PollOutcome, PollingError,
     };
+    use bot_core::locale::Locale;
     use bot_core::telegram_actions::TelegramAction;
 
     use super::{publish_commands, retry_delay, run_polling_until};
@@ -302,7 +313,16 @@ mod tests {
         let diagnostics = publish_commands(&mut sink);
         assert_eq!(sink.actions.len(), 1);
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].contains("synthetic publication failure"));
+        assert!(
+            diagnostics[0]
+                .english()
+                .contains("synthetic publication failure")
+        );
+        assert!(
+            diagnostics[0]
+                .for_locale(Locale::Es)
+                .contains("falló la publicación")
+        );
     }
 
     #[test]
