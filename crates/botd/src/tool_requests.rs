@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::chat_tool_loop::ToolExecutionResult;
 use crate::native_tools::{NativeTool, NativeToolPorts};
+use crate::tool_output;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExternalToolRequest {
@@ -79,12 +80,20 @@ pub trait ExternalToolExecutor {
     fn execute(&mut self, request: ExternalToolRequest, tool_call_id: &str) -> ToolExecutionResult;
 }
 
-#[derive(Default)]
 pub struct ExternalToolbox {
     executors: BTreeMap<NativeTool, Box<dyn ExternalToolExecutor>>,
+    locale: Locale,
 }
 
 impl ExternalToolbox {
+    #[must_use]
+    pub const fn new(locale: Locale) -> Self {
+        Self {
+            executors: BTreeMap::new(),
+            locale,
+        }
+    }
+
     #[must_use]
     pub fn with_executor(
         mut self,
@@ -104,7 +113,7 @@ impl ExternalToolServices for ExternalToolbox {
     fn execute(&mut self, request: ExternalToolRequest, tool_call_id: &str) -> ToolExecutionResult {
         let tool = request.tool();
         self.executors.get_mut(&tool).map_or_else(
-            || ToolExecutionResult::output(format!("{} is unavailable", tool.name())),
+            || ToolExecutionResult::output(tool_output::unavailable(self.locale, tool.name())),
             |executor| executor.execute(request, tool_call_id),
         )
     }
@@ -544,7 +553,7 @@ mod tests {
     fn registry_filters_unavailable_services_and_keeps_pure_calculation() {
         let ports = ports(Locale::En);
         let backend = StandardNativeToolBackend::new(ports, Locale::En);
-        let registry = NativeToolRegistry::new(backend);
+        let registry = NativeToolRegistry::new(backend, Locale::En);
         assert!(!NativeToolPorts::is_available(
             registry.backend().ports(),
             NativeTool::WebFetch
@@ -569,7 +578,7 @@ mod tests {
 
     #[test]
     fn toolbox_has_one_executor_per_typed_tool() {
-        let mut toolbox = ExternalToolbox::default()
+        let mut toolbox = ExternalToolbox::new(Locale::En)
             .with_executor(NativeTool::BotCapabilities, Box::new(Executor));
         assert!(toolbox.is_available(NativeTool::BotCapabilities));
         assert!(!toolbox.is_available(NativeTool::Weather));
@@ -588,7 +597,7 @@ mod tests {
                     "call-2"
                 )
                 .output,
-            "weather is unavailable"
+            "tool 'weather' is unavailable"
         );
     }
 }

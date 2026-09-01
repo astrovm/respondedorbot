@@ -2,6 +2,8 @@
 
 use serde::Deserialize;
 
+use crate::locale::Locale;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnownChatMember {
     pub user_id: String,
@@ -38,33 +40,54 @@ pub fn decode_chat_members(entries: &[(String, String)]) -> Vec<KnownChatMember>
 }
 
 #[must_use]
-pub fn render_chat_members(members: &[KnownChatMember], now_unix: i64) -> String {
+pub fn render_chat_members(members: &[KnownChatMember], now_unix: i64, locale: Locale) -> String {
     if members.is_empty() {
-        return "no conozco a nadie en este chat todavia".to_owned();
+        return match locale {
+            Locale::Es => "no conozco a nadie en este chat todavía".to_owned(),
+            Locale::En => "I do not know anyone in this chat yet".to_owned(),
+        };
     }
     let lines = members
         .iter()
         .map(|member| {
             let age = now_unix.saturating_sub(member.last_seen);
             let ago = if age < 60 {
-                "hace unos segundos".to_owned()
+                match locale {
+                    Locale::Es => "hace unos segundos".to_owned(),
+                    Locale::En => "a few seconds ago".to_owned(),
+                }
             } else if age < 3_600 {
-                format!("hace {} min", age / 60)
+                match locale {
+                    Locale::Es => format!("hace {} min", age / 60),
+                    Locale::En => format!("{} min ago", age / 60),
+                }
             } else if age < 86_400 {
-                format!("hace {}h", age / 3_600)
+                match locale {
+                    Locale::Es => format!("hace {} h", age / 3_600),
+                    Locale::En => format!("{} h ago", age / 3_600),
+                }
             } else {
-                format!("hace {}d", age / 86_400)
+                match locale {
+                    Locale::Es => format!("hace {} d", age / 86_400),
+                    Locale::En => format!("{} d ago", age / 86_400),
+                }
             };
             let name = if member.username.is_empty() {
                 member.first_name.clone()
             } else {
                 format!("{} (@{})", member.first_name, member.username)
             };
-            format!("- {name} — visto {ago}")
+            match locale {
+                Locale::Es => format!("- {name} — visto {ago}"),
+                Locale::En => format!("- {name} — seen {ago}"),
+            }
         })
         .collect::<Vec<_>>()
         .join("\n");
-    format!("Miembros conocidos:\n{lines}")
+    match locale {
+        Locale::Es => format!("Miembros conocidos:\n{lines}"),
+        Locale::En => format!("Known members:\n{lines}"),
+    }
 }
 
 #[cfg(test)]
@@ -129,12 +152,16 @@ mod tests {
             },
         ];
         assert_eq!(
-            render_chat_members(&members, 10_000),
-            "Miembros conocidos:\n- A (@a) — visto hace unos segundos\n- B — visto hace 10 min\n- C — visto hace 2h\n- D — visto hace 1d"
+            render_chat_members(&members, 10_000, Locale::Es),
+            "Miembros conocidos:\n- A (@a) — visto hace unos segundos\n- B — visto hace 10 min\n- C — visto hace 2 h\n- D — visto hace 1 d"
         );
         assert_eq!(
-            render_chat_members(&[], 10_000),
-            "no conozco a nadie en este chat todavia"
+            render_chat_members(&[], 10_000, Locale::Es),
+            "no conozco a nadie en este chat todavía"
+        );
+        assert_eq!(
+            render_chat_members(&members, 10_000, Locale::En),
+            "Known members:\n- A (@a) — seen a few seconds ago\n- B — seen 10 min ago\n- C — seen 2 h ago\n- D — seen 1 d ago"
         );
     }
 }

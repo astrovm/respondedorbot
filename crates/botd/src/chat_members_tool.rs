@@ -2,9 +2,11 @@
 
 use bot_adapters::redis_message_state::RedisMessageState;
 use bot_core::chat_members::{decode_chat_members, render_chat_members};
+use bot_core::locale::Locale;
 use bot_core::message_state::chat_members_key;
 
 use crate::chat_tool_loop::ToolExecutionResult;
+use crate::tool_output;
 use crate::tool_requests::{ExternalToolExecutor, ExternalToolRequest};
 
 pub trait ChatMemberSource {
@@ -28,15 +30,17 @@ pub struct ChatMembersTool<Source, Now> {
     source: Source,
     now: Now,
     chat_id: String,
+    locale: Locale,
 }
 
 impl<Source, Now> ChatMembersTool<Source, Now> {
     #[must_use]
-    pub fn new(source: Source, now: Now, chat_id: &str) -> Self {
+    pub fn new(source: Source, now: Now, chat_id: &str, locale: Locale) -> Self {
         Self {
             source,
             now,
             chat_id: chat_id.to_owned(),
+            locale,
         }
     }
 }
@@ -52,20 +56,25 @@ where
         _tool_call_id: &str,
     ) -> ToolExecutionResult {
         if request != ExternalToolRequest::GetChatMembers {
-            return ToolExecutionResult::output(
-                "get_chat_members received an incompatible request",
-            );
+            return ToolExecutionResult::output(tool_output::incompatible(
+                self.locale,
+                "get_chat_members",
+            ));
         }
         if self.chat_id.is_empty() {
-            return ToolExecutionResult::output("no disponible");
+            return ToolExecutionResult::output(tool_output::unavailable(
+                self.locale,
+                "get_chat_members",
+            ));
         }
         match self.source.members(&self.chat_id) {
             Ok(entries) => ToolExecutionResult::output(render_chat_members(
                 &decode_chat_members(&entries),
                 (self.now)(),
+                self.locale,
             )),
             Err(error) => ToolExecutionResult::with_diagnostics(
-                "no conozco a nadie en este chat todavia",
+                render_chat_members(&[], (self.now)(), self.locale),
                 vec![format!("chat member lookup failed: {error}")],
             ),
         }
@@ -94,6 +103,7 @@ mod tests {
             )])),
             || 10_000,
             "-100",
+            Locale::Es,
         );
         assert_eq!(
             tool.execute(ExternalToolRequest::GetChatMembers, "call")
@@ -104,25 +114,26 @@ mod tests {
 
     #[test]
     fn missing_context_source_failure_and_wrong_request_are_safe() {
-        let mut unavailable = ChatMembersTool::new(Source(Ok(Vec::new())), || 0, "");
+        let mut unavailable = ChatMembersTool::new(Source(Ok(Vec::new())), || 0, "", Locale::En);
         assert_eq!(
             unavailable
                 .execute(ExternalToolRequest::GetChatMembers, "call")
                 .output,
-            "no disponible"
+            "tool 'get_chat_members' is unavailable"
         );
 
         let mut failed = ChatMembersTool::new(
             Source(Err("synthetic Redis failure".to_owned())),
             || 0,
             "-100",
+            Locale::En,
         );
         let result = failed.execute(ExternalToolRequest::GetChatMembers, "call");
-        assert_eq!(result.output, "no conozco a nadie en este chat todavia");
+        assert_eq!(result.output, "I do not know anyone in this chat yet");
         assert!(result.diagnostics[0].contains("synthetic Redis failure"));
         assert_eq!(
             failed.execute(ExternalToolRequest::TaskList, "call").output,
-            "get_chat_members received an incompatible request"
+            "tool 'get_chat_members' received an incompatible request"
         );
     }
 }
