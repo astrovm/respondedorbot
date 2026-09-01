@@ -1794,9 +1794,11 @@ where
             .split('@')
             .next()
             .unwrap_or_default();
-        let known_command = telegram_commands(locale)
-            .iter()
-            .any(|candidate| candidate.command == command_name);
+        let command_starts_with_slash = command.starts_with('/');
+        let known_command = command_starts_with_slash
+            && telegram_commands(locale)
+                .iter()
+                .any(|candidate| candidate.command == command_name);
         let reply_metadata = if reply_to_bot {
             message.replied_message_id.and_then(|reply_id| {
                 let source = self.ai_conversation_source.as_mut()?;
@@ -1814,7 +1816,7 @@ where
         };
         let mut routing = ResponseRoutingInput {
             known_command,
-            command_starts_with_slash: command.starts_with('/'),
+            command_starts_with_slash,
             message_text: prompt_text.to_owned(),
             is_private: message.chat_type.as_deref() == Some("private"),
             is_mention: mention,
@@ -4523,6 +4525,46 @@ mod tests {
             ignored.borrow()[1].reply_context.as_deref(),
             Some("Gordo (mybot): command answer")
         );
+        assert!(deliveries.borrow().is_empty());
+        assert!(dispatcher.actions.0.is_empty());
+    }
+
+    #[test]
+    fn group_ai_commands_require_a_leading_slash() {
+        let (source, (prepared, ignored, deliveries)) = ai_source(Ok(AiPreparation::silent()));
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_ai_conversation_source(Box::new(source));
+
+        let mut plain = update("che", None);
+        let IncomingEvent::Message(message) = &mut plain.event else {
+            return;
+        };
+        message.chat_type = Some("group".to_owned());
+        assert_eq!(dispatcher.dispatch(plain), Ok(DispatchOutcome::Handled));
+
+        let mut command = update("/che seguís ahí?", None);
+        let IncomingEvent::Message(message) = &mut command.event else {
+            return;
+        };
+        message.chat_type = Some("group".to_owned());
+        assert_eq!(dispatcher.dispatch(command), Ok(DispatchOutcome::Handled));
+
+        assert_eq!(ignored.borrow().len(), 1);
+        assert_eq!(ignored.borrow()[0].message_text, "che");
+        assert_eq!(prepared.borrow().len(), 1);
+        assert_eq!(prepared.borrow()[0].command, "/che");
+        assert_eq!(prepared.borrow()[0].message_text, "seguís ahí?");
         assert!(deliveries.borrow().is_empty());
         assert!(dispatcher.actions.0.is_empty());
     }
