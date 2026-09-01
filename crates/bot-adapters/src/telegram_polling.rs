@@ -17,7 +17,7 @@ use crate::telegram_http::{
 
 pub const DEFAULT_LONG_POLL_SECONDS: u64 = 30;
 const HTTP_TIMEOUT_MARGIN_SECONDS: u64 = 5;
-const POLL_BATCH_LIMIT: u8 = 1;
+const POLL_BATCH_LIMIT: u8 = 100;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct IncomingUpdate {
@@ -371,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn poll_request_bounds_each_response_to_one_update() {
+    fn poll_request_accepts_a_full_telegram_update_batch() {
         let transport = transport(Ok(HttpResponse {
             status_code: 200,
             body: r#"{"ok":true,"result":[]}"#.to_owned(),
@@ -391,7 +391,7 @@ mod tests {
             Some(json!({
                 "offset": 42,
                 "timeout": 30,
-                "limit": 1,
+                "limit": 100,
                 "allowed_updates": ["message", "callback_query", "pre_checkout_query"]
             }))
         );

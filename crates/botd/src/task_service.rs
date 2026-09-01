@@ -10,7 +10,7 @@ use bot_adapters::telegram_http::ReqwestTelegramTransport;
 use bot_core::scheduled_tasks::ScheduledTask;
 use thiserror::Error;
 
-use crate::composition::TelegramActionSink;
+use crate::composition::{TelegramActionSink, TelegramDeliveryCoordinator};
 use crate::native_ai::{
     ActionTaskMessenger, OpenRouterTaskProvider, PRIMARY_CHAT_MODEL, PostgresTaskBilling,
 };
@@ -55,6 +55,7 @@ pub struct TaskServiceOptions<'a> {
     pub system_prompt: &'a str,
     pub owner_token: &'a str,
     pub mode: SchedulerMode,
+    pub telegram_delivery: TelegramDeliveryCoordinator,
 }
 
 #[derive(Debug, Error)]
@@ -105,10 +106,10 @@ pub fn build_task_scheduler(
         PRIMARY_CHAT_MODEL,
     );
     let action_transport = ReqwestTelegramTransport::new().map_err(TaskServiceError::Telegram)?;
-    let messenger = ActionTaskMessenger::new(TelegramActionSink::new(
-        action_transport,
-        options.telegram_token,
-    ));
+    let messenger = ActionTaskMessenger::new(
+        TelegramActionSink::new(action_transport, options.telegram_token)
+            .with_delivery_coordinator(options.telegram_delivery),
+    );
     let executor = NativeTaskExecutor::new(provider, billing, messenger, StderrTaskDiagnostics);
     Ok(TaskScheduler::new(
         RedisTaskStore::new(options.redis_endpoint)?,
@@ -124,6 +125,7 @@ mod tests {
     use bot_adapters::redis_connection::RedisEndpoint;
 
     use super::{TaskServiceOptions, build_task_scheduler};
+    use crate::composition::TelegramDeliveryCoordinator;
     use crate::scheduler::SchedulerMode;
 
     #[test]
@@ -141,6 +143,7 @@ mod tests {
             system_prompt: "synthetic persona",
             owner_token: "synthetic-owner",
             mode: SchedulerMode::Authoritative,
+            telegram_delivery: TelegramDeliveryCoordinator::default(),
         });
         assert!(result.is_ok());
     }
