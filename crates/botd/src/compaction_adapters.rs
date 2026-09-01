@@ -330,15 +330,12 @@ impl CompactionBilling for PostgresCompactionBilling {
                 credit_units_from_usd_micros(i128::from(request.job.result_cost_usd_micros))
                     .unwrap_or_default()
             });
-        let actual = request.actual_credit_units.map_or_else(
-            || {
-                if pricing_complete {
-                    billed
-                } else {
-                    reserved.max(billed)
-                }
-            },
-            |value| value.max(0),
+        let actual = compaction_actual_units(
+            reserved,
+            billed,
+            pricing_complete,
+            !request.billing_segments.is_empty(),
+            request.actual_credit_units,
         );
         let operation_id = reservation_nested_string(reservation, "operation_id");
         let settlement_id = reservation_nested_string(reservation, "settlement_id");
@@ -511,6 +508,32 @@ fn reservation_nested_string(reservation: &Value, key: &str) -> String {
         .to_owned()
 }
 
+fn compaction_actual_units(
+    reserved: i64,
+    billed: i64,
+    pricing_complete: bool,
+    has_billing_segments: bool,
+    explicit: Option<i64>,
+) -> i64 {
+    if has_billing_segments {
+        return if pricing_complete {
+            billed
+        } else {
+            reserved.max(billed)
+        };
+    }
+    explicit.map_or_else(
+        || {
+            if pricing_complete {
+                billed
+            } else {
+                reserved.max(billed)
+            }
+        },
+        |value| value.max(0),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -522,7 +545,10 @@ mod tests {
     use bot_adapters::redis_connection::RedisEndpoint;
     use serde_json::{Value, json};
 
-    use super::{OpenRouterCompactionProvider, ceil_decimal, production_compaction_worker};
+    use super::{
+        OpenRouterCompactionProvider, ceil_decimal, compaction_actual_units,
+        production_compaction_worker,
+    };
     use crate::compaction_worker::CompactionProvider;
 
     struct Transport {
@@ -620,5 +646,11 @@ mod tests {
         assert_eq!(ceil_decimal("1234.00000000"), 1234);
         assert_eq!(ceil_decimal("1234.00000001"), 1235);
         assert_eq!(ceil_decimal("0"), 0);
+    }
+
+    #[test]
+    fn durable_provider_usage_overrides_a_stale_zero_terminal_transition() {
+        assert_eq!(compaction_actual_units(16, 38, true, true, Some(0)), 38);
+        assert_eq!(compaction_actual_units(16, 0, true, false, Some(0)), 0);
     }
 }

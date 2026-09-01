@@ -9,7 +9,9 @@ use bot_adapters::openrouter_generation::{
     GenerationOutcome, GenerationTransport, ReqwestGenerationTransport, fetch_with,
 };
 use bot_core::ai_pricing::calculate_billing_for_segments;
-use bot_core::ai_usage::{ProviderUsageStatus, needs_reconciliation};
+use bot_core::ai_usage::{
+    ProviderUsageStatus, needs_reconciliation, provider_reported_cost_is_positive,
+};
 use chrono::DateTime;
 use serde_json::{Map, Value, json};
 
@@ -441,24 +443,15 @@ pub fn production_reconciler(
 }
 
 fn segment_needs_reconciliation(segment: &Value) -> bool {
-    let metadata = segment.get("metadata").and_then(Value::as_object);
     needs_reconciliation(ProviderUsageStatus {
         source: segment
             .get("source")
             .and_then(Value::as_str)
             .unwrap_or_default(),
-        stream_interrupted: metadata
-            .and_then(|value| value.get("stream_interrupted"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        provider_usage_pending: metadata
-            .and_then(|value| value.get("provider_usage_pending"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
         cost_is_positive: segment
             .get("usage")
-            .and_then(|usage| usage.get("cost"))
-            .is_some_and(positive_number),
+            .and_then(Value::as_object)
+            .is_some_and(provider_reported_cost_is_positive),
     })
 }
 
@@ -663,6 +656,29 @@ mod tests {
                 "provider_usage_pending": true
             }
         })
+    }
+
+    #[test]
+    fn positive_upstream_cost_details_do_not_need_reconciliation() {
+        let mut segment = pending_segment();
+        segment["usage"] = json!({
+            "cost_details": {"upstream_inference_cost": "0.001"}
+        });
+
+        assert!(!segment_needs_reconciliation(&segment));
+    }
+
+    #[test]
+    fn unpriced_openrouter_media_does_not_require_producer_flags() {
+        let segment = json!({
+            "kind": "vision",
+            "model": "synthetic/model",
+            "source": "openrouter",
+            "usage": {"prompt_tokens": 10},
+            "metadata": {"provider_generation_id": "generation-1"}
+        });
+
+        assert!(segment_needs_reconciliation(&segment));
     }
 
     #[test]

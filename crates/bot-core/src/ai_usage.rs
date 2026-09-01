@@ -1,6 +1,6 @@
 //! Durable provider-call identity and interrupted-usage policy.
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,8 +17,6 @@ pub struct ProviderSegmentIdentity<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderUsageStatus<'a> {
     pub source: &'a str,
-    pub stream_interrupted: bool,
-    pub provider_usage_pending: bool,
     pub cost_is_positive: bool,
 }
 
@@ -88,19 +86,35 @@ pub fn stable_provider_segment_id(segment: &Value) -> String {
     )
 }
 
-/// Interrupted OpenRouter calls need reconciliation until positive cost arrives.
+/// Return whether OpenRouter supplied a positive authoritative cost.
+#[must_use]
+pub fn provider_reported_cost_is_positive(usage: &Map<String, Value>) -> bool {
+    usage.get("cost").is_some_and(positive_number)
+        || usage
+            .get("cost_details")
+            .and_then(Value::as_object)
+            .and_then(|details| details.get("upstream_inference_cost"))
+            .is_some_and(positive_number)
+}
+
+fn positive_number(value: &Value) -> bool {
+    value
+        .as_f64()
+        .or_else(|| value.as_str()?.parse::<f64>().ok())
+        .is_some_and(|value| value.is_finite() && value > 0.0)
+}
+
+/// Unsettled OpenRouter calls need reconciliation until positive cost arrives.
 #[must_use]
 pub fn needs_reconciliation(status: ProviderUsageStatus<'_>) -> bool {
-    status.source == "openrouter"
-        && (status.stream_interrupted || status.provider_usage_pending)
-        && !status.cost_is_positive
+    status.source == "openrouter" && !status.cost_is_positive
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ProviderSegmentIdentity, ProviderUsageStatus, needs_reconciliation, provider_segment_id,
-        stable_provider_segment_id,
+        ProviderSegmentIdentity, ProviderUsageStatus, needs_reconciliation,
+        provider_reported_cost_is_positive, provider_segment_id, stable_provider_segment_id,
     };
 
     fn identity<'a>() -> ProviderSegmentIdentity<'a> {
@@ -168,13 +182,32 @@ mod tests {
     }
 
     #[test]
-    fn reconciles_only_pending_openrouter_usage_without_positive_cost() {
+    fn recognizes_both_authoritative_provider_cost_fields() {
+        assert!(provider_reported_cost_is_positive(
+            serde_json::json!({"cost": "0.001"})
+                .as_object()
+                .unwrap_or_else(|| unreachable!())
+        ));
+        assert!(provider_reported_cost_is_positive(
+            serde_json::json!({
+                "cost_details": {"upstream_inference_cost": 0.002}
+            })
+            .as_object()
+            .unwrap_or_else(|| unreachable!())
+        ));
+        assert!(!provider_reported_cost_is_positive(
+            serde_json::json!({"prompt_tokens": 10})
+                .as_object()
+                .unwrap_or_else(|| unreachable!())
+        ));
+    }
+
+    #[test]
+    fn reconciles_all_unpriced_openrouter_usage() {
         for (status, expected) in [
             (
                 ProviderUsageStatus {
                     source: "openrouter",
-                    stream_interrupted: true,
-                    provider_usage_pending: false,
                     cost_is_positive: false,
                 },
                 true,
@@ -182,17 +215,6 @@ mod tests {
             (
                 ProviderUsageStatus {
                     source: "openrouter",
-                    stream_interrupted: false,
-                    provider_usage_pending: true,
-                    cost_is_positive: false,
-                },
-                true,
-            ),
-            (
-                ProviderUsageStatus {
-                    source: "openrouter",
-                    stream_interrupted: true,
-                    provider_usage_pending: true,
                     cost_is_positive: true,
                 },
                 false,
@@ -200,8 +222,6 @@ mod tests {
             (
                 ProviderUsageStatus {
                     source: "groq",
-                    stream_interrupted: true,
-                    provider_usage_pending: true,
                     cost_is_positive: false,
                 },
                 false,

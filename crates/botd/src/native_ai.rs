@@ -456,6 +456,9 @@ impl<Store> PostgresTaskBilling<Store> {
         }
         let pricing = calculate_billing_for_segments(&json!(durable_segments))
             .map_err(|error| NativeTaskBillingError::Pricing(error.to_string()))?;
+        if pricing.get("pricing_complete").and_then(Value::as_bool) != Some(true) {
+            return Ok(());
+        }
         let amount = pricing
             .get("charged_credit_units")
             .and_then(Value::as_i64)
@@ -1133,6 +1136,30 @@ mod tests {
             Some(1)
         );
         assert_eq!(settlement.3["pricing_complete"], true);
+    }
+
+    #[test]
+    fn task_keeps_reservation_open_until_provider_cost_is_reconciled() {
+        let segment = json!({
+            "kind": "chat",
+            "model": "deepseek/deepseek-v4-flash-0731",
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            "source": "openrouter",
+            "metadata": {
+                "provider": "openrouter",
+                "provider_generation_id": "generation-pending",
+                "provider_usage_pending": true
+            }
+        });
+        let mut billing =
+            PostgresTaskBilling::new(Store::default(), "deepseek/deepseek-v4-flash-0731");
+
+        billing
+            .settle(&task("en"), "task123:1000", &[segment], "task_success")
+            .unwrap_or_else(|error| panic!("pending settlement: {error}"));
+
+        assert_eq!(billing.store.segments.borrow().len(), 1);
+        assert!(billing.store.settlements.borrow().is_empty());
     }
 
     #[test]

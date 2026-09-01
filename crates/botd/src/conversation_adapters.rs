@@ -522,27 +522,34 @@ impl ConversationBilling for PostgresConversationBilling {
             ("reason".to_owned(), json!(request.reason)),
             ("delivered".to_owned(), json!(request.delivered)),
         ]);
+        let mut pricing_complete = true;
         if !request.billing_segments.is_empty() {
             let pricing =
                 calculate_billing_for_segments(&Value::Array(request.billing_segments.clone()))
                     .map_err(|error| error.to_string())?;
+            pricing_complete =
+                pricing.get("pricing_complete").and_then(Value::as_bool) == Some(true);
             metadata.insert(
                 "billing_segments".to_owned(),
                 Value::Array(request.billing_segments),
             );
             copy_pricing_metadata(&mut metadata, &pricing);
         }
-        let result = self
-            .repository
-            .settle_ai_operation_once(
-                request.user_id,
-                request.chat_id,
-                &operation_id,
-                request.actual_credit_units,
-                &metadata,
-            )
-            .map_err(|error| error.to_string())?;
-        if result.applied
+        let settlement_applied = if pricing_complete {
+            self.repository
+                .settle_ai_operation_once(
+                    request.user_id,
+                    request.chat_id,
+                    &operation_id,
+                    request.actual_credit_units,
+                    &metadata,
+                )
+                .map_err(|error| error.to_string())?
+                .applied
+        } else {
+            false
+        };
+        if settlement_applied
             && request.actual_credit_units == 0
             && let Some(cap_key) = self.cap_key_by_operation.get(&operation_id)
             && let Some(creditless_cap) = self.creditless_cap.as_ref()

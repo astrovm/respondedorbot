@@ -361,6 +361,8 @@ fn raw_components(metadata: &Map<String, Value>, locale: Locale) -> Vec<(String,
         };
         add(component_label.to_owned(), integer(item.get("usd_micros")));
     }
+    let mut web_count = 0_i64;
+    let mut web_micros = 0_i64;
     for item in metadata
         .get("tool_breakdown")
         .and_then(Value::as_array)
@@ -370,16 +372,23 @@ fn raw_components(metadata: &Map<String, Value>, locale: Locale) -> Vec<(String,
     {
         let tool = text(item, "tool").to_lowercase();
         let count = integer(item.get("count")).max(0);
-        let component_label = if tool == "web_search" {
-            if count > 1 {
-                format!("{} ({count}x)", label(locale, "web"))
-            } else {
-                label(locale, "web").to_owned()
-            }
+        if tool == "web_search" {
+            web_count = web_count.saturating_add(count);
+            web_micros = web_micros.saturating_add(integer(item.get("usd_micros")).max(0));
         } else {
-            label(locale, "tool").to_owned()
+            add(
+                label(locale, "tool").to_owned(),
+                integer(item.get("usd_micros")),
+            );
+        }
+    }
+    if web_micros > 0 {
+        let component_label = if web_count > 1 {
+            format!("{} ({web_count}x)", label(locale, "web"))
+        } else {
+            label(locale, "web").to_owned()
         };
-        add(component_label, integer(item.get("usd_micros")));
+        add(component_label, web_micros);
     }
     totals.retain(|(_, amount)| *amount > 0);
     totals
@@ -797,7 +806,10 @@ mod tests {
                             "charged_credit_units_total": 8,
                             "payer_scope": "user",
                             "model_breakdown": [{"kind":"chat","usd_micros":30}],
-                            "tool_breakdown": [{"tool":"web_search","count":1,"usd_micros":50}]
+                            "tool_breakdown": [
+                                {"tool":"web_search","count":1,"usd_micros":20},
+                                {"tool":"web_search","count":1,"usd_micros":30}
+                            ]
                         }),
                     }],
                 },
@@ -823,7 +835,7 @@ mod tests {
         let (text, keyboard) = render_charge_history_page(&page, 55, 2, -180, Locale::Es);
         assert_eq!(
             text,
-            "Gastos IA\n\n26/08 14:32 · 0.08 cr\n  respuesta 0.03 cr\n  web 0.05 cr\n\n26/08 13:00 · audio · 0.07 cr · grupo"
+            "Gastos IA\n\n26/08 14:32 · 0.08 cr\n  respuesta 0.03 cr\n  web (2x) 0.05 cr\n\n26/08 13:00 · audio · 0.07 cr · grupo"
         );
         let Some(keyboard) = keyboard else {
             return;
