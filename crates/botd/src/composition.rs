@@ -1346,7 +1346,7 @@ impl ConversationToolFactory for ProductionToolFactory {
     ) -> Result<Self::Tools, String> {
         let locale = input.locale;
         let chat_id = input.chat_id.0.to_string();
-        let mut toolbox = ExternalToolbox::default();
+        let mut toolbox = ExternalToolbox::new(locale);
 
         if let Some(api_key) = self.coinmarketcap_key.clone().filter(|key| !key.is_empty()) {
             let market = NativeMarketPriceSource {
@@ -1474,6 +1474,7 @@ impl ConversationToolFactory for ProductionToolFactory {
                         .map_err(|error| error.to_string())?,
                     current_unix_timestamp,
                     &chat_id,
+                    locale,
                 )),
             )
             .with_executor(
@@ -1497,10 +1498,10 @@ impl ConversationToolFactory for ProductionToolFactory {
             );
         }
 
-        Ok(NativeToolRegistry::new(StandardNativeToolBackend::new(
-            ValidatedNativeToolPorts::new(toolbox, locale),
+        Ok(NativeToolRegistry::new(
+            StandardNativeToolBackend::new(ValidatedNativeToolPorts::new(toolbox, locale), locale),
             locale,
-        )))
+        ))
     }
 }
 

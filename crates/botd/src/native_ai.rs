@@ -14,7 +14,7 @@ use bot_core::ai_reserve::{
     estimate_chat_reserve_credit_units,
 };
 use bot_core::credit_units::{CreditUnits, format_credit_units};
-use bot_core::locale::Locale;
+use bot_core::locale::{Locale, format_date};
 use bot_core::provider_config::web_search_tool;
 use bot_core::provider_pricing::{DEEPSEEK_MODEL, GEMINI_FLASH_LITE_MODEL};
 use bot_core::scheduled_tasks::ScheduledTask;
@@ -181,30 +181,32 @@ fn task_message_role(role: &str) -> ChatRole {
 }
 
 fn task_system_prompt(persona: &str, task: &ScheduledTask) -> String {
+    let locale = if task.locale == "en" {
+        Locale::En
+    } else {
+        Locale::Es
+    };
     build_system_prompt(
         persona,
-        if task.locale == "en" {
-            Locale::En
-        } else {
-            Locale::Es
-        },
-        &formatted_date(i64::from(task.timezone_offset)),
+        locale,
+        &formatted_date(i64::from(task.timezone_offset), locale),
         true,
         true,
     )
 }
 
-fn formatted_date(timezone_offset_hours: i64) -> String {
+fn formatted_date(timezone_offset_hours: i64, locale: Locale) -> String {
     let unix_seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs().min(i64::MAX as u64) as i64);
     let utc =
         DateTime::<Utc>::from_timestamp(unix_seconds, 0).unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
     let seconds = timezone_offset_hours.clamp(-23, 23).saturating_mul(3_600) as i32;
-    FixedOffset::east_opt(seconds).map_or_else(
-        || utc.format("%A %d/%m/%Y").to_string(),
-        |offset| utc.with_timezone(&offset).format("%A %d/%m/%Y").to_string(),
-    )
+    let date = FixedOffset::east_opt(seconds).map_or_else(
+        || utc.date_naive(),
+        |offset| utc.with_timezone(&offset).date_naive(),
+    );
+    format_date(date, locale)
 }
 
 pub trait TaskCreditStore {

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use bot_adapters::openrouter_chat::DEFAULT_OPENROUTER_BASE_URL;
 use bot_adapters::telegram_http::ReqwestTelegramTransport;
 use bot_adapters::telegram_polling::PollFailure;
+use bot_core::locale::Locale;
 use bot_core::telegram_commands::command_publication_actions;
 
 use crate::background::{
@@ -137,6 +138,7 @@ fn build_operational_reporter(
         admin_chat_id,
         config.instance_name.as_deref(),
         secrets,
+        Locale::Es,
     )))
 }
 

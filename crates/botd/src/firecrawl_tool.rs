@@ -7,6 +7,7 @@ use bot_core::locale::Locale;
 use serde_json::{Value, json};
 
 use crate::chat_tool_loop::ToolExecutionResult;
+use crate::tool_output;
 use crate::tool_requests::{ExternalToolExecutor, ExternalToolRequest};
 
 pub struct FirecrawlTool<Transport, Sleep> {
@@ -35,11 +36,17 @@ where
 {
     fn execute(&mut self, request: ExternalToolRequest, tool_call_id: &str) -> ToolExecutionResult {
         let ExternalToolRequest::WebSearch { query } = request else {
-            return ToolExecutionResult::output("web_search received an incompatible request");
+            return ToolExecutionResult::output(tool_output::incompatible(
+                self.locale,
+                "web_search",
+            ));
         };
         match search_with(&self.transport, &self.api_key, &query, &self.sleep) {
             Ok(outcome) => outcome_result(outcome, &query, tool_call_id, self.locale),
-            Err(error) => ToolExecutionResult::output(format!("Tool 'web_search' error: {error}")),
+            Err(error) => ToolExecutionResult::with_diagnostics(
+                tool_output::failed(self.locale, "web_search"),
+                vec![format!("web_search transport failed: {error}")],
+            ),
         }
     }
 }
@@ -95,13 +102,14 @@ fn outcome_result(
         SearchOutcome::HttpError {
             status_code,
             detail,
-        } => ToolExecutionResult::output(search_error(
-            locale,
-            &format!("Firecrawl HTTP {status_code}: {detail}"),
-        )),
-        SearchOutcome::ApiError { detail } => {
-            ToolExecutionResult::output(search_error(locale, &detail))
-        }
+        } => ToolExecutionResult::with_diagnostics(
+            search_error(locale),
+            vec![format!("Firecrawl HTTP {status_code}: {detail}")],
+        ),
+        SearchOutcome::ApiError { detail } => ToolExecutionResult::with_diagnostics(
+            search_error(locale),
+            vec![format!("Firecrawl API error: {detail}")],
+        ),
     }
 }
 
@@ -119,10 +127,10 @@ fn localized(locale: Locale, spanish: &str, english: &str) -> String {
     }
 }
 
-fn search_error(locale: Locale, detail: &str) -> String {
+fn search_error(locale: Locale) -> String {
     match locale {
-        Locale::Es => format!("Error de búsqueda: {detail}"),
-        Locale::En => format!("Search error: {detail}"),
+        Locale::Es => "Error de búsqueda: Firecrawl rechazó la solicitud.".to_owned(),
+        Locale::En => "Search error: Firecrawl rejected the request.".to_owned(),
     }
 }
 
@@ -214,14 +222,14 @@ mod tests {
                     status_code: 400,
                     body: json!({"error": "bad query"}).to_string(),
                 },
-                "Search error: Firecrawl HTTP 400: bad query",
+                "Search error: Firecrawl rejected the request.",
             ),
             (
                 HttpResponse {
                     status_code: 200,
                     body: json!({"success": false, "error": "api rejected"}).to_string(),
                 },
-                "Search error: api rejected",
+                "Search error: Firecrawl rejected the request.",
             ),
         ];
         for (response, expected) in outcomes {
@@ -234,6 +242,8 @@ mod tests {
             );
             assert_eq!(result.output, expected);
             assert!(result.billing_segment.is_none());
+            assert!(!result.output.contains("bad query"));
+            assert!(!result.output.contains("api rejected"));
         }
 
         for (error, expected) in [
@@ -275,21 +285,19 @@ mod tests {
                     "call"
                 )
                 .output,
-            "web_search received an incompatible request"
+            "tool 'web_search' received an incompatible request"
         );
         let mut tool = tool(
             vec![Err(TransportError::Other("synthetic failure".to_owned()))],
             Locale::En,
         );
-        assert_eq!(
-            tool.execute(
-                ExternalToolRequest::WebSearch {
-                    query: "q".to_owned()
-                },
-                "call"
-            )
-            .output,
-            "Tool 'web_search' error: Firecrawl transport failed: synthetic failure"
+        let result = tool.execute(
+            ExternalToolRequest::WebSearch {
+                query: "q".to_owned(),
+            },
+            "call",
         );
+        assert_eq!(result.output, "tool 'web_search' failed");
+        assert!(result.diagnostics[0].contains("synthetic failure"));
     }
 }

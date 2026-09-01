@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 use bot_adapters::telegram_actions::{ActionOutcome, execute_with};
 use bot_adapters::telegram_http::TelegramTransport;
+use bot_core::locale::Locale;
 use bot_core::telegram_actions::{SendMessage, TelegramAction};
 use bot_core::telegram_input::ChatId;
 
@@ -26,6 +27,7 @@ pub struct TelegramOperationalReporter<Transport> {
     chat_id: ChatId,
     instance_name: String,
     secrets: Vec<String>,
+    locale: Locale,
 }
 
 impl<Transport> TelegramOperationalReporter<Transport> {
@@ -36,6 +38,7 @@ impl<Transport> TelegramOperationalReporter<Transport> {
         chat_id: i64,
         instance_name: Option<&str>,
         secrets: impl IntoIterator<Item = String>,
+        locale: Locale,
     ) -> Self {
         let mut seen = HashSet::new();
         let mut secrets = secrets
@@ -49,6 +52,7 @@ impl<Transport> TelegramOperationalReporter<Transport> {
             chat_id: ChatId(chat_id),
             instance_name: instance_name.unwrap_or("unknown").to_owned(),
             secrets,
+            locale,
         }
     }
 
@@ -66,11 +70,18 @@ where
     Transport: TelegramTransport + Send + Sync + 'static,
 {
     fn report(&self, message: &str) -> Result<(), String> {
-        let text = format!(
-            "admin report from {}: {}",
-            self.instance_name,
-            self.redact(message)
-        );
+        let text = match self.locale {
+            Locale::Es => format!(
+                "informe administrativo de {}: {}",
+                self.instance_name,
+                self.redact(message)
+            ),
+            Locale::En => format!(
+                "admin report from {}: {}",
+                self.instance_name,
+                self.redact(message)
+            ),
+        };
         let action = TelegramAction::SendMessage(SendMessage::new(self.chat_id, &text));
         match execute_with(&self.transport, &self.token, action)
             .map_err(|error| error.to_string())?
@@ -78,18 +89,31 @@ where
             ActionOutcome::Completed { .. } => Ok(()),
             ActionOutcome::RateLimited {
                 retry_after_seconds,
-            } => Err(format!(
-                "admin report was rate limited (retry_after={retry_after_seconds:?})"
-            )),
+            } => Err(match self.locale {
+                Locale::Es => format!(
+                    "el informe administrativo fue limitado (retry_after={retry_after_seconds:?})"
+                ),
+                Locale::En => {
+                    format!("admin report was rate limited (retry_after={retry_after_seconds:?})")
+                }
+            }),
             ActionOutcome::Failed {
                 status_code,
                 description,
-            } => Err(format!(
-                "admin report failed with status {status_code:?}: {description}"
-            )),
-            ActionOutcome::TransportFailed(failure) => {
-                Err(format!("admin report transport failed: {failure:?}"))
-            }
+            } => Err(match self.locale {
+                Locale::Es => format!(
+                    "falló el informe administrativo con estado {status_code:?}: {description}"
+                ),
+                Locale::En => {
+                    format!("admin report failed with status {status_code:?}: {description}")
+                }
+            }),
+            ActionOutcome::TransportFailed(failure) => Err(match self.locale {
+                Locale::Es => {
+                    format!("falló el transporte del informe administrativo: {failure:?}")
+                }
+                Locale::En => format!("admin report transport failed: {failure:?}"),
+            }),
         }
     }
 }
@@ -101,6 +125,7 @@ mod tests {
     use bot_adapters::telegram_http::{
         HttpResponse, TelegramRequest, TelegramTransport, TransportFailureKind,
     };
+    use bot_core::locale::Locale;
     use serde_json::Value;
 
     use super::{OperationalReporter, TelegramOperationalReporter};
@@ -143,6 +168,7 @@ mod tests {
             -42,
             Some("test-instance"),
             ["database-secret".to_owned(), "provider-secret".to_owned()],
+            Locale::Es,
         );
         assert!(
             reporter
@@ -164,7 +190,7 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(
             text,
-            "admin report from test-instance: worker failed at [REDACTED] using [REDACTED]"
+            "informe administrativo de test-instance: worker failed at [REDACTED] using [REDACTED]"
         );
         assert!(!text.contains("database-secret"));
         assert!(!text.contains("provider-secret"));
@@ -178,6 +204,7 @@ mod tests {
             42,
             None,
             [],
+            Locale::En,
         );
         let error = reporter.report("failure");
         assert!(error.is_err());
