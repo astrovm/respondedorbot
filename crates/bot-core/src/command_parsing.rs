@@ -30,7 +30,10 @@ pub fn parse_command(message_text: &str, bot_name: &str) -> ParsedCommand {
         Some((command, remaining)) => (command, remaining.trim_start()),
         None => (trimmed, ""),
     };
-    let mut command = command_token.to_lowercase().replace(bot_name, "");
+    let normalized_bot_name = bot_name.to_lowercase();
+    let mut command = command_token
+        .to_lowercase()
+        .replace(&normalized_bot_name, "");
     if let Some(command_body) = command.strip_prefix('/')
         && !command_body.is_empty()
         && command_body
@@ -67,6 +70,12 @@ mod tests {
             ("/ask\tquestion", "@gordo", "/ask\tquestion", ""),
             ("/ask\nquestion", "@gordo", "/ask\nquestion", ""),
             ("/ASK@GORDO hi", "@gordo", "/ask", "hi"),
+            (
+                "/balance@playtimbabot",
+                "@gordo",
+                "/balance@playtimbabot",
+                "",
+            ),
         ];
 
         for (input, bot_name, command, message_text) in cases {
