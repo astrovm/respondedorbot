@@ -1452,8 +1452,12 @@ where
                     .push("invalid top-up callback chat id".to_owned());
                 return Ok(DispatchOutcome::Handled);
             };
+            let config = self
+                .config
+                .get(&context.chat_id)
+                .map_err(DispatchError::Config)?;
             let locale = resolve_locale(
-                None,
+                Some(&config.language),
                 context.user_language_code.as_deref(),
                 &context.chat_type,
             );
@@ -1785,14 +1789,14 @@ where
                 .to_lowercase()
                 .contains(&format!("@{}", bot_username.to_lowercase()));
         let reply_to_bot = message.replied_sender_username.as_deref() == Some(bot_username);
-        let command_name = command
-            .trim_start_matches('/')
-            .split('@')
-            .next()
-            .unwrap_or_default();
-        let known_command = telegram_commands(locale)
-            .iter()
-            .any(|candidate| candidate.command == command_name);
+        let command_starts_with_slash = command.starts_with('/');
+        let command_name = command.strip_prefix('/').filter(|name| !name.contains('@'));
+        let known_command = command_name.is_some_and(|command_name| {
+            command_starts_with_slash
+                && telegram_commands(locale)
+                    .iter()
+                    .any(|candidate| candidate.command == command_name)
+        });
         let reply_metadata = if reply_to_bot {
             message.replied_message_id.and_then(|reply_id| {
                 let source = self.ai_conversation_source.as_mut()?;
@@ -1810,7 +1814,7 @@ where
         };
         let mut routing = ResponseRoutingInput {
             known_command,
-            command_starts_with_slash: command.starts_with('/'),
+            command_starts_with_slash,
             message_text: prompt_text.to_owned(),
             is_private: message.chat_type.as_deref() == Some("private"),
             is_mention: mention,
@@ -4519,6 +4523,54 @@ mod tests {
             ignored.borrow()[1].reply_context.as_deref(),
             Some("Gordo (mybot): command answer")
         );
+        assert!(deliveries.borrow().is_empty());
+        assert!(dispatcher.actions.0.is_empty());
+    }
+
+    #[test]
+    fn group_ai_commands_require_a_leading_slash() {
+        let (source, (prepared, ignored, deliveries)) = ai_source(Ok(AiPreparation::silent()));
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_ai_conversation_source(Box::new(source));
+
+        let mut plain = update("che", None);
+        let IncomingEvent::Message(message) = &mut plain.event else {
+            return;
+        };
+        message.chat_type = Some("group".to_owned());
+        assert_eq!(dispatcher.dispatch(plain), Ok(DispatchOutcome::Handled));
+
+        let mut command = update("/che seguís ahí?", None);
+        let IncomingEvent::Message(message) = &mut command.event else {
+            return;
+        };
+        message.chat_type = Some("group".to_owned());
+        assert_eq!(dispatcher.dispatch(command), Ok(DispatchOutcome::Handled));
+
+        let mut other_bot = update("/balance@playtimbabot", None);
+        let IncomingEvent::Message(message) = &mut other_bot.event else {
+            return;
+        };
+        message.chat_type = Some("group".to_owned());
+        assert_eq!(dispatcher.dispatch(other_bot), Ok(DispatchOutcome::Handled));
+
+        assert_eq!(ignored.borrow().len(), 2);
+        assert_eq!(ignored.borrow()[0].message_text, "che");
+        assert_eq!(ignored.borrow()[1].command, "/balance@playtimbabot");
+        assert_eq!(prepared.borrow().len(), 1);
+        assert_eq!(prepared.borrow()[0].command, "/che");
+        assert_eq!(prepared.borrow()[0].message_text, "seguís ahí?");
         assert!(deliveries.borrow().is_empty());
         assert!(dispatcher.actions.0.is_empty());
     }
@@ -7545,7 +7597,7 @@ mod tests {
     fn topup_command_and_callback_complete_the_native_invoice_flow() {
         let config = Config {
             value: Ok(ChatConfig {
-                language: "en".to_owned(),
+                language: "es".to_owned(),
                 ..ChatConfig::default()
             }),
             chat_ids: Vec::new(),
@@ -7566,7 +7618,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(command)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert_eq!(command.text, "choose how much you want to add:");
+        assert_eq!(command.text, "elegí cuánto querés cargar:");
         assert_eq!(
             command
                 .reply_markup
@@ -7591,7 +7643,7 @@ mod tests {
                     show_alert: false,
                     ..
                 }
-            ] if payload == "topup:p50:88:en" && text == "invoice ready"
+            ] if payload == "topup:p50:88:es" && text == "listo, te dejé la factura"
         ));
     }
 
@@ -7645,7 +7697,7 @@ mod tests {
     }
 
     #[test]
-    fn topup_guards_are_native_and_do_not_load_chat_configuration() {
+    fn topup_guards_use_the_configured_chat_language() {
         let config = Config {
             value: Ok(ChatConfig::default()),
             chat_ids: Vec::new(),
@@ -7668,7 +7720,7 @@ mod tests {
             dispatcher.dispatch(callback_update("topup:p50", "private", Some("es"))),
             Ok(DispatchOutcome::Handled)
         );
-        assert!(dispatcher.config.chat_ids.is_empty());
+        assert_eq!(dispatcher.config.chat_ids, ["-42", "-42"]);
         assert!(matches!(
             dispatcher.actions.0.as_slice(),
             [

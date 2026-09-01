@@ -1,16 +1,24 @@
 //! Final normalization for text converted into a Telegram command.
 
-use std::sync::OnceLock;
+use std::{collections::HashMap, sync::OnceLock};
 
 use unicode_normalization::UnicodeNormalization;
 
 use crate::locale::Locale;
 
+fn spanish_emoji_names() -> &'static HashMap<String, String> {
+    static NAMES: OnceLock<HashMap<String, String>> = OnceLock::new();
+    NAMES.get_or_init(|| {
+        serde_json::from_str(include_str!("../data/emoji_es.json")).unwrap_or_default()
+    })
+}
+
 fn emoji_name(name: &str, value: &str, locale: Locale) -> String {
-    let localized = match (locale, value) {
-        (Locale::Es, "😄") => "cara sonriendo con ojos sonrientes",
-        (Locale::Es, "💥") => "colisión",
-        _ => name,
+    let localized = match locale {
+        Locale::Es => spanish_emoji_names()
+            .get(value)
+            .map_or("emoji", |localized| localized.trim_matches(':')),
+        Locale::En => name,
     };
     localized
         .chars()
@@ -203,7 +211,7 @@ pub fn normalize_command_text(input: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_command_text, preprocess_command_text};
+    use super::{normalize_command_text, preprocess_command_text, spanish_emoji_names};
     use crate::locale::Locale;
 
     #[test]
@@ -251,9 +259,58 @@ mod tests {
             "_cara_sonriendo_con_ojos_sonrientes_hello _cara_sonriendo_con_ojos_sonrientes_ world"
         );
         assert_eq!(
+            preprocess_command_text("culo ❤️", Locale::Es),
+            "culo _corazón_rojo_"
+        );
+        assert_eq!(
+            normalize_command_text(&preprocess_command_text("culo ❤️", Locale::Es)),
+            Some("/CULO_CORAZON_ROJO".to_owned())
+        );
+        assert_eq!(
             preprocess_command_text("もうすぐです", Locale::Es),
             "mousugudesu"
         );
         assert_eq!(preprocess_command_text("ｶﾀｶﾅ", Locale::Es), "katakana");
+    }
+
+    #[test]
+    fn spanish_emoji_names_cover_unicode_seventeen_without_english_fallbacks() {
+        let cases = [
+            ("❤️", "_corazón_rojo_"),
+            ("🇦🇷", "_bandera_argentina_"),
+            (
+                "👩🏽‍💻",
+                "_profesional_de_la_tecnología_mujer_tono_de_piel_medio_",
+            ),
+            ("🪉", "_arpa_"),
+            ("🫆", "_huella_dactilar_"),
+        ];
+        for (emoji, expected) in cases {
+            assert_eq!(preprocess_command_text(emoji, Locale::Es), expected);
+        }
+
+        let missing = emojis::iter()
+            .filter(|emoji| !spanish_emoji_names().contains_key(emoji.as_str()))
+            .map(emojis::Emoji::as_str)
+            .collect::<Vec<_>>();
+        assert!(
+            missing.is_empty(),
+            "Spanish names are missing for recognized emoji: {missing:?}"
+        );
+        assert!(spanish_emoji_names().len() >= 5_000);
+        let unsupported_non_components = spanish_emoji_names()
+            .keys()
+            .filter(|emoji| emojis::get(emoji).is_none())
+            .filter(|emoji| {
+                !matches!(
+                    emoji.as_str(),
+                    "🏻" | "🏼" | "🏽" | "🏾" | "🏿" | "🦰" | "🦱" | "🦳" | "🦲"
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            unsupported_non_components.is_empty(),
+            "Spanish names contain unsupported emoji: {unsupported_non_components:?}"
+        );
     }
 }
