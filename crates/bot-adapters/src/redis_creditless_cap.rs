@@ -7,8 +7,31 @@ use crate::redis_connection::{RedisEndpoint, RedisPool, pool};
 pub const CREDITLESS_CAP_TTL_SECONDS: i64 = 3_600;
 
 const REFUND_MARKER_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
-const INCREMENT_SCRIPT: &str = "local count = redis.call('INCR', KEYS[1]); if count == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end; local ttl = redis.call('TTL', KEYS[1]); if ttl > 0 then redis.call('SET', KEYS[2], '1', 'EX', ttl) end; return count";
-const REFUND_ONCE_SCRIPT: &str = "if redis.call('SET', KEYS[3], '1', 'EX', ARGV[1], 'NX') then if redis.call('DEL', KEYS[2]) == 1 and redis.call('EXISTS', KEYS[1]) == 1 then redis.call('DECR', KEYS[1]) end; return 1 end; return 0";
+const ADMIT_ONCE_SCRIPT: &str = r#"
+local existing = redis.call('GET', KEYS[2])
+if existing then
+    return tonumber(existing)
+end
+redis.call('DEL', KEYS[3])
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+local ttl = redis.call('TTL', KEYS[1])
+if ttl > 0 then
+    redis.call('SET', KEYS[2], count, 'EX', ttl)
+end
+return count
+"#;
+const REFUND_ONCE_SCRIPT: &str = r#"
+if redis.call('SET', KEYS[3], '1', 'EX', ARGV[1], 'NX') then
+    if redis.call('DEL', KEYS[2]) == 1 and redis.call('EXISTS', KEYS[1]) == 1 then
+        redis.call('DECR', KEYS[1])
+    end
+    return 1
+end
+return 0
+"#;
 
 #[derive(Debug, Error)]
 pub enum RedisCreditlessCapError {
@@ -29,7 +52,7 @@ impl RedisCreditlessCap {
         })
     }
 
-    pub fn increment(
+    pub fn admit_once(
         &self,
         key: &str,
         operation_id: &str,
@@ -41,10 +64,11 @@ impl RedisCreditlessCap {
             .ok_or(RedisCreditlessCapError::InvalidTtl)?;
         let mut connection = self.client.get_connection()?;
         Ok(redis::cmd("EVAL")
-            .arg(INCREMENT_SCRIPT)
-            .arg(2)
+            .arg(ADMIT_ONCE_SCRIPT)
+            .arg(3)
             .arg(key)
             .arg(operation_key(operation_id))
+            .arg(refund_key(operation_id))
             .arg(ttl_seconds)
             .query(&mut connection)?)
     }
@@ -105,7 +129,7 @@ mod tests {
     }
 
     #[test]
-    fn first_increment_sets_expiry_and_later_increment_keeps_it()
+    fn admission_is_idempotent_and_keeps_the_original_expiry()
     -> Result<(), Box<dyn Error + Send + Sync>> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let port = listener.local_addr()?.port();
@@ -114,7 +138,7 @@ mod tests {
             stream.set_read_timeout(Some(Duration::from_secs(2)))?;
             let first = read_command(&mut stream)?;
             assert_eq!(first.first().map(String::as_str), Some("EVAL"));
-            assert_eq!(first.get(2).map(String::as_str), Some("2"));
+            assert_eq!(first.get(2).map(String::as_str), Some("3"));
             assert_eq!(
                 first.get(3).map(String::as_str),
                 Some("creditless_cap:-42:7")
@@ -123,11 +147,22 @@ mod tests {
                 first.get(4).map(String::as_str),
                 Some("creditless_cap_operation:ai:42:7:first")
             );
-            assert_eq!(first.get(5).map(String::as_str), Some("3600"));
+            assert_eq!(
+                first.get(5).map(String::as_str),
+                Some("creditless_cap_refund:ai:42:7:first")
+            );
+            assert_eq!(first.get(6).map(String::as_str), Some("3600"));
+            stream.write_all(b":1\r\n")?;
+            let replay = read_command(&mut stream)?;
+            assert_eq!(replay.first().map(String::as_str), Some("EVAL"));
+            assert_eq!(
+                replay.get(4).map(String::as_str),
+                Some("creditless_cap_operation:ai:42:7:first")
+            );
             stream.write_all(b":1\r\n")?;
             let second = read_command(&mut stream)?;
             assert_eq!(second.first().map(String::as_str), Some("EVAL"));
-            assert_eq!(second.get(2).map(String::as_str), Some("2"));
+            assert_eq!(second.get(2).map(String::as_str), Some("3"));
             assert_eq!(
                 second.get(4).map(String::as_str),
                 Some("creditless_cap_operation:ai:42:7:second")
@@ -160,11 +195,15 @@ mod tests {
             password: None,
         })?;
         assert_eq!(
-            cap.increment("creditless_cap:-42:7", "ai:42:7:first", 3_600)?,
+            cap.admit_once("creditless_cap:-42:7", "ai:42:7:first", 3_600)?,
             1
         );
         assert_eq!(
-            cap.increment("creditless_cap:-42:7", "ai:42:7:second", 3_600)?,
+            cap.admit_once("creditless_cap:-42:7", "ai:42:7:first", 3_600)?,
+            1
+        );
+        assert_eq!(
+            cap.admit_once("creditless_cap:-42:7", "ai:42:7:second", 3_600)?,
             2
         );
         assert!(cap.refund_once("creditless_cap:-42:7", "ai:42:7:first")?);
@@ -184,7 +223,7 @@ mod tests {
             password: None,
         })?;
         assert!(matches!(
-            cap.increment("creditless_cap:-42:7", "ai:42:7", 0),
+            cap.admit_once("creditless_cap:-42:7", "ai:42:7", 0),
             Err(RedisCreditlessCapError::InvalidTtl)
         ));
         Ok(())

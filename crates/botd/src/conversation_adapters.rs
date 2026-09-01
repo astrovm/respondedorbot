@@ -468,42 +468,40 @@ impl ConversationBilling for PostgresConversationBilling {
                 .get("origin_chat_id")
                 .map_or_else(|| chat_id.to_string(), value_as_key_component);
             let cap_key = creditless_cap_key(&origin_chat_id, request.user_id);
-            if result.applied {
-                let count = creditless_cap
-                    .increment(&cap_key, &request.operation_id, CREDITLESS_CAP_TTL_SECONDS)
-                    .map_err(|error| error.to_string())?;
-                if count > request.creditless_user_hourly_limit {
-                    let mut refund_metadata = request.metadata.clone();
-                    refund_metadata.insert("reason".to_owned(), json!("creditless_hourly_cap"));
-                    refund_metadata
-                        .insert("settlement_id".to_owned(), json!(&request.reservation_id));
-                    let refund_id = format!("{}:creditless_cap_refund", request.reservation_id);
-                    let refund = self
-                        .repository
-                        .refund_ai_charge(
-                            request.user_id,
-                            request.chat_id,
-                            amount,
-                            "chat",
-                            "ai_refund",
-                            &refund_metadata,
-                            Some(&refund_id),
-                            &request.operation_id,
-                        )
-                        .map_err(|error| error.to_string())?;
-                    return Ok(ReserveDecision {
-                        authorized: false,
-                        user_balance: refund.user_balance,
-                        chat_balance: refund.chat_balance,
-                        source,
-                        denial: Some(ReserveDenial::CreditlessHourlyCap {
-                            limit: request.creditless_user_hourly_limit,
-                        }),
-                    });
-                }
-            }
             self.cap_key_by_operation
-                .insert(request.operation_id.clone(), cap_key);
+                .insert(request.operation_id.clone(), cap_key.clone());
+            let count = creditless_cap
+                .admit_once(&cap_key, &request.operation_id, CREDITLESS_CAP_TTL_SECONDS)
+                .map_err(|error| error.to_string())?;
+            if count > request.creditless_user_hourly_limit {
+                let mut refund_metadata = request.metadata.clone();
+                refund_metadata.insert("reason".to_owned(), json!("creditless_hourly_cap"));
+                refund_metadata.insert("settlement_id".to_owned(), json!(&request.reservation_id));
+                let refund_id = format!("{}:creditless_cap_refund", request.reservation_id);
+                let refund = self
+                    .repository
+                    .refund_ai_charge(
+                        request.user_id,
+                        request.chat_id,
+                        amount,
+                        "chat",
+                        "ai_refund",
+                        &refund_metadata,
+                        Some(&refund_id),
+                        &request.operation_id,
+                    )
+                    .map_err(|error| error.to_string())?;
+                self.release_operation_state(&request.operation_id);
+                return Ok(ReserveDecision {
+                    authorized: false,
+                    user_balance: refund.user_balance,
+                    chat_balance: refund.chat_balance,
+                    source,
+                    denial: Some(ReserveDenial::CreditlessHourlyCap {
+                        limit: request.creditless_user_hourly_limit,
+                    }),
+                });
+            }
         }
 
         if result.ok
