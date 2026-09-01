@@ -1,8 +1,9 @@
 //! Production adapters for the native media pipeline.
 
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use bot_adapters::media_provider::{
@@ -14,8 +15,8 @@ use bot_adapters::openrouter_chat::{OpenRouterTransport, ReqwestOpenRouterTransp
 use bot_adapters::redis_connection::RedisEndpoint;
 use bot_adapters::redis_media_cache::{cache_media, get_cached_media};
 use bot_adapters::telegram_http::{
-    TelegramFileOutcome, TelegramFileTransport, TelegramHttpOutcome, TelegramTransport,
-    download_file_with, request_with,
+    TELEGRAM_FILE_MAX_BYTES, TelegramFileOutcome, TelegramFileTransport, TelegramHttpOutcome,
+    TelegramTransport, download_file_with, request_with,
 };
 use bot_core::provider_errors::{ProviderErrorFacts, classify_provider_error};
 use serde_json::{Value, json};
@@ -27,6 +28,9 @@ use crate::media::{
 
 const MEDIA_CACHE_TTL_SECONDS: i64 = 7 * 24 * 60 * 60;
 const TELEGRAM_FILE_TIMEOUT_SECONDS: u64 = 30;
+const MEDIA_PROCESS_TIMEOUT: Duration = Duration::from_secs(60);
+const MEDIA_PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const MEDIA_PROCESS_OUTPUT_MAX_BYTES: u64 = 20_000_000;
 
 pub struct TelegramMediaFiles<Transport> {
     transport: Transport,
@@ -136,6 +140,33 @@ impl Default for FfmpegMediaProcessor {
 
 impl FfmpegMediaProcessor {
     fn run(program: &str, arguments: &[String], input: &[u8]) -> Result<Vec<u8>, String> {
+        Self::run_bounded(
+            program,
+            arguments,
+            input,
+            MEDIA_PROCESS_TIMEOUT,
+            TELEGRAM_FILE_MAX_BYTES,
+            MEDIA_PROCESS_OUTPUT_MAX_BYTES,
+        )
+    }
+
+    fn run_bounded(
+        program: &str,
+        arguments: &[String],
+        input: &[u8],
+        timeout: Duration,
+        max_input_bytes: u64,
+        max_output_bytes: u64,
+    ) -> Result<Vec<u8>, String> {
+        if input.len() as u64 > max_input_bytes {
+            return Err("media input exceeds the size limit".to_owned());
+        }
+        if timeout.is_zero() {
+            return Err("media process timeout must be positive".to_owned());
+        }
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| "media process timeout is too large".to_owned())?;
         let mut child = Command::new(program)
             .args(arguments)
             .stdin(Stdio::piped())
@@ -144,18 +175,67 @@ impl FfmpegMediaProcessor {
             .spawn()
             .map_err(|error| error.to_string())?;
         let Some(mut stdin) = child.stdin.take() else {
+            Self::terminate(&mut child);
             return Err("media process did not expose stdin".to_owned());
         };
-        stdin.write_all(input).map_err(|error| error.to_string())?;
-        drop(stdin);
-        let output = child
-            .wait_with_output()
-            .map_err(|error| error.to_string())?;
-        if output.status.success() && !output.stdout.is_empty() {
-            Ok(output.stdout)
-        } else {
-            Err(format!("{program} could not process media"))
-        }
+        let Some(stdout) = child.stdout.take() else {
+            Self::terminate(&mut child);
+            return Err("media process did not expose stdout".to_owned());
+        };
+        thread::scope(|scope| {
+            let writer = scope.spawn(move || {
+                let result = stdin.write_all(input).map_err(|error| error.to_string());
+                drop(stdin);
+                result
+            });
+            let reader = scope.spawn(move || {
+                let mut output = Vec::new();
+                stdout
+                    .take(max_output_bytes.saturating_add(1))
+                    .read_to_end(&mut output)
+                    .map_err(|error| error.to_string())?;
+                if output.len() as u64 > max_output_bytes {
+                    return Err("media process output exceeds the size limit".to_owned());
+                }
+                Ok(output)
+            });
+
+            let status = loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break Ok(status),
+                    Ok(None) if Instant::now() < deadline => {
+                        thread::sleep(MEDIA_PROCESS_POLL_INTERVAL);
+                    }
+                    Ok(None) => {
+                        Self::terminate(&mut child);
+                        break Err(format!("{program} timed out while processing media"));
+                    }
+                    Err(error) => {
+                        Self::terminate(&mut child);
+                        break Err(error.to_string());
+                    }
+                }
+            };
+
+            let write_result = writer
+                .join()
+                .map_err(|_| "media input writer panicked".to_owned())?;
+            let output = reader
+                .join()
+                .map_err(|_| "media output reader panicked".to_owned())??;
+            let status = status?;
+            write_result?;
+            if status.success() && !output.is_empty() {
+                Ok(output)
+            } else {
+                Err(format!("{program} could not process media"))
+            }
+        })
+    }
+
+    fn terminate(child: &mut std::process::Child) {
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     fn duration(&self, input: &[u8]) -> Option<f64> {
@@ -618,6 +698,68 @@ mod tests {
     fn duration_parser_rejects_empty_and_non_finite_values() {
         let processor = FfmpegMediaProcessor::default();
         assert_eq!(processor.duration(b"not media"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn media_process_drains_output_while_writing_input() -> Result<(), String> {
+        let size = 2 * 1024 * 1024;
+        let output = FfmpegMediaProcessor::run_bounded(
+            "sh",
+            &[
+                "-c".to_owned(),
+                format!("head -c {size} /dev/zero; cat >/dev/null"),
+            ],
+            &vec![1; size],
+            Duration::from_secs(5),
+            size as u64,
+            size as u64,
+        )?;
+        assert_eq!(output.len(), size);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn media_process_kills_timed_out_children() {
+        let started = Instant::now();
+        let result = FfmpegMediaProcessor::run_bounded(
+            "sh",
+            &["-c".to_owned(), "while :; do :; done".to_owned()],
+            &[],
+            Duration::from_millis(50),
+            1,
+            1,
+        );
+        assert!(matches!(result, Err(ref error) if error.contains("timed out")));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn media_process_rejects_oversized_input_and_output() {
+        assert_eq!(
+            FfmpegMediaProcessor::run_bounded(
+                "unused",
+                &[],
+                &[0; 17],
+                Duration::from_secs(1),
+                16,
+                16,
+            ),
+            Err("media input exceeds the size limit".to_owned())
+        );
+        assert_eq!(
+            FfmpegMediaProcessor::run_bounded(
+                "sh",
+                &["-c".to_owned(), "head -c 1024 /dev/zero".to_owned()],
+                &[],
+                Duration::from_secs(1),
+                16,
+                16,
+            ),
+            Err("media process output exceeds the size limit".to_owned())
+        );
     }
 
     #[test]
