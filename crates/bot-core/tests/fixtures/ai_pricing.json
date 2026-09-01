@@ -8,12 +8,12 @@
         "usage": {"input_tokens": 1000, "input_cached_tokens": 900, "output_tokens": 500}
       }],
       "expected": {
-        "raw_usd_micros": 59,
-        "raw_usd_micros_exact": "59.3",
+        "raw_usd_micros": 96,
+        "raw_usd_micros_exact": "96.7",
         "charged_credit_units": 2,
         "pricing_complete": true,
         "pricing_basis": "published_rate",
-        "model_usd_micros": 59
+        "model_usd_micros": 96
       }
     },
     {
@@ -32,7 +32,7 @@
       }
     },
     {
-      "name": "upstream_cost_precedes_gateway_cost",
+      "name": "byok_upstream_and_gateway_costs_are_combined",
       "segments": [{
         "kind": "chat",
         "model": "deepseek/deepseek-v4-flash-0731",
@@ -40,12 +40,12 @@
         "metadata": {"provider": "openrouter"}
       }],
       "expected": {
-        "raw_usd_micros": 104,
-        "raw_usd_micros_exact": "104.42124000000",
+        "raw_usd_micros": 105,
+        "raw_usd_micros_exact": "105.42124000000",
         "charged_credit_units": 3,
         "pricing_complete": true,
         "pricing_basis": "provider_reported",
-        "model_usd_micros": 104
+        "model_usd_micros": 105
       }
     },
     {
@@ -69,7 +69,7 @@
       "name": "gemini_cache_audio_and_write_rates",
       "segments": [{
         "kind": "vision",
-        "model": "google/gemini-3.1-flash-lite-preview",
+        "model": "google/gemini-3.1-flash-lite",
         "usage": {
           "prompt_tokens": 1000,
           "completion_tokens": 100,

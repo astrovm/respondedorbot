@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::time::Duration;
 
+use bot_core::provider_pricing::openrouter_price_ceiling;
 use bot_core::provider_stream_policy::StreamToolCallFragment;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
@@ -84,6 +85,18 @@ impl ChatMessage {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ProviderMaxPrice {
+    pub prompt: f64,
+    pub completion: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ProviderPreferences {
+    pub sort: &'static str,
+    pub max_price: ProviderMaxPrice,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
@@ -93,18 +106,27 @@ pub struct ChatCompletionRequest {
     pub max_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderPreferences>,
     pub stream: bool,
 }
 
 impl ChatCompletionRequest {
     #[must_use]
     pub fn new(model: impl Into<String>, messages: Vec<ChatMessage>) -> Self {
+        let model = model.into();
+        let provider =
+            openrouter_price_ceiling(&model).map(|(prompt, completion)| ProviderPreferences {
+                sort: "price",
+                max_price: ProviderMaxPrice { prompt, completion },
+            });
         Self {
-            model: model.into(),
+            model,
             messages,
             tools: Vec::new(),
             max_tokens: None,
             temperature: None,
+            provider,
             stream: false,
         }
     }
@@ -721,6 +743,7 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
 
+    use bot_core::provider_pricing::DEEPSEEK_MODEL;
     use serde_json::{Value, json};
 
     use super::{
@@ -780,6 +803,20 @@ mod tests {
                 ChatMessage::text(ChatRole::User, "synthetic question"),
             ],
         )
+    }
+
+    #[test]
+    fn known_models_are_routed_with_the_reserved_price_ceiling() {
+        let request = ChatCompletionRequest::new(DEEPSEEK_MODEL, Vec::new());
+        let body = serde_json::to_value(request).unwrap_or(Value::Null);
+        assert_eq!(body["provider"]["sort"], "price");
+        assert_eq!(body["provider"]["max_price"]["prompt"], 0.05);
+        assert_eq!(body["provider"]["max_price"]["completion"], 0.16);
+
+        let unknown =
+            serde_json::to_value(ChatCompletionRequest::new("synthetic/model", Vec::new()))
+                .unwrap_or(Value::Null);
+        assert!(unknown.get("provider").is_none());
     }
 
     #[test]

@@ -2,14 +2,15 @@
 
 use thiserror::Error;
 
+use crate::provider_pricing::{
+    CREDIT_UNIT_USD_MICROS, DEEPSEEK_MODEL, FIRECRAWL_SEARCH_MAX_CREDITS,
+    FIRECRAWL_STANDARD_USD_MICROS_PER_CREDIT, GROQ_TRANSCRIPTION_MIN_SECONDS,
+    GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR, TokenPricing, reservation_token_pricing,
+};
+
 pub const CHAT_OUTPUT_TOKEN_LIMIT: i64 = 1_024;
 pub const REASONING_CHAT_OUTPUT_TOKEN_LIMIT: i64 = 8_192;
 pub const VISION_OUTPUT_TOKEN_LIMIT: i64 = 512;
-const CREDIT_UNIT_USD_MICROS: i128 = 50;
-const FIRECRAWL_SEARCH_MAX_CREDITS: i128 = 2;
-const FIRECRAWL_USD_MICROS_PER_CREDIT: i128 = 830;
-const DEEPSEEK_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
-const GEMINI_MODEL: &str = "google/gemini-3.1-flash-lite-preview";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenEstimateValue {
@@ -35,12 +36,6 @@ pub enum ReserveEstimateError {
     NonFiniteAudioDuration,
     #[error("AI model does not define token pricing")]
     MissingTokenPricing,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct TokenPricing {
-    input_per_million: i128,
-    output_per_million: i128,
 }
 
 #[must_use]
@@ -168,7 +163,10 @@ pub fn estimate_transcription_reserve_credit_units(
     if seconds <= 0.0 {
         return Ok(1);
     }
-    let usd_micros = (seconds.max(10.0) * 111_000.0 / 3_600.0).ceil();
+    let usd_micros = (seconds.max(GROQ_TRANSCRIPTION_MIN_SECONDS)
+        * GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR
+        / 3_600.0)
+        .ceil();
     if usd_micros > i128::MAX as f64 {
         return Err(ReserveEstimateError::Overflow);
     }
@@ -177,7 +175,7 @@ pub fn estimate_transcription_reserve_credit_units(
 
 pub fn estimate_firecrawl_reserve_credit_units() -> Result<i64, ReserveEstimateError> {
     Ok(credit_units_from_usd_micros(
-        FIRECRAWL_SEARCH_MAX_CREDITS * FIRECRAWL_USD_MICROS_PER_CREDIT,
+        FIRECRAWL_SEARCH_MAX_CREDITS * FIRECRAWL_STANDARD_USD_MICROS_PER_CREDIT,
     )?
     .max(1))
 }
@@ -194,41 +192,17 @@ pub fn credit_units_from_usd_micros(usd_micros: i128) -> Result<i64, ReserveEsti
 }
 
 fn chat_pricing(model: &str) -> Result<TokenPricing, ReserveEstimateError> {
-    match model {
-        GEMINI_MODEL => Ok(TokenPricing {
-            input_per_million: 250_000,
-            output_per_million: 1_500_000,
-        }),
-        "whisper-large-v3" | "groq/whisper-large-v3" => {
-            Err(ReserveEstimateError::MissingTokenPricing)
-        }
-        _ => Ok(TokenPricing {
-            input_per_million: 30_000,
-            output_per_million: 100_000,
-        }),
-    }
+    reservation_token_pricing(model).ok_or(ReserveEstimateError::MissingTokenPricing)
 }
 
 fn vision_pricing(model: &str) -> Result<TokenPricing, ReserveEstimateError> {
-    if model == DEEPSEEK_MODEL {
-        Ok(TokenPricing {
-            input_per_million: 30_000,
-            output_per_million: 100_000,
-        })
-    } else if matches!(model, "whisper-large-v3" | "groq/whisper-large-v3") {
-        Err(ReserveEstimateError::MissingTokenPricing)
-    } else {
-        Ok(TokenPricing {
-            input_per_million: 250_000,
-            output_per_million: 1_500_000,
-        })
-    }
+    reservation_token_pricing(model).ok_or(ReserveEstimateError::MissingTokenPricing)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        EstimatedMessage, TokenEstimateValue, chat_output_token_limit,
+        EstimatedMessage, ReserveEstimateError, TokenEstimateValue, chat_output_token_limit,
         credit_units_from_usd_micros, estimate_chat_reserve_credit_units,
         estimate_firecrawl_reserve_credit_units, estimate_message_tokens, estimate_nested_tokens,
         estimate_text_tokens, estimate_transcription_reserve_credit_units,
@@ -283,7 +257,7 @@ mod tests {
                 0,
                 "deepseek/deepseek-v4-flash-0731",
             ),
-            Ok(17)
+            Ok(27)
         );
     }
 
@@ -310,9 +284,13 @@ mod tests {
                 100,
                 0,
                 512,
-                "google/gemini-3.1-flash-lite-preview",
+                "google/gemini-3.1-flash-lite",
             ),
             Ok(16)
+        );
+        assert_eq!(
+            estimate_chat_reserve_credit_units(None, &[], None, 0, "unknown/model"),
+            Err(ReserveEstimateError::MissingTokenPricing)
         );
     }
 }

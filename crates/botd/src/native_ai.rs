@@ -16,6 +16,7 @@ use bot_core::ai_reserve::{
 use bot_core::credit_units::{CreditUnits, format_credit_units};
 use bot_core::locale::Locale;
 use bot_core::provider_config::web_search_tool;
+use bot_core::provider_pricing::{DEEPSEEK_MODEL, GEMINI_FLASH_LITE_MODEL};
 use bot_core::scheduled_tasks::ScheduledTask;
 use bot_core::telegram_actions::{SendMessage, TelegramAction};
 use bot_core::telegram_input::ChatId;
@@ -29,10 +30,10 @@ use crate::task_executor::{
     TaskReserveOutcome, build_task_messages,
 };
 
-pub const PRIMARY_CHAT_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
-pub const VISION_MODEL: &str = "google/gemini-3.1-flash-lite-preview";
+pub const PRIMARY_CHAT_MODEL: &str = DEEPSEEK_MODEL;
+pub const VISION_MODEL: &str = GEMINI_FLASH_LITE_MODEL;
 pub const GROQ_TRANSCRIPTION_MODEL: &str = "whisper-large-v3";
-pub const OPENROUTER_TRANSCRIPTION_MODEL: &str = "google/gemini-3.1-flash-lite-preview";
+pub const OPENROUTER_TRANSCRIPTION_MODEL: &str = GEMINI_FLASH_LITE_MODEL;
 const SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE: i64 = 4_000;
 const WEB_SEARCH_MAX_RESULTS: i64 = 5;
 const WEB_SEARCH_MAX_USES: i64 = 3;
