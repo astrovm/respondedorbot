@@ -257,7 +257,7 @@ mod tests {
                 0,
                 "deepseek/deepseek-v4-flash-0731",
             ),
-            Ok(27)
+            Ok(46)
         );
     }
 

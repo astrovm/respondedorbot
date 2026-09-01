@@ -307,6 +307,9 @@ fn reported_cost(usage: &Map<String, Value>) -> Result<Option<ExactDecimal>, AiP
         .map(|cost| cost.multiply_integer(1_000_000))
         .transpose()?
         .filter(|cost| cost.is_positive());
+    if gateway_cost.is_some() {
+        return Ok(gateway_cost);
+    }
     let upstream_cost = if let Some(cost_details) = object(usage.get("cost_details"))
         && let Some(raw_cost) = cost_details.get("upstream_inference_cost")
         && let Some(cost) = ExactDecimal::parse(raw_cost)
@@ -316,11 +319,7 @@ fn reported_cost(usage: &Map<String, Value>) -> Result<Option<ExactDecimal>, AiP
     } else {
         None
     };
-    match (upstream_cost, gateway_cost) {
-        (Some(upstream), Some(gateway)) => Ok(Some(upstream.add(gateway)?)),
-        (Some(upstream), None) => Ok(Some(upstream)),
-        (None, gateway) => Ok(gateway),
-    }
+    Ok(upstream_cost)
 }
 
 /// Return the local input and cached-input rates used by admin cache reports.

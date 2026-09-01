@@ -32,7 +32,7 @@
       }
     },
     {
-      "name": "byok_upstream_and_gateway_costs_are_combined",
+      "name": "openrouter_total_cost_is_not_added_to_its_upstream_component",
       "segments": [{
         "kind": "chat",
         "model": "deepseek/deepseek-v4-flash-0731",
@@ -40,12 +40,29 @@
         "metadata": {"provider": "openrouter"}
       }],
       "expected": {
-        "raw_usd_micros": 105,
-        "raw_usd_micros_exact": "105.42124000000",
+        "raw_usd_micros": 1,
+        "raw_usd_micros_exact": "1.000000",
+        "charged_credit_units": 1,
+        "pricing_complete": true,
+        "pricing_basis": "provider_reported",
+        "model_usd_micros": 1
+      }
+    },
+    {
+      "name": "openrouter_upstream_cost_is_used_when_total_cost_is_missing",
+      "segments": [{
+        "kind": "chat",
+        "model": "deepseek/deepseek-v4-flash-0731",
+        "usage": {"cost_details": {"upstream_inference_cost": "0.00010442124"}},
+        "metadata": {"provider": "openrouter"}
+      }],
+      "expected": {
+        "raw_usd_micros": 104,
+        "raw_usd_micros_exact": "104.42124000000",
         "charged_credit_units": 3,
         "pricing_complete": true,
         "pricing_basis": "provider_reported",
-        "model_usd_micros": 105
+        "model_usd_micros": 104
       }
     },
     {

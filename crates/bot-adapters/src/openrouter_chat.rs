@@ -92,7 +92,6 @@ pub struct ProviderMaxPrice {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProviderPreferences {
-    pub sort: &'static str,
     pub max_price: ProviderMaxPrice,
 }
 
@@ -117,7 +116,6 @@ impl ChatCompletionRequest {
         let model = model.into();
         let provider =
             openrouter_price_ceiling(&model).map(|(prompt, completion)| ProviderPreferences {
-                sort: "price",
                 max_price: ProviderMaxPrice { prompt, completion },
             });
         Self {
@@ -809,9 +807,9 @@ mod tests {
     fn known_models_are_routed_with_the_reserved_price_ceiling() {
         let request = ChatCompletionRequest::new(DEEPSEEK_MODEL, Vec::new());
         let body = serde_json::to_value(request).unwrap_or(Value::Null);
-        assert_eq!(body["provider"]["sort"], "price");
-        assert_eq!(body["provider"]["max_price"]["prompt"], 0.05);
-        assert_eq!(body["provider"]["max_price"]["completion"], 0.16);
+        assert!(body["provider"].get("sort").is_none());
+        assert_eq!(body["provider"]["max_price"]["prompt"], 0.13);
+        assert_eq!(body["provider"]["max_price"]["completion"], 0.28);
 
         let unknown =
             serde_json::to_value(ChatCompletionRequest::new("synthetic/model", Vec::new()))

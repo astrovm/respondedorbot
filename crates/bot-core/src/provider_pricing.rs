@@ -30,6 +30,16 @@ const DEEPSEEK_PRICING: TokenPricing = TokenPricing {
     output_per_million: 160_000,
 };
 
+// Keep reservations above the cheapest advertised route so OpenRouter can
+// fail over across several providers without spending more than the hold.
+const DEEPSEEK_RESERVATION_PRICING: TokenPricing = TokenPricing {
+    input_per_million: 130_000,
+    cached_input_per_million: Some(13_000),
+    cache_write_per_million: None,
+    audio_input_per_million: None,
+    output_per_million: 280_000,
+};
+
 const GEMINI_FLASH_LITE_PRICING: TokenPricing = TokenPricing {
     input_per_million: 250_000,
     cached_input_per_million: Some(25_000),
@@ -66,7 +76,7 @@ pub fn published_token_pricing(provider: &str, model: &str) -> Option<TokenPrici
 #[must_use]
 pub fn reservation_token_pricing(model: &str) -> Option<TokenPricing> {
     match base_model(model) {
-        DEEPSEEK_MODEL => Some(DEEPSEEK_PRICING),
+        DEEPSEEK_MODEL => Some(DEEPSEEK_RESERVATION_PRICING),
         GEMINI_FLASH_LITE_MODEL => Some(GEMINI_FLASH_LITE_PRICING),
         _ => None,
     }
@@ -98,5 +108,6 @@ mod tests {
         }
         assert!(reservation_token_pricing("unknown/model").is_none());
         assert!(openrouter_price_ceiling("unknown/model").is_none());
+        assert_eq!(openrouter_price_ceiling(DEEPSEEK_MODEL), Some((0.13, 0.28)));
     }
 }
