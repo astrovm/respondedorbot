@@ -86,21 +86,22 @@ where
                 last_poll_failure = Some(failure.clone());
                 wait(retry_delay(&failure));
             }
+            Ok(StepOutcome::HandlerFailures {
+                retrying,
+                quarantined,
+            }) => {
+                last_poll_failure = None;
+                for failure in retrying {
+                    report_handler_failure(failure.update_id, &failure.error);
+                }
+                for failure in quarantined {
+                    report_handler_failure(
+                        failure.update_id,
+                        &format!("quarantined after repeated failures: {}", failure.error),
+                    );
+                }
+            }
             Ok(StepOutcome::Idle | StepOutcome::Dispatched { .. }) => last_poll_failure = None,
-            Err(RuntimeError::Handler {
-                update_id,
-                handler_error,
-            }) => {
-                last_poll_failure = None;
-                report_handler_failure(update_id, &handler_error.to_string());
-            }
-            Err(RuntimeError::BackgroundHandler {
-                update_id,
-                handler_error,
-            }) => {
-                last_poll_failure = None;
-                report_handler_failure(update_id, &handler_error);
-            }
             Err(error @ RuntimeError::Poll(_)) => return Err(error.to_string()),
         }
     }
@@ -391,7 +392,8 @@ mod tests {
         let handled = Rc::new(RefCell::new(Vec::new()));
         let source = Source {
             outcomes: VecDeque::from([
-                Ok(PollOutcome::Updates(Vec::new())),
+                Ok(PollOutcome::Updates(vec![update(10), update(11)])),
+                Ok(PollOutcome::Updates(vec![update(10), update(11)])),
                 Ok(PollOutcome::Updates(vec![update(10), update(11)])),
                 Ok(PollOutcome::Updates(vec![update(12)])),
             ]),
@@ -410,7 +412,7 @@ mod tests {
             || {
                 let current = iterations.get();
                 iterations.set(current + 1);
-                current >= 3
+                current >= 4
             },
             |_| {},
             |_| {},
@@ -420,9 +422,16 @@ mod tests {
         assert_eq!(*handled.borrow(), [10, 12]);
         assert_eq!(
             *failures.borrow(),
-            [(11, "synthetic action failure".to_owned())]
+            [
+                (11, "synthetic action failure".to_owned()),
+                (11, "synthetic action failure".to_owned()),
+                (
+                    11,
+                    "quarantined after repeated failures: synthetic action failure".to_owned()
+                ),
+            ]
         );
-        assert_eq!(*offsets.borrow(), [None, None, None]);
+        assert_eq!(*offsets.borrow(), [None, None, None, Some(12)]);
         assert_eq!(runtime.offset(), Some(13));
     }
 
