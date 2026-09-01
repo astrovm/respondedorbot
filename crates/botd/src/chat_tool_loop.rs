@@ -1,0 +1,360 @@
+//! Bounded native chat/tool orchestration with durable per-round usage.
+
+use bot_adapters::openrouter_chat::{OpenRouterChatError, OpenRouterStreamTransport};
+use bot_core::ai_prompt::{PromptMessage, PromptToolCall};
+use bot_core::provider_stream_policy::StreamToolCall;
+use serde_json::{Value, json};
+use thiserror::Error;
+
+use crate::chat_provider::{ChatRoundError, ChatRoundResult, OpenRouterChatStreamer};
+
+pub const DEFAULT_MAX_TOOL_ROUNDS: usize = 5;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolExecutionResult {
+    pub output: String,
+    pub billing_segment: Option<Value>,
+    pub diagnostics: Vec<String>,
+}
+
+impl ToolExecutionResult {
+    #[must_use]
+    pub fn output(output: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+            billing_segment: None,
+            diagnostics: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_diagnostics(output: impl Into<String>, diagnostics: Vec<String>) -> Self {
+        Self {
+            output: output.into(),
+            billing_segment: None,
+            diagnostics,
+        }
+    }
+}
+
+pub trait NativeToolRuntime {
+    fn schemas(&self, task_mode: bool) -> Vec<Value>;
+
+    fn contains(&self, name: &str, task_mode: bool) -> bool;
+
+    fn execute(&mut self, name: &str, arguments: &Value, tool_call_id: &str)
+    -> ToolExecutionResult;
+}
+
+pub trait ChatRoundStream {
+    fn stream_round(
+        &self,
+        messages: &[PromptMessage],
+        tools: &[Value],
+        on_text: &mut dyn FnMut(&str) -> Result<(), OpenRouterChatError>,
+    ) -> Result<ChatRoundResult, ChatRoundError>;
+}
+
+impl<Transport: OpenRouterStreamTransport> ChatRoundStream for OpenRouterChatStreamer<Transport> {
+    fn stream_round(
+        &self,
+        messages: &[PromptMessage],
+        tools: &[Value],
+        on_text: &mut dyn FnMut(&str) -> Result<(), OpenRouterChatError>,
+    ) -> Result<ChatRoundResult, ChatRoundError> {
+        self.stream_round(messages, tools, on_text)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChatToolLoopResult {
+    pub text: String,
+    pub messages: Vec<PromptMessage>,
+    pub billing_segments: Vec<Value>,
+    pub provider_rounds: usize,
+    pub tool_calls_executed: usize,
+    pub diagnostics: Vec<String>,
+    pub stopped_at_limit: bool,
+}
+
+impl ChatToolLoopResult {
+    fn new(messages: &[PromptMessage]) -> Self {
+        Self {
+            text: String::new(),
+            messages: messages.to_vec(),
+            billing_segments: Vec::new(),
+            provider_rounds: 0,
+            tool_calls_executed: 0,
+            diagnostics: Vec::new(),
+            stopped_at_limit: false,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("native chat/tool loop failed after {provider_rounds} provider rounds: {source}")]
+pub struct ChatToolLoopError {
+    pub source: OpenRouterChatError,
+    pub partial: Box<ChatToolLoopResult>,
+    pub provider_rounds: usize,
+}
+
+pub fn run_chat_tool_loop<Provider, Tools>(
+    provider: &Provider,
+    tools: &mut Tools,
+    initial_messages: &[PromptMessage],
+    task_mode: bool,
+    max_rounds: usize,
+    mut on_text: impl FnMut(&str) -> Result<(), OpenRouterChatError>,
+) -> Result<ChatToolLoopResult, ChatToolLoopError>
+where
+    Provider: ChatRoundStream,
+    Tools: NativeToolRuntime,
+{
+    let schemas = tools.schemas(task_mode);
+    let mut result = ChatToolLoopResult::new(initial_messages);
+
+    for _ in 0..max_rounds {
+        let round = provider.stream_round(&result.messages, &schemas, &mut on_text);
+        let round = match round {
+            Ok(round) => round,
+            Err(error) => {
+                result.provider_rounds += 1;
+                record_round(&mut result, &error.partial);
+                return Err(ChatToolLoopError {
+                    source: error.source,
+                    provider_rounds: result.provider_rounds,
+                    partial: Box::new(result),
+                });
+            }
+        };
+        result.provider_rounds += 1;
+        record_round(&mut result, &round);
+
+        let known_calls = round
+            .tool_calls
+            .iter()
+            .filter(|call| tools.contains(&call.name, task_mode))
+            .cloned()
+            .collect::<Vec<_>>();
+        if known_calls.is_empty() {
+            return Ok(result);
+        }
+
+        result.messages.push(PromptMessage::assistant_tool_calls(
+            (!round.text.is_empty()).then_some(round.text.as_str()),
+            known_calls.iter().map(prompt_tool_call).collect(),
+        ));
+        for call in known_calls {
+            let arguments = parse_arguments(&call.arguments);
+            let tool_result = tools.execute(&call.name, &arguments, &call.id);
+            result.tool_calls_executed += 1;
+            if let Some(segment) = tool_result.billing_segment {
+                result.billing_segments.push(segment);
+            }
+            result.diagnostics.extend(tool_result.diagnostics);
+            result
+                .messages
+                .push(PromptMessage::tool_result(&call.id, tool_result.output));
+        }
+    }
+
+    result.stopped_at_limit = true;
+    Ok(result)
+}
+
+fn record_round(result: &mut ChatToolLoopResult, round: &ChatRoundResult) {
+    result.text.push_str(&round.text);
+    if let Some(segment) = round.billing_segment.clone() {
+        result.billing_segments.push(segment);
+    }
+}
+
+fn parse_arguments(raw: &str) -> Value {
+    serde_json::from_str(raw)
+        .ok()
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}))
+}
+
+fn prompt_tool_call(call: &StreamToolCall) -> PromptToolCall {
+    PromptToolCall {
+        id: call.id.clone(),
+        call_type: call.call_type.clone(),
+        name: call.name.clone(),
+        arguments: call.arguments.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use bot_core::ai_prompt::{PromptContent, PromptRole};
+
+    use super::*;
+
+    struct Provider {
+        rounds: RefCell<Vec<Result<ChatRoundResult, ChatRoundError>>>,
+        observed: RefCell<Vec<Vec<PromptMessage>>>,
+    }
+
+    impl ChatRoundStream for Provider {
+        fn stream_round(
+            &self,
+            messages: &[PromptMessage],
+            _tools: &[Value],
+            on_text: &mut dyn FnMut(&str) -> Result<(), OpenRouterChatError>,
+        ) -> Result<ChatRoundResult, ChatRoundError> {
+            self.observed.borrow_mut().push(messages.to_vec());
+            let round = self.rounds.borrow_mut().remove(0)?;
+            if !round.text.is_empty() {
+                on_text(&round.text).map_err(|source| ChatRoundError {
+                    source,
+                    partial: Box::new(round.clone()),
+                })?;
+            }
+            Ok(round)
+        }
+    }
+
+    #[derive(Default)]
+    struct Tools {
+        calls: Vec<(String, Value, String)>,
+    }
+
+    impl NativeToolRuntime for Tools {
+        fn schemas(&self, task_mode: bool) -> Vec<Value> {
+            vec![json!({"task_mode": task_mode})]
+        }
+
+        fn contains(&self, name: &str, _task_mode: bool) -> bool {
+            name == "calculate"
+        }
+
+        fn execute(
+            &mut self,
+            name: &str,
+            arguments: &Value,
+            tool_call_id: &str,
+        ) -> ToolExecutionResult {
+            self.calls
+                .push((name.to_owned(), arguments.clone(), tool_call_id.to_owned()));
+            ToolExecutionResult {
+                output: "4".to_owned(),
+                billing_segment: Some(json!({"kind": "tool"})),
+                diagnostics: vec!["synthetic tool diagnostic".to_owned()],
+            }
+        }
+    }
+
+    fn round(text: &str, calls: Vec<StreamToolCall>, segment: Value) -> ChatRoundResult {
+        ChatRoundResult {
+            text: text.to_owned(),
+            tool_calls: calls,
+            finish_reason: Some("tool_calls".to_owned()),
+            billing_segment: Some(segment),
+        }
+    }
+
+    fn call(name: &str, arguments: &str) -> StreamToolCall {
+        StreamToolCall {
+            index: 0,
+            id: "call-1".to_owned(),
+            call_type: "function".to_owned(),
+            name: name.to_owned(),
+            arguments: arguments.to_owned(),
+        }
+    }
+
+    #[test]
+    fn executes_known_calls_and_supplies_typed_results_to_the_next_round() {
+        let provider = Provider {
+            rounds: RefCell::new(vec![
+                Ok(round(
+                    "checking",
+                    vec![call("calculate", r#"{"expression":"2+2"}"#)],
+                    json!({"round": 1}),
+                )),
+                Ok(round("answer", Vec::new(), json!({"round": 2}))),
+            ]),
+            observed: RefCell::new(Vec::new()),
+        };
+        let mut tools = Tools::default();
+        let mut streamed = String::new();
+        let result = run_chat_tool_loop(
+            &provider,
+            &mut tools,
+            &[PromptMessage::text(PromptRole::User, "question")],
+            false,
+            DEFAULT_MAX_TOOL_ROUNDS,
+            |text| {
+                streamed.push_str(text);
+                Ok(())
+            },
+        )
+        .unwrap_or_else(|error| *error.partial);
+
+        assert_eq!(result.text, "checkinganswer");
+        assert_eq!(streamed, result.text);
+        assert_eq!(result.provider_rounds, 2);
+        assert_eq!(result.tool_calls_executed, 1);
+        assert_eq!(result.billing_segments.len(), 3);
+        assert_eq!(tools.calls[0].1["expression"], "2+2");
+        let observed = provider.observed.borrow();
+        assert_eq!(observed[1][1].role, PromptRole::Assistant);
+        assert_eq!(observed[1][1].tool_calls[0].name, "calculate");
+        assert_eq!(observed[1][2].role, PromptRole::Tool);
+        assert_eq!(observed[1][2].tool_call_id.as_deref(), Some("call-1"));
+        assert_eq!(observed[1][2].content, PromptContent::Text("4".to_owned()));
+    }
+
+    #[test]
+    fn skips_unknown_calls_and_normalizes_malformed_known_arguments() {
+        let provider = Provider {
+            rounds: RefCell::new(vec![Ok(round(
+                "",
+                vec![call("missing", "not-json")],
+                json!({"round": 1}),
+            ))]),
+            observed: RefCell::new(Vec::new()),
+        };
+        let mut tools = Tools::default();
+        let result = run_chat_tool_loop(&provider, &mut tools, &[], false, 5, |_text| Ok(()));
+        assert!(result.is_ok());
+        assert!(tools.calls.is_empty());
+
+        let provider = Provider {
+            rounds: RefCell::new(vec![Ok(round(
+                "",
+                vec![call("calculate", "not-json")],
+                json!({"round": 1}),
+            ))]),
+            observed: RefCell::new(Vec::new()),
+        };
+        let result = run_chat_tool_loop(&provider, &mut tools, &[], false, 1, |_text| Ok(()))
+            .unwrap_or_else(|error| *error.partial);
+        assert_eq!(tools.calls[0].1, json!({}));
+        assert!(result.stopped_at_limit);
+    }
+
+    #[test]
+    fn preserves_partial_round_usage_and_text_when_streaming_fails() {
+        let provider = Provider {
+            rounds: RefCell::new(vec![Err(ChatRoundError {
+                source: OpenRouterChatError::IncompleteStream,
+                partial: Box::new(round("partial", Vec::new(), json!({"pending": true}))),
+            })]),
+            observed: RefCell::new(Vec::new()),
+        };
+        let mut tools = Tools::default();
+        let error = run_chat_tool_loop(&provider, &mut tools, &[], false, 5, |_text| Ok(())).err();
+        assert!(error.is_some());
+        let Some(error) = error else {
+            return;
+        };
+        assert_eq!(error.provider_rounds, 1);
+        assert_eq!(error.partial.text, "partial");
+        assert_eq!(error.partial.billing_segments[0]["pending"], true);
+    }
+}

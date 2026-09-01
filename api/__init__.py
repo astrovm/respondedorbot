@@ -1,1 +1,0 @@
-"""Respondedor bot package initialisation."""

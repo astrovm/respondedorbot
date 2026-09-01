@@ -21,28 +21,62 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: respondedorbot_test
+          POSTGRES_PASSWORD: synthetic-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d respondedorbot_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis/redis-stack-server:7.4.0-v8
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TEST_POSTGRES_URL: postgresql://postgres:synthetic-password@127.0.0.1:5432/respondedorbot_test?sslmode=disable
+      TEST_DATABASE_URL: postgresql://postgres:synthetic-password@127.0.0.1:5432/respondedorbot_test?sslmode=disable
+      TEST_REDIS_URL: redis://127.0.0.1:6379/
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - name: Set up uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          version-file: pyproject.toml
-          enable-cache: true
+      - name: Set up Rust toolchain
+        run: rustup show
 
-      - name: Install dependencies
-        run: uv sync --locked
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
 
-      - name: Lint with ruff
-        run: uv run --locked ruff check api/ tests/
+      - name: Check Rust workspace
+        run: cargo check --locked --workspace --all-targets --all-features
 
-      - name: Type check with mypy
-        run: uv run --locked mypy api/
+      - name: Lint Rust workspace
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
-      - name: Run test suite
-        run: uv run --locked python -m pytest -q
+      - name: Test Rust workspace
+        run: cargo test --locked --workspace --all-features
+
+      - name: Check Rust coverage
+        run: |
+          rustup component add llvm-tools-preview
+          cargo install cargo-llvm-cov --version 0.9.0 --locked
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --locked -p bot-core --all-features --fail-under-lines 95
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --locked -p bot-adapters --all-features --fail-under-lines 85
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --locked -p botd --all-features --fail-under-lines 80
 
   build-and-push:
     needs: checks

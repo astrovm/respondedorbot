@@ -1,0 +1,128 @@
+//! Native known-chat-members AI tool.
+
+use bot_adapters::redis_message_state::RedisMessageState;
+use bot_core::chat_members::{decode_chat_members, render_chat_members};
+use bot_core::message_state::chat_members_key;
+
+use crate::chat_tool_loop::ToolExecutionResult;
+use crate::tool_requests::{ExternalToolExecutor, ExternalToolRequest};
+
+pub trait ChatMemberSource {
+    fn members(&mut self, chat_id: &str) -> Result<Vec<(String, String)>, String>;
+}
+
+impl ChatMemberSource for RedisMessageState {
+    fn members(&mut self, chat_id: &str) -> Result<Vec<(String, String)>, String> {
+        self.get_chat_members(&chat_members_key(chat_id))
+            .map(|members| {
+                members
+                    .into_iter()
+                    .map(|member| (member.user_id, member.payload))
+                    .collect()
+            })
+            .map_err(|error| error.to_string())
+    }
+}
+
+pub struct ChatMembersTool<Source, Now> {
+    source: Source,
+    now: Now,
+    chat_id: String,
+}
+
+impl<Source, Now> ChatMembersTool<Source, Now> {
+    #[must_use]
+    pub fn new(source: Source, now: Now, chat_id: &str) -> Self {
+        Self {
+            source,
+            now,
+            chat_id: chat_id.to_owned(),
+        }
+    }
+}
+
+impl<Source, Now> ExternalToolExecutor for ChatMembersTool<Source, Now>
+where
+    Source: ChatMemberSource,
+    Now: FnMut() -> i64,
+{
+    fn execute(
+        &mut self,
+        request: ExternalToolRequest,
+        _tool_call_id: &str,
+    ) -> ToolExecutionResult {
+        if request != ExternalToolRequest::GetChatMembers {
+            return ToolExecutionResult::output(
+                "get_chat_members received an incompatible request",
+            );
+        }
+        if self.chat_id.is_empty() {
+            return ToolExecutionResult::output("no disponible");
+        }
+        match self.source.members(&self.chat_id) {
+            Ok(entries) => ToolExecutionResult::output(render_chat_members(
+                &decode_chat_members(&entries),
+                (self.now)(),
+            )),
+            Err(error) => ToolExecutionResult::with_diagnostics(
+                "no conozco a nadie en este chat todavia",
+                vec![format!("chat member lookup failed: {error}")],
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Source(Result<Vec<(String, String)>, String>);
+
+    impl ChatMemberSource for Source {
+        fn members(&mut self, chat_id: &str) -> Result<Vec<(String, String)>, String> {
+            assert_eq!(chat_id, "-100");
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn renders_compatible_members_with_an_injected_clock() {
+        let mut tool = ChatMembersTool::new(
+            Source(Ok(vec![(
+                "7".to_owned(),
+                r#"{"first_name":"Ana","username":"ana","last_seen":9400}"#.to_owned(),
+            )])),
+            || 10_000,
+            "-100",
+        );
+        assert_eq!(
+            tool.execute(ExternalToolRequest::GetChatMembers, "call")
+                .output,
+            "Miembros conocidos:\n- Ana (@ana) — visto hace 10 min"
+        );
+    }
+
+    #[test]
+    fn missing_context_source_failure_and_wrong_request_are_safe() {
+        let mut unavailable = ChatMembersTool::new(Source(Ok(Vec::new())), || 0, "");
+        assert_eq!(
+            unavailable
+                .execute(ExternalToolRequest::GetChatMembers, "call")
+                .output,
+            "no disponible"
+        );
+
+        let mut failed = ChatMembersTool::new(
+            Source(Err("synthetic Redis failure".to_owned())),
+            || 0,
+            "-100",
+        );
+        let result = failed.execute(ExternalToolRequest::GetChatMembers, "call");
+        assert_eq!(result.output, "no conozco a nadie en este chat todavia");
+        assert!(result.diagnostics[0].contains("synthetic Redis failure"));
+        assert_eq!(
+            failed.execute(ExternalToolRequest::TaskList, "call").output,
+            "get_chat_members received an incompatible request"
+        );
+    }
+}
