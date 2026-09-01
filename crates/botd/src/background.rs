@@ -12,6 +12,7 @@ use crate::compaction_adapters::production_compaction_worker;
 use crate::compaction_worker::{
     CompactionBilling, CompactionProvider, CompactionQueue, CompactionState, CompactionWorker,
 };
+use crate::composition::TelegramDeliveryCoordinator;
 use crate::operational_reporting::{OperationalReport, OperationalReporter};
 use crate::price_refresh::production_price_refresh_worker;
 use crate::reconciliation::{
@@ -41,6 +42,7 @@ pub struct ProductionBackgroundOptions<'a> {
     pub reconciliation_settings: ReconciliationSettings,
     pub active_operations: ActiveOperationRegistry,
     pub coinmarketcap_key: Option<&'a str>,
+    pub telegram_delivery: TelegramDeliveryCoordinator,
 }
 
 pub fn build_production_background_specs(
@@ -55,6 +57,7 @@ pub fn build_production_background_specs(
         system_prompt: options.system_prompt,
         owner_token: options.owner_token,
         mode: options.scheduler_mode,
+        telegram_delivery: options.telegram_delivery,
     })
     .map_err(|error| error.to_string())?;
     let compaction = production_compaction_worker(
@@ -414,6 +417,7 @@ mod tests {
         BackgroundSupervisor, BackgroundWorker, BackgroundWorkerSpec, ProductionBackgroundOptions,
         build_production_background_specs,
     };
+    use crate::composition::TelegramDeliveryCoordinator;
     use crate::operational_reporting::{OperationalReport, OperationalReporter};
     use crate::reconciliation::{ActiveOperationRegistry, ReconciliationSettings};
     use crate::scheduler::SchedulerMode;
@@ -545,6 +549,7 @@ mod tests {
             reconciliation_settings: ReconciliationSettings::default(),
             active_operations: ActiveOperationRegistry::default(),
             coinmarketcap_key: Some("synthetic-coinmarketcap-key"),
+            telegram_delivery: TelegramDeliveryCoordinator::default(),
         });
         assert!(result.is_ok());
         assert_eq!(result.map(|specs| specs.len()), Ok(4));

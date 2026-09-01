@@ -99,6 +99,15 @@ pub trait ChatConfigSource {
     fn get(&mut self, chat_id: &str) -> Result<ChatConfig, Self::Error>;
 
     fn set(&mut self, chat_id: &str, config: &ChatConfig) -> Result<ChatConfig, Self::Error>;
+
+    fn set_changed(
+        &mut self,
+        chat_id: &str,
+        _previous: &ChatConfig,
+        config: &ChatConfig,
+    ) -> Result<ChatConfig, Self::Error> {
+        self.set(chat_id, config)
+    }
 }
 
 pub trait ActionSink {
@@ -1643,12 +1652,12 @@ where
         };
         let chat_id = ChatId(chat_id_value);
         let message_id = MessageId(context.message_id);
-        let config = self
+        let current_config = self
             .config
             .get(&context.chat_id)
             .map_err(DispatchError::Config)?;
         let locale = resolve_locale(
-            Some(&config.language),
+            Some(&current_config.language),
             context.user_language_code.as_deref(),
             &context.chat_type,
         );
@@ -1689,7 +1698,7 @@ where
                 return Ok(DispatchOutcome::Handled);
             }
         }
-        let (outcome, config) = plan_config_callback(&context.data, &config);
+        let (outcome, config) = plan_config_callback(&context.data, &current_config);
         let (changed, diagnostic) = match outcome {
             ConfigCallbackOutcome::Render {
                 changed,
@@ -1721,7 +1730,7 @@ where
         }
         if changed {
             self.config
-                .set(&context.chat_id, &config)
+                .set_changed(&context.chat_id, &current_config, &config)
                 .map_err(DispatchError::Config)?;
         }
         let rendered_locale = resolve_locale(
@@ -3056,7 +3065,7 @@ where
             StatelessCommandPlan::Action(action) => {
                 if let Some(updated_config) = updated_config {
                     self.config
-                        .set(&chat_id.0.to_string(), &updated_config)
+                        .set_changed(&chat_id.0.to_string(), &config, &updated_config)
                         .map_err(DispatchError::Config)?;
                 }
                 let command = parsed.command;

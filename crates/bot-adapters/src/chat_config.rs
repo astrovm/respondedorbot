@@ -2,7 +2,7 @@
 
 use bot_core::chat_config::{ChatConfig, ChatConfigError};
 use postgres::Client;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use thiserror::Error;
 
 use crate::postgres_connection::postgres_tls_connector;
@@ -64,16 +64,34 @@ impl ChatConfigRepository {
         chat_id: &str,
         config: &ChatConfig,
     ) -> Result<ChatConfig, ChatConfigRepositoryError> {
+        let value = serde_json::to_value(config)?;
+        self.merge_value(chat_id, &value)?;
+        Ok(config.clone())
+    }
+
+    pub fn set_changed(
+        &self,
+        chat_id: &str,
+        previous: &ChatConfig,
+        config: &ChatConfig,
+    ) -> Result<ChatConfig, ChatConfigRepositoryError> {
+        let value = changed_fields(previous, config)?;
+        if !value.is_empty() {
+            self.merge_value(chat_id, &Value::Object(value))?;
+        }
+        Ok(config.clone())
+    }
+
+    fn merge_value(&self, chat_id: &str, value: &Value) -> Result<(), ChatConfigRepositoryError> {
         let mut client = self.connect()?;
         ensure_schema(&mut client)?;
-        let value = serde_json::to_value(config)?;
         client.execute(
             "INSERT INTO chat_configs (chat_id, config) VALUES ($1, $2) \
              ON CONFLICT (chat_id) DO UPDATE SET \
              config = chat_configs.config || EXCLUDED.config, updated_at = NOW()",
-            &[&chat_id, &value],
+            &[&chat_id, value],
         )?;
-        Ok(config.clone())
+        Ok(())
     }
 
     fn connect(&self) -> Result<Client, ChatConfigRepositoryError> {
@@ -82,6 +100,22 @@ impl ChatConfigRepository {
             postgres_tls_connector(&self.database_url)?,
         )?)
     }
+}
+
+fn changed_fields(
+    previous: &ChatConfig,
+    config: &ChatConfig,
+) -> Result<Map<String, Value>, serde_json::Error> {
+    let previous = serde_json::to_value(previous)?;
+    let config = serde_json::to_value(config)?;
+    let previous = previous.as_object();
+    Ok(config.as_object().map_or_else(Map::new, |config| {
+        config
+            .iter()
+            .filter(|(key, value)| previous.and_then(|fields| fields.get(*key)) != Some(*value))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }))
 }
 
 fn ensure_schema(client: &mut Client) -> Result<(), ChatConfigRepositoryError> {
@@ -98,13 +132,64 @@ fn ensure_schema(client: &mut Client) -> Result<(), ChatConfigRepositoryError> {
 #[cfg(test)]
 mod tests {
     use std::env;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     use bot_core::chat_config::ChatConfig;
     use postgres::Client;
     use postgres_native_tls::MakeTlsConnector;
     use serde_json::json;
 
-    use super::ChatConfigRepository;
+    use super::{ChatConfigRepository, changed_fields};
+
+    #[test]
+    fn concurrent_config_updates_can_merge_only_the_fields_they_changed() {
+        let previous = ChatConfig::default();
+        let mut updated = previous.clone();
+        updated.language = "en".to_owned();
+        let patch = changed_fields(&previous, &updated);
+        assert!(patch.is_ok());
+        let Ok(patch) = patch else { return };
+        assert_eq!(patch.len(), 1);
+        assert_eq!(patch.get("language"), Some(&json!("en")));
+    }
+
+    #[test]
+    fn concurrent_database_updates_preserve_unrelated_fields() {
+        let Some(database_url) = test_database_url() else {
+            return;
+        };
+        let chat_id = "-100900003";
+        cleanup(&database_url, chat_id);
+        let previous = ChatConfig::default();
+        let mut language = previous.clone();
+        language.language = "en".to_owned();
+        let mut timezone = previous.clone();
+        timezone.timezone_offset = -3;
+        let barrier = Arc::new(Barrier::new(2));
+
+        let first_url = database_url.clone();
+        let first_barrier = barrier.clone();
+        let first_previous = previous.clone();
+        let first = thread::spawn(move || {
+            first_barrier.wait();
+            ChatConfigRepository::new(&first_url).set_changed(chat_id, &first_previous, &language)
+        });
+        let second_url = database_url.clone();
+        let second = thread::spawn(move || {
+            barrier.wait();
+            ChatConfigRepository::new(&second_url).set_changed(chat_id, &previous, &timezone)
+        });
+
+        assert!(first.join().is_ok_and(|result| result.is_ok()));
+        assert!(second.join().is_ok_and(|result| result.is_ok()));
+        let loaded = ChatConfigRepository::new(&database_url).get(chat_id);
+        assert!(loaded.is_ok());
+        let Ok(Some(loaded)) = loaded else { return };
+        assert_eq!(loaded.language, "en");
+        assert_eq!(loaded.timezone_offset, -3);
+        cleanup(&database_url, chat_id);
+    }
 
     fn test_database_url() -> Option<String> {
         env::var("TEST_POSTGRES_URL").ok()
