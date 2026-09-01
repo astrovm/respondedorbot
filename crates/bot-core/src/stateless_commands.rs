@@ -215,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn plans_ascii_command_conversion_aliases_and_localized_guards() {
+    fn plans_command_conversion_aliases_transliteration_and_localized_guards() {
         assert_eq!(
             message_text(plan_stateless_command(
                 ChatId(1),
@@ -258,6 +258,26 @@ mod tests {
                 Locale::Es,
             )),
             Some("/COLISION".to_owned())
+        );
+        assert_eq!(
+            message_text(plan_stateless_command(
+                ChatId(1),
+                MessageId(2),
+                "/command 日本ごはん",
+                "@bot",
+                Locale::Es,
+            )),
+            Some("/NIPPONGOHAN".to_owned())
+        );
+        assert_eq!(
+            message_text(plan_stateless_command(
+                ChatId(1),
+                MessageId(2),
+                "/comando Привет мир",
+                "@bot",
+                Locale::Es,
+            )),
+            Some("/PRIVET_MIR".to_owned())
         );
         assert_eq!(
             message_text(plan_stateless_command(

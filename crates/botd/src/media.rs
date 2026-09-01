@@ -404,7 +404,7 @@ mod tests {
             Processor,
             Vision,
             Transcription,
-            "google/gemini-3.1-flash-lite-preview",
+            "google/gemini-3.1-flash-lite",
         )
     }
 

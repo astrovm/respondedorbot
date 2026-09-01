@@ -1443,6 +1443,7 @@ mod tests {
     use std::rc::Rc;
 
     use bot_adapters::openrouter_chat::OpenRouterChatError;
+    use bot_core::provider_pricing::DEEPSEEK_MODEL;
     use bot_core::provider_stream_policy::StreamToolCall;
     use bot_core::telegram_input::{ChatId, MessageId, UserId};
 
@@ -1768,7 +1769,7 @@ mod tests {
             },
             billing,
             "synthetic persona",
-            "synthetic/model",
+            DEEPSEEK_MODEL,
             5,
         )
     }

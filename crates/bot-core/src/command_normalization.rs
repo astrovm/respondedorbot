@@ -99,15 +99,32 @@ fn romanize_japanese(input: &str) -> String {
     result
 }
 
-/// Expand emoji names and romanize Japanese text before command normalization.
+fn transliterate_remaining_scripts(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    for character in input.chars() {
+        let latin_with_diacritic = character
+            .to_string()
+            .nfd()
+            .any(|part| part.is_ascii_alphanumeric());
+        if character.is_ascii() || matches!(character, 'ñ' | 'Ñ') || latin_with_diacritic {
+            result.push(character);
+        } else if let Some(transliterated) = deunicode::deunicode_char(character) {
+            result.push_str(transliterated);
+        }
+    }
+    result
+}
+
+/// Expand emoji names and romanize Unicode text before command normalization.
 #[must_use]
 pub fn preprocess_command_text(input: &str, locale: Locale) -> String {
     let demojized = demojize(input, locale);
-    if contains_japanese(&demojized) {
+    let japanese_romanized = if contains_japanese(&demojized) {
         romanize_japanese(&demojized)
     } else {
         demojized
-    }
+    };
+    transliterate_remaining_scripts(&japanese_romanized)
 }
 
 fn is_word_character(character: char) -> bool {
@@ -271,6 +288,30 @@ mod tests {
             "mousugudesu"
         );
         assert_eq!(preprocess_command_text("ｶﾀｶﾅ", Locale::Es), "katakana");
+        assert_eq!(
+            normalize_command_text(&preprocess_command_text("日本ごはん", Locale::Es)),
+            Some("/NIPPONGOHAN".to_owned())
+        );
+    }
+
+    #[test]
+    fn transliterates_other_writing_systems_into_commands() {
+        let cases = [
+            ("Привет мир", "/PRIVET_MIR"),
+            ("Καλημέρα κόσμε", "/KALEMERA_KOSME"),
+            ("안녕하세요", "/ANNYEONGHASEYO"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                normalize_command_text(&preprocess_command_text(input, Locale::Es)).as_deref(),
+                Some(expected)
+            );
+        }
+
+        assert_eq!(
+            normalize_command_text(&preprocess_command_text("ñandú", Locale::Es)),
+            Some("/NIANDU".to_owned())
+        );
     }
 
     #[test]
