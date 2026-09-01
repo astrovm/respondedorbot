@@ -1,0 +1,138 @@
+{
+  "cases": [
+    {
+      "name": "published_cached_deepseek_tokens",
+      "segments": [{
+        "kind": "chat",
+        "model": "deepseek/deepseek-v4-flash-0731",
+        "usage": {"input_tokens": 1000, "input_cached_tokens": 900, "output_tokens": 500}
+      }],
+      "expected": {
+        "raw_usd_micros": 59,
+        "raw_usd_micros_exact": "59.3",
+        "charged_credit_units": 2,
+        "pricing_complete": true,
+        "pricing_basis": "published_rate",
+        "model_usd_micros": 59
+      }
+    },
+    {
+      "name": "submicro_costs_sum_before_rounding",
+      "segments": [
+        {"kind": "chat", "model": "unknown/model", "usage": {"cost": "0.00000003"}, "metadata": {"provider": "openrouter"}},
+        {"kind": "chat", "model": "unknown/model", "usage": {"cost": "0.00000003"}, "metadata": {"provider": "openrouter"}}
+      ],
+      "expected": {
+        "raw_usd_micros": 0,
+        "raw_usd_micros_exact": "0.06000000",
+        "charged_credit_units": 1,
+        "pricing_complete": true,
+        "pricing_basis": "provider_reported",
+        "model_usd_micros": 0
+      }
+    },
+    {
+      "name": "upstream_cost_precedes_gateway_cost",
+      "segments": [{
+        "kind": "chat",
+        "model": "deepseek/deepseek-v4-flash-0731",
+        "usage": {"cost": "0.000001", "cost_details": {"upstream_inference_cost": "0.00010442124"}},
+        "metadata": {"provider": "openrouter"}
+      }],
+      "expected": {
+        "raw_usd_micros": 104,
+        "raw_usd_micros_exact": "104.42124000000",
+        "charged_credit_units": 3,
+        "pricing_complete": true,
+        "pricing_basis": "provider_reported",
+        "model_usd_micros": 104
+      }
+    },
+    {
+      "name": "openrouter_missing_reported_cost_is_incomplete",
+      "segments": [{
+        "kind": "chat",
+        "model": "openai/gpt-oss-120b",
+        "usage": {"prompt_tokens": 1000, "completion_tokens": 500, "cost": 0},
+        "metadata": {"provider": "openrouter", "upstream_provider": "Groq"}
+      }],
+      "expected": {
+        "raw_usd_micros": 0,
+        "raw_usd_micros_exact": "0",
+        "charged_credit_units": 0,
+        "pricing_complete": false,
+        "pricing_basis": "missing",
+        "model_usd_micros": 0
+      }
+    },
+    {
+      "name": "gemini_cache_audio_and_write_rates",
+      "segments": [{
+        "kind": "vision",
+        "model": "google/gemini-3.1-flash-lite-preview",
+        "usage": {
+          "prompt_tokens": 1000,
+          "completion_tokens": 100,
+          "prompt_tokens_details": {"cached_tokens": 200, "audio_tokens": 300, "cache_write_tokens": 100}
+        }
+      }],
+      "expected": {
+        "raw_usd_micros": 413,
+        "raw_usd_micros_exact": "413.3333",
+        "charged_credit_units": 9,
+        "pricing_complete": true,
+        "pricing_basis": "published_rate",
+        "model_usd_micros": 413
+      }
+    },
+    {
+      "name": "standalone_firecrawl",
+      "segments": [{
+        "kind": "web_search",
+        "source": "firecrawl",
+        "metadata": {"web_search_requests": 1, "firecrawl_credits_used": 2}
+      }],
+      "expected": {
+        "raw_usd_micros": 1660,
+        "raw_usd_micros_exact": "1660",
+        "charged_credit_units": 34,
+        "pricing_complete": true,
+        "pricing_basis": "firecrawl_standard",
+        "tool_usd_micros": 1660
+      }
+    },
+    {
+      "name": "transcription_ten_second_minimum",
+      "segments": [{"kind": "transcribe", "model": "groq/whisper-large-v3", "audio_seconds": 1}],
+      "expected": {
+        "raw_usd_micros": 309,
+        "raw_usd_micros_exact": "309",
+        "charged_credit_units": 7,
+        "pricing_complete": true,
+        "pricing_basis": "published_rate",
+        "model_usd_micros": 309
+      }
+    },
+    {
+      "name": "internal_cache_is_free_and_complete",
+      "segments": [{"kind": "summary", "model": "deepseek/deepseek-v4-flash-0731", "source": "cache", "cached": true}],
+      "expected": {
+        "raw_usd_micros": 0,
+        "raw_usd_micros_exact": "0",
+        "charged_credit_units": 0,
+        "pricing_complete": true,
+        "pricing_basis": "internal_cache"
+      }
+    },
+    {
+      "name": "empty_input_has_no_pricing_evidence",
+      "segments": [],
+      "expected": {
+        "raw_usd_micros": 0,
+        "raw_usd_micros_exact": "0",
+        "charged_credit_units": 0,
+        "pricing_complete": false
+      }
+    }
+  ]
+}

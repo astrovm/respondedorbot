@@ -1,0 +1,84 @@
+{
+  "cases": [
+    {
+      "name": "legacy one shot",
+      "input": {
+        "id": "once0001",
+        "chat_id": "-100123",
+        "text": "synthetic reminder",
+        "user_name": "synthetic-user",
+        "user_id": 42,
+        "interval_seconds": null,
+        "run_date": "2026-08-30T12:00:00+00:00",
+        "trigger_config": null,
+        "timezone_offset": -3,
+        "locale": "es"
+      },
+      "expected": {
+        "schema_version": 1,
+        "run_date": "2026-08-30T12:00:00+00:00",
+        "next_run_at": "2026-08-30T12:00:00Z"
+      }
+    },
+    {
+      "name": "canonical second interval",
+      "input": {
+        "schema_version": 1,
+        "id": "repeat01",
+        "chat_id": "-100123",
+        "text": "synthetic interval",
+        "user_name": "synthetic-user",
+        "user_id": 42,
+        "interval_seconds": 3600,
+        "run_date": null,
+        "trigger_config": null,
+        "timezone_offset": -3,
+        "locale": "en",
+        "schedule_anchor_at": "2026-08-30T12:00:00Z",
+        "next_run_at": "2026-08-30T13:00:00Z",
+        "last_execution_id": null
+      },
+      "expected": {
+        "schema_version": 1,
+        "interval_seconds": 3600,
+        "schedule_anchor_at": "2026-08-30T12:00:00Z",
+        "next_run_at": "2026-08-30T13:00:00Z"
+      }
+    },
+    {
+      "name": "canonical weekly cron keeps unknown field",
+      "input": {
+        "schema_version": 1,
+        "id": "weekly01",
+        "chat_id": "-100123",
+        "text": "synthetic weekly task",
+        "user_name": "synthetic-user",
+        "user_id": 42,
+        "interval_seconds": null,
+        "run_date": null,
+        "trigger_config": {
+          "type": "cron",
+          "hour": 9,
+          "minute": 0,
+          "day_of_week": "mon,wed"
+        },
+        "timezone_offset": -3,
+        "locale": "es",
+        "schedule_anchor_at": "2026-08-30T12:00:00Z",
+        "next_run_at": "2026-08-31T12:00:00Z",
+        "last_execution_id": null,
+        "future_field": "preserved"
+      },
+      "expected": {
+        "schema_version": 1,
+        "trigger_config": {
+          "type": "cron",
+          "hour": 9,
+          "minute": 0,
+          "day_of_week": "mon,wed"
+        },
+        "future_field": "preserved"
+      }
+    }
+  ]
+}

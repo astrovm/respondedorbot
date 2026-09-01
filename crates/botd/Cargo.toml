@@ -1,0 +1,23 @@
+[package]
+name = "botd"
+description = "Rust runtime for respondedorbot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bot-adapters.workspace = true
+bot-core.workspace = true
+chrono.workspace = true
+ctrlc.workspace = true
+num-bigint.workspace = true
+rand.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

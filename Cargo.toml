@@ -1,0 +1,60 @@
+[workspace]
+members = [
+    "crates/bot-adapters",
+    "crates/bot-core",
+    "crates/botd",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.0"
+license = "MIT"
+repository = "https://github.com/astrovm/respondedorbot"
+
+[workspace.dependencies]
+base64 = "0.22.1"
+ab_glyph = "0.2.32"
+bot-adapters = { path = "crates/bot-adapters" }
+bot-core = { path = "crates/bot-core" }
+calamine = "0.36.1"
+chrono = { version = "0.4.42", default-features = false, features = ["serde", "std"] }
+ctrlc = { version = "3.5.2", features = ["termination"] }
+image = { version = "0.25.9", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+imageproc = { version = "0.25.0", default-features = false }
+ib-romaji = "0.2.1"
+emojis = "0.9.0"
+num-bigint = "0.5.1"
+native-tls = "0.2.18"
+postgres = { version = "0.19.14", features = ["with-serde_json-1"] }
+postgres-native-tls = "0.5.3"
+proptest = "1.11.0"
+quick-xml = "0.41.0"
+rand = "0.10.2"
+regex = "1.13.1"
+redis = "1.6.0"
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "multipart", "native-tls", "query"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+thiserror = "2.0.20"
+unicode-normalization = "0.1.24"
+url = "2.5.7"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"
