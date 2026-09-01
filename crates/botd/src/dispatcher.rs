@@ -1452,8 +1452,12 @@ where
                     .push("invalid top-up callback chat id".to_owned());
                 return Ok(DispatchOutcome::Handled);
             };
+            let config = self
+                .config
+                .get(&context.chat_id)
+                .map_err(DispatchError::Config)?;
             let locale = resolve_locale(
-                None,
+                Some(&config.language),
                 context.user_language_code.as_deref(),
                 &context.chat_type,
             );
@@ -7545,7 +7549,7 @@ mod tests {
     fn topup_command_and_callback_complete_the_native_invoice_flow() {
         let config = Config {
             value: Ok(ChatConfig {
-                language: "en".to_owned(),
+                language: "es".to_owned(),
                 ..ChatConfig::default()
             }),
             chat_ids: Vec::new(),
@@ -7566,7 +7570,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(command)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert_eq!(command.text, "choose how much you want to add:");
+        assert_eq!(command.text, "elegí cuánto querés cargar:");
         assert_eq!(
             command
                 .reply_markup
@@ -7591,7 +7595,7 @@ mod tests {
                     show_alert: false,
                     ..
                 }
-            ] if payload == "topup:p50:88:en" && text == "invoice ready"
+            ] if payload == "topup:p50:88:es" && text == "listo, te dejé la factura"
         ));
     }
 
@@ -7645,7 +7649,7 @@ mod tests {
     }
 
     #[test]
-    fn topup_guards_are_native_and_do_not_load_chat_configuration() {
+    fn topup_guards_use_the_configured_chat_language() {
         let config = Config {
             value: Ok(ChatConfig::default()),
             chat_ids: Vec::new(),
@@ -7668,7 +7672,7 @@ mod tests {
             dispatcher.dispatch(callback_update("topup:p50", "private", Some("es"))),
             Ok(DispatchOutcome::Handled)
         );
-        assert!(dispatcher.config.chat_ids.is_empty());
+        assert_eq!(dispatcher.config.chat_ids, ["-42", "-42"]);
         assert!(matches!(
             dispatcher.actions.0.as_slice(),
             [

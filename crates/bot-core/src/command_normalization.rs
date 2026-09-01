@@ -10,6 +10,7 @@ fn emoji_name(name: &str, value: &str, locale: Locale) -> String {
     let localized = match (locale, value) {
         (Locale::Es, "😄") => "cara sonriendo con ojos sonrientes",
         (Locale::Es, "💥") => "colisión",
+        (Locale::Es, "❤" | "❤️") => "corazón rojo",
         _ => name,
     };
     localized
@@ -249,6 +250,14 @@ mod tests {
         assert_eq!(
             preprocess_command_text("😄hello 😄 world", Locale::Es),
             "_cara_sonriendo_con_ojos_sonrientes_hello _cara_sonriendo_con_ojos_sonrientes_ world"
+        );
+        assert_eq!(
+            preprocess_command_text("culo ❤️", Locale::Es),
+            "culo _corazón_rojo_"
+        );
+        assert_eq!(
+            normalize_command_text(&preprocess_command_text("culo ❤️", Locale::Es)),
+            Some("/CULO_CORAZON_ROJO".to_owned())
         );
         assert_eq!(
             preprocess_command_text("もうすぐです", Locale::Es),
