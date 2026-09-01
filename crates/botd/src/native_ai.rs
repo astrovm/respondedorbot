@@ -28,8 +28,8 @@ use crate::dispatcher::ActionSink;
 use crate::firecrawl_tool::ScheduledWebSearch;
 use crate::native_tools::{NativeTool, tool_schema};
 use crate::task_executor::{
-    TaskAiProvider, TaskBilling, TaskMessenger, TaskPromptMessage, TaskProviderReply,
-    TaskReserveOutcome, build_task_messages,
+    TaskAiProvider, TaskBilling, TaskMessenger, TaskPromptMessage, TaskProviderFailure,
+    TaskProviderReply, TaskReserveOutcome, build_task_messages,
 };
 use crate::tool_requests::validate_request;
 
@@ -52,14 +52,13 @@ pub fn estimate_task_reserve_credit_units(
             name: TokenEstimateValue::Empty,
         })
         .collect::<Vec<_>>();
-    let chat = estimate_chat_reserve_credit_units(
+    estimate_chat_reserve_credit_units(
         None,
         &estimated_messages,
         Some(chat_output_token_limit(PRIMARY_CHAT_MODEL)),
         SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE,
         PRIMARY_CHAT_MODEL,
-    )?;
-    add_task_web_search_reserve(chat)
+    )
 }
 
 fn add_task_web_search_reserve(chat: i64) -> Result<i64, ReserveEstimateError> {
@@ -135,7 +134,7 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
         messages: &[TaskPromptMessage],
         task: &ScheduledTask,
         _execution_id: &str,
-    ) -> Result<TaskProviderReply, Self::Error> {
+    ) -> Result<TaskProviderReply, TaskProviderFailure<Self::Error>> {
         let mut request = self.request(messages, task);
         let mut billing_segments = Vec::new();
         let mut text = String::new();
@@ -147,7 +146,8 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
         };
         for _ in 0..crate::chat_tool_loop::DEFAULT_MAX_TOOL_ROUNDS {
             let completion =
-                complete_with(&self.transport, &self.api_key, &self.base_url, &request)?;
+                complete_with(&self.transport, &self.api_key, &self.base_url, &request)
+                    .map_err(|source| TaskProviderFailure::new(source, billing_segments.clone()))?;
             billing_segments.push(task_completion_segment(&completion));
             text = completion.text.clone();
             let calls = completion
@@ -367,6 +367,7 @@ pub enum NativeTaskBillingError {
 pub struct PostgresTaskBilling<Store> {
     store: Store,
     model: String,
+    web_search_enabled: bool,
 }
 
 impl<Store> PostgresTaskBilling<Store> {
@@ -375,7 +376,14 @@ impl<Store> PostgresTaskBilling<Store> {
         Self {
             store,
             model: model.to_owned(),
+            web_search_enabled: false,
         }
+    }
+
+    #[must_use]
+    pub const fn with_web_search(mut self, enabled: bool) -> Self {
+        self.web_search_enabled = enabled;
+        self
     }
 
     fn settle_amount(
@@ -456,15 +464,20 @@ impl<Store: TaskCreditStore> TaskBilling for PostgresTaskBilling<Store> {
                 name: TokenEstimateValue::Empty,
             })
             .collect::<Vec<_>>();
-        let amount = estimate_chat_reserve_credit_units(
+        let chat_amount = estimate_chat_reserve_credit_units(
             None,
             &estimated_messages,
             Some(chat_output_token_limit(&self.model)),
             SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE,
             &self.model,
         )
-        .and_then(add_task_web_search_reserve)
         .map_err(|error| NativeTaskBillingError::Estimate(error.to_string()))?;
+        let amount = if self.web_search_enabled {
+            add_task_web_search_reserve(chat_amount)
+                .map_err(|error| NativeTaskBillingError::Estimate(error.to_string()))?
+        } else {
+            chat_amount
+        };
         let amount_i32 = i32::try_from(amount).map_err(|_| NativeTaskBillingError::AmountRange)?;
         let operation_id = operation_id(execution_id);
         let idempotency_key = format!("{operation_id}:reserve");
@@ -810,6 +823,68 @@ mod tests {
         assert_eq!(followup["messages"][3]["tool_call_id"], "call-1");
     }
 
+    #[test]
+    fn scheduled_tool_loop_returns_incurred_usage_when_a_later_round_fails() {
+        let transport = Transport {
+            requests: RefCell::new(Vec::new()),
+            responses: RefCell::new(VecDeque::from([
+                HttpResponse {
+                    status_code: 200,
+                    body: json!({
+                        "id": "generation-tool",
+                        "model": "resolved/model",
+                        "choices": [{
+                            "message": {
+                                "content": null,
+                                "tool_calls": [{
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "web_search",
+                                        "arguments": "{\"query\":\"synthetic query\"}"
+                                    }
+                                }]
+                            },
+                            "finish_reason": "tool_calls"
+                        }],
+                        "usage": {"cost": 0.0001}
+                    })
+                    .to_string(),
+                    headers: BTreeMap::new(),
+                },
+                HttpResponse {
+                    status_code: 503,
+                    body: json!({"error": {"message": "synthetic unavailable"}}).to_string(),
+                    headers: BTreeMap::new(),
+                },
+            ])),
+        };
+        let mut provider = OpenRouterTaskProvider::new(
+            transport,
+            "synthetic-key",
+            "https://synthetic.invalid/api/v1",
+            "deepseek/deepseek-v4-flash-0731",
+            "synthetic persona",
+        )
+        .with_web_search(Box::new(Search));
+
+        let failure = match provider.complete(
+            &[TaskPromptMessage {
+                role: "user",
+                content: "search".to_owned(),
+            }],
+            &task("en"),
+            "task123:1000",
+        ) {
+            Ok(reply) => panic!("the second provider round must fail: {reply:?}"),
+            Err(failure) => failure,
+        };
+
+        assert_eq!(failure.billing_segments.len(), 2);
+        assert_eq!(failure.billing_segments[0]["source"], "openrouter");
+        assert_eq!(failure.billing_segments[1]["source"], "firecrawl");
+    }
+
     type CapturedCharge = (i64, i32, String, String, Map<String, Value>);
     type CapturedSettlement = (i64, String, i64, Map<String, Value>);
 
@@ -923,6 +998,30 @@ mod tests {
         assert_eq!(settlement.3["reason"], "task_success");
         assert_eq!(settlement.3["pricing_complete"], true);
         assert_eq!(settlement.3["billing_segments"][0]["kind"], "chat");
+    }
+
+    #[test]
+    fn task_reserve_adds_firecrawl_capacity_only_when_search_is_enabled() {
+        let prompt = [TaskPromptMessage {
+            role: "user",
+            content: "synthetic prompt".to_owned(),
+        }];
+        let mut without_search =
+            PostgresTaskBilling::new(Store::default(), "deepseek/deepseek-v4-flash-0731");
+        without_search
+            .reserve(&task("en"), "without-search", &prompt)
+            .unwrap_or_else(|error| panic!("reserve without search: {error}"));
+        let without_search_amount = without_search.store.charges.borrow()[0].1;
+
+        let mut with_search =
+            PostgresTaskBilling::new(Store::default(), "deepseek/deepseek-v4-flash-0731")
+                .with_web_search(true);
+        with_search
+            .reserve(&task("en"), "with-search", &prompt)
+            .unwrap_or_else(|error| panic!("reserve with search: {error}"));
+        let with_search_amount = with_search.store.charges.borrow()[0].1;
+
+        assert!(with_search_amount > without_search_amount);
     }
 
     #[test]

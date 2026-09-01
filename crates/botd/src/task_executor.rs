@@ -19,6 +19,28 @@ pub struct TaskProviderReply {
     pub billing_segments: Vec<Value>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaskProviderFailure<Error> {
+    pub source: Error,
+    pub billing_segments: Vec<Value>,
+}
+
+impl<Error> TaskProviderFailure<Error> {
+    #[must_use]
+    pub const fn new(source: Error, billing_segments: Vec<Value>) -> Self {
+        Self {
+            source,
+            billing_segments,
+        }
+    }
+}
+
+impl<Error: std::fmt::Display> std::fmt::Display for TaskProviderFailure<Error> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
 pub trait TaskAiProvider {
     type Error: std::fmt::Display;
 
@@ -27,7 +49,7 @@ pub trait TaskAiProvider {
         messages: &[TaskPromptMessage],
         task: &ScheduledTask,
         execution_id: &str,
-    ) -> Result<TaskProviderReply, Self::Error>;
+    ) -> Result<TaskProviderReply, TaskProviderFailure<Self::Error>>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,8 +234,10 @@ where
             let reply = match self.provider.complete(&messages, task, execution_id) {
                 Ok(reply) => reply,
                 Err(error) => {
+                    let message = error.to_string();
+                    segments.extend(error.billing_segments);
                     self.diagnostics
-                        .record(task.id.as_str(), "provider", &error.to_string());
+                        .record(task.id.as_str(), "provider", &message);
                     self.settle_or_refund(
                         task,
                         execution_id,
@@ -393,13 +417,13 @@ mod tests {
 
     use super::{
         NativeTaskExecutor, ScheduledTaskExecutor, TaskAiProvider, TaskBilling, TaskDiagnostics,
-        TaskExecutionDisposition, TaskMessenger, TaskPromptMessage, TaskProviderReply,
-        TaskReserveOutcome, build_task_messages, clean_task_response,
+        TaskExecutionDisposition, TaskMessenger, TaskPromptMessage, TaskProviderFailure,
+        TaskProviderReply, TaskReserveOutcome, build_task_messages, clean_task_response,
     };
 
     #[derive(Default)]
     struct Provider {
-        replies: VecDeque<Result<TaskProviderReply, &'static str>>,
+        replies: VecDeque<Result<TaskProviderReply, TaskProviderFailure<&'static str>>>,
         prompts: Vec<Vec<TaskPromptMessage>>,
         execution_ids: Vec<String>,
     }
@@ -412,7 +436,7 @@ mod tests {
             messages: &[TaskPromptMessage],
             _task: &ScheduledTask,
             execution_id: &str,
-        ) -> Result<TaskProviderReply, Self::Error> {
+        ) -> Result<TaskProviderReply, TaskProviderFailure<Self::Error>> {
             self.prompts.push(messages.to_vec());
             self.execution_ids.push(execution_id.to_owned());
             self.replies.pop_front().unwrap_or(Ok(TaskProviderReply {
@@ -667,7 +691,10 @@ mod tests {
     #[test]
     fn provider_and_empty_failures_finalize_billing_without_scheduler_retry() {
         let provider = Provider {
-            replies: VecDeque::from([Err("provider unavailable")]),
+            replies: VecDeque::from([Err(TaskProviderFailure::new(
+                "provider unavailable",
+                vec![json!({"attempt": "partial"})],
+            ))]),
             ..Provider::default()
         };
         let mut failed = executor(provider, Billing::default(), Messenger::default());
@@ -676,8 +703,21 @@ mod tests {
             Ok(TaskExecutionDisposition::Complete)
         );
         let (_, billing, _, diagnostics) = failed.parts();
-        assert_eq!(billing.refunds[0].1, "task_error");
+        assert!(billing.refunds.is_empty());
+        assert_eq!(billing.settlements[0].2, "task_error_provider_usage");
+        assert_eq!(billing.settlements[0].1, [json!({"attempt": "partial"})]);
         assert_eq!(diagnostics.0[0].1, "provider");
+
+        let provider = Provider {
+            replies: VecDeque::from([Err(TaskProviderFailure::new(
+                "provider unavailable",
+                Vec::new(),
+            ))]),
+            ..Provider::default()
+        };
+        let mut unused = executor(provider, Billing::default(), Messenger::default());
+        assert!(unused.execute(&task("es"), "task123:1000").is_ok());
+        assert_eq!(unused.parts().1.refunds[0].1, "task_error");
 
         let provider = Provider {
             replies: VecDeque::from([

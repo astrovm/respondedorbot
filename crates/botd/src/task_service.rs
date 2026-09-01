@@ -107,7 +107,8 @@ pub fn build_task_scheduler(
         PRIMARY_CHAT_MODEL,
         options.system_prompt,
     );
-    if let Some(api_key) = options.firecrawl_api_key.filter(|key| !key.is_empty()) {
+    let firecrawl_api_key = options.firecrawl_api_key.filter(|key| !key.is_empty());
+    if let Some(api_key) = firecrawl_api_key {
         provider = provider.with_web_search(Box::new(FirecrawlScheduledWebSearch::new(
             ReqwestFirecrawlTransport::new()?,
             thread::sleep,
@@ -117,7 +118,8 @@ pub fn build_task_scheduler(
     let billing = PostgresTaskBilling::new(
         BillingRepository::new(options.database_url),
         PRIMARY_CHAT_MODEL,
-    );
+    )
+    .with_web_search(firecrawl_api_key.is_some());
     let action_transport = ReqwestTelegramTransport::new().map_err(TaskServiceError::Telegram)?;
     let messenger = ActionTaskMessenger::new(
         TelegramActionSink::new(action_transport, options.telegram_token)
