@@ -14,7 +14,7 @@ license = "MIT"
 repository = "https://github.com/astrovm/respondedorbot"
 
 [workspace.dependencies]
-base64 = "0.23.1"
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 ab_glyph = "0.2.32"
 bot-adapters = { path = "crates/bot-adapters" }
 bot-core = { path = "crates/bot-core" }
