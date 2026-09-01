@@ -402,6 +402,17 @@ impl PostgresConversationBilling {
             active_operations.mark_inactive(operation_id);
         }
     }
+
+    fn refund_creditless_cap(&self, operation_id: &str) -> Result<(), String> {
+        if let Some(cap_key) = self.cap_key_by_operation.get(operation_id)
+            && let Some(creditless_cap) = self.creditless_cap.as_ref()
+        {
+            creditless_cap
+                .refund_once(cap_key, operation_id)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
 }
 
 impl ConversationBilling for PostgresConversationBilling {
@@ -451,43 +462,45 @@ impl ConversationBilling for PostgresConversationBilling {
             && self
                 .cap_checked_operations
                 .insert(request.operation_id.clone())
-            && result.applied
         {
             let origin_chat_id = request
                 .metadata
                 .get("origin_chat_id")
                 .map_or_else(|| chat_id.to_string(), value_as_key_component);
             let cap_key = creditless_cap_key(&origin_chat_id, request.user_id);
-            let count = creditless_cap
-                .increment(&cap_key, CREDITLESS_CAP_TTL_SECONDS)
-                .map_err(|error| error.to_string())?;
-            if count > request.creditless_user_hourly_limit {
-                let mut refund_metadata = request.metadata.clone();
-                refund_metadata.insert("reason".to_owned(), json!("creditless_hourly_cap"));
-                refund_metadata.insert("settlement_id".to_owned(), json!(&request.reservation_id));
-                let refund_id = format!("{}:creditless_cap_refund", request.reservation_id);
-                let refund = self
-                    .repository
-                    .refund_ai_charge(
-                        request.user_id,
-                        request.chat_id,
-                        amount,
-                        "chat",
-                        "ai_refund",
-                        &refund_metadata,
-                        Some(&refund_id),
-                        &request.operation_id,
-                    )
+            if result.applied {
+                let count = creditless_cap
+                    .increment(&cap_key, &request.operation_id, CREDITLESS_CAP_TTL_SECONDS)
                     .map_err(|error| error.to_string())?;
-                return Ok(ReserveDecision {
-                    authorized: false,
-                    user_balance: refund.user_balance,
-                    chat_balance: refund.chat_balance,
-                    source,
-                    denial: Some(ReserveDenial::CreditlessHourlyCap {
-                        limit: request.creditless_user_hourly_limit,
-                    }),
-                });
+                if count > request.creditless_user_hourly_limit {
+                    let mut refund_metadata = request.metadata.clone();
+                    refund_metadata.insert("reason".to_owned(), json!("creditless_hourly_cap"));
+                    refund_metadata
+                        .insert("settlement_id".to_owned(), json!(&request.reservation_id));
+                    let refund_id = format!("{}:creditless_cap_refund", request.reservation_id);
+                    let refund = self
+                        .repository
+                        .refund_ai_charge(
+                            request.user_id,
+                            request.chat_id,
+                            amount,
+                            "chat",
+                            "ai_refund",
+                            &refund_metadata,
+                            Some(&refund_id),
+                            &request.operation_id,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    return Ok(ReserveDecision {
+                        authorized: false,
+                        user_balance: refund.user_balance,
+                        chat_balance: refund.chat_balance,
+                        source,
+                        denial: Some(ReserveDenial::CreditlessHourlyCap {
+                            limit: request.creditless_user_hourly_limit,
+                        }),
+                    });
+                }
             }
             self.cap_key_by_operation
                 .insert(request.operation_id.clone(), cap_key);
@@ -548,7 +561,14 @@ impl ConversationBilling for PostgresConversationBilling {
                 );
                 copy_pricing_metadata(&mut metadata, &pricing);
             }
-            let settlement_applied = if pricing_complete {
+            if pricing_complete {
+                // Refund the ephemeral hourly allowance before committing the
+                // durable zero-cost settlement. A Redis failure then leaves the
+                // database operation replayable, and the Redis operation marker
+                // makes a successful refund safe to retry.
+                if request.actual_credit_units == 0 {
+                    self.refund_creditless_cap(&operation_id)?;
+                }
                 self.repository
                     .settle_ai_operation_once(
                         request.user_id,
@@ -557,18 +577,6 @@ impl ConversationBilling for PostgresConversationBilling {
                         request.actual_credit_units,
                         &metadata,
                     )
-                    .map_err(|error| error.to_string())?
-                    .applied
-            } else {
-                false
-            };
-            if settlement_applied
-                && request.actual_credit_units == 0
-                && let Some(cap_key) = self.cap_key_by_operation.get(&operation_id)
-                && let Some(creditless_cap) = self.creditless_cap.as_ref()
-            {
-                creditless_cap
-                    .decrement(cap_key)
                     .map_err(|error| error.to_string())?;
             }
             Ok(())
@@ -582,17 +590,7 @@ impl ConversationBilling for PostgresConversationBilling {
     }
 
     fn abort_operation(&mut self, operation_id: &str) -> Result<(), String> {
-        let cap_refund = self
-            .cap_key_by_operation
-            .get(operation_id)
-            .and_then(|cap_key| {
-                self.creditless_cap
-                    .as_ref()
-                    .map(|creditless_cap| creditless_cap.decrement(cap_key))
-            })
-            .transpose()
-            .map(|_count| ())
-            .map_err(|error| error.to_string());
+        let cap_refund = self.refund_creditless_cap(operation_id);
         self.release_operation_state(operation_id);
         cap_refund
     }

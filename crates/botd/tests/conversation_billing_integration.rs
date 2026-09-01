@@ -182,5 +182,23 @@ fn postgres_and_redis_enforce_onboarding_replay_cap_and_refund_policy() -> Resul
     billing.abort_operation(abort_operation)?;
     assert_eq!(cap_reader.count(&refund_key)?, Some(0));
     assert!(!active.is_active(abort_operation));
+
+    // A replay reconstructs the cap key without incrementing the counter, and
+    // the operation marker prevents the refund from being applied twice.
+    assert!(
+        billing
+            .reserve(reserve_request(
+                refund_user_id,
+                refund_chat_id,
+                abort_operation,
+                "base",
+                400,
+                1,
+            ))?
+            .authorized
+    );
+    assert_eq!(cap_reader.count(&refund_key)?, Some(0));
+    billing.abort_operation(abort_operation)?;
+    assert_eq!(cap_reader.count(&refund_key)?, Some(0));
     Ok(())
 }
