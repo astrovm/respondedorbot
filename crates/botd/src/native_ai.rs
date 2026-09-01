@@ -422,6 +422,53 @@ impl<Store> PostgresTaskBilling<Store> {
             .map_err(|error| NativeTaskBillingError::Store(error.to_string()))?;
         Ok(())
     }
+
+    fn finalize(
+        &self,
+        task: &ScheduledTask,
+        execution_id: &str,
+        new_segments: &[Value],
+        reason: &'static str,
+    ) -> Result<(), NativeTaskBillingError>
+    where
+        Store: TaskCreditStore,
+    {
+        let user_id = task.user_id.ok_or(NativeTaskBillingError::MissingUser)?;
+        let operation_id = operation_id(execution_id);
+        for segment in new_segments {
+            let metadata = json!({
+                "operation_id": operation_id,
+                "segment_id": stable_provider_segment_id(segment),
+                "task_id": task.id.as_str(),
+                "execution_id": execution_id,
+                "segment": segment,
+            });
+            self.store
+                .record_segment(user_id, &metadata)
+                .map_err(|error| NativeTaskBillingError::Store(error.to_string()))?;
+        }
+        let durable_segments = self
+            .store
+            .list_segments(user_id, &operation_id)
+            .map_err(|error| NativeTaskBillingError::Store(error.to_string()))?;
+        if durable_segments.is_empty() {
+            return self.settle_amount(task, execution_id, &[], reason, 0, None);
+        }
+        let pricing = calculate_billing_for_segments(&json!(durable_segments))
+            .map_err(|error| NativeTaskBillingError::Pricing(error.to_string()))?;
+        let amount = pricing
+            .get("charged_credit_units")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| NativeTaskBillingError::Pricing("missing charge total".to_owned()))?;
+        self.settle_amount(
+            task,
+            execution_id,
+            &durable_segments,
+            reason,
+            amount,
+            Some(&pricing),
+        )
+    }
 }
 
 fn copy_task_pricing_metadata(metadata: &mut Map<String, Value>, pricing: &Value) {
@@ -517,38 +564,7 @@ impl<Store: TaskCreditStore> TaskBilling for PostgresTaskBilling<Store> {
         segments: &[Value],
         reason: &'static str,
     ) -> Result<(), Self::Error> {
-        let user_id = task.user_id.ok_or(NativeTaskBillingError::MissingUser)?;
-        let operation_id = operation_id(execution_id);
-        for segment in segments {
-            let metadata = json!({
-                "operation_id": operation_id,
-                "segment_id": stable_provider_segment_id(segment),
-                "task_id": task.id.as_str(),
-                "execution_id": execution_id,
-                "segment": segment,
-            });
-            self.store
-                .record_segment(user_id, &metadata)
-                .map_err(|error| NativeTaskBillingError::Store(error.to_string()))?;
-        }
-        let durable_segments = self
-            .store
-            .list_segments(user_id, &operation_id)
-            .map_err(|error| NativeTaskBillingError::Store(error.to_string()))?;
-        let pricing = calculate_billing_for_segments(&json!(durable_segments))
-            .map_err(|error| NativeTaskBillingError::Pricing(error.to_string()))?;
-        let amount = pricing
-            .get("charged_credit_units")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| NativeTaskBillingError::Pricing("missing charge total".to_owned()))?;
-        self.settle_amount(
-            task,
-            execution_id,
-            &durable_segments,
-            reason,
-            amount,
-            Some(&pricing),
-        )
+        self.finalize(task, execution_id, segments, reason)
     }
 
     fn refund(
@@ -557,7 +573,7 @@ impl<Store: TaskCreditStore> TaskBilling for PostgresTaskBilling<Store> {
         execution_id: &str,
         reason: &'static str,
     ) -> Result<(), Self::Error> {
-        self.settle_amount(task, execution_id, &[], reason, 0, None)
+        self.finalize(task, execution_id, &[], reason)
     }
 }
 
@@ -1081,6 +1097,42 @@ mod tests {
             Some(2)
         );
         assert_eq!(settlement.2, 60);
+    }
+
+    #[test]
+    fn task_refund_charges_usage_persisted_by_an_earlier_attempt() {
+        let earlier_segment = json!({
+            "kind": "chat",
+            "model": "deepseek/deepseek-v4-flash-0731",
+            "usage": {"cost": "0.001"},
+            "source": "openrouter",
+            "metadata": {
+                "provider": "openrouter",
+                "provider_generation_id": "generation-earlier"
+            }
+        });
+        let store = Store {
+            segments: RefCell::new(vec![json!({
+                "operation_id": "task:task123:1000",
+                "segment_id": "openrouter:generation-earlier",
+                "segment": earlier_segment,
+            })]),
+            ..Store::default()
+        };
+        let mut billing = PostgresTaskBilling::new(store, "deepseek/deepseek-v4-flash-0731");
+
+        billing
+            .refund(&task("en"), "task123:1000", "task_error")
+            .unwrap_or_else(|error| panic!("finalization: {error}"));
+
+        let settlements = billing.store.settlements.borrow();
+        let settlement = &settlements[0];
+        assert_eq!(settlement.2, 20);
+        assert_eq!(
+            settlement.3["billing_segments"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(settlement.3["pricing_complete"], true);
     }
 
     #[test]
