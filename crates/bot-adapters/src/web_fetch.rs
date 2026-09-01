@@ -4,6 +4,7 @@ use std::io::Read;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::time::Duration;
 
+use bot_core::locale::Locale;
 use reqwest::blocking::Client;
 use reqwest::header::{CONTENT_TYPE, LOCATION, USER_AGENT};
 use reqwest::redirect::Policy;
@@ -146,10 +147,12 @@ impl PublicFetchError {
     }
 
     #[must_use]
-    pub const fn public_message(&self) -> &'static str {
-        match self {
-            Self::Blocked { .. } => "url no permitida",
-            Self::Request { .. } => "no se pudo obtener la url",
+    pub const fn public_message(&self, locale: Locale) -> &'static str {
+        match (self, locale) {
+            (Self::Blocked { .. }, Locale::Es) => "URL no permitida",
+            (Self::Blocked { .. }, Locale::En) => "URL is not allowed",
+            (Self::Request { .. }, Locale::Es) => "no se pudo obtener la URL",
+            (Self::Request { .. }, Locale::En) => "could not fetch the URL",
         }
     }
 }
@@ -873,7 +876,11 @@ mod tests {
             "https://example.com",
         );
         if let Err(error) = result {
-            assert_eq!(error.public_message(), "no se pudo obtener la url");
+            assert_eq!(
+                error.public_message(Locale::Es),
+                "no se pudo obtener la URL"
+            );
+            assert_eq!(error.public_message(Locale::En), "could not fetch the URL");
             assert!(error.to_string().contains("no se pudo"));
             assert!(
                 matches!(error, PublicFetchError::Request { detail, .. } if detail.contains("timed out"))

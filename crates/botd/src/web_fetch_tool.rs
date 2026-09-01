@@ -6,6 +6,7 @@ use bot_adapters::web_fetch::{
 use bot_core::locale::Locale;
 
 use crate::chat_tool_loop::ToolExecutionResult;
+use crate::tool_output;
 use crate::tool_requests::{ExternalToolExecutor, ExternalToolRequest};
 
 pub struct WebFetchTool<Transport, Resolver> {
@@ -36,16 +37,19 @@ where
         _tool_call_id: &str,
     ) -> ToolExecutionResult {
         let ExternalToolRequest::WebFetch { url } = request else {
-            return ToolExecutionResult::output("web_fetch received an incompatible request");
+            return ToolExecutionResult::output(tool_output::incompatible(
+                self.locale,
+                "web_fetch",
+            ));
         };
         match fetch_ai_url(&self.transport, &self.resolver, &url) {
             Ok(AiFetchOutcome::Tweet(tweet)) => {
                 let mut parts = Vec::new();
                 if !tweet.author.is_empty() || !tweet.date.is_empty() {
-                    let mut heading = if tweet.author.is_empty() {
-                        "Tweet".to_owned()
-                    } else {
-                        format!("Tweet de {}", tweet.author)
+                    let mut heading = match (self.locale, tweet.author.is_empty()) {
+                        (_, true) => "Tweet".to_owned(),
+                        (Locale::Es, false) => format!("Tweet de {}", tweet.author),
+                        (Locale::En, false) => format!("Tweet by {}", tweet.author),
                     };
                     if !tweet.date.is_empty() {
                         heading.push_str(" · ");
@@ -67,7 +71,11 @@ where
                 })
             }
             Ok(AiFetchOutcome::TweetError { url }) => ToolExecutionResult::with_diagnostics(
-                "no se pudo leer el tweet",
+                localized(
+                    self.locale,
+                    "no se pudo leer el tweet",
+                    "could not read the tweet",
+                ),
                 vec![format!("Twitter oEmbed failed for {url}")],
             ),
             Ok(AiFetchOutcome::Page(page)) => {
@@ -96,8 +104,8 @@ where
 
 fn error_result(url: &str, error: PublicFetchError, locale: Locale) -> ToolExecutionResult {
     let output = match locale {
-        Locale::Es => format!("error obteniendo {url}: {}", error.public_message()),
-        Locale::En => format!("error fetching {url}: {}", error.public_message()),
+        Locale::Es => format!("error obteniendo {url}: {}", error.public_message(locale)),
+        Locale::En => format!("error fetching {url}: {}", error.public_message(locale)),
     };
     let diagnostic = match &error {
         PublicFetchError::Blocked { url } => format!("web_fetch blocked URL {url}"),
@@ -198,7 +206,7 @@ mod tests {
         assert_eq!(
             tool.execute(request("https://x.com/user/status/123"), "call")
                 .output,
-            "Tweet de Example User · Jan 1, 2020\nA status update."
+            "Tweet by Example User · Jan 1, 2020\nA status update."
         );
 
         let empty = serde_json::json!({"html": "<blockquote></blockquote>"}).to_string();
@@ -216,7 +224,7 @@ mod tests {
         let result = tool.execute(request("http://127.0.0.1/secret"), "call");
         assert_eq!(
             result.output,
-            "error fetching http://127.0.0.1/secret: url no permitida"
+            "error fetching http://127.0.0.1/secret: URL is not allowed"
         );
         assert!(result.diagnostics[0].contains("blocked"));
 
@@ -257,7 +265,7 @@ mod tests {
         );
         assert_eq!(
             tool.execute(ExternalToolRequest::TaskList, "call").output,
-            "web_fetch received an incompatible request"
+            "la herramienta 'web_fetch' recibió una solicitud incompatible"
         );
     }
 }

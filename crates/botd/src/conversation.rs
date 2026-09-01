@@ -13,7 +13,7 @@ use bot_core::ai_reserve::{
     estimate_vision_reserve_credit_units,
 };
 use bot_core::ai_response_cleanup::cleanup_response;
-use bot_core::locale::Locale;
+use bot_core::locale::{Locale, format_date};
 use bot_core::text_cleanup::sanitize_summary_text;
 use chrono::{DateTime, FixedOffset, Offset, Utc};
 use serde_json::{Map, Value, json};
@@ -341,7 +341,7 @@ where
                 .as_deref(),
             MAX_HISTORY_MESSAGES,
         )?;
-        let date = formatted_date(input.timestamp, input.timezone_offset_hours);
+        let date = formatted_date(input.timestamp, input.timezone_offset_hours, input.locale);
         let mut messages = vec![PromptMessage::text(
             PromptRole::System,
             build_system_prompt(&self.persona, input.locale, &date, true, false),
@@ -1411,10 +1411,11 @@ fn record_and_settle<Billing: ConversationBilling>(
     })
 }
 
-fn formatted_date(timestamp: i64, timezone_offset_hours: i64) -> String {
-    shifted_time(timestamp, timezone_offset_hours)
-        .format("%A %d/%m/%Y")
-        .to_string()
+fn formatted_date(timestamp: i64, timezone_offset_hours: i64, locale: Locale) -> String {
+    format_date(
+        shifted_time(timestamp, timezone_offset_hours).date_naive(),
+        locale,
+    )
 }
 
 fn formatted_time(timestamp: i64, timezone_offset_hours: i64) -> String {

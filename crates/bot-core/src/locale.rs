@@ -1,5 +1,7 @@
 //! Locale selection shared by native command and callback flows.
 
+use chrono::{Datelike, NaiveDate, Weekday};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Locale {
     Es,
@@ -13,6 +15,34 @@ impl Locale {
             Self::Es => "es",
             Self::En => "en",
         }
+    }
+}
+
+#[must_use]
+pub fn format_date(date: NaiveDate, locale: Locale) -> String {
+    format!(
+        "{} {}",
+        weekday_name(date.weekday(), locale),
+        date.format("%d/%m/%Y")
+    )
+}
+
+const fn weekday_name(weekday: Weekday, locale: Locale) -> &'static str {
+    match (locale, weekday) {
+        (Locale::Es, Weekday::Mon) => "lunes",
+        (Locale::Es, Weekday::Tue) => "martes",
+        (Locale::Es, Weekday::Wed) => "miércoles",
+        (Locale::Es, Weekday::Thu) => "jueves",
+        (Locale::Es, Weekday::Fri) => "viernes",
+        (Locale::Es, Weekday::Sat) => "sábado",
+        (Locale::Es, Weekday::Sun) => "domingo",
+        (Locale::En, Weekday::Mon) => "Monday",
+        (Locale::En, Weekday::Tue) => "Tuesday",
+        (Locale::En, Weekday::Wed) => "Wednesday",
+        (Locale::En, Weekday::Thu) => "Thursday",
+        (Locale::En, Weekday::Fri) => "Friday",
+        (Locale::En, Weekday::Sat) => "Saturday",
+        (Locale::En, Weekday::Sun) => "Sunday",
     }
 }
 
@@ -46,7 +76,9 @@ pub fn resolve_locale(
 
 #[cfg(test)]
 mod tests {
-    use super::{Locale, normalize_locale, resolve_locale};
+    use chrono::NaiveDate;
+
+    use super::{Locale, format_date, normalize_locale, resolve_locale};
 
     #[test]
     fn normalizes_language_and_region_codes() {
@@ -72,5 +104,14 @@ mod tests {
             Locale::Es
         );
         assert_eq!(resolve_locale(Some("en"), Some("es"), "group"), Locale::En);
+    }
+
+    #[test]
+    fn formats_weekdays_in_the_selected_locale() {
+        let Some(date) = NaiveDate::from_ymd_opt(2026, 9, 1) else {
+            return;
+        };
+        assert_eq!(format_date(date, Locale::Es), "martes 01/09/2026");
+        assert_eq!(format_date(date, Locale::En), "Tuesday 01/09/2026");
     }
 }

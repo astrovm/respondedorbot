@@ -12,7 +12,7 @@ use crate::compaction_adapters::production_compaction_worker;
 use crate::compaction_worker::{
     CompactionBilling, CompactionProvider, CompactionQueue, CompactionState, CompactionWorker,
 };
-use crate::operational_reporting::OperationalReporter;
+use crate::operational_reporting::{OperationalReport, OperationalReporter};
 use crate::price_refresh::production_price_refresh_worker;
 use crate::reconciliation::{
     ActiveOperationRegistry, AiBillingReconciler, GenerationSource, ReconciliationSettings,
@@ -132,6 +132,25 @@ pub enum BackgroundError {
     Panicked { name: String },
 }
 
+impl BackgroundError {
+    fn operational_report(&self) -> OperationalReport {
+        match self {
+            Self::InvalidInterval { name } => OperationalReport::new(
+                format!("el proceso en segundo plano {name} tiene un intervalo de cero"),
+                self.to_string(),
+            ),
+            Self::Spawn { name, error } => OperationalReport::new(
+                format!("no se pudo iniciar el proceso en segundo plano {name}: {error}"),
+                self.to_string(),
+            ),
+            Self::Panicked { name } => OperationalReport::new(
+                format!("el proceso en segundo plano {name} falló durante el apagado"),
+                self.to_string(),
+            ),
+        }
+    }
+}
+
 struct WorkerHandle {
     name: String,
     handle: JoinHandle<()>,
@@ -161,7 +180,7 @@ impl BackgroundSupervisor {
             if spec.interval.is_zero() {
                 supervisor.stop_best_effort();
                 let failure = BackgroundError::InvalidInterval { name: spec.name };
-                supervisor.report_failure(&failure.to_string());
+                supervisor.report_failure(&failure);
                 return Err(failure);
             }
             let name = spec.name.clone();
@@ -179,7 +198,13 @@ impl BackgroundSupervisor {
                         match worker.run_once(now_epoch_seconds()) {
                             Ok(()) => last_reported_failure = None,
                             Err(error) => {
-                                let message = format!("background worker {name} failed: {error}");
+                                let report = OperationalReport::new(
+                                    format!(
+                                        "falló el proceso en segundo plano {name}: {error}"
+                                    ),
+                                    format!("background worker {name} failed: {error}"),
+                                );
+                                let message = report.english().to_owned();
                                 eprintln!("{message}");
                                 let now = Instant::now();
                                 let should_report = last_reported_failure.as_ref().is_none_or(
@@ -190,7 +215,7 @@ impl BackgroundSupervisor {
                                     },
                                 );
                                 if should_report {
-                                    if let Err(report_error) = reporter.report(&message) {
+                                    if let Err(report_error) = reporter.report(&report) {
                                         eprintln!(
                                             "could not deliver background failure report: {report_error}"
                                         );
@@ -211,9 +236,14 @@ impl BackgroundSupervisor {
                         }
                     }
                     if let Err(error) = worker.shutdown() {
-                        let message = format!("background worker {name} shutdown failed: {error}");
-                        eprintln!("{message}");
-                        if let Err(report_error) = reporter.report(&message) {
+                        let report = OperationalReport::new(
+                            format!(
+                                "falló el apagado del proceso en segundo plano {name}: {error}"
+                            ),
+                            format!("background worker {name} shutdown failed: {error}"),
+                        );
+                        eprintln!("{}", report.english());
+                        if let Err(report_error) = reporter.report(&report) {
                             eprintln!(
                                 "could not deliver background shutdown failure report: {report_error}"
                             );
@@ -228,7 +258,7 @@ impl BackgroundSupervisor {
                         name: spec.name.clone(),
                         error: error.to_string(),
                     };
-                    supervisor.report_failure(&failure.to_string());
+                    supervisor.report_failure(&failure);
                     return Err(failure);
                 }
             };
@@ -246,7 +276,7 @@ impl BackgroundSupervisor {
         while let Some(worker) = self.handles.pop() {
             if worker.handle.join().is_err() {
                 let failure = BackgroundError::Panicked { name: worker.name };
-                self.report_failure(&failure.to_string());
+                self.report_failure(&failure);
                 return Err(failure);
             }
         }
@@ -258,14 +288,14 @@ impl BackgroundSupervisor {
         self.wake.1.notify_all();
         while let Some(worker) = self.handles.pop() {
             if worker.handle.join().is_err() {
-                self.report_failure(&BackgroundError::Panicked { name: worker.name }.to_string());
+                self.report_failure(&BackgroundError::Panicked { name: worker.name });
             }
         }
     }
 
-    fn report_failure(&self, message: &str) {
-        eprintln!("{message}");
-        if let Err(report_error) = self.reporter.report(message) {
+    fn report_failure(&self, failure: &BackgroundError) {
+        eprintln!("{failure}");
+        if let Err(report_error) = self.reporter.report(&failure.operational_report()) {
             eprintln!("could not deliver operational failure report: {report_error}");
         }
     }
@@ -378,12 +408,13 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use bot_adapters::redis_connection::RedisEndpoint;
+    use bot_core::locale::Locale;
 
     use super::{
         BackgroundSupervisor, BackgroundWorker, BackgroundWorkerSpec, ProductionBackgroundOptions,
         build_production_background_specs,
     };
-    use crate::operational_reporting::OperationalReporter;
+    use crate::operational_reporting::{OperationalReport, OperationalReporter};
     use crate::reconciliation::{ActiveOperationRegistry, ReconciliationSettings};
     use crate::scheduler::SchedulerMode;
     use std::time::Duration;
@@ -396,15 +427,15 @@ mod tests {
 
     #[derive(Default)]
     struct Reporter {
-        messages: Mutex<Vec<String>>,
+        messages: Mutex<Vec<OperationalReport>>,
     }
 
     impl OperationalReporter for Reporter {
-        fn report(&self, message: &str) -> Result<(), String> {
+        fn report(&self, report: &OperationalReport) -> Result<(), String> {
             self.messages
                 .lock()
                 .map_err(|_| "report lock poisoned".to_owned())?
-                .push(message.to_owned());
+                .push(report.clone());
             Ok(())
         }
     }
@@ -456,7 +487,12 @@ mod tests {
             Err(RecvTimeoutError::Disconnected)
         );
         let messages = reporter.messages.lock();
-        assert!(messages.is_ok_and(|messages| messages.len() == 1));
+        assert!(messages.is_ok_and(|messages| {
+            messages.len() == 1
+                && messages[0]
+                    .for_locale(Locale::Es)
+                    .starts_with("falló el proceso en segundo plano synthetic-worker")
+        }));
         assert!(supervisor.stop().is_ok());
     }
 

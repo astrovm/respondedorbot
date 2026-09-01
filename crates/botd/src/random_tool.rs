@@ -7,6 +7,7 @@ use bot_core::random_selection::{RandomSelection, parse_random_selection};
 
 use crate::chat_tool_loop::ToolExecutionResult;
 use crate::dispatcher::RandomSource;
+use crate::tool_output;
 use crate::tool_requests::{ExternalToolExecutor, ExternalToolRequest};
 
 pub struct RandomChoiceTool<Random> {
@@ -32,30 +33,42 @@ where
         _tool_call_id: &str,
     ) -> ToolExecutionResult {
         let ExternalToolRequest::RandomChoice { request } = request else {
-            return ToolExecutionResult::output("random_choice received an incompatible request");
+            return ToolExecutionResult::output(tool_output::incompatible(
+                self.locale,
+                "random_choice",
+            ));
         };
         let selection = match parse_random_selection(&request) {
             Ok(selection) => selection,
             Err(_) => RandomSelection::Invalid,
         };
-        let output = match selection {
+        let result = match selection {
             RandomSelection::Invalid => invalid(self.locale),
             RandomSelection::Choices { values } => match self.random.choice_index(values.len()) {
                 Ok(index) => values
                     .get(index)
                     .cloned()
                     .unwrap_or_else(|| invalid(self.locale)),
-                Err(error) => format!("Tool 'random_choice' error: {error}"),
+                Err(error) => {
+                    return random_failure(self.locale, &error);
+                }
             },
             RandomSelection::InclusiveRange { start, end } => {
                 match self.random.inclusive_integer(&start, &end) {
                     Ok(value) => value.to_string(),
-                    Err(error) => format!("Tool 'random_choice' error: {error}"),
+                    Err(error) => return random_failure(self.locale, &error),
                 }
             }
         };
-        ToolExecutionResult::output(output)
+        ToolExecutionResult::output(result)
     }
+}
+
+fn random_failure(locale: Locale, error: &impl Display) -> ToolExecutionResult {
+    ToolExecutionResult::with_diagnostics(
+        tool_output::failed(locale, "random_choice"),
+        vec![format!("random_choice source failed: {error}")],
+    )
 }
 
 fn invalid(locale: Locale) -> String {
@@ -137,18 +150,16 @@ mod tests {
             tool.execute(request("invalid"), "call").output,
             invalid(Locale::Es)
         );
-        assert_eq!(
-            tool.execute(request("１-３"), "call").output,
-            "Tool 'random_choice' error: synthetic random failure"
-        );
+        let result = tool.execute(request("１-３"), "call");
+        assert_eq!(result.output, "falló la herramienta 'random_choice'");
+        assert!(result.diagnostics[0].contains("synthetic random failure"));
         assert_eq!(
             tool.execute(request("a,b"), "call").output,
             invalid(Locale::Es)
         );
-        assert_eq!(
-            tool.execute(request("1-3"), "call").output,
-            "Tool 'random_choice' error: synthetic random failure"
-        );
+        let result = tool.execute(request("1-3"), "call");
+        assert_eq!(result.output, "falló la herramienta 'random_choice'");
+        assert!(result.diagnostics[0].contains("synthetic random failure"));
     }
 
     #[test]
@@ -162,11 +173,10 @@ mod tests {
         );
         assert_eq!(
             tool.execute(ExternalToolRequest::TaskList, "call").output,
-            "random_choice received an incompatible request"
+            "tool 'random_choice' received an incompatible request"
         );
-        assert_eq!(
-            tool.execute(request("a,b"), "call").output,
-            "Tool 'random_choice' error: synthetic choice failure"
-        );
+        let result = tool.execute(request("a,b"), "call");
+        assert_eq!(result.output, "tool 'random_choice' failed");
+        assert!(result.diagnostics[0].contains("synthetic choice failure"));
     }
 }

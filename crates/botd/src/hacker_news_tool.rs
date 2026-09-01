@@ -5,6 +5,7 @@ use bot_core::hacker_news::{HackerNewsRenderItem, format_items};
 use bot_core::locale::Locale;
 
 use crate::chat_tool_loop::ToolExecutionResult;
+use crate::tool_output;
 use crate::tool_requests::{ExternalToolExecutor, ExternalToolRequest};
 
 pub struct HackerNewsTool<Transport, Cache> {
@@ -35,7 +36,10 @@ where
         _tool_call_id: &str,
     ) -> ToolExecutionResult {
         let ExternalToolRequest::HackerNews { limit } = request else {
-            return ToolExecutionResult::output("hacker_news received an incompatible request");
+            return ToolExecutionResult::output(tool_output::incompatible(
+                self.locale,
+                "hacker_news",
+            ));
         };
         let load = load_hacker_news(&self.transport, &mut self.cache, usize::from(limit));
         let items = load
@@ -136,7 +140,7 @@ mod tests {
         );
         assert_eq!(
             tool.execute(ExternalToolRequest::TaskList, "call").output,
-            "hacker_news received an incompatible request"
+            "tool 'hacker_news' received an incompatible request"
         );
     }
 }

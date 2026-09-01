@@ -8,6 +8,7 @@ use bot_core::weather::{render_weather, weather_load_error};
 
 use crate::chat_tool_loop::ToolExecutionResult;
 use crate::dispatcher::{DollarMarketSource, MarketPriceSource, StockPriceSource, WeatherSource};
+use crate::tool_output;
 use crate::tool_requests::{ExternalToolExecutor, ExternalToolRequest};
 
 pub struct CryptoPricesTool<Source, Now> {
@@ -38,7 +39,10 @@ where
         _tool_call_id: &str,
     ) -> ToolExecutionResult {
         let ExternalToolRequest::CryptoPrices { query } = request else {
-            return ToolExecutionResult::output("crypto_prices received an incompatible request");
+            return ToolExecutionResult::output(tool_output::incompatible(
+                self.locale,
+                "crypto_prices",
+            ));
         };
         let load = self.source.load(
             &query,
@@ -78,7 +82,10 @@ where
         _tool_call_id: &str,
     ) -> ToolExecutionResult {
         let ExternalToolRequest::StockPrices { query } = request else {
-            return ToolExecutionResult::output("stock_prices received an incompatible request");
+            return ToolExecutionResult::output(tool_output::incompatible(
+                self.locale,
+                "stock_prices",
+            ));
         };
         let load = self.source.load(&query, (self.now)());
         let output = render_stock_quotes(load.quotes.as_deref(), self.locale);
@@ -114,7 +121,10 @@ where
         _tool_call_id: &str,
     ) -> ToolExecutionResult {
         let ExternalToolRequest::DollarRates { timeframe } = request else {
-            return ToolExecutionResult::output("dollar_rates received an incompatible request");
+            return ToolExecutionResult::output(tool_output::incompatible(
+                self.locale,
+                "dollar_rates",
+            ));
         };
         let hours_ago = match plan_dollar_command(&timeframe) {
             DollarCommandPlan::Load { hours_ago } => hours_ago,
@@ -159,7 +169,7 @@ where
         _tool_call_id: &str,
     ) -> ToolExecutionResult {
         let ExternalToolRequest::Weather { location } = request else {
-            return ToolExecutionResult::output("weather received an incompatible request");
+            return ToolExecutionResult::output(tool_output::incompatible(self.locale, "weather"));
         };
         let load = self.source.load(&location, (self.now)());
         let output = load.observation.as_ref().map_or_else(
@@ -396,7 +406,7 @@ mod tests {
         );
         assert_eq!(
             crypto.execute(ExternalToolRequest::TaskList, "call").output,
-            "crypto_prices received an incompatible request"
+            "tool 'crypto_prices' received an incompatible request"
         );
     }
 }

@@ -20,6 +20,7 @@ use serde_json::Value;
 
 use crate::chat_tool_loop::ToolExecutionResult;
 use crate::native_ai::estimate_task_reserve_credit_units;
+use crate::tool_output;
 use crate::tool_requests::{ExternalToolExecutor, ExternalToolRequest};
 
 const TASK_RECORD_TTL_SECONDS: i64 = 86_400 * 3_650;
@@ -133,7 +134,10 @@ where
             trigger_config,
         } = request
         else {
-            return ToolExecutionResult::output("task_set received an incompatible request");
+            return ToolExecutionResult::output(tool_output::incompatible(
+                self.context.locale,
+                "task_set",
+            ));
         };
         if self.context.chat_id.is_empty() {
             return ToolExecutionResult::output(no_chat(self.context.locale));
@@ -270,7 +274,10 @@ impl<Store: TaskToolStore> ExternalToolExecutor for TaskListTool<Store> {
         _tool_call_id: &str,
     ) -> ToolExecutionResult {
         if request != ExternalToolRequest::TaskList {
-            return ToolExecutionResult::output("task_list received an incompatible request");
+            return ToolExecutionResult::output(tool_output::incompatible(
+                self.locale,
+                "task_list",
+            ));
         }
         if self.chat_id.is_empty() {
             return ToolExecutionResult::output(no_chat(self.locale));
@@ -316,7 +323,10 @@ impl<Store: TaskToolStore> ExternalToolExecutor for TaskCancelTool<Store> {
         _tool_call_id: &str,
     ) -> ToolExecutionResult {
         let ExternalToolRequest::TaskCancel { task_id } = request else {
-            return ToolExecutionResult::output("task_cancel received an incompatible request");
+            return ToolExecutionResult::output(tool_output::incompatible(
+                self.locale,
+                "task_cancel",
+            ));
         };
         if self.chat_id.is_empty() {
             return ToolExecutionResult::output(no_chat(self.locale));

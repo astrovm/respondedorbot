@@ -7,6 +7,7 @@ use bot_core::ai_capabilities::render_ai_capabilities;
 use bot_core::locale::Locale;
 
 use crate::chat_tool_loop::{NativeToolRuntime, ToolExecutionResult};
+use crate::tool_output;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum NativeTool {
@@ -142,12 +143,13 @@ impl<Ports: NativeToolPorts> NativeToolBackend for StandardNativeToolBackend<Por
 
 pub struct NativeToolRegistry<Backend> {
     backend: Backend,
+    locale: Locale,
 }
 
 impl<Backend> NativeToolRegistry<Backend> {
     #[must_use]
-    pub const fn new(backend: Backend) -> Self {
-        Self { backend }
+    pub const fn new(backend: Backend, locale: Locale) -> Self {
+        Self { backend, locale }
     }
 
     #[must_use]
@@ -180,7 +182,7 @@ impl<Backend: NativeToolBackend> NativeToolRuntime for NativeToolRegistry<Backen
         tool_call_id: &str,
     ) -> ToolExecutionResult {
         NativeTool::from_name(name).map_or_else(
-            || ToolExecutionResult::output(format!("Unknown tool: {name}")),
+            || ToolExecutionResult::output(tool_output::unknown(self.locale, name)),
             |tool| self.backend.execute(tool, arguments, tool_call_id),
         )
     }
@@ -355,10 +357,13 @@ mod tests {
     }
 
     fn registry(unavailable: Option<NativeTool>) -> NativeToolRegistry<Backend> {
-        NativeToolRegistry::new(Backend {
-            unavailable,
-            calls: Vec::new(),
-        })
+        NativeToolRegistry::new(
+            Backend {
+                unavailable,
+                calls: Vec::new(),
+            },
+            Locale::En,
+        )
     }
 
     #[test]
@@ -410,7 +415,7 @@ mod tests {
         assert_eq!(registry.backend().calls[0].2, "call-1");
         assert_eq!(
             registry.execute("unknown", &json!({}), "call-2").output,
-            "Unknown tool: unknown"
+            "unknown tool: unknown"
         );
     }
 
@@ -437,7 +442,7 @@ mod tests {
     #[test]
     fn standard_backend_keeps_calculation_pure_and_other_io_behind_ports() {
         let backend = StandardNativeToolBackend::new(Ports { calls: Vec::new() }, Locale::En);
-        let mut registry = NativeToolRegistry::new(backend);
+        let mut registry = NativeToolRegistry::new(backend, Locale::En);
         let schemas = registry.schemas(false);
         assert_eq!(schemas.len(), 3);
         assert!(registry.contains("calculate", false));

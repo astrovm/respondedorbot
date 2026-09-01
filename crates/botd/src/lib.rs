@@ -32,5 +32,6 @@ pub mod task_executor;
 pub mod task_service;
 pub mod task_tools;
 pub mod telegram_stream;
+pub mod tool_output;
 pub mod tool_requests;
 pub mod web_fetch_tool;
