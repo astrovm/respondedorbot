@@ -52,7 +52,7 @@ use bot_core::rulo::{RuloInput, evaluate_rulo, render_rulo};
 use bot_core::scheduled_tasks::{ScheduledTask, TaskId};
 use bot_core::stateless_commands::{
     StatelessCommandPlan, StatelessRuntimeContext, plan_runtime_stateless_command,
-    plan_stateless_command,
+    plan_stateless_command_with_reply,
 };
 use bot_core::stocks::{
     StockQuote, classify_oil_command, classify_stock_command, render_oil_quotes,
@@ -3045,8 +3045,14 @@ where
                 }
             }
         } else {
-            match plan_stateless_command(chat_id, message_id, &content.text, &self.bot_name, locale)
-            {
+            match plan_stateless_command_with_reply(
+                chat_id,
+                message_id,
+                &content.text,
+                message.replied_text.as_deref(),
+                &self.bot_name,
+                locale,
+            ) {
                 StatelessCommandPlan::NotHandled => plan_runtime_stateless_command(
                     chat_id,
                     message_id,
@@ -4730,6 +4736,7 @@ mod tests {
 
     #[test]
     fn dispatches_ascii_emoji_and_japanese_command_conversion_natively() {
+        let (source, _observations) = ai_source(Ok(AiPreparation::silent()));
         let config = Config {
             value: Ok(ChatConfig {
                 language: "en".to_owned(),
@@ -4744,8 +4751,9 @@ mod tests {
             values(),
             random(),
             authorization(),
-            "@mybot",
-        );
+            "mybot",
+        )
+        .with_ai_conversation_source(Box::new(source));
         assert_eq!(
             dispatcher.dispatch(update("/command hello! world", Some("es"))),
             Ok(DispatchOutcome::Handled)
@@ -4758,6 +4766,14 @@ mod tests {
             dispatcher.dispatch(update("/command もうすぐです", Some("es"))),
             Ok(DispatchOutcome::Handled)
         );
+        let mut replied = update("/comando@mybot", Some("es"));
+        let IncomingEvent::Message(message) = &mut replied.event else {
+            return;
+        };
+        message.has_reply = true;
+        message.replied_message_id = Some(MessageId(6));
+        message.replied_text = Some("Que es el csc".to_owned());
+        assert_eq!(dispatcher.dispatch(replied), Ok(DispatchOutcome::Handled));
         let texts = dispatcher
             .actions
             .0
@@ -4772,11 +4788,12 @@ mod tests {
             vec![
                 "/HELLO_SIGNODEEXCLAMACION_WORLD",
                 "send the text you want to convert",
-                "/MOUSUGUDESU"
+                "/MOUSUGUDESU",
+                "/QUE_ES_EL_CSC"
             ]
         );
-        assert_eq!(dispatcher.state.incoming.len(), 3);
-        assert_eq!(dispatcher.state.outgoing.len(), 3);
+        assert_eq!(dispatcher.state.incoming.len(), 4);
+        assert_eq!(dispatcher.state.outgoing.len(), 4);
     }
 
     #[test]

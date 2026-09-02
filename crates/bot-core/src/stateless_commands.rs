@@ -80,6 +80,18 @@ pub fn plan_stateless_command(
     bot_name: &str,
     locale: Locale,
 ) -> StatelessCommandPlan {
+    plan_stateless_command_with_reply(chat_id, message_id, message_text, None, bot_name, locale)
+}
+
+#[must_use]
+pub fn plan_stateless_command_with_reply(
+    chat_id: ChatId,
+    message_id: MessageId,
+    message_text: &str,
+    replied_message_text: Option<&str>,
+    bot_name: &str,
+    locale: Locale,
+) -> StatelessCommandPlan {
     let parsed = parse_command(message_text, bot_name);
     if parsed.command == "/help" {
         let mut message = SendMessage::new(chat_id, render_help_text(locale));
@@ -87,7 +99,12 @@ pub fn plan_stateless_command(
         return StatelessCommandPlan::Action(TelegramAction::SendMessage(message));
     }
     if matches!(parsed.command.as_str(), "/comando" | "/command") {
-        if parsed.message_text.is_empty() {
+        let conversion_text = if parsed.message_text.is_empty() {
+            replied_message_text.unwrap_or_default().trim()
+        } else {
+            &parsed.message_text
+        };
+        if conversion_text.is_empty() {
             let text = match locale {
                 Locale::Es => "y que queres que convierta boludo? mandate texto",
                 Locale::En => "send the text you want to convert",
@@ -96,7 +113,7 @@ pub fn plan_stateless_command(
             message.reply_to_message_id = Some(message_id);
             return StatelessCommandPlan::Action(TelegramAction::SendMessage(message));
         }
-        let preprocessed = preprocess_command_text(&parsed.message_text, locale);
+        let preprocessed = preprocess_command_text(conversion_text, locale);
         let text = normalize_command_text(&preprocessed).unwrap_or_else(|| match locale {
             Locale::Es => {
                 "no me mandes giladas boludo, tiene que tener letras o numeros".to_owned()
@@ -151,7 +168,7 @@ pub fn plan_runtime_stateless_command(
 mod tests {
     use super::{
         StatelessCommandPlan, StatelessRuntimeContext, plan_runtime_stateless_command,
-        plan_stateless_command,
+        plan_stateless_command, plan_stateless_command_with_reply,
     };
     use crate::locale::Locale;
     use crate::telegram_actions::TelegramAction;
@@ -288,6 +305,43 @@ mod tests {
                 Locale::En,
             )),
             Some("the command must contain letters or numbers".to_owned())
+        );
+    }
+
+    #[test]
+    fn command_conversion_uses_replied_text_only_when_inline_text_is_empty() {
+        assert_eq!(
+            message_text(plan_stateless_command_with_reply(
+                ChatId(1),
+                MessageId(2),
+                "/comando@respondedorbot",
+                Some("Que es el csc"),
+                "respondedorbot",
+                Locale::Es,
+            )),
+            Some("/QUE_ES_EL_CSC".to_owned())
+        );
+        assert_eq!(
+            message_text(plan_stateless_command_with_reply(
+                ChatId(1),
+                MessageId(2),
+                "/command inline text",
+                Some("replied text"),
+                "respondedorbot",
+                Locale::En,
+            )),
+            Some("/INLINE_TEXT".to_owned())
+        );
+        assert_eq!(
+            message_text(plan_stateless_command_with_reply(
+                ChatId(1),
+                MessageId(2),
+                "/command",
+                Some("   "),
+                "respondedorbot",
+                Locale::En,
+            )),
+            Some("send the text you want to convert".to_owned())
         );
     }
 
