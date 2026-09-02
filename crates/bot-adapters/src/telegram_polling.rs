@@ -19,13 +19,13 @@ pub const DEFAULT_LONG_POLL_SECONDS: u64 = 30;
 const HTTP_TIMEOUT_MARGIN_SECONDS: u64 = 5;
 const POLL_BATCH_LIMIT: u8 = 100;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IncomingUpdate {
     pub update_id: i64,
     pub event: IncomingEvent,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum IncomingEvent {
     Message(Box<IncomingMessage>),
     SuccessfulPayment(Map<String, Value>),
@@ -34,7 +34,7 @@ pub enum IncomingEvent {
     Unsupported,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IncomingMessage {
     pub message_id: Option<MessageId>,
     pub chat_id: Option<ChatId>,
