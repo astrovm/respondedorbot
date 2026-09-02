@@ -8,12 +8,15 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
+use bot_adapters::redis_update_queue::{QueuedUpdate, RedisUpdateQueue};
 use bot_adapters::telegram_polling::{
     IncomingUpdate, PollFailure, PollOutcome, PollingError, next_offset,
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const MAX_UPDATE_ATTEMPTS: usize = 3;
+const DURABLE_UPDATE_SCHEMA_VERSION: u32 = 1;
 
 pub trait UpdateSource {
     fn poll(&mut self, offset: Option<i64>) -> Result<PollOutcome, PollingError>;
@@ -22,10 +25,18 @@ pub trait UpdateSource {
 pub trait UpdateHandler {
     type Error;
 
+    fn prepare(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     fn handle(&mut self, update: IncomingUpdate) -> Result<(), Self::Error>;
 
     fn finish_batch(&mut self) -> Vec<UpdateFailure> {
         Vec::new()
+    }
+
+    fn take_background_failures(&mut self) -> BackgroundUpdateFailures {
+        BackgroundUpdateFailures::default()
     }
 
     fn shutdown(&mut self) {}
@@ -35,6 +46,12 @@ pub trait UpdateHandler {
 pub struct UpdateFailure {
     pub update_id: i64,
     pub error: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BackgroundUpdateFailures {
+    pub retrying: Vec<UpdateFailure>,
+    pub quarantined: Vec<UpdateFailure>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -228,6 +245,377 @@ impl<Handler> Drop for ParallelUpdateHandler<Handler> {
     }
 }
 
+pub trait DurableUpdateQueue: Clone + Send + 'static {
+    type Error: Display;
+
+    fn insert_update(&self, update_id: i64, payload: &str) -> Result<bool, Self::Error>;
+    fn list_updates(&self) -> Result<Vec<QueuedUpdate>, Self::Error>;
+    fn replace_update(&self, update_id: i64, payload: &str) -> Result<(), Self::Error>;
+    fn delete_update(&self, update_id: i64) -> Result<bool, Self::Error>;
+    fn quarantine_update(&self, update_id: i64, payload: &str) -> Result<(), Self::Error>;
+}
+
+impl DurableUpdateQueue for RedisUpdateQueue {
+    type Error = bot_adapters::redis_update_queue::RedisUpdateQueueError;
+
+    fn insert_update(&self, update_id: i64, payload: &str) -> Result<bool, Self::Error> {
+        Self::insert_update(self, update_id, payload)
+    }
+
+    fn list_updates(&self) -> Result<Vec<QueuedUpdate>, Self::Error> {
+        Self::list_updates(self)
+    }
+
+    fn replace_update(&self, update_id: i64, payload: &str) -> Result<(), Self::Error> {
+        Self::replace_update(self, update_id, payload)
+    }
+
+    fn delete_update(&self, update_id: i64) -> Result<bool, Self::Error> {
+        Self::delete_update(self, update_id)
+    }
+
+    fn quarantine_update(&self, update_id: i64, payload: &str) -> Result<(), Self::Error> {
+        Self::quarantine_update(self, update_id, payload)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DurableUpdateRecord {
+    schema_version: u32,
+    update: IncomingUpdate,
+    attempts: usize,
+}
+
+#[derive(Serialize)]
+struct DeadUpdateRecord<'a> {
+    schema_version: u32,
+    update: &'a IncomingUpdate,
+    attempts: usize,
+    error: &'a str,
+}
+
+struct DurableUpdateCompletion {
+    record: DurableUpdateRecord,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum DurableParallelHandlerError {
+    #[error("parallel update queue is not available")]
+    QueueUnavailable,
+    #[error("durable update queue failed: {0}")]
+    DurableQueue(String),
+    #[error("could not encode durable update: {0}")]
+    Serialization(String),
+}
+
+pub struct DurableParallelUpdateHandler<Handler, Queue> {
+    updates: Option<SyncSender<DurableUpdateRecord>>,
+    workers: Vec<JoinHandle<()>>,
+    completions: Receiver<DurableUpdateCompletion>,
+    queue: Queue,
+    active: HashSet<i64>,
+    failures: BackgroundUpdateFailures,
+    recovered: bool,
+    handler: PhantomData<fn() -> Handler>,
+}
+
+impl<Handler, Queue> DurableParallelUpdateHandler<Handler, Queue>
+where
+    Handler: UpdateHandler + 'static,
+    Handler::Error: Display,
+    Queue: DurableUpdateQueue,
+{
+    pub fn start<Factory, FactoryError>(
+        worker_count: usize,
+        queue_capacity: usize,
+        queue: Queue,
+        factory: Factory,
+    ) -> Result<Self, ParallelHandlerBuildError>
+    where
+        Factory: Fn() -> Result<Handler, FactoryError> + Send + Sync + 'static,
+        FactoryError: Display,
+    {
+        if worker_count == 0 {
+            return Err(ParallelHandlerBuildError::NoWorkers);
+        }
+        if queue_capacity == 0 {
+            return Err(ParallelHandlerBuildError::EmptyQueue);
+        }
+
+        let (update_sender, update_receiver) =
+            mpsc::sync_channel::<DurableUpdateRecord>(queue_capacity);
+        let update_receiver = Arc::new(Mutex::new(update_receiver));
+        let (startup_sender, startup_receiver) = mpsc::channel();
+        let (completion_sender, completion_receiver) = mpsc::channel();
+        let factory = Arc::new(factory);
+        let mut workers = Vec::with_capacity(worker_count);
+
+        for worker in 0..worker_count {
+            let update_receiver = update_receiver.clone();
+            let startup_sender = startup_sender.clone();
+            let completion_sender = completion_sender.clone();
+            let factory = factory.clone();
+            workers.push(thread::spawn(move || {
+                let mut handler = match panic::catch_unwind(AssertUnwindSafe(|| factory())) {
+                    Ok(Ok(handler)) => {
+                        let _ = startup_sender.send((worker, None));
+                        handler
+                    }
+                    Ok(Err(error)) => {
+                        let _ = startup_sender.send((worker, Some(error.to_string())));
+                        return;
+                    }
+                    Err(_) => {
+                        let _ = startup_sender
+                            .send((worker, Some("worker factory panicked".to_owned())));
+                        return;
+                    }
+                };
+                loop {
+                    let record = match update_receiver.lock() {
+                        Ok(receiver) => receiver.recv(),
+                        Err(_) => return,
+                    };
+                    let Ok(record) = record else { return };
+                    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+                        handler.handle(record.update.clone())
+                    }));
+                    let (error, panicked) = match result {
+                        Ok(result) => (result.err().map(|error| error.to_string()), false),
+                        Err(_) => (Some("update handler panicked".to_owned()), true),
+                    };
+                    let _ = completion_sender.send(DurableUpdateCompletion { record, error });
+                    if panicked {
+                        return;
+                    }
+                }
+            }));
+        }
+        drop(startup_sender);
+        drop(completion_sender);
+
+        for _ in 0..worker_count {
+            match startup_receiver.recv() {
+                Ok((_worker, None)) => {}
+                Ok((worker, Some(error))) => {
+                    drop(update_sender);
+                    join_workers(&mut workers);
+                    return Err(ParallelHandlerBuildError::WorkerStartup { worker, error });
+                }
+                Err(_) => {
+                    drop(update_sender);
+                    join_workers(&mut workers);
+                    return Err(ParallelHandlerBuildError::WorkerStartup {
+                        worker: workers.len(),
+                        error: "worker stopped during startup".to_owned(),
+                    });
+                }
+            }
+        }
+
+        Ok(Self {
+            updates: Some(update_sender),
+            workers,
+            completions: completion_receiver,
+            queue,
+            active: HashSet::new(),
+            failures: BackgroundUpdateFailures::default(),
+            recovered: false,
+            handler: PhantomData,
+        })
+    }
+
+    fn drain_completions(&mut self, retry: bool) {
+        while let Ok(completion) = self.completions.try_recv() {
+            self.handle_completion(completion, retry);
+        }
+    }
+
+    fn recover(&mut self) -> Result<(), DurableParallelHandlerError> {
+        if self.recovered {
+            return Ok(());
+        }
+        let queued = self
+            .queue
+            .list_updates()
+            .map_err(|error| DurableParallelHandlerError::DurableQueue(error.to_string()))?;
+        for queued in queued {
+            let update_id = queued.update_id;
+            if self.active.contains(&update_id) {
+                continue;
+            }
+            let record = match decode_queued_update(&queued) {
+                Ok(record) => record,
+                Err(error) => {
+                    self.queue
+                        .quarantine_update(update_id, &queued.payload)
+                        .map_err(|queue_error| {
+                            DurableParallelHandlerError::DurableQueue(queue_error.to_string())
+                        })?;
+                    self.failures
+                        .quarantined
+                        .push(UpdateFailure { update_id, error });
+                    continue;
+                }
+            };
+            self.updates
+                .as_ref()
+                .ok_or(DurableParallelHandlerError::QueueUnavailable)?
+                .send(record)
+                .map_err(|_| DurableParallelHandlerError::QueueUnavailable)?;
+            self.active.insert(update_id);
+        }
+        self.recovered = true;
+        Ok(())
+    }
+
+    fn handle_completion(&mut self, completion: DurableUpdateCompletion, retry: bool) {
+        let mut record = completion.record;
+        let update_id = record.update.update_id;
+        self.active.remove(&update_id);
+        let Some(error) = completion.error else {
+            if let Err(queue_error) = self.queue.delete_update(update_id) {
+                self.failures.retrying.push(UpdateFailure {
+                    update_id,
+                    error: format!("could not acknowledge completed durable update: {queue_error}"),
+                });
+            }
+            return;
+        };
+
+        record.attempts = record.attempts.saturating_add(1);
+        if record.attempts >= MAX_UPDATE_ATTEMPTS {
+            let payload = serde_json::to_string(&DeadUpdateRecord {
+                schema_version: DURABLE_UPDATE_SCHEMA_VERSION,
+                update: &record.update,
+                attempts: record.attempts,
+                error: &error,
+            });
+            match payload {
+                Ok(payload) => match self.queue.quarantine_update(update_id, &payload) {
+                    Ok(()) => self
+                        .failures
+                        .quarantined
+                        .push(UpdateFailure { update_id, error }),
+                    Err(queue_error) => self.failures.retrying.push(UpdateFailure {
+                        update_id,
+                        error: format!("could not quarantine durable update: {queue_error}"),
+                    }),
+                },
+                Err(serialization_error) => self.failures.retrying.push(UpdateFailure {
+                    update_id,
+                    error: format!("could not encode dead durable update: {serialization_error}"),
+                }),
+            }
+            return;
+        }
+
+        let payload = serde_json::to_string(&record);
+        match payload {
+            Ok(payload) => match self.queue.replace_update(update_id, &payload) {
+                Ok(()) => {
+                    self.failures
+                        .retrying
+                        .push(UpdateFailure { update_id, error });
+                    if retry
+                        && let Some(sender) = &self.updates
+                        && sender.send(record).is_ok()
+                    {
+                        self.active.insert(update_id);
+                    }
+                }
+                Err(queue_error) => self.failures.retrying.push(UpdateFailure {
+                    update_id,
+                    error: format!("could not persist durable update retry: {queue_error}"),
+                }),
+            },
+            Err(serialization_error) => self.failures.retrying.push(UpdateFailure {
+                update_id,
+                error: format!("could not encode durable update retry: {serialization_error}"),
+            }),
+        }
+    }
+
+    fn stop(&mut self) {
+        self.updates.take();
+        join_workers(&mut self.workers);
+        self.drain_completions(false);
+    }
+}
+
+impl<Handler, Queue> UpdateHandler for DurableParallelUpdateHandler<Handler, Queue>
+where
+    Handler: UpdateHandler + 'static,
+    Handler::Error: Display,
+    Queue: DurableUpdateQueue,
+{
+    type Error = DurableParallelHandlerError;
+
+    fn prepare(&mut self) -> Result<(), Self::Error> {
+        self.recover()
+    }
+
+    fn handle(&mut self, update: IncomingUpdate) -> Result<(), Self::Error> {
+        self.recover()?;
+        let update_id = update.update_id;
+        if self.active.contains(&update_id) {
+            return Ok(());
+        }
+        let record = DurableUpdateRecord {
+            schema_version: DURABLE_UPDATE_SCHEMA_VERSION,
+            update,
+            attempts: 0,
+        };
+        let payload = serde_json::to_string(&record)
+            .map_err(|error| DurableParallelHandlerError::Serialization(error.to_string()))?;
+        self.queue
+            .insert_update(update_id, &payload)
+            .map_err(|error| DurableParallelHandlerError::DurableQueue(error.to_string()))?;
+        self.updates
+            .as_ref()
+            .ok_or(DurableParallelHandlerError::QueueUnavailable)?
+            .send(record)
+            .map_err(|_| DurableParallelHandlerError::QueueUnavailable)?;
+        self.active.insert(update_id);
+        Ok(())
+    }
+
+    fn take_background_failures(&mut self) -> BackgroundUpdateFailures {
+        self.drain_completions(true);
+        std::mem::take(&mut self.failures)
+    }
+
+    fn shutdown(&mut self) {
+        self.stop();
+    }
+}
+
+impl<Handler, Queue> Drop for DurableParallelUpdateHandler<Handler, Queue> {
+    fn drop(&mut self) {
+        self.updates.take();
+        join_workers(&mut self.workers);
+    }
+}
+
+fn decode_queued_update(queued: &QueuedUpdate) -> Result<DurableUpdateRecord, String> {
+    let record = serde_json::from_str::<DurableUpdateRecord>(&queued.payload)
+        .map_err(|error| error.to_string())?;
+    if record.schema_version != DURABLE_UPDATE_SCHEMA_VERSION {
+        return Err(format!(
+            "unsupported schema version {}",
+            record.schema_version
+        ));
+    }
+    if record.update.update_id != queued.update_id {
+        return Err(format!(
+            "payload contains update id {}",
+            record.update.update_id
+        ));
+    }
+    Ok(record)
+}
+
 fn join_workers(workers: &mut Vec<JoinHandle<()>>) {
     for worker in workers.drain(..) {
         let _ = worker.join();
@@ -251,6 +639,8 @@ pub enum StepOutcome {
 pub enum RuntimeError {
     #[error(transparent)]
     Poll(#[from] PollingError),
+    #[error("update handler preparation failed: {0}")]
+    Handler(String),
 }
 
 pub struct PollingRuntime<Source, Handler> {
@@ -286,6 +676,16 @@ where
     }
 
     pub fn step(&mut self) -> Result<StepOutcome, RuntimeError> {
+        self.handler
+            .prepare()
+            .map_err(|error| RuntimeError::Handler(error.to_string()))?;
+        let background_failures = self.handler.take_background_failures();
+        if !background_failures.retrying.is_empty() || !background_failures.quarantined.is_empty() {
+            return Ok(StepOutcome::HandlerFailures {
+                retrying: background_failures.retrying,
+                quarantined: background_failures.quarantined,
+            });
+        }
         match self.source.poll(self.offset)? {
             PollOutcome::Retry(failure) => Ok(StepOutcome::Retry(failure)),
             PollOutcome::Updates(updates) if updates.is_empty() => Ok(StepOutcome::Idle),
@@ -362,7 +762,7 @@ where
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, VecDeque};
     use std::convert::Infallible;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
@@ -370,6 +770,7 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    use bot_adapters::redis_update_queue::QueuedUpdate;
     use bot_adapters::telegram_http::TransportFailureKind;
     use bot_adapters::telegram_polling::{
         IncomingEvent, IncomingMessage, IncomingUpdate, PollFailure,
@@ -377,9 +778,69 @@ mod tests {
     use bot_core::telegram_input::ChatId;
 
     use super::{
-        ParallelHandlerBuildError, ParallelUpdateHandler, PollingRuntime, RuntimeError,
-        StepOutcome, UpdateFailure, UpdateHandler, UpdateSource,
+        DurableParallelUpdateHandler, DurableUpdateQueue, ParallelHandlerBuildError,
+        ParallelUpdateHandler, PollingRuntime, RuntimeError, StepOutcome, UpdateFailure,
+        UpdateHandler, UpdateSource,
     };
+
+    #[derive(Clone, Default)]
+    struct MemoryDurableQueue {
+        updates: Arc<Mutex<HashMap<i64, String>>>,
+        dead: Arc<Mutex<HashMap<i64, String>>>,
+    }
+
+    impl DurableUpdateQueue for MemoryDurableQueue {
+        type Error = &'static str;
+
+        fn insert_update(&self, update_id: i64, payload: &str) -> Result<bool, Self::Error> {
+            let mut updates = self.updates.lock().map_err(|_| "queue lock poisoned")?;
+            if updates.contains_key(&update_id) {
+                return Ok(false);
+            }
+            updates.insert(update_id, payload.to_owned());
+            Ok(true)
+        }
+
+        fn list_updates(&self) -> Result<Vec<QueuedUpdate>, Self::Error> {
+            let updates = self.updates.lock().map_err(|_| "queue lock poisoned")?;
+            Ok(updates
+                .iter()
+                .map(|(update_id, payload)| QueuedUpdate {
+                    update_id: *update_id,
+                    payload: payload.clone(),
+                })
+                .collect())
+        }
+
+        fn replace_update(&self, update_id: i64, payload: &str) -> Result<(), Self::Error> {
+            self.updates
+                .lock()
+                .map_err(|_| "queue lock poisoned")?
+                .insert(update_id, payload.to_owned());
+            Ok(())
+        }
+
+        fn delete_update(&self, update_id: i64) -> Result<bool, Self::Error> {
+            Ok(self
+                .updates
+                .lock()
+                .map_err(|_| "queue lock poisoned")?
+                .remove(&update_id)
+                .is_some())
+        }
+
+        fn quarantine_update(&self, update_id: i64, payload: &str) -> Result<(), Self::Error> {
+            self.dead
+                .lock()
+                .map_err(|_| "queue lock poisoned")?
+                .insert(update_id, payload.to_owned());
+            self.updates
+                .lock()
+                .map_err(|_| "queue lock poisoned")?
+                .remove(&update_id);
+            Ok(())
+        }
+    }
 
     struct Source {
         outcomes:
@@ -564,6 +1025,64 @@ mod tests {
         };
         let mut runtime = PollingRuntime::new(source, InfallibleHandler);
         assert_eq!(runtime.step(), Ok(StepOutcome::Idle));
+    }
+
+    #[test]
+    fn durable_handler_polls_and_starts_later_updates_while_earlier_work_is_running() {
+        struct BlockingHandler {
+            started: mpsc::Sender<i64>,
+            release: Arc<(Mutex<bool>, Condvar)>,
+        }
+
+        impl UpdateHandler for BlockingHandler {
+            type Error = Infallible;
+
+            fn handle(&mut self, update: IncomingUpdate) -> Result<(), Self::Error> {
+                let _ = self.started.send(update.update_id);
+                let (released, wake) = &*self.release;
+                if let Ok(guard) = released.lock() {
+                    let _guard = wake.wait_while(guard, |released| !*released);
+                }
+                Ok(())
+            }
+        }
+
+        let source = Source {
+            outcomes: VecDeque::from([
+                Ok(bot_adapters::telegram_polling::PollOutcome::Updates(vec![
+                    update(1),
+                ])),
+                Ok(bot_adapters::telegram_polling::PollOutcome::Updates(vec![
+                    update(2),
+                ])),
+            ]),
+            offsets: Vec::new(),
+        };
+        let (started_sender, started_receiver) = mpsc::channel();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let factory_release = release.clone();
+        let handler =
+            DurableParallelUpdateHandler::start(2, 4, MemoryDurableQueue::default(), move || {
+                Ok::<_, Infallible>(BlockingHandler {
+                    started: started_sender.clone(),
+                    release: factory_release.clone(),
+                })
+            });
+        assert!(handler.is_ok());
+        let Ok(handler) = handler else { return };
+        let mut runtime = PollingRuntime::new(source, handler);
+
+        assert_eq!(runtime.step(), Ok(StepOutcome::Dispatched { count: 1 }));
+        assert_eq!(started_receiver.recv_timeout(Duration::from_secs(1)), Ok(1));
+        assert_eq!(runtime.step(), Ok(StepOutcome::Dispatched { count: 1 }));
+        assert_eq!(started_receiver.recv_timeout(Duration::from_secs(1)), Ok(2));
+        assert_eq!(runtime.source.offsets, [None, Some(2)]);
+
+        if let Ok(mut released) = release.0.lock() {
+            *released = true;
+            release.1.notify_all();
+        }
+        runtime.shutdown();
     }
 
     #[test]
