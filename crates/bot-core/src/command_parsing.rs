@@ -18,7 +18,7 @@ impl ParsedCommand {
     }
 }
 
-/// Match the existing Python command normalization behavior.
+/// Parse a command and remove only an exact suffix addressed to the configured bot.
 #[must_use]
 pub fn parse_command(message_text: &str, bot_name: &str) -> ParsedCommand {
     let trimmed = message_text.trim();
@@ -30,10 +30,15 @@ pub fn parse_command(message_text: &str, bot_name: &str) -> ParsedCommand {
         Some((command, remaining)) => (command, remaining.trim_start()),
         None => (trimmed, ""),
     };
-    let normalized_bot_name = bot_name.to_lowercase();
-    let mut command = command_token
-        .to_lowercase()
-        .replace(&normalized_bot_name, "");
+    let mut command = command_token.to_lowercase();
+    let bot_username = bot_name.trim().trim_start_matches('@').to_lowercase();
+    let bot_suffix = format!("@{bot_username}");
+    if command.starts_with('/')
+        && !bot_username.is_empty()
+        && let Some(without_suffix) = command.strip_suffix(&bot_suffix)
+    {
+        command = without_suffix.to_owned();
+    }
     if let Some(command_body) = command.strip_prefix('/')
         && !command_body.is_empty()
         && command_body
@@ -54,6 +59,8 @@ mod tests {
     use proptest::prelude::*;
 
     use super::{ParsedCommand, parse_command};
+    use crate::locale::Locale;
+    use crate::telegram_commands::telegram_commands;
 
     #[test]
     fn parses_commands_and_message_text() {
@@ -62,7 +69,7 @@ mod tests {
             ("   ", "@gordo", "", ""),
             ("/ASK hola", "@gordo", "/ask", "hola"),
             ("/ask@gordo   che", "@gordo", "/ask", "che"),
-            ("/ask@gordo@gordo x", "@gordo", "/ask", "x"),
+            ("/ask@gordo   che", "gordo", "/ask", "che"),
             ("/ㅤ hola", "@gordo", "/ask", "hola"),
             ("/ㅤㅤ   hola", "@gordo", "/ask", "hola"),
             ("/unknown", "@gordo", "/unknown", ""),
@@ -70,9 +77,12 @@ mod tests {
             ("/ask\tquestion", "@gordo", "/ask\tquestion", ""),
             ("/ask\nquestion", "@gordo", "/ask\nquestion", ""),
             ("/ASK@GORDO hi", "@gordo", "/ask", "hi"),
+            ("/ask@gordo@gordo x", "@gordo", "/ask@gordo", "x"),
+            ("/gordo", "gordo", "/gordo", ""),
+            ("hello@gordo world", "gordo", "hello@gordo", "world"),
             (
                 "/balance@playtimbabot",
-                "@gordo",
+                "gordo",
                 "/balance@playtimbabot",
                 "",
             ),
@@ -88,6 +98,28 @@ mod tests {
                 "input={:?}",
                 input
             );
+        }
+    }
+
+    #[test]
+    fn parses_every_public_and_admin_command_addressed_to_this_bot() {
+        let mut commands = telegram_commands(Locale::Es)
+            .into_iter()
+            .map(|entry| entry.command)
+            .collect::<Vec<_>>();
+        commands.extend(["printcredits", "creditlog"]);
+
+        for bot_name in ["respondedorbot", "@respondedorbot"] {
+            for command in &commands {
+                assert_eq!(
+                    parse_command(&format!("/{command}@RespondedorBot value"), bot_name),
+                    ParsedCommand {
+                        command: format!("/{command}"),
+                        message_text: "value".to_owned(),
+                    },
+                    "command={command} bot_name={bot_name}",
+                );
+            }
         }
     }
 
