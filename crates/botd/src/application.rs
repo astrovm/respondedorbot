@@ -534,4 +534,18 @@ mod tests {
         stopping.store(false, Ordering::Release);
         interruptible_wait(&stopping, Duration::ZERO);
     }
+
+    #[test]
+    fn polling_wait_is_interrupted_before_its_deadline() {
+        let stopping = std::sync::Arc::new(AtomicBool::new(false));
+        let signal = stopping.clone();
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(5));
+            signal.store(true, Ordering::Release);
+        });
+        let started = std::time::Instant::now();
+        interruptible_wait(&stopping, Duration::from_secs(1));
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(thread.join().is_ok());
+    }
 }

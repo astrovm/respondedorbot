@@ -478,7 +478,8 @@ mod tests {
 
     use super::{
         DollarCache, DollarTransport, HISTORY_TTL_SECONDS, HttpResponse, ReqwestDollarTransport,
-        TransportFailureKind, hour_key, load_dollar_market, refresh_dollar_snapshot, request_key,
+        TransportFailureKind, hour_key, load_dollar_market, refresh_dollar_snapshot, request_hash,
+        request_key,
     };
     use crate::request_cache::RequestCache;
     use bot_core::locale::Locale;
@@ -487,16 +488,26 @@ mod tests {
     struct Cache {
         values: HashMap<String, String>,
         writes: Vec<(String, String, i64, bool)>,
+        fail_get: bool,
+        fail_set: bool,
+        fail_set_if_absent: bool,
     }
 
     impl RequestCache for Cache {
         type Error = &'static str;
 
         fn get(&mut self, key: &str) -> Result<Option<String>, Self::Error> {
-            Ok(self.values.get(key).cloned())
+            if self.fail_get {
+                Err("synthetic cache read failure")
+            } else {
+                Ok(self.values.get(key).cloned())
+            }
         }
 
         fn set(&mut self, key: &str, value: &str, ttl_seconds: i64) -> Result<(), Self::Error> {
+            if self.fail_set {
+                return Err("synthetic cache write failure");
+            }
             self.values.insert(key.to_owned(), value.to_owned());
             self.writes
                 .push((key.to_owned(), value.to_owned(), ttl_seconds, false));
@@ -511,6 +522,9 @@ mod tests {
             value: &str,
             ttl_seconds: i64,
         ) -> Result<bool, Self::Error> {
+            if self.fail_set_if_absent {
+                return Err("synthetic history write failure");
+            }
             let inserted = !self.values.contains_key(key);
             if inserted {
                 self.values.insert(key.to_owned(), value.to_owned());
@@ -706,6 +720,96 @@ mod tests {
     }
 
     #[test]
+    fn malformed_stale_and_failing_cache_entries_keep_fresh_quotes_available() {
+        let now = 1_725_000_000;
+        let provider_response = HttpResponse {
+            status_code: 200,
+            body: serde_json::json!({
+                "oficial": {"price": "1420.5", "variation": "2.5"},
+                "blue": {"ask": true, "variation": null}
+            })
+            .to_string(),
+        };
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::from([
+                Ok(provider_response.clone()),
+                Ok(provider_response),
+            ])),
+            calls: RefCell::new(0),
+        };
+        let mut cache = Cache::default();
+        cache.values.insert(
+            "market:dolar:formatted:6".to_owned(),
+            serde_json::json!({"timestamp": now - 100_000, "value": "stale"}).to_string(),
+        );
+        cache.values.insert(
+            format!(
+                "request_cache_history:{}:{}",
+                hour_key(now - 6 * 3_600),
+                request_hash()
+            ),
+            "not-json".to_owned(),
+        );
+        cache
+            .values
+            .insert("tcrm_100".to_owned(), "not-json".to_owned());
+        cache.values.insert(
+            "bcra_currency_band_limits".to_owned(),
+            serde_json::json!({"data":{"lower":"invalid","upper":1500}}).to_string(),
+        );
+        cache.fail_set_if_absent = true;
+
+        let load = load_dollar_market(&transport, &mut cache, 6, Locale::En, now);
+        assert!(
+            load.text
+                .as_deref()
+                .is_some_and(|text| text.contains("1420.5")),
+            "text={:?}, diagnostics={:?}",
+            load.text,
+            load.diagnostics
+        );
+        for expected in [
+            "invalid dollar cache key",
+            "could not write dollar history key",
+        ] {
+            assert!(
+                load.diagnostics.iter().any(|item| item.contains(expected)),
+                "missing diagnostic {expected}: {:?}",
+                load.diagnostics
+            );
+        }
+        cache.fail_set = true;
+        let mut write_diagnostics = Vec::new();
+        super::store_formatted(
+            &mut cache,
+            6,
+            now,
+            "synthetic formatted value",
+            &mut write_diagnostics,
+        );
+        assert!(write_diagnostics[0].contains("could not write formatted dollar cache key"));
+
+        let mut failing_cache = Cache {
+            fail_get: true,
+            ..Cache::default()
+        };
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::from([
+                Err(TransportFailureKind::Timeout),
+                Err(TransportFailureKind::Connection),
+            ])),
+            calls: RefCell::new(0),
+        };
+        let load = load_dollar_market(&transport, &mut failing_cache, 6, Locale::Es, now);
+        assert!(load.text.is_none());
+        assert!(
+            load.diagnostics
+                .iter()
+                .any(|item| item.contains("could not read dollar cache key"))
+        );
+    }
+
+    #[test]
     fn reqwest_transport_reads_the_configured_dollar_endpoint() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
         let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
@@ -729,5 +833,8 @@ mod tests {
         assert_eq!(response.body, r#"{"oficial":{"price":100}}"#);
         transport.before_retry();
         assert!(server.join().is_ok());
+        let unavailable = ReqwestDollarTransport::with_url("http://127.0.0.1:1/dollar")
+            .unwrap_or_else(|_| unreachable!());
+        assert!(unavailable.get().is_err());
     }
 }
