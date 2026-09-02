@@ -165,30 +165,38 @@ pub fn build_task_scheduler(
 #[cfg(test)]
 mod tests {
     use bot_adapters::redis_connection::RedisEndpoint;
+    use bot_adapters::redis_task_store::RedisTaskStore;
+    use bot_core::scheduled_tasks::{ScheduledTask, TaskId, TaskSchedule};
 
-    use super::{TaskServiceOptions, build_task_scheduler, build_task_verifier, verify_tasks_once};
+    use super::{
+        TaskServiceOptions, VerificationExecutor, build_task_scheduler, build_task_verifier,
+        verify_tasks_once,
+    };
     use crate::composition::TelegramDeliveryCoordinator;
-    use crate::scheduler::SchedulerMode;
+    use crate::scheduler::{ScheduledTaskExecutor, SchedulerMode, TaskExecutionDisposition};
+    use crate::task_executor::{TaskExecutionJournal, TaskExecutionState};
 
     #[test]
     fn authoritative_composition_is_side_effect_free_until_the_scheduler_steps() {
-        let result = build_task_scheduler(TaskServiceOptions {
-            redis_endpoint: &RedisEndpoint {
-                host: "synthetic.invalid".to_owned(),
-                port: 6379,
-                password: Some("synthetic-password".to_owned()),
-            },
-            database_url: "postgresql://synthetic.invalid/database",
-            telegram_token: "synthetic-token",
-            openrouter_api_key: "synthetic-key",
-            openrouter_base_url: "https://synthetic.invalid/api/v1",
-            firecrawl_api_key: None,
-            system_prompt: "synthetic persona",
-            owner_token: "synthetic-owner",
-            mode: SchedulerMode::Authoritative,
-            telegram_delivery: TelegramDeliveryCoordinator::default(),
-        });
-        assert!(result.is_ok());
+        for firecrawl_api_key in [None, Some(""), Some("synthetic-search-key")] {
+            let result = build_task_scheduler(TaskServiceOptions {
+                redis_endpoint: &RedisEndpoint {
+                    host: "synthetic.invalid".to_owned(),
+                    port: 6379,
+                    password: Some("synthetic-password".to_owned()),
+                },
+                database_url: "postgresql://synthetic.invalid/database",
+                telegram_token: "synthetic-token",
+                openrouter_api_key: "synthetic-key",
+                openrouter_base_url: "https://synthetic.invalid/api/v1",
+                firecrawl_api_key,
+                system_prompt: "synthetic persona",
+                owner_token: "synthetic-owner",
+                mode: SchedulerMode::Authoritative,
+                telegram_delivery: TelegramDeliveryCoordinator::default(),
+            });
+            assert!(result.is_ok());
+        }
     }
 
     #[test]
@@ -208,6 +216,42 @@ mod tests {
         };
         assert!(build_task_verifier(&endpoint, "synthetic-verifier").is_ok());
         assert!(verify_tasks_once(&endpoint, "synthetic-verifier", 1_700_000_000).is_ok());
+
+        let execution_id = format!("synthetic-journal-{}", std::process::id());
+        let mut journal = RedisTaskStore::new(&endpoint).map_err(|error| error.to_string())?;
+        assert!(TaskExecutionJournal::load(&mut journal, &execution_id)?.is_none());
+        let state: TaskExecutionState = serde_json::from_value(serde_json::json!({
+            "response": "synthetic response",
+            "billing_segments": [],
+            "kind": "success",
+            "billing_finalized": true,
+            "delivered": false,
+            "delivery_attempts": 1
+        }))
+        .map_err(|error| error.to_string())?;
+        TaskExecutionJournal::save(&mut journal, &execution_id, &state)?;
+        assert_eq!(
+            TaskExecutionJournal::load(&mut journal, &execution_id)?,
+            Some(state)
+        );
+
+        let task = ScheduledTask {
+            id: TaskId::new("synthetic-task").map_err(|error| error.to_string())?,
+            chat_id: "synthetic-chat".to_owned(),
+            text: "synthetic task".to_owned(),
+            user_name: "synthetic-user".to_owned(),
+            user_id: Some(42),
+            schedule: TaskSchedule::Once,
+            timezone_offset: 0,
+            locale: "en".to_owned(),
+            schedule_anchor_at: Some(1_700_000_000),
+            next_run_at: Some(1_700_000_000),
+            last_execution_id: None,
+        };
+        assert_eq!(
+            VerificationExecutor.execute(&task, &execution_id),
+            Ok(TaskExecutionDisposition::Retry)
+        );
         Ok(())
     }
 }

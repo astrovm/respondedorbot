@@ -875,10 +875,10 @@ mod tests {
     use bot_core::telegram_input::ChatId;
 
     use super::{
-        DURABLE_UPDATE_SCHEMA_VERSION, DurableParallelUpdateHandler, DurableUpdateQueue,
-        DurableUpdateRecord, HandlerErrorDisposition, ParallelHandlerBuildError,
-        ParallelHandlerError, ParallelUpdateHandler, PollingRuntime, RuntimeError, StepOutcome,
-        UpdateConfirmation, UpdateFailure, UpdateHandler, UpdateSource,
+        DURABLE_UPDATE_SCHEMA_VERSION, DurableParallelUpdateHandler, DurableUpdateCompletion,
+        DurableUpdateQueue, DurableUpdateRecord, HandlerErrorDisposition,
+        ParallelHandlerBuildError, ParallelHandlerError, ParallelUpdateHandler, PollingRuntime,
+        RuntimeError, StepOutcome, UpdateConfirmation, UpdateFailure, UpdateHandler, UpdateSource,
     };
 
     #[derive(Clone, Default)]
@@ -974,6 +974,74 @@ mod tests {
         outcomes:
             VecDeque<Result<bot_adapters::telegram_polling::PollOutcome, super::PollingError>>,
         offsets: Vec<Option<i64>>,
+    }
+
+    #[test]
+    fn durable_completion_retries_quarantines_and_preserves_queue_failures() {
+        struct Handler;
+        impl UpdateHandler for Handler {
+            type Error = Infallible;
+
+            fn handle(&mut self, _update: IncomingUpdate) -> Result<(), Self::Error> {
+                Ok(())
+            }
+        }
+
+        let queue = MemoryDurableQueue::default();
+        let mut handler = DurableParallelUpdateHandler::start(1, 2, queue.clone(), || {
+            Ok::<_, Infallible>(Handler)
+        })
+        .unwrap_or_else(|_| unreachable!());
+        handler.handle_completion(
+            DurableUpdateCompletion {
+                record: DurableUpdateRecord {
+                    schema_version: DURABLE_UPDATE_SCHEMA_VERSION,
+                    update: update(801),
+                    attempts: 0,
+                    completed: false,
+                },
+                error: Some("synthetic retry".to_owned()),
+            },
+            false,
+        );
+        assert_eq!(handler.failures.retrying.len(), 1);
+        assert!(
+            queue
+                .updates
+                .lock()
+                .is_ok_and(|updates| updates.contains_key(&801))
+        );
+
+        handler.handle_completion(
+            DurableUpdateCompletion {
+                record: DurableUpdateRecord {
+                    schema_version: DURABLE_UPDATE_SCHEMA_VERSION,
+                    update: update(802),
+                    attempts: super::MAX_UPDATE_ATTEMPTS - 1,
+                    completed: false,
+                },
+                error: Some("synthetic terminal failure".to_owned()),
+            },
+            false,
+        );
+        assert_eq!(handler.failures.quarantined.len(), 1);
+        assert!(queue.dead.lock().is_ok_and(|dead| dead.contains_key(&802)));
+
+        queue.replace_failures.store(1, Ordering::SeqCst);
+        handler.handle_completion(
+            DurableUpdateCompletion {
+                record: DurableUpdateRecord {
+                    schema_version: DURABLE_UPDATE_SCHEMA_VERSION,
+                    update: update(803),
+                    attempts: 0,
+                    completed: false,
+                },
+                error: Some("synthetic persistence failure".to_owned()),
+            },
+            false,
+        );
+        assert!(handler.failures.fatal.is_some());
+        handler.stop();
     }
 
     impl UpdateSource for Source {

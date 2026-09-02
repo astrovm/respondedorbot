@@ -71,6 +71,7 @@ pub enum SearchOutcome {
 
 pub struct ReqwestFirecrawlTransport {
     client: Client,
+    search_url: String,
 }
 
 impl ReqwestFirecrawlTransport {
@@ -82,8 +83,19 @@ impl ReqwestFirecrawlTransport {
                 .timeout(Duration::from_secs(75))
                 .build()
         })
-        .map(|client| Self { client })
+        .map(|client| Self {
+            client,
+            search_url: SEARCH_URL.to_owned(),
+        })
         .map_err(|error| TransportError::Other(error.to_string()))
+    }
+
+    #[cfg(test)]
+    fn with_search_url(search_url: &str) -> Result<Self, TransportError> {
+        Self::new().map(|mut transport| {
+            transport.search_url = search_url.to_owned();
+            transport
+        })
     }
 }
 
@@ -91,7 +103,7 @@ impl FirecrawlTransport for ReqwestFirecrawlTransport {
     fn post(&self, request: &SearchRequest) -> Result<HttpResponse, TransportError> {
         let response = self
             .client
-            .post(SEARCH_URL)
+            .post(&self.search_url)
             .bearer_auth(&request.api_key)
             .json(&json!({
                 "query": request.query,
@@ -267,10 +279,13 @@ pub fn search(api_key: &str, query: &str) -> Result<SearchOutcome, TransportErro
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     use super::{
-        FirecrawlTransport, HttpResponse, SearchOutcome, SearchRequest, TransportError, clean_text,
-        search_with,
+        FirecrawlTransport, HttpResponse, ReqwestFirecrawlTransport, SearchOutcome, SearchRequest,
+        TransportError, clean_text, search_with,
     };
     use serde_json::{Value, json};
 
@@ -415,5 +430,41 @@ mod tests {
         assert_eq!(clean_text(&json!("áéí"), 3), "áéí");
         assert_eq!(clean_text(&json!("áéí"), 2), "á…");
         assert_eq!(clean_text(&json!("text"), 0), "…");
+    }
+
+    #[test]
+    fn reqwest_transport_sends_authenticated_bounded_search_payload() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+            let mut request = [0_u8; 8_192];
+            let bytes = stream.read(&mut request).unwrap_or_default();
+            let request = String::from_utf8_lossy(&request[..bytes]);
+            assert!(request.starts_with("POST /search HTTP/1.1"));
+            assert!(request.contains("authorization: Bearer synthetic-key"));
+            assert!(request.contains(
+                r#"{"limit":5,"query":"synthetic query","sources":["web"],"timeout":60000}"#
+            ));
+            let body = r#"{"success":true,"data":[]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap_or_else(|_| unreachable!());
+        });
+        let transport =
+            ReqwestFirecrawlTransport::with_search_url(&format!("http://{address}/search"))
+                .unwrap_or_else(|_| unreachable!());
+        let response = transport
+            .post(&SearchRequest {
+                query: "synthetic query".to_owned(),
+                api_key: "synthetic-key".to_owned(),
+            })
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.body, r#"{"success":true,"data":[]}"#);
+        assert!(server.join().is_ok());
     }
 }

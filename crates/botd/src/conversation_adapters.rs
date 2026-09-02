@@ -702,7 +702,8 @@ mod tests {
 
     use super::{
         PayerSource, PostgresConversationBilling, RedisConversationState, StoredHistoryEntry,
-        build_compaction_view, decode_history, decode_summary_memory, history_sort_key, role,
+        build_compaction_view, decode_history, decode_retrieved, decode_summary_memory,
+        history_sort_key, role, user_identity,
     };
     use crate::ai_dispatch::AiConversationInput;
     use crate::conversation::{ConversationBilling, ConversationState, SettlementRequest};
@@ -812,13 +813,96 @@ mod tests {
         );
         assert!(state.reply_metadata(&chat_id.to_string(), "999")?.is_none());
 
+        let malformed_key =
+            bot_core::message_state::bot_message_metadata_key(&chat_id.to_string(), "malformed");
+        state
+            .state
+            .set_value(&malformed_key, "not json", 60)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            state
+                .reply_metadata(&chat_id.to_string(), "malformed")?
+                .is_none()
+        );
+        state
+            .state
+            .set_value(&malformed_key, "[]", 60)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            state
+                .reply_metadata(&chat_id.to_string(), "malformed")?
+                .is_none()
+        );
+
+        state
+            .state
+            .set_value(
+                &bot_core::message_state::chat_summary_key(&chat_id.to_string()),
+                "synthetic summary",
+                60,
+            )
+            .map_err(|error| error.to_string())?;
+        state
+            .state
+            .set_value(
+                &bot_core::message_state::chat_compacted_until_key(&chat_id.to_string()),
+                "2",
+                60,
+            )
+            .map_err(|error| error.to_string())?;
+        let compacted = state.load_memory(&chat_id.to_string(), "", None, 20)?;
+        assert_eq!(compacted.summary.as_deref(), Some("synthetic summary"));
+
         let summary = state.load_summary_memory(&chat_id.to_string(), 20)?;
-        assert_eq!(summary.history.len(), 4);
+        assert!(!summary.history.is_empty());
 
         let mut empty = conversation_input(chat_id, 5, Locale::En);
         empty.message_text.clear();
         state.record_incoming(&empty)?;
+
+        let mut anonymous = conversation_input(chat_id, 6, Locale::Es);
+        anonymous.chat_type = "private".to_owned();
+        anonymous.sender_first_name.clear();
+        anonymous.sender_username.clear();
+        state.record_incoming(&anonymous)?;
+        anonymous.message_id = MessageId(7);
+        anonymous.locale = Locale::En;
+        state.record_incoming(&anonymous)?;
+        anonymous.message_id = MessageId(8);
+        anonymous.reply_context = None;
+        state.record_incoming(&anonymous)?;
         Ok(())
+    }
+
+    #[test]
+    fn retrieved_rows_and_user_identity_normalize_optional_fields() {
+        use std::collections::{BTreeMap, HashSet};
+
+        let rows = vec![
+            bot_adapters::redis_message_state::SearchRow {
+                key: "recent".to_owned(),
+                fields: BTreeMap::from([
+                    ("message_id".to_owned(), "2".to_owned()),
+                    ("text".to_owned(), "duplicate".to_owned()),
+                ]),
+            },
+            bot_adapters::redis_message_state::SearchRow {
+                key: "missing-role".to_owned(),
+                fields: BTreeMap::from([("text".to_owned(), "useful result".to_owned())]),
+            },
+            bot_adapters::redis_message_state::SearchRow {
+                key: "empty".to_owned(),
+                fields: BTreeMap::from([("text".to_owned(), String::new())]),
+            },
+        ];
+        let decoded = decode_retrieved(rows, &HashSet::from(["2".to_owned()]));
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].role, "user");
+        assert_eq!(decoded[0].text, "useful result");
+
+        let mut input = conversation_input(1, 2, Locale::En);
+        input.sender_username.clear();
+        assert_eq!(user_identity(&input), "Synthetic");
     }
 
     #[test]

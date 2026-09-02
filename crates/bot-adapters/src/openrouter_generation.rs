@@ -44,6 +44,7 @@ pub enum GenerationOutcome {
 
 pub struct ReqwestGenerationTransport {
     client: Client,
+    generation_url: String,
 }
 
 impl ReqwestGenerationTransport {
@@ -52,8 +53,19 @@ impl ReqwestGenerationTransport {
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(20))
             .build()
-            .map(|client| Self { client })
+            .map(|client| Self {
+                client,
+                generation_url: GENERATION_URL.to_owned(),
+            })
             .map_err(|error| GenerationError::Transport(error.to_string()))
+    }
+
+    #[cfg(test)]
+    fn with_generation_url(generation_url: &str) -> Result<Self, GenerationError> {
+        Self::new().map(|mut transport| {
+            transport.generation_url = generation_url.to_owned();
+            transport
+        })
     }
 }
 
@@ -61,7 +73,7 @@ impl GenerationTransport for ReqwestGenerationTransport {
     fn get(&self, request: &GenerationRequest) -> Result<HttpResponse, GenerationError> {
         let response = self
             .client
-            .get(GENERATION_URL)
+            .get(&self.generation_url)
             .query(&[("id", &request.generation_id)])
             .bearer_auth(&request.api_key)
             .send()
@@ -115,12 +127,15 @@ pub fn fetch(api_key: &str, generation_id: &str) -> Result<GenerationOutcome, Ge
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     use serde_json::json;
 
     use super::{
         GenerationError, GenerationOutcome, GenerationRequest, GenerationTransport, HttpResponse,
-        fetch_with, parse_response,
+        ReqwestGenerationTransport, fetch_with, parse_response,
     };
 
     struct FakeTransport {
@@ -231,5 +246,39 @@ mod tests {
             fetch_with(&transport, "key", "generation"),
             Err(GenerationError::Transport("synthetic failure".to_owned()))
         );
+    }
+
+    #[test]
+    fn reqwest_transport_sends_generation_identity_and_credentials() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+            let mut request = [0_u8; 2_048];
+            let bytes = stream.read(&mut request).unwrap_or_default();
+            let request = String::from_utf8_lossy(&request[..bytes]);
+            assert!(request.starts_with("GET /generation?id=synthetic-id HTTP/1.1"));
+            assert!(request.contains("authorization: Bearer synthetic-key"));
+            let body = r#"{"data":{"id":"synthetic-id"}}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap_or_else(|_| unreachable!());
+        });
+        let transport = ReqwestGenerationTransport::with_generation_url(&format!(
+            "http://{address}/generation"
+        ))
+        .unwrap_or_else(|_| unreachable!());
+        let response = transport
+            .get(&GenerationRequest {
+                generation_id: "synthetic-id".to_owned(),
+                api_key: "synthetic-key".to_owned(),
+            })
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.body, r#"{"data":{"id":"synthetic-id"}}"#);
+        assert!(server.join().is_ok());
     }
 }

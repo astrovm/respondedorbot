@@ -6,8 +6,11 @@ use bot_adapters::billing_schema::BillingSchemaRepository;
 use bot_adapters::redis_connection::RedisEndpoint;
 use bot_adapters::redis_creditless_cap::{RedisCreditlessCap, creditless_cap_key};
 use botd::compaction_scheduler::PayerSource;
-use botd::conversation::{ConversationBilling, ReserveDenial, ReserveRequest, SettlementRequest};
+use botd::conversation::{
+    ConversationBilling, ProviderSegmentRequest, ReserveDenial, ReserveRequest, SettlementRequest,
+};
 use botd::conversation_adapters::PostgresConversationBilling;
+use botd::native_ai::TaskCreditStore;
 use botd::reconciliation::ActiveOperationRegistry;
 use serde_json::{Map, json};
 
@@ -72,6 +75,48 @@ fn postgres_and_redis_enforce_onboarding_replay_cap_and_refund_policy() -> Resul
             .transferred
     );
 
+    let task_user_id = user_id + 500_000_000;
+    let task_operation = format!("integration-task:{nonce}");
+    assert_eq!(repository.mint_user_credits(task_user_id, 100, None)?, 100);
+    let task_metadata = Map::from_iter([
+        ("operation_id".to_owned(), json!(task_operation)),
+        ("usage_tag".to_owned(), json!("scheduled_task")),
+    ]);
+    let charged = TaskCreditStore::charge(
+        &repository,
+        task_user_id,
+        20,
+        &task_metadata,
+        &format!("{task_operation}:reserve"),
+        &task_operation,
+    )?;
+    assert!(charged.ok);
+    assert!(TaskCreditStore::record_segment(
+        &repository,
+        task_user_id,
+        &json!({
+            "operation_id": task_operation,
+            "segment_id": format!("{task_operation}:segment"),
+            "segment": {
+                "kind": "chat",
+                "model": "unknown/synthetic-model",
+                "usage": {"cost": "0.000001"},
+                "metadata": {"provider": "openrouter"}
+            }
+        }),
+    )?);
+    assert_eq!(
+        TaskCreditStore::list_segments(&repository, task_user_id, &task_operation)?.len(),
+        1
+    );
+    assert!(TaskCreditStore::settle_once(
+        &repository,
+        task_user_id,
+        &task_operation,
+        5,
+        &Map::from_iter([("reason".to_owned(), json!("synthetic_task"))]),
+    )?);
+
     let cap_reader = RedisCreditlessCap::new(&endpoint)?;
     let cap_key = creditless_cap_key(&chat_id.to_string(), user_id);
     let active = ActiveOperationRegistry::default();
@@ -87,6 +132,20 @@ fn postgres_and_redis_enforce_onboarding_replay_cap_and_refund_policy() -> Resul
     assert_eq!(admitted.denial, None);
     assert!(active.is_active(&base_operation));
     assert_eq!(cap_reader.count(&cap_key)?, Some(1));
+
+    billing.record_segment(ProviderSegmentRequest {
+        user_id,
+        chat_id: Some(chat_id),
+        operation_id: base_operation.clone(),
+        segment_id: format!("{base_operation}:segment"),
+        segment: json!({
+            "kind": "chat",
+            "model": "unknown/synthetic-model",
+            "usage": {"cost": "0.000001"},
+            "metadata": {"provider": "openrouter"}
+        }),
+    })?;
+    assert!(matches!(billing.personal_balance(user_id)?, Some(0 | 300)));
 
     let replay = billing.reserve(base)?;
     assert!(replay.authorized);
@@ -124,7 +183,12 @@ fn postgres_and_redis_enforce_onboarding_replay_cap_and_refund_policy() -> Resul
         actual_credit_units: 500,
         delivered: true,
         reason: "integration_success".to_owned(),
-        billing_segments: Vec::new(),
+        billing_segments: vec![json!({
+            "kind": "chat",
+            "model": "unknown/synthetic-model",
+            "usage": {"cost": "0.000001"},
+            "metadata": {"provider": "openrouter"}
+        })],
     })?;
     assert!(!active.is_active(&base_operation));
     assert_eq!(cap_reader.count(&cap_key)?, Some(1));
@@ -181,6 +245,8 @@ fn postgres_and_redis_enforce_onboarding_replay_cap_and_refund_policy() -> Resul
         billing_segments: Vec::new(),
     })?;
     assert_eq!(cap_reader.count(&refund_key)?, Some(0));
+
+    billing.release_operation("synthetic-operation-without-reservation");
     assert_eq!(repository.get_balance("chat", refund_chat_id)?, 1_000);
 
     assert!(

@@ -152,8 +152,9 @@ pub fn production_price_refresh_worker(
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use super::{ClosureJob, NamedJob, PriceCacheRefreshWorker};
+    use super::{ClosureJob, NamedJob, PriceCacheRefreshWorker, production_price_refresh_worker};
     use crate::background::BackgroundWorker;
+    use bot_adapters::redis_connection::RedisEndpoint;
 
     #[test]
     fn runs_all_jobs_and_reports_each_failure() {
@@ -201,5 +202,31 @@ mod tests {
         let error = result.err().unwrap_or_default();
         assert!(error.contains("second: synthetic failure"));
         assert!(error.contains("third: synthetic failure"));
+    }
+
+    #[test]
+    fn production_worker_composes_optional_market_jobs_without_provider_io() {
+        let endpoint = RedisEndpoint {
+            host: "synthetic.invalid".to_owned(),
+            port: 6379,
+            password: Some("synthetic-password".to_owned()),
+        };
+        let without_crypto =
+            production_price_refresh_worker(&endpoint, None).unwrap_or_else(|_| unreachable!());
+        assert_eq!(without_crypto.jobs.len(), 2);
+        assert_eq!(without_crypto.jobs[0].name, "dollar");
+        assert_eq!(without_crypto.jobs[1].name, "oil");
+
+        let with_crypto = production_price_refresh_worker(&endpoint, Some("synthetic-market-key"))
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(with_crypto.jobs.len(), 4);
+        assert_eq!(
+            with_crypto
+                .jobs
+                .iter()
+                .map(|job| job.name)
+                .collect::<Vec<_>>(),
+            ["dollar", "crypto-ars", "crypto-usd", "oil"]
+        );
     }
 }

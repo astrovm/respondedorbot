@@ -51,6 +51,9 @@ pub trait BcraTransport {
 
 pub struct ReqwestBcraTransport {
     client: Client,
+    bcra_url: String,
+    risk_url: String,
+    itcrm_url: String,
 }
 
 impl ReqwestBcraTransport {
@@ -59,8 +62,27 @@ impl ReqwestBcraTransport {
         crate::http_client::shared_client(&CLIENT, || {
             Client::builder().timeout(Duration::from_secs(10)).build()
         })
-        .map(|client| Self { client })
+        .map(|client| Self {
+            client,
+            bcra_url: BCRA_URL.to_owned(),
+            risk_url: RISK_URL.to_owned(),
+            itcrm_url: ITCRM_URL.to_owned(),
+        })
         .map_err(|_| TransportFailureKind::Request)
+    }
+
+    #[cfg(test)]
+    fn with_urls(
+        bcra_url: &str,
+        risk_url: &str,
+        itcrm_url: &str,
+    ) -> Result<Self, TransportFailureKind> {
+        Self::new().map(|mut transport| {
+            transport.bcra_url = bcra_url.trim_end_matches('/').to_owned();
+            transport.risk_url = risk_url.to_owned();
+            transport.itcrm_url = itcrm_url.to_owned();
+            transport
+        })
     }
 }
 
@@ -69,22 +91,22 @@ impl BcraTransport for ReqwestBcraTransport {
         let request = match request {
             BcraRequest::Variables => self
                 .client
-                .get(format!("{BCRA_URL}/monetarias"))
+                .get(format!("{}/monetarias", self.bcra_url))
                 .query(&[("limit", "2000")]),
             BcraRequest::Series { id, limit } => self
                 .client
-                .get(format!("{BCRA_URL}/monetarias/{id}"))
+                .get(format!("{}/monetarias/{id}", self.bcra_url))
                 .query(&[("limit", limit.to_string())]),
             BcraRequest::Value { id, date } => self
                 .client
-                .get(format!("{BCRA_URL}/monetarias/{id}"))
+                .get(format!("{}/monetarias/{id}", self.bcra_url))
                 .query(&[
                     ("desde", date.as_str()),
                     ("hasta", date.as_str()),
                     ("limit", "1"),
                 ]),
-            BcraRequest::CountryRisk => self.client.get(RISK_URL),
-            BcraRequest::Itcrm => self.client.get(ITCRM_URL),
+            BcraRequest::CountryRisk => self.client.get(&self.risk_url),
+            BcraRequest::Itcrm => self.client.get(&self.itcrm_url),
         };
         let response = request.send().map_err(classify)?;
         let status_code = response.status().as_u16();
@@ -752,6 +774,9 @@ mod tests {
     use std::{
         cell::RefCell,
         collections::{HashMap, VecDeque},
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
     };
     #[derive(Default)]
     struct Cache {
@@ -795,6 +820,62 @@ mod tests {
             Some("29/10 12:34")
         );
         assert!(parse_workbook(b"invalid").is_err());
+    }
+
+    #[test]
+    fn cache_and_cell_boundaries_preserve_diagnostics_and_numeric_formats() {
+        struct FailingCache;
+        impl RequestCache for FailingCache {
+            type Error = &'static str;
+
+            fn get(&mut self, _key: &str) -> Result<Option<String>, Self::Error> {
+                Err("synthetic read failure")
+            }
+
+            fn set(&mut self, _key: &str, _value: &str, _ttl: i64) -> Result<(), Self::Error> {
+                Err("synthetic write failure")
+            }
+        }
+
+        let mut diagnostics = Vec::new();
+        let mut cache = FailingCache;
+        assert!(read(&mut cache, "synthetic", &mut diagnostics).is_none());
+        store(
+            &mut cache,
+            "synthetic",
+            &json!({"value": 1}),
+            60,
+            60,
+            1_700_000_000,
+            &mut diagnostics,
+        );
+        assert_eq!(diagnostics.len(), 3);
+
+        let mut invalid = Cache::default();
+        invalid
+            .values
+            .insert("synthetic".to_owned(), "not json".to_owned());
+        assert!(read(&mut invalid, "synthetic", &mut diagnostics).is_none());
+
+        assert_eq!(cell_number(&Data::Float(42.5)), Some(42.5));
+        assert_eq!(cell_number(&Data::Int(42)), Some(42.0));
+        assert_eq!(
+            cell_number(&Data::String("1.234,5".to_owned())),
+            Some(1234.5)
+        );
+        assert_eq!(cell_number(&Data::Empty), None);
+        assert!(cell_date(&Data::String("2025-09-19".to_owned())).is_some());
+        assert!(cell_date(&Data::DateTimeIso("2025-09-19".to_owned())).is_some());
+        assert_eq!(cell_date(&Data::Empty), None);
+
+        assert!(
+            arguments(&BcraRequest::Value {
+                id: 1,
+                date: "2025-09-19".to_owned(),
+            })
+            .is_some()
+        );
+        assert!(arguments(&BcraRequest::Itcrm).is_none());
     }
     #[test]
     fn loads_all_json_sources_and_writes_compatible_values() {
@@ -875,6 +956,60 @@ mod tests {
         let text = load.text.unwrap_or_default();
         assert!(text.contains("reserves: USD 25.000 million"));
         assert!(text.contains("there is no new BCRA update"));
+    }
+
+    #[test]
+    fn reqwest_transport_preserves_all_bcra_request_shapes() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+        let server = thread::spawn(move || {
+            for expected in [
+                "/bcra/monetarias?limit=2000",
+                "/bcra/monetarias/7?limit=20",
+                "/bcra/monetarias/8?desde=2026-09-02&hasta=2026-09-02&limit=1",
+                "/risk",
+                "/itcrm",
+            ] {
+                let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+                let mut request = [0_u8; 2_048];
+                let bytes = stream.read(&mut request).unwrap_or_default();
+                assert!(
+                    String::from_utf8_lossy(&request[..bytes])
+                        .starts_with(&format!("GET {expected} HTTP/1.1"))
+                );
+                let body = b"synthetic";
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap_or_else(|_| unreachable!());
+                stream.write_all(body).unwrap_or_else(|_| unreachable!());
+            }
+        });
+        let base = format!("http://{address}");
+        let transport = ReqwestBcraTransport::with_urls(
+            &format!("{base}/bcra"),
+            &format!("{base}/risk"),
+            &format!("{base}/itcrm"),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        for request in [
+            BcraRequest::Variables,
+            BcraRequest::Series { id: 7, limit: 20 },
+            BcraRequest::Value {
+                id: 8,
+                date: "2026-09-02".to_owned(),
+            },
+            BcraRequest::CountryRisk,
+            BcraRequest::Itcrm,
+        ] {
+            let response = transport.get(&request).unwrap_or_else(|_| unreachable!());
+            assert_eq!(response.status_code, 200);
+            assert_eq!(response.body, b"synthetic");
+        }
+        transport.before_retry();
+        assert!(server.join().is_ok());
     }
 
     #[test]

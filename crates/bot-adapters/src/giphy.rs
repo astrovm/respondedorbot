@@ -46,6 +46,7 @@ pub trait GiphyTransport {
 
 pub struct ReqwestGiphyTransport {
     client: Client,
+    search_url: String,
 }
 
 impl ReqwestGiphyTransport {
@@ -53,8 +54,19 @@ impl ReqwestGiphyTransport {
         Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .build()
-            .map(|client| Self { client })
+            .map(|client| Self {
+                client,
+                search_url: GIPHY_SEARCH_URL.to_owned(),
+            })
             .map_err(|_| TransportFailureKind::Request)
+    }
+
+    #[cfg(test)]
+    fn with_search_url(search_url: &str) -> Result<Self, TransportFailureKind> {
+        Self::new().map(|mut transport| {
+            transport.search_url = search_url.to_owned();
+            transport
+        })
     }
 }
 
@@ -62,7 +74,7 @@ impl GiphyTransport for ReqwestGiphyTransport {
     fn search(&self, request: &SearchRequest) -> Result<HttpResponse, TransportFailureKind> {
         let response = self
             .client
-            .get(GIPHY_SEARCH_URL)
+            .get(&self.search_url)
             .query(&[
                 ("api_key", request.api_key.clone()),
                 ("q", request.term.clone()),
@@ -157,10 +169,13 @@ pub fn search(api_key: &str, term: &str, offset: u16) -> SearchOutcome {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     use super::{
-        GiphyTransport, HttpResponse, SearchOutcome, SearchRequest, TransportFailureKind,
-        parse_response, search_with,
+        GiphyTransport, HttpResponse, ReqwestGiphyTransport, SearchOutcome, SearchRequest,
+        TransportFailureKind, parse_response, search_with,
     };
 
     struct FakeTransport {
@@ -235,5 +250,46 @@ mod tests {
         assert_eq!(requests[0].api_key, "synthetic-key");
         assert_eq!(requests[0].term, "buenos dias");
         assert_eq!(requests[0].offset, 73);
+    }
+
+    #[test]
+    fn reqwest_transport_sends_the_complete_search_contract() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+            let mut request = [0_u8; 2_048];
+            let bytes = stream.read(&mut request).unwrap_or_default();
+            let request = String::from_utf8_lossy(&request[..bytes]);
+            assert!(request.starts_with("GET /search?"));
+            for expected in [
+                "api_key=synthetic-key",
+                "q=synthetic+term",
+                "limit=25",
+                "offset=9",
+                "rating=g",
+            ] {
+                assert!(request.contains(expected), "{request}");
+            }
+            let body = r#"{"data":[]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap_or_else(|_| unreachable!());
+        });
+        let transport = ReqwestGiphyTransport::with_search_url(&format!("http://{address}/search"))
+            .unwrap_or_else(|_| unreachable!());
+        let response = transport
+            .search(&SearchRequest {
+                api_key: "synthetic-key".to_owned(),
+                term: "synthetic term".to_owned(),
+                offset: 9,
+            })
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.body, r#"{"data":[]}"#);
+        assert!(server.join().is_ok());
     }
 }

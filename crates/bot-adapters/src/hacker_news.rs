@@ -294,6 +294,9 @@ fn append_field(
 mod tests {
     use std::cell::RefCell;
     use std::collections::HashMap;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     use super::*;
 
@@ -369,6 +372,32 @@ mod tests {
         let load = load_hacker_news(&transport, &mut cache, 1);
         assert_eq!(load.items.len(), 1);
         assert!(transport.urls.borrow().is_empty());
+    }
+
+    #[test]
+    fn reqwest_transport_reads_status_and_body_from_an_injected_url() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+            let mut request = [0_u8; 1_024];
+            let bytes = stream.read(&mut request).unwrap_or_default();
+            assert!(String::from_utf8_lossy(&request[..bytes]).starts_with("GET /feed HTTP/1.1"));
+            let body = "synthetic feed";
+            write!(
+                stream,
+                "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap_or_else(|_| unreachable!());
+        });
+        let transport = ReqwestHackerNewsTransport::new().unwrap_or_else(|_| unreachable!());
+        let response = transport
+            .get(&format!("http://{address}/feed"))
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(response.status_code, 206);
+        assert_eq!(response.body, "synthetic feed");
+        assert!(server.join().is_ok());
     }
 
     #[test]

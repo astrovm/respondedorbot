@@ -44,6 +44,8 @@ pub trait PolymarketTransport {
 
 pub struct ReqwestPolymarketTransport {
     client: Client,
+    events_url: String,
+    midpoints_url: String,
 }
 
 impl ReqwestPolymarketTransport {
@@ -51,8 +53,21 @@ impl ReqwestPolymarketTransport {
         Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .build()
-            .map(|client| Self { client })
+            .map(|client| Self {
+                client,
+                events_url: EVENTS_URL.to_owned(),
+                midpoints_url: MIDPOINTS_URL.to_owned(),
+            })
             .map_err(|_| TransportFailureKind::Request)
+    }
+
+    #[cfg(test)]
+    fn with_urls(events_url: &str, midpoints_url: &str) -> Result<Self, TransportFailureKind> {
+        Self::new().map(|mut transport| {
+            transport.events_url = events_url.to_owned();
+            transport.midpoints_url = midpoints_url.to_owned();
+            transport
+        })
     }
 }
 
@@ -60,7 +75,7 @@ impl PolymarketTransport for ReqwestPolymarketTransport {
     fn events(&self) -> Result<HttpResponse, TransportFailureKind> {
         let response = self
             .client
-            .get(EVENTS_URL)
+            .get(&self.events_url)
             .query(&[
                 ("limit", "10"),
                 ("active", "true"),
@@ -82,7 +97,7 @@ impl PolymarketTransport for ReqwestPolymarketTransport {
             .collect::<Vec<_>>();
         let response = self
             .client
-            .post(MIDPOINTS_URL)
+            .post(&self.midpoints_url)
             .json(&payload)
             .send()
             .map_err(classify_error)?;
@@ -231,10 +246,13 @@ pub fn load_elections<T: PolymarketTransport, C: RequestCache>(
 mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     use super::{
-        HttpResponse, MidpointsRequest, PolymarketTransport, TransportFailureKind,
-        events_cache_key, load_elections,
+        HttpResponse, MidpointsRequest, PolymarketTransport, ReqwestPolymarketTransport,
+        TransportFailureKind, events_cache_key, load_elections,
     };
     use crate::request_cache::RequestCache;
 
@@ -331,5 +349,60 @@ mod tests {
         assert_eq!(load.events.len(), 1);
         assert!(load.live_prices.is_empty());
         assert_eq!(load.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn reqwest_transport_preserves_event_query_and_midpoint_batch() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+        let server = thread::spawn(move || {
+            for method in ["GET", "POST"] {
+                let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+                let mut request = [0_u8; 8_192];
+                let bytes = stream.read(&mut request).unwrap_or_default();
+                let request = String::from_utf8_lossy(&request[..bytes]);
+                if method == "GET" {
+                    assert!(request.starts_with("GET /events?"), "{request}");
+                    for parameter in [
+                        "limit=10",
+                        "active=true",
+                        "closed=false",
+                        "tag_slug=global-elections",
+                        "order=liquidity",
+                        "ascending=false",
+                    ] {
+                        assert!(request.contains(parameter), "{request}");
+                    }
+                } else {
+                    assert!(request.starts_with("POST /midpoints HTTP/1.1"), "{request}");
+                    assert!(
+                        request
+                            .contains(r#"[{"token_id":"synthetic-a"},{"token_id":"synthetic-b"}]"#)
+                    );
+                }
+                let body = r#"{"synthetic":true}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap_or_else(|_| unreachable!());
+            }
+        });
+        let base = format!("http://{address}");
+        let transport = ReqwestPolymarketTransport::with_urls(
+            &format!("{base}/events"),
+            &format!("{base}/midpoints"),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert!(transport.events().is_ok());
+        assert!(
+            transport
+                .midpoints(&MidpointsRequest {
+                    token_ids: vec!["synthetic-a".to_owned(), "synthetic-b".to_owned()],
+                })
+                .is_ok()
+        );
+        assert!(server.join().is_ok());
     }
 }

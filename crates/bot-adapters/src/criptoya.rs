@@ -72,6 +72,7 @@ pub trait CriptoYaTransport {
 
 pub struct ReqwestCriptoYaTransport {
     client: Client,
+    api_base: String,
 }
 
 impl ReqwestCriptoYaTransport {
@@ -79,20 +80,31 @@ impl ReqwestCriptoYaTransport {
         Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .build()
-            .map(|client| Self { client })
+            .map(|client| Self {
+                client,
+                api_base: DOLLAR_URL.trim_end_matches("/dolar").to_owned(),
+            })
             .map_err(|_| TransportFailureKind::Request)
+    }
+
+    #[cfg(test)]
+    fn with_api_base(api_base: &str) -> Result<Self, TransportFailureKind> {
+        Self::new().map(|mut transport| {
+            transport.api_base = api_base.trim_end_matches('/').to_owned();
+            transport
+        })
     }
 }
 
 impl CriptoYaTransport for ReqwestCriptoYaTransport {
     fn get(&self, request: &CriptoYaRequest) -> Result<HttpResponse, TransportFailureKind> {
         let url = match request {
-            CriptoYaRequest::Dollar => DOLLAR_URL.to_owned(),
+            CriptoYaRequest::Dollar => format!("{}/dolar", self.api_base),
             CriptoYaRequest::Exchange {
                 asset,
                 fiat,
                 amount,
-            } => format!("https://criptoya.com/api/{asset}/{fiat}/{amount:.0}"),
+            } => format!("{}/{asset}/{fiat}/{amount:.0}", self.api_base),
         };
         let response = self.client.get(url).send().map_err(classify_error)?;
         let status_code = response.status().as_u16();
@@ -422,15 +434,18 @@ pub fn fetch_exchange_quotes<T: CriptoYaTransport>(
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     use bot_core::devo::DevoQuotes;
     use bot_core::rulo::{ExchangeQuote, RuloInput};
 
     use super::{
         CriptoYaRequest, CriptoYaTransport, DollarQuotesOutcome, ExchangeQuotesOutcome,
-        ExchangeSide, HttpResponse, RuloMarketOutcome, TransportFailureKind, fetch_dollar_quotes,
-        fetch_exchange_quotes, fetch_rulo_market, parse_dollar_quotes, parse_exchange_quotes,
-        parse_rulo_market,
+        ExchangeSide, HttpResponse, ReqwestCriptoYaTransport, RuloMarketOutcome,
+        TransportFailureKind, fetch_dollar_quotes, fetch_exchange_quotes, fetch_rulo_market,
+        parse_dollar_quotes, parse_exchange_quotes, parse_rulo_market,
     };
 
     struct Transport {
@@ -647,5 +662,42 @@ mod tests {
             ),
             ExchangeQuotesOutcome::InvalidJson
         );
+    }
+
+    #[test]
+    fn reqwest_transport_builds_dollar_and_exchange_paths() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+        let server = thread::spawn(move || {
+            for path in ["/api/dolar", "/api/USDT/ARS/1000"] {
+                let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+                let mut request = [0_u8; 1_024];
+                let bytes = stream.read(&mut request).unwrap_or_default();
+                assert!(
+                    String::from_utf8_lossy(&request[..bytes])
+                        .starts_with(&format!("GET {path} HTTP/1.1"))
+                );
+                let body = r#"{"synthetic":true}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap_or_else(|_| unreachable!());
+            }
+        });
+        let transport = ReqwestCriptoYaTransport::with_api_base(&format!("http://{address}/api/"))
+            .unwrap_or_else(|_| unreachable!());
+        assert!(transport.get(&CriptoYaRequest::Dollar).is_ok());
+        assert!(
+            transport
+                .get(&CriptoYaRequest::Exchange {
+                    asset: "USDT".to_owned(),
+                    fiat: "ARS".to_owned(),
+                    amount: 1_000.0,
+                })
+                .is_ok()
+        );
+        assert!(server.join().is_ok());
     }
 }

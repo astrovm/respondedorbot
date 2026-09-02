@@ -388,4 +388,12 @@ mod tests {
             "request_cache:b3cc0475bb78a5026098858e9889acf666d31062d513d303314eca31d36e72f2"
         );
     }
+
+    #[test]
+    fn python_string_encoding_escapes_every_control_family() {
+        assert_eq!(
+            python_json_string("\u{8}\u{c}\r\t\u{1}"),
+            r#""\b\f\r\t\u0001""#
+        );
+    }
 }
