@@ -1,6 +1,6 @@
 //! Long-poll state ownership and update dispatch.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::marker::PhantomData;
 use std::panic::{self, AssertUnwindSafe};
@@ -35,6 +35,10 @@ pub trait UpdateHandler {
         HandlerErrorDisposition::RetryUpdate
     }
 
+    fn confirm_updates(&mut self, _confirmation: UpdateConfirmation) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     fn finish_batch(&mut self) -> Vec<UpdateFailure> {
         Vec::new()
     }
@@ -52,6 +56,12 @@ pub enum HandlerErrorDisposition {
     StopRuntime,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateConfirmation {
+    Before(i64),
+    All,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateFailure {
     pub update_id: i64,
@@ -62,6 +72,7 @@ pub struct UpdateFailure {
 pub struct BackgroundUpdateFailures {
     pub retrying: Vec<UpdateFailure>,
     pub quarantined: Vec<UpdateFailure>,
+    pub fatal: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -294,6 +305,8 @@ struct DurableUpdateRecord {
     schema_version: u32,
     update: IncomingUpdate,
     attempts: usize,
+    #[serde(default)]
+    completed: bool,
 }
 
 #[derive(Serialize)]
@@ -325,7 +338,7 @@ pub struct DurableParallelUpdateHandler<Handler, Queue> {
     completions: Receiver<DurableUpdateCompletion>,
     queue: Queue,
     active: HashSet<i64>,
-    pending_acknowledgements: VecDeque<i64>,
+    completed: HashSet<i64>,
     failures: BackgroundUpdateFailures,
     recovered: bool,
     handler: PhantomData<fn() -> Handler>,
@@ -431,7 +444,7 @@ where
             completions: completion_receiver,
             queue,
             active: HashSet::new(),
-            pending_acknowledgements: VecDeque::new(),
+            completed: HashSet::new(),
             failures: BackgroundUpdateFailures::default(),
             recovered: false,
             handler: PhantomData,
@@ -439,24 +452,8 @@ where
     }
 
     fn drain_completions(&mut self, retry: bool) {
-        self.retry_pending_acknowledgements();
         while let Ok(completion) = self.completions.try_recv() {
             self.handle_completion(completion, retry);
-        }
-    }
-
-    fn retry_pending_acknowledgements(&mut self) {
-        let pending = self.pending_acknowledgements.len();
-        for _ in 0..pending {
-            let Some(update_id) = self.pending_acknowledgements.pop_front() else {
-                break;
-            };
-            match self.queue.delete_update(update_id) {
-                Ok(_) => {
-                    self.active.remove(&update_id);
-                }
-                Err(_) => self.pending_acknowledgements.push_back(update_id),
-            }
         }
     }
 
@@ -487,6 +484,11 @@ where
                     continue;
                 }
             };
+            if record.completed {
+                self.active.insert(update_id);
+                self.completed.insert(update_id);
+                continue;
+            }
             self.updates
                 .as_ref()
                 .ok_or(DurableParallelHandlerError::QueueUnavailable)?
@@ -502,19 +504,19 @@ where
         let mut record = completion.record;
         let update_id = record.update.update_id;
         let Some(error) = completion.error else {
-            match self.queue.delete_update(update_id) {
-                Ok(_) => {
-                    self.active.remove(&update_id);
-                }
-                Err(queue_error) => {
-                    self.pending_acknowledgements.push_back(update_id);
-                    self.failures.retrying.push(UpdateFailure {
-                        update_id,
-                        error: format!(
-                            "could not acknowledge completed durable update: {queue_error}"
-                        ),
-                    });
-                }
+            record.completed = true;
+            match serde_json::to_string(&record) {
+                Ok(payload) => match self.queue.replace_update(update_id, &payload) {
+                    Ok(()) => {
+                        self.completed.insert(update_id);
+                    }
+                    Err(queue_error) => self.set_fatal(format!(
+                        "could not persist completed durable update: {queue_error}"
+                    )),
+                },
+                Err(serialization_error) => self.set_fatal(format!(
+                    "could not encode completed durable update: {serialization_error}"
+                )),
             }
             return;
         };
@@ -534,15 +536,13 @@ where
                         .failures
                         .quarantined
                         .push(UpdateFailure { update_id, error }),
-                    Err(queue_error) => self.failures.retrying.push(UpdateFailure {
-                        update_id,
-                        error: format!("could not quarantine durable update: {queue_error}"),
-                    }),
+                    Err(queue_error) => self.set_fatal(format!(
+                        "could not quarantine durable update {update_id}: {queue_error}"
+                    )),
                 },
-                Err(serialization_error) => self.failures.retrying.push(UpdateFailure {
-                    update_id,
-                    error: format!("could not encode dead durable update: {serialization_error}"),
-                }),
+                Err(serialization_error) => self.set_fatal(format!(
+                    "could not encode dead durable update {update_id}: {serialization_error}"
+                )),
             }
             return;
         }
@@ -554,22 +554,30 @@ where
                     self.failures
                         .retrying
                         .push(UpdateFailure { update_id, error });
-                    if retry
-                        && let Some(sender) = &self.updates
-                        && sender.send(record).is_ok()
-                    {
-                        self.active.insert(update_id);
+                    if retry && let Some(sender) = &self.updates {
+                        match sender.send(record) {
+                            Ok(()) => {
+                                self.active.insert(update_id);
+                            }
+                            Err(_) => self.set_fatal(format!(
+                                "could not resubmit durable update {update_id}"
+                            )),
+                        }
                     }
                 }
-                Err(queue_error) => self.failures.retrying.push(UpdateFailure {
-                    update_id,
-                    error: format!("could not persist durable update retry: {queue_error}"),
-                }),
+                Err(queue_error) => self.set_fatal(format!(
+                    "could not persist durable update {update_id} retry: {queue_error}"
+                )),
             },
-            Err(serialization_error) => self.failures.retrying.push(UpdateFailure {
-                update_id,
-                error: format!("could not encode durable update retry: {serialization_error}"),
-            }),
+            Err(serialization_error) => self.set_fatal(format!(
+                "could not encode durable update {update_id} retry: {serialization_error}"
+            )),
+        }
+    }
+
+    fn set_fatal(&mut self, error: String) {
+        if self.failures.fatal.is_none() {
+            self.failures.fatal = Some(error);
         }
     }
 
@@ -602,6 +610,7 @@ where
             schema_version: DURABLE_UPDATE_SCHEMA_VERSION,
             update,
             attempts: 0,
+            completed: false,
         };
         let payload = serde_json::to_string(&record)
             .map_err(|error| DurableParallelHandlerError::Serialization(error.to_string()))?;
@@ -619,6 +628,26 @@ where
 
     fn error_disposition(&self, _error: &Self::Error) -> HandlerErrorDisposition {
         HandlerErrorDisposition::StopRuntime
+    }
+
+    fn confirm_updates(&mut self, confirmation: UpdateConfirmation) -> Result<(), Self::Error> {
+        let confirmed = self
+            .completed
+            .iter()
+            .copied()
+            .filter(|update_id| match confirmation {
+                UpdateConfirmation::Before(offset) => *update_id < offset,
+                UpdateConfirmation::All => true,
+            })
+            .collect::<Vec<_>>();
+        for update_id in confirmed {
+            self.queue
+                .delete_update(update_id)
+                .map_err(|error| DurableParallelHandlerError::DurableQueue(error.to_string()))?;
+            self.completed.remove(&update_id);
+            self.active.remove(&update_id);
+        }
+        Ok(())
     }
 
     fn take_background_failures(&mut self) -> BackgroundUpdateFailures {
@@ -720,16 +749,35 @@ where
             .prepare()
             .map_err(|error| RuntimeError::Handler(error.to_string()))?;
         let background_failures = self.handler.take_background_failures();
+        if let Some(error) = background_failures.fatal {
+            return Err(RuntimeError::Handler(error));
+        }
         if !background_failures.retrying.is_empty() || !background_failures.quarantined.is_empty() {
             return Ok(StepOutcome::HandlerFailures {
                 retrying: background_failures.retrying,
                 quarantined: background_failures.quarantined,
             });
         }
-        match self.source.poll(self.offset)? {
+        let requested_offset = self.offset;
+        match self.source.poll(requested_offset)? {
             PollOutcome::Retry(failure) => Ok(StepOutcome::Retry(failure)),
-            PollOutcome::Updates(updates) if updates.is_empty() => Ok(StepOutcome::Idle),
             PollOutcome::Updates(updates) => {
+                let confirmation = requested_offset.map_or_else(
+                    || {
+                        updates
+                            .iter()
+                            .map(|update| update.update_id)
+                            .min()
+                            .map_or(UpdateConfirmation::All, UpdateConfirmation::Before)
+                    },
+                    UpdateConfirmation::Before,
+                );
+                self.handler
+                    .confirm_updates(confirmation)
+                    .map_err(|error| RuntimeError::Handler(error.to_string()))?;
+                if updates.is_empty() {
+                    return Ok(StepOutcome::Idle);
+                }
                 if let Some(next) = next_offset(&updates, self.offset) {
                     self.pending_offset = Some(
                         self.pending_offset
@@ -825,9 +873,9 @@ mod tests {
     use bot_core::telegram_input::ChatId;
 
     use super::{
-        DurableParallelUpdateHandler, DurableUpdateQueue, ParallelHandlerBuildError,
-        ParallelUpdateHandler, PollingRuntime, RuntimeError, StepOutcome, UpdateFailure,
-        UpdateHandler, UpdateSource,
+        DURABLE_UPDATE_SCHEMA_VERSION, DurableParallelUpdateHandler, DurableUpdateQueue,
+        DurableUpdateRecord, ParallelHandlerBuildError, ParallelUpdateHandler, PollingRuntime,
+        RuntimeError, StepOutcome, UpdateFailure, UpdateHandler, UpdateSource,
     };
 
     #[derive(Clone, Default)]
@@ -835,6 +883,7 @@ mod tests {
         updates: Arc<Mutex<HashMap<i64, String>>>,
         dead: Arc<Mutex<HashMap<i64, String>>>,
         insert_failures: Arc<AtomicUsize>,
+        replace_failures: Arc<AtomicUsize>,
         delete_failures: Arc<AtomicUsize>,
     }
 
@@ -871,6 +920,15 @@ mod tests {
         }
 
         fn replace_update(&self, update_id: i64, payload: &str) -> Result<(), Self::Error> {
+            if self
+                .replace_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err("synthetic replace failure");
+            }
             self.updates
                 .lock()
                 .map_err(|_| "queue lock poisoned")?
@@ -1186,7 +1244,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_completion_retries_a_failed_acknowledgement_without_replaying_work() {
+    fn completed_update_is_retained_until_telegram_confirms_it() {
         struct RecordingHandler {
             processed: mpsc::Sender<i64>,
         }
@@ -1199,14 +1257,24 @@ mod tests {
             }
         }
 
+        let retry = PollFailure::Transport {
+            failure: TransportFailureKind::Timeout,
+        };
         let source = Source {
-            outcomes: VecDeque::from([Ok(bot_adapters::telegram_polling::PollOutcome::Updates(
-                vec![update(51)],
-            ))]),
+            outcomes: VecDeque::from([
+                Ok(bot_adapters::telegram_polling::PollOutcome::Updates(vec![
+                    update(51),
+                ])),
+                Ok(bot_adapters::telegram_polling::PollOutcome::Retry(
+                    retry.clone(),
+                )),
+                Ok(bot_adapters::telegram_polling::PollOutcome::Updates(
+                    Vec::new(),
+                )),
+            ]),
             offsets: Vec::new(),
         };
         let queue = MemoryDurableQueue::default();
-        queue.delete_failures.store(1, Ordering::SeqCst);
         let (processed_sender, processed_receiver) = mpsc::channel();
         let handler = DurableParallelUpdateHandler::start(1, 2, queue.clone(), move || {
             Ok::<_, Infallible>(RecordingHandler {
@@ -1224,16 +1292,24 @@ mod tests {
         );
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {
-            match runtime.step() {
-                Ok(StepOutcome::HandlerFailures { retrying, .. })
-                    if retrying.iter().any(|failure| failure.update_id == 51) =>
-                {
-                    break;
-                }
-                Ok(_) if Instant::now() < deadline => thread::yield_now(),
-                outcome => panic!("durable acknowledgement failure was not reported: {outcome:?}"),
+            let failures = runtime.handler.take_background_failures();
+            assert!(failures.fatal.is_none());
+            let completed = queue
+                .updates
+                .lock()
+                .ok()
+                .and_then(|updates| updates.get(&51).cloned())
+                .and_then(|payload| serde_json::from_str::<DurableUpdateRecord>(&payload).ok())
+                .is_some_and(|record| record.completed);
+            if completed {
+                break;
             }
+            if Instant::now() >= deadline {
+                panic!("completed durable update was not persisted");
+            }
+            thread::yield_now();
         }
+        assert_eq!(runtime.step(), Ok(StepOutcome::Retry(retry)));
         assert!(
             queue
                 .updates
@@ -1243,10 +1319,205 @@ mod tests {
 
         assert_eq!(runtime.step(), Ok(StepOutcome::Idle));
         assert!(queue.updates.lock().is_ok_and(|updates| updates.is_empty()));
-        assert!(runtime.handler.pending_acknowledgements.is_empty());
         assert_eq!(
             processed_receiver.try_recv(),
             Err(mpsc::TryRecvError::Empty)
+        );
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn recovered_completed_update_is_not_replayed_before_confirmation() {
+        struct RecordingHandler {
+            processed: mpsc::Sender<i64>,
+        }
+        impl UpdateHandler for RecordingHandler {
+            type Error = Infallible;
+
+            fn handle(&mut self, update: IncomingUpdate) -> Result<(), Self::Error> {
+                let _ = self.processed.send(update.update_id);
+                Ok(())
+            }
+        }
+
+        let queue = MemoryDurableQueue::default();
+        let persisted = serde_json::to_string(&DurableUpdateRecord {
+            schema_version: DURABLE_UPDATE_SCHEMA_VERSION,
+            update: update(61),
+            attempts: 0,
+            completed: true,
+        });
+        assert!(persisted.is_ok());
+        let Ok(persisted) = persisted else { return };
+        assert!(queue.insert_update(61, &persisted).is_ok());
+        let source = Source {
+            outcomes: VecDeque::from([
+                Ok(bot_adapters::telegram_polling::PollOutcome::Updates(vec![
+                    update(61),
+                ])),
+                Ok(bot_adapters::telegram_polling::PollOutcome::Updates(
+                    Vec::new(),
+                )),
+            ]),
+            offsets: Vec::new(),
+        };
+        let (processed_sender, processed_receiver) = mpsc::channel();
+        let handler = DurableParallelUpdateHandler::start(1, 2, queue.clone(), move || {
+            Ok::<_, Infallible>(RecordingHandler {
+                processed: processed_sender.clone(),
+            })
+        });
+        assert!(handler.is_ok());
+        let Ok(handler) = handler else { return };
+        let mut runtime = PollingRuntime::new(source, handler);
+
+        assert_eq!(runtime.step(), Ok(StepOutcome::Dispatched { count: 1 }));
+        assert!(
+            queue
+                .updates
+                .lock()
+                .is_ok_and(|updates| updates.contains_key(&61))
+        );
+        assert_eq!(
+            processed_receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        );
+
+        assert_eq!(runtime.step(), Ok(StepOutcome::Idle));
+        assert!(queue.updates.lock().is_ok_and(|updates| updates.is_empty()));
+        assert_eq!(runtime.source.offsets, [None, Some(62)]);
+        assert_eq!(
+            processed_receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        );
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn confirmation_failure_stops_runtime_with_completed_update_intact() {
+        struct RecordingHandler {
+            processed: mpsc::Sender<i64>,
+        }
+        impl UpdateHandler for RecordingHandler {
+            type Error = Infallible;
+
+            fn handle(&mut self, update: IncomingUpdate) -> Result<(), Self::Error> {
+                let _ = self.processed.send(update.update_id);
+                Ok(())
+            }
+        }
+
+        let source = Source {
+            outcomes: VecDeque::from([
+                Ok(bot_adapters::telegram_polling::PollOutcome::Updates(vec![
+                    update(66),
+                ])),
+                Ok(bot_adapters::telegram_polling::PollOutcome::Updates(
+                    Vec::new(),
+                )),
+            ]),
+            offsets: Vec::new(),
+        };
+        let queue = MemoryDurableQueue::default();
+        let (processed_sender, processed_receiver) = mpsc::channel();
+        let handler = DurableParallelUpdateHandler::start(1, 2, queue.clone(), move || {
+            Ok::<_, Infallible>(RecordingHandler {
+                processed: processed_sender.clone(),
+            })
+        });
+        assert!(handler.is_ok());
+        let Ok(handler) = handler else { return };
+        let mut runtime = PollingRuntime::new(source, handler);
+
+        assert_eq!(runtime.step(), Ok(StepOutcome::Dispatched { count: 1 }));
+        assert_eq!(
+            processed_receiver.recv_timeout(Duration::from_secs(1)),
+            Ok(66)
+        );
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let failures = runtime.handler.take_background_failures();
+            assert!(failures.fatal.is_none());
+            let completed = queue
+                .updates
+                .lock()
+                .ok()
+                .and_then(|updates| updates.get(&66).cloned())
+                .and_then(|payload| serde_json::from_str::<DurableUpdateRecord>(&payload).ok())
+                .is_some_and(|record| record.completed);
+            if completed {
+                break;
+            }
+            if Instant::now() >= deadline {
+                panic!("completed durable update was not persisted");
+            }
+            thread::yield_now();
+        }
+        queue.delete_failures.store(1, Ordering::SeqCst);
+
+        assert!(matches!(runtime.step(), Err(RuntimeError::Handler(_))));
+        assert!(
+            queue
+                .updates
+                .lock()
+                .is_ok_and(|updates| updates.contains_key(&66))
+        );
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn failed_retry_persistence_stops_runtime_for_recovery() {
+        struct FailingHandler {
+            processed: mpsc::Sender<i64>,
+        }
+        impl UpdateHandler for FailingHandler {
+            type Error = &'static str;
+
+            fn handle(&mut self, update: IncomingUpdate) -> Result<(), Self::Error> {
+                let _ = self.processed.send(update.update_id);
+                Err("synthetic handler failure")
+            }
+        }
+
+        let source = Source {
+            outcomes: VecDeque::from([Ok(bot_adapters::telegram_polling::PollOutcome::Updates(
+                vec![update(71)],
+            ))]),
+            offsets: Vec::new(),
+        };
+        let queue = MemoryDurableQueue::default();
+        queue.replace_failures.store(1, Ordering::SeqCst);
+        let (processed_sender, processed_receiver) = mpsc::channel();
+        let handler = DurableParallelUpdateHandler::start(1, 2, queue.clone(), move || {
+            Ok::<_, Infallible>(FailingHandler {
+                processed: processed_sender.clone(),
+            })
+        });
+        assert!(handler.is_ok());
+        let Ok(handler) = handler else { return };
+        let mut runtime = PollingRuntime::new(source, handler);
+
+        assert_eq!(runtime.step(), Ok(StepOutcome::Dispatched { count: 1 }));
+        assert_eq!(
+            processed_receiver.recv_timeout(Duration::from_secs(1)),
+            Ok(71)
+        );
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match runtime.step() {
+                Err(RuntimeError::Handler(error)) => {
+                    assert!(error.contains("could not persist durable update 71 retry"));
+                    break;
+                }
+                Ok(_) if Instant::now() < deadline => thread::yield_now(),
+                outcome => panic!("durable transition failure did not stop runtime: {outcome:?}"),
+            }
+        }
+        assert!(
+            queue
+                .updates
+                .lock()
+                .is_ok_and(|updates| updates.contains_key(&71))
         );
         runtime.shutdown();
     }

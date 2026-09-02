@@ -148,11 +148,15 @@ enqueue failure, final failure, and successful completion must settle correctly.
 | `telegram:updates:dead` | Hash of updates quarantined after repeated failures |
 
 The polling runtime writes each decoded update to the pending hash before it
-advances the Telegram offset. Parallel workers delete successful updates,
-persist retry counts, and atomically move terminal failures to the dead hash.
-Pending records are recovered before polling starts after a process restart.
-Redis must use `noeviction` or a `volatile-*` maxmemory policy so the
-non-expiring pending hash cannot be evicted after Telegram acknowledges it.
+advances the Telegram offset. Parallel workers mark successful updates as
+completed, persist retry counts, and atomically move terminal failures to the
+dead hash. A completed record is deleted only after a successful Telegram poll
+confirms its offset. Pending and completed records are recovered before polling
+starts after a process restart. Redis must use `noeviction` or a `volatile-*`
+maxmemory policy so the non-expiring pending hash cannot be evicted after
+Telegram acknowledges it. The production Redis service enables AOF with
+`appendfsync always`; an accepted update must reach durable storage before the
+bot advances its polling offset.
 
 ### Scheduled tasks
 
