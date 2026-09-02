@@ -297,7 +297,7 @@ mod tests {
             1_788_000_000,
             None,
             Some("7"),
-            Some("astro"),
+            Some("test_user"),
             Some("41"),
             true,
         );

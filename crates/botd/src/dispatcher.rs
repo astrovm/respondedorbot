@@ -4573,7 +4573,7 @@ mod tests {
         message.chat_type = Some("group".to_owned());
         assert_eq!(dispatcher.dispatch(command), Ok(DispatchOutcome::Handled));
 
-        let mut other_bot = update("/balance@playtimbabot", None);
+        let mut other_bot = update("/balance@otherbot", None);
         let IncomingEvent::Message(message) = &mut other_bot.event else {
             return;
         };
@@ -4582,7 +4582,7 @@ mod tests {
 
         assert_eq!(ignored.borrow().len(), 2);
         assert_eq!(ignored.borrow()[0].message_text, "che");
-        assert_eq!(ignored.borrow()[1].command, "/balance@playtimbabot");
+        assert_eq!(ignored.borrow()[1].command, "/balance@otherbot");
         assert_eq!(prepared.borrow().len(), 1);
         assert_eq!(prepared.borrow()[0].command, "/che");
         assert_eq!(prepared.borrow()[0].message_text, "seguís ahí?");
@@ -4772,7 +4772,7 @@ mod tests {
         };
         message.has_reply = true;
         message.replied_message_id = Some(MessageId(6));
-        message.replied_text = Some("Que es el csc".to_owned());
+        message.replied_text = Some("quoted content".to_owned());
         assert_eq!(dispatcher.dispatch(replied), Ok(DispatchOutcome::Handled));
         let texts = dispatcher
             .actions
@@ -4789,7 +4789,7 @@ mod tests {
                 "/HELLO_SIGNODEEXCLAMACION_WORLD",
                 "send the text you want to convert",
                 "/MOUSUGUDESU",
-                "/QUE_ES_EL_CSC"
+                "/QUOTED_CONTENT"
             ]
         );
         assert_eq!(dispatcher.state.incoming.len(), 4);

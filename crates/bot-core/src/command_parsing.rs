@@ -65,27 +65,22 @@ mod tests {
     #[test]
     fn parses_commands_and_message_text() {
         let cases = [
-            ("", "@gordo", "", ""),
-            ("   ", "@gordo", "", ""),
-            ("/ASK hola", "@gordo", "/ask", "hola"),
-            ("/ask@gordo   che", "@gordo", "/ask", "che"),
-            ("/ask@gordo   che", "gordo", "/ask", "che"),
-            ("/ㅤ hola", "@gordo", "/ask", "hola"),
-            ("/ㅤㅤ   hola", "@gordo", "/ask", "hola"),
-            ("/unknown", "@gordo", "/unknown", ""),
-            ("hello world", "@gordo", "hello", "world"),
-            ("/ask\tquestion", "@gordo", "/ask\tquestion", ""),
-            ("/ask\nquestion", "@gordo", "/ask\nquestion", ""),
-            ("/ASK@GORDO hi", "@gordo", "/ask", "hi"),
-            ("/ask@gordo@gordo x", "@gordo", "/ask@gordo", "x"),
-            ("/gordo", "gordo", "/gordo", ""),
-            ("hello@gordo world", "gordo", "hello@gordo", "world"),
-            (
-                "/balance@playtimbabot",
-                "gordo",
-                "/balance@playtimbabot",
-                "",
-            ),
+            ("", "@testbot", "", ""),
+            ("   ", "@testbot", "", ""),
+            ("/ASK hola", "@testbot", "/ask", "hola"),
+            ("/ask@testbot   che", "@testbot", "/ask", "che"),
+            ("/ask@testbot   che", "testbot", "/ask", "che"),
+            ("/ㅤ hola", "@testbot", "/ask", "hola"),
+            ("/ㅤㅤ   hola", "@testbot", "/ask", "hola"),
+            ("/unknown", "@testbot", "/unknown", ""),
+            ("hello world", "@testbot", "hello", "world"),
+            ("/ask\tquestion", "@testbot", "/ask\tquestion", ""),
+            ("/ask\nquestion", "@testbot", "/ask\nquestion", ""),
+            ("/ASK@TESTBOT hi", "@testbot", "/ask", "hi"),
+            ("/ask@testbot@testbot x", "@testbot", "/ask@testbot", "x"),
+            ("/testbot", "testbot", "/testbot", ""),
+            ("hello@testbot world", "testbot", "hello@testbot", "world"),
+            ("/balance@otherbot", "testbot", "/balance@otherbot", ""),
         ];
 
         for (input, bot_name, command, message_text) in cases {
@@ -109,10 +104,10 @@ mod tests {
             .collect::<Vec<_>>();
         commands.extend(["printcredits", "creditlog"]);
 
-        for bot_name in ["respondedorbot", "@respondedorbot"] {
+        for bot_name in ["testbot", "@testbot"] {
             for command in &commands {
                 assert_eq!(
-                    parse_command(&format!("/{command}@RespondedorBot value"), bot_name),
+                    parse_command(&format!("/{command}@TestBot value"), bot_name),
                     ParsedCommand {
                         command: format!("/{command}"),
                         message_text: "value".to_owned(),
