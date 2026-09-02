@@ -145,7 +145,63 @@ pub fn reply_context(
 
 #[cfg(test)]
 mod tests {
-    use super::{AiReplyMetadata, reply_context};
+    use bot_core::locale::Locale;
+    use bot_core::telegram_input::{ChatId, MessageId, UserId};
+
+    use super::{
+        AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, AiReplyMetadata,
+        reply_context,
+    };
+
+    struct MinimalSource {
+        prepared: usize,
+    }
+
+    impl AiConversationSource for MinimalSource {
+        fn reply_metadata(
+            &mut self,
+            _chat_id: &str,
+            _message_id: &str,
+        ) -> Result<Option<AiReplyMetadata>, String> {
+            Ok(None)
+        }
+
+        fn prepare(&mut self, _input: AiConversationInput) -> Result<AiPreparation, String> {
+            self.prepared += 1;
+            Ok(AiPreparation::reply("synthetic reply", None))
+        }
+
+        fn complete_delivery(&mut self, _delivery: AiDelivery) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn input() -> AiConversationInput {
+        AiConversationInput {
+            chat_id: ChatId(1),
+            message_id: MessageId(2),
+            chat_type: "private".to_owned(),
+            chat_title: "Synthetic Chat".to_owned(),
+            sender_id: UserId(3),
+            sender_first_name: "Synthetic".to_owned(),
+            sender_username: "synthetic_user".to_owned(),
+            message_text: "synthetic message".to_owned(),
+            command: String::new(),
+            reply_to_message_id: None,
+            reply_context: None,
+            has_reply: false,
+            visual_media_kind: None,
+            audio_media_kind: None,
+            photo_file_id: None,
+            audio_file_id: None,
+            audio_duration_seconds: None,
+            locale: Locale::En,
+            timezone_offset_hours: 0,
+            creditless_user_hourly_limit: 0,
+            timestamp: 1_700_000_000,
+            spontaneous: false,
+        }
+    }
 
     #[test]
     fn metadata_distinguishes_non_ai_command_followups() {
@@ -185,5 +241,33 @@ mod tests {
             Some("answer".to_owned())
         );
         assert_eq!(reply_context(Some("Gordo"), None, Some("  ")), None);
+    }
+
+    #[test]
+    fn optional_source_operations_have_safe_defaults() {
+        let mut source = MinimalSource { prepared: 0 };
+        let mut tokens = Vec::new();
+        let prepared = source
+            .prepare_streaming(input(), &mut |token| {
+                tokens.push(token.to_owned());
+                Ok(())
+            })
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(prepared, AiPreparation::reply("synthetic reply", None));
+        assert_eq!(source.prepared, 1);
+        assert!(tokens.is_empty());
+        assert_eq!(
+            source
+                .prepare_media_command(input())
+                .unwrap_or_else(|_| unreachable!()),
+            None
+        );
+        assert_eq!(
+            source
+                .prepare_summary_command_streaming(input(), &mut |_token| Ok(()))
+                .unwrap_or_else(|_| unreachable!()),
+            None
+        );
+        assert!(source.record_ignored(input()).is_ok());
     }
 }

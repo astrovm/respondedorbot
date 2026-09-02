@@ -863,9 +863,11 @@ mod tests {
     use std::sync::mpsc;
     use std::sync::{Arc, Condvar, Mutex};
     use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+    use bot_adapters::redis_connection::RedisEndpoint;
     use bot_adapters::redis_update_queue::QueuedUpdate;
+    use bot_adapters::redis_update_queue::RedisUpdateQueue;
     use bot_adapters::telegram_http::TransportFailureKind;
     use bot_adapters::telegram_polling::{
         IncomingEvent, IncomingMessage, IncomingUpdate, PollFailure,
@@ -874,8 +876,9 @@ mod tests {
 
     use super::{
         DURABLE_UPDATE_SCHEMA_VERSION, DurableParallelUpdateHandler, DurableUpdateQueue,
-        DurableUpdateRecord, ParallelHandlerBuildError, ParallelUpdateHandler, PollingRuntime,
-        RuntimeError, StepOutcome, UpdateFailure, UpdateHandler, UpdateSource,
+        DurableUpdateRecord, HandlerErrorDisposition, ParallelHandlerBuildError,
+        ParallelHandlerError, ParallelUpdateHandler, PollingRuntime, RuntimeError, StepOutcome,
+        UpdateConfirmation, UpdateFailure, UpdateHandler, UpdateSource,
     };
 
     #[derive(Clone, Default)]
@@ -1740,5 +1743,122 @@ mod tests {
             Err(ParallelHandlerBuildError::WorkerStartup { error, .. })
                 if error == "worker factory panicked"
         ));
+    }
+
+    #[test]
+    fn handler_defaults_and_parallel_validation_are_safe() {
+        let mut handler = Handler::default();
+        assert_eq!(handler.prepare(), Ok(()));
+        assert_eq!(
+            handler.error_disposition(&"synthetic"),
+            HandlerErrorDisposition::RetryUpdate
+        );
+        assert_eq!(handler.confirm_updates(UpdateConfirmation::All), Ok(()));
+        assert!(handler.finish_batch().is_empty());
+        assert_eq!(handler.take_background_failures(), Default::default());
+        handler.shutdown();
+
+        assert!(matches!(
+            ParallelUpdateHandler::<Handler>::start(0, 1, || Ok::<_, Infallible>(
+                Handler::default()
+            )),
+            Err(ParallelHandlerBuildError::NoWorkers)
+        ));
+        assert!(matches!(
+            ParallelUpdateHandler::<Handler>::start(1, 0, || Ok::<_, Infallible>(
+                Handler::default()
+            )),
+            Err(ParallelHandlerBuildError::EmptyQueue)
+        ));
+        assert!(matches!(
+            ParallelUpdateHandler::<Handler>::start(1, 1, || {
+                Err::<Handler, _>("synthetic startup failure")
+            }),
+            Err(ParallelHandlerBuildError::WorkerStartup { error, .. })
+                if error == "synthetic startup failure"
+        ));
+        assert!(matches!(
+            DurableParallelUpdateHandler::<Handler, MemoryDurableQueue>::start(
+                0,
+                1,
+                MemoryDurableQueue::default(),
+                || Ok::<_, Infallible>(Handler::default()),
+            ),
+            Err(ParallelHandlerBuildError::NoWorkers)
+        ));
+        assert!(matches!(
+            DurableParallelUpdateHandler::<Handler, MemoryDurableQueue>::start(
+                1,
+                0,
+                MemoryDurableQueue::default(),
+                || Ok::<_, Infallible>(Handler::default()),
+            ),
+            Err(ParallelHandlerBuildError::EmptyQueue)
+        ));
+        assert!(matches!(
+            DurableParallelUpdateHandler::<Handler, MemoryDurableQueue>::start(
+                1,
+                1,
+                MemoryDurableQueue::default(),
+                || Err::<Handler, _>("synthetic durable startup failure"),
+            ),
+            Err(ParallelHandlerBuildError::WorkerStartup { error, .. })
+                if error == "synthetic durable startup failure"
+        ));
+
+        let mut stopped =
+            ParallelUpdateHandler::start(1, 1, || Ok::<_, Infallible>(Handler::default()))
+                .unwrap_or_else(|_| unreachable!());
+        stopped.shutdown();
+        assert_eq!(
+            stopped.handle(update(1)),
+            Err(ParallelHandlerError::QueueUnavailable)
+        );
+    }
+
+    #[test]
+    fn redis_durable_queue_implements_the_runtime_port() -> Result<(), String> {
+        let Some(port) = std::env::var("TEST_REDIS_PORT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+        else {
+            return Ok(());
+        };
+        let endpoint = RedisEndpoint {
+            host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+            port,
+            password: std::env::var("TEST_REDIS_PASSWORD")
+                .ok()
+                .filter(|value| !value.is_empty()),
+        };
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos();
+        let update_id = i64::try_from(suffix % 1_000_000_000).map_err(|error| error.to_string())?;
+        let queue = RedisUpdateQueue::new(&endpoint).map_err(|error| error.to_string())?;
+        assert!(
+            DurableUpdateQueue::insert_update(&queue, update_id, "synthetic queued update")
+                .map_err(|error| error.to_string())?
+        );
+        assert!(
+            !DurableUpdateQueue::insert_update(&queue, update_id, "synthetic duplicate")
+                .map_err(|error| error.to_string())?
+        );
+        assert!(
+            DurableUpdateQueue::list_updates(&queue)
+                .map_err(|error| error.to_string())?
+                .iter()
+                .any(|queued| queued.update_id == update_id)
+        );
+        DurableUpdateQueue::replace_update(&queue, update_id, "synthetic replacement")
+            .map_err(|error| error.to_string())?;
+        DurableUpdateQueue::quarantine_update(&queue, update_id, "synthetic dead update")
+            .map_err(|error| error.to_string())?;
+        assert!(
+            !DurableUpdateQueue::delete_update(&queue, update_id)
+                .map_err(|error| error.to_string())?
+        );
+        Ok(())
     }
 }

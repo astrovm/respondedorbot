@@ -1684,6 +1684,62 @@ mod tests {
         }
     }
 
+    struct ConfigurableMedia {
+        prepare_error: Option<String>,
+        execute_error: Option<String>,
+        reserve_credit_units: i64,
+    }
+
+    impl MediaRuntime for ConfigurableMedia {
+        fn prepare(
+            &mut self,
+            kind: MediaKind,
+            file_id: &str,
+            duration_hint_seconds: Option<f64>,
+        ) -> Result<crate::media::PreparedMedia, String> {
+            if let Some(error) = &self.prepare_error {
+                return Err(error.clone());
+            }
+            Ok(match kind {
+                MediaKind::Image => crate::media::PreparedMedia::Image {
+                    file_id: file_id.to_owned(),
+                    bytes: b"synthetic image".to_vec(),
+                    mime: "image/png".to_owned(),
+                    reserve_credit_units: self.reserve_credit_units,
+                },
+                MediaKind::Audio => crate::media::PreparedMedia::Audio {
+                    file_id: file_id.to_owned(),
+                    bytes: b"synthetic audio".to_vec(),
+                    duration_seconds: duration_hint_seconds.unwrap_or(1.0),
+                    reserve_credit_units: self.reserve_credit_units,
+                },
+            })
+        }
+
+        fn execute(
+            &mut self,
+            prepared: crate::media::PreparedMedia,
+            _prompt: &str,
+        ) -> Result<MediaExecution, String> {
+            if let Some(error) = &self.execute_error {
+                return Err(error.clone());
+            }
+            Ok(MediaExecution {
+                kind: prepared.kind(),
+                file_id: "synthetic-media".to_owned(),
+                text: "synthetic media result".to_owned(),
+                billing_segment: Some(json!({
+                    "kind":"vision",
+                    "model":"synthetic/model",
+                    "usage":{"cost":"0.0001"},
+                    "source":"openrouter",
+                    "metadata":{"provider":"openrouter"}
+                })),
+                cached: false,
+            })
+        }
+    }
+
     #[derive(Default)]
     struct State {
         memory: ConversationMemory,
@@ -1735,8 +1791,10 @@ mod tests {
         settlements: Vec<SettlementRequest>,
         released_operations: Vec<String>,
         personal_balance: Option<i64>,
+        personal_balance_error: Option<String>,
         record_failure: bool,
         settlement_failure: bool,
+        abort_failure: bool,
     }
 
     impl ConversationBilling for Billing {
@@ -1771,7 +1829,11 @@ mod tests {
 
         fn abort_operation(&mut self, operation_id: &str) -> Result<(), String> {
             self.released_operations.push(operation_id.to_owned());
-            Ok(())
+            if self.abort_failure {
+                Err("synthetic abort failure".to_owned())
+            } else {
+                Ok(())
+            }
         }
 
         fn release_operation(&mut self, operation_id: &str) {
@@ -1779,7 +1841,11 @@ mod tests {
         }
 
         fn personal_balance(&mut self, _user_id: i64) -> Result<Option<i64>, String> {
-            Ok(self.personal_balance)
+            if let Some(error) = &self.personal_balance_error {
+                Err(error.clone())
+            } else {
+                Ok(self.personal_balance)
+            }
         }
     }
 
@@ -1808,6 +1874,60 @@ mod tests {
             timestamp: 1_672_531_200,
             spontaneous: false,
         }
+    }
+
+    #[test]
+    fn insufficient_credit_messages_cover_locale_chat_and_hourly_cap_contexts() {
+        let denied = ReserveDecision {
+            authorized: false,
+            user_balance: 125,
+            chat_balance: 250,
+            source: None,
+            denial: None,
+        };
+        let mut private = input();
+        assert!(
+            NativeConversation::<Provider, Tools, State, Billing>::insufficient(
+                Locale::En,
+                &private,
+                &denied,
+            )
+            .contains("out of AI credits")
+        );
+        private.locale = Locale::Es;
+        assert!(
+            NativeConversation::<Provider, Tools, State, Billing>::insufficient(
+                Locale::Es,
+                &private,
+                &denied,
+            )
+            .contains("te quedaste seco")
+        );
+        private.chat_type = "supergroup".to_owned();
+        assert!(
+            NativeConversation::<Provider, Tools, State, Billing>::insufficient(
+                Locale::En,
+                &private,
+                &denied,
+            )
+            .contains("this group")
+        );
+        let capped = ReserveDecision {
+            denial: Some(ReserveDenial::CreditlessHourlyCap { limit: 5 }),
+            ..denied
+        };
+        assert!(
+            NativeConversation::<Provider, Tools, State, Billing>::insufficient(
+                Locale::Es,
+                &private,
+                &capped,
+            )
+            .contains("5 mensajes")
+        );
+        assert_eq!(
+            NativeConversation::<Provider, Tools, State, Billing>::preparation_error(Locale::En),
+            "I could not answer, try again"
+        );
     }
 
     fn conversation(
@@ -2249,6 +2369,519 @@ mod tests {
     }
 
     #[test]
+    fn automatic_image_failures_remain_diagnostic_and_credit_safe() {
+        let mut request = input();
+        request.photo_file_id = Some("synthetic-image".to_owned());
+
+        let mut preparation_failure = conversation(
+            vec![Ok(round("synthetic answer", None))],
+            Billing::default(),
+        )
+        .with_media(Box::new(ConfigurableMedia {
+            prepare_error: Some("synthetic preparation failure".to_owned()),
+            execute_error: None,
+            reserve_credit_units: 5,
+        }));
+        let result = preparation_failure
+            .prepare(request.clone())
+            .unwrap_or_else(|_| unreachable!());
+        assert!(
+            matches!(result, AiPreparation::Reply { diagnostics, .. } if diagnostics.iter().any(|value| value.contains("synthetic preparation failure")))
+        );
+
+        let denied = ReserveDecision {
+            authorized: false,
+            user_balance: 0,
+            chat_balance: 0,
+            source: None,
+            denial: None,
+        };
+        let mut reserve_failure = conversation(
+            vec![Ok(round("must not run", None))],
+            Billing {
+                decisions: VecDeque::from([
+                    ReserveDecision {
+                        authorized: true,
+                        user_balance: 1_000,
+                        chat_balance: 0,
+                        source: Some(PayerSource::User),
+                        denial: None,
+                    },
+                    denied,
+                ]),
+                ..Billing::default()
+            },
+        )
+        .with_media(Box::new(ConfigurableMedia {
+            prepare_error: None,
+            execute_error: None,
+            reserve_credit_units: 5,
+        }));
+        let result = reserve_failure
+            .prepare(request.clone())
+            .unwrap_or_else(|_| unreachable!());
+        assert!(matches!(
+            result,
+            AiPreparation::Reply {
+                completion_id: None,
+                ..
+            }
+        ));
+        assert_eq!(
+            reserve_failure.billing.settlements[0].reason,
+            "ai_response_media_reserve_failed"
+        );
+        assert!(reserve_failure.provider.prompts.borrow().is_empty());
+
+        let mut provider_failure = conversation(
+            vec![Ok(round("synthetic answer", None))],
+            Billing::default(),
+        )
+        .with_media(Box::new(ConfigurableMedia {
+            prepare_error: None,
+            execute_error: Some("synthetic media provider failure".to_owned()),
+            reserve_credit_units: 5,
+        }));
+        let result = provider_failure
+            .prepare(request)
+            .unwrap_or_else(|_| unreachable!());
+        assert!(
+            matches!(result, AiPreparation::Reply { diagnostics, .. } if diagnostics.iter().any(|value| value.contains("synthetic media provider failure")))
+        );
+    }
+
+    #[test]
+    fn explicit_media_denials_and_provider_failures_settle_the_admission() {
+        let denied = ReserveDecision {
+            authorized: false,
+            user_balance: 0,
+            chat_balance: 0,
+            source: None,
+            denial: None,
+        };
+        let mut admission_denied = conversation(
+            Vec::new(),
+            Billing {
+                decisions: VecDeque::from([denied.clone()]),
+                ..Billing::default()
+            },
+        )
+        .with_media(Box::new(ConfigurableMedia {
+            prepare_error: None,
+            execute_error: None,
+            reserve_credit_units: 5,
+        }));
+        assert!(matches!(
+            admission_denied.prepare_media_command(input()),
+            Ok(Some(AiPreparation::Reply {
+                completion_id: None,
+                ..
+            }))
+        ));
+
+        let mut audio = input();
+        audio.audio_file_id = Some("synthetic-audio".to_owned());
+        audio.audio_duration_seconds = Some(1.0);
+        let mut extension_denied = conversation(
+            Vec::new(),
+            Billing {
+                decisions: VecDeque::from([
+                    ReserveDecision {
+                        authorized: true,
+                        user_balance: 1_000,
+                        chat_balance: 0,
+                        source: Some(PayerSource::User),
+                        denial: None,
+                    },
+                    denied,
+                ]),
+                ..Billing::default()
+            },
+        )
+        .with_media(Box::new(ConfigurableMedia {
+            prepare_error: None,
+            execute_error: None,
+            reserve_credit_units: 10_000,
+        }));
+        assert!(matches!(
+            extension_denied.prepare_media_command(audio.clone()),
+            Ok(Some(AiPreparation::Reply {
+                completion_id: None,
+                ..
+            }))
+        ));
+        assert_eq!(
+            extension_denied.billing.settlements[0].reason,
+            "transcribe_command_reserve_adjustment_failed"
+        );
+
+        let mut provider_failure =
+            conversation(Vec::new(), Billing::default()).with_media(Box::new(ConfigurableMedia {
+                prepare_error: None,
+                execute_error: Some("synthetic provider failure".to_owned()),
+                reserve_credit_units: 1,
+            }));
+        let result = provider_failure
+            .prepare_media_command(audio)
+            .unwrap_or_else(|_| unreachable!())
+            .unwrap_or_else(|| unreachable!());
+        let AiPreparation::Reply {
+            completion_id: Some(completion_id),
+            diagnostics,
+            ..
+        } = result
+        else {
+            unreachable!();
+        };
+        assert!(diagnostics[0].contains("synthetic provider failure"));
+        assert!(
+            provider_failure
+                .complete_delivery(AiDelivery {
+                    completion_id,
+                    delivered: false,
+                    sent_message_id: None,
+                })
+                .is_ok()
+        );
+        assert_eq!(
+            provider_failure.billing.settlements[0].reason,
+            "transcribe_command_delivery_failure_refund"
+        );
+    }
+
+    #[test]
+    fn successful_configurable_image_is_added_to_the_prompt_and_billing() {
+        let mut service = conversation(
+            vec![Ok(round("synthetic answer", None))],
+            Billing::default(),
+        )
+        .with_media(Box::new(ConfigurableMedia {
+            prepare_error: None,
+            execute_error: None,
+            reserve_credit_units: 5,
+        }));
+        let mut request = input();
+        request.photo_file_id = Some("synthetic-image".to_owned());
+        let result = service.prepare(request).unwrap_or_else(|_| unreachable!());
+        let AiPreparation::Reply {
+            completion_id: Some(completion_id),
+            ..
+        } = result
+        else {
+            unreachable!();
+        };
+        let prompts = service.provider.prompts.borrow();
+        let prompt = prompts[0]
+            .iter()
+            .filter_map(|message| match &message.content {
+                PromptContent::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(prompt.contains("[Image: synthetic media result]"));
+        drop(prompts);
+        assert!(
+            service
+                .complete_delivery(AiDelivery {
+                    completion_id,
+                    delivered: true,
+                    sent_message_id: Some(MessageId(99)),
+                })
+                .is_ok()
+        );
+        assert_eq!(service.billing.segments.len(), 2);
+    }
+
+    #[test]
+    fn delivery_reasons_cover_conversation_media_and_summary_outcomes() {
+        let segment = round("synthetic", None)
+            .billing_segment
+            .unwrap_or_else(|| unreachable!());
+        let cases = [
+            (
+                PendingKind::Conversation {
+                    provider_failed: true,
+                },
+                true,
+                vec![segment.clone()],
+                "ai_response_provider_usage_before_fallback",
+            ),
+            (
+                PendingKind::Conversation {
+                    provider_failed: false,
+                },
+                false,
+                Vec::new(),
+                "ai_response_delivery_failure_refund",
+            ),
+            (
+                PendingKind::MediaCommand,
+                false,
+                vec![segment.clone()],
+                "transcribe_command_provider_usage_before_delivery_failure",
+            ),
+            (
+                PendingKind::SummaryCommand {
+                    provider_failed: true,
+                },
+                true,
+                vec![segment.clone()],
+                "summary_stream_provider_usage_before_fallback",
+            ),
+            (
+                PendingKind::SummaryCommand {
+                    provider_failed: false,
+                },
+                false,
+                Vec::new(),
+                "summary_stream_failed",
+            ),
+            (
+                PendingKind::SummaryCommand {
+                    provider_failed: false,
+                },
+                false,
+                vec![segment],
+                "summary_stream_provider_usage_before_delivery_failure",
+            ),
+        ];
+        for (index, (kind, delivered, segments, expected_reason)) in cases.into_iter().enumerate() {
+            let mut service = conversation(Vec::new(), Billing::default());
+            let completion_id = format!("synthetic-completion-{index}");
+            service.pending.insert(
+                completion_id.clone(),
+                PendingConversation {
+                    input: input(),
+                    text: "synthetic output".to_owned(),
+                    segments,
+                    kind,
+                    compaction_plan: None,
+                    compaction_payer: None,
+                },
+            );
+            assert!(
+                service
+                    .complete_delivery(AiDelivery {
+                        completion_id,
+                        delivered,
+                        sent_message_id: Some(MessageId(99)),
+                    })
+                    .is_ok()
+            );
+            assert_eq!(service.billing.settlements[0].reason, expected_reason);
+        }
+    }
+
+    #[test]
+    fn ordinary_context_extension_denial_and_spontaneous_fallback_settle_immediately() {
+        let authorized = ReserveDecision {
+            authorized: true,
+            user_balance: 1_000,
+            chat_balance: 0,
+            source: Some(PayerSource::User),
+            denial: None,
+        };
+        let denied = ReserveDecision {
+            authorized: false,
+            user_balance: 0,
+            chat_balance: 0,
+            source: None,
+            denial: None,
+        };
+        let mut extension_denied = conversation(
+            Vec::new(),
+            Billing {
+                decisions: VecDeque::from([authorized, denied]),
+                ..Billing::default()
+            },
+        );
+        extension_denied.state.memory.history = vec![HistoryMessage {
+            role: PromptRole::User,
+            text: "synthetic context ".repeat(1_000),
+        }];
+        assert!(matches!(
+            extension_denied.prepare(input()),
+            Ok(AiPreparation::Reply {
+                completion_id: None,
+                ..
+            })
+        ));
+        assert_eq!(
+            extension_denied.billing.settlements[0].reason,
+            "ai_response_reserve_adjustment_failed"
+        );
+
+        let mut spontaneous_input = input();
+        spontaneous_input.spontaneous = true;
+        let mut fallback = conversation(
+            vec![Err(ChatRoundError {
+                source: OpenRouterChatError::IncompleteStream,
+                partial: Box::new(round("", None)),
+            })],
+            Billing::default(),
+        );
+        assert!(matches!(
+            fallback.prepare(spontaneous_input),
+            Ok(AiPreparation::Silent { .. })
+        ));
+        assert_eq!(
+            fallback.billing.settlements[0].reason,
+            "ai_response_provider_usage_before_fallback"
+        );
+
+        let mut missing_round = conversation(Vec::new(), Billing::default());
+        assert!(matches!(
+            missing_round.prepare(input()),
+            Ok(AiPreparation::Reply { ref diagnostics, .. })
+                if diagnostics.iter().any(|value| value.contains("AI provider stream"))
+        ));
+
+        let mut media_without_attachment = conversation(
+            vec![Ok(round("synthetic answer", None))],
+            Billing::default(),
+        )
+        .with_media(Box::new(ConfigurableMedia {
+            prepare_error: None,
+            execute_error: None,
+            reserve_credit_units: 0,
+        }));
+        assert!(matches!(
+            media_without_attachment.prepare(input()),
+            Ok(AiPreparation::Reply { .. })
+        ));
+    }
+
+    #[test]
+    fn task_billing_unavailability_and_state_forwarding_are_explicit() {
+        let mut task = input();
+        task.command = "/tarea".to_owned();
+        task.message_text = "recordá el resultado sintético".to_owned();
+        task.locale = Locale::Es;
+
+        let mut unavailable = conversation(Vec::new(), Billing::default());
+        assert!(matches!(
+            unavailable.prepare(task.clone()),
+            Ok(AiPreparation::Reply { ref text, completion_id: None, .. })
+                if text.contains("cobro de ia")
+        ));
+
+        let mut failed = conversation(
+            Vec::new(),
+            Billing {
+                personal_balance_error: Some("synthetic billing failure".to_owned()),
+                ..Billing::default()
+            },
+        );
+        assert_eq!(
+            failed.prepare(task.clone()),
+            Ok(AiPreparation::reply(
+                crate::task_tools::task_credit_check(Locale::Es),
+                None,
+            ))
+        );
+
+        let mut successful = conversation(
+            vec![Ok(round("respuesta sintética", None))],
+            Billing {
+                personal_balance: Some(i64::MAX),
+                ..Billing::default()
+            },
+        );
+        assert!(matches!(
+            successful.prepare(task.clone()),
+            Ok(AiPreparation::Reply { .. })
+        ));
+        let prompts = successful.provider.prompts.borrow();
+        let prompt = prompts[0]
+            .iter()
+            .filter_map(|message| match &message.content {
+                PromptContent::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(prompt.contains("creá una tarea programada"));
+        drop(prompts);
+
+        assert_eq!(successful.reply_metadata("42", "7"), Ok(None));
+        assert!(successful.record_ignored(task).is_ok());
+        assert_eq!(successful.state.incoming.len(), 2);
+
+        let mut no_media = conversation(Vec::new(), Billing::default());
+        assert_eq!(no_media.prepare_media_command(input()), Ok(None));
+        let mut configured =
+            conversation(Vec::new(), Billing::default()).with_media(Box::new(ConfigurableMedia {
+                prepare_error: None,
+                execute_error: None,
+                reserve_credit_units: 0,
+            }));
+        let mut replied_without_media = input();
+        replied_without_media.has_reply = true;
+        assert!(matches!(
+            configured.prepare_media_command(replied_without_media),
+            Ok(Some(AiPreparation::Reply { ref text, .. }))
+                if text == media_command_none(Locale::En)
+        ));
+    }
+
+    #[test]
+    fn abort_and_settlement_failures_keep_both_diagnostics() {
+        struct FailingTools;
+        impl ConversationToolFactory for FailingTools {
+            type Tools = NoTools;
+
+            fn create(&mut self, _input: &AiConversationInput) -> Result<Self::Tools, String> {
+                Err("synthetic tool factory failure".to_owned())
+            }
+        }
+        let mut preparation = NativeConversation::new(
+            Provider {
+                rounds: RefCell::new(VecDeque::new()),
+                prompts: RefCell::new(Vec::new()),
+            },
+            FailingTools,
+            State::default(),
+            Billing {
+                abort_failure: true,
+                ..Billing::default()
+            },
+            "synthetic persona",
+            DEEPSEEK_MODEL,
+            5,
+        );
+        let error = preparation.prepare(input()).err().unwrap_or_default();
+        assert!(error.contains("synthetic tool factory failure"));
+        assert!(error.contains("synthetic abort failure"));
+
+        let mut delivery = conversation(
+            vec![Ok(round("synthetic answer", None))],
+            Billing {
+                record_failure: true,
+                settlement_failure: true,
+                ..Billing::default()
+            },
+        );
+        let AiPreparation::Reply {
+            completion_id: Some(completion_id),
+            ..
+        } = delivery.prepare(input()).unwrap_or_else(|_| unreachable!())
+        else {
+            unreachable!();
+        };
+        let error = delivery
+            .complete_delivery(AiDelivery {
+                completion_id,
+                delivered: true,
+                sent_message_id: Some(MessageId(99)),
+            })
+            .err()
+            .unwrap_or_default();
+        assert!(error.contains("provider usage recording failed"));
+        assert!(error.contains("settlement failed"));
+    }
+
+    #[test]
     fn summary_command_streams_custom_prompt_and_settles_summary_usage() {
         let mut service = conversation(
             vec![Ok(round("**synthetic summary**", None))],
@@ -2499,6 +3132,288 @@ mod tests {
             "ai_response_provider_usage_before_delivery_failure"
         );
         assert!(service.state.outgoing.is_empty());
+    }
+
+    #[test]
+    fn localized_media_summary_and_prompt_helpers_cover_supported_shapes() {
+        assert!(
+            NativeConversation::<Provider, Tools, State, Billing>::preparation_error(Locale::Es)
+                .contains("probá")
+        );
+        for (kind, locale) in [
+            (MediaKind::Image, Locale::Es),
+            (MediaKind::Image, Locale::En),
+            (MediaKind::Audio, Locale::Es),
+            (MediaKind::Audio, Locale::En),
+        ] {
+            assert!(!media_prompt(kind, locale).is_empty());
+        }
+        assert!(!sticker_prompt(Locale::Es).is_empty());
+        assert!(!sticker_prompt(Locale::En).is_empty());
+        assert!(!media_command_reply_required(Locale::Es).is_empty());
+        assert!(!media_command_reply_required(Locale::En).is_empty());
+        assert!(!media_command_none(Locale::Es).is_empty());
+        assert!(!media_command_none(Locale::En).is_empty());
+
+        for (kind, visual_kind, locale) in [
+            (MediaKind::Audio, None, Locale::Es),
+            (MediaKind::Audio, None, Locale::En),
+            (MediaKind::Image, Some("sticker"), Locale::Es),
+            (MediaKind::Image, Some("sticker"), Locale::En),
+            (MediaKind::Image, None, Locale::Es),
+            (MediaKind::Image, None, Locale::En),
+        ] {
+            assert!(
+                !media_command_prepare_error(
+                    kind,
+                    visual_kind,
+                    locale,
+                    &MediaPipelineError::Download.to_string(),
+                )
+                .is_empty()
+            );
+            assert!(!media_command_provider_error(kind, visual_kind, locale).is_empty());
+            assert!(!media_command_success(kind, visual_kind, locale, "**synthetic**").is_empty());
+        }
+        assert!(
+            !media_command_prepare_error(
+                MediaKind::Audio,
+                None,
+                Locale::Es,
+                &MediaPipelineError::InvalidAudio.to_string(),
+            )
+            .is_empty()
+        );
+        assert!(
+            !media_command_prepare_error(
+                MediaKind::Audio,
+                None,
+                Locale::En,
+                &MediaPipelineError::InvalidAudio.to_string(),
+            )
+            .is_empty()
+        );
+        assert!(
+            !media_command_prepare_error(
+                MediaKind::Image,
+                None,
+                Locale::En,
+                "synthetic provider failure",
+            )
+            .is_empty()
+        );
+
+        for custom in ["", "25", "25 synthetic focus", "synthetic focus"] {
+            assert!(!summary_prompt(custom, Locale::Es).is_empty());
+            assert!(!summary_prompt(custom, Locale::En).is_empty());
+        }
+        assert!(!summary_empty(Locale::Es).is_empty());
+        assert!(!summary_error(Locale::Es).is_empty());
+
+        let image = MediaExecution {
+            kind: MediaKind::Image,
+            file_id: "synthetic-image".to_owned(),
+            text: "synthetic visual context".to_owned(),
+            billing_segment: None,
+            cached: true,
+        };
+        let audio = MediaExecution {
+            kind: MediaKind::Audio,
+            file_id: "synthetic-audio".to_owned(),
+            text: "synthetic audio context".to_owned(),
+            billing_segment: None,
+            cached: true,
+        };
+        let mut empty_messages = Vec::new();
+        append_media_context(&mut empty_messages, &image, Locale::Es);
+        let mut parts = vec![PromptMessage {
+            role: PromptRole::User,
+            content: PromptContent::TextParts(vec!["synthetic".to_owned()]),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        }];
+        append_media_context(&mut parts, &image, Locale::Es);
+        append_media_context(&mut parts, &image, Locale::En);
+        assert!(matches!(&parts[0].content, PromptContent::TextParts(values) if values.len() == 3));
+        let mut empty = vec![PromptMessage {
+            role: PromptRole::User,
+            content: PromptContent::Empty,
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        }];
+        append_media_context(&mut empty, &audio, Locale::Es);
+        assert!(
+            matches!(&empty[0].content, PromptContent::Text(value) if value.contains("Transcripción"))
+        );
+
+        let mut identity = input();
+        identity.sender_username.clear();
+        assert_eq!(user_identity(&identity), "Synthetic");
+        identity.sender_first_name.clear();
+        identity.sender_username = "synthetic_user".to_owned();
+        assert_eq!(user_identity(&identity), "(synthetic_user)");
+        assert_eq!(group_chat_id(&identity), None);
+        identity.chat_type = "group".to_owned();
+        assert_eq!(group_chat_id(&identity), Some(42));
+
+        let tool_message = PromptMessage {
+            role: PromptRole::Tool,
+            content: PromptContent::TextParts(vec!["one".to_owned(), "two".to_owned()]),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        };
+        assert!(matches!(
+            estimated_message(&tool_message).content,
+            TokenEstimateValue::Sequence(_)
+        ));
+        let empty_message = PromptMessage {
+            role: PromptRole::Assistant,
+            content: PromptContent::Empty,
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        };
+        assert_eq!(
+            estimated_message(&empty_message).content,
+            TokenEstimateValue::Empty
+        );
+        assert!(!formatted_date(i64::MAX, i64::MAX, Locale::En).is_empty());
+        assert_eq!(format_credit_units(-1), "0.00");
+
+        let mut tools = NoTools;
+        assert!(!tools.contains("synthetic", false));
+        assert_eq!(
+            tools
+                .execute("synthetic", &Value::Null, "synthetic-call")
+                .output,
+            ""
+        );
+
+        let mut spanish_group = input();
+        spanish_group.chat_type = "supergroup".to_owned();
+        assert!(
+            NativeConversation::<Provider, Tools, State, Billing>::insufficient(
+                Locale::Es,
+                &spanish_group,
+                &ReserveDecision {
+                    authorized: false,
+                    user_balance: 1,
+                    chat_balance: 2,
+                    source: None,
+                    denial: None,
+                },
+            )
+            .contains("grupo")
+        );
+    }
+
+    #[test]
+    fn summary_credit_and_memory_failures_are_finalized_without_provider_io() {
+        let denied = ReserveDecision {
+            authorized: false,
+            user_balance: 0,
+            chat_balance: 0,
+            source: None,
+            denial: None,
+        };
+        let mut service = conversation(
+            Vec::new(),
+            Billing {
+                decisions: VecDeque::from([denied.clone()]),
+                ..Billing::default()
+            },
+        );
+        assert!(matches!(
+            service.prepare_summary_command_streaming(input(), &mut |_token| Ok(())),
+            Ok(Some(AiPreparation::Reply {
+                completion_id: None,
+                ..
+            }))
+        ));
+
+        struct FailingSummaryState;
+        impl ConversationState for FailingSummaryState {
+            fn reply_metadata(
+                &mut self,
+                _chat_id: &str,
+                _message_id: &str,
+            ) -> Result<Option<AiReplyMetadata>, String> {
+                Ok(None)
+            }
+            fn load_memory(
+                &mut self,
+                _chat_id: &str,
+                _search_text: &str,
+                _reply_to_message_id: Option<&str>,
+                _max_history_messages: usize,
+            ) -> Result<ConversationMemory, String> {
+                Err("synthetic memory failure".to_owned())
+            }
+            fn record_incoming(&mut self, _input: &AiConversationInput) -> Result<(), String> {
+                Ok(())
+            }
+            fn record_outgoing(
+                &mut self,
+                _input: &AiConversationInput,
+                _sent_message_id: Option<i64>,
+                _text: &str,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let mut failing = NativeConversation::new(
+            Provider {
+                rounds: RefCell::new(VecDeque::new()),
+                prompts: RefCell::new(Vec::new()),
+            },
+            Tools,
+            FailingSummaryState,
+            Billing::default(),
+            "synthetic persona",
+            DEEPSEEK_MODEL,
+            5,
+        );
+        assert_eq!(
+            failing.prepare_summary_command_streaming(input(), &mut |_token| Ok(())),
+            Err("synthetic memory failure".to_owned())
+        );
+        assert_eq!(
+            failing.billing.settlements[0].reason,
+            "summary_preparation_failed"
+        );
+        assert_eq!(failing.reply_metadata("42", "7"), Ok(None));
+        assert!(failing.record_ignored(input()).is_ok());
+
+        let mut extension_denied = conversation(
+            Vec::new(),
+            Billing {
+                decisions: VecDeque::from([
+                    ReserveDecision {
+                        authorized: true,
+                        user_balance: 1_000,
+                        chat_balance: 0,
+                        source: Some(PayerSource::User),
+                        denial: None,
+                    },
+                    denied,
+                ]),
+                ..Billing::default()
+            },
+        );
+        extension_denied.state.memory.history = vec![HistoryMessage {
+            role: PromptRole::User,
+            text: "synthetic context ".repeat(1_000),
+        }];
+        assert!(matches!(
+            extension_denied.prepare_summary_command_streaming(input(), &mut |_token| Ok(())),
+            Ok(Some(AiPreparation::Reply {
+                completion_id: None,
+                ..
+            }))
+        ));
+        assert_eq!(
+            extension_denied.billing.settlements[0].reason,
+            "summary_reserve_adjustment_failed"
+        );
     }
 
     #[test]

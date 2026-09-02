@@ -18,6 +18,7 @@ workspace/
 # Local reports and generated artifacts
 coverage/
 lcov.info
+*.profraw
 docs/superpowers/
 .survey/
 .sisyphus/

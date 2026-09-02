@@ -538,7 +538,11 @@ fn compaction_actual_units(
 mod tests {
     use std::cell::RefCell;
     use std::error::Error;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
+    use bot_adapters::billing_read::BillingRepository;
+    use bot_adapters::billing_schema::BillingSchemaRepository;
+    use bot_adapters::compaction_job::{COMPACTION_JOB_SCHEMA_VERSION, CompactionJobRecord};
     use bot_adapters::openrouter_chat::{
         HttpRequest, HttpResponse, OpenRouterChatError, OpenRouterTransport,
     };
@@ -546,13 +550,140 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        OpenRouterCompactionProvider, ceil_decimal, compaction_actual_units,
-        production_compaction_worker,
+        OpenRouterCompactionProvider, PostgresCompactionBilling, RedisCompactionState,
+        ceil_decimal, compaction_actual_units, production_compaction_worker,
     };
-    use crate::compaction_worker::CompactionProvider;
+    use crate::compaction_worker::{
+        CompactionBilling, CompactionProvider, CompactionState,
+        SettlementRequest as CompactionSettlementRequest,
+    };
 
     struct Transport {
         request: RefCell<Option<HttpRequest>>,
+    }
+
+    fn integration_redis_endpoint() -> Option<RedisEndpoint> {
+        let port = std::env::var("TEST_REDIS_PORT").ok()?.parse().ok()?;
+        Some(RedisEndpoint {
+            host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+            port,
+            password: std::env::var("TEST_REDIS_PASSWORD")
+                .ok()
+                .filter(|value| !value.is_empty()),
+        })
+    }
+
+    #[test]
+    fn redis_compaction_state_round_trips_summary_and_marker_atomically() -> Result<(), String> {
+        let Some(endpoint) = integration_redis_endpoint() else {
+            return Ok(());
+        };
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos();
+        let chat_id = format!("synthetic-compaction-{nonce}");
+        let mut state = RedisCompactionState::new(&endpoint)?;
+        assert_eq!(state.load(&chat_id)?, (None, None));
+        state.save(&chat_id, "synthetic summary", "message-7")?;
+        assert_eq!(
+            state.load(&chat_id)?,
+            (
+                Some("synthetic summary".to_owned()),
+                Some("message-7".to_owned())
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn postgres_compaction_billing_records_provider_usage_and_settles_once() -> Result<(), String> {
+        let Some(database_url) = std::env::var("TEST_DATABASE_URL").ok() else {
+            return Ok(());
+        };
+        BillingSchemaRepository::new(&database_url)
+            .ensure_schema()
+            .map_err(|error| error.to_string())?;
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos();
+        let suffix = i64::try_from(nonce % 100_000_000).map_err(|error| error.to_string())?;
+        let user_id = 7_200_000_000_000_i64 + suffix;
+        let operation_id = format!("synthetic-compaction-billing-{nonce}");
+        let usage_tag = format!("synthetic-usage-{nonce}");
+        let repository = BillingRepository::new(&database_url);
+        repository
+            .mint_user_credits(user_id, 100, None)
+            .map_err(|error| error.to_string())?;
+        let metadata = serde_json::Map::from_iter([
+            ("operation_id".to_owned(), json!(&operation_id)),
+            ("settlement_id".to_owned(), json!(&operation_id)),
+            ("usage_tag".to_owned(), json!(&usage_tag)),
+            ("credit_scale".to_owned(), json!(100)),
+        ]);
+        let reserve = repository
+            .charge_ai_credits(
+                user_id,
+                None,
+                10,
+                "ai_reserve",
+                &metadata,
+                Some("user"),
+                Some(&operation_id),
+                &operation_id,
+            )
+            .map_err(|error| error.to_string())?;
+        assert!(reserve.ok);
+        let job = CompactionJobRecord {
+            schema_version: COMPACTION_JOB_SCHEMA_VERSION,
+            chat_id: user_id.to_string(),
+            messages: vec![json!({"role":"user","text":"synthetic memory"})],
+            prior_summary: None,
+            expected_marker: None,
+            target_marker: "message-7".to_owned(),
+            reservation: json!({
+                "reserved_credit_units":10,
+                "source":"user",
+                "usage_tag":usage_tag,
+                "credit_scale":100,
+                "metadata":metadata,
+            }),
+            user_id,
+            message_id: Some("7".to_owned()),
+            locale: "en".to_owned(),
+            attempts: 0,
+            next_attempt_at: 0.0,
+            result_summary: Some("synthetic summary".to_owned()),
+            result_cost_usd_micros: 0,
+            result_billing_segment: None,
+        };
+        let segment = json!({
+            "kind":"summary",
+            "text":"synthetic summary",
+            "model":"deepseek/deepseek-v4-flash-0731",
+            "usage":{"prompt_tokens":4,"completion_tokens":2},
+            "source":"openrouter",
+            "metadata":{"provider_generation_id":format!("synthetic-generation-{nonce}")},
+        });
+        let mut billing = PostgresCompactionBilling::new(&database_url);
+        assert!(!billing.is_settled(&job)?);
+        billing.record_provider_segment(&job, &operation_id, &segment)?;
+        let segments = billing.list_provider_segments(user_id, &operation_id)?;
+        assert_eq!(segments.len(), 1);
+        billing.settle(CompactionSettlementRequest {
+            job: &job,
+            billing_segments: &segments,
+            actual_credit_units: None,
+            reason: "synthetic_success",
+        })?;
+        assert!(billing.is_settled(&job)?);
+        assert!(!billing.settle_incompatible("synthetic", &json!({}))?);
+        assert!(
+            !billing
+                .settle_incompatible("synthetic", &json!({"user_id":user_id,"reservation":{}}),)?
+        );
+        Ok(())
     }
 
     #[test]
@@ -642,15 +773,87 @@ mod tests {
     }
 
     #[test]
+    fn spanish_compaction_maps_roles_skips_empty_messages_and_rejects_empty_output() {
+        struct EmptyTransport;
+        impl OpenRouterTransport for EmptyTransport {
+            fn post(&self, _: &HttpRequest) -> Result<HttpResponse, OpenRouterChatError> {
+                Ok(HttpResponse {
+                    status_code: 200,
+                    body: json!({
+                        "model":"requested/model",
+                        "choices":[{"message":{"content":"  "}}]
+                    })
+                    .to_string(),
+                    headers: Default::default(),
+                })
+            }
+        }
+        let mut provider = OpenRouterCompactionProvider::new(
+            EmptyTransport,
+            "synthetic-key",
+            "https://provider.example.test/v1",
+            "requested/model",
+            "synthetic prompt",
+        );
+        let result = provider.compact(
+            &[
+                json!({"role":"system","content":"system context"}),
+                json!({"role":"assistant","text":"assistant context"}),
+                json!({"role":"tool","content":"tool context"}),
+                json!({"role":"user","content":""}),
+                json!({"unrelated":true}),
+            ],
+            Some(""),
+            "es-AR",
+        );
+        assert!(matches!(
+            result,
+            Err(ref error) if error == "summary provider returned empty text"
+        ));
+    }
+
+    #[test]
     fn decimal_ceiling_matches_python_cost_checkpoint() {
         assert_eq!(ceil_decimal("1234.00000000"), 1234);
         assert_eq!(ceil_decimal("1234.00000001"), 1235);
         assert_eq!(ceil_decimal("0"), 0);
+        assert_eq!(ceil_decimal("invalid"), 0);
     }
 
     #[test]
     fn durable_provider_usage_overrides_a_stale_zero_terminal_transition() {
         assert_eq!(compaction_actual_units(16, 38, true, true, Some(0)), 38);
         assert_eq!(compaction_actual_units(16, 0, true, false, Some(0)), 0);
+        assert_eq!(compaction_actual_units(16, 8, false, true, None), 16);
+        assert_eq!(compaction_actual_units(16, 8, false, false, None), 16);
+        assert_eq!(compaction_actual_units(16, 8, true, false, None), 8);
+        assert_eq!(compaction_actual_units(16, 8, true, false, Some(-2)), 0);
+    }
+
+    #[test]
+    fn legacy_reservation_fields_accept_strings_nested_metadata_and_defaults() {
+        let reservation = json!({
+            "reserved_credit_units":"14",
+            "chat_scope_id":"-42",
+            "metadata": {
+                "credit_scale":"100",
+                "operation_id":"synthetic-operation",
+                "settlement_id":"synthetic-settlement"
+            }
+        });
+        assert_eq!(
+            super::reservation_i64(&reservation, "reserved_credit_units"),
+            Some(14)
+        );
+        assert_eq!(super::reservation_credit_scale(&reservation), Some(100));
+        assert_eq!(super::reservation_chat_id(&reservation), Some(-42));
+        assert_eq!(
+            super::reservation_nested_string(&reservation, "operation_id"),
+            "synthetic-operation"
+        );
+        assert_eq!(
+            super::reservation_nested_string(&reservation, "missing"),
+            ""
+        );
     }
 }

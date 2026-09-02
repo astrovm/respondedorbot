@@ -633,11 +633,62 @@ fn task_canceled(task_id: &TaskId, locale: Locale) -> String {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::collections::BTreeMap;
     use std::rc::Rc;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
+    use bot_adapters::redis_connection::RedisEndpoint;
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn redis_task_tool_store_round_trips_through_the_public_port() -> Result<(), String> {
+        let Some(port) = std::env::var("TEST_REDIS_PORT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+        else {
+            return Ok(());
+        };
+        let endpoint = RedisEndpoint {
+            host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+            port,
+            password: std::env::var("TEST_REDIS_PASSWORD")
+                .ok()
+                .filter(|value| !value.is_empty()),
+        };
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos();
+        let task_id =
+            TaskId::new(format!("synthetic_{nonce}")).map_err(|error| error.to_string())?;
+        let chat_id = format!("synthetic-chat-{nonce}");
+        let document = TaskRecordDocument {
+            task: ScheduledTask {
+                id: task_id.clone(),
+                chat_id: chat_id.clone(),
+                text: "synthetic scheduled task".to_owned(),
+                user_name: "synthetic-user".to_owned(),
+                user_id: Some(42),
+                schedule: TaskSchedule::Once,
+                timezone_offset: 0,
+                locale: "en".to_owned(),
+                schedule_anchor_at: Some(1_700_000_000),
+                next_run_at: Some(1_700_000_000),
+                last_execution_id: None,
+            },
+            legacy_run_date: None,
+            extra: BTreeMap::new(),
+        };
+        let mut store = RedisTaskStore::new(&endpoint).map_err(|error| error.to_string())?;
+        TaskToolStore::save(&mut store, &document, 600)?;
+        assert_eq!(TaskToolStore::list(&mut store, &chat_id)?, [document.task]);
+        assert!(TaskToolStore::cancel(&mut store, &task_id, &chat_id)?);
+        assert!(TaskToolStore::list(&mut store, &chat_id)?.is_empty());
+        assert!(RandomTaskIdSource.next_id().is_ok());
+        Ok(())
+    }
 
     struct StoreState {
         tasks: Vec<ScheduledTask>,
@@ -941,5 +992,214 @@ mod tests {
         );
         assert_eq!(result.output, "that task does not exist in this chat");
         assert!(result.diagnostics[0].contains("synthetic list failure"));
+    }
+
+    #[test]
+    fn rejects_incompatible_requests_and_missing_chat_context() {
+        let state = Rc::new(RefCell::new(StoreState::default()));
+        let mut set = set_tool(Rc::clone(&state), Ok(i64::MAX), Locale::En);
+        assert!(
+            set.execute(ExternalToolRequest::TaskList, "call")
+                .output
+                .contains("task_set")
+        );
+        set.context.chat_id.clear();
+        assert_eq!(
+            set.execute(set_request(Some(60), None, None), "call")
+                .output,
+            "I could not identify the chat"
+        );
+
+        let mut list = TaskListTool::new(Store(Rc::clone(&state)), "", Locale::Es);
+        assert!(
+            list.execute(
+                ExternalToolRequest::TaskCancel {
+                    task_id: "synthetic".to_owned(),
+                },
+                "call"
+            )
+            .output
+            .contains("task_list")
+        );
+        assert_eq!(
+            list.execute(ExternalToolRequest::TaskList, "call").output,
+            "no se en que chat estoy"
+        );
+
+        let mut cancel = TaskCancelTool::new(Store(state), "", Locale::En);
+        assert!(
+            cancel
+                .execute(ExternalToolRequest::TaskList, "call")
+                .output
+                .contains("task_cancel")
+        );
+        assert_eq!(
+            cancel
+                .execute(
+                    ExternalToolRequest::TaskCancel {
+                        task_id: "synthetic".to_owned(),
+                    },
+                    "call"
+                )
+                .output,
+            "I could not identify the chat"
+        );
+    }
+
+    #[test]
+    fn reports_balance_id_timestamp_and_cancel_failures() {
+        let state = Rc::new(RefCell::new(StoreState::default()));
+        let mut balance_failure = set_tool(
+            Rc::clone(&state),
+            Err("synthetic balance failure".to_owned()),
+            Locale::En,
+        );
+        let result = balance_failure.execute(set_request(Some(60), None, None), "call");
+        assert_eq!(result.output, task_credit_check(Locale::En));
+        assert!(result.diagnostics[0].contains("synthetic balance failure"));
+
+        let mut id_failure = TaskSetTool::new(
+            Store(Rc::clone(&state)),
+            Balance {
+                result: Ok(i64::MAX),
+                calls: Rc::new(RefCell::new(Vec::new())),
+            },
+            Ids(vec![Err("synthetic ID failure".to_owned())]),
+            || 1_700_000_000,
+            context(Locale::Es),
+        );
+        let result = id_failure.execute(set_request(Some(60), None, None), "call");
+        assert_eq!(result.output, create_error(Locale::Es));
+        assert!(result.diagnostics[0].contains("synthetic ID failure"));
+
+        let mut timestamp_failure = TaskSetTool::new(
+            Store(Rc::clone(&state)),
+            Balance {
+                result: Ok(i64::MAX),
+                calls: Rc::new(RefCell::new(Vec::new())),
+            },
+            Ids(vec![
+                TaskId::new("synthetic").map_err(|error| error.to_string()),
+            ]),
+            || i64::MAX - 60,
+            context(Locale::En),
+        );
+        let result = timestamp_failure.execute(set_request(Some(60), None, None), "call");
+        assert_eq!(result.output, create_error(Locale::En));
+        assert!(result.diagnostics[0].contains("timestamp"));
+
+        state.borrow_mut().tasks = task("synthetic", "-100").into_iter().collect();
+        state.borrow_mut().cancel_result = Ok(false);
+        let mut cancel = TaskCancelTool::new(Store(Rc::clone(&state)), "-100", Locale::En);
+        assert_eq!(
+            cancel
+                .execute(
+                    ExternalToolRequest::TaskCancel {
+                        task_id: "bad id!".to_owned(),
+                    },
+                    "call"
+                )
+                .output,
+            task_not_found(Locale::En)
+        );
+        assert_eq!(
+            cancel
+                .execute(
+                    ExternalToolRequest::TaskCancel {
+                        task_id: "synthetic".to_owned(),
+                    },
+                    "call"
+                )
+                .output,
+            task_not_found(Locale::En)
+        );
+        state.borrow_mut().cancel_result = Err("synthetic cancel failure".to_owned());
+        let result = cancel.execute(
+            ExternalToolRequest::TaskCancel {
+                task_id: "synthetic".to_owned(),
+            },
+            "call",
+        );
+        assert_eq!(result.output, task_not_found(Locale::En));
+        assert!(result.diagnostics[0].contains("synthetic cancel failure"));
+    }
+
+    #[test]
+    fn trigger_validation_and_descriptions_cover_every_supported_shape() {
+        let validation_errors = [
+            TriggerError::Required,
+            TriggerError::UnsupportedType,
+            TriggerError::DelayPositive,
+            TriggerError::DelayMaximum,
+            TriggerError::IntervalMinimum,
+            TriggerError::IntervalMaximum,
+            TriggerError::DaysRequired,
+            TriggerError::DaysPositive,
+            TriggerError::DaysMaximum,
+            TriggerError::HourRequired,
+            TriggerError::HourRange,
+            TriggerError::MinuteRequired,
+            TriggerError::MinuteRange,
+            TriggerError::Weekday {
+                value: "synthetic".to_owned(),
+            },
+            TriggerError::WeekdayEmpty,
+            TriggerError::DayRange,
+        ];
+        for error in validation_errors {
+            assert!(!trigger_error(error.clone(), Locale::Es).is_empty());
+            assert!(!trigger_error(error, Locale::En).is_empty());
+        }
+
+        assert_eq!(
+            trigger_config_input(Some(&json!({"type":"interval", "days":2}))),
+            TriggerConfigInput::IntervalDays {
+                days: IntegerInput::Value(2)
+            }
+        );
+        assert_eq!(
+            trigger_config_input(Some(&json!({"type":"synthetic"}))),
+            TriggerConfigInput::Unsupported
+        );
+        assert_eq!(
+            trigger_config_input(Some(&json!({"type":"cron", "hour":null, "minute":"bad"}))),
+            TriggerConfigInput::Cron {
+                hour: IntegerInput::Missing,
+                minute: IntegerInput::Invalid,
+                weekdays: None,
+                day: IntegerInput::Missing,
+            }
+        );
+
+        let triggers = [
+            TaskTrigger::IntervalDays { days: 2 },
+            TaskTrigger::Cron {
+                hour: 9,
+                minute: 5,
+                weekdays: Vec::new(),
+                day: Some(3),
+            },
+            TaskTrigger::Cron {
+                hour: 9,
+                minute: 5,
+                weekdays: Vec::new(),
+                day: None,
+            },
+        ];
+        for trigger in &triggers {
+            let _schedule = task_schedule(trigger);
+            assert!(!describe_trigger(trigger, Locale::Es).is_empty());
+            assert!(!describe_trigger(trigger, Locale::En).is_empty());
+        }
+        for seconds in [60, 120, 3_600, 7_200, 86_400, 172_800] {
+            assert!(!interval_description(seconds, true, Locale::Es).is_empty());
+            assert!(!interval_description(seconds, true, Locale::En).is_empty());
+            assert!(!interval_description(seconds, false, Locale::Es).is_empty());
+            assert!(!interval_description(seconds, false, Locale::En).is_empty());
+        }
+        for day in ["mon", "tue", "wed", "thu", "fri", "sat", "sun", "synthetic"] {
+            assert!(!localized_weekday(day, Locale::Es).is_empty());
+            assert_eq!(localized_weekday(day, Locale::En), day);
+        }
     }
 }
