@@ -136,12 +136,6 @@ jobs:
             --env BOT_SYSTEM_PROMPT=synthetic-system-prompt \
             "${IMAGE}" /usr/local/bin/botd --check-config
 
-      - name: Push image
-        if: github.event_name == 'push'
-        run: |
-          REPO="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
-          podman push "${REPO}:sha-${{ github.sha }}"
-
   publish-latest:
     if: github.event_name == 'push'
     needs:
@@ -150,18 +144,47 @@ jobs:
       - image
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       packages: write
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
       - name: Log in to GHCR
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io \
             --username "${{ github.actor }}" \
             --password-stdin
 
-      - name: Publish latest image
+      - name: Build validated image from cache
         run: |
           REPO="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
-          podman pull "${REPO}:sha-${{ github.sha }}"
+          podman pull "${REPO}:build-cache"
+          podman build \
+            --cache-from "${REPO}:build-cache" \
+            --tag "${REPO}:sha-${{ github.sha }}" \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            .
+
+      - name: Verify validated image
+        run: |
+          REPO="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          IMAGE="${REPO}:sha-${{ github.sha }}"
+          podman run --rm \
+            --env TELEGRAM_TOKEN=synthetic-telegram-token \
+            --env TELEGRAM_USERNAME=synthetic_test_bot \
+            --env SUPABASE_POSTGRES_URL=postgresql://synthetic-user:synthetic-password@db.synthetic.invalid:5432/postgres?sslmode=require \
+            --env COINMARKETCAP_KEY=synthetic-coinmarketcap-key \
+            --env OPENROUTER_API_KEY=synthetic-openrouter-key \
+            --env BOT_SYSTEM_PROMPT=synthetic-system-prompt \
+            "${IMAGE}" /usr/local/bin/botd --check-config
+
+      - name: Publish validated images
+        run: |
+          REPO="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           podman tag "${REPO}:sha-${{ github.sha }}" "${REPO}:latest"
+          podman push "${REPO}:sha-${{ github.sha }}"
           podman push "${REPO}:latest"
