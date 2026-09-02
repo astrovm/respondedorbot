@@ -30,6 +30,7 @@ pub mod redis_maintenance;
 pub mod redis_media_cache;
 pub mod redis_message_state;
 pub mod redis_task_store;
+pub mod redis_update_queue;
 pub mod request_cache;
 pub mod stock_pool;
 pub mod task_record;

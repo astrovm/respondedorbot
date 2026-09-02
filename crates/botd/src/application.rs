@@ -25,7 +25,7 @@ use crate::operational_reporting::{
     NoopOperationalReporter, OperationalReport, OperationalReporter, TelegramOperationalReporter,
 };
 use crate::reconciliation::ActiveOperationRegistry;
-use crate::runtime::{PollingRuntime, RuntimeError, StepOutcome, UpdateHandler, UpdateSource};
+use crate::runtime::{PollingRuntime, StepOutcome, UpdateHandler, UpdateSource};
 use crate::scheduler::SchedulerMode;
 
 #[must_use]
@@ -102,7 +102,7 @@ where
                 }
             }
             Ok(StepOutcome::Idle | StepOutcome::Dispatched { .. }) => last_poll_failure = None,
-            Err(error @ RuntimeError::Poll(_)) => return Err(error.to_string()),
+            Err(error) => return Err(error.to_string()),
         }
     }
     Ok(())

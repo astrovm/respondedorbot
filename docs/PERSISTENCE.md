@@ -140,6 +140,20 @@ billing reservation, user/message identifiers, locale, attempts, retry time,
 and optional result/usage information. A job is coupled to a billing reservation;
 enqueue failure, final failure, and successful completion must settle correctly.
 
+### Telegram update queue
+
+| Key | Type and value |
+| --- | --- |
+| `telegram:updates:pending` | Hash from update ID to a versioned JSON update record |
+| `telegram:updates:dead` | Hash of updates quarantined after repeated failures |
+
+The polling runtime writes each decoded update to the pending hash before it
+advances the Telegram offset. Parallel workers delete successful updates,
+persist retry counts, and atomically move terminal failures to the dead hash.
+Pending records are recovered before polling starts after a process restart.
+Redis must use `noeviction` or a `volatile-*` maxmemory policy so the
+non-expiring pending hash cannot be evicted after Telegram acknowledges it.
+
 ### Scheduled tasks
 
 | Key pattern | Type and value | Lifetime |

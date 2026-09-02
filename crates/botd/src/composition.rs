@@ -54,6 +54,7 @@ use bot_adapters::redis_creditless_cap::RedisCreditlessCap;
 use bot_adapters::redis_json_cache::{RedisJsonCache, RedisJsonCacheError};
 use bot_adapters::redis_message_state::{RedisMessageState, RedisMessageStateError};
 use bot_adapters::redis_task_store::{RedisTaskStore, RedisTaskStoreError};
+use bot_adapters::redis_update_queue::RedisUpdateQueue;
 use bot_adapters::request_cache::RequestCache;
 use bot_adapters::stock_pool::{StockPoolCache, load_stock_pool};
 use bot_adapters::telegram_actions::{ActionError, ActionOutcome, execute_with};
@@ -122,7 +123,7 @@ use crate::media_adapters::{
 use crate::native_tools::{NativeTool, NativeToolRegistry, StandardNativeToolBackend};
 use crate::random_tool::RandomChoiceTool;
 use crate::reconciliation::ActiveOperationRegistry;
-use crate::runtime::{ParallelUpdateHandler, PollingRuntime, UpdateSource};
+use crate::runtime::{DurableParallelUpdateHandler, PollingRuntime, UpdateSource};
 use crate::task_tools::{
     RandomTaskIdSource, TaskCancelTool, TaskListTool, TaskSetTool, TaskToolContext,
 };
@@ -1328,7 +1329,7 @@ pub type ConcreteNativeDispatcher = NativeDispatcher<
 
 pub type ConcreteNativeRuntime = PollingRuntime<
     TelegramUpdateSource<ReqwestTelegramTransport>,
-    ParallelUpdateHandler<ConcreteNativeDispatcher>,
+    DurableParallelUpdateHandler<ConcreteNativeDispatcher, RedisUpdateQueue>,
 >;
 
 #[derive(Debug, Error)]
@@ -1952,11 +1953,15 @@ pub fn build_native_runtime(
     let source =
         TelegramUpdateSource::new(polling_transport, &options.token, options.long_poll_timeout);
     let worker_options = options.clone();
-    let handler =
-        ParallelUpdateHandler::start(UPDATE_WORKER_COUNT, UPDATE_QUEUE_CAPACITY, move || {
-            build_native_dispatcher(worker_options.borrowed())
-        })
+    let update_queue = RedisUpdateQueue::new(&options.redis_endpoint)
         .map_err(|error| CompositionError::UpdateWorkers(error.to_string()))?;
+    let handler = DurableParallelUpdateHandler::start(
+        UPDATE_WORKER_COUNT,
+        UPDATE_QUEUE_CAPACITY,
+        update_queue,
+        move || build_native_dispatcher(worker_options.borrowed()),
+    )
+    .map_err(|error| CompositionError::UpdateWorkers(error.to_string()))?;
     Ok(PollingRuntime::new(source, handler))
 }
 
