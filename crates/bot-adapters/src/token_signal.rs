@@ -763,13 +763,58 @@ fn encode_png(image: RgbImage) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, VecDeque};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     use bot_core::token_signals::{SignalQuery, TokenAddress, TokenSignal};
+    use serde_json::json;
 
     use super::{
-        BinaryResponse, JsonResponse, TokenSignalAdapter, TokenSignalCache, TokenSignalTransport,
-        render_signal_chart,
+        BinaryResponse, JsonResponse, ReqwestTokenSignalTransport, TokenSignalAdapter,
+        TokenSignalCache, TokenSignalTransport, render_signal_chart,
     };
+
+    #[test]
+    fn reqwest_transport_supports_json_get_post_and_binary_downloads() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+        let server = thread::spawn(move || {
+            for (content_type, body) in [
+                ("application/json", br#"{"method":"get"}"#.as_slice()),
+                ("application/json", br#"{"method":"post"}"#.as_slice()),
+                ("image/png", &[1_u8, 2, 3][..]),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+                let mut request = [0_u8; 8_192];
+                let _ = stream.read(&mut request);
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream
+                    .write_all(headers.as_bytes())
+                    .unwrap_or_else(|_| unreachable!());
+                stream.write_all(body).unwrap_or_else(|_| unreachable!());
+            }
+        });
+        let transport = ReqwestTokenSignalTransport::new().unwrap_or_else(|_| unreachable!());
+        let base_url = format!("http://{address}");
+        let get = transport
+            .get_json(&base_url, &[("query", "synthetic".to_owned())])
+            .unwrap_or_else(|_| unreachable!());
+        assert!(get.body.contains("get"));
+        let post = transport
+            .post_json(&base_url, &json!({"value":"synthetic"}))
+            .unwrap_or_else(|_| unreachable!());
+        assert!(post.body.contains("post"));
+        let binary = transport
+            .get_binary(&base_url)
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(binary.content_type, "image/png");
+        assert_eq!(binary.body, [1, 2, 3]);
+        assert!(server.join().is_ok());
+    }
 
     #[derive(Default)]
     struct Cache {

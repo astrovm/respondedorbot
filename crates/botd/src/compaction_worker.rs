@@ -580,6 +580,7 @@ fn raw_cost_usd_micros(segments: &[Value]) -> i64 {
 mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::convert::Infallible;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use serde_json::{Value, json};
 
@@ -588,7 +589,60 @@ mod tests {
         CompactionState, CompactionWorker, SettlementRequest,
     };
     use bot_adapters::compaction_job::CompactionJobRecord;
-    use bot_adapters::redis_compaction_queue::QueueJob;
+    use bot_adapters::redis_compaction_queue::{QueueJob, RedisCompactionQueue};
+    use bot_adapters::redis_connection::RedisEndpoint;
+
+    #[test]
+    fn redis_compaction_queue_supports_the_worker_port_contract() -> Result<(), String> {
+        let Some(port) = std::env::var("TEST_REDIS_PORT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+        else {
+            return Ok(());
+        };
+        let endpoint = RedisEndpoint {
+            host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+            port,
+            password: std::env::var("TEST_REDIS_PASSWORD")
+                .ok()
+                .filter(|value| !value.is_empty()),
+        };
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos();
+        let chat_id = format!("synthetic-worker-{nonce}");
+        let mut queue = RedisCompactionQueue::new(&endpoint).map_err(|error| error.to_string())?;
+        CompactionQueue::replace_job(&mut queue, &chat_id, r#"{"synthetic":true}"#)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            CompactionQueue::list_jobs(&mut queue)
+                .map_err(|error| error.to_string())?
+                .iter()
+                .any(|job| job.chat_id == chat_id)
+        );
+        assert!(
+            CompactionQueue::acquire_lock(&mut queue, &chat_id, "synthetic-owner", 60)
+                .map_err(|error| error.to_string())?
+        );
+        assert!(
+            CompactionQueue::release_lock(&mut queue, &chat_id, "synthetic-owner")
+                .map_err(|error| error.to_string())?
+        );
+        assert!(
+            CompactionQueue::quarantine_job(
+                &mut queue,
+                &chat_id,
+                &format!("synthetic-dead-{nonce}"),
+                r#"{"reason":"synthetic"}"#,
+            )
+            .map_err(|error| error.to_string())?
+        );
+        assert!(
+            !CompactionQueue::delete_job(&mut queue, &chat_id).map_err(|error| error.to_string())?
+        );
+        Ok(())
+    }
 
     #[derive(Default)]
     struct Queue {

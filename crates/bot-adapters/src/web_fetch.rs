@@ -715,7 +715,9 @@ fn truncate_chars(value: &str, limit: usize) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::io::{Read, Write};
+    use std::net::{Ipv4Addr, Ipv6Addr, TcpListener};
+    use std::thread;
 
     use super::*;
 
@@ -783,6 +785,38 @@ mod tests {
             ));
             assert!(transport.urls.borrow().is_empty());
         }
+    }
+
+    #[test]
+    fn reqwest_transport_preserves_http_metadata_and_bounds_the_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+        let body = "x".repeat(FETCH_MAX_BYTES + 32);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+            let mut request = [0_u8; 4_096];
+            let _ = stream.read(&mut request);
+            let headers = format!(
+                "HTTP/1.1 302 Found\r\nContent-Type: text/plain\r\nLocation: /next\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream
+                .write_all(headers.as_bytes())
+                .unwrap_or_else(|_| unreachable!());
+            stream
+                .write_all(body.as_bytes())
+                .unwrap_or_else(|_| unreachable!());
+        });
+        let transport = ReqwestWebFetchTransport::new().unwrap_or_else(|_| unreachable!());
+        let response = transport
+            .get(&format!("http://{address}/start"))
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(response.status_code, 302);
+        assert_eq!(response.content_type, "text/plain");
+        assert_eq!(response.location.as_deref(), Some("/next"));
+        assert_eq!(response.body.len(), FETCH_MAX_BYTES);
+        assert!(response.truncated);
+        assert!(server.join().is_ok());
     }
 
     #[test]
@@ -981,5 +1015,79 @@ mod tests {
         );
         assert!(matches!(result, Ok(AiFetchOutcome::Page(_))));
         assert_eq!(transport.urls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn redirect_and_http_failures_preserve_the_effective_url() {
+        let public = Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]);
+        let missing_location = Transport {
+            responses: RefCell::new(vec![Ok(response(302, ""))]),
+            urls: RefCell::new(Vec::new()),
+        };
+        let error = fetch_public_url(&missing_location, &public, "https://example.com/synthetic")
+            .err()
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(error.url(), "https://example.com/synthetic");
+        assert!(error.to_string().contains("no se pudo"));
+
+        let mut redirects = Vec::new();
+        for _ in 0..=FETCH_MAX_REDIRECTS {
+            let mut redirect = response(307, "");
+            redirect.location = Some("/synthetic".to_owned());
+            redirects.push(Ok(redirect));
+        }
+        let transport = Transport {
+            responses: RefCell::new(redirects),
+            urls: RefCell::new(Vec::new()),
+        };
+        assert!(matches!(
+            fetch_public_url(&transport, &public, "https://example.com/synthetic"),
+            Err(PublicFetchError::Request { detail, .. }) if detail == "too many redirects"
+        ));
+
+        let transport = Transport {
+            responses: RefCell::new(vec![Ok(response(503, "synthetic unavailable"))]),
+            urls: RefCell::new(Vec::new()),
+        };
+        assert!(matches!(
+            fetch_public_url(&transport, &public, "https://example.com/synthetic"),
+            Err(PublicFetchError::Request { detail, .. }) if detail == "HTTP 503"
+        ));
+
+        let blocked = PublicFetchError::Blocked {
+            url: "http://localhost/synthetic".to_owned(),
+        };
+        assert_eq!(blocked.url(), "http://localhost/synthetic");
+        assert_eq!(blocked.public_message(Locale::Es), "URL no permitida");
+        assert_eq!(blocked.public_message(Locale::En), "URL is not allowed");
+    }
+
+    #[test]
+    fn html_parser_handles_comments_attributes_entities_and_incomplete_markup() {
+        let attributes =
+            parse_attributes("disabled data-name=synthetic quoted='two words' empty= trailing/");
+        assert!(attributes.contains(&("disabled".to_owned(), String::new())));
+        assert!(attributes.contains(&("data-name".to_owned(), "synthetic".to_owned())));
+        assert!(attributes.contains(&("quoted".to_owned(), "two words".to_owned())));
+
+        let html = concat!(
+            "<!-- synthetic comment -->",
+            "<title>First</title><title>Second</title>",
+            "<p>A &lt; B &gt; C &quot;quoted&quot; &apos;single&apos; ",
+            "&#65; &#x42; &#X43; &unknown;</p>",
+            "<script>ignored</script><style>ignored</style><noscript>ignored</noscript>",
+            "<div>tail"
+        );
+        let (title, text) = extract_text_from_html(html);
+        assert_eq!(title.as_deref(), Some("First Second"));
+        assert!(text.contains("A < B > C \"quoted\" 'single' A B C &unknown;"));
+        assert!(text.contains("tail"));
+
+        assert_eq!(extract_first_element_text("<p synthetic", "p"), "");
+        assert_eq!(extract_first_element_text("<p>synthetic", "p"), "");
+        assert_eq!(extract_tweet_date("<span>synthetic"), "");
+        assert_eq!(decode_entity("synthetic"), None);
+        assert_eq!(decode_entity("#x110000"), None);
+        assert_eq!(normalize_http_url(""), None);
     }
 }
