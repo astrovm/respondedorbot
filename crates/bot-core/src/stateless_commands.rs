@@ -280,11 +280,11 @@ mod tests {
             message_text(plan_stateless_command(
                 ChatId(1),
                 MessageId(2),
-                "/command 日本ごはん",
+                "/command テスト",
                 "@bot",
                 Locale::Es,
             )),
-            Some("/NIPPONGOHAN".to_owned())
+            Some("/TESUTO".to_owned())
         );
         assert_eq!(
             message_text(plan_stateless_command(
@@ -314,20 +314,20 @@ mod tests {
             message_text(plan_stateless_command_with_reply(
                 ChatId(1),
                 MessageId(2),
-                "/comando@respondedorbot",
-                Some("Que es el csc"),
-                "respondedorbot",
+                "/comando@testbot",
+                Some("quoted content"),
+                "testbot",
                 Locale::Es,
             )),
-            Some("/QUE_ES_EL_CSC".to_owned())
+            Some("/QUOTED_CONTENT".to_owned())
         );
         assert_eq!(
             message_text(plan_stateless_command_with_reply(
                 ChatId(1),
                 MessageId(2),
                 "/command inline text",
-                Some("replied text"),
-                "respondedorbot",
+                Some("quoted content"),
+                "testbot",
                 Locale::En,
             )),
             Some("/INLINE_TEXT".to_owned())
@@ -338,7 +338,7 @@ mod tests {
                 MessageId(2),
                 "/command",
                 Some("   "),
-                "respondedorbot",
+                "testbot",
                 Locale::En,
             )),
             Some("send the text you want to convert".to_owned())

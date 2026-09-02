@@ -276,12 +276,12 @@ mod tests {
             "_cara_sonriendo_con_ojos_sonrientes_hello _cara_sonriendo_con_ojos_sonrientes_ world"
         );
         assert_eq!(
-            preprocess_command_text("culo ❤️", Locale::Es),
-            "culo _corazón_rojo_"
+            preprocess_command_text("prueba ❤️", Locale::Es),
+            "prueba _corazón_rojo_"
         );
         assert_eq!(
-            normalize_command_text(&preprocess_command_text("culo ❤️", Locale::Es)),
-            Some("/CULO_CORAZON_ROJO".to_owned())
+            normalize_command_text(&preprocess_command_text("prueba ❤️", Locale::Es)),
+            Some("/PRUEBA_CORAZON_ROJO".to_owned())
         );
         assert_eq!(
             preprocess_command_text("もうすぐです", Locale::Es),
@@ -289,8 +289,8 @@ mod tests {
         );
         assert_eq!(preprocess_command_text("ｶﾀｶﾅ", Locale::Es), "katakana");
         assert_eq!(
-            normalize_command_text(&preprocess_command_text("日本ごはん", Locale::Es)),
-            Some("/NIPPONGOHAN".to_owned())
+            normalize_command_text(&preprocess_command_text("テスト", Locale::Es)),
+            Some("/TESUTO".to_owned())
         );
     }
 
