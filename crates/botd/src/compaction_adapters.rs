@@ -678,6 +678,49 @@ mod tests {
             reason: "synthetic_success",
         })?;
         assert!(billing.is_settled(&job)?);
+
+        let legacy_user_id = user_id + 1;
+        let legacy_usage_tag = format!("synthetic-legacy-usage-{nonce}");
+        let legacy_settlement_id = format!("synthetic-legacy-settlement-{nonce}");
+        repository
+            .mint_user_credits(legacy_user_id, 100, None)
+            .map_err(|error| error.to_string())?;
+        let legacy_metadata = serde_json::Map::from_iter([
+            ("settlement_id".to_owned(), json!(&legacy_settlement_id)),
+            ("usage_tag".to_owned(), json!(&legacy_usage_tag)),
+            ("credit_scale".to_owned(), json!(100)),
+        ]);
+        assert!(
+            repository
+                .charge_ai_credits(
+                    legacy_user_id,
+                    None,
+                    10,
+                    "ai_reserve",
+                    &legacy_metadata,
+                    Some("user"),
+                    None,
+                    &legacy_settlement_id,
+                )
+                .map_err(|error| error.to_string())?
+                .ok
+        );
+        let mut legacy_job = job.clone();
+        legacy_job.user_id = legacy_user_id;
+        legacy_job.chat_id = legacy_user_id.to_string();
+        legacy_job.reservation = json!({
+            "reserved_credit_units": 10,
+            "source": "user",
+            "usage_tag": legacy_usage_tag,
+            "credit_scale": 100,
+            "metadata": legacy_metadata,
+        });
+        billing.settle(CompactionSettlementRequest {
+            job: &legacy_job,
+            billing_segments: &[],
+            actual_credit_units: Some(0),
+            reason: "synthetic_legacy_success",
+        })?;
         assert!(!billing.settle_incompatible("synthetic", &json!({}))?);
         assert!(
             !billing
@@ -717,6 +760,12 @@ mod tests {
             "synthetic-owner",
         );
         assert!(result.is_ok());
+        let Some(worker) = result.ok() else {
+            return;
+        };
+        let (_queue, _state, _provider, _billing, mut token) = worker.into_parts();
+        assert_eq!(token(), "synthetic-owner:compaction:0");
+        assert_eq!(token(), "synthetic-owner:compaction:1");
     }
 
     impl OpenRouterTransport for Transport {

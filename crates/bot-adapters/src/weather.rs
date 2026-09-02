@@ -419,7 +419,8 @@ mod tests {
 
     use super::{
         HttpResponse, ReqwestWeatherTransport, TransportFailureKind, WeatherRequest,
-        WeatherTransport, compatible_cache_key, load_weather, python_cache_arguments,
+        WeatherTransport, compatible_cache_key, falsey_string, load_weather, number_text,
+        python_cache_arguments,
     };
     use crate::request_cache::RequestCache;
 
@@ -569,10 +570,34 @@ mod tests {
         assert!(load.observation.is_some());
         assert_eq!(transport.requests.borrow().len(), 2);
         assert_eq!(load.diagnostics.len(), 2);
+
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::from([
+                Err(TransportFailureKind::Request),
+                Err(TransportFailureKind::Request),
+            ])),
+            requests: RefCell::default(),
+        };
+        let mut cache = Cache {
+            gets: VecDeque::from([Ok(Some(format!(
+                r#"{{"timestamp":1,"data":{}}}"#,
+                forecast()
+            )))]),
+            ..Cache::default()
+        };
+        let load = load_weather(&transport, &mut cache, "CABA", 10_000);
+        assert!(load.observation.is_some());
+        assert!(
+            load.diagnostics
+                .iter()
+                .all(|value| value.contains("request error"))
+        );
     }
 
     #[test]
     fn missing_locations_and_malformed_forecasts_are_safe() {
+        assert_eq!(falsey_string(Some(&serde_json::json!(7))), "7");
+        assert!(number_text(&serde_json::json!("not a number")).is_none());
         let transport = Transport {
             responses: RefCell::new(VecDeque::from([
                 response(r#"{"results":[]}"#),
@@ -666,5 +691,17 @@ mod tests {
         );
         transport.before_retry();
         assert!(server.join().is_ok());
+        let unavailable = ReqwestWeatherTransport::with_urls(
+            "http://127.0.0.1:1/geocode",
+            "http://127.0.0.1:1/forecast",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert!(
+            unavailable
+                .get(&WeatherRequest::Geocode {
+                    name: "Synthetic Place".to_owned(),
+                })
+                .is_err()
+        );
     }
 }

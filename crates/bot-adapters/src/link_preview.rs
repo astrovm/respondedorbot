@@ -712,4 +712,54 @@ mod tests {
         assert_eq!(download_oversized_video(&transport, &too_large), None);
         assert_eq!(transport.calls.borrow().len(), 1);
     }
+
+    #[test]
+    fn invalid_urls_terminal_head_responses_and_retry_failures_are_safe() {
+        struct RequestOnly;
+        impl LinkPreviewTransport for RequestOnly {
+            fn request(
+                &self,
+                _request: &PreviewRequest,
+            ) -> Result<PreviewResponse, PreviewFailure> {
+                Err(PreviewFailure::Connection)
+            }
+        }
+        assert_eq!(
+            RequestOnly.download_video("https://example.test/video", 10),
+            Err(PreviewFailure::Request)
+        );
+
+        let invalid = FakeTransport {
+            responses: RefCell::new(vec![
+                Err(PreviewFailure::Request),
+                Err(PreviewFailure::Request),
+                Err(PreviewFailure::Request),
+            ]),
+            requests: RefCell::new(Vec::new()),
+        };
+        assert!(!inspect_with(&invalid, "not a URL").embeddable);
+
+        let not_found = FakeTransport {
+            responses: RefCell::new(vec![Ok(response(404, "text/html", "missing"))]),
+            requests: RefCell::new(Vec::new()),
+        };
+        let result = inspect_with(&not_found, "https://eeinstagram.com/p/missing");
+        assert_eq!(result.status_code, Some(404));
+        assert!(!result.embeddable);
+
+        let retries = FakeTransport {
+            responses: RefCell::new(vec![
+                Err(PreviewFailure::Timeout),
+                Err(PreviewFailure::Connection),
+                Err(PreviewFailure::Request),
+                Err(PreviewFailure::Timeout),
+                Err(PreviewFailure::Connection),
+                Err(PreviewFailure::Request),
+            ]),
+            requests: RefCell::new(Vec::new()),
+        };
+        let result = inspect_with(&retries, "https://eeinstagram.com/reel/unavailable");
+        assert_eq!(result.failure, Some(PreviewFailure::Request));
+        assert_eq!(retries.requests.borrow().len(), 6);
+    }
 }

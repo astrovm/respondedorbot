@@ -251,5 +251,8 @@ mod tests {
         assert_eq!(response.status_code, 200);
         assert_eq!(response.body, "synthetic screener");
         assert!(server.join().is_ok());
+        let unavailable = ReqwestFinvizTransport::with_screener_url("http://127.0.0.1:1/screener")
+            .unwrap_or_else(|_| unreachable!());
+        assert!(unavailable.fetch().is_err());
     }
 }

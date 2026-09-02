@@ -285,7 +285,7 @@ mod tests {
 
     use super::{
         FirecrawlTransport, HttpResponse, ReqwestFirecrawlTransport, SearchOutcome, SearchRequest,
-        TransportError, clean_text, search_with,
+        TransportError, clean_text, extract_results, response_error, search_with,
     };
     use serde_json::{Value, json};
 
@@ -430,6 +430,16 @@ mod tests {
         assert_eq!(clean_text(&json!("áéí"), 3), "áéí");
         assert_eq!(clean_text(&json!("áéí"), 2), "á…");
         assert_eq!(clean_text(&json!("text"), 0), "…");
+        assert_eq!(clean_text(&json!(true), 20), "True");
+        assert_eq!(clean_text(&json!(0), 20), "");
+        assert_eq!(clean_text(&json!([]), 20), "");
+        assert_eq!(clean_text(&json!({}), 20), "");
+        assert_eq!(clean_text(&json!([1, 2]), 20), "[1,2]");
+        assert_eq!(clean_text(&json!({"value": 1}), 20), r#"{"value":1}"#);
+        assert_eq!(response_error("   "), "respuesta sin detalles");
+        assert_eq!(response_error("plain failure"), "plain failure");
+        assert!(extract_results(&json!({})).is_empty());
+        assert!(extract_results(&json!({"data": {"web": {}}})).is_empty());
     }
 
     #[test]
@@ -466,5 +476,15 @@ mod tests {
         assert_eq!(response.status_code, 200);
         assert_eq!(response.body, r#"{"success":true,"data":[]}"#);
         assert!(server.join().is_ok());
+        let unavailable = ReqwestFirecrawlTransport::with_search_url("http://127.0.0.1:1/search")
+            .unwrap_or_else(|_| unreachable!());
+        assert!(
+            unavailable
+                .post(&SearchRequest {
+                    query: "synthetic query".to_owned(),
+                    api_key: "synthetic-key".to_owned(),
+                })
+                .is_err()
+        );
     }
 }

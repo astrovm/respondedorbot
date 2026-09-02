@@ -134,8 +134,10 @@ mod tests {
 
     use bot_core::greeting_commands::GreetingCategory;
 
-    use super::{GiphyPoolCache, load_giphy_pool};
-    use crate::giphy::{GiphyTransport, HttpResponse, SearchRequest, TransportFailureKind};
+    use super::{GiphyPoolCache, load_giphy_pool, search_diagnostic};
+    use crate::giphy::{
+        GiphyTransport, HttpResponse, SearchOutcome, SearchRequest, TransportFailureKind,
+    };
 
     #[derive(Default)]
     struct Cache {
@@ -277,6 +279,21 @@ mod tests {
         );
         assert!(load.urls.is_empty());
         assert_eq!(load.diagnostics.len(), 1);
+
+        for stale in [Ok(None), Err("stale unavailable")] {
+            let mut cache = Cache {
+                gets: VecDeque::from([Ok(None), stale]),
+                ..Cache::default()
+            };
+            let load = load_giphy_pool(
+                &empty_transport,
+                &mut cache,
+                None,
+                GreetingCategory::Night,
+                || unreachable!(),
+            );
+            assert!(load.urls.is_empty());
+        }
     }
 
     #[test]
@@ -314,5 +331,13 @@ mod tests {
         );
         assert_eq!(load.urls, vec!["https://example.test/result.gif"]);
         assert_eq!(load.diagnostics.len(), 6);
+        assert!(
+            search_diagnostic(
+                GreetingCategory::Morning,
+                "synthetic term",
+                &SearchOutcome::Success { urls: Vec::new() },
+            )
+            .contains("unexpectedly succeeded")
+        );
     }
 }

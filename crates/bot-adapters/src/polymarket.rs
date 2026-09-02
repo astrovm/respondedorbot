@@ -352,6 +352,48 @@ mod tests {
     }
 
     #[test]
+    fn midpoint_payload_variants_and_tokenless_events_are_explicit() {
+        let tokenless = r#"[{"title":"Election","slug":"election","markets":[{"groupItemTitle":"A","outcomes":["Yes","No"],"outcomePrices":[0.4,0.6]}]}]"#;
+        let transport = Transport {
+            events: RefCell::new(VecDeque::from([response(tokenless)])),
+            midpoints: RefCell::default(),
+            requests: RefCell::default(),
+        };
+        let load = load_elections(&transport, &mut Cache, 100);
+        assert_eq!(load.events.len(), 1);
+        assert!(load.live_prices.is_empty());
+        assert!(transport.requests.borrow().is_empty());
+        assert_eq!(super::midpoint_number(&serde_json::json!(0.5)), Some(0.5));
+        assert_eq!(super::midpoint_number(&serde_json::json!(true)), None);
+
+        for (midpoint, expected) in [
+            (response("[]"), "non-object payload"),
+            (response("not-json"), "invalid JSON"),
+            (
+                Ok(HttpResponse {
+                    status_code: 503,
+                    body: String::new(),
+                }),
+                "HTTP 503",
+            ),
+        ] {
+            let transport = Transport {
+                events: RefCell::new(VecDeque::from([response(events())])),
+                midpoints: RefCell::new(VecDeque::from([midpoint])),
+                requests: RefCell::default(),
+            };
+            let load = load_elections(&transport, &mut Cache, 100);
+            assert_eq!(load.events.len(), 1);
+            assert!(load.live_prices.is_empty());
+            assert!(
+                load.diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.contains(expected))
+            );
+        }
+    }
+
+    #[test]
     fn reqwest_transport_preserves_event_query_and_midpoint_batch() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
         let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
@@ -404,5 +446,11 @@ mod tests {
                 .is_ok()
         );
         assert!(server.join().is_ok());
+        let unavailable = ReqwestPolymarketTransport::with_urls(
+            "http://127.0.0.1:1/events",
+            "http://127.0.0.1:1/midpoints",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert!(unavailable.events().is_err());
     }
 }

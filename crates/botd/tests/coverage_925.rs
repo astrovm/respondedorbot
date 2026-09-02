@@ -73,6 +73,9 @@ impl BackgroundWorker for PanicWorker {
 
 #[test]
 fn background_failures_are_reported_even_when_reporting_or_shutdown_fails() {
+    let mut default_shutdown = PanicWorker;
+    assert!(BackgroundWorker::shutdown(&mut default_shutdown).is_ok());
+
     let reporter = Arc::new(Reporter {
         fail: true,
         ..Reporter::default()
@@ -446,6 +449,9 @@ fn compaction_worker_exercises_durable_failure_and_recovery_boundaries() {
     let mut future = compaction_job("future");
     future.next_attempt_at = 200.0;
     jobs.push(queue_job(future));
+    let mut unsupported = compaction_job("unsupported-schema");
+    unsupported.schema_version = COMPACTION_JOB_SCHEMA_VERSION + 1;
+    jobs.push(queue_job(unsupported));
     for id in [
         "lock-busy",
         "lock-error",
@@ -457,6 +463,8 @@ fn compaction_worker_exercises_durable_failure_and_recovery_boundaries() {
         "provider-unbillable:unbillable",
         "record-error",
         "replace-error",
+        "segments-error",
+        "replace-error-restore",
         "save-error",
         "settle-error",
         "release-error",
@@ -469,6 +477,9 @@ fn compaction_worker_exercises_durable_failure_and_recovery_boundaries() {
     let mut terminal = compaction_job("terminal-provider-error:provider-error");
     terminal.attempts = 2;
     jobs.push(queue_job(terminal));
+    let mut terminal_settlement = compaction_job("terminal-settle-error:provider-error");
+    terminal_settlement.attempts = 2;
+    jobs.push(queue_job(terminal_settlement));
 
     let mut worker = CompactionWorker::new(
         Queue {
@@ -499,6 +510,7 @@ fn compaction_worker_exercises_durable_failure_and_recovery_boundaries() {
         "acquire_lock",
         "delete_completed",
         "schedule_retry",
+        "terminal_settlement",
         "release_lock",
     ] {
         assert!(stages.contains(stage), "missing stage {stage}: {stages:?}");
@@ -507,6 +519,22 @@ fn compaction_worker_exercises_durable_failure_and_recovery_boundaries() {
     assert!(queue.quarantined.contains(&"bad-quarantine-ok".to_owned()));
     assert!(state.saved.contains(&"success".to_owned()));
     assert!(billing.settled.iter().any(|chat| chat == "success"));
+
+    let mut background_worker = CompactionWorker::new(
+        Queue {
+            jobs: vec![queue_job(compaction_job("lock-error"))],
+            ..Queue::default()
+        },
+        State::default(),
+        Provider,
+        Billing::default(),
+        || "synthetic-token".to_owned(),
+    );
+    let error = BackgroundWorker::run_once(&mut background_worker, 100)
+        .err()
+        .unwrap_or_else(|| unreachable!());
+    assert!(error.contains("lock-error"));
+    assert!(error.contains("acquire_lock"));
 }
 
 struct Enqueue {
@@ -745,6 +773,16 @@ impl UpdateHandler for Handler {
     }
 }
 
+struct PanicHandler;
+
+impl UpdateHandler for PanicHandler {
+    type Error = &'static str;
+
+    fn handle(&mut self, _update: IncomingUpdate) -> Result<(), Self::Error> {
+        panic!("synthetic handler panic")
+    }
+}
+
 fn incoming(update_id: i64) -> IncomingUpdate {
     IncomingUpdate {
         update_id,
@@ -781,6 +819,32 @@ fn durable_parallel_handler_surfaces_queue_and_recovery_failures() {
         ),
         Err(ParallelHandlerBuildError::WorkerStartup { .. })
     ));
+    assert!(matches!(
+        DurableParallelUpdateHandler::<Handler, DurableQueue>::start(
+            1,
+            1,
+            DurableQueue::default(),
+            || -> Result<Handler, Infallible> { panic!("synthetic factory panic") },
+        ),
+        Err(ParallelHandlerBuildError::WorkerStartup { .. })
+    ));
+
+    let panic_queue = DurableQueue::default();
+    let mut panicking = DurableParallelUpdateHandler::start(1, 2, panic_queue, || {
+        Ok::<_, Infallible>(PanicHandler)
+    })
+    .unwrap_or_else(|_| unreachable!());
+    assert!(panicking.handle(incoming(39)).is_ok());
+    let mut panic_failure = None;
+    for _ in 0..100 {
+        let failures = panicking.take_background_failures();
+        panic_failure = failures.retrying.first().cloned();
+        if panic_failure.is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(panic_failure.is_some_and(|failure| failure.error.contains("panicked")));
 
     let malformed = DurableQueue::default();
     malformed
@@ -869,4 +933,114 @@ fn durable_parallel_handler_surfaces_queue_and_recovery_failures() {
             assert!(handler.handle(incoming(60)).is_err());
         }
     }
+
+    let quarantine = DurableQueue::default();
+    {
+        let mut state = quarantine.state.lock().unwrap_or_else(|_| unreachable!());
+        state.fail = Some("quarantine");
+        state.queued.push(QueuedUpdate {
+            update_id: 70,
+            payload: "malformed synthetic update".to_owned(),
+        });
+    }
+    let mut handler = DurableParallelUpdateHandler::start(1, 2, quarantine, || {
+        Ok::<_, Infallible>(Handler { fail: false })
+    })
+    .unwrap_or_else(|_| unreachable!());
+    assert!(handler.prepare().is_err());
+
+    let replacement = DurableQueue::default();
+    replacement
+        .state
+        .lock()
+        .unwrap_or_else(|_| unreachable!())
+        .fail = Some("replace");
+    let mut handler = DurableParallelUpdateHandler::start(1, 2, replacement, || {
+        Ok::<_, Infallible>(Handler { fail: false })
+    })
+    .unwrap_or_else(|_| unreachable!());
+    assert!(handler.handle(incoming(71)).is_ok());
+    let mut fatal = None;
+    for _ in 0..100 {
+        fatal = handler.take_background_failures().fatal;
+        if fatal.is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(fatal.is_some_and(|error| error.contains("persist completed")));
+
+    let retry_queue = DurableQueue::default();
+    let mut retrying = DurableParallelUpdateHandler::start(1, 2, retry_queue.clone(), || {
+        Ok::<_, Infallible>(Handler { fail: true })
+    })
+    .unwrap_or_else(|_| unreachable!());
+    assert!(retrying.handle(incoming(74)).is_ok());
+    let mut retried = false;
+    for _ in 0..100 {
+        retried |= !retrying.take_background_failures().retrying.is_empty();
+        if retry_queue
+            .state
+            .lock()
+            .is_ok_and(|state| state.replaced.len() >= 2)
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(retried);
+
+    let deletion = DurableQueue::default();
+    let mut handler = DurableParallelUpdateHandler::start(1, 2, deletion.clone(), || {
+        Ok::<_, Infallible>(Handler { fail: false })
+    })
+    .unwrap_or_else(|_| unreachable!());
+    assert!(handler.handle(incoming(72)).is_ok());
+    for _ in 0..100 {
+        let _failures = handler.take_background_failures();
+        if deletion
+            .state
+            .lock()
+            .is_ok_and(|state| state.replaced.contains(&72))
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    deletion
+        .state
+        .lock()
+        .unwrap_or_else(|_| unreachable!())
+        .fail = Some("delete");
+    assert!(handler.confirm_updates(UpdateConfirmation::All).is_err());
+
+    let terminal = DurableQueue::default();
+    {
+        let mut state = terminal.state.lock().unwrap_or_else(|_| unreachable!());
+        state.queued.push(QueuedUpdate {
+            update_id: 73,
+            payload: json!({
+                "schema_version": 1,
+                "update": incoming(73),
+                "attempts": 2,
+                "completed": false
+            })
+            .to_string(),
+        });
+        state.fail = Some("quarantine");
+    }
+    let mut handler = DurableParallelUpdateHandler::start(1, 2, terminal.clone(), || {
+        Ok::<_, Infallible>(Handler { fail: true })
+    })
+    .unwrap_or_else(|_| unreachable!());
+    assert!(handler.prepare().is_ok());
+    let mut fatal = None;
+    for _ in 0..100 {
+        fatal = handler.take_background_failures().fatal;
+        if fatal.is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(fatal.is_some_and(|error| error.contains("quarantine durable update")));
 }

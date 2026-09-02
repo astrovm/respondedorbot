@@ -426,6 +426,7 @@ mod tests {
         for (tool, arguments, expected) in cases {
             let result = ports.execute_external(tool, &arguments, "call-1");
             assert_eq!(result.output, "synthetic result");
+            assert_eq!(expected.tool(), tool);
             assert_eq!(
                 ports.services().calls.last().map(|call| &call.0),
                 Some(&expected)
@@ -476,6 +477,9 @@ mod tests {
                 task_id: "task-7".to_owned()
             }
         );
+        assert_eq!(ports.services().calls[0].0.tool(), NativeTool::WebSearch);
+        assert_eq!(ports.services().calls[1].0.tool(), NativeTool::TaskSet);
+        assert_eq!(ports.services().calls[2].0.tool(), NativeTool::TaskCancel);
     }
 
     #[test]

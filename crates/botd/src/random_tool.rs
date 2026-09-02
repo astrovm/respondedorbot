@@ -150,6 +150,10 @@ mod tests {
             tool.execute(request("invalid"), "call").output,
             invalid(Locale::Es)
         );
+        assert_eq!(
+            tool.execute(request("🧉"), "call").output,
+            invalid(Locale::Es)
+        );
         let result = tool.execute(request("１-３"), "call");
         assert_eq!(result.output, "falló la herramienta 'random_choice'");
         assert!(result.diagnostics[0].contains("synthetic random failure"));

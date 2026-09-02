@@ -474,5 +474,17 @@ mod tests {
         );
         transport.before_retry();
         assert!(server.join().is_ok());
+        let unavailable = ReqwestYahooFinanceTransport::with_urls(
+            "http://127.0.0.1:1/chart",
+            "http://127.0.0.1:1/search",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert!(
+            unavailable
+                .chart(&YahooChartRequest {
+                    symbol: "EXM".to_owned(),
+                })
+                .is_err()
+        );
     }
 }

@@ -475,7 +475,7 @@ mod tests {
     use bot_core::telegram_input::{ChatId, MessageId};
     use bot_core::{locale::Locale, telegram_commands::telegram_commands};
 
-    use super::{ActionOutcome, execute_with, multipart_caption};
+    use super::{ActionError, ActionOutcome, execute_with, multipart_caption, prepare};
     use crate::telegram_http::{
         HttpResponse, TelegramMultipartRequest, TelegramRequest, TelegramTransport,
         TransportFailureKind,
@@ -561,6 +561,18 @@ mod tests {
                 message_id: Some(44)
             })
         );
+        assert_eq!(
+            execute_with(
+                &transport,
+                "synthetic-token",
+                TelegramAction::SendTyping {
+                    chat_id: ChatId(42)
+                },
+            ),
+            Ok(ActionOutcome::TransportFailed(
+                TransportFailureKind::Request
+            ))
+        );
         let requests = transport.requests.borrow();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].endpoint, "sendVideo");
@@ -613,6 +625,14 @@ mod tests {
         let transport = PhotoTransport {
             requests: RefCell::new(Vec::new()),
         };
+        let markup = InlineKeyboardMarkup {
+            inline_keyboard: vec![vec![InlineKeyboardButton {
+                text: "Details".to_owned(),
+                url: Some("https://example.test/details".to_owned()),
+                callback_data: None,
+                copy_text: None,
+            }]],
+        };
         assert_eq!(
             execute_with(
                 &transport,
@@ -622,8 +642,8 @@ mod tests {
                     photo: vec![1, 2, 3].into(),
                     reply_to_message_id: Some(MessageId(7)),
                     caption: "<b>signal</b>".to_owned(),
-                    parse_mode: Some(ParseMode::Html),
-                    reply_markup: None,
+                    parse_mode: Some(ParseMode::MarkdownV2),
+                    reply_markup: Some(markup.clone()),
                 },
             ),
             Ok(ActionOutcome::Completed {
@@ -640,12 +660,24 @@ mod tests {
                     photo: vec![4, 5, 6].into(),
                     caption: "<b>updated</b>".to_owned(),
                     parse_mode: Some(ParseMode::Html),
-                    reply_markup: None,
+                    reply_markup: Some(markup),
                 },
             ),
             Ok(ActionOutcome::Completed {
                 message_id: Some(55)
             })
+        );
+        assert_eq!(
+            execute_with(
+                &transport,
+                "synthetic-token",
+                TelegramAction::SendTyping {
+                    chat_id: ChatId(42)
+                },
+            ),
+            Ok(ActionOutcome::TransportFailed(
+                TransportFailureKind::Request
+            ))
         );
         let requests = transport.requests.borrow();
         assert_eq!(requests.len(), 2);
@@ -655,8 +687,13 @@ mod tests {
         assert!(
             requests[0]
                 .fields
-                .contains(&("parse_mode".to_owned(), "HTML".to_owned()))
+                .contains(&("parse_mode".to_owned(), "MarkdownV2".to_owned()))
         );
+        assert!(requests[0].fields.iter().any(|(key, value)| {
+            key == "reply_markup"
+                && value.contains("Details")
+                && value.contains("https://example.test/details")
+        }));
         assert_eq!(requests[1].endpoint, "editMessageMedia");
         let media = requests[1]
             .fields
@@ -668,6 +705,43 @@ mod tests {
                 && media.contains("<b>updated</b>")
                 && media.contains("HTML")
         }));
+        assert!(requests[1].fields.iter().any(|(key, value)| {
+            key == "reply_markup"
+                && value.contains("Details")
+                && value.contains("https://example.test/details")
+        }));
+    }
+
+    #[test]
+    fn multipart_transport_failures_remain_typed() {
+        struct FailedTransport;
+
+        impl TelegramTransport for FailedTransport {
+            fn send(
+                &self,
+                _request: &TelegramRequest,
+            ) -> Result<HttpResponse, TransportFailureKind> {
+                Err(TransportFailureKind::Request)
+            }
+        }
+
+        assert_eq!(
+            execute_with(
+                &FailedTransport,
+                "synthetic-token",
+                TelegramAction::SendPhoto {
+                    chat_id: ChatId(42),
+                    photo: vec![1, 2, 3].into(),
+                    reply_to_message_id: None,
+                    caption: "synthetic caption".to_owned(),
+                    parse_mode: None,
+                    reply_markup: None,
+                },
+            ),
+            Ok(ActionOutcome::TransportFailed(
+                TransportFailureKind::Request
+            ))
+        );
     }
 
     #[test]
@@ -948,5 +1022,16 @@ mod tests {
                 TransportFailureKind::Timeout
             ))
         );
+
+        assert!(matches!(
+            prepare(TelegramAction::SendVideo {
+                chat_id: ChatId(1),
+                video: vec![1].into(),
+                reply_to_message_id: None,
+                caption: String::new(),
+                reply_markup: None,
+            }),
+            Err(ActionError::InvalidAction)
+        ));
     }
 }

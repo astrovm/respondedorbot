@@ -135,8 +135,8 @@ PostgreSQL tests.
 Coverage requirements:
 
 - `bot-core`: 95%
-- `bot-adapters`: 85%
-- `botd`: 80%
+- `bot-adapters`: 95%
+- `botd`: 95%
 
 More detail: [Testing](docs/TESTING.md)
 

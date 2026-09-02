@@ -771,6 +771,7 @@ pub fn load_bcra<T: BcraTransport, C: RequestCache>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use std::{
         cell::RefCell,
         collections::{HashMap, VecDeque},
@@ -781,6 +782,7 @@ mod tests {
     #[derive(Default)]
     struct Cache {
         values: HashMap<String, String>,
+        fail_sets: bool,
     }
     impl RequestCache for Cache {
         type Error = &'static str;
@@ -788,6 +790,9 @@ mod tests {
             Ok(self.values.get(k).cloned())
         }
         fn set(&mut self, k: &str, v: &str, _: i64) -> Result<(), Self::Error> {
+            if self.fail_sets {
+                return Err("synthetic cache write failure");
+            }
             self.values.insert(k.to_owned(), v.to_owned());
             Ok(())
         }
@@ -820,6 +825,97 @@ mod tests {
             Some("29/10 12:34")
         );
         assert!(parse_workbook(b"invalid").is_err());
+    }
+
+    #[test]
+    fn parses_the_official_workbook_shape_and_exposes_latest_itcrm() {
+        const WORKBOOK: &str = "UEsDBBQAAAAIAPuUIl1bma6u5QAAAAsCAAATAAAAW0NvbnRlbnRfVHlwZXNdLnhtbK2RvVLDMBCEX0WjNhOdk4KCsZ0i0AYKXuCQz7HG+hudEszbIzuBggnQUN1Iu3vfalTvJmfFmRKb4Bu5UZXctfXLeyQWRfHcyCHneA/AeiCHrEIkX5Q+JIe5HNMRIuoRjwTbqroDHXwmn9d53iHb+oF6PNksHqdyfaEksizF/mKcWY3EGK3RmIsOZ999o6yvBFWSi4cHE3lVDBJuEmblZ8A191SenUxH4hlTPqArLpgsvIU0voYwqt+X3GgZ+t5o6oI+uRJRHBNhxwNRdlYtUzk0fvU3fzEzLGPzz0W+9n/2gOW72w9QSwMEFAAAAAgA+5QiXUuDozqWAAAABQEAAAsAAABfcmVscy8ucmVsc43PPQ7CMAwF4KtEPkDdMjCgpl1YuiIuEFL3R23iyAlQbk9GihgY/fz0Wa7bza3qQRJn9hqqooS2qS+0mpSDOM0hqtzwUcOUUjghRjuRM7HgQD5vBhZnUh5lxGDsYkbCQ1keUT4N2Juq6zVI11egrq9A/9g8DLOlM9u7I59+nPhqZNnISEnDtuKTZbkxL0VGAZsadw82b1BLAwQUAAAACAD7lCJdLWvSpKMAAAD4AAAADwAAAHhsL3dvcmtib29rLnhtbI2PORKDMAxFr+LRATCkSMEYUyQNRZpMLuCACB7wMpKzHD8eCH0qLX/0vr5qP24RLyS2wTdQFSW0Wr0DzfcQZpFFzw1MKcVaSu4ndIaLENFnZQzkTMojPSRHQjPwhJjcIg9leZTOWA8boaZ/GGEcbY/n0D8d+rRBCBeT8ms82cig1erAvyq8cdhAdztdLyDWVTfkECCotrmhbqhAaiX3K7kH019QSwMEFAAAAAgA+5QiXW026XSaAAAABgEAABoAAAB4bC9fcmVscy93b3JrYm9vay54bWwucmVsc43POw7CMAwG4KtEPkDdMjCgpl1YWBEXiFK3qdo8FJvX7YkYEJUYmCz/tj7Lbf/wq7pR5jkGDU1VQ9+1Z1qNlIDdnFiVjcAanEg6ILJ15A1XMVEokzFmb6S0ecJk7GImwl1d7zF/G7A11WnQkE9DA+ryTPSPHcdxtnSM9uopyI8TeI95YUckBTV5ItHwiRjfpamKCti1uPmwewFQSwMEFAAAAAgA+5QiXZR5P5S8AAAAYgEAABgAAAB4bC93b3Jrc2hlZXRzL3NoZWV0MS54bWyFkEEKwjAQRa9SstZMEq2ipBHFG3iCUKMNNklJhurxTUVKBcXdzP88HjNy93Bt0ZuYbPAV4ZSRnZL3EG+pMQaL3PpUkQax2wKkujFOJxo643NzCdFpzGu8Quqi0ecX5FoQjK3AaeuJkq/sqFErGcO9iNmS03oY9pwUWBHrW+vNCWPObVISlWBiNWebOeMSUEkYUqjf1OEXxalYLGflJwJZOprFaBb/zOKbeeB7xUXJ6Dp7+qkCJofC+EH1BFBLAQIUAxQAAAAIAPuUIl1bma6u5QAAAAsCAAATAAAAAAAAAAAAAACAAQAAAABbQ29udGVudF9UeXBlc10ueG1sUEsBAhQDFAAAAAgA+5QiXUuDozqWAAAABQEAAAsAAAAAAAAAAAAAAIABFgEAAF9yZWxzLy5yZWxzUEsBAhQDFAAAAAgA+5QiXS1r0qSjAAAA+AAAAA8AAAAAAAAAAAAAAIAB1QEAAHhsL3dvcmtib29rLnhtbFBLAQIUAxQAAAAIAPuUIl1tNul0mgAAAAYBAAAaAAAAAAAAAAAAAACAAaUCAAB4bC9fcmVscy93b3JrYm9vay54bWwucmVsc1BLAQIUAxQAAAAIAPuUIl2UeT+UvAAAAGIBAAAYAAAAAAAAAAAAAACAAXcDAAB4bC93b3Jrc2hlZXRzL3NoZWV0MS54bWxQSwUGAAAAAAUABQBFAQAAaQQAAAAA";
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(WORKBOOK)
+            .unwrap_or_else(|_| unreachable!());
+        let values = parse_workbook(&bytes).unwrap_or_else(|_| unreachable!());
+        assert_eq!(values.len(), 2);
+        assert_eq!(
+            values.last_key_value().map(|(_, value)| *value),
+            Some(1250.75)
+        );
+
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::from([
+                response(json!({"results":[{
+                    "categoria":"Principales Variables",
+                    "idVariable":5,
+                    "descripcion":"Tipo de cambio mayorista",
+                    "ultFechaInformada":"2026-09-02",
+                    "ultValorInformado":1450.0
+                }]})),
+                Ok(HttpResponse {
+                    status_code: 200,
+                    body: bytes,
+                }),
+            ])),
+        };
+        let mut cache = Cache::default();
+        let load = load_dollar_references(&transport, &mut cache, 1_788_321_600);
+        assert_eq!(
+            load.itcrm.as_ref().map(|details| details.value),
+            Some(1250.75)
+        );
+        assert!(cache.values.contains_key("latest_itcrm_details"));
+
+        let mut failing_cache = Cache {
+            fail_sets: true,
+            ..Cache::default()
+        };
+        let mut diagnostics = Vec::new();
+        persist_market(
+            &mut failing_cache,
+            &[BcraVariable {
+                description: "Tipo de cambio mayorista".to_owned(),
+                value: "1450.0".to_owned(),
+                date: "2026-09-02".to_owned(),
+            }],
+            load.itcrm.as_ref(),
+            1_788_321_600,
+            &mut diagnostics,
+        );
+        assert!(diagnostics.iter().any(|entry| entry.contains("tcrm_100")));
+    }
+
+    #[test]
+    fn itcrm_provider_failures_are_diagnostic_and_cached_values_avoid_io() {
+        for provider_result in [
+            Ok(HttpResponse {
+                status_code: 503,
+                body: Vec::new(),
+            }),
+            Err(TransportFailureKind::Connection),
+        ] {
+            let transport = Transport {
+                responses: RefCell::new(VecDeque::from([provider_result])),
+            };
+            let mut diagnostics = Vec::new();
+            assert!(itcrm(&transport, &mut Cache::default(), &mut diagnostics).is_none());
+            assert_eq!(diagnostics.len(), 1);
+        }
+
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::new()),
+        };
+        let mut cache = Cache::default();
+        cache.values.insert(
+            "latest_itcrm_details".to_owned(),
+            json!({"value": 1250.75, "date": "02/09/26"}).to_string(),
+        );
+        let mut diagnostics = Vec::new();
+        assert_eq!(
+            itcrm(&transport, &mut cache, &mut diagnostics),
+            Some(ItcrmDetails {
+                value: 1250.75,
+                date: "02/09/26".to_owned(),
+            })
+        );
+        assert!(diagnostics.is_empty());
     }
 
     #[test]
@@ -1010,6 +1106,13 @@ mod tests {
         }
         transport.before_retry();
         assert!(server.join().is_ok());
+        let unavailable = ReqwestBcraTransport::with_urls(
+            "http://127.0.0.1:1/bcra",
+            "http://127.0.0.1:1/risk",
+            "http://127.0.0.1:1/itcrm",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert!(unavailable.get(&BcraRequest::Variables).is_err());
     }
 
     #[test]

@@ -3,12 +3,12 @@ use std::error::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bot_adapters::redis_connection::RedisEndpoint;
-use bot_adapters::redis_task_store::RedisTaskStore;
+use bot_adapters::redis_task_store::{RedisTaskStore, TASK_SCHEDULER_OWNER_KEY};
 use bot_adapters::task_record::TaskRecordDocument;
 use bot_core::scheduled_tasks::{ScheduledTask, TaskId, TaskSchedule};
 use botd::scheduler::{
-    ScheduledTaskExecutor, SchedulerMode, SchedulerSettings, SchedulerStep,
-    TaskExecutionDisposition, TaskObservation, TaskScheduler,
+    ScheduledTaskExecutor, SchedulerCompletion, SchedulerMode, SchedulerSettings, SchedulerStep,
+    SchedulerStore, TaskExecutionDisposition, TaskObservation, TaskScheduler,
 };
 
 fn redis_endpoint() -> Option<RedisEndpoint> {
@@ -74,6 +74,7 @@ fn real_redis_scheduler_claims_executes_advances_and_deletes() -> Result<(), Box
     let repeat_id = format!("repeat_{}_{}", std::process::id(), suffix);
     let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())?;
     let setup = RedisTaskStore::new(&endpoint)?;
+    let _deleted_owner = setup.delete(TASK_SCHEDULER_OWNER_KEY)?;
     setup.save_task(&document(&once_id, TaskSchedule::Once, now)?, 600)?;
     setup.save_task(
         &document(
@@ -97,9 +98,13 @@ fn real_redis_scheduler_claims_executes_advances_and_deletes() -> Result<(), Box
         return Err("integration scheduler did not acquire ownership".into());
     };
     assert!(failures.is_empty());
-    assert_eq!(tasks.len(), 2);
+    let current_tasks = tasks
+        .iter()
+        .filter(|task| task.task_id == once_id || task.task_id == repeat_id)
+        .collect::<Vec<_>>();
+    assert_eq!(current_tasks.len(), 2);
     assert!(
-        tasks
+        current_tasks
             .iter()
             .all(|task| matches!(task.observation, TaskObservation::Executed { .. }))
     );
@@ -111,8 +116,51 @@ fn real_redis_scheduler_claims_executes_advances_and_deletes() -> Result<(), Box
         .ok_or("recurring task was not retained")?;
     assert_eq!(recurring.task.next_run_at, now.checked_add(600));
     assert!(recurring.task.last_execution_id.is_some());
+    assert!(scheduler.shutdown()?);
+
+    let boundary_id = format!("boundary_{}_{}", std::process::id(), suffix);
+    let boundary = document(
+        &boundary_id,
+        TaskSchedule::IntervalSeconds { seconds: 600 },
+        now + 600,
+    )?;
+    let mut direct = RedisTaskStore::new(&endpoint)?;
+    assert!(SchedulerStore::save_task(&mut direct, &boundary, 600)?);
+    assert!(!SchedulerStore::remove_due_task_id(
+        &mut direct,
+        "synthetic-missing-task"
+    )?);
+    let direct_owner = format!("direct-owner-{}_{}", std::process::id(), suffix);
+    assert!(SchedulerStore::acquire_owner(
+        &mut direct,
+        &direct_owner,
+        30
+    )?);
+    assert!(SchedulerStore::acquire_owner(
+        &mut direct,
+        &direct_owner,
+        30
+    )?);
+    assert!(SchedulerStore::renew_owner(&mut direct, &direct_owner, 30)?);
+    assert!(!SchedulerStore::release_occurrence(
+        &mut direct,
+        &boundary_id,
+        "synthetic-execution",
+        "synthetic-claim"
+    )?);
+    assert!(!SchedulerStore::complete_occurrence(
+        &mut direct,
+        &SchedulerCompletion {
+            task_id: &boundary_id,
+            chat_id: "-100987654",
+            execution_id: "synthetic-execution",
+            claim_token: "synthetic-claim",
+            next_document: None,
+            record_ttl_seconds: 600,
+        },
+    )?);
+    assert!(SchedulerStore::release_owner(&mut direct, &direct_owner)?);
 
     verify.cancel_task(&repeat_id, "-100987654")?;
-    assert!(scheduler.shutdown()?);
     Ok(())
 }

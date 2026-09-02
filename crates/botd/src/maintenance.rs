@@ -80,4 +80,40 @@ mod tests {
         });
         assert!(matches!(result, Err(MaintenanceError::InvalidRetention)));
     }
+
+    #[test]
+    fn maintenance_can_run_without_postgres() -> Result<(), String> {
+        let Some(port) = std::env::var("TEST_REDIS_PORT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+        else {
+            return Ok(());
+        };
+        let endpoint = RedisEndpoint {
+            host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+            port,
+            password: None,
+        };
+        let report = run_maintenance(MaintenanceOptions {
+            redis_endpoint: &endpoint,
+            database_url: None,
+            redis_maxmemory: "256mb",
+            redis_maxmemory_policy: "allkeys-lru",
+            ai_ledger_retention_days: 1,
+        })
+        .map_err(|error| error.to_string())?;
+        assert_eq!(report.ledger["reason"], "postgres not configured");
+        if let Ok(database_url) = std::env::var("TEST_POSTGRES_URL") {
+            let report = run_maintenance(MaintenanceOptions {
+                redis_endpoint: &endpoint,
+                database_url: Some(&database_url),
+                redis_maxmemory: "256mb",
+                redis_maxmemory_policy: "allkeys-lru",
+                ai_ledger_retention_days: 1,
+            })
+            .map_err(|error| error.to_string())?;
+            assert!(report.ledger.is_object());
+        }
+        Ok(())
+    }
 }

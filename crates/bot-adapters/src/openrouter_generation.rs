@@ -280,5 +280,16 @@ mod tests {
         assert_eq!(response.status_code, 200);
         assert_eq!(response.body, r#"{"data":{"id":"synthetic-id"}}"#);
         assert!(server.join().is_ok());
+        let unavailable =
+            ReqwestGenerationTransport::with_generation_url("http://127.0.0.1:1/generation")
+                .unwrap_or_else(|_| unreachable!());
+        assert!(
+            unavailable
+                .get(&GenerationRequest {
+                    generation_id: "synthetic-id".to_owned(),
+                    api_key: "synthetic-key".to_owned(),
+                })
+                .is_err()
+        );
     }
 }

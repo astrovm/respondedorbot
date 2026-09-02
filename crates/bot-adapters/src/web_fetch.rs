@@ -568,7 +568,7 @@ impl VisibleTextParser {
                     remaining = &remaining[end + 3..];
                     continue;
                 }
-                break;
+                return;
             }
             let Some(end) = remaining.find('>') else {
                 self.text(remaining);
@@ -940,6 +940,89 @@ mod tests {
             assert!(!is_public_ip(address), "{address}");
         }
         assert!(is_public_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+    }
+
+    #[test]
+    fn redirect_http_and_plain_text_boundaries_return_typed_results() {
+        let public = Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]);
+
+        let transport = Transport {
+            responses: RefCell::new(vec![Ok(response(302, ""))]),
+            urls: RefCell::new(Vec::new()),
+        };
+        let error = fetch_public_url(&transport, &public, "https://example.com")
+            .err()
+            .unwrap_or_else(|| unreachable!());
+        assert!(error.to_string().contains("no se pudo"));
+
+        let mut invalid_redirect = response(302, "");
+        invalid_redirect.location = Some("file:///synthetic".to_owned());
+        let transport = Transport {
+            responses: RefCell::new(vec![Ok(invalid_redirect)]),
+            urls: RefCell::new(Vec::new()),
+        };
+        assert!(matches!(
+            fetch_public_url(&transport, &public, "https://example.com"),
+            Err(PublicFetchError::Blocked { .. })
+        ));
+
+        let mut redirects = Vec::new();
+        for index in 0..=FETCH_MAX_REDIRECTS {
+            let mut redirect = response(302, "");
+            redirect.location = Some(format!("/next-{index}"));
+            redirects.push(Ok(redirect));
+        }
+        let transport = Transport {
+            responses: RefCell::new(redirects),
+            urls: RefCell::new(Vec::new()),
+        };
+        let error = fetch_public_url(&transport, &public, "https://example.com")
+            .err()
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(error.url(), "https://example.com/next-4");
+
+        let transport = Transport {
+            responses: RefCell::new(vec![Ok(response(418, "synthetic failure"))]),
+            urls: RefCell::new(Vec::new()),
+        };
+        let error = fetch_public_url(&transport, &public, "https://example.com")
+            .err()
+            .unwrap_or_else(|| unreachable!());
+        assert!(matches!(error, PublicFetchError::Request { detail, .. } if detail == "HTTP 418"));
+
+        let mut plain = response(200, "one&nbsp; two");
+        plain.content_type = "text/plain".to_owned();
+        let transport = Transport {
+            responses: RefCell::new(vec![Ok(plain)]),
+            urls: RefCell::new(Vec::new()),
+        };
+        let page = fetch_public_url(&transport, &public, "https://example.com")
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(page.content, "one two");
+        assert_eq!(page.title, None);
+    }
+
+    #[test]
+    fn html_parser_handles_unclosed_markup_and_all_supported_entities() {
+        let (title, text) = extract_text_from_html(
+            "<title>one <b>two</title><p>a&amp;b &#65; &#x42; &unknown;</p><!-- open",
+        );
+        assert_eq!(title.as_deref(), Some("one two"));
+        assert_eq!(text, "a&b A B &unknown;");
+
+        let (_, text) = extract_text_from_html("before <broken");
+        assert_eq!(text, "before <broken");
+        let (_, text) = extract_text_from_html("<p>one<br>two</p>");
+        assert_eq!(text, "one\ntwo");
+
+        assert!(!is_public_ip(IpAddr::V4(Ipv4Addr::new(0, 1, 2, 3))));
+        assert!(!is_public_ip(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))));
+        assert!(!is_public_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1))));
+        assert!(!is_public_ip(IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1))));
+        assert!(!is_public_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED)));
+        assert!(!is_public_ip(IpAddr::V6(Ipv6Addr::new(
+            0xfe80, 0, 0, 0, 0, 0, 0, 1,
+        ))));
     }
 
     #[test]

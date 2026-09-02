@@ -247,7 +247,7 @@ mod tests {
     use bot_adapters::openrouter_chat::{
         HttpRequest, OpenRouterChatError, OpenRouterStreamTransport,
     };
-    use bot_core::ai_prompt::{PromptContent, PromptMessage, PromptRole};
+    use bot_core::ai_prompt::{PromptContent, PromptMessage, PromptRole, PromptToolCall};
     use serde_json::{Value, json};
 
     use super::OpenRouterChatStreamer;
@@ -417,5 +417,48 @@ mod tests {
         };
         assert_eq!(error.partial.text, "");
         assert!(error.partial.billing_segment.is_none());
+    }
+
+    #[test]
+    fn request_conversion_preserves_empty_content_roles_and_tool_calls() {
+        let transport = Transport {
+            chunks: vec![b"data: [DONE]\n\n".to_vec()],
+            failure: None,
+            requests: RefCell::new(Vec::new()),
+        };
+        let provider = OpenRouterChatStreamer::new(
+            transport,
+            "synthetic-key",
+            "https://synthetic.invalid",
+            "requested/model",
+        );
+        let messages = [
+            PromptMessage {
+                role: PromptRole::Assistant,
+                content: PromptContent::Empty,
+                tool_call_id: None,
+                tool_calls: vec![PromptToolCall {
+                    id: "synthetic-call".to_owned(),
+                    call_type: "function".to_owned(),
+                    name: "calculate".to_owned(),
+                    arguments: r#"{"expression":"2+2"}"#.to_owned(),
+                }],
+            },
+            PromptMessage {
+                role: PromptRole::Tool,
+                content: PromptContent::Text("4".to_owned()),
+                tool_call_id: Some("synthetic-call".to_owned()),
+                tool_calls: Vec::new(),
+            },
+        ];
+        let result = provider.stream_round(&messages, &[], |_text| Ok(()));
+        assert!(result.is_ok_and(|result| result.text.is_empty()));
+        let body = serde_json::from_str::<Value>(&provider.transport.requests.borrow()[0].body)
+            .unwrap_or(Value::Null);
+        assert_eq!(body["messages"][0]["role"], "assistant");
+        assert!(body["messages"][0]["content"].is_null());
+        assert_eq!(body["messages"][0]["tool_calls"][0]["id"], "synthetic-call");
+        assert_eq!(body["messages"][1]["role"], "tool");
+        assert_eq!(body["messages"][1]["tool_call_id"], "synthetic-call");
     }
 }

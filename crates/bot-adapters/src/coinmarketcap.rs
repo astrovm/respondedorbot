@@ -445,6 +445,7 @@ mod tests {
     use std::thread;
 
     use crate::request_cache::RequestCache;
+    use serde_json::{Value, json};
 
     use super::{
         BitcoinPriceOutcome, BitcoinPriceRequest, CoinMarketCapMarketTransport,
@@ -480,6 +481,7 @@ mod tests {
     struct Cache {
         reads: VecDeque<Result<Option<String>, &'static str>>,
         writes: Vec<(String, String, i64)>,
+        fail_write: bool,
     }
 
     impl RequestCache for Cache {
@@ -490,6 +492,9 @@ mod tests {
         }
 
         fn set(&mut self, key: &str, value: &str, ttl: i64) -> Result<(), Self::Error> {
+            if self.fail_write {
+                return Err("synthetic write failure");
+            }
             self.writes.push((key.to_owned(), value.to_owned(), ttl));
             Ok(())
         }
@@ -685,6 +690,78 @@ mod tests {
         );
         assert!(diagnostics.is_empty());
         assert!(cache.writes.is_empty());
+    }
+
+    #[test]
+    fn empty_quotes_invalid_payloads_and_refresh_cache_failures_are_safe() {
+        let empty_request = MarketRequest {
+            api_key: "synthetic-key".to_owned(),
+            currency: "USD".to_owned(),
+            kind: MarketRequestKind::Quotes {
+                identifiers: Vec::new(),
+                by_slug: false,
+            },
+        };
+        let transport = MarketTransport {
+            responses: RefCell::new(VecDeque::new()),
+            requests: RefCell::new(Vec::new()),
+        };
+        let load = load_market_assets(&transport, &mut Cache::default(), &empty_request, 100);
+        assert_eq!(load.assets, Some(Vec::new()));
+        assert!(transport.requests.borrow().is_empty());
+
+        let invalid_request = MarketRequest {
+            api_key: "synthetic-key".to_owned(),
+            currency: "USD".to_owned(),
+            kind: MarketRequestKind::Listings,
+        };
+        let transport = MarketTransport {
+            responses: RefCell::new(VecDeque::from([Ok(HttpResponse {
+                status_code: 200,
+                body: json!({"unexpected": true}).to_string(),
+            })])),
+            requests: RefCell::new(Vec::new()),
+        };
+        let load = load_market_assets(&transport, &mut Cache::default(), &invalid_request, 100);
+        assert!(load.assets.is_none());
+        assert!(load.diagnostics[0].contains("invalid data"));
+        assert_eq!(super::text(Some(&Value::Bool(true))), "");
+
+        let response = || {
+            Ok(HttpResponse {
+                status_code: 200,
+                body: json!({"data": []}).to_string(),
+            })
+        };
+        for (reads, fail_write, expected) in [
+            (
+                VecDeque::from([Ok(None), Err("synthetic history read failure")]),
+                false,
+                "could not read CoinMarketCap history key",
+            ),
+            (
+                VecDeque::from([Ok(None), Ok(None)]),
+                true,
+                "could not write request cache key",
+            ),
+        ] {
+            let transport = MarketTransport {
+                responses: RefCell::new(VecDeque::from([response()])),
+                requests: RefCell::new(Vec::new()),
+            };
+            let diagnostics = refresh_market_snapshot(
+                &transport,
+                &mut Cache {
+                    reads,
+                    fail_write,
+                    ..Cache::default()
+                },
+                "synthetic-key",
+                "USD",
+                1_725_000_000,
+            );
+            assert!(diagnostics.iter().any(|entry| entry.contains(expected)));
+        }
     }
 
     #[test]

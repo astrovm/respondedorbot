@@ -652,6 +652,78 @@ mod tests {
     }
 
     #[test]
+    fn multipart_handles_false_flags_and_all_validation_and_transport_boundaries() {
+        let transport = FakeMultipartTransport {
+            response: RefCell::new(Some(Err(TransportFailureKind::Connection))),
+            requests: RefCell::new(Vec::new()),
+        };
+        assert_eq!(
+            multipart_request_with(
+                &transport,
+                MultipartUpload {
+                    token: "synthetic-token".to_owned(),
+                    endpoint: "sendDocument".to_owned(),
+                    data_payload: json!({"enabled": false}),
+                    file_field: "document".to_owned(),
+                    file_name: "synthetic.bin".to_owned(),
+                    file_bytes: vec![1],
+                    content_type: "application/octet-stream".to_owned(),
+                    timeout: Duration::from_secs(1),
+                },
+            ),
+            Ok(TelegramHttpOutcome::TransportError {
+                kind: TransportFailureKind::Connection,
+            })
+        );
+        assert_eq!(
+            transport.requests.borrow()[0].fields,
+            [("enabled".to_owned(), "False".to_owned())]
+        );
+
+        for payload in [json!([]), json!({"nested": []})] {
+            let transport = FakeMultipartTransport {
+                response: RefCell::new(Some(Err(TransportFailureKind::Request))),
+                requests: RefCell::new(Vec::new()),
+            };
+            let result = multipart_request_with(
+                &transport,
+                MultipartUpload {
+                    token: "synthetic-token".to_owned(),
+                    endpoint: "sendDocument".to_owned(),
+                    data_payload: payload,
+                    file_field: "document".to_owned(),
+                    file_name: "synthetic.bin".to_owned(),
+                    file_bytes: Vec::new(),
+                    content_type: "application/octet-stream".to_owned(),
+                    timeout: Duration::from_secs(1),
+                },
+            );
+            assert_eq!(result, Err(TelegramHttpError::InvalidPayload));
+            assert!(transport.requests.borrow().is_empty());
+        }
+
+        let transport = FakeMultipartTransport {
+            response: RefCell::new(Some(Err(TransportFailureKind::Request))),
+            requests: RefCell::new(Vec::new()),
+        };
+        let result = multipart_request_with(
+            &transport,
+            MultipartUpload {
+                token: String::new(),
+                endpoint: String::new(),
+                data_payload: json!({}),
+                file_field: String::new(),
+                file_name: String::new(),
+                file_bytes: Vec::new(),
+                content_type: String::new(),
+                timeout: Duration::ZERO,
+            },
+        );
+        assert_eq!(result, Err(TelegramHttpError::InvalidTimeout));
+        assert!(transport.requests.borrow().is_empty());
+    }
+
+    #[test]
     fn file_download_preserves_binary_content_and_request_identity() {
         let transport = FakeFileTransport {
             response: RefCell::new(Some(Ok(BinaryHttpResponse {

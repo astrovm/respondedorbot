@@ -553,13 +553,16 @@ mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::convert::Infallible;
 
-    use bot_adapters::billing_read::UnsettledAiOperation;
+    use bot_adapters::billing_read::{BillingRepository, UnsettledAiOperation};
+    use bot_adapters::openrouter_generation::{
+        GenerationError, GenerationRequest, GenerationTransport, HttpResponse,
+    };
     use serde_json::{Map, Value, json};
 
     use super::{
-        ActiveOperationRegistry, AiBillingReconciler, GenerationSource, ReconciliationSettings,
-        ReconciliationStore, age_seconds, reconciled_segment, segment_needs_reconciliation,
-        settlement_reason,
+        ActiveOperationRegistry, AiBillingReconciler, GenerationSource, OpenRouterGenerationSource,
+        ReconciliationSettings, ReconciliationStore, age_seconds, reconciled_segment,
+        segment_needs_reconciliation, settlement_reason,
     };
 
     #[derive(Default)]
@@ -656,6 +659,66 @@ mod tests {
                 "provider_usage_pending": true
             }
         })
+    }
+
+    struct GenerationResponse(HttpResponse);
+
+    impl GenerationTransport for GenerationResponse {
+        fn get(&self, _request: &GenerationRequest) -> Result<HttpResponse, GenerationError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn production_generation_and_billing_ports_preserve_boundary_results() {
+        let mut pending = OpenRouterGenerationSource::new(
+            GenerationResponse(HttpResponse {
+                status_code: 404,
+                body: String::new(),
+            }),
+            "synthetic-key",
+        );
+        assert_eq!(pending.generation("synthetic-generation"), Ok(None));
+
+        let mut complete = OpenRouterGenerationSource::new(
+            GenerationResponse(HttpResponse {
+                status_code: 200,
+                body: r#"{"data":{"total_cost":"0.001"}}"#.to_owned(),
+            }),
+            "synthetic-key",
+        );
+        assert!(
+            complete.generation("synthetic-generation").is_ok_and(
+                |generation| generation.is_some_and(|value| value["total_cost"] == "0.001")
+            )
+        );
+
+        let Some(database_url) = std::env::var("TEST_POSTGRES_URL").ok() else {
+            return;
+        };
+        let separator = if database_url.contains('?') { '&' } else { '?' };
+        let missing_schema =
+            format!("{database_url}{separator}options=-csearch_path%3Dcoverage95_missing");
+        let mut repository = BillingRepository::new(&missing_schema);
+        assert!(ReconciliationStore::list_unsettled(&mut repository, 1).is_err());
+        assert!(
+            ReconciliationStore::update_provider_segment(
+                &mut repository,
+                "synthetic-operation",
+                "synthetic-segment",
+                &json!({}),
+            )
+            .is_err()
+        );
+        assert!(
+            ReconciliationStore::settle_operation(
+                &mut repository,
+                &operation("synthetic-operation", "2026-09-02T00:00:00Z", None),
+                1,
+                &Map::new(),
+            )
+            .is_err()
+        );
     }
 
     #[test]

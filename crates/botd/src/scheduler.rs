@@ -1062,6 +1062,51 @@ mod tests {
             Ok(SchedulerStep::Observed { failures, .. })
                 if failures.len() == 1 && failures[0].stage == "complete"
         ));
+
+        let invalid = document(
+            "invalid1",
+            TaskSchedule::IntervalSeconds { seconds: 0 },
+            1_000,
+        );
+        let mut invalid_store = Store {
+            due: vec!["invalid1".to_owned()],
+            ..Store::default()
+        };
+        invalid_store
+            .documents
+            .insert("invalid1".to_owned(), invalid);
+        let mut invalid_scheduler =
+            scheduler(invalid_store, Executor::default(), SchedulerMode::Verify);
+        let invalid_result = invalid_scheduler.step(1_000);
+        assert!(
+            matches!(
+                &invalid_result,
+                Ok(SchedulerStep::Observed { failures, .. })
+                    if failures.len() == 1 && failures[0].stage == "evaluate"
+            ),
+            "unexpected invalid-task result: {invalid_result:?}"
+        );
+
+        let record = document("lost1", TaskSchedule::Once, 1_000);
+        let mut unavailable_store = Store {
+            due: vec!["lost1".to_owned()],
+            complete_available: false,
+            ..Store::default()
+        };
+        unavailable_store
+            .documents
+            .insert("lost1".to_owned(), record);
+        let mut unavailable = scheduler(
+            unavailable_store,
+            Executor::default(),
+            SchedulerMode::Authoritative,
+        );
+        assert!(matches!(
+            unavailable.step(1_000),
+            Ok(SchedulerStep::Observed { tasks, failures })
+                if failures.is_empty()
+                    && matches!(tasks[0].observation, TaskObservation::ClaimedElsewhere { .. })
+        ));
     }
 
     #[test]

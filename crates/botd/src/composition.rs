@@ -2010,9 +2010,14 @@ mod tests {
     use bot_adapters::request_cache::RequestCache;
     use bot_adapters::stock_pool::StockPoolCache;
     use bot_adapters::telegram_http::{
-        HttpResponse, TelegramRequest, TelegramTransport, TransportFailureKind,
+        HttpResponse, TelegramMultipartRequest, TelegramRequest, TelegramTransport,
+        TransportFailureKind,
     };
     use bot_adapters::telegram_polling::{PollFailure, PollOutcome};
+    use bot_adapters::token_signal::{
+        BinaryResponse as TokenBinaryResponse, JsonResponse as TokenJsonResponse,
+        TokenSignalAdapter, TokenSignalCache, TokenSignalTransport,
+    };
     use bot_adapters::weather::{
         HttpResponse as WeatherHttpResponse, TransportFailureKind as WeatherFailure,
         WeatherRequest, WeatherTransport,
@@ -2027,6 +2032,9 @@ mod tests {
     use bot_core::telegram_actions::{LabeledPrice, SendMessage, TelegramAction};
     use bot_core::telegram_input::ChatId;
     use bot_core::telegram_payments::StarPaymentRecord;
+    use bot_core::token_signals::{
+        PairToken, SignalQuery, SignalState, TokenAddress, TokenPair, TokenSignal,
+    };
     use bot_core::{
         command_state::{
             IncomingCommandState, OutgoingCommandState, prepare_incoming_command_state,
@@ -2039,7 +2047,8 @@ mod tests {
     use crate::dispatcher::{
         ActionReceipt, ActionSink, BcraSource, BillingTransferSink, ElectionSource,
         GroupAuthorizer, MarketPriceSource, MessageStateSink, OilPriceSource, RandomSource,
-        RuntimeValues, ScheduledTaskSource, StarPaymentSink, StockPriceSource, WeatherSource,
+        RuntimeValues, ScheduledTaskSource, StarPaymentSink, StockPriceSource, TokenSignalSource,
+        WeatherSource,
     };
     use crate::reconciliation::ActiveOperationRegistry;
     use crate::runtime::UpdateSource;
@@ -2089,6 +2098,17 @@ mod tests {
     struct CriptoTransport {
         results: RefCell<Vec<Result<CriptoYaHttpResponse, CriptoYaFailure>>>,
         requests: RefCell<Vec<CriptoYaRequest>>,
+    }
+
+    struct DollarTransportStub;
+
+    impl bot_adapters::dollar::DollarTransport for DollarTransportStub {
+        fn get(
+            &self,
+        ) -> Result<bot_adapters::dollar::HttpResponse, bot_adapters::dollar::TransportFailureKind>
+        {
+            Err(bot_adapters::dollar::TransportFailureKind::Request)
+        }
     }
 
     struct WeatherTransportStub {
@@ -2291,6 +2311,17 @@ mod tests {
         }
     }
 
+    impl bot_adapters::dollar::DollarCache for WeatherCacheStub {
+        fn set_if_absent(
+            &mut self,
+            _key: &str,
+            _value: &str,
+            _ttl_seconds: i64,
+        ) -> Result<bool, Self::Error> {
+            Ok(true)
+        }
+    }
+
     impl StockPoolCache for WeatherCacheStub {
         type Error = std::convert::Infallible;
 
@@ -2328,6 +2359,16 @@ mod tests {
     impl TelegramTransport for Transport {
         fn send(&self, request: &TelegramRequest) -> Result<HttpResponse, TransportFailureKind> {
             self.requests.borrow_mut().push(request.clone());
+            self.response
+                .borrow_mut()
+                .take()
+                .unwrap_or(Err(TransportFailureKind::Request))
+        }
+
+        fn send_action_multipart(
+            &self,
+            _request: &TelegramMultipartRequest,
+        ) -> Result<HttpResponse, TransportFailureKind> {
             self.response
                 .borrow_mut()
                 .take()
@@ -2742,6 +2783,182 @@ mod tests {
             "token",
         );
         assert_eq!(delivered.try_invoice(invoice()), Ok(true));
+    }
+
+    #[test]
+    fn optional_animation_video_and_photo_preserve_soft_delivery_failures() {
+        let animation = || TelegramAction::SendAnimation {
+            chat_id: ChatId(1),
+            animation: "synthetic-animation".to_owned(),
+            reply_to_message_id: Some(MessageId(2)),
+            caption: None,
+        };
+        let video = || TelegramAction::SendVideo {
+            chat_id: ChatId(1),
+            video: Arc::from([1_u8, 2, 3]),
+            reply_to_message_id: Some(MessageId(2)),
+            caption: "synthetic video".to_owned(),
+            reply_markup: None,
+        };
+        let photo = || TelegramAction::SendPhoto {
+            chat_id: ChatId(1),
+            photo: Arc::from([4_u8, 5, 6]),
+            reply_to_message_id: Some(MessageId(2)),
+            caption: "synthetic photo".to_owned(),
+            parse_mode: None,
+            reply_markup: None,
+        };
+
+        let mut animation_failed = TelegramActionSink::new(
+            transport(400, r#"{"ok":false,"description":"animation rejected"}"#),
+            "token",
+        );
+        assert_eq!(animation_failed.try_animation(animation()), Ok(false));
+        let mut animation_sent = TelegramActionSink::new(
+            transport(200, r#"{"ok":true,"result":{"message_id":3}}"#),
+            "token",
+        );
+        assert_eq!(animation_sent.try_animation(animation()), Ok(true));
+
+        let mut video_failed = TelegramActionSink::new(
+            transport(400, r#"{"ok":false,"description":"video rejected"}"#),
+            "token",
+        );
+        assert_eq!(video_failed.try_video(video()), Ok(None));
+        let mut video_sent = TelegramActionSink::new(
+            transport(200, r#"{"ok":true,"result":{"message_id":4}}"#),
+            "token",
+        );
+        assert_eq!(
+            video_sent.try_video(video()),
+            Ok(Some(ActionReceipt {
+                message_id: Some(MessageId(4))
+            }))
+        );
+
+        let mut photo_failed = TelegramActionSink::new(
+            transport(400, r#"{"ok":false,"description":"photo rejected"}"#),
+            "token",
+        );
+        assert_eq!(photo_failed.try_photo(photo()), Ok(None));
+        let mut photo_sent = TelegramActionSink::new(
+            transport(200, r#"{"ok":true,"result":{"message_id":5}}"#),
+            "token",
+        );
+        assert_eq!(
+            photo_sent.try_photo(photo()),
+            Ok(Some(ActionReceipt {
+                message_id: Some(MessageId(5))
+            }))
+        );
+    }
+
+    #[test]
+    fn token_signal_dispatch_port_forwards_queries_rendering_and_state_storage() {
+        struct TokenTransport;
+        impl TokenSignalTransport for TokenTransport {
+            fn get_json(
+                &self,
+                _url: &str,
+                _query: &[(&str, String)],
+            ) -> Result<TokenJsonResponse, String> {
+                Ok(TokenJsonResponse {
+                    status_code: 503,
+                    body: String::new(),
+                })
+            }
+
+            fn post_json(
+                &self,
+                _url: &str,
+                _body: &serde_json::Value,
+            ) -> Result<TokenJsonResponse, String> {
+                Err("synthetic POST failure".to_owned())
+            }
+
+            fn get_binary(&self, _url: &str) -> Result<TokenBinaryResponse, String> {
+                Err("synthetic image failure".to_owned())
+            }
+        }
+
+        #[derive(Default)]
+        struct TokenCache(std::collections::HashMap<String, String>);
+        impl TokenSignalCache for TokenCache {
+            type Error = &'static str;
+
+            fn get(&mut self, key: &str) -> Result<Option<String>, Self::Error> {
+                Ok(self.0.get(key).cloned())
+            }
+
+            fn set(
+                &mut self,
+                key: &str,
+                value: &str,
+                _ttl_seconds: i64,
+            ) -> Result<(), Self::Error> {
+                self.0.insert(key.to_owned(), value.to_owned());
+                Ok(())
+            }
+        }
+
+        let address = TokenAddress {
+            chain_id: "ethereum".to_owned(),
+            network: "eth".to_owned(),
+            tag: "ETH".to_owned(),
+            address: "0x0000000000000000000000000000000000000001".to_owned(),
+        };
+        let mut adapter = TokenSignalAdapter::new(TokenTransport, TokenCache::default());
+        let symbol =
+            TokenSignalSource::load(&mut adapter, &SignalQuery::Symbol("SYNTHETIC".to_owned()));
+        assert!(symbol.signal.is_none());
+        assert!(!symbol.diagnostics.is_empty());
+        let token = TokenSignalSource::load_token(&mut adapter, &address);
+        assert!(token.signal.is_none());
+        assert!(!token.diagnostics.is_empty());
+
+        let signal = TokenSignal {
+            token: address.clone(),
+            pair: TokenPair {
+                base_token: PairToken {
+                    symbol: "SYN".to_owned(),
+                    ..PairToken::default()
+                },
+                ..TokenPair::default()
+            },
+            candles: Vec::new(),
+            supply: None,
+            token_image_url: None,
+            socials: std::collections::BTreeMap::new(),
+            pump: None,
+        };
+        assert!(
+            TokenSignalSource::render_photo(&mut adapter, &signal)
+                .is_ok_and(|image| image.starts_with(b"\x89PNG"))
+        );
+
+        let state = SignalState {
+            chat_id: "synthetic-chat".to_owned(),
+            message_id: 2,
+            source_message_id: 1,
+            requester_id: "synthetic-user".to_owned(),
+            chain_id: address.chain_id,
+            network: address.network,
+            tag: address.tag,
+            address: address.address,
+            last_refresh_at: None,
+        };
+        assert_eq!(
+            TokenSignalSource::load_state(&mut adapter, "missing"),
+            Ok(None)
+        );
+        assert_eq!(
+            TokenSignalSource::save_state(&mut adapter, "saved", &state),
+            Ok(())
+        );
+        assert_eq!(
+            TokenSignalSource::load_state(&mut adapter, "saved"),
+            Ok(Some(state))
+        );
     }
 
     #[test]
@@ -3419,6 +3636,29 @@ mod tests {
         };
         let input = partial_rulo.rulo_input().unwrap_or_else(|_| unreachable!());
         assert_eq!(input.diagnostics.len(), 2);
+    }
+
+    #[test]
+    fn dollar_market_wrapper_merges_independent_provider_diagnostics() {
+        use crate::dispatcher::DollarMarketSource;
+
+        let mut source = super::CriptoYaDollarMarketSource {
+            transport: DollarTransportStub,
+            bcra_transport: BcraTransportStub,
+            cache: WeatherCacheStub,
+        };
+        let load = source.load(6, Locale::En, 1_700_000_000);
+        assert!(load.text.is_none());
+        assert!(
+            load.diagnostics
+                .iter()
+                .any(|item| item.contains("CriptoYa dollar request"))
+        );
+        assert!(
+            load.diagnostics
+                .iter()
+                .any(|item| item.contains("BCRA") || item.contains("ITCRM"))
+        );
     }
 
     #[test]
