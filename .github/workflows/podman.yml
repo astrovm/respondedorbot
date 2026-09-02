@@ -108,14 +108,13 @@ jobs:
       - name: Build image
         run: |
           REPO="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
-          CACHE_FLAGS=()
-          if podman pull "${REPO}:build-cache"; then
-            CACHE_FLAGS+=(--cache-from "${REPO}:build-cache")
-          fi
+          CACHE_REPO="${REPO}-build-cache"
+          CACHE_FLAGS=(--cache-from "${CACHE_REPO}")
           if [ "${{ github.event_name }}" = "push" ]; then
-            CACHE_FLAGS+=(--cache-to "${REPO}:build-cache")
+            CACHE_FLAGS+=(--cache-to "${CACHE_REPO}")
           fi
           podman build \
+            --layers \
             "${CACHE_FLAGS[@]}" \
             --tag "${REPO}:sha-${{ github.sha }}" \
             --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
@@ -160,9 +159,10 @@ jobs:
       - name: Build validated image from cache
         run: |
           REPO="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
-          podman pull "${REPO}:build-cache"
+          CACHE_REPO="${REPO}-build-cache"
           podman build \
-            --cache-from "${REPO}:build-cache" \
+            --layers \
+            --cache-from "${CACHE_REPO}" \
             --tag "${REPO}:sha-${{ github.sha }}" \
             --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
             --label "org.opencontainers.image.revision=${{ github.sha }}" \
