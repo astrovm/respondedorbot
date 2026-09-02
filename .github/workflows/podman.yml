@@ -17,7 +17,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  checks:
+  quality:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust toolchain
+        run: rustup show
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint Rust workspace
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+  coverage:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -57,31 +75,21 @@ jobs:
       - name: Set up Rust toolchain
         run: rustup show
 
-      - name: Check Rust formatting
-        run: cargo fmt --all -- --check
-
-      - name: Check Rust workspace
-        run: cargo check --locked --workspace --all-targets --all-features
-
-      - name: Lint Rust workspace
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-
-      - name: Test Rust workspace
-        run: cargo test --locked --workspace --all-features
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: cargo-llvm-cov@0.9.0
 
       - name: Check Rust coverage
         run: |
           rustup component add llvm-tools-preview
-          cargo install cargo-llvm-cov --version 0.9.0 --locked
           cargo llvm-cov clean --workspace
-          cargo llvm-cov --locked -p bot-core --all-features --fail-under-lines 95
-          cargo llvm-cov clean --workspace
-          cargo llvm-cov --locked -p bot-adapters --all-features --fail-under-lines 85
-          cargo llvm-cov clean --workspace
-          cargo llvm-cov --locked -p botd --all-features --fail-under-lines 80
+          cargo llvm-cov --locked --workspace --all-features --no-report
+          cargo llvm-cov report -p bot-core --fail-under-lines 95
+          cargo llvm-cov report -p bot-adapters --fail-under-lines 85
+          cargo llvm-cov report -p botd --fail-under-lines 80
 
-  build-and-push:
-    needs: checks
+  image:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -92,7 +100,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Log in to GHCR
-        if: github.event_name == 'push'
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io \
             --username "${{ github.actor }}" \
@@ -101,12 +108,16 @@ jobs:
       - name: Build image
         run: |
           REPO="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
-          TAG_FLAGS="--tag ${REPO}:sha-${{ github.sha }}"
+          CACHE_FLAGS=()
+          if podman pull "${REPO}:build-cache"; then
+            CACHE_FLAGS+=(--cache-from "${REPO}:build-cache")
+          fi
           if [ "${{ github.event_name }}" = "push" ]; then
-            TAG_FLAGS="${TAG_FLAGS} --tag ${REPO}:latest"
+            CACHE_FLAGS+=(--cache-to "${REPO}:build-cache")
           fi
           podman build \
-            ${TAG_FLAGS} \
+            "${CACHE_FLAGS[@]}" \
+            --tag "${REPO}:sha-${{ github.sha }}" \
             --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
             --label "org.opencontainers.image.revision=${{ github.sha }}" \
             --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -125,9 +136,55 @@ jobs:
             --env BOT_SYSTEM_PROMPT=synthetic-system-prompt \
             "${IMAGE}" /usr/local/bin/botd --check-config
 
-      - name: Push image
-        if: github.event_name != 'pull_request'
+  publish-latest:
+    if: github.event_name == 'push'
+    needs:
+      - quality
+      - coverage
+      - image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io \
+            --username "${{ github.actor }}" \
+            --password-stdin
+
+      - name: Build validated image from cache
         run: |
           REPO="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          podman pull "${REPO}:build-cache"
+          podman build \
+            --cache-from "${REPO}:build-cache" \
+            --tag "${REPO}:sha-${{ github.sha }}" \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            .
+
+      - name: Verify validated image
+        run: |
+          REPO="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          IMAGE="${REPO}:sha-${{ github.sha }}"
+          podman run --rm \
+            --env TELEGRAM_TOKEN=synthetic-telegram-token \
+            --env TELEGRAM_USERNAME=synthetic_test_bot \
+            --env SUPABASE_POSTGRES_URL=postgresql://synthetic-user:synthetic-password@db.synthetic.invalid:5432/postgres?sslmode=require \
+            --env COINMARKETCAP_KEY=synthetic-coinmarketcap-key \
+            --env OPENROUTER_API_KEY=synthetic-openrouter-key \
+            --env BOT_SYSTEM_PROMPT=synthetic-system-prompt \
+            "${IMAGE}" /usr/local/bin/botd --check-config
+
+      - name: Publish validated images
+        run: |
+          REPO="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          podman tag "${REPO}:sha-${{ github.sha }}" "${REPO}:latest"
           podman push "${REPO}:sha-${{ github.sha }}"
           podman push "${REPO}:latest"
