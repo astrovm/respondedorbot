@@ -151,6 +151,8 @@ The polling runtime writes each decoded update to the pending hash before it
 advances the Telegram offset. Parallel workers delete successful updates,
 persist retry counts, and atomically move terminal failures to the dead hash.
 Pending records are recovered before polling starts after a process restart.
+Redis must use `noeviction` or a `volatile-*` maxmemory policy so the
+non-expiring pending hash cannot be evicted after Telegram acknowledges it.
 
 ### Scheduled tasks
 

@@ -153,6 +153,8 @@ pub enum ConfigError {
     InvalidLongPollTimeout,
     #[error("REDIS_PORT must be an integer from 1 through 65535")]
     InvalidRedisPort,
+    #[error("REDIS_MAXMEMORY_POLICY must not evict non-expiring durable keys")]
+    UnsafeRedisMaxmemoryPolicy,
     #[error("AI_LEDGER_RETENTION_DAYS must be a positive integer")]
     InvalidLedgerRetention,
     #[error("SUPABASE_POSTGRES_URL not set")]
@@ -237,7 +239,13 @@ impl MaintenanceConfig {
             .unwrap_or_else(|| "256mb".to_owned());
         let redis_maxmemory_policy = lookup("REDIS_MAXMEMORY_POLICY")
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "allkeys-lru".to_owned());
+            .unwrap_or_else(|| "volatile-lru".to_owned());
+        if !matches!(
+            redis_maxmemory_policy.as_str(),
+            "noeviction" | "volatile-lru" | "volatile-lfu" | "volatile-random" | "volatile-ttl"
+        ) {
+            return Err(ConfigError::UnsafeRedisMaxmemoryPolicy);
+        }
         let ai_ledger_retention_days = lookup("AI_LEDGER_RETENTION_DAYS").map_or(
             Ok(DEFAULT_AI_LEDGER_RETENTION_DAYS),
             |value| {
@@ -630,8 +638,17 @@ mod tests {
         assert_eq!(config.redis_endpoint.port, 6379);
         assert_eq!(config.database_url(), None);
         assert_eq!(config.redis_maxmemory, "256mb");
-        assert_eq!(config.redis_maxmemory_policy, "allkeys-lru");
+        assert_eq!(config.redis_maxmemory_policy, "volatile-lru");
         assert_eq!(config.ai_ledger_retention_days, 30);
+        for unsafe_policy in ["allkeys-lru", "allkeys-lfu", "allkeys-random", "unknown"] {
+            assert_eq!(
+                MaintenanceConfig::from_lookup(|name| {
+                    (name == "REDIS_MAXMEMORY_POLICY").then(|| unsafe_policy.to_owned())
+                })
+                .map(|_| ()),
+                Err(ConfigError::UnsafeRedisMaxmemoryPolicy)
+            );
+        }
         for invalid in ["", "0", "-1", "many"] {
             assert_eq!(
                 MaintenanceConfig::from_lookup(|name| {
