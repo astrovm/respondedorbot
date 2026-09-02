@@ -166,7 +166,7 @@ pub fn build_task_scheduler(
 mod tests {
     use bot_adapters::redis_connection::RedisEndpoint;
 
-    use super::{TaskServiceOptions, build_task_scheduler};
+    use super::{TaskServiceOptions, build_task_scheduler, build_task_verifier, verify_tasks_once};
     use crate::composition::TelegramDeliveryCoordinator;
     use crate::scheduler::SchedulerMode;
 
@@ -189,5 +189,25 @@ mod tests {
             telegram_delivery: TelegramDeliveryCoordinator::default(),
         });
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn verification_service_composes_and_steps_against_local_redis() -> Result<(), String> {
+        let Some(port) = std::env::var("TEST_REDIS_PORT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+        else {
+            return Ok(());
+        };
+        let endpoint = RedisEndpoint {
+            host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+            port,
+            password: std::env::var("TEST_REDIS_PASSWORD")
+                .ok()
+                .filter(|value| !value.is_empty()),
+        };
+        assert!(build_task_verifier(&endpoint, "synthetic-verifier").is_ok());
+        assert!(verify_tasks_once(&endpoint, "synthetic-verifier", 1_700_000_000).is_ok());
+        Ok(())
     }
 }

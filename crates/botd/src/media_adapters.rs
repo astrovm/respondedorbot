@@ -534,11 +534,125 @@ pub type ProductionTranscriptionProvider =
 mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use bot_adapters::media_provider::{GroqTranscriptionRequest, GroqTranscriptionResponse};
     use bot_adapters::openrouter_chat::{HttpRequest, HttpResponse, OpenRouterChatError};
+    use bot_adapters::telegram_http::{
+        BinaryHttpResponse, HttpResponse as TelegramResponse, TelegramFileRequest, TelegramRequest,
+        TransportFailureKind,
+    };
 
     use super::*;
+
+    struct TelegramMediaTransport {
+        metadata: RefCell<Option<Result<TelegramResponse, TransportFailureKind>>>,
+        file: RefCell<Option<Result<BinaryHttpResponse, TransportFailureKind>>>,
+    }
+
+    impl TelegramTransport for TelegramMediaTransport {
+        fn send(&self, _: &TelegramRequest) -> Result<TelegramResponse, TransportFailureKind> {
+            self.metadata
+                .borrow_mut()
+                .take()
+                .unwrap_or(Err(TransportFailureKind::Request))
+        }
+    }
+
+    impl TelegramFileTransport for TelegramMediaTransport {
+        fn download(
+            &self,
+            _: &TelegramFileRequest,
+        ) -> Result<BinaryHttpResponse, TransportFailureKind> {
+            self.file
+                .borrow_mut()
+                .take()
+                .unwrap_or(Err(TransportFailureKind::Request))
+        }
+    }
+
+    fn telegram_media(
+        metadata: Result<TelegramResponse, TransportFailureKind>,
+        file: Result<BinaryHttpResponse, TransportFailureKind>,
+    ) -> TelegramMediaFiles<TelegramMediaTransport> {
+        TelegramMediaFiles::new(
+            TelegramMediaTransport {
+                metadata: RefCell::new(Some(metadata)),
+                file: RefCell::new(Some(file)),
+            },
+            "synthetic-token",
+        )
+    }
+
+    #[test]
+    fn telegram_media_source_requires_valid_metadata_and_successful_download() {
+        let metadata = || TelegramResponse {
+            status_code: 200,
+            body: json!({"result":{"file_path":"media/synthetic.bin"}}).to_string(),
+        };
+        let mut success = telegram_media(
+            Ok(metadata()),
+            Ok(BinaryHttpResponse {
+                status_code: 200,
+                body: vec![1, 2, 3],
+            }),
+        );
+        assert_eq!(success.download("synthetic-file"), Ok(Some(vec![1, 2, 3])));
+
+        let mut invalid_json = telegram_media(
+            Ok(TelegramResponse {
+                status_code: 200,
+                body: "invalid".to_owned(),
+            }),
+            Err(TransportFailureKind::Request),
+        );
+        assert!(invalid_json.download("synthetic-file").is_err());
+
+        for metadata in [
+            Ok(TelegramResponse {
+                status_code: 404,
+                body: String::new(),
+            }),
+            Err(TransportFailureKind::Timeout),
+        ] {
+            let mut source = telegram_media(metadata, Err(TransportFailureKind::Request));
+            assert_eq!(source.download("synthetic-file"), Ok(None));
+        }
+
+        let mut failed_download =
+            telegram_media(Ok(metadata()), Err(TransportFailureKind::Connection));
+        assert_eq!(failed_download.download("synthetic-file"), Ok(None));
+    }
+
+    #[test]
+    fn redis_media_cache_round_trips_text_against_local_redis() -> Result<(), String> {
+        let Some(port) = std::env::var("TEST_REDIS_PORT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+        else {
+            return Ok(());
+        };
+        let endpoint = RedisEndpoint {
+            host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+            port,
+            password: std::env::var("TEST_REDIS_PASSWORD")
+                .ok()
+                .filter(|value| !value.is_empty()),
+        };
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos();
+        let file_id = format!("synthetic-media-{nonce}");
+        let mut cache = RedisMediaCache::new(endpoint);
+        assert_eq!(cache.get("synthetic", &file_id)?, None);
+        cache.set("synthetic", &file_id, "synthetic transcript")?;
+        assert_eq!(
+            cache.get("synthetic", &file_id)?,
+            Some("synthetic transcript".to_owned())
+        );
+        Ok(())
+    }
 
     fn pcm_wav(sample_rate: u32, samples: &[i16]) -> Vec<u8> {
         let data_len = u32::try_from(samples.len() * 2).unwrap_or(0);
@@ -603,6 +717,107 @@ mod tests {
             headers: BTreeMap::new(),
             body: body.to_string(),
         }
+    }
+
+    struct VisionTransport {
+        requests: RefCell<Vec<HttpRequest>>,
+        responses: RefCell<Vec<Result<HttpResponse, OpenRouterChatError>>>,
+    }
+
+    impl OpenRouterTransport for VisionTransport {
+        fn post(&self, request: &HttpRequest) -> Result<HttpResponse, OpenRouterChatError> {
+            self.requests.borrow_mut().push(request.clone());
+            self.responses.borrow_mut().remove(0)
+        }
+    }
+
+    fn vision_response(text: &str) -> HttpResponse {
+        HttpResponse {
+            status_code: 200,
+            headers: BTreeMap::new(),
+            body: json!({
+                "choices": [{"message": {"content": text}}],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 3}
+            })
+            .to_string(),
+        }
+    }
+
+    #[test]
+    fn vision_provider_selects_the_prompt_language_and_preserves_media_metadata() {
+        for (prompt, expected_system_prompt) in [
+            (
+                "Describe the synthetic image",
+                "respond in English without emojis or markdown.",
+            ),
+            (
+                "describí la imagen sintética",
+                "respondé siempre en minúsculas, sin emojis, sin markdown y en lenguaje coloquial argentino.",
+            ),
+        ] {
+            let mut provider = OpenRouterVisionProvider::new(
+                VisionTransport {
+                    requests: RefCell::new(Vec::new()),
+                    responses: RefCell::new(vec![Ok(vision_response("synthetic description"))]),
+                },
+                "synthetic-key",
+                "https://example.test/api/v1",
+                "synthetic/vision-model",
+                321,
+            );
+            let result = provider
+                .describe(
+                    &PreparedImage {
+                        bytes: vec![1, 2, 3],
+                        mime: "image/png".to_owned(),
+                    },
+                    prompt,
+                    "synthetic-file",
+                )
+                .unwrap_or_else(|_| unreachable!())
+                .unwrap_or_else(|| unreachable!());
+            assert_eq!(result.text, "synthetic description");
+
+            let requests = provider.transport.requests.borrow();
+            let payload = serde_json::from_str::<Value>(&requests[0].body).unwrap_or(Value::Null);
+            assert_eq!(payload["messages"][0]["content"], expected_system_prompt);
+            assert_eq!(payload["messages"][1]["content"][0]["text"], prompt);
+            assert_eq!(payload["max_tokens"], 321);
+            assert!(
+                payload["messages"][1]["content"][1]["image_url"]["url"]
+                    .as_str()
+                    .is_some_and(|url| url.starts_with("data:image/png;base64,"))
+            );
+            assert_eq!(
+                result.billing_segment["metadata"]["file_id"],
+                "synthetic-file"
+            );
+        }
+    }
+
+    #[test]
+    fn vision_provider_reports_transport_failures() {
+        let mut provider = OpenRouterVisionProvider::new(
+            VisionTransport {
+                requests: RefCell::new(Vec::new()),
+                responses: RefCell::new(vec![Err(OpenRouterChatError::Transport(
+                    "synthetic transport failure".to_owned(),
+                ))]),
+            },
+            "synthetic-key",
+            "https://example.test/api/v1",
+            "synthetic/vision-model",
+            321,
+        );
+        let result = provider.describe(
+            &PreparedImage {
+                bytes: vec![1, 2, 3],
+                mime: "image/png".to_owned(),
+            },
+            "Describe the synthetic image",
+            "synthetic-file",
+        );
+        assert!(matches!(result, Err(ref error) if error.contains("synthetic transport failure")));
     }
 
     #[test]
@@ -763,10 +978,12 @@ mod tests {
     }
 
     #[test]
-    fn installed_ffmpeg_normalizes_real_image_and_audio_payloads() {
-        if Command::new("ffmpeg").arg("-version").output().is_err() {
-            return;
-        }
+    fn installed_ffmpeg_normalizes_real_image_and_audio_payloads() -> Result<(), String> {
+        let version = Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .map_err(|error| format!("ffmpeg must be installed for media tests: {error}"))?;
+        assert!(version.status.success());
         let mut processor = FfmpegMediaProcessor::default();
         let image = processor
             .prepare_image(b"P6\n2 1\n255\n\xff\x00\x00\x00\xff\x00")
@@ -782,5 +999,6 @@ mod tests {
             .unwrap_or_else(|| unreachable!());
         assert!(audio.bytes.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]));
         assert!((0.08..=0.2).contains(&audio.duration_seconds));
+        Ok(())
     }
 }

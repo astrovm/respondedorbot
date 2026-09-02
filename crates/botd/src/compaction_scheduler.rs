@@ -409,13 +409,18 @@ fn random_token() -> String {
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
+    use bot_adapters::billing_read::BillingRepository;
+    use bot_adapters::billing_schema::BillingSchemaRepository;
+    use bot_adapters::redis_compaction_queue::RedisCompactionQueue;
+    use bot_adapters::redis_connection::RedisEndpoint;
     use serde_json::{Value, json};
 
     use super::{
         COMPACTION_MODEL, CompactionEnqueueStore, CompactionReservationStore,
         CompactionScheduleContext, MemoryCompactionPlan, MemoryCompactionScheduler,
-        NativeCompactionScheduler,
+        NativeCompactionScheduler, PostgresCompactionReservations,
     };
     use bot_core::locale::Locale;
 
@@ -496,6 +501,83 @@ mod tests {
             locale: Locale::En,
             payer_source: Some(super::PayerSource::Chat),
         }
+    }
+
+    #[test]
+    fn production_reservation_and_queue_ports_round_trip_against_local_stores() -> Result<(), String>
+    {
+        let Some(database_url) = std::env::var("TEST_DATABASE_URL").ok() else {
+            return Ok(());
+        };
+        let Some(port) = std::env::var("TEST_REDIS_PORT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+        else {
+            return Ok(());
+        };
+        BillingSchemaRepository::new(&database_url)
+            .ensure_schema()
+            .map_err(|error| error.to_string())?;
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos();
+        let suffix = i64::try_from(nonce % 100_000_000).map_err(|error| error.to_string())?;
+        let user_id = 7_100_000_000_000_i64 + suffix;
+        let repository = BillingRepository::new(&database_url);
+        repository
+            .mint_user_credits(user_id, 100, None)
+            .map_err(|error| error.to_string())?;
+        let context = CompactionScheduleContext {
+            user_id,
+            group_chat_id: None,
+            origin_chat_id: user_id,
+            message_id: 7,
+            locale: Locale::En,
+            payer_source: Some(super::PayerSource::User),
+        };
+        let usage_tag = format!("synthetic-compaction-{nonce}");
+        let mut billing = PostgresCompactionReservations::new(&database_url);
+        let reservation = billing
+            .reserve(context, &usage_tag, 10, "message-7", 3)?
+            .ok_or_else(|| "synthetic reservation was denied".to_owned())?;
+        assert_eq!(reservation["source"], "user");
+        assert_eq!(
+            repository
+                .get_balance("user", user_id)
+                .map_err(|error| error.to_string())?,
+            90
+        );
+        billing.refund_enqueue_failure(user_id, &reservation)?;
+        assert_eq!(
+            repository
+                .get_balance("user", user_id)
+                .map_err(|error| error.to_string())?,
+            100
+        );
+
+        let endpoint = RedisEndpoint {
+            host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+            port,
+            password: std::env::var("TEST_REDIS_PASSWORD")
+                .ok()
+                .filter(|value| !value.is_empty()),
+        };
+        let mut queue = RedisCompactionQueue::new(&endpoint).map_err(|error| error.to_string())?;
+        let chat_id = format!("synthetic-scheduler-{nonce}");
+        assert!(
+            !CompactionEnqueueStore::job_exists(&mut queue, &chat_id)
+                .map_err(|error| error.to_string())?
+        );
+        assert!(
+            CompactionEnqueueStore::insert_job(&mut queue, &chat_id, r#"{"value":1}"#)
+                .map_err(|error| error.to_string())?
+        );
+        assert!(
+            CompactionEnqueueStore::job_exists(&mut queue, &chat_id)
+                .map_err(|error| error.to_string())?
+        );
+        Ok(())
     }
 
     #[test]

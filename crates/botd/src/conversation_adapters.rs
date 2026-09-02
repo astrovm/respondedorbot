@@ -692,14 +692,20 @@ fn user_identity(input: &AiConversationInput) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use bot_adapters::redis_connection::RedisEndpoint;
     use bot_core::ai_prompt::PromptRole;
+    use bot_core::locale::Locale;
+    use bot_core::telegram_input::{ChatId, MessageId, UserId};
     use serde_json::json;
 
     use super::{
-        PayerSource, PostgresConversationBilling, StoredHistoryEntry, build_compaction_view,
-        decode_history, decode_summary_memory, history_sort_key, role,
+        PayerSource, PostgresConversationBilling, RedisConversationState, StoredHistoryEntry,
+        build_compaction_view, decode_history, decode_summary_memory, history_sort_key, role,
     };
-    use crate::conversation::{ConversationBilling, SettlementRequest};
+    use crate::ai_dispatch::AiConversationInput;
+    use crate::conversation::{ConversationBilling, ConversationState, SettlementRequest};
     use crate::reconciliation::ActiveOperationRegistry;
 
     #[test]
@@ -733,6 +739,86 @@ mod tests {
         assert!(!active.is_active(operation_id));
         assert!(!billing.payer_by_operation.contains_key(operation_id));
         assert!(!billing.cap_key_by_operation.contains_key(operation_id));
+    }
+
+    fn integration_redis_endpoint() -> Option<RedisEndpoint> {
+        let port = std::env::var("TEST_REDIS_PORT").ok()?.parse().ok()?;
+        Some(RedisEndpoint {
+            host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+            port,
+            password: std::env::var("TEST_REDIS_PASSWORD")
+                .ok()
+                .filter(|value| !value.is_empty()),
+        })
+    }
+
+    fn conversation_input(chat_id: i64, message_id: i64, locale: Locale) -> AiConversationInput {
+        AiConversationInput {
+            chat_id: ChatId(chat_id),
+            message_id: MessageId(message_id),
+            chat_type: "supergroup".to_owned(),
+            chat_title: "Synthetic chat".to_owned(),
+            sender_id: UserId(42),
+            sender_first_name: "Synthetic".to_owned(),
+            sender_username: "synthetic_user".to_owned(),
+            message_text: "synthetic message".to_owned(),
+            command: String::new(),
+            reply_to_message_id: Some(MessageId(message_id - 1)),
+            reply_context: Some("earlier synthetic message".to_owned()),
+            has_reply: true,
+            visual_media_kind: None,
+            audio_media_kind: None,
+            photo_file_id: None,
+            audio_file_id: None,
+            audio_duration_seconds: None,
+            locale,
+            timezone_offset_hours: -3,
+            creditless_user_hourly_limit: 10,
+            timestamp: 1_700_000_000 + message_id,
+            spontaneous: false,
+        }
+    }
+
+    #[test]
+    fn redis_conversation_state_round_trips_live_conversation_memory() -> Result<(), String> {
+        let Some(endpoint) = integration_redis_endpoint() else {
+            return Ok(());
+        };
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos();
+        let chat_id = -i64::try_from(nonce % 1_000_000_000).map_err(|error| error.to_string())?;
+        let mut state = RedisConversationState::new(&endpoint)?;
+        let spanish = conversation_input(chat_id, 2, Locale::Es);
+        state.record_incoming(&spanish)?;
+        state.record_outgoing(&spanish, Some(3), "synthetic assistant reply")?;
+
+        let english = conversation_input(chat_id, 4, Locale::En);
+        state.record_incoming(&english)?;
+        state.record_outgoing(&english, None, "second synthetic reply")?;
+
+        let memory = state.load_memory(&chat_id.to_string(), "synthetic", Some("2"), 20)?;
+        assert_eq!(memory.history.len(), 4);
+        assert!(memory.history.iter().any(|entry| {
+            entry.role == PromptRole::Assistant && entry.text == "synthetic assistant reply"
+        }));
+        assert_eq!(
+            state.reply_metadata(&chat_id.to_string(), "3")?,
+            Some(crate::ai_dispatch::AiReplyMetadata {
+                kind: "ai".to_owned(),
+                uses_ai: false,
+            })
+        );
+        assert!(state.reply_metadata(&chat_id.to_string(), "999")?.is_none());
+
+        let summary = state.load_summary_memory(&chat_id.to_string(), 20)?;
+        assert_eq!(summary.history.len(), 4);
+
+        let mut empty = conversation_input(chat_id, 5, Locale::En);
+        empty.message_text.clear();
+        state.record_incoming(&empty)?;
+        Ok(())
     }
 
     #[test]

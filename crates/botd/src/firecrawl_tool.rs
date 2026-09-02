@@ -380,4 +380,50 @@ mod tests {
         assert_eq!(result.output, "tool 'web_search' failed");
         assert!(result.diagnostics[0].contains("synthetic failure"));
     }
+
+    #[test]
+    fn scheduled_search_uses_the_same_success_and_validation_paths() {
+        let transport = Transport {
+            responses: RefCell::new(vec![Ok(HttpResponse {
+                status_code: 200,
+                body: json!({
+                    "success": true,
+                    "creditsUsed": "1",
+                    "id": "scheduled-request",
+                    "data": []
+                })
+                .to_string(),
+            })]),
+        };
+        let mut search =
+            FirecrawlScheduledWebSearch::new(transport, |_| {}, "synthetic-scheduled-key");
+        let result = ScheduledWebSearch::execute(
+            &mut search,
+            ExternalToolRequest::WebSearch {
+                query: "synthetic scheduled query".to_owned(),
+            },
+            "scheduled-call",
+            Locale::En,
+        );
+        let output = serde_json::from_str::<Value>(&result.output).unwrap_or(Value::Null);
+        assert_eq!(output["query"], "synthetic scheduled query");
+        assert_eq!(
+            result
+                .billing_segment
+                .as_ref()
+                .and_then(|segment| segment["metadata"]["provider_request_id"].as_str()),
+            Some("scheduled-request")
+        );
+
+        assert_eq!(
+            ScheduledWebSearch::execute(
+                &mut search,
+                ExternalToolRequest::TaskList,
+                "scheduled-call",
+                Locale::Es,
+            )
+            .output,
+            "la herramienta 'web_search' recibió una solicitud incompatible"
+        );
+    }
 }

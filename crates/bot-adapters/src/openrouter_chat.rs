@@ -740,15 +740,44 @@ where
 mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     use bot_core::provider_pricing::DEEPSEEK_MODEL;
     use serde_json::{Value, json};
 
     use super::{
         ChatCompletionRequest, ChatMessage, ChatRole, ChatStreamEvent, HttpRequest, HttpResponse,
-        OpenRouterChatError, OpenRouterStreamTransport, OpenRouterTransport, ToolCall,
-        ToolFunctionCall, complete_with, parse_chat_completion, stream_with,
+        OpenRouterChatError, OpenRouterStreamTransport, OpenRouterTransport,
+        ReqwestOpenRouterTransport, ToolCall, ToolFunctionCall, complete_with,
+        parse_chat_completion, stream_with,
     };
+
+    fn serve_once(
+        status: &str,
+        content_type: &str,
+        body: &str,
+    ) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+        let status = status.to_owned();
+        let content_type = content_type.to_owned();
+        let body = body.to_owned();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+            let mut request = [0_u8; 8_192];
+            let _ = stream.read(&mut request);
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nX-Synthetic: yes\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .unwrap_or_else(|_| unreachable!());
+        });
+        (format!("http://{address}"), server)
+    }
 
     struct Transport {
         response: RefCell<Option<Result<HttpResponse, OpenRouterChatError>>>,
@@ -880,6 +909,45 @@ mod tests {
         let body: Value = serde_json::from_str(&requests[0].body).unwrap_or(Value::Null);
         assert_eq!(body["stream"], false);
         assert_eq!(body["messages"][1]["role"], "user");
+    }
+
+    #[test]
+    fn reqwest_transport_reads_blocking_and_streaming_http_responses() {
+        let completion_body = json!({
+            "choices":[{"message":{"content":"synthetic response"}}]
+        })
+        .to_string();
+        let (base_url, server) = serve_once("200 OK", "application/json", &completion_body);
+        let transport = ReqwestOpenRouterTransport::new().unwrap_or_else(|_| unreachable!());
+        let completion = complete_with(&transport, "synthetic-key", &base_url, &request());
+        assert!(matches!(completion, Ok(ref value) if value.text == "synthetic response"));
+        assert!(server.join().is_ok());
+
+        let stream_body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let (base_url, server) = serve_once("200 OK", "text/event-stream", stream_body);
+        let mut streaming_request = request();
+        streaming_request.stream = true;
+        let mut events = Vec::new();
+        let streamed = stream_with(
+            &transport,
+            "synthetic-key",
+            &base_url,
+            &streaming_request,
+            &mut |event| {
+                events.push(event);
+                Ok(())
+            },
+        );
+        assert!(streamed.is_ok());
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ChatStreamEvent::Done))
+        );
+        assert!(server.join().is_ok());
     }
 
     #[test]

@@ -80,14 +80,19 @@ jobs:
         with:
           tool: cargo-llvm-cov@0.9.0
 
+      - name: Install media test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+
       - name: Check Rust coverage
         run: |
           rustup component add llvm-tools-preview
           cargo llvm-cov clean --workspace
-          cargo llvm-cov --locked --workspace --all-features --no-report
+          cargo llvm-cov --locked --workspace --all-features --no-report -- --test-threads=1
           cargo llvm-cov report -p bot-core --fail-under-lines 95
-          cargo llvm-cov report -p bot-adapters --fail-under-lines 85
-          cargo llvm-cov report -p botd --fail-under-lines 80
+          cargo llvm-cov report -p bot-adapters --fail-under-lines 90
+          cargo llvm-cov report -p botd --fail-under-lines 90
 
   image:
     runs-on: ubuntu-latest

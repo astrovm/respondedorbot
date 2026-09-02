@@ -497,11 +497,61 @@ pub fn inspect(url: &str) -> PreviewInspection {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     use super::{
         LinkPreviewTransport, PreviewFailure, PreviewInspection, PreviewMetadata, PreviewMethod,
-        PreviewRequest, PreviewResponse, download_oversized_video, inspect_with,
+        PreviewRequest, PreviewResponse, ReqwestLinkPreviewTransport, download_oversized_video,
+        inspect_with,
     };
+
+    #[test]
+    fn reqwest_preview_transport_handles_redirect_policy_head_get_and_video_bounds() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+        let server = thread::spawn(move || {
+            for body in [b"preview".as_slice(), b"".as_slice(), b"video".as_slice()] {
+                let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+                let mut request = [0_u8; 4_096];
+                let _ = stream.read(&mut request);
+                let content_type = if body == b"video" {
+                    "video/mp4"
+                } else {
+                    "text/html"
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .unwrap_or_else(|_| unreachable!());
+                stream.write_all(body).unwrap_or_else(|_| unreachable!());
+            }
+        });
+        let transport = ReqwestLinkPreviewTransport::new().unwrap_or_else(|_| unreachable!());
+        let url = format!("http://{address}/resource");
+        let get = transport
+            .request(&PreviewRequest {
+                url: url.clone(),
+                method: PreviewMethod::Get,
+                follow_redirects: true,
+            })
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(get.body, "preview");
+        let head = transport
+            .request(&PreviewRequest {
+                url: url.clone(),
+                method: PreviewMethod::Head,
+                follow_redirects: false,
+            })
+            .unwrap_or_else(|_| unreachable!());
+        assert!(head.body.is_empty());
+        assert_eq!(transport.download_video(&url, 5), Ok(b"video".to_vec()));
+        assert!(server.join().is_ok());
+    }
 
     struct FakeTransport {
         responses: RefCell<Vec<Result<PreviewResponse, PreviewFailure>>>,

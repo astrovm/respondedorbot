@@ -1977,12 +1977,25 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use bot_adapters::billing_read::{BillingRepository, ChargeHistoryRow};
+    use bot_adapters::chat_config::ChatConfigRepository;
+    use bot_adapters::coinmarketcap::{
+        BitcoinPriceRequest, CoinMarketCapTransport, HttpResponse as CoinMarketCapHttpResponse,
+        TransportFailureKind as CoinMarketCapFailure,
+    };
     use bot_adapters::criptoya::{
         CriptoYaRequest, CriptoYaTransport, HttpResponse as CriptoYaHttpResponse,
         TransportFailureKind as CriptoYaFailure,
     };
     use bot_adapters::finviz::{
         FinvizTransport, HttpResponse as FinvizHttpResponse, TransportFailureKind as FinvizFailure,
+    };
+    use bot_adapters::giphy::{
+        GiphyTransport, HttpResponse as GiphyHttpResponse, SearchRequest,
+        TransportFailureKind as GiphyFailure,
+    };
+    use bot_adapters::giphy_pool::GiphyPoolCache;
+    use bot_adapters::link_preview::{
+        LinkPreviewTransport, PreviewFailure, PreviewRequest, PreviewResponse,
     };
     use bot_adapters::polymarket::{
         HttpResponse as PolymarketHttpResponse, MidpointsRequest, PolymarketTransport,
@@ -2003,6 +2016,8 @@ mod tests {
         HttpResponse as YahooHttpResponse, TransportFailureKind as YahooFailure, YahooChartRequest,
         YahooFinanceTransport, YahooSearchRequest,
     };
+    use bot_core::greeting_commands::GreetingCategory;
+    use bot_core::locale::Locale;
     use bot_core::telegram_actions::{LabeledPrice, SendMessage, TelegramAction};
     use bot_core::telegram_input::ChatId;
     use bot_core::telegram_payments::StarPaymentRecord;
@@ -2032,7 +2047,20 @@ mod tests {
         TelegramGroupAuthorizer, TelegramUpdateSource, YahooOilPriceSource, YahooStockPriceSource,
         build_native_runtime, publish_telegram_commands,
     };
+    use crate::ai_dispatch::AiConversationInput;
+    use crate::conversation::ConversationToolFactory;
     use crate::dispatcher::RuloSource;
+
+    fn integration_redis_endpoint() -> Option<RedisEndpoint> {
+        let port = std::env::var("TEST_REDIS_PORT").ok()?.parse().ok()?;
+        Some(RedisEndpoint {
+            host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+            port,
+            password: std::env::var("TEST_REDIS_PASSWORD")
+                .ok()
+                .filter(|value| !value.is_empty()),
+        })
+    }
 
     struct Transport {
         response: RefCell<Option<Result<HttpResponse, TransportFailureKind>>>,
@@ -2099,6 +2127,69 @@ mod tests {
         events: RefCell<Option<Result<PolymarketHttpResponse, PolymarketFailure>>>,
         midpoints: RefCell<Option<Result<PolymarketHttpResponse, PolymarketFailure>>>,
         requests: RefCell<Vec<MidpointsRequest>>,
+    }
+
+    struct BitcoinTransportStub {
+        response: RefCell<Option<Result<CoinMarketCapHttpResponse, CoinMarketCapFailure>>>,
+    }
+
+    impl CoinMarketCapTransport for BitcoinTransportStub {
+        fn get(
+            &self,
+            _: &BitcoinPriceRequest,
+        ) -> Result<CoinMarketCapHttpResponse, CoinMarketCapFailure> {
+            self.response
+                .borrow_mut()
+                .take()
+                .unwrap_or(Err(CoinMarketCapFailure::Request))
+        }
+    }
+
+    struct GiphyTransportStub;
+
+    impl GiphyTransport for GiphyTransportStub {
+        fn search(&self, request: &SearchRequest) -> Result<GiphyHttpResponse, GiphyFailure> {
+            Ok(GiphyHttpResponse {
+                status_code: 200,
+                body: serde_json::json!({
+                    "data":[{"images":{"original":{"url":format!("https://images.example.test/{}.gif", request.term)}}}]
+                })
+                .to_string(),
+            })
+        }
+    }
+
+    struct LinkPreviewTransportStub;
+
+    impl LinkPreviewTransport for LinkPreviewTransportStub {
+        fn request(&self, request: &PreviewRequest) -> Result<PreviewResponse, PreviewFailure> {
+            if request.url.contains("cdn.example.test") {
+                return Ok(PreviewResponse {
+                    status_code: 200,
+                    final_url: request.url.clone(),
+                    content_type: "video/mp4".to_owned(),
+                    content_length: Some(25_000_000),
+                    location: None,
+                    body: String::new(),
+                });
+            }
+            Ok(PreviewResponse {
+                status_code: 200,
+                final_url: request.url.clone(),
+                content_type: "text/html".to_owned(),
+                content_length: None,
+                location: None,
+                body: format!(
+                    "<meta property='og:title' content='{}'><meta property='og:description' content='{}'><meta property='og:video' content='https://cdn.example.test/video.mp4'>",
+                    "title ".repeat(40),
+                    "description ".repeat(40)
+                ),
+            })
+        }
+
+        fn download_video(&self, _: &str, _: u64) -> Result<Vec<u8>, PreviewFailure> {
+            Ok(vec![1, 2, 3])
+        }
     }
 
     impl PolymarketTransport for PolymarketTransportStub {
@@ -2169,6 +2260,18 @@ mod tests {
     }
 
     impl StockPoolCache for WeatherCacheStub {
+        type Error = std::convert::Infallible;
+
+        fn get(&mut self, _key: &str) -> Result<Option<String>, Self::Error> {
+            Ok(None)
+        }
+
+        fn set(&mut self, _key: &str, _value: &str, _ttl_seconds: i64) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    impl GiphyPoolCache for WeatherCacheStub {
         type Error = std::convert::Infallible;
 
         fn get(&mut self, _key: &str) -> Result<Option<String>, Self::Error> {
@@ -2966,6 +3069,388 @@ mod tests {
             telegram_delivery: TelegramDeliveryCoordinator::default(),
         });
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn production_dispatcher_composes_every_optional_feature_with_real_local_stores() {
+        let Some(endpoint) = integration_redis_endpoint() else {
+            return;
+        };
+        let Some(database_url) = std::env::var("TEST_DATABASE_URL").ok() else {
+            return;
+        };
+        let result = super::build_native_dispatcher(NativeRuntimeOptions {
+            token: "synthetic-token",
+            database_url: &database_url,
+            bot_name: "@synthetic_bot",
+            instance_name: Some("synthetic-instance".to_owned()),
+            redis_endpoint: &endpoint,
+            long_poll_timeout: Duration::from_secs(30),
+            admin_user_id: Some(99),
+            coinmarketcap_key: Some("synthetic-market-key".to_owned()),
+            giphy_api_key: Some("synthetic-image-key".to_owned()),
+            openrouter_api_key: Some("synthetic-ai-key".to_owned()),
+            openrouter_base_url: Some("https://provider.example.test/v1".to_owned()),
+            groq_free_api_key: Some("synthetic-audio-free-key".to_owned()),
+            groq_api_key: Some("synthetic-audio-paid-key".to_owned()),
+            firecrawl_api_key: Some("synthetic-search-key".to_owned()),
+            system_prompt: Some("synthetic system prompt".to_owned()),
+            trigger_words: Some(vec!["synthetic".to_owned()]),
+            active_operations: ActiveOperationRegistry::default(),
+            telegram_delivery: TelegramDeliveryCoordinator::default(),
+        });
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn production_tool_factory_exposes_all_configured_tools_with_local_stores() {
+        let Some(endpoint) = integration_redis_endpoint() else {
+            return;
+        };
+        let Some(database_url) = std::env::var("TEST_DATABASE_URL").ok() else {
+            return;
+        };
+        let mut factory = super::ProductionToolFactory::new(
+            &endpoint,
+            &database_url,
+            Some("synthetic-market-key".to_owned()),
+            Some("synthetic-search-key".to_owned()),
+        );
+        let input = AiConversationInput {
+            chat_id: ChatId(-42),
+            message_id: MessageId(7),
+            chat_type: "supergroup".to_owned(),
+            chat_title: "Synthetic chat".to_owned(),
+            sender_id: UserId(9),
+            sender_first_name: "Synthetic".to_owned(),
+            sender_username: "synthetic_user".to_owned(),
+            message_text: "synthetic question".to_owned(),
+            command: String::new(),
+            reply_to_message_id: None,
+            reply_context: None,
+            has_reply: false,
+            visual_media_kind: None,
+            audio_media_kind: None,
+            photo_file_id: None,
+            audio_file_id: None,
+            audio_duration_seconds: None,
+            locale: Locale::En,
+            timezone_offset_hours: i64::from(i32::MAX) + 1,
+            creditless_user_hourly_limit: 10,
+            timestamp: 1_700_000_000,
+            spontaneous: false,
+        };
+        assert!(factory.create(&input).is_ok());
+
+        let mut minimal = super::ProductionToolFactory::new(&endpoint, &database_url, None, None);
+        assert!(minimal.create(&input).is_ok());
+    }
+
+    #[test]
+    fn link_replacement_includes_bounded_preview_context_and_large_video() {
+        let mut source = super::NativeLinkReplacementSource {
+            transport: LinkPreviewTransportStub,
+        };
+        let load = crate::dispatcher::LinkReplacementSource::load(
+            &mut source,
+            "see https://www.instagram.com/p/synthetic/",
+            1_700_000_000,
+        );
+        assert!(load.replacement.changed);
+        assert!(load.replacement.text.contains("eeinstagram"));
+        assert!(load.context.as_deref().is_some_and(|context| {
+            context.contains("LINKS DEL MENSAJE:")
+                && context.contains("titulo:")
+                && context.contains("descripcion:")
+        }));
+        assert_eq!(load.oversized_video, Some(vec![1, 2, 3]));
+        assert!(load.diagnostics.is_empty());
+        assert_eq!(super::bounded_link_text(Some("   "), 10), None);
+        assert_eq!(super::bounded_link_text(None, 10), None);
+    }
+
+    #[test]
+    fn provider_source_wrappers_preserve_success_missing_and_failure_semantics() {
+        use crate::dispatcher::{BitcoinPriceSource, DollarQuotesSource, GreetingPoolSource};
+
+        for (response, expected) in [
+            (
+                Ok(CoinMarketCapHttpResponse {
+                    status_code: 200,
+                    body: serde_json::json!({"data":[{"quote":{"USD":{"price":42.5}}}]})
+                        .to_string(),
+                }),
+                Ok(Some(42.5)),
+            ),
+            (
+                Ok(CoinMarketCapHttpResponse {
+                    status_code: 404,
+                    body: String::new(),
+                }),
+                Err("CoinMarketCap returned HTTP 404".to_owned()),
+            ),
+            (
+                Err(CoinMarketCapFailure::Timeout),
+                Err("CoinMarketCap transport failed: Timeout".to_owned()),
+            ),
+        ] {
+            let mut source = super::CoinMarketCapBitcoinPriceSource {
+                transport: BitcoinTransportStub {
+                    response: RefCell::new(Some(response)),
+                },
+                api_key: "synthetic-key".to_owned(),
+            };
+            assert_eq!(source.price("USD"), expected);
+        }
+
+        let mut dollar = super::CriptoYaDollarQuotesSource {
+            transport: CriptoTransport {
+                results: RefCell::new(vec![Ok(CriptoYaHttpResponse {
+                    status_code: 200,
+                    body: serde_json::json!({
+                        "oficial":{"price":100},
+                        "tarjeta":{"price":150},
+                        "cripto":{"usdt":{"ask":200,"bid":190}}
+                    })
+                    .to_string(),
+                })]),
+                requests: RefCell::new(Vec::new()),
+            },
+        };
+        assert!(dollar.devo_quotes().is_ok_and(|quotes| quotes.is_some()));
+
+        let mut greetings = super::GiphyGreetingPoolSource {
+            transport: GiphyTransportStub,
+            cache: WeatherCacheStub,
+            api_key: Some("synthetic-key".to_owned()),
+        };
+        let load = greetings.pool(GreetingCategory::Morning);
+        assert!(!load.urls.is_empty());
+        assert!(load.diagnostics.is_empty());
+
+        for (response, expected) in [
+            (
+                Ok(CoinMarketCapHttpResponse {
+                    status_code: 200,
+                    body: serde_json::json!({"data":[]}).to_string(),
+                }),
+                Ok(None),
+            ),
+            (
+                Ok(CoinMarketCapHttpResponse {
+                    status_code: 200,
+                    body: "not-json".to_owned(),
+                }),
+                Err("CoinMarketCap returned invalid JSON".to_owned()),
+            ),
+        ] {
+            let mut source = super::CoinMarketCapBitcoinPriceSource {
+                transport: BitcoinTransportStub {
+                    response: RefCell::new(Some(response)),
+                },
+                api_key: "synthetic-key".to_owned(),
+            };
+            assert_eq!(source.price("USD"), expected);
+        }
+
+        for (result, expected) in [
+            (
+                Ok(CriptoYaHttpResponse {
+                    status_code: 200,
+                    body: serde_json::json!({
+                        "oficial":{"price":"NaN"},
+                        "tarjeta":{"price":150},
+                        "cripto":{"usdt":{"ask":200,"bid":190}}
+                    })
+                    .to_string(),
+                }),
+                Ok(None),
+            ),
+            (
+                Ok(CriptoYaHttpResponse {
+                    status_code: 503,
+                    body: String::new(),
+                }),
+                Err("CriptoYa returned HTTP 503".to_owned()),
+            ),
+            (
+                Ok(CriptoYaHttpResponse {
+                    status_code: 200,
+                    body: "not-json".to_owned(),
+                }),
+                Err("CriptoYa returned invalid JSON".to_owned()),
+            ),
+            (
+                Err(CriptoYaFailure::Timeout),
+                Err("CriptoYa transport failed: Timeout".to_owned()),
+            ),
+        ] {
+            let mut source = super::CriptoYaDollarQuotesSource {
+                transport: CriptoTransport {
+                    results: RefCell::new(vec![result]),
+                    requests: RefCell::new(Vec::new()),
+                },
+            };
+            assert_eq!(source.devo_quotes(), expected);
+        }
+
+        let exchange = |body: &str| {
+            Ok(CriptoYaHttpResponse {
+                status_code: 200,
+                body: body.to_owned(),
+            })
+        };
+        let mut rulo = CriptoYaRuloSource {
+            transport: CriptoTransport {
+                results: RefCell::new(vec![
+                    exchange(r#"{"oficial":{"price":100},"blue":{"bid":110}}"#),
+                    exchange(r#"{"synthetic_exchange":{"totalAsk":1.1}}"#),
+                    exchange(r#"{"synthetic_exchange":{"totalBid":120}}"#),
+                ]),
+                requests: RefCell::new(Vec::new()),
+            },
+        };
+        let input = rulo.rulo_input().unwrap_or_else(|_| unreachable!());
+        assert_eq!(input.input.official, Some(100.0));
+        assert_eq!(input.input.usd_to_usdt.len(), 1);
+        assert_eq!(input.input.usdt_to_ars.len(), 1);
+        assert!(input.diagnostics.is_empty());
+
+        for (result, expected) in [
+            (
+                Ok(CriptoYaHttpResponse {
+                    status_code: 200,
+                    body: "not-json".to_owned(),
+                }),
+                "CriptoYa dollar market returned invalid JSON",
+            ),
+            (
+                Ok(CriptoYaHttpResponse {
+                    status_code: 429,
+                    body: String::new(),
+                }),
+                "CriptoYa dollar market returned HTTP 429",
+            ),
+            (
+                Err(CriptoYaFailure::Connection),
+                "CriptoYa dollar market transport failed: Connection",
+            ),
+        ] {
+            let mut source = CriptoYaRuloSource {
+                transport: CriptoTransport {
+                    results: RefCell::new(vec![result]),
+                    requests: RefCell::new(Vec::new()),
+                },
+            };
+            assert_eq!(source.rulo_input(), Err(expected.to_owned()));
+        }
+
+        let mut partial_rulo = CriptoYaRuloSource {
+            transport: CriptoTransport {
+                results: RefCell::new(vec![
+                    exchange("{}"),
+                    Err(CriptoYaFailure::Timeout),
+                    Ok(CriptoYaHttpResponse {
+                        status_code: 503,
+                        body: String::new(),
+                    }),
+                ]),
+                requests: RefCell::new(Vec::new()),
+            },
+        };
+        let input = partial_rulo.rulo_input().unwrap_or_else(|_| unreachable!());
+        assert_eq!(input.diagnostics.len(), 2);
+    }
+
+    #[test]
+    fn postgres_dispatcher_ports_round_trip_balances_payments_history_and_chat_config()
+    -> Result<(), String> {
+        use crate::dispatcher::{
+            AdminCreditLogSource, AdminCreditSink, BillingBalanceSource, BillingTransferSink,
+            ChargeHistorySource, ChatConfigSource, StarPaymentSink,
+        };
+
+        let Some(database_url) = std::env::var("TEST_DATABASE_URL").ok() else {
+            return Ok(());
+        };
+        bot_adapters::billing_schema::BillingSchemaRepository::new(&database_url)
+            .ensure_schema()
+            .map_err(|error| error.to_string())?;
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos();
+        let suffix = i64::try_from(nonce % 100_000_000).map_err(|error| error.to_string())?;
+        let user_id = 7_300_000_000_000_i64 + suffix;
+        let chat_id = -7_400_000_000_000_i64 - suffix;
+        let mut billing = BillingRepository::new(&database_url);
+        assert_eq!(AdminCreditSink::mint(&mut billing, user_id, 100)?, 100);
+        let balances = BillingBalanceSource::load(&mut billing, user_id, Some(chat_id))?;
+        assert!(matches!(balances.user_balance, 100 | 400));
+        assert_eq!(balances.chat_balance, Some(0));
+        let initial_user_balance = balances.user_balance;
+        let transfer = BillingTransferSink::transfer(&mut billing, user_id, chat_id, 25)?;
+        assert!(transfer.transferred);
+        assert_eq!(transfer.user_balance, initial_user_balance - 25);
+        assert_eq!(transfer.chat_balance, 25);
+
+        let payment = StarPaymentRecord {
+            charge_id: format!("synthetic-charge-{nonce}"),
+            user_id,
+            pack_id: "synthetic-pack".to_owned(),
+            xtr_amount: 5,
+            credits_awarded: 50,
+            payload: format!("synthetic:{nonce}"),
+        };
+        let receipt = StarPaymentSink::record(&mut billing, &payment)?;
+        assert!(receipt.inserted);
+        assert_eq!(receipt.user_balance, initial_user_balance + 25);
+        let replay = StarPaymentSink::record(&mut billing, &payment)?;
+        assert!(!replay.inserted);
+        assert_eq!(replay.user_balance, initial_user_balance + 25);
+
+        let operation_id = format!("synthetic-history-{nonce}");
+        let metadata = serde_json::Map::from_iter([
+            ("operation_id".to_owned(), serde_json::json!(&operation_id)),
+            ("credit_scale".to_owned(), serde_json::json!(100)),
+        ]);
+        let reserve = billing
+            .charge_ai_credits(
+                user_id,
+                None,
+                10,
+                "ai_reserve",
+                &metadata,
+                Some("user"),
+                Some(&operation_id),
+                &operation_id,
+            )
+            .map_err(|error| error.to_string())?;
+        assert!(reserve.ok);
+        billing
+            .settle_ai_operation_once(user_id, None, &operation_id, 2, &metadata)
+            .map_err(|error| error.to_string())?;
+
+        let history = ChargeHistorySource::load(&mut billing, user_id, 10, None, "older")?;
+        assert!(!history.groups.is_empty());
+        assert!(!AdminCreditLogSource::load(&mut billing, 10)?.is_empty());
+
+        let mut configs = ChatConfigRepository::new(&database_url);
+        let previous = ChatConfigSource::get(&mut configs, &chat_id.to_string())
+            .map_err(|error| error.to_string())?;
+        let mut changed = previous.clone();
+        changed.language = "en".to_owned();
+        let stored =
+            ChatConfigSource::set_changed(&mut configs, &chat_id.to_string(), &previous, &changed)
+                .map_err(|error| error.to_string())?;
+        assert_eq!(stored.language, "en");
+        assert_eq!(
+            ChatConfigSource::get(&mut configs, &chat_id.to_string())
+                .map_err(|error| error.to_string())?
+                .language,
+            "en"
+        );
+        Ok(())
     }
 
     #[test]

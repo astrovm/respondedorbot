@@ -6,6 +6,7 @@ pub mod background;
 pub mod chat_members_tool;
 pub mod chat_provider;
 pub mod chat_tool_loop;
+pub mod cli;
 pub mod compaction_adapters;
 pub mod compaction_scheduler;
 pub mod compaction_worker;
