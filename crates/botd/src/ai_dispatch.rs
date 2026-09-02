@@ -244,14 +244,13 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unit_arg)]
     fn optional_source_operations_have_safe_defaults() {
         let mut source = MinimalSource { prepared: 0 };
+        assert_eq!(source.reply_metadata("1", "2"), Ok(None));
         let mut tokens = Vec::new();
         let prepared = source
-            .prepare_streaming(input(), &mut |token| {
-                tokens.push(token.to_owned());
-                Ok(())
-            })
+            .prepare_streaming(input(), &mut |token| Ok(tokens.push(token.to_owned())))
             .unwrap_or_else(|_| unreachable!());
         assert_eq!(prepared, AiPreparation::reply("synthetic reply", None));
         assert_eq!(source.prepared, 1);
@@ -269,5 +268,20 @@ mod tests {
             None
         );
         assert!(source.record_ignored(input()).is_ok());
+        assert!(
+            source
+                .complete_delivery(AiDelivery {
+                    completion_id: "synthetic-completion".to_owned(),
+                    delivered: true,
+                    sent_message_id: Some(MessageId(3)),
+                })
+                .is_ok()
+        );
+        assert_eq!(
+            AiPreparation::silent(),
+            AiPreparation::Silent {
+                diagnostics: Vec::new()
+            }
+        );
     }
 }

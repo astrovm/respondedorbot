@@ -130,22 +130,34 @@ pub trait TelegramFileTransport {
 
 pub struct ReqwestTelegramTransport {
     client: Client,
+    api_base: String,
 }
 
 impl ReqwestTelegramTransport {
     pub fn new() -> Result<Self, TransportFailureKind> {
         Client::builder()
             .build()
-            .map(|client| Self { client })
+            .map(|client| Self {
+                client,
+                api_base: TELEGRAM_API_BASE.to_owned(),
+            })
             .map_err(|_| TransportFailureKind::Request)
+    }
+
+    #[cfg(test)]
+    fn with_api_base(api_base: &str) -> Result<Self, TransportFailureKind> {
+        Self::new().map(|mut transport| {
+            transport.api_base = api_base.trim_end_matches('/').to_owned();
+            transport
+        })
     }
 }
 
 impl TelegramTransport for ReqwestTelegramTransport {
     fn send(&self, request: &TelegramRequest) -> Result<HttpResponse, TransportFailureKind> {
         let url = format!(
-            "{TELEGRAM_API_BASE}/bot{}/{}",
-            request.token, request.endpoint
+            "{}/bot{}/{}",
+            self.api_base, request.token, request.endpoint
         );
         let mut builder = self
             .client
@@ -174,8 +186,8 @@ impl TelegramMultipartTransport for ReqwestTelegramTransport {
         request: &TelegramMultipartRequest,
     ) -> Result<HttpResponse, TransportFailureKind> {
         let url = format!(
-            "{TELEGRAM_API_BASE}/bot{}/{}",
-            request.token, request.endpoint
+            "{}/bot{}/{}",
+            self.api_base, request.token, request.endpoint
         );
         let mut form = Form::new();
         for (name, value) in &request.fields {
@@ -205,8 +217,8 @@ impl TelegramFileTransport for ReqwestTelegramTransport {
         request: &TelegramFileRequest,
     ) -> Result<BinaryHttpResponse, TransportFailureKind> {
         let url = format!(
-            "{TELEGRAM_API_BASE}/file/bot{}/{}",
-            request.token, request.file_path
+            "{}/file/bot{}/{}",
+            self.api_base, request.token, request.file_path
         );
         let response = self
             .client
@@ -405,17 +417,21 @@ pub fn download_file(
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::thread;
     use std::time::Duration;
 
     use reqwest::Method;
     use serde_json::json;
 
     use super::{
-        BinaryHttpResponse, HttpResponse, MultipartUpload, TELEGRAM_FILE_MAX_BYTES,
-        TelegramFileOutcome, TelegramFileRequest, TelegramFileTransport, TelegramHttpError,
-        TelegramHttpOutcome, TelegramMultipartRequest, TelegramMultipartTransport, TelegramRequest,
-        TelegramTransport, TransportFailureKind, download_file_with, multipart_request_with,
-        read_limited, request_with, response_outcome,
+        BinaryHttpResponse, HttpResponse, MultipartUpload, ReqwestTelegramTransport,
+        TELEGRAM_FILE_MAX_BYTES, TelegramFileOutcome, TelegramFileRequest, TelegramFileTransport,
+        TelegramHttpError, TelegramHttpOutcome, TelegramMultipartRequest,
+        TelegramMultipartTransport, TelegramRequest, TelegramTransport, TransportFailureKind,
+        download_file_with, multipart_request_with, read_limited, request_with, response_outcome,
     };
 
     struct FakeTransport {
@@ -702,5 +718,104 @@ mod tests {
             Err(TelegramHttpError::InvalidTimeout)
         );
         assert!(invalid.requests.borrow().is_empty());
+    }
+
+    #[test]
+    fn reqwest_transport_covers_json_multipart_and_binary_http_boundaries() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+        let server = thread::spawn(move || {
+            for (expected_line, body) in [
+                (
+                    "POST /bot-token/sendMessage?query=value HTTP/1.1",
+                    b"json".as_slice(),
+                ),
+                (
+                    "POST /bot-token/sendPhoto HTTP/1.1",
+                    b"multipart".as_slice(),
+                ),
+                (
+                    "GET /file/bot-token/photos/file.bin HTTP/1.1",
+                    &[0_u8, 127, 255],
+                ),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+                let mut request = [0_u8; 16_384];
+                let bytes = stream.read(&mut request).unwrap_or_default();
+                let request = String::from_utf8_lossy(&request[..bytes]);
+                assert!(request.starts_with(expected_line), "{request}");
+                if expected_line.contains("sendMessage") {
+                    assert!(request.contains(r#"{"text":"synthetic"}"#));
+                }
+                if expected_line.contains("sendPhoto") {
+                    assert!(request.contains("name=\"chat_id\""));
+                    assert!(request.contains("synthetic-photo"));
+                }
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap_or_else(|_| unreachable!());
+                stream.write_all(body).unwrap_or_else(|_| unreachable!());
+            }
+        });
+        let reqwest_transport =
+            ReqwestTelegramTransport::with_api_base(&format!("http://{address}"))
+                .unwrap_or_else(|_| unreachable!());
+        let response = reqwest_transport
+            .send(&TelegramRequest {
+                token: "-token".to_owned(),
+                endpoint: "sendMessage".to_owned(),
+                method: Method::POST,
+                params: Some(json!({"query":"value"})),
+                json_payload: Some(json!({"text":"synthetic"})),
+                timeout: Duration::from_secs(5),
+            })
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(response.body, "json");
+        let response = TelegramMultipartTransport::send_multipart(
+            &reqwest_transport,
+            &TelegramMultipartRequest {
+                token: "-token".to_owned(),
+                endpoint: "sendPhoto".to_owned(),
+                fields: vec![("chat_id".to_owned(), "42".to_owned())],
+                file_field: "photo".to_owned(),
+                file_name: "synthetic.png".to_owned(),
+                file_bytes: Arc::from(b"synthetic-photo".as_slice()),
+                content_type: "image/png".to_owned(),
+                timeout: Duration::from_secs(5),
+            },
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert_eq!(response.body, "multipart");
+        let response = reqwest_transport
+            .download(&TelegramFileRequest {
+                token: "-token".to_owned(),
+                file_path: "photos/file.bin".to_owned(),
+                timeout: Duration::from_secs(5),
+                max_bytes: 3,
+            })
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(response.body, [0, 127, 255]);
+        assert!(server.join().is_ok());
+
+        let fake = transport(Ok(HttpResponse {
+            status_code: 200,
+            body: String::new(),
+        }));
+        assert_eq!(
+            fake.send_action_multipart(&TelegramMultipartRequest {
+                token: String::new(),
+                endpoint: String::new(),
+                fields: Vec::new(),
+                file_field: String::new(),
+                file_name: String::new(),
+                file_bytes: Arc::from([]),
+                content_type: String::new(),
+                timeout: Duration::from_secs(1),
+            }),
+            Err(TransportFailureKind::Request)
+        );
     }
 }

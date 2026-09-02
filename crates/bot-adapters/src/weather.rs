@@ -47,6 +47,8 @@ pub trait WeatherTransport {
 
 pub struct ReqwestWeatherTransport {
     client: Client,
+    geocoding_url: String,
+    forecast_url: String,
 }
 
 impl ReqwestWeatherTransport {
@@ -55,15 +57,28 @@ impl ReqwestWeatherTransport {
         crate::http_client::shared_client(&CLIENT, || {
             Client::builder().timeout(REQUEST_TIMEOUT).build()
         })
-        .map(|client| Self { client })
+        .map(|client| Self {
+            client,
+            geocoding_url: GEOCODING_URL.to_owned(),
+            forecast_url: FORECAST_URL.to_owned(),
+        })
         .map_err(|_| TransportFailureKind::Request)
+    }
+
+    #[cfg(test)]
+    fn with_urls(geocoding_url: &str, forecast_url: &str) -> Result<Self, TransportFailureKind> {
+        Self::new().map(|mut transport| {
+            transport.geocoding_url = geocoding_url.to_owned();
+            transport.forecast_url = forecast_url.to_owned();
+            transport
+        })
     }
 }
 
 impl WeatherTransport for ReqwestWeatherTransport {
     fn get(&self, request: &WeatherRequest) -> Result<HttpResponse, TransportFailureKind> {
         let builder = match request {
-            WeatherRequest::Geocode { name } => self.client.get(GEOCODING_URL).query(&[
+            WeatherRequest::Geocode { name } => self.client.get(&self.geocoding_url).query(&[
                 ("name", name.as_str()),
                 ("count", "10"),
                 ("language", "es"),
@@ -72,7 +87,7 @@ impl WeatherTransport for ReqwestWeatherTransport {
             WeatherRequest::Forecast {
                 latitude,
                 longitude,
-            } => self.client.get(FORECAST_URL).query(&[
+            } => self.client.get(&self.forecast_url).query(&[
                 ("latitude", latitude.to_string()),
                 ("longitude", longitude.to_string()),
                 ("current", "weather_code".to_owned()),
@@ -398,10 +413,13 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::convert::Infallible;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     use super::{
-        HttpResponse, TransportFailureKind, WeatherRequest, WeatherTransport, compatible_cache_key,
-        load_weather, python_cache_arguments,
+        HttpResponse, ReqwestWeatherTransport, TransportFailureKind, WeatherRequest,
+        WeatherTransport, compatible_cache_key, load_weather, python_cache_arguments,
     };
     use crate::request_cache::RequestCache;
 
@@ -580,5 +598,73 @@ mod tests {
                 .observation
                 .is_none()
         );
+    }
+
+    #[test]
+    fn reqwest_transport_preserves_geocoding_and_forecast_contracts() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+        let server = thread::spawn(move || {
+            for (path, parameters) in [
+                (
+                    "/geocode",
+                    vec![
+                        "name=Synthetic+Place",
+                        "count=10",
+                        "language=es",
+                        "format=json",
+                    ],
+                ),
+                (
+                    "/forecast",
+                    vec![
+                        "latitude=-34.6",
+                        "longitude=-58.4",
+                        "current=weather_code",
+                        "timezone=auto",
+                        "forecast_days=2",
+                    ],
+                ),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+                let mut request = [0_u8; 4_096];
+                let bytes = stream.read(&mut request).unwrap_or_default();
+                let request = String::from_utf8_lossy(&request[..bytes]);
+                assert!(request.starts_with(&format!("GET {path}?")), "{request}");
+                for parameter in parameters {
+                    assert!(request.contains(parameter), "{request}");
+                }
+                let body = r#"{"synthetic":true}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap_or_else(|_| unreachable!());
+            }
+        });
+        let base = format!("http://{address}");
+        let transport = ReqwestWeatherTransport::with_urls(
+            &format!("{base}/geocode"),
+            &format!("{base}/forecast"),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert!(
+            transport
+                .get(&WeatherRequest::Geocode {
+                    name: "Synthetic Place".to_owned(),
+                })
+                .is_ok()
+        );
+        assert!(
+            transport
+                .get(&WeatherRequest::Forecast {
+                    latitude: -34.6,
+                    longitude: -58.4,
+                })
+                .is_ok()
+        );
+        transport.before_retry();
+        assert!(server.join().is_ok());
     }
 }

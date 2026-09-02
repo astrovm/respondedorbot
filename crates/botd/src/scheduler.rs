@@ -605,6 +605,12 @@ mod tests {
         fail_due: bool,
         fail_load: bool,
         fail_complete: bool,
+        fail_owner: bool,
+        fail_remove: bool,
+        fail_save: bool,
+        fail_claim: bool,
+        fail_release_occurrence: bool,
+        fail_release_owner: bool,
     }
 
     impl Default for Store {
@@ -626,6 +632,12 @@ mod tests {
                 fail_due: false,
                 fail_load: false,
                 fail_complete: false,
+                fail_owner: false,
+                fail_remove: false,
+                fail_save: false,
+                fail_claim: false,
+                fail_release_occurrence: false,
+                fail_release_owner: false,
             }
         }
     }
@@ -650,6 +662,9 @@ mod tests {
         }
 
         fn remove_due_task_id(&mut self, task_id: &str) -> Result<bool, Self::Error> {
+            if self.fail_remove {
+                return Err("remove failed");
+            }
             self.stale_removed.push(task_id.to_owned());
             self.due.retain(|candidate| candidate != task_id);
             Ok(true)
@@ -660,11 +675,17 @@ mod tests {
             document: &TaskRecordDocument,
             _ttl_seconds: i64,
         ) -> Result<bool, Self::Error> {
+            if self.fail_save {
+                return Err("save failed");
+            }
             self.saved.push(document.clone());
             Ok(true)
         }
 
         fn acquire_owner(&mut self, _token: &str, _ttl_seconds: i64) -> Result<bool, Self::Error> {
+            if self.fail_owner {
+                return Err("owner failed");
+            }
             self.acquired += 1;
             Ok(self.owner_available)
         }
@@ -675,6 +696,9 @@ mod tests {
         }
 
         fn release_owner(&mut self, _token: &str) -> Result<bool, Self::Error> {
+            if self.fail_release_owner {
+                return Err("owner release failed");
+            }
             self.owner_releases += 1;
             Ok(true)
         }
@@ -686,6 +710,9 @@ mod tests {
             _claim_token: &str,
             _ttl_seconds: i64,
         ) -> Result<bool, Self::Error> {
+            if self.fail_claim {
+                return Err("claim failed");
+            }
             Ok(self.claim_available)
         }
 
@@ -695,6 +722,9 @@ mod tests {
             _execution_id: &str,
             _claim_token: &str,
         ) -> Result<bool, Self::Error> {
+            if self.fail_release_occurrence {
+                return Err("occurrence release failed");
+            }
             self.occurrence_releases += 1;
             Ok(true)
         }
@@ -1032,5 +1062,87 @@ mod tests {
             Ok(SchedulerStep::Observed { failures, .. })
                 if failures.len() == 1 && failures[0].stage == "complete"
         ));
+    }
+
+    #[test]
+    fn reports_each_owner_index_claim_and_release_failure_boundary() {
+        let mut owner = scheduler(
+            Store {
+                fail_owner: true,
+                ..Store::default()
+            },
+            Executor::default(),
+            SchedulerMode::Authoritative,
+        );
+        assert_eq!(
+            owner.step(1_000),
+            Err(SchedulerError::Store("owner failed".to_owned()))
+        );
+
+        let scenarios = [
+            ("missing1", "remove_stale_index", "remove"),
+            ("future1", "repair_due_index", "save"),
+            ("execute1", "claim", "claim"),
+        ];
+        for (task_id, expected_stage, failure) in scenarios {
+            let mut store = Store {
+                due: vec![task_id.to_owned()],
+                fail_remove: failure == "remove",
+                fail_save: failure == "save",
+                fail_claim: failure == "claim",
+                ..Store::default()
+            };
+            if failure != "remove" {
+                let next_run_at = if failure == "save" { 2_000 } else { 1_000 };
+                store.documents.insert(
+                    task_id.to_owned(),
+                    document(task_id, TaskSchedule::Once, next_run_at),
+                );
+            }
+            let mut scheduler = scheduler(store, Executor::default(), SchedulerMode::Authoritative);
+            assert!(matches!(
+                scheduler.step(1_000),
+                Ok(SchedulerStep::Observed { failures, .. })
+                    if failures.len() == 1 && failures[0].stage == expected_stage
+            ));
+        }
+
+        for outcome in [
+            Ok(TaskExecutionDisposition::Retry),
+            Err("synthetic execution failure"),
+        ] {
+            let mut store = Store {
+                due: vec!["release1".to_owned()],
+                fail_release_occurrence: true,
+                ..Store::default()
+            };
+            store.documents.insert(
+                "release1".to_owned(),
+                document("release1", TaskSchedule::Once, 1_000),
+            );
+            let executor = Executor {
+                outcomes: VecDeque::from([outcome]),
+                ..Executor::default()
+            };
+            let mut scheduler = scheduler(store, executor, SchedulerMode::Authoritative);
+            assert!(matches!(
+                scheduler.step(1_000),
+                Ok(SchedulerStep::Observed { failures, .. }) if failures.len() == 1
+            ));
+        }
+
+        let mut release = scheduler(
+            Store {
+                fail_release_owner: true,
+                ..Store::default()
+            },
+            Executor::default(),
+            SchedulerMode::Authoritative,
+        );
+        assert!(release.step(1_000).is_ok());
+        assert_eq!(
+            release.shutdown(),
+            Err(SchedulerError::Store("owner release failed".to_owned()))
+        );
     }
 }

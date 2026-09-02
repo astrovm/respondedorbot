@@ -875,4 +875,50 @@ mod tests {
         assert_eq!(age_seconds("2026-08-31 00:00:00+00", 1_788_134_400), 0);
         assert_eq!(age_seconds("invalid", 1_788_134_400), 0);
     }
+
+    #[test]
+    fn provider_errors_are_reported_through_direct_and_background_runs() {
+        struct FailingGenerations;
+        impl GenerationSource for FailingGenerations {
+            type Error = &'static str;
+
+            fn generation(
+                &mut self,
+                _generation_id: &str,
+            ) -> Result<Option<Map<String, Value>>, Self::Error> {
+                Err("synthetic generation failure")
+            }
+        }
+
+        let make = || {
+            AiBillingReconciler::new(
+                Store {
+                    operations: vec![operation(
+                        "provider-failure",
+                        "2026-08-31T00:00:00Z",
+                        Some(pending_segment()),
+                    )],
+                    ..Store::default()
+                },
+                FailingGenerations,
+                ActiveOperationRegistry::default(),
+                ReconciliationSettings::default(),
+            )
+        };
+        let mut direct = make();
+        assert!(!direct.active_operations().is_active("provider-failure"));
+        let report = direct.run_once(1_788_138_000).unwrap_or_default();
+        assert_eq!(report.pending, 1);
+        assert_eq!(report.failures.len(), 1);
+
+        let mut background = make();
+        assert!(
+            crate::background::BackgroundWorker::run_once(&mut background, 1_788_138_000,).is_err()
+        );
+
+        let active = ActiveOperationRegistry::default();
+        active.mark_active("");
+        active.mark_inactive("");
+        assert!(!active.is_active(""));
+    }
 }

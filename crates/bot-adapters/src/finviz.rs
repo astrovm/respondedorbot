@@ -42,6 +42,7 @@ pub trait FinvizTransport {
 
 pub struct ReqwestFinvizTransport {
     client: Client,
+    screener_url: String,
 }
 
 impl ReqwestFinvizTransport {
@@ -50,8 +51,19 @@ impl ReqwestFinvizTransport {
         crate::http_client::shared_client(&CLIENT, || {
             Client::builder().timeout(Duration::from_secs(10)).build()
         })
-        .map(|client| Self { client })
+        .map(|client| Self {
+            client,
+            screener_url: SCREENER_URL.to_owned(),
+        })
         .map_err(|_| TransportFailureKind::Request)
+    }
+
+    #[cfg(test)]
+    fn with_screener_url(screener_url: &str) -> Result<Self, TransportFailureKind> {
+        Self::new().map(|mut transport| {
+            transport.screener_url = screener_url.to_owned();
+            transport
+        })
     }
 }
 
@@ -59,7 +71,7 @@ impl FinvizTransport for ReqwestFinvizTransport {
     fn fetch(&self) -> Result<HttpResponse, TransportFailureKind> {
         let response = self
             .client
-            .get(SCREENER_URL)
+            .get(&self.screener_url)
             .query(&[("v", "152"), ("f", "cap_mega"), ("o", "-marketcap")])
             .header("User-Agent", USER_AGENT)
             .send()
@@ -133,10 +145,13 @@ pub fn fetch() -> ScreenerOutcome {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     use super::{
-        FinvizTransport, HttpResponse, ScreenerOutcome, TransportFailureKind, fetch_with,
-        parse_symbols,
+        FinvizTransport, HttpResponse, ReqwestFinvizTransport, ScreenerOutcome,
+        TransportFailureKind, fetch_with, parse_symbols,
     };
 
     struct FakeTransport {
@@ -204,5 +219,37 @@ mod tests {
                 kind: TransportFailureKind::Timeout,
             }
         );
+    }
+
+    #[test]
+    fn reqwest_transport_sends_the_mega_cap_screener_contract() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+            let mut request = [0_u8; 2_048];
+            let bytes = stream.read(&mut request).unwrap_or_default();
+            let request = String::from_utf8_lossy(&request[..bytes]);
+            assert!(request.starts_with("GET /screener?v=152&f=cap_mega&o=-marketcap HTTP/1.1"));
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("user-agent: mozilla/5.0")
+            );
+            let body = "synthetic screener";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap_or_else(|_| unreachable!());
+        });
+        let transport =
+            ReqwestFinvizTransport::with_screener_url(&format!("http://{address}/screener"))
+                .unwrap_or_else(|_| unreachable!());
+        let response = transport.fetch().unwrap_or_else(|_| unreachable!());
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.body, "synthetic screener");
+        assert!(server.join().is_ok());
     }
 }

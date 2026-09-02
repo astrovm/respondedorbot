@@ -875,6 +875,25 @@ mod tests {
     }
 
     #[test]
+    fn successful_compaction_runs_through_the_background_boundary() {
+        let provider = Provider {
+            replies: VecDeque::from([Ok(CompactionProviderResult {
+                summary: "background summary".to_owned(),
+                cost_usd_micros: 1,
+                billing_segment: Some(json!({
+                    "kind": "summary",
+                    "source": "openrouter",
+                    "model": "synthetic/model",
+                    "usage": {"cost": "0.000001"}
+                })),
+            })]),
+            calls: 0,
+        };
+        let mut worker = worker(job(), provider, Billing::default());
+        assert!(crate::background::BackgroundWorker::run_once(&mut worker, 100).is_ok());
+    }
+
+    #[test]
     fn deletes_already_settled_jobs_without_repeating_provider_work() {
         let provider = Provider {
             replies: VecDeque::new(),

@@ -683,6 +683,22 @@ mod tests {
             !billing
                 .settle_incompatible("synthetic", &json!({"user_id":user_id,"reservation":{}}),)?
         );
+        assert!(billing.settle_incompatible(
+            &job.chat_id,
+            &json!({
+                "user_id": user_id,
+                "reservation": {
+                    "reserved_credit_units": 10,
+                    "source": "user",
+                    "usage_tag": usage_tag,
+                    "credit_scale": 100,
+                    "metadata": {
+                        "settlement_id": operation_id,
+                        "operation_id": operation_id,
+                    }
+                }
+            }),
+        )?);
         Ok(())
     }
 
