@@ -198,7 +198,7 @@ mod tests {
         assert_eq!(
             parse_response(HttpResponse {
                 status_code: 200,
-                body: r#"{"data":[{"images":{"original":{"url":"https://example.test/a.gif"}}},{"images":{"original":{"url":""}}},{"images":{}}]}"#.to_owned(),
+                body: r#"{"data":[{"images":{"original":{"url":"https://example.test/a.gif"}}},{"images":{"original":{"url":""}}},{"images":{}},{}]}"#.to_owned(),
             }),
             SearchOutcome::Success {
                 urls: vec!["https://example.test/a.gif".to_owned()],
@@ -222,7 +222,14 @@ mod tests {
             }),
             SearchOutcome::InvalidJson
         );
-        for body in [r#"[]"#, r#"{"data":{}}"#, r#"{"data":[{"images":[] }]}"#] {
+        for body in [
+            r#"[]"#,
+            r#"{"data":{}}"#,
+            r#"{"data":[1]}"#,
+            r#"{"data":[{"images":[] }]}"#,
+            r#"{"data":[{"images":{"original":[]}}]}"#,
+            r#"{"data":[{"images":{"original":{"url":1}}}]}"#,
+        ] {
             assert_eq!(
                 parse_response(HttpResponse {
                     status_code: 200,
@@ -291,5 +298,16 @@ mod tests {
         assert_eq!(response.status_code, 200);
         assert_eq!(response.body, r#"{"data":[]}"#);
         assert!(server.join().is_ok());
+        let unavailable = ReqwestGiphyTransport::with_search_url("http://127.0.0.1:1/search")
+            .unwrap_or_else(|_| unreachable!());
+        assert!(
+            unavailable
+                .search(&SearchRequest {
+                    api_key: "synthetic-key".to_owned(),
+                    term: "synthetic term".to_owned(),
+                    offset: 0,
+                })
+                .is_err()
+        );
     }
 }

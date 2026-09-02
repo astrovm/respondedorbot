@@ -228,9 +228,27 @@ mod tests {
 
     #[test]
     fn reply_context_matches_the_legacy_identity_shape() {
+        assert!(
+            AiReplyMetadata {
+                kind: "command".to_owned(),
+                uses_ai: false,
+            }
+            .is_non_ai_command()
+        );
+        assert!(
+            !AiReplyMetadata {
+                kind: "message".to_owned(),
+                uses_ai: false,
+            }
+            .is_non_ai_command()
+        );
         assert_eq!(
             reply_context(Some("Gordo"), Some("testbot"), Some(" earlier answer ")),
             Some("Gordo (testbot): earlier answer".to_owned())
+        );
+        assert_eq!(
+            reply_context(Some("Gordo"), None, Some("answer")),
+            Some("Gordo: answer".to_owned())
         );
         assert_eq!(
             reply_context(None, Some("testbot"), Some("answer")),

@@ -91,8 +91,8 @@ jobs:
           cargo llvm-cov clean --workspace
           cargo llvm-cov --locked --workspace --all-features --no-report -- --test-threads=1
           cargo llvm-cov report -p bot-core --fail-under-lines 95
-          cargo llvm-cov report -p bot-adapters --fail-under-lines 92.5
-          cargo llvm-cov report -p botd --fail-under-lines 92.5
+          cargo llvm-cov report -p bot-adapters --fail-under-lines 95
+          cargo llvm-cov report -p botd --fail-under-lines 95
 
   image:
     runs-on: ubuntu-latest

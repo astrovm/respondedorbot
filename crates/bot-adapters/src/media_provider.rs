@@ -729,8 +729,31 @@ mod tests {
         let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
-            let mut request = [0_u8; 8_192];
-            let _read = stream.read(&mut request).unwrap_or_default();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 8_192];
+                let read = stream.read(&mut chunk).unwrap_or_default();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers.lines().find_map(|line| {
+                    let lower = line.to_ascii_lowercase();
+                    lower
+                        .strip_prefix("content-length:")?
+                        .trim()
+                        .parse::<usize>()
+                        .ok()
+                });
+                if content_length.is_some_and(|length| request.len() >= header_end + 4 + length) {
+                    break;
+                }
+            }
             let body = vec![b'x'; (MAX_RESPONSE_BYTES + 1) as usize];
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",

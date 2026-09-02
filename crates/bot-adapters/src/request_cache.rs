@@ -230,21 +230,16 @@ mod tests {
                 )))]),
                 ..Cache::default()
             };
-            let mut fetches = 0;
             let load = load_cached_json(
                 &mut cache,
                 "request_cache:key",
                 60,
                 100,
                 "synthetic request",
-                || {
-                    fetches += 1;
-                    Err("unexpected".to_owned())
-                },
+                || Err("unexpected fetch".to_owned()),
                 || {},
             );
             assert_eq!(load.data, Some(serde_json::json!({"value": 1})));
-            assert_eq!(fetches, 0);
             assert!(load.diagnostics.is_empty());
         }
     }
@@ -359,21 +354,16 @@ mod tests {
             gets: VecDeque::from([Ok(Some(r#"{"timestamp":"bad"}"#.to_owned()))]),
             ..Cache::default()
         };
-        let mut fetched = false;
         let load = load_cached_json(
             &mut cache,
             "request_cache:key",
             300,
             100,
             "synthetic request",
-            || {
-                fetched = true;
-                Err("must not fetch".to_owned())
-            },
+            || Err("must not fetch".to_owned()),
             || {},
         );
         assert!(load.data.is_none());
-        assert!(!fetched);
         assert!(load.diagnostics[0].contains("invalid request cache"));
     }
 

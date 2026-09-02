@@ -448,4 +448,47 @@ mod tests {
         assert!(load.diagnostics[1].contains("connection failed"));
         assert!(load.diagnostics[2].contains("could not parse"));
     }
+
+    #[test]
+    fn cache_io_and_empty_feed_results_remain_nonfatal() {
+        let transport = Transport {
+            responses: RefCell::new(vec![Ok(HackerNewsResponse {
+                status_code: 200,
+                body: "<rss><channel></channel></rss>".to_owned(),
+            })]),
+            urls: RefCell::new(Vec::new()),
+        };
+        let mut cache = Cache {
+            read_error: Some("synthetic cache read failure".to_owned()),
+            ..Cache::default()
+        };
+        let load = load_hacker_news(&transport, &mut cache, 0);
+        assert!(load.items.is_empty());
+        assert!(load.diagnostics[0].contains("synthetic cache read failure"));
+
+        let transport = Transport {
+            responses: RefCell::new(vec![Ok(HackerNewsResponse {
+                status_code: 200,
+                body: FEED.to_owned(),
+            })]),
+            urls: RefCell::new(Vec::new()),
+        };
+        let mut cache = Cache {
+            write_error: Some("synthetic cache write failure".to_owned()),
+            ..Cache::default()
+        };
+        let load = load_hacker_news(&transport, &mut cache, MAX_ITEMS + 1);
+        assert_eq!(load.items.len(), 2);
+        assert!(
+            load.diagnostics
+                .iter()
+                .any(|item| item.contains("synthetic cache write failure"))
+        );
+
+        assert!(parse_feed("<rss><item><title>&unknown;</title></item></rss>", 1).is_err());
+        assert!(
+            parse_feed("<rss><item><title></title></item></rss>", 1)
+                .is_ok_and(|items| items.is_empty())
+        );
+    }
 }

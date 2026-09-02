@@ -3227,7 +3227,7 @@ where
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use std::convert::Infallible;
     use std::rc::Rc;
 
@@ -3242,7 +3242,7 @@ mod tests {
         PairVolume, SignalQuery, SignalState, TokenAddress, TokenPair, TokenSignal,
     };
     use num_bigint::BigInt;
-    use serde_json::{Map, json};
+    use serde_json::{Map, Value, json};
 
     use crate::ai_dispatch::{
         AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, AiReplyMetadata,
@@ -3304,6 +3304,71 @@ mod tests {
         }
     }
 
+    enum PhotoOutcome {
+        Skipped,
+        Unconfirmed,
+    }
+
+    struct PhotoActions {
+        outcome: PhotoOutcome,
+    }
+
+    impl ActionSink for PhotoActions {
+        type Error = Infallible;
+
+        fn execute(&mut self, _action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
+            Ok(ActionReceipt {
+                message_id: Some(MessageId(700)),
+            })
+        }
+
+        fn try_photo(
+            &mut self,
+            _action: TelegramAction,
+        ) -> Result<Option<ActionReceipt>, Self::Error> {
+            match self.outcome {
+                PhotoOutcome::Skipped => Ok(None),
+                PhotoOutcome::Unconfirmed => Ok(Some(ActionReceipt { message_id: None })),
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum DeliveryOutcome {
+        Confirmed,
+        Unconfirmed,
+        Rejected,
+    }
+
+    struct DeliveryActions {
+        outcome: DeliveryOutcome,
+        actions: Vec<TelegramAction>,
+    }
+
+    impl DeliveryActions {
+        fn new(outcome: DeliveryOutcome) -> Self {
+            Self {
+                outcome,
+                actions: Vec::new(),
+            }
+        }
+    }
+
+    impl ActionSink for DeliveryActions {
+        type Error = &'static str;
+
+        fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
+            self.actions.push(action);
+            match self.outcome {
+                DeliveryOutcome::Confirmed => Ok(ActionReceipt {
+                    message_id: Some(MessageId(700)),
+                }),
+                DeliveryOutcome::Unconfirmed => Ok(ActionReceipt { message_id: None }),
+                DeliveryOutcome::Rejected => Err("synthetic delivery rejection"),
+            }
+        }
+    }
+
     #[derive(Default)]
     struct State {
         incoming: Vec<IncomingCommandWritePlan>,
@@ -3326,6 +3391,7 @@ mod tests {
 
     struct AiSource {
         metadata: Option<AiReplyMetadata>,
+        metadata_error: Option<String>,
         preparation: Option<Result<AiPreparation, String>>,
         media_preparation: Option<Result<AiPreparation, String>>,
         summary_preparation: Option<Result<AiPreparation, String>>,
@@ -3333,6 +3399,8 @@ mod tests {
         prepared: Rc<RefCell<Vec<AiConversationInput>>>,
         ignored: Rc<RefCell<Vec<AiConversationInput>>>,
         deliveries: Rc<RefCell<Vec<AiDelivery>>>,
+        delivery_error: Option<String>,
+        ignored_error: Option<String>,
     }
 
     impl AiConversationSource for AiSource {
@@ -3341,6 +3409,9 @@ mod tests {
             _chat_id: &str,
             _message_id: &str,
         ) -> Result<Option<AiReplyMetadata>, String> {
+            if let Some(error) = self.metadata_error.clone() {
+                return Err(error);
+            }
             Ok(self.metadata.clone())
         }
 
@@ -3393,12 +3464,12 @@ mod tests {
 
         fn record_ignored(&mut self, input: AiConversationInput) -> Result<(), String> {
             self.ignored.borrow_mut().push(input);
-            Ok(())
+            self.ignored_error.clone().map_or(Ok(()), Err)
         }
 
         fn complete_delivery(&mut self, delivery: AiDelivery) -> Result<(), String> {
             self.deliveries.borrow_mut().push(delivery);
-            Ok(())
+            self.delivery_error.clone().map_or(Ok(()), Err)
         }
     }
 
@@ -3415,6 +3486,7 @@ mod tests {
         (
             AiSource {
                 metadata: None,
+                metadata_error: None,
                 preparation: Some(preparation),
                 media_preparation: None,
                 summary_preparation: None,
@@ -3422,6 +3494,8 @@ mod tests {
                 prepared: Rc::clone(&prepared),
                 ignored: Rc::clone(&ignored),
                 deliveries: Rc::clone(&deliveries),
+                delivery_error: None,
+                ignored_error: None,
             },
             (prepared, ignored, deliveries),
         )
@@ -3558,6 +3632,58 @@ mod tests {
         }
     }
 
+    struct SequencedTasks {
+        lists: VecDeque<Result<Vec<ScheduledTask>, String>>,
+    }
+
+    impl ScheduledTaskSource for SequencedTasks {
+        fn list(&mut self, _chat_id: &str) -> Result<Vec<ScheduledTask>, String> {
+            self.lists.pop_front().unwrap_or_else(|| Ok(Vec::new()))
+        }
+
+        fn cancel(&mut self, _task_id: &TaskId, _chat_id: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+    }
+
+    #[derive(Default)]
+    struct EditFailActions(Vec<TelegramAction>);
+
+    impl ActionSink for EditFailActions {
+        type Error = &'static str;
+
+        fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
+            self.0.push(action);
+            Ok(ActionReceipt {
+                message_id: Some(MessageId(700)),
+            })
+        }
+
+        fn try_edit(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
+            self.0.push(action);
+            Err("synthetic edit failure")
+        }
+    }
+
+    #[derive(Default)]
+    struct EditSkipActions(Vec<TelegramAction>);
+
+    impl ActionSink for EditSkipActions {
+        type Error = Infallible;
+
+        fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
+            self.0.push(action);
+            Ok(ActionReceipt {
+                message_id: Some(MessageId(700)),
+            })
+        }
+
+        fn try_edit(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
+            self.0.push(action);
+            Ok(false)
+        }
+    }
+
     fn scheduled_task(owner_user_id: i64) -> Result<ScheduledTask, TaskStateError> {
         Ok(ScheduledTask {
             id: TaskId::new("task0001")?,
@@ -3596,6 +3722,43 @@ mod tests {
             diagnostics: Vec::new(),
             checks: Vec::new(),
         }
+    }
+
+    fn dispatcher() -> NativeDispatcher<Config, Actions, State, Values, Samples, Authorization> {
+        NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+    }
+
+    fn delivery_dispatcher(
+        source: AiSource,
+        outcome: DeliveryOutcome,
+    ) -> NativeDispatcher<Config, DeliveryActions, State, Values, Samples, Authorization> {
+        NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig {
+                    language: "en".to_owned(),
+                    ..ChatConfig::default()
+                }),
+                chat_ids: Vec::new(),
+            },
+            DeliveryActions::new(outcome),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_ai_conversation_source(Box::new(source))
     }
 
     fn update(text: &str, language: Option<&str>) -> IncomingUpdate {
@@ -3953,6 +4116,36 @@ mod tests {
                 .borrow_mut()
                 .push((signal_id.to_owned(), state.clone()));
             Ok(())
+        }
+    }
+
+    struct FallibleSignals {
+        query_load: TokenSignalLoad,
+        token_load: TokenSignalLoad,
+        photo: Result<Vec<u8>, String>,
+        state: Result<Option<SignalState>, String>,
+        save_error: Option<String>,
+    }
+
+    impl TokenSignalSource for FallibleSignals {
+        fn load(&mut self, _query: &SignalQuery) -> TokenSignalLoad {
+            self.query_load.clone()
+        }
+
+        fn load_token(&mut self, _token: &TokenAddress) -> TokenSignalLoad {
+            self.token_load.clone()
+        }
+
+        fn render_photo(&mut self, _signal: &TokenSignal) -> Result<Vec<u8>, String> {
+            self.photo.clone()
+        }
+
+        fn load_state(&mut self, _signal_id: &str) -> Result<Option<SignalState>, String> {
+            self.state.clone()
+        }
+
+        fn save_state(&mut self, _signal_id: &str, _state: &SignalState) -> Result<(), String> {
+            self.save_error.clone().map_or(Ok(()), Err)
         }
     }
 
@@ -4473,6 +4666,191 @@ mod tests {
             dispatcher.state_diagnostics(),
             ["summary command: synthetic summary failure"]
         );
+    }
+
+    #[test]
+    fn media_and_summary_commands_handle_empty_and_silent_preparations() {
+        #[derive(Clone, Copy)]
+        enum CommandCase {
+            MediaNone,
+            MediaSilent,
+            SummaryNone,
+            SummarySilent,
+        }
+
+        for case in [
+            CommandCase::MediaNone,
+            CommandCase::MediaSilent,
+            CommandCase::SummaryNone,
+            CommandCase::SummarySilent,
+        ] {
+            let (mut source, _observations) = ai_source(Ok(AiPreparation::silent()));
+            let command = match case {
+                CommandCase::MediaNone => "/transcribe",
+                CommandCase::MediaSilent => {
+                    source.media_preparation = Some(Ok(AiPreparation::Silent {
+                        diagnostics: vec!["synthetic silent media".to_owned()],
+                    }));
+                    "/transcribe"
+                }
+                CommandCase::SummaryNone => "/summary",
+                CommandCase::SummarySilent => {
+                    source.summary_preparation = Some(Ok(AiPreparation::Silent {
+                        diagnostics: vec!["synthetic silent summary".to_owned()],
+                    }));
+                    "/summary"
+                }
+            };
+            let mut dispatcher = NativeDispatcher::new(
+                Config {
+                    value: Ok(ChatConfig {
+                        language: "en".to_owned(),
+                        ..ChatConfig::default()
+                    }),
+                    chat_ids: Vec::new(),
+                },
+                Actions::default(),
+                State::default(),
+                values(),
+                random(),
+                authorization(),
+                "@mybot",
+            )
+            .with_ai_conversation_source(Box::new(source));
+
+            assert_eq!(
+                dispatcher.dispatch(update(command, Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+            match case {
+                CommandCase::MediaNone | CommandCase::SummaryNone => {
+                    assert_eq!(dispatcher.actions.0.len(), 1);
+                }
+                CommandCase::MediaSilent | CommandCase::SummarySilent => {
+                    assert!(dispatcher.actions.0.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ai_delivery_records_confirmed_unconfirmed_and_rejected_outcomes() {
+        let cases = [
+            (DeliveryOutcome::Confirmed, true, false),
+            (DeliveryOutcome::Unconfirmed, false, false),
+            (DeliveryOutcome::Rejected, false, true),
+        ];
+        for (outcome, delivered, rejected) in cases {
+            let (mut source, (_prepared, _ignored, deliveries)) =
+                ai_source(Ok(AiPreparation::Reply {
+                    text: "synthetic answer".to_owned(),
+                    completion_id: Some("synthetic-completion".to_owned()),
+                    diagnostics: Vec::new(),
+                }));
+            source.delivery_error = Some("synthetic completion failure".to_owned());
+            let mut dispatcher = delivery_dispatcher(source, outcome);
+            let result = dispatcher.dispatch(update("synthetic question", Some("en")));
+            if rejected {
+                assert!(matches!(
+                    result,
+                    Err(DispatchError::Action("synthetic delivery rejection"))
+                ));
+            } else {
+                assert_eq!(result, Ok(DispatchOutcome::Handled));
+            }
+            assert_eq!(deliveries.borrow().len(), 1);
+            assert_eq!(deliveries.borrow()[0].delivered, delivered);
+            assert!(
+                dispatcher
+                    .state_diagnostics()
+                    .iter()
+                    .any(|entry| entry.contains("completion"))
+            );
+            if !delivered && !rejected {
+                assert!(
+                    dispatcher
+                        .state_diagnostics()
+                        .iter()
+                        .any(|entry| entry.contains("no message identifier"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn media_delivery_records_unconfirmed_rejected_and_completion_failures() {
+        for (outcome, rejected) in [
+            (DeliveryOutcome::Unconfirmed, false),
+            (DeliveryOutcome::Rejected, true),
+        ] {
+            let (mut source, (_prepared, _ignored, deliveries)) =
+                ai_source(Ok(AiPreparation::silent()));
+            source.media_preparation = Some(Ok(AiPreparation::Reply {
+                text: "synthetic transcript".to_owned(),
+                completion_id: Some("synthetic-media".to_owned()),
+                diagnostics: Vec::new(),
+            }));
+            source.delivery_error = Some("synthetic media completion failure".to_owned());
+            let mut dispatcher = delivery_dispatcher(source, outcome);
+            let result = dispatcher.dispatch(update("/transcribe", Some("en")));
+            if rejected {
+                assert!(matches!(
+                    result,
+                    Err(DispatchError::Action("synthetic delivery rejection"))
+                ));
+            } else {
+                assert_eq!(result, Ok(DispatchOutcome::Handled));
+            }
+            assert_eq!(deliveries.borrow().len(), 1);
+            assert!(!deliveries.borrow()[0].delivered);
+            assert!(
+                dispatcher
+                    .state_diagnostics()
+                    .iter()
+                    .any(|entry| entry.contains("completion"))
+            );
+        }
+    }
+
+    #[test]
+    fn summary_delivery_records_unconfirmed_rejected_and_completion_failures() {
+        for (outcome, rejected) in [
+            (DeliveryOutcome::Confirmed, false),
+            (DeliveryOutcome::Unconfirmed, false),
+            (DeliveryOutcome::Rejected, true),
+        ] {
+            let (mut source, (_prepared, _ignored, deliveries)) =
+                ai_source(Ok(AiPreparation::silent()));
+            source.summary_preparation = Some(Ok(AiPreparation::Reply {
+                text: "synthetic summary".to_owned(),
+                completion_id: Some("synthetic-summary".to_owned()),
+                diagnostics: Vec::new(),
+            }));
+            source.delivery_error = Some("synthetic summary completion failure".to_owned());
+            let mut dispatcher = delivery_dispatcher(source, outcome);
+            let result = dispatcher.dispatch(update("/summary", Some("en")));
+            if rejected {
+                assert!(matches!(
+                    result,
+                    Err(DispatchError::Action("synthetic delivery rejection"))
+                ));
+            } else {
+                assert_eq!(result, Ok(DispatchOutcome::Handled));
+            }
+            assert_eq!(deliveries.borrow().len(), 1);
+            assert_eq!(
+                deliveries.borrow()[0].delivered,
+                !rejected && matches!(outcome, DeliveryOutcome::Confirmed)
+            );
+            if matches!(outcome, DeliveryOutcome::Confirmed) {
+                assert!(
+                    dispatcher
+                        .state_diagnostics()
+                        .iter()
+                        .any(|entry| entry.contains("summary delivery completion"))
+                );
+            }
+        }
     }
 
     #[test]
@@ -7179,6 +7557,292 @@ mod tests {
     }
 
     #[test]
+    fn token_signal_callbacks_handle_missing_expired_delete_and_unknown_state() {
+        let mut missing = dispatcher();
+        assert_eq!(
+            missing.dispatch(callback_update("sig:ref:abc", "private", Some("en"))),
+            Err(DispatchError::MissingService("token signals"))
+        );
+
+        for state in [Err("synthetic state failure".to_owned()), Ok(None)] {
+            let mut expired = dispatcher().with_token_signal_source(Box::new(FallibleSignals {
+                query_load: TokenSignalLoad {
+                    signal: None,
+                    diagnostics: Vec::new(),
+                },
+                token_load: TokenSignalLoad {
+                    signal: None,
+                    diagnostics: Vec::new(),
+                },
+                photo: Err("unused".to_owned()),
+                state,
+                save_error: None,
+            }));
+            assert_eq!(
+                expired.dispatch(callback_update("sig:ref:abc", "private", Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert!(matches!(
+                expired.actions.0.as_slice(),
+                [TelegramAction::AnswerCallback { text: Some(text), show_alert: true, .. }]
+                    if !text.is_empty()
+            ));
+        }
+
+        let signal = token_signal();
+        let state = SignalState {
+            chat_id: "-42".to_owned(),
+            message_id: 7,
+            source_message_id: 6,
+            requester_id: "88".to_owned(),
+            chain_id: signal.token.chain_id.clone(),
+            network: signal.token.network.clone(),
+            tag: signal.token.tag.clone(),
+            address: signal.token.address.clone(),
+            last_refresh_at: None,
+        };
+        let source = |state: SignalState| FallibleSignals {
+            query_load: TokenSignalLoad {
+                signal: None,
+                diagnostics: Vec::new(),
+            },
+            token_load: TokenSignalLoad {
+                signal: Some(signal.clone()),
+                diagnostics: Vec::new(),
+            },
+            photo: Ok(vec![1]),
+            state: Ok(Some(state)),
+            save_error: None,
+        };
+        let mut deleted = dispatcher().with_token_signal_source(Box::new(source(state.clone())));
+        assert_eq!(
+            deleted.dispatch(callback_update("sig:del:abc", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            deleted.actions.0.as_slice(),
+            [TelegramAction::DeleteMessage { .. }, TelegramAction::AnswerCallback { text: Some(text), show_alert: false, .. }]
+                if !text.is_empty()
+        ));
+
+        let mut unknown = dispatcher().with_token_signal_source(Box::new(source(state)));
+        assert_eq!(
+            unknown.dispatch(callback_update("sig:wat:abc", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            unknown.actions.0.as_slice(),
+            [TelegramAction::AnswerCallback {
+                text: None,
+                show_alert: false,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn token_signal_refresh_reports_no_data_render_and_state_write_failures() {
+        let signal = token_signal();
+        let state = SignalState {
+            chat_id: "-42".to_owned(),
+            message_id: 7,
+            source_message_id: 6,
+            requester_id: "88".to_owned(),
+            chain_id: signal.token.chain_id.clone(),
+            network: signal.token.network.clone(),
+            tag: signal.token.tag.clone(),
+            address: signal.token.address.clone(),
+            last_refresh_at: None,
+        };
+        let source = |token_load: TokenSignalLoad,
+                      photo: Result<Vec<u8>, String>,
+                      save_error: Option<String>| FallibleSignals {
+            query_load: TokenSignalLoad {
+                signal: None,
+                diagnostics: Vec::new(),
+            },
+            token_load,
+            photo,
+            state: Ok(Some(state.clone())),
+            save_error,
+        };
+
+        let mut no_data = dispatcher().with_token_signal_source(Box::new(source(
+            TokenSignalLoad {
+                signal: None,
+                diagnostics: vec!["synthetic refresh diagnostic".to_owned()],
+            },
+            Err("unused".to_owned()),
+            None,
+        )));
+        assert_eq!(
+            no_data.dispatch(callback_update("sig:ref:abc", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            no_data.actions.0.as_slice(),
+            [TelegramAction::AnswerCallback { text: Some(text), show_alert: true, .. }]
+                if !text.is_empty()
+        ));
+
+        let loaded = TokenSignalLoad {
+            signal: Some(signal.clone()),
+            diagnostics: Vec::new(),
+        };
+        let mut render_failed = dispatcher().with_token_signal_source(Box::new(source(
+            loaded.clone(),
+            Err("synthetic render failure".to_owned()),
+            None,
+        )));
+        assert_eq!(
+            render_failed.dispatch(callback_update("sig:ref:abc", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            render_failed.actions.0.as_slice(),
+            [TelegramAction::AnswerCallback { text: Some(text), show_alert: true, .. }]
+                if !text.is_empty()
+        ));
+
+        let mut save_failed = dispatcher().with_token_signal_source(Box::new(source(
+            loaded,
+            Ok(vec![1, 2, 3]),
+            Some("synthetic save failure".to_owned()),
+        )));
+        assert_eq!(
+            save_failed.dispatch(callback_update("sig:ref:abc", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            save_failed
+                .state_diagnostics()
+                .iter()
+                .any(|entry| entry.contains("refresh state write failed"))
+        );
+    }
+
+    #[test]
+    fn token_signal_message_failures_fall_through_without_losing_diagnostics() {
+        let address = "J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump";
+        let (ai, _observations) = ai_source(Ok(AiPreparation::silent()));
+        let mut missing = dispatcher()
+            .with_token_signal_source(Box::new(FallibleSignals {
+                query_load: TokenSignalLoad {
+                    signal: None,
+                    diagnostics: vec!["synthetic query miss".to_owned()],
+                },
+                token_load: TokenSignalLoad {
+                    signal: None,
+                    diagnostics: Vec::new(),
+                },
+                photo: Err("unused".to_owned()),
+                state: Ok(None),
+                save_error: None,
+            }))
+            .with_ai_conversation_source(Box::new(ai));
+        assert_eq!(
+            missing.dispatch(update(address, Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            missing
+                .state_diagnostics()
+                .iter()
+                .any(|entry| entry.contains("synthetic query miss"))
+        );
+
+        let signal = token_signal();
+        let (ai, _observations) = ai_source(Ok(AiPreparation::silent()));
+        let mut render_failed = dispatcher()
+            .with_token_signal_source(Box::new(FallibleSignals {
+                query_load: TokenSignalLoad {
+                    signal: Some(signal.clone()),
+                    diagnostics: Vec::new(),
+                },
+                token_load: TokenSignalLoad {
+                    signal: None,
+                    diagnostics: Vec::new(),
+                },
+                photo: Err("synthetic initial render failure".to_owned()),
+                state: Ok(None),
+                save_error: None,
+            }))
+            .with_ai_conversation_source(Box::new(ai));
+        assert_eq!(
+            render_failed.dispatch(update(address, Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            render_failed
+                .state_diagnostics()
+                .iter()
+                .any(|entry| entry.contains("token signal photo failed"))
+        );
+
+        let mut save_failed = dispatcher().with_token_signal_source(Box::new(FallibleSignals {
+            query_load: TokenSignalLoad {
+                signal: Some(signal),
+                diagnostics: Vec::new(),
+            },
+            token_load: TokenSignalLoad {
+                signal: None,
+                diagnostics: Vec::new(),
+            },
+            photo: Ok(vec![1, 2, 3]),
+            state: Ok(None),
+            save_error: Some("synthetic initial state failure".to_owned()),
+        }));
+        assert_eq!(
+            save_failed.dispatch(update(address, Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            save_failed
+                .state_diagnostics()
+                .iter()
+                .any(|entry| entry.contains("state write failed"))
+        );
+
+        for outcome in [PhotoOutcome::Skipped, PhotoOutcome::Unconfirmed] {
+            let mut delivery_failed = NativeDispatcher::new(
+                Config {
+                    value: Ok(ChatConfig::default()),
+                    chat_ids: Vec::new(),
+                },
+                PhotoActions { outcome },
+                State::default(),
+                values(),
+                random(),
+                authorization(),
+                "@mybot",
+            )
+            .with_token_signal_source(Box::new(FallibleSignals {
+                query_load: TokenSignalLoad {
+                    signal: Some(token_signal()),
+                    diagnostics: Vec::new(),
+                },
+                token_load: TokenSignalLoad {
+                    signal: None,
+                    diagnostics: Vec::new(),
+                },
+                photo: Ok(vec![1]),
+                state: Ok(None),
+                save_error: None,
+            }));
+            assert_eq!(
+                delivery_failed.dispatch(update(address, Some("en"))),
+                Err(DispatchError::MissingService("AI conversation"))
+            );
+            assert!(
+                delivery_failed
+                    .state_diagnostics()
+                    .iter()
+                    .any(|entry| entry.contains("token signal photo delivery"))
+            );
+        }
+    }
+
+    #[test]
     fn task_owner_can_delete_in_group_and_message_is_refreshed() -> Result<(), TaskStateError> {
         let cancellations = Rc::new(RefCell::new(Vec::new()));
         let mut denied_admin = authorization();
@@ -7339,6 +8003,97 @@ mod tests {
             ));
             assert_eq!(!dispatcher.state_diagnostics().is_empty(), has_diagnostic);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn task_callback_handles_missing_tasks_and_post_delete_refresh_failures()
+    -> Result<(), TaskStateError> {
+        let mut missing = dispatcher().with_scheduled_task_source(Box::new(FallibleTasks {
+            list_result: Ok(Vec::new()),
+            cancel_result: Ok(true),
+        }));
+        assert_eq!(
+            missing.dispatch(callback_update("task:del:task0001", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            missing.actions.0.as_slice(),
+            [TelegramAction::AnswerCallback {
+                text: Some(text),
+                show_alert: true,
+                ..
+            }] if text == "that task does not exist"
+        ));
+
+        let mut refresh_failed =
+            dispatcher().with_scheduled_task_source(Box::new(SequencedTasks {
+                lists: VecDeque::from([
+                    Ok(vec![scheduled_task(88)?]),
+                    Err("synthetic refresh failure".to_owned()),
+                ]),
+            }));
+        assert_eq!(
+            refresh_failed.dispatch(callback_update("task:del:task0001", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            refresh_failed
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.contains("synthetic refresh failure"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn task_callback_tolerates_non_numeric_chat_ids_and_edit_rejection()
+    -> Result<(), TaskStateError> {
+        let callback_with_chat = |chat_id: Value| {
+            let mut update = callback_update("task:del:task0001", "private", Some("en"));
+            let IncomingEvent::CallbackQuery(callback) = &mut update.event else {
+                unreachable!();
+            };
+            callback["message"]["chat"]["id"] = chat_id;
+            update
+        };
+
+        let mut invalid_chat = dispatcher().with_scheduled_task_source(Box::new(Tasks {
+            lists: vec![vec![scheduled_task(88)?], Vec::new()],
+            cancellations: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            invalid_chat.dispatch(callback_with_chat(json!("synthetic-chat"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(invalid_chat.actions.0.len(), 1);
+
+        let mut rejected = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            EditFailActions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_scheduled_task_source(Box::new(Tasks {
+            lists: vec![vec![scheduled_task(88)?], Vec::new()],
+            cancellations: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            rejected.dispatch(callback_with_chat(json!(-42))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            rejected
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.contains("scheduled task edit failed"))
+        );
         Ok(())
     }
 
@@ -7515,6 +8270,90 @@ mod tests {
             }) if text == "se trabó leyendo tus gastos"
         ));
         assert!(failed.state_diagnostics()[0].contains("synthetic callback read failure"));
+    }
+
+    #[test]
+    fn charge_history_callback_reports_rejected_and_skipped_edits() {
+        let page = || ChargeHistoryPage {
+            groups: vec![ChargeHistoryGroup {
+                cursor_id: 20,
+                created_at: "2026-08-26T17:00:00+00:00".to_owned(),
+                entries: vec![ChargeHistoryEntry {
+                    id: 20,
+                    event_type: "ai_settlement_result".to_owned(),
+                    metadata: json!({"charged_credit_units_total":4}),
+                }],
+            }],
+            has_newer: false,
+            has_older: false,
+            newer_cursor: Some(20),
+            older_cursor: Some(20),
+        };
+        let config = || Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+
+        let mut rejected = NativeDispatcher::new(
+            config(),
+            EditFailActions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_charge_history_source(Box::new(ChargeHistories {
+            result: Ok(page()),
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            rejected.dispatch(callback_update("chg:88:2:o:29:-180", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            rejected
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.contains("charge history edit failed"))
+        );
+        assert!(matches!(
+            rejected.actions.0.last(),
+            Some(TelegramAction::AnswerCallback {
+                text: Some(text),
+                show_alert: true,
+                ..
+            }) if text == "I could not load your expenses"
+        ));
+
+        let mut skipped = NativeDispatcher::new(
+            config(),
+            EditSkipActions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_charge_history_source(Box::new(ChargeHistories {
+            result: Ok(page()),
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            skipped.dispatch(callback_update("chg:88:2:o:29:-180", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            skipped.actions.0.last(),
+            Some(TelegramAction::AnswerCallback {
+                text: Some(text),
+                show_alert: true,
+                ..
+            }) if text == "I could not update the history"
+        ));
     }
 
     #[test]
@@ -8825,6 +9664,245 @@ mod tests {
                 "incoming command state: synthetic incoming failure",
                 "outgoing command state: synthetic outgoing failure",
             ]
+        );
+
+        let (mut source, _observations) = ai_source(Ok(AiPreparation::silent()));
+        source.media_preparation = Some(Ok(AiPreparation::reply("synthetic media result", None)));
+        source.summary_preparation =
+            Some(Ok(AiPreparation::reply("synthetic summary result", None)));
+        let mut dispatcher = dispatcher.with_ai_conversation_source(Box::new(source));
+        let mut media = update("/transcribe", None);
+        if let IncomingEvent::Message(message) = &mut media.event {
+            message.has_reply = true;
+            message.replied_message_id = Some(MessageId(6));
+            message.audio_media_kind = Some("voice".to_owned());
+            if let Some(content) = message.content.as_mut() {
+                content.audio_file_id = Some("synthetic-audio".to_owned());
+            }
+        }
+        assert_eq!(dispatcher.dispatch(media), Ok(DispatchOutcome::Handled));
+        assert!(dispatcher.state_diagnostics().iter().any(|diagnostic| {
+            diagnostic == "incoming media command state: synthetic incoming failure"
+        }));
+        assert!(dispatcher.state_diagnostics().iter().any(|diagnostic| {
+            diagnostic == "outgoing media command state: synthetic outgoing failure"
+        }));
+        assert_eq!(
+            dispatcher.dispatch(update("/summary", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(dispatcher.state_diagnostics().iter().any(|diagnostic| {
+            diagnostic == "incoming summary command state: synthetic incoming failure"
+        }));
+    }
+
+    #[test]
+    fn ai_routing_reports_metadata_and_ignored_state_failures() {
+        let (mut metadata_source, _observations) = ai_source(Ok(AiPreparation::silent()));
+        metadata_source.metadata_error = Some("synthetic metadata failure".to_owned());
+        let mut metadata_dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_ai_conversation_source(Box::new(metadata_source));
+        let mut reply = update("synthetic follow-up", None);
+        if let IncomingEvent::Message(message) = &mut reply.event {
+            message.has_reply = true;
+            message.replied_message_id = Some(MessageId(6));
+            message.replied_sender_username = Some("mybot".to_owned());
+        }
+        assert_eq!(
+            metadata_dispatcher.dispatch(reply),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            metadata_dispatcher
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| {
+                    diagnostic == "AI reply metadata: synthetic metadata failure"
+                })
+        );
+
+        let (mut ignored_source, _observations) = ai_source(Ok(AiPreparation::silent()));
+        ignored_source.ignored_error = Some("synthetic ignored-state failure".to_owned());
+        let mut ignored_dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_ai_conversation_source(Box::new(ignored_source));
+        let mut ordinary = update("synthetic group message", None);
+        if let IncomingEvent::Message(message) = &mut ordinary.event {
+            message.chat_type = Some("group".to_owned());
+        }
+        assert_eq!(
+            ignored_dispatcher.dispatch(ordinary),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            ignored_dispatcher
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| {
+                    diagnostic == "ignored AI message state: synthetic ignored-state failure"
+                })
+        );
+    }
+
+    #[test]
+    fn public_handler_and_default_random_boundary_are_usable() {
+        let mut samples = Samples {
+            choice_index: usize::MAX,
+            integer: BigInt::from(0_u8),
+        };
+        assert_eq!(samples.unit_interval(), Ok(0.9999));
+
+        let mut native_dispatcher = dispatcher();
+        let mut unsupported = update("synthetic message", None);
+        unsupported.event = IncomingEvent::Unsupported;
+        assert!(crate::runtime::UpdateHandler::handle(&mut native_dispatcher, unsupported).is_ok());
+        assert_eq!(
+            native_dispatcher.last_outcome(),
+            Some(DispatchOutcome::Unsupported)
+        );
+
+        let mut missing_tasks = dispatcher();
+        assert!(matches!(
+            missing_tasks.dispatch(update("/tasks", None)),
+            Err(DispatchError::MissingService("scheduled tasks"))
+        ));
+    }
+
+    #[test]
+    fn ai_streaming_and_localized_failure_boundaries_remain_nonfatal() {
+        for summary in [false, true] {
+            let (mut source, _observations) =
+                ai_source(Ok(AiPreparation::reply("synthetic final response", None)));
+            source.tokens = vec!["synthetic draft response".to_owned()];
+            if summary {
+                source.summary_preparation = source.preparation.take();
+            }
+            let mut dispatcher = NativeDispatcher::new(
+                Config {
+                    value: Ok(ChatConfig::default()),
+                    chat_ids: Vec::new(),
+                },
+                EditFailActions::default(),
+                State::default(),
+                values(),
+                random(),
+                authorization(),
+                "@mybot",
+            )
+            .with_ai_conversation_source(Box::new(source));
+            let input = if summary {
+                update("/summary", None)
+            } else {
+                update("synthetic question", None)
+            };
+            assert_eq!(dispatcher.dispatch(input), Ok(DispatchOutcome::Handled));
+            assert!(dispatcher.state_diagnostics().iter().any(|diagnostic| {
+                diagnostic.contains("Telegram stream ignored")
+                    || diagnostic.contains("Telegram send returned no message")
+            }));
+        }
+
+        let (source, _observations) = ai_source(Err("synthetic provider failure".to_owned()));
+        let mut failed = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_ai_conversation_source(Box::new(source));
+        assert_eq!(
+            failed.dispatch(update("synthetic question", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            failed.actions.0.first(),
+            Some(TelegramAction::SendMessage(message))
+                if message.text == "me quedé reculando y no te pude responder, probá de nuevo"
+        ));
+
+        let (source, _observations) = ai_source(Ok(AiPreparation::silent()));
+        let mut missing_media = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_ai_conversation_source(Box::new(source));
+        let mut media = update("/transcribe", None);
+        if let IncomingEvent::Message(message) = &mut media.event {
+            message.has_reply = true;
+            message.replied_message_id = Some(MessageId(6));
+            message.audio_media_kind = Some("voice".to_owned());
+            if let Some(content) = message.content.as_mut() {
+                content.audio_file_id = Some("synthetic-audio".to_owned());
+            }
+        }
+        assert_eq!(missing_media.dispatch(media), Ok(DispatchOutcome::Handled));
+        assert_eq!(
+            missing_media.dispatch(update("/summary", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+
+        let (source, _observations) = ai_source(Ok(AiPreparation::silent()));
+        let mut random_dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig {
+                    ai_random_replies: true,
+                    ..ChatConfig::default()
+                }),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            Samples {
+                choice_index: 9_999,
+                integer: BigInt::from(0_u8),
+            },
+            authorization(),
+            "@mybot",
+        )
+        .with_ai_conversation_source(Box::new(source));
+        let mut group = update("synthetic group message", None);
+        if let IncomingEvent::Message(message) = &mut group.event {
+            message.chat_type = Some("group".to_owned());
+        }
+        assert_eq!(
+            random_dispatcher.dispatch(group),
+            Ok(DispatchOutcome::Handled)
         );
     }
 }

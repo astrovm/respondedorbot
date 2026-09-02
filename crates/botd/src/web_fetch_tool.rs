@@ -216,6 +216,29 @@ mod tests {
                 .output,
             "tweet sin texto legible"
         );
+
+        let dated = serde_json::json!({
+            "html": "<blockquote><p>Actualización sintética.</p><a>Sep 2, 2026</a></blockquote>"
+        })
+        .to_string();
+        let mut tool = make_tool(vec![Ok(response("application/json", &dated))], Locale::Es);
+        assert_eq!(
+            tool.execute(request("https://x.com/user/status/123"), "call")
+                .output,
+            "Tweet · Sep 2, 2026\nActualización sintética."
+        );
+
+        let mut tool = make_tool(
+            vec![Ok(response(
+                "text/html",
+                "<html><head><title>Ejemplo</title></head><body>Contenido</body></html>",
+            ))],
+            Locale::Es,
+        );
+        assert_eq!(
+            tool.execute(request("https://example.com"), "call").output,
+            "Título: Ejemplo\nContenido"
+        );
     }
 
     #[test]

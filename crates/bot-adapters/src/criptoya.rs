@@ -699,5 +699,8 @@ mod tests {
                 .is_ok()
         );
         assert!(server.join().is_ok());
+        let unavailable = ReqwestCriptoYaTransport::with_api_base("http://127.0.0.1:1/api/")
+            .unwrap_or_else(|_| unreachable!());
+        assert!(unavailable.get(&CriptoYaRequest::Dollar).is_err());
     }
 }

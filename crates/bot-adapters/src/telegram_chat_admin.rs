@@ -164,6 +164,12 @@ mod tests {
         let (failed, _) = lookup(r#"{"ok":false,"description":"synthetic denial"}"#);
         assert_eq!(failed.diagnostic.as_deref(), Some("synthetic denial"));
 
+        let (failed_without_description, _) = lookup(r#"{"ok":false}"#);
+        assert_eq!(
+            failed_without_description.diagnostic.as_deref(),
+            Some("Telegram chat-admin lookup failed (200)")
+        );
+
         let (malformed, _) = lookup("not-json");
         assert!(!malformed.is_admin);
         assert!(malformed.diagnostic.is_some());

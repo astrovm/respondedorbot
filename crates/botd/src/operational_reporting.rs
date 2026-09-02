@@ -272,4 +272,65 @@ mod tests {
         assert!(error.is_err());
         assert!(error.err().is_some_and(|error| error.contains("forbidden")));
     }
+
+    #[test]
+    fn localizes_every_telegram_reporting_failure() {
+        let cases = [
+            (
+                Locale::Es,
+                r#"{"ok":false,"error_code":429,"description":"slow","parameters":{"retry_after":3}}"#,
+                "limitado",
+            ),
+            (
+                Locale::En,
+                r#"{"ok":false,"error_code":429,"description":"slow","parameters":{"retry_after":3}}"#,
+                "rate limited",
+            ),
+            (
+                Locale::Es,
+                r#"{"ok":false,"error_code":403,"description":"forbidden"}"#,
+                "falló",
+            ),
+            (
+                Locale::En,
+                r#"{"ok":false,"error_code":403,"description":"forbidden"}"#,
+                "failed",
+            ),
+        ];
+        for (locale, body, expected) in cases {
+            let reporter = TelegramOperationalReporter::new(
+                transport(body),
+                "synthetic-token",
+                42,
+                None,
+                [],
+                locale,
+            );
+            let error = reporter
+                .report(&OperationalReport::new(
+                    "fallo sintético",
+                    "synthetic failure",
+                ))
+                .err();
+            assert!(error.is_some_and(|error| error.contains(expected)));
+        }
+
+        for (locale, expected) in [(Locale::Es, "transporte"), (Locale::En, "transport")] {
+            let reporter = TelegramOperationalReporter::new(
+                Transport::default(),
+                "synthetic-token",
+                42,
+                None,
+                [],
+                locale,
+            );
+            let error = reporter
+                .report(&OperationalReport::new(
+                    "fallo sintético",
+                    "synthetic failure",
+                ))
+                .err();
+            assert!(error.is_some_and(|error| error.contains(expected)));
+        }
+    }
 }
