@@ -261,6 +261,7 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::rc::Rc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     use bot_adapters::telegram_http::TransportFailureKind;
@@ -270,8 +271,13 @@ mod tests {
     use bot_core::locale::Locale;
     use bot_core::telegram_actions::TelegramAction;
 
-    use super::{publish_commands, retry_delay, run_polling_until};
+    use super::{
+        build_operational_reporter, interruptible_wait, publish_commands, report_best_effort,
+        retry_delay, run_polling_until,
+    };
+    use crate::config::ProductionConfig;
     use crate::dispatcher::{ActionReceipt, ActionSink};
+    use crate::operational_reporting::{OperationalReport, OperationalReporter};
     use crate::runtime::{PollingRuntime, UpdateHandler, UpdateSource};
 
     #[derive(Default)]
@@ -487,5 +493,45 @@ mod tests {
         );
         assert_eq!(*reports.borrow(), [failure.clone(), failure]);
         assert_eq!(waits.get(), 3);
+    }
+
+    #[test]
+    fn operational_reporting_composes_with_and_without_an_admin() {
+        fn config(admin: Option<&str>) -> ProductionConfig {
+            let lookup = |name: &str| match name {
+                "TELEGRAM_TOKEN" => Some("synthetic-telegram-token".to_owned()),
+                "SUPABASE_POSTGRES_URL" => Some(
+                    "postgresql://synthetic:synthetic@db.example.test/database?sslmode=require"
+                        .to_owned(),
+                ),
+                "TELEGRAM_USERNAME" => Some("synthetic_test_bot".to_owned()),
+                "COINMARKETCAP_KEY" => Some("synthetic-market-key".to_owned()),
+                "OPENROUTER_API_KEY" => Some("synthetic-ai-key".to_owned()),
+                "BOT_SYSTEM_PROMPT" => Some("synthetic system prompt".to_owned()),
+                "ADMIN_CHAT_ID" => admin.map(str::to_owned),
+                _ => None,
+            };
+            ProductionConfig::from_lookup_and_prompt(lookup, || Ok(None))
+                .unwrap_or_else(|_| unreachable!())
+        }
+
+        assert!(build_operational_reporter(&config(None)).is_ok());
+        assert!(build_operational_reporter(&config(Some("42"))).is_ok());
+
+        struct FailingReporter;
+        impl OperationalReporter for FailingReporter {
+            fn report(&self, _report: &OperationalReport) -> Result<(), String> {
+                Err("synthetic report failure".to_owned())
+            }
+        }
+        report_best_effort(
+            &FailingReporter,
+            &OperationalReport::new("informe sintético", "synthetic report"),
+        );
+
+        let stopping = AtomicBool::new(true);
+        interruptible_wait(&stopping, Duration::from_secs(1));
+        stopping.store(false, Ordering::Release);
+        interruptible_wait(&stopping, Duration::ZERO);
     }
 }

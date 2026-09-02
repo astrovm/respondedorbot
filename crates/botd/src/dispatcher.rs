@@ -4166,6 +4166,40 @@ mod tests {
     }
 
     #[test]
+    fn optional_native_routes_report_the_exact_missing_service() {
+        let make = || {
+            NativeDispatcher::new(
+                Config {
+                    value: Ok(ChatConfig::default()),
+                    chat_ids: Vec::new(),
+                },
+                Actions::default(),
+                State::default(),
+                values(),
+                random(),
+                authorization(),
+                "@mybot",
+            )
+        };
+
+        assert_eq!(
+            make().dispatch(update("https://x.com/example/status/1", Some("en"))),
+            Err(DispatchError::MissingService("link replacement"))
+        );
+        assert_eq!(
+            make().dispatch(update(
+                "J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump",
+                Some("en"),
+            )),
+            Err(DispatchError::MissingService("token signals"))
+        );
+        assert_eq!(
+            make().dispatch(callback_update("task:del:task0001", "private", Some("en"))),
+            Err(DispatchError::MissingService("scheduled tasks"))
+        );
+    }
+
+    #[test]
     fn private_ai_turn_crosses_the_transaction_seam_and_acknowledges_delivery() {
         let (source, (prepared, ignored, deliveries)) = ai_source(Ok(AiPreparation::Reply {
             text: "native answer".to_owned(),

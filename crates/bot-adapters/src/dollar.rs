@@ -67,6 +67,7 @@ impl DollarCache for RedisJsonCache {
 
 pub struct ReqwestDollarTransport {
     client: Client,
+    dollar_url: String,
 }
 
 impl ReqwestDollarTransport {
@@ -75,14 +76,29 @@ impl ReqwestDollarTransport {
         crate::http_client::shared_client(&CLIENT, || {
             Client::builder().timeout(REQUEST_TIMEOUT).build()
         })
-        .map(|client| Self { client })
+        .map(|client| Self {
+            client,
+            dollar_url: DOLLAR_URL.to_owned(),
+        })
         .map_err(|_| TransportFailureKind::Request)
+    }
+
+    #[cfg(test)]
+    fn with_url(dollar_url: &str) -> Result<Self, TransportFailureKind> {
+        Self::new().map(|mut transport| {
+            transport.dollar_url = dollar_url.to_owned();
+            transport
+        })
     }
 }
 
 impl DollarTransport for ReqwestDollarTransport {
     fn get(&self) -> Result<HttpResponse, TransportFailureKind> {
-        let response = self.client.get(DOLLAR_URL).send().map_err(classify_error)?;
+        let response = self
+            .client
+            .get(&self.dollar_url)
+            .send()
+            .map_err(classify_error)?;
         let status_code = response.status().as_u16();
         response
             .text()
@@ -456,10 +472,13 @@ pub fn load_dollar_market<T: DollarTransport, C: DollarCache>(
 mod tests {
     use std::cell::RefCell;
     use std::collections::{HashMap, VecDeque};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     use super::{
-        DollarCache, DollarTransport, HISTORY_TTL_SECONDS, HttpResponse, TransportFailureKind,
-        hour_key, load_dollar_market, refresh_dollar_snapshot, request_key,
+        DollarCache, DollarTransport, HISTORY_TTL_SECONDS, HttpResponse, ReqwestDollarTransport,
+        TransportFailureKind, hour_key, load_dollar_market, refresh_dollar_snapshot, request_key,
     };
     use crate::request_cache::RequestCache;
     use bot_core::locale::Locale;
@@ -684,5 +703,31 @@ mod tests {
         assert!(diagnostics.is_empty());
         assert_eq!(*transport.calls.borrow(), 0);
         assert!(cache.writes.is_empty());
+    }
+
+    #[test]
+    fn reqwest_transport_reads_the_configured_dollar_endpoint() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+            let mut request = [0_u8; 1_024];
+            let bytes = stream.read(&mut request).unwrap_or_default();
+            assert!(String::from_utf8_lossy(&request[..bytes]).starts_with("GET /dollar HTTP/1.1"));
+            let body = r#"{"oficial":{"price":100}}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap_or_else(|_| unreachable!());
+        });
+        let transport = ReqwestDollarTransport::with_url(&format!("http://{address}/dollar"))
+            .unwrap_or_else(|_| unreachable!());
+        let response = transport.get().unwrap_or_else(|_| unreachable!());
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.body, r#"{"oficial":{"price":100}}"#);
+        transport.before_retry();
+        assert!(server.join().is_ok());
     }
 }

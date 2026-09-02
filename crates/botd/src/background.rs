@@ -465,8 +465,8 @@ mod tests {
     use bot_core::locale::Locale;
 
     use super::{
-        BackgroundSupervisor, BackgroundWorker, BackgroundWorkerSpec, ProductionBackgroundOptions,
-        build_production_background_specs,
+        BackgroundError, BackgroundSupervisor, BackgroundWorker, BackgroundWorkerSpec,
+        ProductionBackgroundOptions, build_production_background_specs,
     };
     use crate::composition::TelegramDeliveryCoordinator;
     use crate::operational_reporting::{OperationalReport, OperationalReporter};
@@ -609,6 +609,17 @@ mod tests {
     }
 
     #[test]
+    fn spawn_failures_have_a_localized_operational_report() {
+        let failure = BackgroundError::Spawn {
+            name: "synthetic-worker".to_owned(),
+            error: "synthetic spawn failure".to_owned(),
+        };
+        let report = failure.operational_report();
+        assert!(report.for_locale(Locale::Es).contains("no se pudo iniciar"));
+        assert!(report.english().contains("synthetic spawn failure"));
+    }
+
+    #[test]
     fn production_background_composition_does_not_start_or_contact_services() {
         let result = build_production_background_specs(ProductionBackgroundOptions {
             redis_endpoint: &RedisEndpoint {
@@ -632,5 +643,28 @@ mod tests {
         });
         assert!(result.is_ok());
         assert_eq!(result.map(|specs| specs.len()), Ok(7));
+    }
+
+    #[test]
+    fn task_verifier_runs_through_the_background_worker_boundary() -> Result<(), String> {
+        let Some(port) = std::env::var("TEST_REDIS_PORT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+        else {
+            return Ok(());
+        };
+        let endpoint = RedisEndpoint {
+            host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+            port,
+            password: std::env::var("TEST_REDIS_PASSWORD")
+                .ok()
+                .filter(|value| !value.is_empty()),
+        };
+        let mut verifier =
+            crate::task_service::build_task_verifier(&endpoint, "synthetic-background-verifier")
+                .map_err(|error| error.to_string())?;
+        BackgroundWorker::run_once(&mut verifier, 1_700_000_000)?;
+        BackgroundWorker::shutdown(&mut verifier)?;
+        Ok(())
     }
 }

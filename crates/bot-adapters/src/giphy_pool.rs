@@ -141,6 +141,7 @@ mod tests {
     struct Cache {
         gets: VecDeque<Result<Option<String>, &'static str>>,
         sets: Vec<(String, String, i64)>,
+        fail_sets: bool,
     }
 
     impl GiphyPoolCache for Cache {
@@ -151,6 +152,9 @@ mod tests {
         }
 
         fn set(&mut self, key: &str, value: &str, ttl_seconds: i64) -> Result<(), Self::Error> {
+            if self.fail_sets {
+                return Err("synthetic write failure");
+            }
             self.sets
                 .push((key.to_owned(), value.to_owned(), ttl_seconds));
             Ok(())
@@ -273,5 +277,42 @@ mod tests {
         );
         assert!(load.urls.is_empty());
         assert_eq!(load.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn malformed_fresh_pool_and_provider_failures_keep_useful_diagnostics() {
+        let search_transport = transport(vec![
+            Ok(HttpResponse {
+                status_code: 503,
+                body: String::new(),
+            }),
+            Ok(HttpResponse {
+                status_code: 200,
+                body: "not json".to_owned(),
+            }),
+            Ok(HttpResponse {
+                status_code: 200,
+                body: r#"{"data":{}}"#.to_owned(),
+            }),
+            Ok(HttpResponse {
+                status_code: 200,
+                body: r#"{"data":[{"images":{"original":{"url":"https://example.test/result.gif"}}}]}"#
+                    .to_owned(),
+            }),
+        ]);
+        let mut cache = Cache {
+            gets: VecDeque::from([Ok(Some("not json".to_owned()))]),
+            fail_sets: true,
+            ..Cache::default()
+        };
+        let load = load_giphy_pool(
+            &search_transport,
+            &mut cache,
+            Some("synthetic-key"),
+            GreetingCategory::Morning,
+            || 0,
+        );
+        assert_eq!(load.urls, vec!["https://example.test/result.gif"]);
+        assert_eq!(load.diagnostics.len(), 6);
     }
 }

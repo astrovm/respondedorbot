@@ -1976,10 +1976,15 @@ mod tests {
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    use bot_adapters::bcra::{
+        BcraRequest, BcraTransport, HttpResponse as BcraHttpResponse,
+        TransportFailureKind as BcraFailure,
+    };
     use bot_adapters::billing_read::{BillingRepository, ChargeHistoryRow};
     use bot_adapters::chat_config::ChatConfigRepository;
     use bot_adapters::coinmarketcap::{
-        BitcoinPriceRequest, CoinMarketCapTransport, HttpResponse as CoinMarketCapHttpResponse,
+        BitcoinPriceRequest, CoinMarketCapMarketTransport, CoinMarketCapTransport,
+        HttpResponse as CoinMarketCapHttpResponse, MarketRequest, MarketRequestKind,
         TransportFailureKind as CoinMarketCapFailure,
     };
     use bot_adapters::criptoya::{
@@ -2018,6 +2023,7 @@ mod tests {
     };
     use bot_core::greeting_commands::GreetingCategory;
     use bot_core::locale::Locale;
+    use bot_core::market_prices::CryptoMarketProvider;
     use bot_core::telegram_actions::{LabeledPrice, SendMessage, TelegramAction};
     use bot_core::telegram_input::ChatId;
     use bot_core::telegram_payments::StarPaymentRecord;
@@ -2031,9 +2037,9 @@ mod tests {
     use num_bigint::BigInt;
 
     use crate::dispatcher::{
-        ActionReceipt, ActionSink, BillingTransferSink, ElectionSource, GroupAuthorizer,
-        MessageStateSink, OilPriceSource, RandomSource, RuntimeValues, StarPaymentSink,
-        StockPriceSource, WeatherSource,
+        ActionReceipt, ActionSink, BcraSource, BillingTransferSink, ElectionSource,
+        GroupAuthorizer, MarketPriceSource, MessageStateSink, OilPriceSource, RandomSource,
+        RuntimeValues, ScheduledTaskSource, StarPaymentSink, StockPriceSource, WeatherSource,
     };
     use crate::reconciliation::ActiveOperationRegistry;
     use crate::runtime::UpdateSource;
@@ -2131,6 +2137,32 @@ mod tests {
 
     struct BitcoinTransportStub {
         response: RefCell<Option<Result<CoinMarketCapHttpResponse, CoinMarketCapFailure>>>,
+    }
+
+    struct BcraTransportStub;
+
+    impl BcraTransport for BcraTransportStub {
+        fn get(&self, _request: &BcraRequest) -> Result<BcraHttpResponse, BcraFailure> {
+            Err(BcraFailure::Timeout)
+        }
+    }
+
+    struct MarketTransportStub {
+        responses: RefCell<Vec<Result<CoinMarketCapHttpResponse, CoinMarketCapFailure>>>,
+        requests: RefCell<Vec<MarketRequest>>,
+    }
+
+    impl CoinMarketCapMarketTransport for MarketTransportStub {
+        fn get_market(
+            &self,
+            request: &MarketRequest,
+        ) -> Result<CoinMarketCapHttpResponse, CoinMarketCapFailure> {
+            self.requests.borrow_mut().push(request.clone());
+            if self.responses.borrow().is_empty() {
+                return Err(CoinMarketCapFailure::Request);
+            }
+            self.responses.borrow_mut().remove(0)
+        }
     }
 
     impl CoinMarketCapTransport for BitcoinTransportStub {
@@ -2752,7 +2784,26 @@ mod tests {
             .map_or(0, |duration| duration.as_secs());
         assert!(actual >= before as i64);
         assert!(actual <= after as i64);
+        assert!((before as i64..=after as i64).contains(&super::current_unix_timestamp()));
         assert_eq!(values.instance_name(), Some("synthetic"));
+    }
+
+    #[test]
+    fn telegram_action_chat_identity_excludes_callback_only_actions() {
+        assert_eq!(
+            super::telegram_action_chat_id(&TelegramAction::SendTyping {
+                chat_id: ChatId(42),
+            }),
+            Some(42)
+        );
+        assert_eq!(
+            super::telegram_action_chat_id(&TelegramAction::AnswerCallback {
+                callback_id: "synthetic-callback".to_owned(),
+                text: None,
+                show_alert: false,
+            }),
+            None
+        );
     }
 
     #[test]
@@ -3167,6 +3218,14 @@ mod tests {
         assert!(load.diagnostics.is_empty());
         assert_eq!(super::bounded_link_text(Some("   "), 10), None);
         assert_eq!(super::bounded_link_text(None, 10), None);
+        assert_eq!(
+            super::bounded_link_text(Some("  short   title  "), 20),
+            Some("short title".to_owned())
+        );
+        assert_eq!(
+            super::bounded_link_text(Some("abcdefgh"), 6),
+            Some("abc...".to_owned())
+        );
     }
 
     #[test]
@@ -3360,6 +3419,165 @@ mod tests {
         };
         let input = partial_rulo.rulo_input().unwrap_or_else(|_| unreachable!());
         assert_eq!(input.diagnostics.len(), 2);
+    }
+
+    #[test]
+    fn cached_market_wrapper_forwards_listing_and_quote_requests() {
+        let asset = |container: &str| format!(r#"{{"data":{container}}}"#,);
+        let row = r#"{"id":1,"symbol":"EXM","name":"Synthetic Asset","slug":"synthetic-asset","quote":{"USD":{"price":42,"percent_change_24h":1}}}"#;
+        let transport = MarketTransportStub {
+            responses: RefCell::new(vec![
+                Ok(CoinMarketCapHttpResponse {
+                    status_code: 200,
+                    body: asset(&format!("[{row}]")),
+                }),
+                Ok(CoinMarketCapHttpResponse {
+                    status_code: 200,
+                    body: asset(&format!(r#"{{"EXM":[{row}]}}"#)),
+                }),
+            ]),
+            requests: RefCell::new(Vec::new()),
+        };
+        let mut cache = WeatherCacheStub;
+        let mut source = super::CachedCoinMarketCap {
+            transport: &transport,
+            cache: &mut cache,
+            api_key: "synthetic-key",
+            now_unix: 100,
+            diagnostics: Vec::new(),
+        };
+        assert_eq!(source.listings("USD").map(|assets| assets.len()), Ok(1));
+        assert_eq!(
+            source
+                .quotes(&["EXM".to_owned()], "USD", false)
+                .map(|assets| assets[0].symbol.clone()),
+            Ok("EXM".to_owned())
+        );
+        assert!(source.diagnostics.is_empty());
+        assert!(matches!(
+            transport.requests.borrow()[0].kind,
+            MarketRequestKind::Listings
+        ));
+        assert!(matches!(
+            &transport.requests.borrow()[1].kind,
+            MarketRequestKind::Quotes { identifiers, by_slug: false }
+                if identifiers == &["EXM".to_owned()]
+        ));
+
+        let failing = MarketTransportStub {
+            responses: RefCell::new(vec![
+                Err(CoinMarketCapFailure::Timeout),
+                Err(CoinMarketCapFailure::Connection),
+            ]),
+            requests: RefCell::new(Vec::new()),
+        };
+        let mut cache = WeatherCacheStub;
+        let mut source = super::CachedCoinMarketCap {
+            transport: &failing,
+            cache: &mut cache,
+            api_key: "synthetic-key",
+            now_unix: 100,
+            diagnostics: Vec::new(),
+        };
+        assert_eq!(
+            source.listings("USD"),
+            Err("provider returned no usable market data".to_owned())
+        );
+        assert_eq!(source.diagnostics.len(), 2);
+    }
+
+    #[test]
+    fn native_market_source_combines_provider_output_and_diagnostics() {
+        use bot_core::market_prices::MarketPriceCommand;
+
+        let row = r#"{"id":1,"symbol":"EXM","name":"Synthetic Asset","slug":"synthetic-asset","quote":{"USD":{"price":42,"percent_change_24h":1}}}"#;
+        let transport = MarketTransportStub {
+            responses: RefCell::new(vec![
+                Ok(CoinMarketCapHttpResponse {
+                    status_code: 200,
+                    body: format!(r#"{{"data":[{row}]}}"#),
+                }),
+                Ok(CoinMarketCapHttpResponse {
+                    status_code: 200,
+                    body: format!(r#"{{"data":{{"EXM":[{row}]}}}}"#),
+                }),
+            ]),
+            requests: RefCell::new(Vec::new()),
+        };
+        let stocks = super::YahooStockPriceSource {
+            yahoo_transport: StockYahooTransportStub {
+                chart_responses: RefCell::new(Vec::new()),
+                search_responses: RefCell::new(Vec::new()),
+                charts: RefCell::new(Vec::new()),
+                searches: RefCell::new(Vec::new()),
+            },
+            finviz_transport: FinvizTransportStub {
+                response: RefCell::new(None),
+            },
+            cache: WeatherCacheStub,
+        };
+        let mut source = super::NativeMarketPriceSource {
+            transport,
+            cache: WeatherCacheStub,
+            api_key: "synthetic-key".to_owned(),
+            stocks,
+        };
+        let load = source.load(
+            "EXM",
+            MarketPriceCommand::CryptoOnly,
+            Locale::En,
+            1_700_000_000,
+        );
+        assert!(load.text.contains("EXM"));
+        assert!(load.text.contains("42"));
+        assert!(load.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn native_source_wrappers_preserve_failures_and_redis_task_boundaries() -> Result<(), String> {
+        use bot_adapters::redis_task_store::RedisTaskStore;
+        use bot_core::market_prices::UnifiedStockProvider;
+        use bot_core::scheduled_tasks::TaskId;
+
+        let mut bcra = super::NativeBcraSource {
+            transport: BcraTransportStub,
+            cache: WeatherCacheStub,
+        };
+        let load = bcra.load(Locale::En, 1_700_000_000);
+        assert!(load.text.is_none());
+        assert!(!load.diagnostics.is_empty());
+
+        let mut stock_source = super::YahooStockPriceSource {
+            yahoo_transport: StockYahooTransportStub {
+                chart_responses: RefCell::new(Vec::new()),
+                search_responses: RefCell::new(Vec::new()),
+                charts: RefCell::new(Vec::new()),
+                searches: RefCell::new(Vec::new()),
+            },
+            finviz_transport: FinvizTransportStub {
+                response: RefCell::new(None),
+            },
+            cache: WeatherCacheStub,
+        };
+        let mut stocks = super::UnifiedStocks {
+            source: &mut stock_source,
+            now_unix: 1_700_000_000,
+            diagnostics: Vec::new(),
+        };
+        assert!(stocks.lookup("Synthetic Corporation")?.is_some());
+        assert!(!stocks.diagnostics.is_empty());
+
+        let Some(endpoint) = integration_redis_endpoint() else {
+            return Ok(());
+        };
+        let mut tasks = super::RedisScheduledTaskSource {
+            store: RedisTaskStore::new(&endpoint).map_err(|error| error.to_string())?,
+        };
+        let chat_id = format!("synthetic-wrapper-{}", std::process::id());
+        assert!(tasks.list(&chat_id)?.is_empty());
+        let task_id = TaskId::new("synthetic-missing-task").map_err(|error| error.to_string())?;
+        assert!(!tasks.cancel(&task_id, &chat_id)?);
+        Ok(())
     }
 
     #[test]

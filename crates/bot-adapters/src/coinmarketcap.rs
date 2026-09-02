@@ -55,6 +55,8 @@ pub trait CoinMarketCapTransport {
 
 pub struct ReqwestCoinMarketCapTransport {
     client: Client,
+    listings_url: String,
+    quotes_url: String,
 }
 
 impl ReqwestCoinMarketCapTransport {
@@ -63,8 +65,21 @@ impl ReqwestCoinMarketCapTransport {
         crate::http_client::shared_client(&CLIENT, || {
             Client::builder().timeout(REQUEST_TIMEOUT).build()
         })
-        .map(|client| Self { client })
+        .map(|client| Self {
+            client,
+            listings_url: LISTINGS_URL.to_owned(),
+            quotes_url: QUOTES_URL.to_owned(),
+        })
         .map_err(|_| TransportFailureKind::Request)
+    }
+
+    #[cfg(test)]
+    fn with_urls(listings_url: &str, quotes_url: &str) -> Result<Self, TransportFailureKind> {
+        Self::new().map(|mut transport| {
+            transport.listings_url = listings_url.to_owned();
+            transport.quotes_url = quotes_url.to_owned();
+            transport
+        })
     }
 }
 
@@ -72,7 +87,7 @@ impl CoinMarketCapTransport for ReqwestCoinMarketCapTransport {
     fn get(&self, request: &BitcoinPriceRequest) -> Result<HttpResponse, TransportFailureKind> {
         let response = self
             .client
-            .get(LISTINGS_URL)
+            .get(&self.listings_url)
             .query(&[
                 ("start", "1"),
                 ("limit", "100"),
@@ -115,7 +130,7 @@ pub trait CoinMarketCapMarketTransport {
 impl CoinMarketCapMarketTransport for ReqwestCoinMarketCapTransport {
     fn get_market(&self, request: &MarketRequest) -> Result<HttpResponse, TransportFailureKind> {
         let builder = match &request.kind {
-            MarketRequestKind::Listings => self.client.get(LISTINGS_URL).query(&[
+            MarketRequestKind::Listings => self.client.get(&self.listings_url).query(&[
                 ("start", "1"),
                 ("limit", "100"),
                 ("convert", request.currency.as_str()),
@@ -125,7 +140,7 @@ impl CoinMarketCapMarketTransport for ReqwestCoinMarketCapTransport {
                 by_slug,
             } => {
                 let parameter = if *by_slug { "slug" } else { "symbol" };
-                self.client.get(QUOTES_URL).query(&[
+                self.client.get(&self.quotes_url).query(&[
                     (parameter, identifiers.join(",")),
                     ("convert", request.currency.clone()),
                 ])
@@ -425,14 +440,17 @@ pub fn fetch_bitcoin_price<T: CoinMarketCapTransport>(
 mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     use crate::request_cache::RequestCache;
 
     use super::{
         BitcoinPriceOutcome, BitcoinPriceRequest, CoinMarketCapMarketTransport,
         CoinMarketCapTransport, HttpResponse, MarketRequest, MarketRequestKind,
-        TransportFailureKind, fetch_bitcoin_price, load_market_assets, market_cache_arguments,
-        parse_bitcoin_price, refresh_market_snapshot,
+        ReqwestCoinMarketCapTransport, TransportFailureKind, fetch_bitcoin_price,
+        load_market_assets, market_cache_arguments, parse_bitcoin_price, refresh_market_snapshot,
     };
 
     struct Transport {
@@ -667,5 +685,74 @@ mod tests {
         );
         assert!(diagnostics.is_empty());
         assert!(cache.writes.is_empty());
+    }
+
+    #[test]
+    fn reqwest_transport_sends_listing_and_quote_contracts() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+        let server = thread::spawn(move || {
+            for (path, query) in [
+                ("/listings", "start=1&limit=100&convert=USD"),
+                ("/listings", "start=1&limit=100&convert=ARS"),
+                ("/quotes", "slug=bitcoin%2Cethereum&convert=USD"),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+                let mut request = [0_u8; 4_096];
+                let bytes = stream.read(&mut request).unwrap_or_default();
+                let request = String::from_utf8_lossy(&request[..bytes]);
+                assert!(
+                    request.starts_with(&format!("GET {path}?{query} HTTP/1.1")),
+                    "{request}"
+                );
+                assert!(request.contains("x-cmc_pro_api_key: synthetic-key"));
+                assert!(request.contains("accepts: application/json"));
+                let body = r#"{"data":[]}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap_or_else(|_| unreachable!());
+            }
+        });
+        let base = format!("http://{address}");
+        let transport = ReqwestCoinMarketCapTransport::with_urls(
+            &format!("{base}/listings"),
+            &format!("{base}/quotes"),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            transport
+                .get(&BitcoinPriceRequest {
+                    api_key: "synthetic-key".to_owned(),
+                    currency: "USD".to_owned(),
+                })
+                .map(|response| response.status_code),
+            Ok(200)
+        );
+        assert!(
+            transport
+                .get_market(&MarketRequest {
+                    api_key: "synthetic-key".to_owned(),
+                    currency: "ARS".to_owned(),
+                    kind: MarketRequestKind::Listings,
+                })
+                .is_ok()
+        );
+        assert!(
+            transport
+                .get_market(&MarketRequest {
+                    api_key: "synthetic-key".to_owned(),
+                    currency: "USD".to_owned(),
+                    kind: MarketRequestKind::Quotes {
+                        identifiers: vec!["bitcoin".to_owned(), "ethereum".to_owned()],
+                        by_slug: true,
+                    },
+                })
+                .is_ok()
+        );
+        transport.before_retry();
+        assert!(server.join().is_ok());
     }
 }

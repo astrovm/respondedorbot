@@ -50,6 +50,8 @@ pub trait YahooFinanceTransport {
 
 pub struct ReqwestYahooFinanceTransport {
     client: Client,
+    chart_url: String,
+    search_url: String,
 }
 
 impl ReqwestYahooFinanceTransport {
@@ -58,8 +60,21 @@ impl ReqwestYahooFinanceTransport {
         crate::http_client::shared_client(&CLIENT, || {
             Client::builder().timeout(REQUEST_TIMEOUT).build()
         })
-        .map(|client| Self { client })
+        .map(|client| Self {
+            client,
+            chart_url: CHART_URL.to_owned(),
+            search_url: SEARCH_URL.to_owned(),
+        })
         .map_err(|_| TransportFailureKind::Request)
+    }
+
+    #[cfg(test)]
+    fn with_urls(chart_url: &str, search_url: &str) -> Result<Self, TransportFailureKind> {
+        Self::new().map(|mut transport| {
+            transport.chart_url = chart_url.to_owned();
+            transport.search_url = search_url.to_owned();
+            transport
+        })
     }
 }
 
@@ -67,7 +82,7 @@ impl YahooFinanceTransport for ReqwestYahooFinanceTransport {
     fn chart(&self, request: &YahooChartRequest) -> Result<HttpResponse, TransportFailureKind> {
         let response = self
             .client
-            .get(format!("{CHART_URL}/{}", request.symbol))
+            .get(format!("{}/{}", self.chart_url, request.symbol))
             .query(&[("range", "5d"), ("interval", "1d")])
             .header("User-Agent", "Mozilla/5.0")
             .send()
@@ -82,7 +97,7 @@ impl YahooFinanceTransport for ReqwestYahooFinanceTransport {
     fn search(&self, request: &YahooSearchRequest) -> Result<HttpResponse, TransportFailureKind> {
         let response = self
             .client
-            .get(SEARCH_URL)
+            .get(&self.search_url)
             .query(&[
                 ("q", request.query.as_str()),
                 ("quotesCount", "5"),
@@ -235,12 +250,16 @@ pub fn load_symbol<T: YahooFinanceTransport, C: RequestCache>(
 mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     use crate::request_cache::RequestCache;
 
     use super::{
-        HttpResponse, TransportFailureKind, YahooChartRequest, YahooFinanceTransport,
-        YahooSearchRequest, cache_key, load_quote, load_symbol, search_cache_key,
+        HttpResponse, ReqwestYahooFinanceTransport, TransportFailureKind, YahooChartRequest,
+        YahooFinanceTransport, YahooSearchRequest, cache_key, load_quote, load_symbol,
+        search_cache_key,
     };
 
     struct Transport {
@@ -401,5 +420,59 @@ mod tests {
                 .last()
                 .is_some_and(|diagnostic| diagnostic.contains("no usable symbol"))
         );
+    }
+
+    #[test]
+    fn reqwest_transport_preserves_chart_and_search_http_contracts() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+        let server = thread::spawn(move || {
+            for expected in [
+                "/chart/EXM?range=5d&interval=1d",
+                "/search?q=Synthetic+Company&quotesCount=5&newsCount=0",
+            ] {
+                let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+                let mut request = [0_u8; 2_048];
+                let bytes = stream.read(&mut request).unwrap_or_default();
+                let request = String::from_utf8_lossy(&request[..bytes]);
+                assert!(request.starts_with(&format!("GET {expected} HTTP/1.1")));
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("user-agent: mozilla/5.0")
+                );
+                let body = r#"{"synthetic":true}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap_or_else(|_| unreachable!());
+            }
+        });
+        let base = format!("http://{address}");
+        let transport = ReqwestYahooFinanceTransport::with_urls(
+            &format!("{base}/chart"),
+            &format!("{base}/search"),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            transport
+                .chart(&YahooChartRequest {
+                    symbol: "EXM".to_owned(),
+                })
+                .map(|response| response.status_code),
+            Ok(200)
+        );
+        assert_eq!(
+            transport
+                .search(&YahooSearchRequest {
+                    query: "Synthetic Company".to_owned(),
+                })
+                .map(|response| response.body),
+            Ok(r#"{"synthetic":true}"#.to_owned())
+        );
+        transport.before_retry();
+        assert!(server.join().is_ok());
     }
 }
