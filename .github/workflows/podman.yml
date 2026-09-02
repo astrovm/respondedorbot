@@ -80,6 +80,11 @@ jobs:
         with:
           tool: cargo-llvm-cov@0.9.0
 
+      - name: Install media test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+
       - name: Check Rust coverage
         run: |
           rustup component add llvm-tools-preview

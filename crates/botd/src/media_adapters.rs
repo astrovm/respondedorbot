@@ -719,6 +719,107 @@ mod tests {
         }
     }
 
+    struct VisionTransport {
+        requests: RefCell<Vec<HttpRequest>>,
+        responses: RefCell<Vec<Result<HttpResponse, OpenRouterChatError>>>,
+    }
+
+    impl OpenRouterTransport for VisionTransport {
+        fn post(&self, request: &HttpRequest) -> Result<HttpResponse, OpenRouterChatError> {
+            self.requests.borrow_mut().push(request.clone());
+            self.responses.borrow_mut().remove(0)
+        }
+    }
+
+    fn vision_response(text: &str) -> HttpResponse {
+        HttpResponse {
+            status_code: 200,
+            headers: BTreeMap::new(),
+            body: json!({
+                "choices": [{"message": {"content": text}}],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 3}
+            })
+            .to_string(),
+        }
+    }
+
+    #[test]
+    fn vision_provider_selects_the_prompt_language_and_preserves_media_metadata() {
+        for (prompt, expected_system_prompt) in [
+            (
+                "Describe the synthetic image",
+                "respond in English without emojis or markdown.",
+            ),
+            (
+                "describí la imagen sintética",
+                "respondé siempre en minúsculas, sin emojis, sin markdown y en lenguaje coloquial argentino.",
+            ),
+        ] {
+            let mut provider = OpenRouterVisionProvider::new(
+                VisionTransport {
+                    requests: RefCell::new(Vec::new()),
+                    responses: RefCell::new(vec![Ok(vision_response("synthetic description"))]),
+                },
+                "synthetic-key",
+                "https://example.test/api/v1",
+                "synthetic/vision-model",
+                321,
+            );
+            let result = provider
+                .describe(
+                    &PreparedImage {
+                        bytes: vec![1, 2, 3],
+                        mime: "image/png".to_owned(),
+                    },
+                    prompt,
+                    "synthetic-file",
+                )
+                .unwrap_or_else(|_| unreachable!())
+                .unwrap_or_else(|| unreachable!());
+            assert_eq!(result.text, "synthetic description");
+
+            let requests = provider.transport.requests.borrow();
+            let payload = serde_json::from_str::<Value>(&requests[0].body).unwrap_or(Value::Null);
+            assert_eq!(payload["messages"][0]["content"], expected_system_prompt);
+            assert_eq!(payload["messages"][1]["content"][0]["text"], prompt);
+            assert_eq!(payload["max_tokens"], 321);
+            assert!(
+                payload["messages"][1]["content"][1]["image_url"]["url"]
+                    .as_str()
+                    .is_some_and(|url| url.starts_with("data:image/png;base64,"))
+            );
+            assert_eq!(
+                result.billing_segment["metadata"]["file_id"],
+                "synthetic-file"
+            );
+        }
+    }
+
+    #[test]
+    fn vision_provider_reports_transport_failures() {
+        let mut provider = OpenRouterVisionProvider::new(
+            VisionTransport {
+                requests: RefCell::new(Vec::new()),
+                responses: RefCell::new(vec![Err(OpenRouterChatError::Transport(
+                    "synthetic transport failure".to_owned(),
+                ))]),
+            },
+            "synthetic-key",
+            "https://example.test/api/v1",
+            "synthetic/vision-model",
+            321,
+        );
+        let result = provider.describe(
+            &PreparedImage {
+                bytes: vec![1, 2, 3],
+                mime: "image/png".to_owned(),
+            },
+            "Describe the synthetic image",
+            "synthetic-file",
+        );
+        assert!(matches!(result, Err(ref error) if error.contains("synthetic transport failure")));
+    }
+
     #[test]
     fn groq_rate_limit_tries_next_account_before_openrouter() {
         let groq = Groq {
@@ -877,10 +978,12 @@ mod tests {
     }
 
     #[test]
-    fn installed_ffmpeg_normalizes_real_image_and_audio_payloads() {
-        if Command::new("ffmpeg").arg("-version").output().is_err() {
-            return;
-        }
+    fn installed_ffmpeg_normalizes_real_image_and_audio_payloads() -> Result<(), String> {
+        let version = Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .map_err(|error| format!("ffmpeg must be installed for media tests: {error}"))?;
+        assert!(version.status.success());
         let mut processor = FfmpegMediaProcessor::default();
         let image = processor
             .prepare_image(b"P6\n2 1\n255\n\xff\x00\x00\x00\xff\x00")
@@ -896,5 +999,6 @@ mod tests {
             .unwrap_or_else(|| unreachable!());
         assert!(audio.bytes.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]));
         assert!((0.08..=0.2).contains(&audio.duration_seconds));
+        Ok(())
     }
 }
