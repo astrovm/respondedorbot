@@ -242,7 +242,7 @@ where
                 vec![format!("task persistence failed: {error}")],
             );
         }
-        ToolExecutionResult::output(created(
+        ToolExecutionResult::confirmed_output(created(
             &describe_trigger(&trigger, self.context.locale),
             &text,
             self.context.locale,
@@ -815,6 +815,10 @@ mod tests {
         assert_eq!(
             result.output,
             "task scheduled in 1 hour: check the synthetic result"
+        );
+        assert_eq!(
+            result.failure_fallback.as_deref(),
+            Some("task scheduled in 1 hour: check the synthetic result")
         );
         let state = state.borrow();
         assert_eq!(state.saved.len(), 1);

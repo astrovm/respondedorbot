@@ -23,7 +23,7 @@ use crate::ai_dispatch::{
     AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, AiReplyMetadata,
 };
 use crate::chat_tool_loop::{
-    ChatRoundStream, ChatToolLoopError, NativeToolRuntime, run_chat_tool_loop,
+    ChatRoundStream, ChatToolLoopError, NativeToolRuntime, provider_error_kind, run_chat_tool_loop,
 };
 use crate::compaction_scheduler::{
     CompactionScheduleContext, MemoryCompactionPlan, MemoryCompactionScheduler, PayerSource,
@@ -941,15 +941,20 @@ where
                 on_token(token).map_err(bot_adapters::openrouter_chat::OpenRouterChatError::Stream)
             },
         );
-        let (raw_text, chat_segments, chat_diagnostics, provider_failed) = match loop_result {
-            Ok(result) => (
-                result.text,
-                result.billing_segments,
-                result.diagnostics,
-                result.stopped_at_limit,
-            ),
-            Err(error) => partial_failure(error),
-        };
+        let (raw_text, chat_segments, chat_diagnostics, provider_failed, failure_fallback) =
+            match loop_result {
+                Ok(result) => (
+                    result.text,
+                    result.billing_segments,
+                    result.diagnostics,
+                    result.stopped_at_limit,
+                    result.failure_fallback,
+                ),
+                Err(error) => {
+                    eprintln!("{}", provider_failure_diagnostic(&operation_id, &error));
+                    partial_failure(error)
+                }
+            };
         segments.extend(chat_segments);
         diagnostics.extend(chat_diagnostics);
         let identity = user_identity(&input);
@@ -960,7 +965,9 @@ where
         )
         .final_text;
         let fallback = cleaned.trim().is_empty() || provider_failed;
-        let text = if fallback {
+        let text = if provider_failed {
+            failure_fallback.unwrap_or_else(|| Self::preparation_error(input.locale).to_owned())
+        } else if fallback {
             Self::preparation_error(input.locale).to_owned()
         } else {
             cleaned
@@ -1324,7 +1331,9 @@ fn append_media_context(messages: &mut [PromptMessage], media: &MediaExecution, 
     }
 }
 
-fn partial_failure(error: ChatToolLoopError) -> (String, Vec<Value>, Vec<String>, bool) {
+fn partial_failure(
+    error: ChatToolLoopError,
+) -> (String, Vec<Value>, Vec<String>, bool, Option<String>) {
     let mut diagnostics = error.partial.diagnostics.clone();
     diagnostics.push(format!("AI provider stream: {}", error.source));
     (
@@ -1332,7 +1341,56 @@ fn partial_failure(error: ChatToolLoopError) -> (String, Vec<Value>, Vec<String>
         error.partial.billing_segments.clone(),
         diagnostics,
         true,
+        error.partial.failure_fallback.clone(),
     )
+}
+
+fn provider_failure_diagnostic(operation_id: &str, error: &ChatToolLoopError) -> String {
+    let segment = error
+        .partial
+        .billing_segments
+        .iter()
+        .rev()
+        .find(|segment| segment.get("source").and_then(Value::as_str) == Some("openrouter"));
+    let metadata = segment
+        .and_then(|segment| segment.get("metadata"))
+        .and_then(Value::as_object);
+    let field = |value: Option<&str>| sanitize_log_field(value.unwrap_or("unknown"));
+    format!(
+        "AI provider failure: operation_id={} provider_rounds={} error_kind={} generation_id={} model={} upstream_provider={}",
+        sanitize_log_field(operation_id),
+        error.provider_rounds,
+        provider_error_kind(&error.source),
+        field(
+            metadata
+                .and_then(|metadata| metadata.get("provider_generation_id"))
+                .and_then(Value::as_str)
+        ),
+        field(
+            segment
+                .and_then(|segment| segment.get("model"))
+                .and_then(Value::as_str)
+        ),
+        field(
+            metadata
+                .and_then(|metadata| metadata.get("upstream_provider"))
+                .and_then(Value::as_str)
+        ),
+    )
+}
+
+fn sanitize_log_field(value: &str) -> String {
+    value
+        .chars()
+        .take(128)
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || "-._/:".contains(character) {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn operation_id(input: &AiConversationInput) -> String {
@@ -1582,6 +1640,37 @@ mod tests {
 
         fn create(&mut self, _input: &AiConversationInput) -> Result<Self::Tools, String> {
             Ok(NoTools)
+        }
+    }
+
+    struct ConfirmingTool;
+
+    impl NativeToolRuntime for ConfirmingTool {
+        fn schemas(&self, _task_mode: bool) -> Vec<Value> {
+            vec![json!({"type": "function"})]
+        }
+
+        fn contains(&self, name: &str, _task_mode: bool) -> bool {
+            name == "task_set"
+        }
+
+        fn execute(
+            &mut self,
+            _name: &str,
+            _arguments: &Value,
+            _tool_call_id: &str,
+        ) -> ToolExecutionResult {
+            ToolExecutionResult::confirmed_output("synthetic task confirmation")
+        }
+    }
+
+    struct ConfirmingTools;
+
+    impl ConversationToolFactory for ConfirmingTools {
+        type Tools = ConfirmingTool;
+
+        fn create(&mut self, _input: &AiConversationInput) -> Result<Self::Tools, String> {
+            Ok(ConfirmingTool)
         }
     }
 
@@ -2005,6 +2094,116 @@ mod tests {
             Ok(())
         );
         assert_eq!(service.billing.settlements.len(), 1);
+    }
+
+    #[test]
+    fn completed_tool_confirmation_replaces_a_failed_followup_round() {
+        let failed_round = || {
+            Err(ChatRoundError {
+                source: OpenRouterChatError::IncompleteStream,
+                partial: Box::new(ChatRoundResult {
+                    text: String::new(),
+                    tool_calls: Vec::new(),
+                    finish_reason: None,
+                    billing_segment: Some(json!({
+                        "kind": "chat",
+                        "model": "synthetic/model",
+                        "usage": {},
+                        "source": "openrouter",
+                        "metadata": {
+                            "provider_generation_id": "synthetic-generation",
+                            "upstream_provider": "Synthetic"
+                        }
+                    })),
+                }),
+            })
+        };
+        let first_round = ChatRoundResult {
+            text: String::new(),
+            tool_calls: vec![StreamToolCall {
+                index: 0,
+                id: "synthetic-call".to_owned(),
+                call_type: "function".to_owned(),
+                name: "task_set".to_owned(),
+                arguments: r#"{"text":"synthetic task","delay_seconds":3600}"#.to_owned(),
+            }],
+            finish_reason: Some("tool_calls".to_owned()),
+            billing_segment: Some(json!({
+                "kind": "chat",
+                "model": "synthetic/model",
+                "usage": {"cost": "0.0001"},
+                "source": "openrouter"
+            })),
+        };
+        let mut service = NativeConversation::new(
+            Provider {
+                rounds: RefCell::new(
+                    vec![
+                        Ok(first_round),
+                        failed_round(),
+                        failed_round(),
+                        failed_round(),
+                    ]
+                    .into(),
+                ),
+                prompts: RefCell::new(Vec::new()),
+            },
+            ConfirmingTools,
+            State::default(),
+            Billing::default(),
+            "synthetic persona",
+            DEEPSEEK_MODEL,
+            5,
+        );
+
+        let preparation = service.prepare(input());
+
+        assert!(matches!(
+            preparation,
+            Ok(AiPreparation::Reply {
+                ref text,
+                completion_id: Some(_),
+                ref diagnostics,
+            }) if text == "synthetic task confirmation"
+                && diagnostics.iter().filter(|value| value.contains("AI provider retry")).count() == 2
+        ));
+        assert_eq!(service.provider.prompts.borrow().len(), 4);
+    }
+
+    #[test]
+    fn provider_failure_logs_only_sanitized_identifiers() {
+        let error = ChatToolLoopError {
+            source: OpenRouterChatError::Transport("secret transport detail".to_owned()),
+            provider_rounds: 3,
+            partial: Box::new(crate::chat_tool_loop::ChatToolLoopResult {
+                text: String::new(),
+                messages: Vec::new(),
+                billing_segments: vec![json!({
+                    "kind": "chat",
+                    "model": "synthetic/model\nunsafe",
+                    "source": "openrouter",
+                    "metadata": {
+                        "provider_generation_id": "generation\nunsafe",
+                        "upstream_provider": "Synthetic Provider"
+                    }
+                })],
+                provider_rounds: 3,
+                tool_calls_executed: 0,
+                diagnostics: Vec::new(),
+                failure_fallback: None,
+                stopped_at_limit: false,
+            }),
+        };
+
+        let diagnostic = provider_failure_diagnostic("ai:1:2:3", &error);
+
+        assert!(diagnostic.contains("operation_id=ai:1:2:3"));
+        assert!(diagnostic.contains("error_kind=transport"));
+        assert!(diagnostic.contains("generation_id=generation_unsafe"));
+        assert!(diagnostic.contains("model=synthetic/model_unsafe"));
+        assert!(diagnostic.contains("upstream_provider=Synthetic_Provider"));
+        assert!(!diagnostic.contains("secret transport detail"));
+        assert!(!diagnostic.contains('\n'));
     }
 
     #[test]
