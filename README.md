@@ -201,6 +201,23 @@ Before starting, edit `~/respondedorbot/.env` and add the personality files to
 The runtime image contains `botd`, FFmpeg, and native shared libraries. CI
 publishes `latest` and immutable `sha-<full-commit-sha>` images.
 
+Before removing old persisted formats, inspect and migrate them with the same
+image that will run the bot:
+
+```bash
+# Report what would change. This does not write data.
+podman exec systemd-respondedorbot \
+  /usr/local/bin/botd --migrate-legacy
+
+# After taking a database backup, apply the reported changes.
+podman exec systemd-respondedorbot \
+  /usr/local/bin/botd --migrate-legacy --apply
+```
+
+The command is idempotent and prints one JSON report. It upgrades Redis record
+versions, rebuilds scheduled-task indexes, and removes obsolete PostgreSQL chat
+configuration fields. Missed task occurrences are not executed.
+
 To roll back, pin the Quadlet `Image=` setting to a verified SHA tag, reload
 the user units, and restart the service.
 
