@@ -2,6 +2,8 @@
 
 use serde_json::{Map, Value};
 
+use crate::ai_usage::provider_reported_cost_is_positive;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderExceptionFacts {
     pub json_decode_error: bool,
@@ -34,6 +36,9 @@ pub fn is_retryable_provider_exception(facts: ProviderExceptionFacts) -> bool {
 
 #[must_use]
 pub fn response_has_billable_usage(usage: &Map<String, Value>) -> bool {
+    if provider_reported_cost_is_positive(usage) {
+        return true;
+    }
     for key in [
         "cost",
         "prompt_tokens",
@@ -191,6 +196,7 @@ mod tests {
             json!({"total_tokens": true}),
             json!({"input_tokens": 1}),
             json!({"output_tokens": 1}),
+            json!({"cost_details": {"upstream_inference_cost": "0.1"}}),
             json!({"server_tool_use": {"web_search_requests": "2"}}),
         ] {
             assert!(response_has_billable_usage(
@@ -201,6 +207,7 @@ mod tests {
             json!({}),
             json!({"cost": "invalid"}),
             json!({"prompt_tokens": -1}),
+            json!({"cost_details": {"upstream_inference_cost": 0}}),
             json!({"server_tool_use": {"web_search_requests": "invalid"}}),
         ] {
             assert!(!response_has_billable_usage(

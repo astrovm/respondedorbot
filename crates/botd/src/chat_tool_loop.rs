@@ -595,23 +595,28 @@ mod tests {
     }
 
     #[test]
-    fn does_not_retry_a_failed_round_with_billable_usage() {
-        let provider = Provider {
-            rounds: RefCell::new(vec![Err(ChatRoundError {
-                source: OpenRouterChatError::IncompleteStream,
-                partial: Box::new(round("", Vec::new(), json!({"usage": {"cost": "0.001"}}))),
-            })]),
-            observed: RefCell::new(Vec::new()),
-        };
-        let mut tools = Tools::default();
+    fn does_not_retry_a_failed_round_with_any_billable_usage_shape() {
+        for usage in [
+            json!({"cost": "0.001"}),
+            json!({"cost_details": {"upstream_inference_cost": "0.001"}}),
+        ] {
+            let provider = Provider {
+                rounds: RefCell::new(vec![Err(ChatRoundError {
+                    source: OpenRouterChatError::IncompleteStream,
+                    partial: Box::new(round("", Vec::new(), json!({"usage": usage}))),
+                })]),
+                observed: RefCell::new(Vec::new()),
+            };
+            let mut tools = Tools::default();
 
-        let error = run_chat_tool_loop(&provider, &mut tools, &[], false, 5, |_text| Ok(()))
-            .err()
-            .unwrap_or_else(|| unreachable!());
+            let error = run_chat_tool_loop(&provider, &mut tools, &[], false, 5, |_text| Ok(()))
+                .err()
+                .unwrap_or_else(|| unreachable!());
 
-        assert_eq!(error.provider_rounds, 1);
-        assert_eq!(provider.observed.borrow().len(), 1);
-        assert_eq!(error.partial.billing_segments.len(), 1);
+            assert_eq!(error.provider_rounds, 1);
+            assert_eq!(provider.observed.borrow().len(), 1);
+            assert_eq!(error.partial.billing_segments.len(), 1);
+        }
     }
 
     #[test]

@@ -966,12 +966,8 @@ where
         .final_text;
         let fallback = cleaned.trim().is_empty() || provider_failed;
         let has_failure_fallback = !failure_fallbacks.is_empty();
-        let text = if provider_failed {
-            if !has_failure_fallback {
-                Self::preparation_error(input.locale).to_owned()
-            } else {
-                failure_fallbacks.join("\n")
-            }
+        let text = if fallback && has_failure_fallback {
+            failure_fallbacks.join("\n")
         } else if fallback {
             Self::preparation_error(input.locale).to_owned()
         } else {
@@ -2101,7 +2097,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_tool_confirmation_replaces_a_failed_followup_round_for_every_route() {
+    fn completed_tool_confirmation_replaces_failed_and_empty_followups_for_every_route() {
         let failed_round = || {
             Err(ChatRoundError {
                 source: OpenRouterChatError::IncompleteStream,
@@ -2139,18 +2135,18 @@ mod tests {
                 "source": "openrouter"
             })),
         };
-        for spontaneous in [false, true] {
+        for (spontaneous, empty_success) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let mut rounds = vec![Ok(first_round.clone())];
+            if empty_success {
+                rounds.push(Ok(round("", None)));
+            } else {
+                rounds.extend([failed_round(), failed_round(), failed_round()]);
+            }
             let mut service = NativeConversation::new(
                 Provider {
-                    rounds: RefCell::new(
-                        vec![
-                            Ok(first_round.clone()),
-                            failed_round(),
-                            failed_round(),
-                            failed_round(),
-                        ]
-                        .into(),
-                    ),
+                    rounds: RefCell::new(rounds.into()),
                     prompts: RefCell::new(Vec::new()),
                 },
                 ConfirmingTools,
@@ -2172,9 +2168,13 @@ mod tests {
                     completion_id: Some(_),
                     ref diagnostics,
                 }) if text == "synthetic task confirmation"
-                    && diagnostics.iter().filter(|value| value.contains("AI provider retry")).count() == 2
+                    && diagnostics.iter().filter(|value| value.contains("AI provider retry")).count()
+                        == if empty_success { 0 } else { 2 }
             ));
-            assert_eq!(service.provider.prompts.borrow().len(), 4);
+            assert_eq!(
+                service.provider.prompts.borrow().len(),
+                if empty_success { 2 } else { 4 }
+            );
         }
     }
 
