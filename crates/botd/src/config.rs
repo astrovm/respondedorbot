@@ -62,12 +62,6 @@ pub struct TaskVerificationConfig {
 }
 
 #[derive(Clone)]
-pub struct LegacyMigrationConfig {
-    pub redis_endpoint: RedisEndpoint,
-    database_url: String,
-}
-
-#[derive(Clone)]
 pub struct MaintenanceConfig {
     pub redis_endpoint: RedisEndpoint,
     database_url: Option<String>,
@@ -87,21 +81,6 @@ impl fmt::Debug for TaskVerificationConfig {
                 &self.redis_endpoint.password.as_ref().map(|_| "[REDACTED]"),
             )
             .field("owner_token", &self.owner_token)
-            .finish()
-    }
-}
-
-impl fmt::Debug for LegacyMigrationConfig {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("LegacyMigrationConfig")
-            .field("redis_host", &self.redis_endpoint.host)
-            .field("redis_port", &self.redis_endpoint.port)
-            .field(
-                "redis_password",
-                &self.redis_endpoint.password.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field("database_url", &"[REDACTED]")
             .finish()
     }
 }
@@ -238,32 +217,6 @@ impl TaskVerificationConfig {
             redis_endpoint,
             owner_token,
         })
-    }
-}
-
-impl LegacyMigrationConfig {
-    pub fn from_env() -> Result<Self, ConfigError> {
-        Self::from_lookup(|name| std::env::var(name).ok())
-    }
-
-    pub fn from_lookup<F>(lookup: F) -> Result<Self, ConfigError>
-    where
-        F: Fn(&str) -> Option<String>,
-    {
-        let redis_endpoint = redis_endpoint_from_lookup(&lookup)?;
-        let database_url = lookup("SUPABASE_POSTGRES_URL")
-            .filter(|value| !value.trim().is_empty())
-            .ok_or(ConfigError::MissingDatabaseUrl)?;
-        validate_connection_string(&database_url)?;
-        Ok(Self {
-            redis_endpoint,
-            database_url,
-        })
-    }
-
-    #[must_use]
-    pub fn database_url(&self) -> &str {
-        &self.database_url
     }
 }
 
@@ -531,8 +484,7 @@ mod tests {
     use bot_adapters::postgres_connection::PostgresConnectionStringError;
 
     use super::{
-        ConfigError, LegacyMigrationConfig, MaintenanceConfig, ProductionConfig, RuntimeConfig,
-        TaskVerificationConfig,
+        ConfigError, MaintenanceConfig, ProductionConfig, RuntimeConfig, TaskVerificationConfig,
     };
 
     const SYNTHETIC_DATABASE_URL: &str = "postgresql://synthetic-user:synthetic-password@db.synthetic.invalid:5432/postgres?sslmode=require";
@@ -673,34 +625,6 @@ mod tests {
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("redis-secret"));
         assert!(!debug.contains("database-secret"));
-    }
-
-    #[test]
-    fn legacy_migration_configuration_requires_only_storage_and_redacts_secrets() {
-        let values = HashMap::from([
-            ("REDIS_HOST".to_owned(), "redis.internal".to_owned()),
-            ("REDIS_PORT".to_owned(), "6380".to_owned()),
-            ("REDIS_PASSWORD".to_owned(), "redis-secret".to_owned()),
-            (
-                "SUPABASE_POSTGRES_URL".to_owned(),
-                SYNTHETIC_DATABASE_URL.to_owned(),
-            ),
-        ]);
-        let config = LegacyMigrationConfig::from_lookup(|name| values.get(name).cloned());
-        assert!(config.is_ok());
-        let Some(config) = config.ok() else { return };
-        assert_eq!(config.redis_endpoint.host, "redis.internal");
-        assert_eq!(config.redis_endpoint.port, 6380);
-        assert_eq!(config.database_url(), SYNTHETIC_DATABASE_URL);
-        let debug = format!("{config:?}");
-        assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("redis-secret"));
-        assert!(!debug.contains("database-secret"));
-
-        assert_eq!(
-            LegacyMigrationConfig::from_lookup(|_| None).map(|_| ()),
-            Err(ConfigError::MissingDatabaseUrl)
-        );
     }
 
     #[test]

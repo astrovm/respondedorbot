@@ -98,11 +98,12 @@ mod tests {
     }
 
     #[test]
-    fn renders_compatible_members_with_an_injected_clock() {
+    fn renders_current_members_with_an_injected_clock() {
         let mut tool = ChatMembersTool::new(
             Source(Ok(vec![(
                 "7".to_owned(),
-                r#"{"first_name":"Ana","username":"ana","last_seen":9400}"#.to_owned(),
+                r#"{"schema_version":1,"first_name":"Ana","username":"ana","last_seen":9400}"#
+                    .to_owned(),
             )])),
             || 10_000,
             "-100",
