@@ -12,7 +12,8 @@ use bot_core::ai_pricing::calculate_billing_for_segments;
 use bot_core::ai_prompt::{HistoryMessage, PromptRole, RetrievedMessage};
 use bot_core::ai_request::sanitize_assistant_text;
 use bot_core::command_state::{
-    BOT_MESSAGE_METADATA_TTL_SECONDS, CHAT_HISTORY_WRITE_LIMIT, CHAT_STATE_TTL_SECONDS,
+    BOT_MESSAGE_METADATA_SCHEMA_VERSION, BOT_MESSAGE_METADATA_TTL_SECONDS,
+    CHAT_HISTORY_WRITE_LIMIT, CHAT_STATE_TTL_SECONDS,
 };
 use bot_core::message_state::{
     CHAT_HISTORY_MAX_MESSAGES, bot_message_metadata_key, chat_compacted_until_key,
@@ -269,7 +270,11 @@ impl ConversationState for RedisConversationState {
             self.state
                 .set_value(
                     &bot_message_metadata_key(&chat_id, &sent_message_id.to_string()),
-                    &json!({"type": "ai"}).to_string(),
+                    &json!({
+                        "schema_version": BOT_MESSAGE_METADATA_SCHEMA_VERSION,
+                        "type": "ai"
+                    })
+                    .to_string(),
                     BOT_MESSAGE_METADATA_TTL_SECONDS,
                 )
                 .map_err(|error| error.to_string())?;
