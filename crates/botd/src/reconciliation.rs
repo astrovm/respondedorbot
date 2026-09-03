@@ -443,6 +443,15 @@ pub fn production_reconciler(
 }
 
 fn segment_needs_reconciliation(segment: &Value) -> bool {
+    if segment
+        .get("metadata")
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("usage_reconciled"))
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return false;
+    }
     needs_reconciliation(ProviderUsageStatus {
         source: segment
             .get("source")
@@ -462,15 +471,32 @@ fn positive_number(value: &Value) -> bool {
         .is_some_and(|value| value > 0.0)
 }
 
+fn zero_number(value: &Value) -> bool {
+    value
+        .as_f64()
+        .or_else(|| value.as_str()?.parse::<f64>().ok())
+        .is_some_and(|value| value.is_finite() && value == 0.0)
+}
+
+fn generation_finished(generation: &Map<String, Value>) -> bool {
+    ["finish_reason", "native_finish_reason"].iter().any(|key| {
+        generation
+            .get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    })
+}
+
 fn reconciled_segment(segment: &Value, generation: &Map<String, Value>) -> Option<Value> {
     let upstream_cost = generation.get("upstream_inference_cost")?;
-    if !positive_number(upstream_cost) {
+    let authoritative_zero = zero_number(upstream_cost) && generation_finished(generation);
+    if !positive_number(upstream_cost) && !authoritative_zero {
         return None;
     }
     let total_cost = generation
         .get("total_cost")
         .or_else(|| generation.get("cost"))
-        .filter(|value| positive_number(value))
+        .filter(|value| positive_number(value) || authoritative_zero && zero_number(value))
         .unwrap_or(upstream_cost);
     let mut reconciled = segment.as_object()?.clone();
     let mut usage = segment
@@ -850,6 +876,77 @@ mod tests {
             store.settlements[0].2["reconciliation_unresolved"],
             json!(false)
         );
+    }
+
+    #[test]
+    fn finalized_zero_cost_generation_refunds_without_waiting_for_timeout() {
+        let store = Store {
+            operations: vec![operation(
+                "zero-cost",
+                "2026-08-31T00:00:00Z",
+                Some(pending_segment()),
+            )],
+            ..Store::default()
+        };
+        let generations = Generations {
+            values: HashMap::from([(
+                "generation-1".to_owned(),
+                VecDeque::from([Some(
+                    json!({
+                        "upstream_inference_cost": 0,
+                        "total_cost": 0,
+                        "tokens_prompt": 0,
+                        "tokens_completion": 0,
+                        "finish_reason": "stop",
+                        "provider_name": "Synthetic",
+                        "model": "synthetic/model"
+                    })
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default(),
+                )]),
+            )]),
+        };
+        let mut reconciler = AiBillingReconciler::new(
+            store,
+            generations,
+            ActiveOperationRegistry::default(),
+            ReconciliationSettings::default(),
+        );
+
+        let report = reconciler.run_once(1_788_134_700).unwrap_or_default();
+
+        assert_eq!(report.settled, 1);
+        assert_eq!(report.pending, 0);
+        let (store, _, _) = reconciler.into_parts();
+        assert_eq!(store.updates.len(), 1);
+        assert_eq!(store.settlements.len(), 1);
+        assert_eq!(store.settlements[0].1, 0);
+        assert_eq!(
+            store.settlements[0].2["reason"],
+            json!("recovered_provider_usage")
+        );
+        assert_eq!(
+            store.settlements[0].2["reconciliation_unresolved"],
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn unfinished_zero_cost_generation_remains_pending() {
+        let segment = pending_segment();
+        let generation = json!({
+            "upstream_inference_cost": 0,
+            "total_cost": 0,
+            "finish_reason": null,
+            "native_finish_reason": null
+        })
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+
+        assert!(reconciled_segment(&segment, &generation).is_none());
+        assert!(segment_needs_reconciliation(&segment));
     }
 
     #[test]

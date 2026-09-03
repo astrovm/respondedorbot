@@ -128,6 +128,10 @@ impl ExactDecimal {
         self.coefficient > 0
     }
 
+    fn is_nonnegative(self) -> bool {
+        self.coefficient >= 0
+    }
+
     fn floor_i64(self) -> Result<i64, AiPricingError> {
         let divisor = pow10(self.scale).ok_or(AiPricingError::Overflow)?;
         let quotient = self.coefficient.div_euclid(divisor);
@@ -300,13 +304,16 @@ fn token_usage(usage: &Map<String, Value>) -> Result<TokenUsage, AiPricingError>
     })
 }
 
-fn reported_cost(usage: &Map<String, Value>) -> Result<Option<ExactDecimal>, AiPricingError> {
+fn reported_cost(
+    usage: &Map<String, Value>,
+    accept_zero: bool,
+) -> Result<Option<ExactDecimal>, AiPricingError> {
     let gateway_cost = usage
         .get("cost")
         .and_then(ExactDecimal::parse)
         .map(|cost| cost.multiply_integer(1_000_000))
         .transpose()?
-        .filter(|cost| cost.is_positive());
+        .filter(|cost| cost.is_positive() || accept_zero && cost.is_nonnegative());
     if gateway_cost.is_some() {
         return Ok(gateway_cost);
     }
@@ -315,7 +322,7 @@ fn reported_cost(usage: &Map<String, Value>) -> Result<Option<ExactDecimal>, AiP
         && let Some(cost) = ExactDecimal::parse(raw_cost)
     {
         let cost = cost.multiply_integer(1_000_000)?;
-        cost.is_positive().then_some(cost)
+        (cost.is_positive() || accept_zero && cost.is_nonnegative()).then_some(cost)
     } else {
         None
     };
@@ -340,6 +347,7 @@ fn model_cost(
     model: &str,
     usage: &Map<String, Value>,
     provider: &str,
+    accept_reported_zero: bool,
 ) -> Result<ModelCost, AiPricingError> {
     let tokens = token_usage(usage)?;
     if usage.is_empty() {
@@ -350,7 +358,7 @@ fn model_cost(
             tokens,
         });
     }
-    if let Some(exact) = reported_cost(usage)? {
+    if let Some(exact) = reported_cost(usage, accept_reported_zero)? {
         return Ok(ModelCost {
             usd_micros: exact.floor_i64()?,
             exact,
@@ -505,7 +513,9 @@ pub fn calculate_billing_for_segments(segments: &Value) -> Result<Value, AiPrici
         let upstream_provider = python_string(metadata.get("upstream_provider"))?
             .trim()
             .to_lowercase();
-        let reported = reported_cost(usage)?;
+        let usage_reconciled =
+            metadata.get("usage_reconciled").and_then(Value::as_bool) == Some(true);
+        let reported = reported_cost(usage, usage_reconciled)?;
         let (search_cost, tool_cost) = firecrawl_cost(metadata)?;
 
         if kind == "web_search"
@@ -529,7 +539,7 @@ pub fn calculate_billing_for_segments(segments: &Value) -> Result<Value, AiPrici
             matches!(model.as_str(), "whisper-large-v3" | "groq/whisper-large-v3");
         if kind == "transcribe"
             && has_audio_pricing
-            && !(provider == "openrouter" && reported.is_some_and(ExactDecimal::is_positive))
+            && !(provider == "openrouter" && reported.is_some())
         {
             let usd_micros = transcription_cost(audio_seconds)?;
             total = total.add(ExactDecimal::from_ratio(i128::from(usd_micros), 0))?;
@@ -561,7 +571,7 @@ pub fn calculate_billing_for_segments(segments: &Value) -> Result<Value, AiPrici
             continue;
         }
 
-        let model_cost = model_cost(&model, usage, &provider)?;
+        let model_cost = model_cost(&model, usage, &provider, usage_reconciled)?;
         total = total.add(model_cost.exact)?;
         let mut model_item = model_cost.tokens.json_fields();
         model_item.insert("model".to_owned(), json!(model));
@@ -573,7 +583,7 @@ pub fn calculate_billing_for_segments(segments: &Value) -> Result<Value, AiPrici
         if let Some(tool_cost) = tool_cost {
             tool_breakdown.push(tool_cost);
         }
-        let complete = reported.is_some_and(ExactDecimal::is_positive)
+        let complete = reported.is_some()
             || (model_cost.tokens.has_tokens() && model_cost.pricing_basis == "published_rate");
         if !complete {
             unsupported_notes.push(format!(
@@ -757,6 +767,34 @@ mod tests {
         assert_eq!(output["model_breakdown"][0]["usd_micros"], 0);
         assert_eq!(output["model_breakdown"][1]["usd_micros"], 413);
         assert_eq!(output["tool_breakdown"][0]["usd_micros"], 1660);
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_zero_provider_cost_only_after_authoritative_reconciliation()
+    -> Result<(), AiPricingError> {
+        let pending = calculate_billing_for_segments(&json!([{
+            "kind": "chat",
+            "model": "synthetic/model",
+            "usage": {"cost": 0, "cost_details": {"upstream_inference_cost": 0}},
+            "source": "openrouter",
+            "metadata": {"provider": "openrouter", "provider_usage_pending": true}
+        }]))?;
+        assert_eq!(pending["pricing_complete"], false);
+
+        let reconciled = calculate_billing_for_segments(&json!([{
+            "kind": "chat",
+            "model": "synthetic/model",
+            "usage": {"cost": 0, "cost_details": {"upstream_inference_cost": 0}},
+            "source": "openrouter",
+            "metadata": {"provider": "openrouter", "usage_reconciled": true}
+        }]))?;
+        assert_eq!(reconciled["pricing_complete"], true);
+        assert_eq!(reconciled["charged_credit_units"], 0);
+        assert_eq!(
+            reconciled["segment_breakdown"][0]["pricing_basis"],
+            "provider_reported"
+        );
         Ok(())
     }
 }

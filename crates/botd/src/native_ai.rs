@@ -662,6 +662,7 @@ mod tests {
         ) -> ToolExecutionResult {
             ToolExecutionResult {
                 output: "synthetic search".to_owned(),
+                failure_fallback: None,
                 billing_segment: Some(json!({
                     "kind": "web_search",
                     "model": "",
