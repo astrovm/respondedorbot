@@ -207,10 +207,10 @@ where
                 );
             }
         };
-        let legacy_run_date = matches!(schedule, TaskSchedule::Once)
+        let run_date = matches!(schedule, TaskSchedule::Once)
             .then(|| timestamp_text(next_run_at))
             .transpose();
-        let legacy_run_date = match legacy_run_date {
+        let run_date = match run_date {
             Ok(value) => value,
             Err(error) => {
                 return ToolExecutionResult::with_diagnostics(
@@ -233,7 +233,7 @@ where
                 next_run_at: Some(next_run_at),
                 last_execution_id: None,
             },
-            legacy_run_date,
+            run_date,
             extra: BTreeMap::new(),
         };
         if let Err(error) = self.store.save(&document, TASK_RECORD_TTL_SECONDS) {
@@ -678,7 +678,7 @@ mod tests {
                 next_run_at: Some(1_700_000_000),
                 last_execution_id: None,
             },
-            legacy_run_date: None,
+            run_date: None,
             extra: BTreeMap::new(),
         };
         let mut store = RedisTaskStore::new(&endpoint).map_err(|error| error.to_string())?;
@@ -805,7 +805,7 @@ mod tests {
     }
 
     #[test]
-    fn creates_a_rollback_compatible_one_shot_after_the_credit_precondition() {
+    fn creates_a_canonical_one_shot_after_the_credit_precondition() {
         let state = Rc::new(RefCell::new(StoreState {
             cancel_result: Ok(true),
             ..StoreState::default()
@@ -826,10 +826,7 @@ mod tests {
         assert_eq!(document.task.schedule, TaskSchedule::Once);
         assert_eq!(document.task.schedule_anchor_at, Some(1_700_000_000));
         assert_eq!(document.task.next_run_at, Some(1_700_003_600));
-        assert_eq!(
-            document.legacy_run_date.as_deref(),
-            Some("2023-11-14T23:13:20Z")
-        );
+        assert_eq!(document.run_date.as_deref(), Some("2023-11-14T23:13:20Z"));
     }
 
     #[test]
@@ -849,7 +846,7 @@ mod tests {
             state.borrow().saved[0].0.task.schedule,
             TaskSchedule::IntervalSeconds { seconds: 86_400 }
         );
-        assert!(state.borrow().saved[0].0.legacy_run_date.is_none());
+        assert!(state.borrow().saved[0].0.run_date.is_none());
 
         let mut cron = set_tool(Rc::clone(&state), Ok(i64::MAX), Locale::Es);
         assert_eq!(

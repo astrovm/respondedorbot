@@ -49,7 +49,7 @@ fn canonical_task_claim_advance_and_cancel_are_atomic() -> Result<(), Box<dyn Er
             next_run_at: Some(scheduled_for),
             last_execution_id: None,
         },
-        legacy_run_date: None,
+        run_date: None,
         extra: Default::default(),
     };
 

@@ -782,7 +782,7 @@ mod tests {
                 next_run_at: Some(next_run_at),
                 last_execution_id: None,
             },
-            legacy_run_date: None,
+            run_date: None,
             extra: Default::default(),
         }
     }

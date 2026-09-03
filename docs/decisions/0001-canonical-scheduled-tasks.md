@@ -14,8 +14,7 @@ billing, and single-owner execution.
 
 ## Decision
 
-`task:data:{task_id}` is the canonical record. Version 1 retains the established
-trigger fields for stored-data compatibility:
+`task:data:{task_id}` is the canonical version 1 record:
 
 ```json
 {
@@ -81,11 +80,8 @@ or writing state.
 ## Consequences
 
 Task listing and execution depend only on canonical records in Redis database 0.
-Older fields remain readable for stored-data compatibility.
 The claim protocol prevents concurrent workers from executing the same live
 occurrence. As with the existing implementation, a process crash after an
 external Telegram send but before durable completion cannot provide strict
 exactly-once delivery; stable execution and billing identifiers make retries
 detectable and financial mutations idempotent.
-
-Redis database 1 is not used by the native runtime.

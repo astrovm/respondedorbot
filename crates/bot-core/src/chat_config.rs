@@ -67,12 +67,9 @@ fn coerce_bool(value: Option<&Value>, default: bool) -> bool {
 fn coerce_integer(
     values: &Map<String, Value>,
     field: &'static str,
-    legacy_field: Option<&str>,
     default: i64,
 ) -> Result<i64, ChatConfigError> {
-    let value = values
-        .get(field)
-        .or_else(|| legacy_field.and_then(|legacy| values.get(legacy)));
+    let value = values.get(field);
     let Some(value) = value else {
         return Ok(default);
     };
@@ -112,12 +109,7 @@ impl ChatConfig {
                 values.get("ignore_link_fix_followups"),
                 defaults.ignore_link_fix_followups,
             ),
-            timezone_offset: coerce_integer(
-                values,
-                "timezone_offset",
-                None,
-                defaults.timezone_offset,
-            )?,
+            timezone_offset: coerce_integer(values, "timezone_offset", defaults.timezone_offset)?,
             ai_random_replies: coerce_bool(
                 values.get("ai_random_replies"),
                 defaults.ai_random_replies,
@@ -125,7 +117,6 @@ impl ChatConfig {
             creditless_user_hourly_limit: coerce_integer(
                 values,
                 "creditless_user_hourly_limit",
-                Some("creditless_user_daily_limit"),
                 defaults.creditless_user_hourly_limit,
             )?,
         })
@@ -144,7 +135,7 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_all_supported_legacy_shapes() {
+    fn normalizes_supported_stored_shapes() {
         assert_eq!(
             ChatConfig::from_json(&json!({
                 "language": "en",
@@ -153,7 +144,7 @@ mod tests {
                 "ignore_link_fix_followups": 0,
                 "timezone_offset": "4",
                 "ai_random_replies": "enabled",
-                "creditless_user_daily_limit": 9.8
+                "creditless_user_hourly_limit": 9.8
             })),
             Ok(ChatConfig {
                 language: "en".to_owned(),

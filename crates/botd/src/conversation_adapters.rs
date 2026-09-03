@@ -16,8 +16,9 @@ use bot_core::command_state::{
     CHAT_HISTORY_WRITE_LIMIT, CHAT_STATE_TTL_SECONDS,
 };
 use bot_core::message_state::{
-    CHAT_HISTORY_MAX_MESSAGES, bot_message_metadata_key, chat_compacted_until_key,
-    chat_members_key, chat_summary_key, prepare_chat_member_payload, prepare_message_write,
+    CHAT_HISTORY_MAX_MESSAGES, MESSAGE_HISTORY_SCHEMA_VERSION, bot_message_metadata_key,
+    chat_compacted_until_key, chat_members_key, chat_summary_key, prepare_chat_member_payload,
+    prepare_message_write,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -48,6 +49,7 @@ impl RedisConversationState {
 
 #[derive(Clone, Debug, Deserialize)]
 struct StoredHistoryEntry {
+    schema_version: u8,
     #[serde(default)]
     id: String,
     #[serde(default)]
@@ -79,6 +81,11 @@ impl ConversationState for RedisConversationState {
         let Some(value) = value.as_object() else {
             return Ok(None);
         };
+        if value.get("schema_version").and_then(Value::as_u64)
+            != Some(u64::from(BOT_MESSAGE_METADATA_SCHEMA_VERSION))
+        {
+            return Ok(None);
+        }
         Ok(Some(AiReplyMetadata {
             kind: value
                 .get("type")
@@ -636,6 +643,7 @@ fn decode_history(entries: Vec<String>) -> Vec<StoredHistoryEntry> {
     let mut entries = entries
         .into_iter()
         .filter_map(|entry| serde_json::from_str::<StoredHistoryEntry>(&entry).ok())
+        .filter(|entry| entry.schema_version == MESSAGE_HISTORY_SCHEMA_VERSION)
         .collect::<Vec<_>>();
     entries.sort_by_key(history_sort_key);
     entries
@@ -706,9 +714,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        PayerSource, PostgresConversationBilling, RedisConversationState, StoredHistoryEntry,
-        build_compaction_view, decode_history, decode_retrieved, decode_summary_memory,
-        history_sort_key, role, user_identity,
+        MESSAGE_HISTORY_SCHEMA_VERSION, PayerSource, PostgresConversationBilling,
+        RedisConversationState, StoredHistoryEntry, build_compaction_view, decode_history,
+        decode_retrieved, decode_summary_memory, history_sort_key, role, user_identity,
     };
     use crate::ai_dispatch::AiConversationInput;
     use crate::conversation::{ConversationBilling, ConversationState, SettlementRequest};
@@ -838,6 +846,15 @@ mod tests {
                 .reply_metadata(&chat_id.to_string(), "malformed")?
                 .is_none()
         );
+        state
+            .state
+            .set_value(&malformed_key, r#"{"type":"ai"}"#, 60)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            state
+                .reply_metadata(&chat_id.to_string(), "malformed")?
+                .is_none()
+        );
 
         state
             .state
@@ -911,11 +928,13 @@ mod tests {
     }
 
     #[test]
-    fn history_decoder_sorts_user_then_bot_and_preserves_legacy_roles() {
+    fn history_decoder_requires_current_records_and_sorts_user_then_bot() {
         let entries = decode_history(vec![
-            r#"{"id":"10","text":"later","timestamp":10,"role":"user"}"#.to_owned(),
-            r#"{"id":"bot_9","text":"answer","timestamp":9}"#.to_owned(),
-            r#"{"id":"9","text":"question","timestamp":9}"#.to_owned(),
+            r#"{"schema_version":1,"id":"10","text":"later","timestamp":10,"role":"user"}"#
+                .to_owned(),
+            r#"{"schema_version":1,"id":"bot_9","text":"answer","timestamp":9}"#.to_owned(),
+            r#"{"schema_version":1,"id":"9","text":"question","timestamp":9}"#.to_owned(),
+            r#"{"id":"8","text":"old","timestamp":8,"role":"user"}"#.to_owned(),
             "malformed".to_owned(),
         ]);
         assert_eq!(entries.len(), 3);
@@ -932,9 +951,10 @@ mod tests {
     #[test]
     fn summary_memory_uses_only_entries_after_a_valid_marker() {
         let entries = vec![
-            r#"{"id":"1","text":"old","timestamp":1,"role":"user"}"#.to_owned(),
-            r#"{"id":"2","text":"marker","timestamp":2,"role":"assistant"}"#.to_owned(),
-            r#"{"id":"3","text":"new","timestamp":3,"role":"user"}"#.to_owned(),
+            r#"{"schema_version":1,"id":"1","text":"old","timestamp":1,"role":"user"}"#.to_owned(),
+            r#"{"schema_version":1,"id":"2","text":"marker","timestamp":2,"role":"assistant"}"#
+                .to_owned(),
+            r#"{"schema_version":1,"id":"3","text":"new","timestamp":3,"role":"user"}"#.to_owned(),
         ];
         let compacted = decode_summary_memory(
             entries.clone(),
@@ -956,6 +976,7 @@ mod tests {
     fn plans_only_dropped_delta_and_keeps_current_context_rules() -> Result<(), &'static str> {
         let history = (1..=50)
             .map(|id| StoredHistoryEntry {
+                schema_version: MESSAGE_HISTORY_SCHEMA_VERSION,
                 id: id.to_string(),
                 text: format!("message {id}"),
                 timestamp: id,

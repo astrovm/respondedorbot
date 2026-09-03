@@ -31,7 +31,7 @@ The dependency direction is `botd -> bot-adapters -> bot-core`.
 
 ## State ownership
 
-Redis stores caches, conversation history and metadata, compaction jobs, callback state, and canonical task records. PostgreSQL stores chat configuration, credit accounts, payments, provider usage, and the billing ledger. Stored formats remain backward compatible.
+Redis stores caches, conversation history and metadata, compaction jobs, callback state, and canonical task records. PostgreSQL stores chat configuration, credit accounts, payments, provider usage, and the billing ledger. Durable records use explicit schema versions.
 
 Scheduled tasks use canonical JSON records plus atomic Redis ownership and occurrence leases. Billing mutations use PostgreSQL transactions, stable operation identifiers, idempotent provider segments, and exact-once settlement guards.
 

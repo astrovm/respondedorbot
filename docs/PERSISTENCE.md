@@ -2,8 +2,7 @@
 
 ## Scope
 
-These formats are compatibility boundaries. The application reads existing
-records and writes the documented stable formats.
+The application reads and writes these documented, versioned formats.
 
 ## PostgreSQL
 
@@ -109,7 +108,6 @@ database and values are decoded as UTF-8 strings.
 | `chat_history:{chat_id}` | List of JSON message records, newest first | 30 days |
 | `chat_message_order:{chat_id}` | Sorted set of message IDs by per-chat sequence | 30 days |
 | `chat_message_sequence:{chat_id}` | Integer sequence counter | 30 days |
-| `chat_message_ids:{chat_id}` | Legacy deduplication set retained for stored-data compatibility | maintenance repairs TTL |
 | `chatmsg:{chat_id}:{message_id}` | RediSearch hash with chat, role, user, reply, mention, text, and timestamp fields | 30 days |
 | `chat_summary:{chat_id}` | Summary text | 30 days |
 | `chat_user_summary:{chat_id}` | User-specific summary text | 30 days |
@@ -182,10 +180,9 @@ Canonical task fields currently are:
 Trigger variants are delay seconds, interval seconds, interval days, and cron
 with hour/minute plus optional weekday list or day of month.
 
-The authoritative version 1 schema adds next-run state, schedule anchors, and
-execution idempotency. The claim protocol is defined in
-[ADR 0001](decisions/0001-canonical-scheduled-tasks.md). Older trigger fields
-remain readable as stored-data compatibility fields.
+The authoritative version 1 schema includes next-run state, schedule anchors,
+and execution idempotency. The claim protocol is defined in
+[ADR 0001](decisions/0001-canonical-scheduled-tasks.md).
 
 ### Caches and callback state
 
@@ -205,34 +202,6 @@ Known compatibility key families include:
 
 Generic JSON cache records and stale-cache records preserve their established
 timestamp/value shapes and TTL semantics.
-
-## Redis database 1
-
-The native application does not use Redis database 1. Historical scheduler
-objects in that database are not executable state and may be removed after the
-deployment owner confirms that no rollback image needs them. Canonical tasks in
-database 0 are the only scheduling source of truth.
-
-## Legacy-data migration
-
-`botd --migrate-legacy` inspects database 0 and PostgreSQL and prints a JSON
-report without changing data. Add `--apply` to perform the migration after a
-backup. Repeated runs are safe.
-
-The migration:
-
-- adds schema version 1 to unversioned conversation history, chat members, and
-  bot-message metadata;
-- rewrites scheduled tasks to the canonical version 1 record, calculates their
-  next future occurrence, and rebuilds the per-chat and global due indexes;
-- removes the obsolete `world_cup_goal_alerts` chat configuration field.
-
-The task migration does not execute occurrences missed before migration. Redis
-writes compare the value read during inspection before replacing it, so a
-concurrent change stops the command instead of overwriting newer data.
-Malformed or unsupported conversation records are counted in the report and
-left unchanged. An invalid scheduled task stops the migration because silently
-skipping executable state could hide a user-visible task.
 
 ## Files and environment
 
