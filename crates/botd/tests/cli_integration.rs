@@ -26,7 +26,6 @@ fn every_cli_mode_reports_missing_configuration_without_starting_services()
         Vec::new(),
         vec!["--check-config"],
         vec!["--maintenance"],
-        vec!["--migrate-legacy"],
         vec!["--verify-tasks"],
     ] {
         let output = botd(&arguments)?;
@@ -63,7 +62,6 @@ fn operational_cli_modes_report_storage_connection_failures() -> Result<(), Box<
             vec!["--verify-tasks"],
             "scheduled-task verification failed:",
         ),
-        (vec!["--migrate-legacy"], "legacy migration failed:"),
     ];
     for (arguments, expected_error) in cases {
         let output = isolated_botd()
@@ -121,35 +119,6 @@ fn operational_cli_modes_succeed_against_disposable_local_services() -> Result<(
     assert!(report.get("redis").is_some());
     assert!(report.get("ledger").is_some());
 
-    let migration = isolated_botd()
-        .arg("--migrate-legacy")
-        .env("REDIS_HOST", "127.0.0.1")
-        .env("REDIS_PORT", &redis_port)
-        .env("SUPABASE_POSTGRES_URL", std::env::var("TEST_DATABASE_URL")?)
-        .output()?;
-    assert!(
-        migration.status.success(),
-        "{}",
-        String::from_utf8(migration.stderr)?
-    );
-    let report: serde_json::Value = serde_json::from_slice(&migration.stdout)?;
-    assert_eq!(report["mode"], "dry-run");
-    assert!(report.get("redis").is_some());
-    assert!(report.get("postgres").is_some());
-
-    let migration = isolated_botd()
-        .args(["--migrate-legacy", "--apply"])
-        .env("REDIS_HOST", "127.0.0.1")
-        .env("REDIS_PORT", &redis_port)
-        .env("SUPABASE_POSTGRES_URL", std::env::var("TEST_DATABASE_URL")?)
-        .output()?;
-    assert!(
-        migration.status.success(),
-        "{}",
-        String::from_utf8(migration.stderr)?
-    );
-    let report: serde_json::Value = serde_json::from_slice(&migration.stdout)?;
-    assert_eq!(report["mode"], "apply");
     Ok(())
 }
 

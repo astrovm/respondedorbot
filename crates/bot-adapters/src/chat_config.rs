@@ -1,4 +1,4 @@
-//! PostgreSQL chat configuration repository compatible with the Python schema.
+//! PostgreSQL chat configuration repository.
 
 use bot_core::chat_config::{ChatConfig, ChatConfigError};
 use postgres::Client;
@@ -204,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_absent_legacy_and_native_rows_without_schema_changes() {
+    fn reads_absent_and_native_rows_without_schema_changes() {
         let Some(database_url) = test_database_url() else {
             return;
         };
@@ -224,7 +224,7 @@ mod tests {
             "INSERT INTO chat_configs (chat_id, config) VALUES ($1, $2)",
             &[
                 &chat_id,
-                &json!({"language":"en", "creditless_user_daily_limit":8}),
+                &json!({"language":"en", "creditless_user_hourly_limit":8}),
             ],
         );
         assert_eq!(inserted.ok(), Some(1));

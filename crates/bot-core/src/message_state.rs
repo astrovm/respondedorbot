@@ -1,4 +1,4 @@
-//! Backward-compatible Redis conversation-state write preparation.
+//! Redis conversation-state write preparation.
 
 use serde::Serialize;
 use std::cmp::Reverse;
@@ -27,7 +27,6 @@ pub struct MessageWritePlan {
 pub struct MessageWriteKeys {
     pub history: String,
     pub order: String,
-    pub legacy_ids: String,
     pub sequence: String,
     pub search_document: String,
 }
@@ -65,7 +64,7 @@ struct ChatMemberEntry<'a> {
     last_seen: i64,
 }
 
-/// Truncate stored message text using the legacy character-count rule.
+/// Truncate stored message text by Unicode character count.
 #[must_use]
 pub fn truncate_text(text: Option<&str>, max_length: usize) -> String {
     let Some(text) = text else {
@@ -104,7 +103,7 @@ pub fn escape_search_text(query_text: &str) -> String {
         .join(" ")
 }
 
-/// Escape one TAG query value using the legacy ASCII-safe rule.
+/// Escape one TAG query value using the ASCII-safe RediSearch rule.
 #[must_use]
 pub fn escape_search_tag(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
@@ -147,7 +146,7 @@ pub fn chat_members_key(chat_id: &str) -> String {
     format!("chat_members:{chat_id}")
 }
 
-/// Encode a versioned member record that legacy readers can still consume.
+/// Encode a versioned member record.
 pub fn prepare_chat_member_payload(
     first_name: &str,
     username: &str,
@@ -215,7 +214,7 @@ pub fn rank_search_candidates(
         .collect()
 }
 
-/// Prepare all compatibility-sensitive values for the existing atomic Lua write.
+/// Prepare all values for the atomic Redis write.
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_message_write(
     chat_id: &str,
@@ -249,7 +248,6 @@ pub fn prepare_message_write(
         keys: MessageWriteKeys {
             history: format!("chat_history:{chat_id}"),
             order: format!("chat_message_order:{chat_id}"),
-            legacy_ids: format!("chat_message_ids:{chat_id}"),
             sequence: format!("chat_message_sequence:{chat_id}"),
             search_document: format!("chatmsg:{chat_id}:{message_id}"),
         },
@@ -279,7 +277,7 @@ mod tests {
     };
 
     #[test]
-    fn truncates_by_unicode_characters_with_legacy_small_limit_rules() {
+    fn truncates_by_unicode_characters_with_small_limit_rules() {
         assert_eq!(truncate_text(None, 10), "");
         assert_eq!(truncate_text(Some("hello"), 0), "");
         assert_eq!(truncate_text(Some("hello"), 2), "..");
@@ -307,7 +305,6 @@ mod tests {
         };
         assert_eq!(plan.keys.history, "chat_history:-1001");
         assert_eq!(plan.keys.order, "chat_message_order:-1001");
-        assert_eq!(plan.keys.legacy_ids, "chat_message_ids:-1001");
         assert_eq!(plan.keys.sequence, "chat_message_sequence:-1001");
         assert_eq!(plan.keys.search_document, "chatmsg:-1001:42");
         assert_eq!(plan.role, "user");

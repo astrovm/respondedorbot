@@ -22,6 +22,7 @@ use bot_adapters::openrouter_generation::ReqwestGenerationTransport;
 use bot_adapters::polymarket::ReqwestPolymarketTransport;
 use bot_adapters::redis_connection::RedisEndpoint;
 use bot_adapters::redis_json_cache::RedisJsonCache;
+use bot_adapters::redis_message_state::RedisMessageState;
 use bot_adapters::request_cache::RequestCache as JsonRequestCache;
 use bot_adapters::stock_pool::StockPoolCache;
 use bot_adapters::task_record::{TaskRecordError, decode_task_record, encode_task_record};
@@ -35,6 +36,7 @@ use bot_adapters::token_signal::{
 use bot_adapters::weather::ReqwestWeatherTransport;
 use bot_adapters::web_fetch::{HostResolver, ReqwestWebFetchTransport, SystemHostResolver};
 use bot_adapters::yahoo_finance::ReqwestYahooFinanceTransport;
+use bot_core::message_state::prepare_message_write;
 use bot_core::token_signals::{
     PairToken, SignalQuery, SignalState, TokenAddress, TokenPair, TokenSignal,
 };
@@ -93,6 +95,61 @@ fn shared_redis_cache_implements_every_provider_cache_port() {
         StockPoolCache::get(&mut cache, "coverage95:stocks"),
         Ok(Some(value)) if value == "[]"
     ));
+}
+
+#[test]
+fn message_state_write_refreshes_every_canonical_ttl() {
+    let Some(port) = std::env::var("TEST_REDIS_PORT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+    else {
+        return;
+    };
+    let endpoint = RedisEndpoint {
+        host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+        port,
+        password: std::env::var("TEST_REDIS_PASSWORD")
+            .ok()
+            .filter(|value| !value.is_empty()),
+    };
+    let state = RedisMessageState::new(&endpoint).unwrap_or_else(|_| unreachable!());
+    let plan = prepare_message_write(
+        "coverage95-ttl",
+        "1",
+        "synthetic message",
+        1,
+        None,
+        Some("7"),
+        Some("user"),
+        None,
+        false,
+    )
+    .unwrap_or_else(|_| unreachable!());
+
+    assert!(state.save_message(&plan, 60, 10).unwrap_or(false));
+
+    let client = redis::Client::open(format!("redis://{}:{}/", endpoint.host, endpoint.port))
+        .unwrap_or_else(|_| unreachable!());
+    let mut connection = client.get_connection().unwrap_or_else(|_| unreachable!());
+    for key in [
+        &plan.keys.history,
+        &plan.keys.order,
+        &plan.keys.sequence,
+        &plan.keys.search_document,
+    ] {
+        let ttl: i64 = redis::cmd("TTL")
+            .arg(key)
+            .query(&mut connection)
+            .unwrap_or(-1);
+        assert!((1..=60).contains(&ttl), "missing TTL for {key}");
+    }
+    let _: usize = redis::cmd("DEL")
+        .arg(&plan.keys.history)
+        .arg(&plan.keys.order)
+        .arg(&plan.keys.sequence)
+        .arg(&plan.keys.search_document)
+        .query(&mut connection)
+        .unwrap_or(0);
 }
 
 #[test]

@@ -12,8 +12,9 @@ pub struct KnownChatMember {
     pub last_seen: i64,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 struct StoredMemberPayload {
+    schema_version: u8,
     #[serde(default)]
     first_name: String,
     #[serde(default)]
@@ -27,14 +28,14 @@ pub fn decode_chat_members(entries: &[(String, String)]) -> Vec<KnownChatMember>
     entries
         .iter()
         .filter(|(user_id, _)| !user_id.is_empty())
-        .map(|(user_id, payload)| {
-            let parsed = serde_json::from_str::<StoredMemberPayload>(payload).unwrap_or_default();
-            KnownChatMember {
+        .filter_map(|(user_id, payload)| {
+            let parsed = serde_json::from_str::<StoredMemberPayload>(payload).ok()?;
+            (parsed.schema_version == 1).then(|| KnownChatMember {
                 user_id: user_id.clone(),
                 first_name: parsed.first_name,
                 username: parsed.username,
                 last_seen: parsed.last_seen,
-            }
+            })
         })
         .collect()
 }
@@ -95,7 +96,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decodes_compatible_payloads_and_defaults_malformed_json() {
+    fn decodes_only_current_member_payloads() {
         assert_eq!(
             decode_chat_members(&[
                 (
@@ -106,20 +107,12 @@ mod tests {
                 ("8".to_owned(), "invalid".to_owned()),
                 (String::new(), "{}".to_owned()),
             ]),
-            [
-                KnownChatMember {
-                    user_id: "7".to_owned(),
-                    first_name: "Ana".to_owned(),
-                    username: "ana".to_owned(),
-                    last_seen: 100,
-                },
-                KnownChatMember {
-                    user_id: "8".to_owned(),
-                    first_name: String::new(),
-                    username: String::new(),
-                    last_seen: 0,
-                },
-            ]
+            [KnownChatMember {
+                user_id: "7".to_owned(),
+                first_name: "Ana".to_owned(),
+                username: "ana".to_owned(),
+                last_seen: 100,
+            },]
         );
     }
 

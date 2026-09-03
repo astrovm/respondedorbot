@@ -14,7 +14,6 @@ pub mod giphy;
 pub mod giphy_pool;
 pub mod hacker_news;
 mod http_client;
-pub mod legacy_migration;
 pub mod link_preview;
 pub mod media_provider;
 pub mod openrouter_chat;

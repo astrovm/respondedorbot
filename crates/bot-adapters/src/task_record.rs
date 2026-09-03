@@ -1,4 +1,4 @@
-//! Versioned, rollback-compatible scheduled-task JSON records.
+//! Versioned scheduled-task JSON records.
 
 use std::collections::BTreeMap;
 
@@ -14,8 +14,7 @@ use thiserror::Error;
 #[derive(Clone, Debug, PartialEq)]
 pub struct TaskRecordDocument {
     pub task: ScheduledTask,
-    /// Original one-shot date retained for rollback readers.
-    pub legacy_run_date: Option<String>,
+    pub run_date: Option<String>,
     /// Fields from newer compatible writers that this adapter does not own.
     pub extra: BTreeMap<String, Value>,
 }
@@ -235,13 +234,13 @@ fn trigger_fields(schedule: &TaskSchedule) -> (Option<i64>, Option<Value>) {
     }
 }
 
-/// Decode both legacy unversioned and canonical version 1 records.
+/// Decode canonical version 1 records.
 pub fn decode_task_record(payload: &str) -> Result<TaskRecordDocument, TaskRecordError> {
     let raw = serde_json::from_str::<RawTaskRecord>(payload)?;
     match raw.schema_version {
-        None | Some(0) => {}
         Some(version) if version == u64::from(TASK_SCHEMA_VERSION) => {}
         Some(version) => return Err(TaskRecordError::UnsupportedVersion(version)),
+        None => return Err(TaskRecordError::UnsupportedVersion(0)),
     }
 
     let id = TaskId::new(required_string(&raw.id, "id")?)?;
@@ -275,17 +274,16 @@ pub fn decode_task_record(payload: &str) -> Result<TaskRecordDocument, TaskRecor
             next_run_at,
             last_execution_id: raw.last_execution_id,
         },
-        legacy_run_date: raw.run_date,
+        run_date: raw.run_date,
         extra: raw.extra,
     })
 }
 
-/// Encode the additive version 1 payload while retaining unknown compatible
-/// fields and legacy trigger representation.
+/// Encode version 1 while retaining unknown forward-compatible fields.
 pub fn encode_task_record(document: &TaskRecordDocument) -> Result<String, TaskRecordError> {
     let (interval_seconds, trigger_config) = trigger_fields(&document.task.schedule);
     let run_date = if matches!(document.task.schedule, TaskSchedule::Once) {
-        document.legacy_run_date.as_deref()
+        document.run_date.as_deref()
     } else {
         None
     };
@@ -308,36 +306,13 @@ pub fn encode_task_record(document: &TaskRecordDocument) -> Result<String, TaskR
     })?)
 }
 
-/// Upgrade a readable record to canonical version 1 without changing its
-/// schedule. An unversioned recurring record without a next run remains
-/// incomplete and is rejected.
-pub fn normalize_task_record(payload: &str) -> Result<String, TaskRecordError> {
-    encode_task_record(&decode_task_record(payload)?)
-}
-
 #[cfg(test)]
 mod tests {
     use bot_core::scheduled_tasks::TaskSchedule;
     use chrono::Weekday;
-    use serde::Deserialize;
     use serde_json::{Value, json};
 
-    use super::{
-        TASK_SCHEMA_VERSION, TaskRecordError, decode_task_record, encode_task_record,
-        normalize_task_record,
-    };
-
-    #[test]
-    fn upgrades_a_legacy_one_shot_and_uses_run_date_as_next_run() -> Result<(), TaskRecordError> {
-        let normalized = normalize_task_record(
-            r#"{"id":"abc12345","chat_id":"-100123","text":"synthetic task","user_name":"user","user_id":42,"interval_seconds":null,"run_date":"2026-08-30T12:00:00+00:00","trigger_config":null}"#,
-        )?;
-        let value: Value = serde_json::from_str(&normalized)?;
-        assert_eq!(value["schema_version"], TASK_SCHEMA_VERSION);
-        assert_eq!(value["next_run_at"], "2026-08-30T12:00:00Z");
-        assert_eq!(value["run_date"], "2026-08-30T12:00:00+00:00");
-        Ok(())
-    }
+    use super::{TaskRecordError, decode_task_record, encode_task_record};
 
     #[test]
     fn round_trips_canonical_cron_and_preserves_unknown_fields() -> Result<(), TaskRecordError> {
@@ -378,10 +353,10 @@ mod tests {
     }
 
     #[test]
-    fn accepts_numeric_legacy_chat_ids_and_defaults_locale_and_timezone()
+    fn accepts_supported_numeric_fields_and_defaults_locale_and_timezone()
     -> Result<(), TaskRecordError> {
         let document = decode_task_record(
-            r#"{"id":"abc12345","chat_id":123,"text":"synthetic task","user_name":null,"interval_seconds":600,"run_date":null,"trigger_config":null}"#,
+            r#"{"schema_version":1,"id":"abc12345","chat_id":123,"text":"synthetic task","user_name":null,"interval_seconds":600,"run_date":null,"trigger_config":null}"#,
         )?;
         assert_eq!(document.task.chat_id, "123");
         assert_eq!(document.task.timezone_offset, -3);
@@ -391,11 +366,22 @@ mod tests {
             TaskSchedule::IntervalSeconds { seconds: 600 }
         );
         assert_eq!(document.task.next_run_at, None);
+
+        let numeric_name = decode_task_record(
+            r#"{"schema_version":1,"id":"abc12346","chat_id":"123","text":"synthetic task","user_name":7,"interval_seconds":300}"#,
+        )?;
+        assert_eq!(numeric_name.task.user_name, "7");
         Ok(())
     }
 
     #[test]
     fn rejects_unsupported_versions_and_malformed_records() {
+        assert!(matches!(
+            decode_task_record(
+                r#"{"id":"abc12345","chat_id":"1","text":"x","run_date":"2026-08-30T12:00:00Z"}"#
+            ),
+            Err(TaskRecordError::UnsupportedVersion(0))
+        ));
         assert!(matches!(
             decode_task_record(
                 r#"{"schema_version":2,"id":"abc12345","chat_id":"1","text":"x","run_date":"2026-08-30T12:00:00Z"}"#
@@ -404,46 +390,31 @@ mod tests {
         ));
         assert!(matches!(
             decode_task_record(
-                r#"{"id":"bad:id","chat_id":"1","text":"x","run_date":"2026-08-30T12:00:00Z"}"#
+                r#"{"schema_version":1,"id":"bad:id","chat_id":"1","text":"x","run_date":"2026-08-30T12:00:00Z"}"#
             ),
             Err(TaskRecordError::State(_))
         ));
         assert!(matches!(
             decode_task_record(
-                r#"{"id":"abc12345","chat_id":"1","text":"x","trigger_config":{"type":"cron","hour":99,"minute":0}}"#
+                r#"{"schema_version":1,"id":"abc12345","chat_id":"1","text":"x","trigger_config":{"type":"cron","hour":99,"minute":0}}"#
             ),
             Err(TaskRecordError::InvalidTrigger)
         ));
         assert!(matches!(
             decode_task_record(
-                r#"{"id":"abc12345","chat_id":"1","text":"x","run_date":"not-a-date"}"#
+                r#"{"schema_version":1,"id":"abc12345","chat_id":"1","text":"x","interval_seconds":299}"#
+            ),
+            Err(TaskRecordError::InvalidTrigger)
+        ));
+        assert!(matches!(
+            decode_task_record(r#"{"schema_version":1,"id":"abc12345","chat_id":"1","text":"x"}"#),
+            Err(TaskRecordError::InvalidTrigger)
+        ));
+        assert!(matches!(
+            decode_task_record(
+                r#"{"schema_version":1,"id":"abc12345","chat_id":"1","text":"x","run_date":"not-a-date"}"#
             ),
             Err(TaskRecordError::InvalidTimestamp("run_date"))
         ));
-    }
-
-    #[test]
-    fn fixture_examples_normalize_to_their_expected_values()
-    -> Result<(), Box<dyn std::error::Error>> {
-        #[derive(Deserialize)]
-        struct Contract {
-            cases: Vec<Case>,
-        }
-        #[derive(Deserialize)]
-        struct Case {
-            input: Value,
-            expected: Value,
-        }
-
-        let contract: Contract =
-            serde_json::from_str(include_str!("../tests/fixtures/task_records.json"))?;
-        for case in contract.cases {
-            let normalized = normalize_task_record(&case.input.to_string())?;
-            let value: Value = serde_json::from_str(&normalized)?;
-            for (key, expected) in case.expected.as_object().into_iter().flatten() {
-                assert_eq!(&value[key], expected);
-            }
-        }
-        Ok(())
     }
 }

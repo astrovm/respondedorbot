@@ -3,20 +3,14 @@
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bot_adapters::legacy_migration::MigrationMode;
-
 use crate::application::run_production;
-use crate::config::{
-    LegacyMigrationConfig, MaintenanceConfig, ProductionConfig, TaskVerificationConfig,
-};
-use crate::legacy_migration::run_legacy_migration;
+use crate::config::{MaintenanceConfig, ProductionConfig, TaskVerificationConfig};
 use crate::maintenance::{MaintenanceOptions, run_maintenance};
 use crate::task_service::verify_tasks_once;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Runtime,
-    MigrateLegacy { apply: bool },
     Maintenance,
     VerifyTasks,
     CheckConfig,
@@ -27,14 +21,7 @@ fn mode(arguments: impl IntoIterator<Item = impl AsRef<str>>) -> Mode {
         .into_iter()
         .map(|argument| argument.as_ref().to_owned())
         .collect::<Vec<_>>();
-    if arguments
-        .iter()
-        .any(|argument| argument == "--migrate-legacy")
-    {
-        Mode::MigrateLegacy {
-            apply: arguments.iter().any(|argument| argument == "--apply"),
-        }
-    } else if arguments.iter().any(|argument| argument == "--maintenance") {
+    if arguments.iter().any(|argument| argument == "--maintenance") {
         Mode::Maintenance
     } else if arguments
         .iter()
@@ -53,50 +40,10 @@ fn mode(arguments: impl IntoIterator<Item = impl AsRef<str>>) -> Mode {
 
 pub fn run(arguments: impl IntoIterator<Item = impl AsRef<str>>) -> ExitCode {
     match mode(arguments) {
-        Mode::MigrateLegacy { apply } => migrate_legacy(apply),
         Mode::Maintenance => maintenance(),
         Mode::VerifyTasks => verify_tasks(),
         Mode::CheckConfig => check_config(),
         Mode::Runtime => native_runtime(),
-    }
-}
-
-fn migrate_legacy(apply: bool) -> ExitCode {
-    let config = match LegacyMigrationConfig::from_env() {
-        Ok(config) => config,
-        Err(error) => {
-            eprintln!("FATAL: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs().min(i64::MAX as u64) as i64);
-    let migration_mode = if apply {
-        MigrationMode::Apply
-    } else {
-        MigrationMode::DryRun
-    };
-    match run_legacy_migration(
-        &config.redis_endpoint,
-        config.database_url(),
-        migration_mode,
-        now,
-    ) {
-        Ok(report) => match serde_json::to_string(&report) {
-            Ok(encoded) => {
-                println!("{encoded}");
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                eprintln!("migration report encoding failed: {error}");
-                ExitCode::FAILURE
-            }
-        },
-        Err(error) => {
-            eprintln!("legacy migration failed: {error}");
-            ExitCode::FAILURE
-        }
     }
 }
 
@@ -201,20 +148,8 @@ mod tests {
         assert_eq!(mode(["botd", "--verify-tasks"]), Mode::VerifyTasks);
         assert_eq!(mode(["botd", "--maintenance"]), Mode::Maintenance);
         assert_eq!(
-            mode(["botd", "--migrate-legacy"]),
-            Mode::MigrateLegacy { apply: false }
-        );
-        assert_eq!(
-            mode(["botd", "--migrate-legacy", "--apply"]),
-            Mode::MigrateLegacy { apply: true }
-        );
-        assert_eq!(
             mode(["botd", "--check-config", "--maintenance"]),
             Mode::Maintenance
-        );
-        assert_eq!(
-            mode(["botd", "--maintenance", "--migrate-legacy"]),
-            Mode::MigrateLegacy { apply: false }
         );
     }
 }

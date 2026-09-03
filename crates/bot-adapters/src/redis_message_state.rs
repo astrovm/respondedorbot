@@ -15,15 +15,11 @@ use crate::redis_connection::{RedisEndpoint, RedisPool, pool};
 const CHAT_SEARCH_INDEX: &str = "idx:chat_messages";
 
 const SAVE_MESSAGE_SCRIPT: &str = r#"
-local legacy_type = redis.call('TYPE', KEYS[3]).ok
-if legacy_type == 'set' and redis.call('SISMEMBER', KEYS[3], ARGV[1]) == 1 then
-    return 0
-end
 if redis.call('ZSCORE', KEYS[2], ARGV[1]) then
     return 0
 end
 
-local sequence = redis.call('INCR', KEYS[4])
+local sequence = redis.call('INCR', KEYS[3])
 redis.call('ZADD', KEYS[2], sequence, ARGV[1])
 redis.call('LPUSH', KEYS[1], ARGV[2])
 redis.call('LTRIM', KEYS[1], 0, tonumber(ARGV[4]) - 1)
@@ -36,10 +32,10 @@ end
 
 redis.call('EXPIRE', KEYS[1], ARGV[3])
 redis.call('EXPIRE', KEYS[2], ARGV[3])
-redis.call('EXPIRE', KEYS[4], ARGV[3])
+redis.call('EXPIRE', KEYS[3], ARGV[3])
 redis.call(
     'HSET',
-    KEYS[5],
+    KEYS[4],
     'chat_id', ARGV[5],
     'message_id', ARGV[1],
     'role', ARGV[6],
@@ -50,7 +46,7 @@ redis.call(
     'reply_to_message_id', ARGV[11],
     'mentions_bot', ARGV[12]
 )
-redis.call('EXPIRE', KEYS[5], ARGV[3])
+redis.call('EXPIRE', KEYS[4], ARGV[3])
 return 1
 "#;
 
@@ -184,10 +180,9 @@ impl RedisMessageState {
         let mut connection = self.client.get_connection()?;
         let stored: i64 = redis::cmd("EVAL")
             .arg(SAVE_MESSAGE_SCRIPT)
-            .arg(5)
+            .arg(4)
             .arg(&plan.keys.history)
             .arg(&plan.keys.order)
-            .arg(&plan.keys.legacy_ids)
             .arg(&plan.keys.sequence)
             .arg(&plan.keys.search_document)
             .arg(&plan.message_id)
@@ -348,12 +343,22 @@ mod tests {
         time::Duration,
     };
 
-    use super::{RedisMessageState, RedisMessageStateError, StoredChatMember};
+    use super::{RedisMessageState, RedisMessageStateError, StoredChatMember, value_text};
     use crate::redis_connection::{
         RedisEndpoint,
         test_support::{read_command, read_command_from},
     };
     use bot_core::message_state::prepare_message_write;
+
+    #[test]
+    fn converts_supported_redis_scalar_values_to_text() {
+        assert_eq!(
+            value_text(&redis::Value::SimpleString("synthetic".to_owned())).as_deref(),
+            Some("synthetic")
+        );
+        assert_eq!(value_text(&redis::Value::Int(7)).as_deref(), Some("7"));
+        assert_eq!(value_text(&redis::Value::Nil), None);
+    }
 
     #[test]
     fn preserves_auxiliary_keys_ttls_transactions_and_member_payloads()
