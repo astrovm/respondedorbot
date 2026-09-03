@@ -418,7 +418,7 @@ pub fn download_file(
 mod tests {
     use std::cell::RefCell;
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
@@ -433,6 +433,37 @@ mod tests {
         TelegramMultipartTransport, TelegramRequest, TelegramTransport, TransportFailureKind,
         download_file_with, multipart_request_with, read_limited, request_with, response_outcome,
     };
+
+    fn read_complete_http_request(stream: &mut TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4_096];
+        loop {
+            let bytes = stream.read(&mut buffer).unwrap_or_default();
+            if bytes == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..bytes]);
+
+            let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") else {
+                continue;
+            };
+            let header_end = header_end + 4;
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            if request.len() >= header_end + content_length {
+                break;
+            }
+        }
+        request
+    }
 
     struct FakeTransport {
         response: RefCell<Option<Result<HttpResponse, TransportFailureKind>>>,
@@ -812,9 +843,8 @@ mod tests {
                 ),
             ] {
                 let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
-                let mut request = [0_u8; 16_384];
-                let bytes = stream.read(&mut request).unwrap_or_default();
-                let request = String::from_utf8_lossy(&request[..bytes]);
+                let request = read_complete_http_request(&mut stream);
+                let request = String::from_utf8_lossy(&request);
                 assert!(request.starts_with(expected_line), "{request}");
                 if expected_line.contains("sendMessage") {
                     assert!(request.contains(r#"{"text":"synthetic"}"#));
