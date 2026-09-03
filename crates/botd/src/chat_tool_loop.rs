@@ -2,6 +2,10 @@
 
 use bot_adapters::openrouter_chat::{OpenRouterChatError, OpenRouterStreamTransport};
 use bot_core::ai_prompt::{PromptMessage, PromptToolCall};
+use bot_core::provider_runtime_policy::{
+    ProviderExceptionFacts, is_retryable_provider_exception, response_has_billable_usage,
+    retry_wait_seconds,
+};
 use bot_core::provider_stream_policy::StreamToolCall;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -10,8 +14,8 @@ use thiserror::Error;
 use crate::chat_provider::{ChatRoundError, ChatRoundResult, OpenRouterChatStreamer};
 
 pub const DEFAULT_MAX_TOOL_ROUNDS: usize = 5;
-const PROVIDER_RETRY_DELAYS: [Duration; 2] =
-    [Duration::from_millis(250), Duration::from_millis(500)];
+const MAX_PROVIDER_RETRIES: usize = 2;
+const MAX_RATE_LIMIT_RETRY_SECONDS: u64 = 5;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolExecutionResult {
@@ -91,7 +95,7 @@ pub struct ChatToolLoopResult {
     pub provider_rounds: usize,
     pub tool_calls_executed: usize,
     pub diagnostics: Vec<String>,
-    pub failure_fallback: Option<String>,
+    pub failure_fallbacks: Vec<String>,
     pub stopped_at_limit: bool,
 }
 
@@ -104,7 +108,7 @@ impl ChatToolLoopResult {
             provider_rounds: 0,
             tool_calls_executed: 0,
             diagnostics: Vec::new(),
-            failure_fallback: None,
+            failure_fallbacks: Vec::new(),
             stopped_at_limit: false,
         }
     }
@@ -114,6 +118,7 @@ impl ChatToolLoopResult {
 #[error("native chat/tool loop failed after {provider_rounds} provider rounds: {source}")]
 pub struct ChatToolLoopError {
     pub source: OpenRouterChatError,
+    pub failed_round: Box<ChatRoundResult>,
     pub partial: Box<ChatToolLoopResult>,
     pub provider_rounds: usize,
 }
@@ -142,23 +147,28 @@ where
                 Err(error) => {
                     result.provider_rounds += 1;
                     record_round(&mut result, &error.partial);
-                    let retryable = retry < PROVIDER_RETRY_DELAYS.len()
+                    let retry_delay = (retry < MAX_PROVIDER_RETRIES
                         && retryable_provider_error(&error.source)
                         && error.partial.text.is_empty()
-                        && error.partial.tool_calls.is_empty();
-                    if retryable {
+                        && error.partial.tool_calls.is_empty()
+                        && !round_has_billable_usage(&error.partial))
+                    .then(|| provider_retry_delay(&error.source, retry))
+                    .flatten();
+                    if let Some(delay) = retry_delay {
                         result.diagnostics.push(format!(
-                            "AI provider retry: round={} attempt={} error_kind={}",
+                            "AI provider retry: round={} attempt={} error_kind={} delay_ms={}",
                             logical_round + 1,
                             retry + 1,
-                            provider_error_kind(&error.source)
+                            provider_error_kind(&error.source),
+                            delay.as_millis(),
                         ));
-                        wait_before_retry(PROVIDER_RETRY_DELAYS[retry]);
+                        wait_before_retry(delay);
                         retry += 1;
                         continue;
                     }
                     return Err(ChatToolLoopError {
                         source: error.source,
+                        failed_round: error.partial,
                         provider_rounds: result.provider_rounds,
                         partial: Box::new(result),
                     });
@@ -191,7 +201,7 @@ where
             }
             result.diagnostics.extend(tool_result.diagnostics);
             if let Some(fallback) = tool_result.failure_fallback {
-                result.failure_fallback = Some(fallback);
+                result.failure_fallbacks.push(fallback);
             }
             result
                 .messages
@@ -204,16 +214,48 @@ where
 }
 
 fn retryable_provider_error(error: &OpenRouterChatError) -> bool {
-    matches!(
-        error,
-        OpenRouterChatError::Transport(_)
-            | OpenRouterChatError::IncompleteStream
-            | OpenRouterChatError::RateLimited { .. }
-            | OpenRouterChatError::Http {
-                status_code: 408 | 425 | 500..=599,
-                ..
-            }
-    )
+    is_retryable_provider_exception(provider_exception_facts(error))
+}
+
+fn provider_exception_facts(error: &OpenRouterChatError) -> ProviderExceptionFacts {
+    ProviderExceptionFacts {
+        json_decode_error: matches!(error, OpenRouterChatError::InvalidJson(_)),
+        connection_error: matches!(
+            error,
+            OpenRouterChatError::Transport(_) | OpenRouterChatError::IncompleteStream
+        ),
+        timeout_error: false,
+        rate_limit_error: matches!(error, OpenRouterChatError::RateLimited { .. }),
+        api_status_code: match error {
+            OpenRouterChatError::Http { status_code, .. } => Some(i64::from(*status_code)),
+            _ => None,
+        },
+    }
+}
+
+fn round_has_billable_usage(round: &ChatRoundResult) -> bool {
+    round
+        .billing_segment
+        .as_ref()
+        .and_then(|segment| segment.get("usage"))
+        .and_then(Value::as_object)
+        .is_some_and(response_has_billable_usage)
+}
+
+fn provider_retry_delay(error: &OpenRouterChatError, retry: usize) -> Option<Duration> {
+    let retry = u32::try_from(retry).ok()?;
+    let default = Duration::from_secs(retry_wait_seconds(retry)?);
+    let OpenRouterChatError::RateLimited {
+        retry_after_seconds: Some(retry_after),
+        ..
+    } = error
+    else {
+        return Some(default);
+    };
+    if *retry_after > MAX_RATE_LIMIT_RETRY_SECONDS {
+        return None;
+    }
+    Some(default.max(Duration::from_secs(*retry_after)))
 }
 
 pub(crate) fn provider_error_kind(error: &OpenRouterChatError) -> String {
@@ -465,10 +507,7 @@ mod tests {
         assert_eq!(result.provider_rounds, 3);
         assert_eq!(result.tool_calls_executed, 1);
         assert_eq!(tools.calls.len(), 1);
-        assert_eq!(
-            result.failure_fallback.as_deref(),
-            Some("synthetic confirmation")
-        );
+        assert_eq!(result.failure_fallbacks, ["synthetic confirmation"]);
         assert_eq!(
             result
                 .diagnostics
@@ -512,9 +551,84 @@ mod tests {
         assert_eq!(error.provider_rounds, 4);
         assert_eq!(error.partial.tool_calls_executed, 1);
         assert_eq!(tools.calls.len(), 1);
+        assert_eq!(error.partial.failure_fallbacks, ["synthetic confirmation"]);
+    }
+
+    #[test]
+    fn preserves_every_completed_tool_confirmation() {
+        let mut second_call = call("calculate", r#"{"expression":"3+3"}"#);
+        second_call.index = 1;
+        second_call.id = "call-2".to_owned();
+        let failed_round = || {
+            Err(ChatRoundError {
+                source: OpenRouterChatError::IncompleteStream,
+                partial: Box::new(round("", Vec::new(), json!({"pending": true}))),
+            })
+        };
+        let provider = Provider {
+            rounds: RefCell::new(vec![
+                Ok(round(
+                    "",
+                    vec![call("calculate", r#"{"expression":"2+2"}"#), second_call],
+                    json!({"round": 1}),
+                )),
+                failed_round(),
+                failed_round(),
+                failed_round(),
+            ]),
+            observed: RefCell::new(Vec::new()),
+        };
+        let mut tools = Tools {
+            confirm: true,
+            ..Tools::default()
+        };
+
+        let error = run_chat_tool_loop(&provider, &mut tools, &[], false, 5, |_text| Ok(()))
+            .err()
+            .unwrap_or_else(|| unreachable!());
+
+        assert_eq!(tools.calls.len(), 2);
         assert_eq!(
-            error.partial.failure_fallback.as_deref(),
-            Some("synthetic confirmation")
+            error.partial.failure_fallbacks,
+            ["synthetic confirmation", "synthetic confirmation"]
+        );
+    }
+
+    #[test]
+    fn does_not_retry_a_failed_round_with_billable_usage() {
+        let provider = Provider {
+            rounds: RefCell::new(vec![Err(ChatRoundError {
+                source: OpenRouterChatError::IncompleteStream,
+                partial: Box::new(round("", Vec::new(), json!({"usage": {"cost": "0.001"}}))),
+            })]),
+            observed: RefCell::new(Vec::new()),
+        };
+        let mut tools = Tools::default();
+
+        let error = run_chat_tool_loop(&provider, &mut tools, &[], false, 5, |_text| Ok(()))
+            .err()
+            .unwrap_or_else(|| unreachable!());
+
+        assert_eq!(error.provider_rounds, 1);
+        assert_eq!(provider.observed.borrow().len(), 1);
+        assert_eq!(error.partial.billing_segments.len(), 1);
+    }
+
+    #[test]
+    fn retry_delay_respects_short_rate_limit_advice_and_rejects_long_waits() {
+        let rate_limit = |retry_after_seconds| OpenRouterChatError::RateLimited {
+            retry_after_seconds,
+            message: "synthetic".to_owned(),
+        };
+
+        assert_eq!(
+            provider_retry_delay(&rate_limit(Some(3)), 0),
+            Some(Duration::from_secs(3))
+        );
+        assert_eq!(provider_retry_delay(&rate_limit(Some(6)), 0), None);
+        assert_eq!(
+            provider_retry_delay(&rate_limit(None), 1),
+            Some(Duration::from_secs(2))
         );
     }
 

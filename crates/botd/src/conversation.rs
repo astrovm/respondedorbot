@@ -941,14 +941,14 @@ where
                 on_token(token).map_err(bot_adapters::openrouter_chat::OpenRouterChatError::Stream)
             },
         );
-        let (raw_text, chat_segments, chat_diagnostics, provider_failed, failure_fallback) =
+        let (raw_text, chat_segments, chat_diagnostics, provider_failed, failure_fallbacks) =
             match loop_result {
                 Ok(result) => (
                     result.text,
                     result.billing_segments,
                     result.diagnostics,
                     result.stopped_at_limit,
-                    result.failure_fallback,
+                    result.failure_fallbacks,
                 ),
                 Err(error) => {
                     eprintln!("{}", provider_failure_diagnostic(&operation_id, &error));
@@ -966,7 +966,11 @@ where
         .final_text;
         let fallback = cleaned.trim().is_empty() || provider_failed;
         let text = if provider_failed {
-            failure_fallback.unwrap_or_else(|| Self::preparation_error(input.locale).to_owned())
+            if failure_fallbacks.is_empty() {
+                Self::preparation_error(input.locale).to_owned()
+            } else {
+                failure_fallbacks.join("\n")
+            }
         } else if fallback {
             Self::preparation_error(input.locale).to_owned()
         } else {
@@ -1333,7 +1337,7 @@ fn append_media_context(messages: &mut [PromptMessage], media: &MediaExecution, 
 
 fn partial_failure(
     error: ChatToolLoopError,
-) -> (String, Vec<Value>, Vec<String>, bool, Option<String>) {
+) -> (String, Vec<Value>, Vec<String>, bool, Vec<String>) {
     let mut diagnostics = error.partial.diagnostics.clone();
     diagnostics.push(format!("AI provider stream: {}", error.source));
     (
@@ -1341,17 +1345,16 @@ fn partial_failure(
         error.partial.billing_segments.clone(),
         diagnostics,
         true,
-        error.partial.failure_fallback.clone(),
+        error.partial.failure_fallbacks.clone(),
     )
 }
 
 fn provider_failure_diagnostic(operation_id: &str, error: &ChatToolLoopError) -> String {
     let segment = error
-        .partial
-        .billing_segments
-        .iter()
-        .rev()
-        .find(|segment| segment.get("source").and_then(Value::as_str) == Some("openrouter"));
+        .failed_round
+        .billing_segment
+        .as_ref()
+        .filter(|segment| segment.get("source").and_then(Value::as_str) == Some("openrouter"));
     let metadata = segment
         .and_then(|segment| segment.get("metadata"))
         .and_then(Value::as_object);
@@ -2175,10 +2178,11 @@ mod tests {
         let error = ChatToolLoopError {
             source: OpenRouterChatError::Transport("secret transport detail".to_owned()),
             provider_rounds: 3,
-            partial: Box::new(crate::chat_tool_loop::ChatToolLoopResult {
+            failed_round: Box::new(ChatRoundResult {
                 text: String::new(),
-                messages: Vec::new(),
-                billing_segments: vec![json!({
+                tool_calls: Vec::new(),
+                finish_reason: None,
+                billing_segment: Some(json!({
                     "kind": "chat",
                     "model": "synthetic/model\nunsafe",
                     "source": "openrouter",
@@ -2186,11 +2190,24 @@ mod tests {
                         "provider_generation_id": "generation\nunsafe",
                         "upstream_provider": "Synthetic Provider"
                     }
+                })),
+            }),
+            partial: Box::new(crate::chat_tool_loop::ChatToolLoopResult {
+                text: String::new(),
+                messages: Vec::new(),
+                billing_segments: vec![json!({
+                    "kind": "chat",
+                    "model": "previous/model",
+                    "source": "openrouter",
+                    "metadata": {
+                        "provider_generation_id": "previous-generation",
+                        "upstream_provider": "Previous Provider"
+                    }
                 })],
                 provider_rounds: 3,
                 tool_calls_executed: 0,
                 diagnostics: Vec::new(),
-                failure_fallback: None,
+                failure_fallbacks: Vec::new(),
                 stopped_at_limit: false,
             }),
         };
@@ -2202,6 +2219,7 @@ mod tests {
         assert!(diagnostic.contains("generation_id=generation_unsafe"));
         assert!(diagnostic.contains("model=synthetic/model_unsafe"));
         assert!(diagnostic.contains("upstream_provider=Synthetic_Provider"));
+        assert!(!diagnostic.contains("previous-generation"));
         assert!(!diagnostic.contains("secret transport detail"));
         assert!(!diagnostic.contains('\n'));
     }

@@ -29,7 +29,7 @@ pub fn is_retryable_provider_exception(facts: ProviderExceptionFacts) -> bool {
         || facts.rate_limit_error
         || facts
             .api_status_code
-            .is_some_and(|status| status == 429 || status >= 500)
+            .is_some_and(|status| matches!(status, 408 | 409 | 425 | 429) || status >= 500)
 }
 
 #[must_use]
@@ -152,6 +152,20 @@ mod tests {
                 timeout_error: false,
                 rate_limit_error: false,
                 api_status_code: Some(503),
+            },
+            ProviderExceptionFacts {
+                json_decode_error: false,
+                connection_error: false,
+                timeout_error: false,
+                rate_limit_error: false,
+                api_status_code: Some(408),
+            },
+            ProviderExceptionFacts {
+                json_decode_error: false,
+                connection_error: false,
+                timeout_error: false,
+                rate_limit_error: false,
+                api_status_code: Some(425),
             },
         ] {
             assert!(is_retryable_provider_exception(facts));
