@@ -95,57 +95,53 @@ jobs:
           cargo llvm-cov report -p botd --fail-under-lines 95
 
   image:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-26.04
     permissions:
       contents: read
-      packages: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Log in to GHCR
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io \
-            --username "${{ github.actor }}" \
-            --password-stdin
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Set image creation timestamp
+        id: image-metadata
+        run: echo "created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
 
       - name: Build image
-        run: |
-          REPO="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
-          CACHE_REPO="${REPO}-build-cache"
-          CACHE_FLAGS=(--cache-from "${CACHE_REPO}")
-          if [ "${{ github.event_name }}" = "push" ]; then
-            CACHE_FLAGS+=(--cache-to "${CACHE_REPO}")
-          fi
-          podman build \
-            --layers \
-            "${CACHE_FLAGS[@]}" \
-            --tag "${REPO}:sha-${{ github.sha }}" \
-            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
-            --label "org.opencontainers.image.revision=${{ github.sha }}" \
-            --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            .
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: Containerfile
+          load: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ steps.image-metadata.outputs.created }}
+          cache-from: type=gha,scope=respondedorbot
+          cache-to: type=gha,mode=max,scope=respondedorbot
 
       - name: Verify image
         run: |
-          REPO="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
-          IMAGE="${REPO}:sha-${{ github.sha }}"
-          podman run --rm \
+          docker run --rm \
             --env TELEGRAM_TOKEN=synthetic-telegram-token \
             --env TELEGRAM_USERNAME=synthetic_test_bot \
             --env SUPABASE_POSTGRES_URL=postgresql://synthetic-user:synthetic-password@db.synthetic.invalid:5432/postgres?sslmode=require \
             --env COINMARKETCAP_KEY=synthetic-coinmarketcap-key \
             --env OPENROUTER_API_KEY=synthetic-openrouter-key \
             --env BOT_SYSTEM_PROMPT=synthetic-system-prompt \
-            "${IMAGE}" /usr/local/bin/botd --check-config
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}" \
+            /usr/local/bin/botd --check-config
 
   publish-latest:
     if: github.event_name == 'push'
     needs:
       - quality
       - coverage
-      - image
     runs-on: ubuntu-26.04
     permissions:
       contents: read
@@ -155,41 +151,50 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Log in to GHCR
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io \
-            --username "${{ github.actor }}" \
-            --password-stdin
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
-      - name: Build validated image from cache
-        run: |
-          REPO="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
-          CACHE_REPO="${REPO}-build-cache"
-          podman build \
-            --layers \
-            --cache-from "${CACHE_REPO}" \
-            --tag "${REPO}:sha-${{ github.sha }}" \
-            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
-            --label "org.opencontainers.image.revision=${{ github.sha }}" \
-            --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            .
+      - name: Set image creation timestamp
+        id: image-metadata
+        run: echo "created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
 
-      - name: Verify validated image
+      - name: Build image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: Containerfile
+          load: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ steps.image-metadata.outputs.created }}
+          cache-from: type=gha,scope=respondedorbot
+          cache-to: type=gha,mode=max,scope=respondedorbot
+
+      - name: Verify image
         run: |
-          REPO="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
-          IMAGE="${REPO}:sha-${{ github.sha }}"
-          podman run --rm \
+          docker run --rm \
             --env TELEGRAM_TOKEN=synthetic-telegram-token \
             --env TELEGRAM_USERNAME=synthetic_test_bot \
             --env SUPABASE_POSTGRES_URL=postgresql://synthetic-user:synthetic-password@db.synthetic.invalid:5432/postgres?sslmode=require \
             --env COINMARKETCAP_KEY=synthetic-coinmarketcap-key \
             --env OPENROUTER_API_KEY=synthetic-openrouter-key \
             --env BOT_SYSTEM_PROMPT=synthetic-system-prompt \
-            "${IMAGE}" /usr/local/bin/botd --check-config
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}" \
+            /usr/local/bin/botd --check-config
 
-      - name: Publish validated images
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish verified image
         run: |
           REPO="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
-          podman tag "${REPO}:sha-${{ github.sha }}" "${REPO}:latest"
-          podman push "${REPO}:sha-${{ github.sha }}"
-          podman push "${REPO}:latest"
+          docker push "${REPO}:sha-${{ github.sha }}"
+          docker push "${REPO}:latest"
