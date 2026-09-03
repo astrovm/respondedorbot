@@ -131,6 +131,7 @@ fn outcome_result(
             });
             ToolExecutionResult {
                 output: json!({"query": query, "results": results}).to_string(),
+                failure_fallback: None,
                 billing_segment,
                 diagnostics: Vec::new(),
             }
