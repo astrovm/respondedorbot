@@ -17,6 +17,7 @@ pub mod conversation_adapters;
 pub mod dispatcher;
 pub mod firecrawl_tool;
 pub mod hacker_news_tool;
+pub mod legacy_migration;
 pub mod maintenance;
 pub mod market_tools;
 pub mod media;

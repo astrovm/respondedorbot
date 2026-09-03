@@ -115,7 +115,7 @@ database and values are decoded as UTF-8 strings.
 | `chat_user_summary:{chat_id}` | User-specific summary text | 30 days |
 | `chat_compacted_until:{chat_id}` | Compaction marker | 30 days |
 | `chat_user_compacted_until:{chat_id}` | User compaction marker | 30 days |
-| `bot_message_meta:{chat_id}:{message_id}` | JSON metadata for bot replies | 3 days |
+| `bot_message_meta:{chat_id}:{message_id}` | Version 1 JSON metadata for bot replies | 3 days |
 | `chat_members:{chat_id}` | Hash of user ID to JSON member data | 30 days |
 
 The RediSearch index name is `idx:chat_messages`, with prefix `chatmsg:`. Its
@@ -212,6 +212,27 @@ The native application does not use Redis database 1. Historical scheduler
 objects in that database are not executable state and may be removed after the
 deployment owner confirms that no rollback image needs them. Canonical tasks in
 database 0 are the only scheduling source of truth.
+
+## Legacy-data migration
+
+`botd --migrate-legacy` inspects database 0 and PostgreSQL and prints a JSON
+report without changing data. Add `--apply` to perform the migration after a
+backup. Repeated runs are safe.
+
+The migration:
+
+- adds schema version 1 to unversioned conversation history, chat members, and
+  bot-message metadata;
+- rewrites scheduled tasks to the canonical version 1 record, calculates their
+  next future occurrence, and rebuilds the per-chat and global due indexes;
+- removes the obsolete `world_cup_goal_alerts` chat configuration field.
+
+The task migration does not execute occurrences missed before migration. Redis
+writes compare the value read during inspection before replacing it, so a
+concurrent change stops the command instead of overwriting newer data.
+Malformed or unsupported conversation records are counted in the report and
+left unchanged. An invalid scheduled task stops the migration because silently
+skipping executable state could hide a user-visible task.
 
 ## Files and environment
 

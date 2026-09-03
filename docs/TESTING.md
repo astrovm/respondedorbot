@@ -26,6 +26,8 @@ CI supplies PostgreSQL and Redis Stack and sets `TEST_POSTGRES_URL`, `TEST_DATAB
 4. Integration tests cover billing replay/refund policy, scheduler claiming/advancement, Redis state, PostgreSQL schema and transactions, and real FFmpeg normalization.
 5. Lifecycle tests cover polling offsets, retries, worker failure reporting, graceful shutdown, cancellation, and restart-safe claims.
 6. Container verification builds the release image and confirms `botd` is executable.
+7. Legacy-data migration tests cover dry-run behavior, idempotent application,
+   record versioning, task reconstruction, and conditional Redis writes.
 
 ## Critical scenarios
 

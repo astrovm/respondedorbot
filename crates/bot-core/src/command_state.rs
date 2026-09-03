@@ -11,6 +11,7 @@ use crate::telegram_input::{ChatId, MessageId, UserId};
 
 pub const CHAT_STATE_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
 pub const BOT_MESSAGE_METADATA_TTL_SECONDS: i64 = 3 * 24 * 60 * 60;
+pub const BOT_MESSAGE_METADATA_SCHEMA_VERSION: u8 = 1;
 pub const CHAT_HISTORY_WRITE_LIMIT: usize = 400;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +69,7 @@ pub enum CommandStateError {
 
 #[derive(Serialize)]
 struct CommandMetadata<'a> {
+    schema_version: u8,
     r#type: &'static str,
     command: &'a str,
     uses_ai: bool,
@@ -144,6 +146,7 @@ pub fn prepare_outgoing_command_state(
     let metadata = input.sent_message_id.map(|message_id| {
         let message_id = message_id.0.to_string();
         serde_json::to_string(&CommandMetadata {
+            schema_version: BOT_MESSAGE_METADATA_SCHEMA_VERSION,
             r#type: "command",
             command: input.command,
             uses_ai: false,
@@ -216,6 +219,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&metadata.payload).ok(),
             Some(serde_json::json!({
+                "schema_version":1,
                 "type":"command",
                 "command":"/time",
                 "uses_ai":false
