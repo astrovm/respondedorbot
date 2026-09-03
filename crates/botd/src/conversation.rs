@@ -965,8 +965,9 @@ where
         )
         .final_text;
         let fallback = cleaned.trim().is_empty() || provider_failed;
+        let has_failure_fallback = !failure_fallbacks.is_empty();
         let text = if provider_failed {
-            if failure_fallbacks.is_empty() {
+            if !has_failure_fallback {
                 Self::preparation_error(input.locale).to_owned()
             } else {
                 failure_fallbacks.join("\n")
@@ -976,7 +977,7 @@ where
         } else {
             cleaned
         };
-        if input.spontaneous && fallback {
+        if input.spontaneous && fallback && !has_failure_fallback {
             record_and_settle(
                 &mut self.billing,
                 &input,
@@ -2100,7 +2101,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_tool_confirmation_replaces_a_failed_followup_round() {
+    fn completed_tool_confirmation_replaces_a_failed_followup_round_for_every_route() {
         let failed_round = || {
             Err(ChatRoundError {
                 source: OpenRouterChatError::IncompleteStream,
@@ -2138,39 +2139,43 @@ mod tests {
                 "source": "openrouter"
             })),
         };
-        let mut service = NativeConversation::new(
-            Provider {
-                rounds: RefCell::new(
-                    vec![
-                        Ok(first_round),
-                        failed_round(),
-                        failed_round(),
-                        failed_round(),
-                    ]
-                    .into(),
-                ),
-                prompts: RefCell::new(Vec::new()),
-            },
-            ConfirmingTools,
-            State::default(),
-            Billing::default(),
-            "synthetic persona",
-            DEEPSEEK_MODEL,
-            5,
-        );
+        for spontaneous in [false, true] {
+            let mut service = NativeConversation::new(
+                Provider {
+                    rounds: RefCell::new(
+                        vec![
+                            Ok(first_round.clone()),
+                            failed_round(),
+                            failed_round(),
+                            failed_round(),
+                        ]
+                        .into(),
+                    ),
+                    prompts: RefCell::new(Vec::new()),
+                },
+                ConfirmingTools,
+                State::default(),
+                Billing::default(),
+                "synthetic persona",
+                DEEPSEEK_MODEL,
+                5,
+            );
+            let mut request = input();
+            request.spontaneous = spontaneous;
 
-        let preparation = service.prepare(input());
+            let preparation = service.prepare(request);
 
-        assert!(matches!(
-            preparation,
-            Ok(AiPreparation::Reply {
-                ref text,
-                completion_id: Some(_),
-                ref diagnostics,
-            }) if text == "synthetic task confirmation"
-                && diagnostics.iter().filter(|value| value.contains("AI provider retry")).count() == 2
-        ));
-        assert_eq!(service.provider.prompts.borrow().len(), 4);
+            assert!(matches!(
+                preparation,
+                Ok(AiPreparation::Reply {
+                    ref text,
+                    completion_id: Some(_),
+                    ref diagnostics,
+                }) if text == "synthetic task confirmation"
+                    && diagnostics.iter().filter(|value| value.contains("AI provider retry")).count() == 2
+            ));
+            assert_eq!(service.provider.prompts.borrow().len(), 4);
+        }
     }
 
     #[test]
