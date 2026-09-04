@@ -2120,7 +2120,7 @@ where
                 .push(format!("incoming media command state plan: {error}")),
         }
 
-        let action = if completion_id.is_none() && text.chars().count() > MAX_TELEGRAM_TEXT_LENGTH {
+        let action = if text.chars().count() > MAX_TELEGRAM_TEXT_LENGTH {
             TelegramAction::SendDocument {
                 chat_id,
                 document: text.as_bytes().to_vec().into(),
@@ -4567,52 +4567,62 @@ mod tests {
 
     #[test]
     fn long_youtube_transcript_is_sent_as_a_complete_text_document() {
-        let transcript = "texto sintético 🦀 ".repeat(300);
-        assert!(transcript.chars().count() > MAX_TELEGRAM_TEXT_LENGTH);
-        let (mut source, (_prepared, _ignored, deliveries)) =
-            ai_source(Ok(AiPreparation::silent()));
-        source.media_preparation = Some(Ok(AiPreparation::Reply {
-            text: transcript.clone(),
-            completion_id: None,
-            diagnostics: Vec::new(),
-        }));
-        let mut dispatcher = NativeDispatcher::new(
-            Config {
-                value: Ok(ChatConfig::default()),
-                chat_ids: Vec::new(),
-            },
-            Actions::default(),
-            State::default(),
-            values(),
-            random(),
-            authorization(),
-            "@mybot",
-        )
-        .with_ai_conversation_source(Box::new(source));
+        for completion_id in [None, Some("youtube-paid".to_owned())] {
+            let transcript = "texto sintético 🦀 ".repeat(300);
+            assert!(transcript.chars().count() > MAX_TELEGRAM_TEXT_LENGTH);
+            let (mut source, (_prepared, _ignored, deliveries)) =
+                ai_source(Ok(AiPreparation::silent()));
+            source.media_preparation = Some(Ok(AiPreparation::Reply {
+                text: transcript.clone(),
+                completion_id: completion_id.clone(),
+                diagnostics: Vec::new(),
+            }));
+            let mut dispatcher = NativeDispatcher::new(
+                Config {
+                    value: Ok(ChatConfig::default()),
+                    chat_ids: Vec::new(),
+                },
+                Actions::default(),
+                State::default(),
+                values(),
+                random(),
+                authorization(),
+                "@mybot",
+            )
+            .with_ai_conversation_source(Box::new(source));
 
-        assert_eq!(
-            dispatcher.dispatch(update("/transcript https://youtu.be/synthetic", None)),
-            Ok(DispatchOutcome::Handled)
-        );
-        let [
-            TelegramAction::SendDocument {
-                document,
-                file_name,
-                reply_to_message_id,
-                caption,
-                ..
-            },
-        ] = dispatcher.actions.0.as_slice()
-        else {
-            return;
-        };
-        assert_eq!(document.as_ref(), transcript.as_bytes());
-        assert_eq!(file_name, "youtube-transcript.txt");
-        assert_eq!(*reply_to_message_id, Some(MessageId(7)));
-        assert_eq!(caption, "🎬 transcripción de YouTube");
-        assert!(deliveries.borrow().is_empty());
-        assert_eq!(dispatcher.state.incoming.len(), 1);
-        assert_eq!(dispatcher.state.outgoing.len(), 1);
+            assert_eq!(
+                dispatcher.dispatch(update("/transcript https://youtu.be/synthetic", None)),
+                Ok(DispatchOutcome::Handled)
+            );
+            let [
+                TelegramAction::SendDocument {
+                    document,
+                    file_name,
+                    reply_to_message_id,
+                    caption,
+                    ..
+                },
+            ] = dispatcher.actions.0.as_slice()
+            else {
+                unreachable!("long transcripts must be sent as documents");
+            };
+            assert_eq!(document.as_ref(), transcript.as_bytes());
+            assert_eq!(file_name, "youtube-transcript.txt");
+            assert_eq!(*reply_to_message_id, Some(MessageId(7)));
+            assert_eq!(caption, "🎬 transcripción de YouTube");
+            let expected = completion_id
+                .map(|completion_id| AiDelivery {
+                    completion_id,
+                    delivered: true,
+                    sent_message_id: Some(MessageId(700)),
+                })
+                .into_iter()
+                .collect::<Vec<_>>();
+            assert_eq!(*deliveries.borrow(), expected);
+            assert_eq!(dispatcher.state.incoming.len(), 1);
+            assert_eq!(dispatcher.state.outgoing.len(), 1);
+        }
     }
 
     #[test]

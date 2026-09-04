@@ -337,6 +337,7 @@ pub fn poll_once_with<T: TelegramTransport>(
 mod tests {
     use std::cell::RefCell;
 
+    use bot_core::telegram_input::{MessageContent, MessageId};
     use reqwest::Method;
     use serde_json::{Value, json};
 
@@ -565,7 +566,74 @@ mod tests {
     }
 
     #[test]
+    fn replied_animations_preserve_file_identity_without_audio() {
+        let result = parse_response(
+            200,
+            r#"{"ok":true,"result":[{"update_id":32,"message":{"message_id":11,"chat":{"id":42,"type":"private"},"from":{"id":88},"text":"/transcript","reply_to_message":{"message_id":10,"caption":"synthetic GIF","animation":{"file_id":"synthetic-animation","duration":5}}}}]}"#,
+        );
+        let Ok(PollOutcome::Updates(updates)) = result else {
+            unreachable!("expected a parsed animation reply");
+        };
+        let IncomingEvent::Message(message) = &updates[0].event else {
+            unreachable!("expected a message event");
+        };
+        assert!(message.has_reply);
+        assert_eq!(message.replied_message_id, Some(MessageId(10)));
+        assert_eq!(message.replied_text.as_deref(), Some("synthetic GIF"));
+        assert_eq!(message.visual_media_kind.as_deref(), Some("animation"));
+        assert_eq!(message.audio_media_kind, None);
+        assert_eq!(message.audio_duration_seconds, None);
+        assert_eq!(
+            message.content.as_ref(),
+            Some(&MessageContent {
+                text: "/transcript".to_owned(),
+                photo_file_id: Some("synthetic-animation".to_owned()),
+                audio_file_id: None,
+            })
+        );
+    }
+
+    #[test]
+    fn media_duration_accepts_numbers_and_strings_and_ignores_invalid_types() {
+        for (duration, expected) in [
+            (serde_json::json!(4), Some(4)),
+            (serde_json::json!(4.75), Some(4)),
+            (serde_json::json!("4"), Some(4)),
+            (serde_json::json!(-1), Some(0)),
+            (serde_json::json!(null), None),
+            (serde_json::json!({}), None),
+            (serde_json::json!("invalid"), None),
+        ] {
+            let payload = serde_json::json!({
+                "ok": true,
+                "result": [{"update_id": 33, "message": {
+                    "message_id": 12, "chat": {"id": 42},
+                    "caption": "/transcribe", "voice": {"file_id": "synthetic-voice", "duration": duration}
+                }}]
+            });
+            let Ok(PollOutcome::Updates(updates)) = parse_response(200, &payload.to_string())
+            else {
+                unreachable!("expected a parsed media update");
+            };
+            let IncomingEvent::Message(message) = &updates[0].event else {
+                unreachable!("expected a media message");
+            };
+            assert_eq!(message.audio_duration_seconds, expected);
+            assert_eq!(message.audio_media_kind.as_deref(), Some("voice"));
+        }
+    }
+
+    #[test]
     fn api_failures_preserve_conflict_rate_limit_and_status_information() {
+        for error_code in [Some(401), Some(500), None] {
+            assert_eq!(
+                parse_response(
+                    200,
+                    &serde_json::json!({"ok": false, "error_code": error_code}).to_string()
+                ),
+                Ok(PollOutcome::Retry(PollFailure::Api { error_code }))
+            );
+        }
         assert_eq!(
             parse_response(200, r#"{"ok":false,"error_code":409}"#),
             Ok(PollOutcome::Retry(PollFailure::Conflict))
