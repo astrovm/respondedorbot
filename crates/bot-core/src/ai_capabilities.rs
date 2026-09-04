@@ -11,7 +11,7 @@ const CAPABILITIES_ES: &str = r#"CAPACIDADES DEL BOT:
 - /p, /prices, /price, /precios, /precio, /presios, /presio, /bresio, /bresios, /brecio, /brecios: precios crypto, acciones y otros activos
 - /c, /cripto, /criptos, /crypto, /cryptos: precios solo de crypto
 - /clima, /weather: clima actual para cualquier ciudad o ubicación
-- token cards: si el mensaje completo es un address Solana/EVM o un $ticker, mando card con chart/imagen, stats, socials, links y botones; si el $ticker no es un token, busco su precio de mercado
+- token cards: si el mensaje completo es un address Solana/EVM o un $ticker, uso el mismo buscador de precios; un activo lleva gráfico y los tokens llevan card con stats, socials y links
 - /dolar, /dollar, /usd: cotizaciones del dólar y variaciones por ventana
 - /s, /accion, /acciones, /stock, /stocks: precios de acciones por símbolo o empresa desde Yahoo Finance
 - /petroleo, /oil: precio Brent y WTI
@@ -39,7 +39,7 @@ const CAPABILITIES_EN: &str = r#"BOT CAPABILITIES:
 - /p, /prices, /price, /precios, /precio, /presios, /presio, /bresio, /bresios, /brecio, /brecios: crypto, stock, and other asset prices
 - /c, /cripto, /criptos, /crypto, /cryptos: crypto-only prices
 - /clima, /weather: current weather for any city or location
-- token cards: send a Solana or EVM address, or a $ticker, for a market card; unknown token cashtags fall back to market prices
+- token cards: send a Solana or EVM address, or a $ticker; canonical assets resolve first, single assets get charts, and unknown symbols use exact token lookup
 - /dolar, /dollar, /usd: dollar exchange rates and changes by time window
 - /s, /accion, /acciones, /stock, /stocks: stock prices by symbol or company from Yahoo Finance
 - /petroleo, /oil: Brent and WTI oil prices

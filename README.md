@@ -114,14 +114,18 @@ exits.
 | `/random`, `/convertbase`, `/comando`, `/time` | Utilities |
 | `/gm`, `/gn`, `/help`, `/instance` | Greetings and bot information |
 
-`/prices` checks CoinMarketCap first, then Yahoo Finance for unresolved symbols
-and company names. Full Solana/EVM addresses and `$ticker` messages use token
-cards when available. Crypto commands such as `/c timba`, `/c $timba`, and
-`/c <address>` use the same token cards, with pump.fun as a fallback for tokens
-not listed on DexScreener. Price commands also accept explicit addresses and
-`$ticker` queries; multi-asset queries and conversion options retain their
-existing price behavior. `/p timba` (and other price aliases) tries token cards
-when ordinary crypto and stock lookup cannot resolve the symbol.
+`/p` and its aliases resolve cryptocurrencies, stocks, company names, and tokens.
+`/c` keeps lookup restricted to crypto. Canonical assets take priority over DEX
+namesakes: `/c bitcoin` resolves BTC and `/p apple` resolves AAPL. Use `stock:` or
+`crypto:` to disambiguate. A single asset gets a chart; comma-separated lists
+such as `/p btc,timba` combine market and token quotes. Bare `/c` shows Bitcoin; bare `/p`, top-N lists, stablecoin lists, and conversion
+options retain their list behavior.
+
+Full Solana/EVM addresses and `$ticker` messages share the command resolver.
+Addresses preserve case and pin the token identity; symbol searches require an
+exact match. DexScreener and pump.fun supply token cards. Missing chart history
+or photo delivery falls back to the available quote/card text, and missing
+metrics are shown as N/A.
 
 ## Test it
 

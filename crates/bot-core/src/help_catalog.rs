@@ -13,7 +13,8 @@ ia:
 mercado:
 - /p, /prices, /price, /precios, /precio, /presios, /presio, /bresio, /bresios, /brecio, /brecios: precios crypto, acciones y otros activos
 - /c, /cripto, /criptos, /crypto, /cryptos: precios solo de crypto
-  ejemplo: /p nvda
+  ejemplo: /p apple
+  ejemplo: /p btc,timba
   ejemplo: /precio btc nvda
   ejemplo: /precio stock:META
   ejemplo: /prices btc eth xmr
@@ -27,7 +28,7 @@ general:
   ejemplo: /clima Córdoba, Argentina
 
 mercado:
-- token cards: si el mensaje completo es un address Solana/EVM o un $ticker, mando card con chart/imagen, stats, socials, links y botones; si el $ticker no es un token, busco su precio de mercado
+- token cards: si el mensaje completo es un address Solana/EVM o un $ticker, uso el mismo buscador de precios; un activo lleva gráfico y los tokens llevan card con stats, socials y links
   ejemplo: J8PS...pump
   ejemplo: $GLORP
 - /dolar, /dollar, /usd: cotizaciones del dólar y variaciones por ventana
@@ -85,7 +86,8 @@ AI:
 markets:
 - /p, /prices, /price, /precios, /precio, /presios, /presio, /bresio, /bresios, /brecio, /brecios: crypto, stock, and other asset prices
 - /c, /cripto, /criptos, /crypto, /cryptos: crypto-only prices
-  example: /p nvda
+  example: /p apple
+  example: /p btc,timba
   example: /price btc nvda
   example: /price stock:META
   example: /prices btc eth xmr
@@ -99,7 +101,7 @@ general:
   example: /weather London
 
 markets:
-- token cards: send a Solana or EVM address, or a $ticker, for a market card; unknown token cashtags fall back to market prices
+- token cards: send a Solana or EVM address, or a $ticker; canonical assets resolve first, single assets get charts, and unknown symbols use exact token lookup
   example: J8PS...pump
   example: $GLORP
 - /dolar, /dollar, /usd: dollar exchange rates and changes by time window
