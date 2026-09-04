@@ -152,7 +152,10 @@ mod tests {
     #[test]
     fn cached_lists_are_authoritative_even_when_empty_and_coerce_values() {
         for (raw, expected) in [
-            (r#"["AAPL",1,true,null]"#, vec!["AAPL", "1", "True", "None"]),
+            (
+                r#"["AAPL",1,true,false,null]"#,
+                vec!["AAPL", "1", "True", "False", "None"],
+            ),
             ("[]", Vec::new()),
         ] {
             let mut cache = Cache {
