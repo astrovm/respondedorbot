@@ -2071,16 +2071,11 @@ where
         };
         let preparation = match source.prepare_media_command(input) {
             Ok(Some(preparation)) => preparation,
-            Ok(None) => {
-                let text = match locale {
-                    bot_core::locale::Locale::Es => "se trabó el /transcribe, probá más tarde",
-                    bot_core::locale::Locale::En => "/transcribe failed, try again later",
-                };
-                return self.send_failure_reply(chat_id, message_id, text);
-            }
-            Err(error) => {
-                self.state_diagnostics
-                    .push(format!("media command: {error}"));
+            result => {
+                if let Err(error) = result {
+                    self.state_diagnostics
+                        .push(format!("media command: {error}"));
+                }
                 let text = match locale {
                     bot_core::locale::Locale::Es => "se trabó el /transcribe, probá más tarde",
                     bot_core::locale::Locale::En => "/transcribe failed, try again later",
@@ -2126,10 +2121,7 @@ where
                 document: text.as_bytes().to_vec().into(),
                 file_name: "youtube-transcript.txt".to_owned(),
                 reply_to_message_id: Some(message_id),
-                caption: match locale {
-                    bot_core::locale::Locale::Es => "🎬 transcripción de YouTube".to_owned(),
-                    bot_core::locale::Locale::En => "🎬 YouTube transcript".to_owned(),
-                },
+                caption: String::new(),
             }
         } else {
             let mut response = SendMessage::new(chat_id, &text);
@@ -4502,7 +4494,7 @@ mod tests {
     fn explicit_media_command_uses_its_native_transaction_and_command_state() {
         let (mut source, (prepared, ignored, deliveries)) = ai_source(Ok(AiPreparation::silent()));
         source.media_preparation = Some(Ok(AiPreparation::Reply {
-            text: "🎵 audio transcription: synthetic transcript".to_owned(),
+            text: "synthetic transcript".to_owned(),
             completion_id: Some("media-1".to_owned()),
             diagnostics: vec!["media diagnostic".to_owned()],
         }));
@@ -4553,7 +4545,7 @@ mod tests {
         let [TelegramAction::SendMessage(message)] = dispatcher.actions.0.as_slice() else {
             return;
         };
-        assert_eq!(message.text, "🎵 audio transcription: synthetic transcript");
+        assert_eq!(message.text, "synthetic transcript");
         assert_eq!(
             deliveries.borrow().as_slice(),
             [AiDelivery {
@@ -4610,7 +4602,7 @@ mod tests {
             assert_eq!(document.as_ref(), transcript.as_bytes());
             assert_eq!(file_name, "youtube-transcript.txt");
             assert_eq!(*reply_to_message_id, Some(MessageId(7)));
-            assert_eq!(caption, "🎬 transcripción de YouTube");
+            assert!(caption.is_empty());
             let expected = completion_id
                 .map(|completion_id| AiDelivery {
                     completion_id,

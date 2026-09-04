@@ -622,22 +622,13 @@ where
                         input.locale,
                         &error,
                     );
-                    self.pending.insert(
-                        operation_id.clone(),
-                        PendingConversation {
-                            input,
-                            text: text.clone(),
-                            segments: Vec::new(),
-                            kind: PendingKind::MediaCommand,
-                            compaction_plan: None,
-                            compaction_payer: None,
-                        },
-                    );
-                    return Ok(AiPreparation::Reply {
+                    return Ok(self.prepare_media_command_reply(
+                        input,
+                        operation_id,
                         text,
-                        completion_id: Some(operation_id),
-                        diagnostics: vec![format!("media command preparation: {error}")],
-                    });
+                        Vec::new(),
+                        vec![format!("media command preparation: {error}")],
+                    ));
                 }
             };
             let required_amount = prepared.reserve_credit_units();
@@ -673,12 +664,7 @@ where
                 .execute(prepared, prompt)
             {
                 Ok(execution) => {
-                    let text = media_command_success(
-                        execution.kind,
-                        input.visual_media_kind.as_deref(),
-                        input.locale,
-                        &execution.text,
-                    );
+                    let text = sanitize_summary_text(&execution.text);
                     (
                         text,
                         execution.billing_segment.into_iter().collect(),
@@ -708,6 +694,17 @@ where
                 Vec::new(),
             )
         };
+        Ok(self.prepare_media_command_reply(input, operation_id, text, segments, diagnostics))
+    }
+
+    fn prepare_media_command_reply(
+        &mut self,
+        input: AiConversationInput,
+        operation_id: String,
+        text: String,
+        segments: Vec<Value>,
+        diagnostics: Vec<String>,
+    ) -> AiPreparation {
         self.pending.insert(
             operation_id.clone(),
             PendingConversation {
@@ -719,11 +716,11 @@ where
                 compaction_payer: None,
             },
         );
-        Ok(AiPreparation::Reply {
+        AiPreparation::Reply {
             text,
             completion_id: Some(operation_id),
             diagnostics,
-        })
+        }
     }
 
     fn prepare_youtube_media_command(
@@ -763,7 +760,7 @@ where
                 diagnostics: preparation.diagnostics,
             }));
         };
-        let text = youtube_command_success(input.locale, &transcript);
+        let text = sanitize_summary_text(&transcript);
         if segments.is_empty() {
             if preparation.reserve_decision.is_some() {
                 self.settle_immediately(
@@ -778,22 +775,13 @@ where
                 diagnostics: preparation.diagnostics,
             }));
         }
-        self.pending.insert(
-            operation_id.clone(),
-            PendingConversation {
-                input: input.clone(),
-                text: text.clone(),
-                segments,
-                kind: PendingKind::MediaCommand,
-                compaction_plan: None,
-                compaction_payer: None,
-            },
-        );
-        Ok(Some(AiPreparation::Reply {
+        Ok(Some(self.prepare_media_command_reply(
+            input.clone(),
+            operation_id,
             text,
-            completion_id: Some(operation_id),
-            diagnostics: preparation.diagnostics,
-        }))
+            segments,
+            preparation.diagnostics,
+        )))
     }
 
     fn prepare_summary_command_transaction(
@@ -1453,14 +1441,6 @@ fn youtube_context_error(locale: Locale) -> &'static str {
     }
 }
 
-fn youtube_command_success(locale: Locale, text: &str) -> String {
-    let text = sanitize_summary_text(text);
-    match locale {
-        Locale::Es => format!("🎬 transcripción de YouTube: {text}"),
-        Locale::En => format!("🎬 YouTube transcript: {text}"),
-    }
-}
-
 fn media_command_prepare_error(
     kind: MediaKind,
     visual_kind: Option<&str>,
@@ -1528,29 +1508,6 @@ fn media_command_provider_error(
             "no pude sacar qué mierda tiene la imagen, probá más tarde"
         }
         (MediaKind::Image, _, Locale::En) => "I could not describe the image, try again later",
-    }
-}
-
-fn media_command_success(
-    kind: MediaKind,
-    visual_kind: Option<&str>,
-    locale: Locale,
-    text: &str,
-) -> String {
-    let text = sanitize_summary_text(text);
-    match (kind, visual_kind, locale) {
-        (MediaKind::Audio, _, Locale::Es) => format!("🎵 te saqué esto del audio: {text}"),
-        (MediaKind::Audio, _, Locale::En) => format!("🎵 audio transcription: {text}"),
-        (MediaKind::Image, Some("sticker"), Locale::Es) => {
-            format!("🎨 en el sticker veo: {text}")
-        }
-        (MediaKind::Image, Some("sticker"), Locale::En) => format!("🎨 sticker: {text}"),
-        (MediaKind::Image, Some("animation"), Locale::Es) => {
-            format!("🎞️ en el GIF veo: {text}")
-        }
-        (MediaKind::Image, Some("animation"), Locale::En) => format!("🎞️ GIF: {text}"),
-        (MediaKind::Image, _, Locale::Es) => text,
-        (MediaKind::Image, _, Locale::En) => format!("🖼️ image: {text}"),
     }
 }
 
@@ -2984,7 +2941,7 @@ mod tests {
         else {
             return;
         };
-        assert_eq!(text, "🎵 audio transcription: synthetic transcript");
+        assert_eq!(text, "synthetic transcript");
         assert_eq!(
             service.billing.reserves[0].metadata["usage_tag"],
             "transcribe_command_media"
@@ -3021,7 +2978,7 @@ mod tests {
         assert!(matches!(
             service.prepare_media_command(request),
             Ok(Some(AiPreparation::Reply { ref text, .. }))
-                if text == "🎵 audio transcription: synthetic transcript"
+                if text == "synthetic transcript"
         ));
     }
 
@@ -3053,7 +3010,7 @@ mod tests {
             else {
                 unreachable!();
             };
-            assert_eq!(text, "🎬 YouTube transcript: synthetic transcript");
+            assert_eq!(text, "synthetic transcript");
             assert_eq!(service.billing.reserves.len(), 1);
             assert_eq!(service.billing.reserves[0].amount, 60);
             assert_eq!(
@@ -3128,7 +3085,7 @@ mod tests {
         assert!(matches!(
             service.prepare_media_command(request),
             Ok(Some(AiPreparation::Reply { ref text, .. }))
-                if text == "🎞️ GIF: synthetic GIF description"
+                if text == "synthetic GIF description"
         ));
     }
 
@@ -3172,7 +3129,7 @@ mod tests {
         assert!(matches!(
             preparation,
             Ok(Some(AiPreparation::Reply { ref text, .. }))
-                if text == "🎨 sticker: synthetic sticker"
+                if text == "synthetic sticker"
         ));
     }
 
@@ -4030,12 +3987,8 @@ mod tests {
                 .is_empty()
             );
             assert!(!media_command_provider_error(kind, visual_kind, locale).is_empty());
-            assert!(!media_command_success(kind, visual_kind, locale, "**synthetic**").is_empty());
         }
-        assert_eq!(
-            media_command_success(MediaKind::Image, None, Locale::Es, "**synthetic**"),
-            "synthetic"
-        );
+        assert_eq!(sanitize_summary_text("**synthetic**"), "synthetic");
         assert!(
             !media_command_prepare_error(
                 MediaKind::Audio,
