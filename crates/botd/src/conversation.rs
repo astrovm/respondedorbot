@@ -1440,7 +1440,7 @@ fn media_command_success(
             format!("🎞️ en el GIF veo: {text}")
         }
         (MediaKind::Image, Some("animation"), Locale::En) => format!("🎞️ GIF: {text}"),
-        (MediaKind::Image, _, Locale::Es) => format!("🖼️ en la imagen veo: {text}"),
+        (MediaKind::Image, _, Locale::Es) => text,
         (MediaKind::Image, _, Locale::En) => format!("🖼️ image: {text}"),
     }
 }
@@ -3824,6 +3824,10 @@ mod tests {
             assert!(!media_command_provider_error(kind, visual_kind, locale).is_empty());
             assert!(!media_command_success(kind, visual_kind, locale, "**synthetic**").is_empty());
         }
+        assert_eq!(
+            media_command_success(MediaKind::Image, None, Locale::Es, "**synthetic**"),
+            "synthetic"
+        );
         assert!(
             !media_command_prepare_error(
                 MediaKind::Audio,
