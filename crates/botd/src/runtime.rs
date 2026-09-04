@@ -875,8 +875,8 @@ mod tests {
     use bot_core::telegram_input::ChatId;
 
     use super::{
-        DURABLE_UPDATE_SCHEMA_VERSION, DurableParallelUpdateHandler, DurableUpdateCompletion,
-        DurableUpdateQueue, DurableUpdateRecord, HandlerErrorDisposition,
+        BackgroundUpdateFailures, DURABLE_UPDATE_SCHEMA_VERSION, DurableParallelUpdateHandler,
+        DurableUpdateCompletion, DurableUpdateQueue, DurableUpdateRecord, HandlerErrorDisposition,
         ParallelHandlerBuildError, ParallelHandlerError, ParallelUpdateHandler, PollingRuntime,
         RuntimeError, StepOutcome, UpdateConfirmation, UpdateFailure, UpdateHandler, UpdateSource,
     };
@@ -986,6 +986,8 @@ mod tests {
                 Ok(())
             }
         }
+        let mut probe = Handler;
+        assert_eq!(probe.handle(update(800)), Ok(()));
 
         let queue = MemoryDurableQueue::default();
         let mut handler = DurableParallelUpdateHandler::start(1, 2, queue.clone(), || {
@@ -1071,6 +1073,22 @@ mod tests {
             }
             self.handled.push(update.update_id);
             Ok(())
+        }
+    }
+
+    struct BackgroundHandler {
+        failures: BackgroundUpdateFailures,
+    }
+
+    impl UpdateHandler for BackgroundHandler {
+        type Error = &'static str;
+
+        fn handle(&mut self, _update: IncomingUpdate) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn take_background_failures(&mut self) -> BackgroundUpdateFailures {
+            std::mem::take(&mut self.failures)
         }
     }
 
@@ -1216,11 +1234,13 @@ mod tests {
             }
         }
         let source = Source {
-            outcomes: VecDeque::new(),
+            outcomes: VecDeque::from([Ok(bot_adapters::telegram_polling::PollOutcome::Updates(
+                vec![update(1)],
+            ))]),
             offsets: Vec::new(),
         };
         let mut runtime = PollingRuntime::new(source, InfallibleHandler);
-        assert_eq!(runtime.step(), Ok(StepOutcome::Idle));
+        assert_eq!(runtime.step(), Ok(StepOutcome::Dispatched { count: 1 }));
     }
 
     #[test]
@@ -1291,6 +1311,8 @@ mod tests {
                 Ok(())
             }
         }
+        let mut probe = InfallibleHandler;
+        assert_eq!(probe.handle(update(40)), Ok(()));
 
         let source = Source {
             outcomes: VecDeque::from([Ok(bot_adapters::telegram_polling::PollOutcome::Updates(
@@ -1800,6 +1822,8 @@ mod tests {
                 Ok(())
             }
         }
+        let mut probe = FactoryHandler;
+        assert_eq!(probe.handle(update(89)), Ok(()));
 
         let handler = ParallelUpdateHandler::<FactoryHandler>::start(2, 2, || {
             panic!("synthetic factory panic");
@@ -1882,6 +1906,69 @@ mod tests {
             stopped.handle(update(1)),
             Err(ParallelHandlerError::QueueUnavailable)
         );
+    }
+
+    #[test]
+    fn background_failures_and_duplicate_durable_updates_are_deterministic() {
+        let retrying = vec![UpdateFailure {
+            update_id: 91,
+            error: "synthetic retry".to_owned(),
+        }];
+        let quarantined = vec![UpdateFailure {
+            update_id: 92,
+            error: "synthetic quarantine".to_owned(),
+        }];
+        let mut handler = BackgroundHandler {
+            failures: BackgroundUpdateFailures {
+                retrying: retrying.clone(),
+                quarantined: quarantined.clone(),
+                fatal: None,
+            },
+        };
+        assert_eq!(handler.handle(update(90)), Ok(()));
+        let source = Source {
+            outcomes: VecDeque::new(),
+            offsets: Vec::new(),
+        };
+        let mut runtime = PollingRuntime::new(source, handler);
+        assert_eq!(
+            runtime.step(),
+            Ok(StepOutcome::HandlerFailures {
+                retrying,
+                quarantined,
+            })
+        );
+        assert!(runtime.source.offsets.is_empty());
+
+        let source = Source {
+            outcomes: VecDeque::new(),
+            offsets: Vec::new(),
+        };
+        let handler = BackgroundHandler {
+            failures: BackgroundUpdateFailures {
+                fatal: Some("synthetic fatal failure".to_owned()),
+                ..BackgroundUpdateFailures::default()
+            },
+        };
+        let mut runtime = PollingRuntime::new(source, handler);
+        assert_eq!(
+            runtime.step(),
+            Err(RuntimeError::Handler("synthetic fatal failure".to_owned()))
+        );
+        assert!(runtime.source.offsets.is_empty());
+
+        let queue = MemoryDurableQueue::default();
+        assert_eq!(queue.insert_update(91, "synthetic payload"), Ok(true));
+        assert_eq!(queue.insert_update(91, "duplicate payload"), Ok(false));
+        let durable = DurableParallelUpdateHandler::start(1, 1, queue, || {
+            Ok::<_, Infallible>(Handler::default())
+        });
+        assert!(durable.is_ok());
+        if let Ok(mut durable) = durable {
+            durable.active.insert(91);
+            assert_eq!(durable.recover(), Ok(()));
+            durable.stop();
+        }
     }
 
     #[test]
