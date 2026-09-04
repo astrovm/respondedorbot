@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use bot_adapters::firecrawl::FIRECRAWL_AUDIO_MAX_BYTES;
 use bot_adapters::media_provider::{
     GroqTranscriptionTransport, MediaProviderError, MediaProviderResult,
     ReqwestGroqTranscriptionTransport, VisionRequest, describe_image_with,
@@ -283,6 +284,44 @@ impl FfmpegMediaProcessor {
             .sum::<f64>();
         (duration.is_finite() && duration > 0.0).then_some(duration)
     }
+
+    fn prepare_audio_bounded(
+        &self,
+        input: &[u8],
+        duration_hint_seconds: Option<f64>,
+        max_input_bytes: u64,
+    ) -> Result<Option<PreparedAudio>, String> {
+        let extracted = Self::run_bounded(
+            &self.ffmpeg,
+            &[
+                "-loglevel".to_owned(),
+                "error".to_owned(),
+                "-i".to_owned(),
+                "pipe:0".to_owned(),
+                "-vn".to_owned(),
+                "-ac".to_owned(),
+                "1".to_owned(),
+                "-c:a".to_owned(),
+                "libopus".to_owned(),
+                "-f".to_owned(),
+                "webm".to_owned(),
+                "pipe:1".to_owned(),
+            ],
+            input,
+            MEDIA_PROCESS_TIMEOUT,
+            max_input_bytes,
+            MEDIA_PROCESS_OUTPUT_MAX_BYTES,
+        )
+        .unwrap_or_else(|_| input.to_vec());
+        let hinted = duration_hint_seconds.filter(|value| value.is_finite() && *value > 0.0);
+        let duration_seconds = hinted
+            .or_else(|| self.duration(&extracted))
+            .or_else(|| self.duration(input));
+        Ok(duration_seconds.map(|duration_seconds| PreparedAudio {
+            bytes: extracted,
+            duration_seconds,
+        }))
+    }
 }
 
 impl MediaProcessor for FfmpegMediaProcessor {
@@ -318,33 +357,15 @@ impl MediaProcessor for FfmpegMediaProcessor {
         input: &[u8],
         duration_hint_seconds: Option<f64>,
     ) -> Result<Option<PreparedAudio>, String> {
-        let extracted = Self::run(
-            &self.ffmpeg,
-            &[
-                "-loglevel".to_owned(),
-                "error".to_owned(),
-                "-i".to_owned(),
-                "pipe:0".to_owned(),
-                "-vn".to_owned(),
-                "-ac".to_owned(),
-                "1".to_owned(),
-                "-c:a".to_owned(),
-                "libopus".to_owned(),
-                "-f".to_owned(),
-                "webm".to_owned(),
-                "pipe:1".to_owned(),
-            ],
-            input,
-        )
-        .unwrap_or_else(|_| input.to_vec());
-        let hinted = duration_hint_seconds.filter(|value| value.is_finite() && *value > 0.0);
-        let duration_seconds = hinted
-            .or_else(|| self.duration(&extracted))
-            .or_else(|| self.duration(input));
-        Ok(duration_seconds.map(|duration_seconds| PreparedAudio {
-            bytes: extracted,
-            duration_seconds,
-        }))
+        self.prepare_audio_bounded(input, duration_hint_seconds, TELEGRAM_FILE_MAX_BYTES)
+    }
+
+    fn prepare_external_audio(
+        &mut self,
+        input: &[u8],
+        duration_hint_seconds: Option<f64>,
+    ) -> Result<Option<PreparedAudio>, String> {
+        self.prepare_audio_bounded(input, duration_hint_seconds, FIRECRAWL_AUDIO_MAX_BYTES)
     }
 }
 
@@ -993,12 +1014,19 @@ mod tests {
         assert!(image.bytes.starts_with(b"RIFF"));
         assert_eq!(image.bytes.get(8..12), Some(b"WEBP".as_slice()));
 
+        let wav = pcm_wav(8_000, &[0; 800]);
         let audio = processor
-            .prepare_audio(&pcm_wav(8_000, &[0; 800]), None)
+            .prepare_audio(&wav, None)
             .unwrap_or_else(|_| unreachable!())
             .unwrap_or_else(|| unreachable!());
         assert!(audio.bytes.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]));
         assert!((0.08..=0.2).contains(&audio.duration_seconds));
+        let external = processor
+            .prepare_external_audio(&wav, None)
+            .unwrap_or_else(|_| unreachable!())
+            .unwrap_or_else(|| unreachable!());
+        assert!(external.bytes.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]));
+        assert!((0.08..=0.2).contains(&external.duration_seconds));
         Ok(())
     }
 }
