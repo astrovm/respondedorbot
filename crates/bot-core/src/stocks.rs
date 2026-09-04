@@ -42,7 +42,10 @@ pub fn classify_oil_command(command: &str) -> bool {
 
 #[must_use]
 pub fn classify_stock_command(command: &str) -> bool {
-    matches!(command, "/accion" | "/acciones" | "/stock" | "/stocks")
+    matches!(
+        command,
+        "/accion" | "/acciones" | "/s" | "/stock" | "/stocks"
+    )
 }
 
 #[must_use]
@@ -439,6 +442,7 @@ mod tests {
         assert!(classify_stock_command("/acciones"));
         assert!(classify_stock_command("/stocks"));
         assert!(classify_stock_command("/accion"));
+        assert!(classify_stock_command("/s"));
         assert!(classify_stock_command("/stock"));
         assert!(!classify_stock_command("/shares"));
         let quote = super::StockQuote {

@@ -90,11 +90,11 @@ exits.
 
 | Command | Purpose |
 | --- | --- |
-| `/prices`, `/precios`, `/c` | Crypto and traditional markets |
-| `/crypto`, `/criptos` | Crypto prices and conversions |
+| `/p`, `/prices`, `/precios` | Crypto and traditional markets |
+| `/c`, `/cripto`, `/criptos`, `/crypto`, `/cryptos` | Crypto prices and conversions |
 | `/clima`, `/weather` | Current weather |
 | `/dolar`, `/dollar`, `/usd` | Dollar rates |
-| `/accion`, `/acciones`, `/stock`, `/stocks` | Stock prices |
+| `/s`, `/accion`, `/acciones`, `/stock`, `/stocks` | Stock prices |
 | `/petroleo`, `/oil` | Oil prices |
 | `/eleccion`, `/elections` | Polymarket elections |
 | `/bcra`, `/variables` | BCRA variables |

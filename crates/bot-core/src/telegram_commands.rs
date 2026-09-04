@@ -47,13 +47,13 @@ const COMMAND_GROUPS: &[CommandGroup] = &[
     CommandGroup {
         aliases: &[
             "prices", "price", "precios", "precio", "presios", "presio", "bresio", "bresios",
-            "brecio", "brecios", "c",
+            "brecio", "brecios", "p",
         ],
         description_es: "precios de crypto, acciones y otros activos [símbolo o empresa]",
         description_en: "crypto, stock, and other asset prices [symbol or company]",
     },
     CommandGroup {
-        aliases: &["crypto", "criptos"],
+        aliases: &["c", "cripto", "criptos", "crypto", "cryptos"],
         description_es: "precios crypto por símbolo [moneda] [1h/24h/7d/30d]",
         description_en: "crypto prices by symbol [currency] [1h/24h/7d/30d]",
     },
@@ -73,7 +73,7 @@ const COMMAND_GROUPS: &[CommandGroup] = &[
         description_en: "Brent and WTI oil prices",
     },
     CommandGroup {
-        aliases: &["accion", "acciones", "stock", "stocks"],
+        aliases: &["accion", "acciones", "s", "stock", "stocks"],
         description_es: "precios por símbolo o empresa [aapl tsla]",
         description_en: "stock prices by symbol or company [aapl tsla]",
     },
@@ -235,15 +235,15 @@ mod tests {
         for (locale, expected_hash) in [
             (
                 Locale::Es,
-                "0b03536c5001ef64897d4aca89fa01ca420ad75e43a6bc42c295f042bfc87f1e",
+                "22d36d4b74b8b5bd82396df746b65f5e578fedc9aa559dd8263c1f7d4c7e7689",
             ),
             (
                 Locale::En,
-                "ba6767e7b594eb2cf418fd064da4d9b4dc60611372e9532af786dcacece34e5a",
+                "54ee805dce011953abe578fc3cf8903788e1c001f2f41dcb1a9ca00b93f89c1b",
             ),
         ] {
             let commands = telegram_commands(locale);
-            assert_eq!(commands.len(), 70);
+            assert_eq!(commands.len(), 74);
             let encoded = serde_json::to_string(&commands);
             assert!(encoded.is_ok());
             let digest = encoded.map(|value| sha256_hex(&value));
@@ -282,6 +282,6 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(languages, [(70, None), (70, Some("es")), (70, Some("en"))]);
+        assert_eq!(languages, [(74, None), (74, Some("es")), (74, Some("en"))]);
     }
 }

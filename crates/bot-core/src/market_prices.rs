@@ -70,9 +70,11 @@ pub struct MarketPriceExecution {
 #[must_use]
 pub fn classify_market_price_command(command: &str) -> Option<MarketPriceCommand> {
     match command {
-        "/crypto" | "/criptos" => Some(MarketPriceCommand::CryptoOnly),
+        "/c" | "/cripto" | "/criptos" | "/crypto" | "/cryptos" => {
+            Some(MarketPriceCommand::CryptoOnly)
+        }
         "/prices" | "/price" | "/precios" | "/precio" | "/presios" | "/presio" | "/bresio"
-        | "/bresios" | "/brecio" | "/brecios" | "/c" => Some(MarketPriceCommand::Unified),
+        | "/bresios" | "/brecio" | "/brecios" | "/p" => Some(MarketPriceCommand::Unified),
         _ => None,
     }
 }
@@ -739,14 +741,14 @@ mod tests {
     fn recognizes_every_public_alias() {
         for alias in [
             "/prices", "/price", "/precios", "/precio", "/presios", "/presio", "/bresio",
-            "/bresios", "/brecio", "/brecios", "/c",
+            "/bresios", "/brecio", "/brecios", "/p",
         ] {
             assert_eq!(
                 classify_market_price_command(alias),
                 Some(MarketPriceCommand::Unified)
             );
         }
-        for alias in ["/crypto", "/criptos"] {
+        for alias in ["/c", "/cripto", "/criptos", "/crypto", "/cryptos"] {
             assert_eq!(
                 classify_market_price_command(alias),
                 Some(MarketPriceCommand::CryptoOnly)
