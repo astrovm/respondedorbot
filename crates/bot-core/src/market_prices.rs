@@ -63,6 +63,7 @@ pub trait UnifiedStockProvider {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarketPriceExecution {
+    pub no_assets_found: bool,
     pub text: String,
     pub diagnostics: Vec<String>,
 }
@@ -89,6 +90,7 @@ pub fn execute_market_price_command<C: CryptoMarketProvider, S: UnifiedStockProv
     let valid = TIMEFRAMES.map(str::to_owned);
     let query = parse_price_query(text, &valid);
     let mut diagnostics = Vec::new();
+    let mut no_assets_found = false;
     let rendered = match query {
         PriceQuery::UnsupportedTimeframe { timeframe } => invalid_timeframe(&timeframe, locale),
         PriceQuery::AmountConversion(request) => {
@@ -123,11 +125,13 @@ pub fn execute_market_price_command<C: CryptoMarketProvider, S: UnifiedStockProv
                     crypto,
                     stocks,
                     &mut diagnostics,
+                    &mut no_assets_found,
                 )
             }
         }
     };
     MarketPriceExecution {
+        no_assets_found,
         text: rendered,
         diagnostics,
     }
@@ -145,6 +149,7 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
     crypto: &mut C,
     stocks: &mut S,
     diagnostics: &mut Vec<String>,
+    no_assets_found: &mut bool,
 ) -> String {
     let listed = match crypto.listings(target_parameter) {
         Ok(rows) => rows,
@@ -242,6 +247,7 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
         return String::new();
     }
     if !unresolved.is_empty() && selection.rows.is_empty() && stock_quotes.is_empty() {
+        *no_assets_found = true;
         return missing_assets(&unresolved, locale);
     }
     let mut parts = Vec::new();
@@ -881,6 +887,29 @@ mod tests {
         assert!(result.text.contains("BTC:"));
         assert!(!result.text.contains("USDT:"));
         assert!(result.text.contains("USDC:"));
+    }
+
+    #[test]
+    fn reports_unresolved_market_queries_without_parsing_localized_text() {
+        for (query, listed, missing) in [
+            ("timba", Vec::new(), true),
+            ("btc", vec![coin("BTC", 50_000.0)], false),
+            ("btc timba", vec![coin("BTC", 50_000.0)], false),
+        ] {
+            for locale in [Locale::Es, Locale::En] {
+                let result = execute_market_price_command(
+                    query,
+                    MarketPriceCommand::Unified,
+                    locale,
+                    &mut Crypto {
+                        listings: vec![listed.clone()],
+                        quotes: Vec::new(),
+                    },
+                    &mut Stocks::default(),
+                );
+                assert_eq!(result.no_assets_found, missing);
+            }
+        }
     }
 
     #[test]

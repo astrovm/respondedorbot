@@ -314,6 +314,7 @@ pub trait StockPriceSource {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarketPriceLoad {
+    pub no_assets_found: bool,
     pub text: String,
     pub diagnostics: Vec<String>,
 }
@@ -945,6 +946,7 @@ where
         &mut self,
         message: &IncomingMessage,
         query: &SignalQuery,
+        market_fallback: Option<MarketPriceCommand>,
         locale: bot_core::locale::Locale,
         timestamp: i64,
     ) -> OptionalNativeDispatchResult<Config, Actions, Random> {
@@ -959,10 +961,11 @@ where
         let load = source.load(query);
         self.state_diagnostics.extend(load.diagnostics);
         let Some(signal) = load.signal else {
-            if let SignalQuery::Symbol(symbol) = query
+            if let Some(command) = market_fallback
+                && let SignalQuery::Symbol(symbol) = query
                 && let Some(source) = self.market_price_source.as_mut()
             {
-                let load = source.load(symbol, MarketPriceCommand::Unified, locale, timestamp);
+                let load = source.load(symbol, command, locale, timestamp);
                 self.state_diagnostics.extend(load.diagnostics);
                 let mut reply = SendMessage::new(chat_id, &load.text);
                 reply.reply_to_message_id = Some(message_id);
@@ -2406,8 +2409,13 @@ where
         );
         let timestamp = self.runtime_values.unix_timestamp();
         if let Some(query) = detect_signal_query(&content.text)
-            && let Some(outcome) =
-                self.dispatch_token_signal_message(message, &query, locale, timestamp)?
+            && let Some(outcome) = self.dispatch_token_signal_message(
+                message,
+                &query,
+                Some(MarketPriceCommand::Unified),
+                locale,
+                timestamp,
+            )?
         {
             return Ok(outcome);
         }
@@ -2857,11 +2865,34 @@ where
             message.disable_web_page_preview = true;
             StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if let Some(command) = classify_market_price_command(&parsed.command) {
+            let query = detect_signal_query(&parsed.message_text).or_else(|| {
+                (command == MarketPriceCommand::CryptoOnly)
+                    .then(|| detect_signal_query(&format!("${}", parsed.message_text.trim())))
+                    .flatten()
+            });
+            if self.token_signal_source.is_some()
+                && let Some(query) = query
+                && let Some(outcome) =
+                    self.dispatch_token_signal_message(message, &query, None, locale, timestamp)?
+            {
+                return Ok(outcome);
+            }
             let Some(source) = self.market_price_source.as_mut() else {
                 return Err(DispatchError::MissingService("market prices"));
             };
             let load = source.load(&parsed.message_text, command, locale, timestamp);
             self.state_diagnostics.extend(load.diagnostics);
+            if command == MarketPriceCommand::Unified
+                && load.no_assets_found
+                && self.token_signal_source.is_some()
+                && detect_signal_query(&parsed.message_text).is_none()
+                && let Some(query) =
+                    detect_signal_query(&format!("${}", parsed.message_text.trim()))
+                && let Some(outcome) =
+                    self.dispatch_token_signal_message(message, &query, None, locale, timestamp)?
+            {
+                return Ok(outcome);
+            }
             let mut message = SendMessage::new(chat_id, &load.text);
             message.reply_to_message_id = Some(message_id);
             StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
@@ -5762,6 +5793,7 @@ mod tests {
         )
         .with_market_price_source(Box::new(MarketPrices {
             result: MarketPriceLoad {
+                no_assets_found: false,
                 text: "BTC: 50000 USD (+2.5% 24h)".to_owned(),
                 diagnostics: vec!["synthetic stale CMC cache".to_owned()],
             },
@@ -7437,6 +7469,165 @@ mod tests {
     }
 
     #[test]
+    fn token_commands_send_cards_for_mints_symbols_cashtags_and_aliases() {
+        let mint = "F3A1baCgv4TF79TSjdMTvpMDtNv8DJvHZwNc9DG8pump";
+        for command in [
+            "/c", "/cripto", "/criptos", "/crypto", "/cryptos", "/c@mybot", "/p", "/price",
+            "/prices", "/precios", "/p@mybot",
+        ] {
+            for argument in [mint, "timba", "$timba"] {
+                let mut signal = token_signal();
+                signal.token.address = mint.to_owned();
+                signal.pair.base_token.address = mint.to_owned();
+                signal.pair.base_token.name = "TIMBA".to_owned();
+                signal.pair.base_token.symbol = "TIMBA".to_owned();
+                let queries = Rc::new(RefCell::new(Vec::new()));
+                let market_calls = Rc::new(RefCell::new(Vec::new()));
+                let saved = Rc::new(RefCell::new(Vec::new()));
+                let mut dispatcher = NativeDispatcher::new(
+                    Config {
+                        value: Ok(ChatConfig::default()),
+                        chat_ids: Vec::new(),
+                    },
+                    Actions::default(),
+                    State::default(),
+                    values(),
+                    random(),
+                    authorization(),
+                    "@mybot",
+                )
+                .with_token_signal_source(Box::new(Signals {
+                    query_load: TokenSignalLoad {
+                        signal: Some(signal),
+                        diagnostics: Vec::new(),
+                    },
+                    token_load: TokenSignalLoad {
+                        signal: None,
+                        diagnostics: Vec::new(),
+                    },
+                    photo: Ok(b"png".to_vec()),
+                    state: None,
+                    queries: Rc::clone(&queries),
+                    saved: Rc::clone(&saved),
+                }))
+                .with_market_price_source(Box::new(MarketPrices {
+                    result: MarketPriceLoad {
+                        no_assets_found: true,
+                        text: "missing".to_owned(),
+                        diagnostics: Vec::new(),
+                    },
+                    calls: Rc::clone(&market_calls),
+                }));
+                assert_eq!(
+                    dispatcher.dispatch(update(&format!("{command} {argument}"), Some("es"))),
+                    Ok(DispatchOutcome::Handled)
+                );
+                let expected = if argument == mint {
+                    SignalQuery::Address(TokenAddress {
+                        address: mint.to_owned(),
+                        chain_id: "solana".to_owned(),
+                        network: "solana".to_owned(),
+                        tag: "SOL".to_owned(),
+                    })
+                } else {
+                    SignalQuery::Symbol("timba".to_owned())
+                };
+                assert_eq!(queries.borrow().as_slice(), &[expected]);
+                assert_eq!(
+                    market_calls.borrow().len(),
+                    usize::from(argument == "timba" && command.starts_with("/p"))
+                );
+                assert!(matches!(dispatcher.actions.0.as_slice(),
+                    [TelegramAction::SendPhoto { caption, reply_to_message_id: Some(MessageId(7)), .. }]
+                    if caption.contains("TIMBA")));
+                assert_eq!(saved.borrow().len(), 1);
+                assert_eq!(saved.borrow()[0].1.address, mint);
+            }
+        }
+    }
+
+    #[test]
+    fn token_command_fallback_preserves_market_scope_and_complex_queries() {
+        use bot_core::market_prices::MarketPriceCommand;
+        for (text, argument, scope, token_lookup) in [
+            ("/p timba", "timba", MarketPriceCommand::Unified, true),
+            ("/p BTC", "BTC", MarketPriceCommand::Unified, false),
+            ("/p AAPL", "AAPL", MarketPriceCommand::Unified, false),
+            ("/c timba", "timba", MarketPriceCommand::CryptoOnly, true),
+            ("/c $timba", "$timba", MarketPriceCommand::CryptoOnly, true),
+            (
+                "/c btc eth",
+                "btc eth",
+                MarketPriceCommand::CryptoOnly,
+                false,
+            ),
+            ("/c btc 7d", "btc 7d", MarketPriceCommand::CryptoOnly, false),
+            (
+                "/c 2 btc to usd",
+                "2 btc to usd",
+                MarketPriceCommand::CryptoOnly,
+                false,
+            ),
+            ("/prices AAPL", "AAPL", MarketPriceCommand::Unified, false),
+            ("/price $timba", "$timba", MarketPriceCommand::Unified, true),
+            (
+                "/p 0x26449b21EaF982D252956e34E675634b8b15f990",
+                "0x26449b21EaF982D252956e34E675634b8b15f990",
+                MarketPriceCommand::Unified,
+                true,
+            ),
+            ("/c", "", MarketPriceCommand::CryptoOnly, false),
+        ] {
+            let calls = Rc::new(RefCell::new(Vec::new()));
+            let queries = Rc::new(RefCell::new(Vec::new()));
+            let mut dispatcher = NativeDispatcher::new(
+                Config {
+                    value: Ok(ChatConfig::default()),
+                    chat_ids: Vec::new(),
+                },
+                Actions::default(),
+                State::default(),
+                values(),
+                random(),
+                authorization(),
+                "@mybot",
+            )
+            .with_token_signal_source(Box::new(Signals {
+                query_load: TokenSignalLoad {
+                    signal: None,
+                    diagnostics: Vec::new(),
+                },
+                token_load: TokenSignalLoad {
+                    signal: None,
+                    diagnostics: Vec::new(),
+                },
+                photo: Err("unused".to_owned()),
+                state: None,
+                queries: Rc::clone(&queries),
+                saved: Rc::new(RefCell::new(Vec::new())),
+            }))
+            .with_market_price_source(Box::new(MarketPrices {
+                result: MarketPriceLoad {
+                    no_assets_found: text == "/p timba",
+                    text: "market fallback".to_owned(),
+                    diagnostics: Vec::new(),
+                },
+                calls: Rc::clone(&calls),
+            }));
+            assert_eq!(
+                dispatcher.dispatch(update(text, Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert_eq!(queries.borrow().len(), usize::from(token_lookup));
+            assert_eq!(calls.borrow().len(), 1);
+            assert_eq!(calls.borrow()[0].0, argument);
+            assert_eq!(calls.borrow()[0].1, scope);
+            assert!(matches!(dispatcher.actions.0.as_slice(),
+                [TelegramAction::SendMessage(message)] if message.text == "market fallback"));
+        }
+    }
+
+    #[test]
     fn unresolved_cashtag_uses_the_existing_unified_market_fallback() {
         let queries = Rc::new(RefCell::new(Vec::new()));
         let saved = Rc::new(RefCell::new(Vec::new()));
@@ -7469,6 +7660,7 @@ mod tests {
         }))
         .with_market_price_source(Box::new(MarketPrices {
             result: MarketPriceLoad {
+                no_assets_found: false,
                 text: "NVDA: 123.45 USD (+1.25% 24h)".to_owned(),
                 diagnostics: Vec::new(),
             },

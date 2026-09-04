@@ -287,6 +287,11 @@ where
         token: &TokenAddress,
         diagnostics: &mut Vec<String>,
     ) -> Option<PumpMetadata> {
+        self.pump_json(token, diagnostics)
+            .and_then(|value| serde_json::from_value(value).ok())
+    }
+
+    fn pump_json(&mut self, token: &TokenAddress, diagnostics: &mut Vec<String>) -> Option<Value> {
         if token.chain_id != "solana" || !token.address.ends_with("pump") {
             return None;
         }
@@ -300,7 +305,99 @@ where
             Some,
             diagnostics,
         )
-        .and_then(|value| serde_json::from_value(value).ok())
+    }
+
+    fn pump_signal(&mut self, value: Value, diagnostics: &mut Vec<String>) -> Option<TokenSignal> {
+        let mint = value.get("mint")?.as_str()?;
+        let SignalQuery::Address(token) = bot_core::token_signals::detect_signal_query(mint)?
+        else {
+            return None;
+        };
+        if token.chain_id != "solana" || value.get("symbol")?.as_str()?.trim().is_empty() {
+            return None;
+        }
+        let pump: PumpMetadata = serde_json::from_value(value.clone()).ok()?;
+        let decimals = value
+            .get("base_decimals")
+            .and_then(Value::as_u64)
+            .unwrap_or(6);
+        let scale = 10_f64.powi(i32::try_from(decimals).ok()?.min(18));
+        let supply = self
+            .supply(&token, diagnostics)
+            .or_else(|| flexible_number(&pump.total_supply).map(|supply| supply / scale))
+            .filter(|supply| *supply > 0.0);
+        let market_cap = value
+            .get("usd_market_cap")
+            .or_else(|| value.get("market_cap_usd"))
+            .and_then(flexible_number);
+        let pair: TokenPair = serde_json::from_value(json!({
+            "chainId": "solana",
+            "url": format!("https://pump.fun/coin/{mint}"),
+            "baseToken": {"address": mint, "name": value.get("name"), "symbol": value.get("symbol")},
+            "priceUsd": market_cap.zip(supply).map(|(cap, supply)| cap / supply),
+            "marketCap": market_cap,
+            "pairCreatedAt": pump.created_timestamp,
+        })).ok()?;
+        Some(TokenSignal {
+            token,
+            token_image_url: token_image_url(&pair, Some(&pump)),
+            socials: token_socials(&pair, Some(&pump)),
+            pair,
+            candles: Vec::new(),
+            supply,
+            pump: Some(pump),
+        })
+    }
+
+    fn search_pump_signal(
+        &mut self,
+        symbol: &str,
+        diagnostics: &mut Vec<String>,
+    ) -> Option<TokenSignal> {
+        let normalized = symbol.trim_start_matches('$').to_ascii_lowercase();
+        let key = format!("token_signal:pump_search:{normalized}");
+        let value = self.cached_json(
+            &key,
+            30,
+            "pump.fun search",
+            |transport| {
+                transport.get_json(
+                    "https://frontend-api-v3.pump.fun/coins/search-unrestricted",
+                    &[
+                        ("searchTerm", normalized.clone()),
+                        ("limit", "20".to_owned()),
+                        ("offset", "0".to_owned()),
+                        ("includeNsfw", "true".to_owned()),
+                        ("sort", "market_cap".to_owned()),
+                        ("order", "DESC".to_owned()),
+                    ],
+                )
+            },
+            Some,
+            diagnostics,
+        )?;
+        let mut matches = value
+            .as_array()?
+            .iter()
+            .filter(|coin| {
+                coin.get("symbol")
+                    .and_then(Value::as_str)
+                    .is_some_and(|symbol| symbol.trim().eq_ignore_ascii_case(&normalized))
+            })
+            .collect::<Vec<_>>();
+        let cap = |coin: &Value| {
+            coin.get("usd_market_cap")
+                .or_else(|| coin.get("market_cap_usd"))
+                .and_then(flexible_number)
+                .unwrap_or(0.0)
+        };
+        matches.sort_by(|left, right| cap(right).total_cmp(&cap(left)));
+        for coin in matches {
+            if let Some(signal) = self.pump_signal(coin.clone(), diagnostics) {
+                return Some(signal);
+            }
+        }
+        None
     }
 
     fn supply(&mut self, token: &TokenAddress, diagnostics: &mut Vec<String>) -> Option<f64> {
@@ -361,6 +458,33 @@ where
 
     pub fn load_query(&mut self, query: &SignalQuery) -> TokenSignalLoad {
         match query {
+            SignalQuery::Address(token) if token.chain_id == "ethereum" => {
+                let mut diagnostics = Vec::new();
+                let key = format!("token_signal:address:{}", token.address);
+                let url = format!(
+                    "https://api.dexscreener.com/latest/dex/tokens/{}",
+                    token.address
+                );
+                let pairs: Vec<TokenPair> = self
+                    .cached_json(
+                        &key,
+                        30,
+                        "DexScreener address",
+                        |transport| transport.get_json(&url, &[]),
+                        |value| value.get("pairs").cloned(),
+                        &mut diagnostics,
+                    )
+                    .and_then(|value| serde_json::from_value(value).ok())
+                    .unwrap_or_default();
+                let pairs = pairs
+                    .into_iter()
+                    .filter(|pair| {
+                        pair.base_token.address.eq_ignore_ascii_case(&token.address)
+                            && token_from_pair(pair).is_some()
+                    })
+                    .collect();
+                self.load_pairs(token, pairs, diagnostics)
+            }
             SignalQuery::Address(token) => self.load_token(token),
             SignalQuery::Symbol(symbol) => self.load_symbol(symbol),
         }
@@ -368,7 +492,28 @@ where
 
     pub fn load_token(&mut self, token: &TokenAddress) -> TokenSignalLoad {
         let mut diagnostics = Vec::new();
-        let mut pairs = self.pairs(token, &mut diagnostics);
+        let pairs = self.pairs(token, &mut diagnostics);
+        if pairs.is_empty() {
+            let signal = self
+                .pump_json(token, &mut diagnostics)
+                .filter(|value| {
+                    value.get("mint").and_then(Value::as_str) == Some(token.address.as_str())
+                })
+                .and_then(|value| self.pump_signal(value, &mut diagnostics));
+            return TokenSignalLoad {
+                signal,
+                diagnostics,
+            };
+        }
+        self.load_pairs(token, pairs, diagnostics)
+    }
+
+    fn load_pairs(
+        &mut self,
+        token: &TokenAddress,
+        mut pairs: Vec<TokenPair>,
+        mut diagnostics: Vec<String>,
+    ) -> TokenSignalLoad {
         pairs.sort_by(|left, right| {
             let left = pair_rank(left);
             let right = pair_rank(right);
@@ -382,17 +527,20 @@ where
             if pair.pair_address.is_empty() {
                 continue;
             }
-            let candles = self.candles(token, &pair.pair_address, &mut diagnostics);
+            let resolved = token_from_pair(&pair).unwrap_or_else(|| token.clone());
+            let candles = self.candles(&resolved, &pair.pair_address, &mut diagnostics);
             if !candles.is_empty() {
                 return TokenSignalLoad {
-                    signal: Some(self.enrich(token.clone(), pair, candles, &mut diagnostics)),
+                    signal: Some(self.enrich(resolved, pair, candles, &mut diagnostics)),
                     diagnostics,
                 };
             }
         }
         TokenSignalLoad {
-            signal: fallback
-                .map(|pair| self.enrich(token.clone(), pair, Vec::new(), &mut diagnostics)),
+            signal: fallback.map(|pair| {
+                let resolved = token_from_pair(&pair).unwrap_or_else(|| token.clone());
+                self.enrich(resolved, pair, Vec::new(), &mut diagnostics)
+            }),
             diagnostics,
         }
     }
@@ -415,7 +563,7 @@ where
         });
         let Some(initial_pair) = choose_symbol_pair(&pairs, symbol) else {
             return TokenSignalLoad {
-                signal: None,
+                signal: self.search_pump_signal(symbol, &mut diagnostics),
                 diagnostics,
             };
         };
@@ -866,6 +1014,145 @@ mod tests {
     }
 
     #[test]
+    fn timba_ticker_and_mint_use_pump_when_dexscreener_has_no_listing() -> Result<(), String> {
+        let mint = "F3A1baCgv4TF79TSjdMTvpMDtNv8DJvHZwNc9DG8pump";
+        let coin = json!({
+            "mint": mint, "name": "TIMBA", "symbol": "TIMBA",
+            "usd_market_cap": 5140.0, "total_supply": 1000000000000000_u64,
+            "real_token_reserves": 510180253241868_u64,
+            "twitter": "https://x.com/timbatoken", "complete": false,
+            "image_uri": "https://image.test/timba.png"
+        });
+        for query in ["$timba", mint] {
+            let search = query.starts_with('$');
+            let mut other = coin.clone();
+            other["symbol"] = json!("TIMBAX");
+            other["usd_market_cap"] = json!(999999);
+            let mut smaller = coin.clone();
+            smaller["mint"] = json!("J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump");
+            smaller["usd_market_cap"] = json!(100);
+            let transport = Transport {
+                json: std::cell::RefCell::new(VecDeque::from([
+                    JsonResponse {
+                        status_code: 200,
+                        body: if search {
+                            json!({"pairs":[]})
+                        } else {
+                            json!([])
+                        }
+                        .to_string(),
+                    },
+                    JsonResponse {
+                        status_code: 200,
+                        body: if search {
+                            json!([other, smaller, coin])
+                        } else {
+                            coin.clone()
+                        }
+                        .to_string(),
+                    },
+                ])),
+                post: std::cell::RefCell::new(VecDeque::new()),
+                binary: std::cell::RefCell::new(VecDeque::new()),
+            };
+            let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
+            let query = bot_core::token_signals::detect_signal_query(query).ok_or("query")?;
+            let signal = adapter.load_query(&query).signal.ok_or("signal")?;
+            assert_eq!(signal.token.address, mint);
+            assert_eq!(signal.pair.base_token.symbol, "TIMBA");
+            assert_eq!(signal.supply, Some(1_000_000_000.0));
+            assert_eq!(signal.pair.market_cap, json!(5140.0));
+            assert_eq!(signal.pair.price_usd, json!(0.00000514));
+            assert_eq!(
+                signal.token_image_url.as_deref(),
+                Some("https://image.test/timba.png")
+            );
+            assert_eq!(
+                signal.socials.get("X").map(String::as_str),
+                Some("https://x.com/timbatoken")
+            );
+            let caption = bot_core::token_signals::format_signal_caption(&signal, 0);
+            assert!(caption.contains(&format!("https://pump.fun/coin/{mint}")));
+            assert!(!caption.contains("geckoterminal.com"));
+            assert!(adapter.render_photo(&signal).is_ok());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn pump_search_failures_and_inexact_symbols_preserve_market_fallback() {
+        for response in [
+            json!([]),
+            json!({"error":"unavailable"}),
+            json!([{
+                "symbol":"TIMBAX", "mint":"F3A1baCgv4TF79TSjdMTvpMDtNv8DJvHZwNc9DG8pump"
+            }]),
+            json!([{"symbol":"TIMBA", "mint":"invalid"}]),
+        ] {
+            let transport = Transport {
+                json: std::cell::RefCell::new(VecDeque::from([
+                    JsonResponse {
+                        status_code: 200,
+                        body: json!({"pairs":[]}).to_string(),
+                    },
+                    JsonResponse {
+                        status_code: 200,
+                        body: response.to_string(),
+                    },
+                ])),
+                post: std::cell::RefCell::new(VecDeque::new()),
+                binary: std::cell::RefCell::new(VecDeque::new()),
+            };
+            let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
+            assert!(adapter.load_symbol("timba").signal.is_none());
+        }
+    }
+
+    #[test]
+    fn evm_address_discovers_chain_and_keeps_card_without_candles() -> Result<(), String> {
+        let address = "0x26449b21EaF982D252956e34E675634b8b15f990";
+        let transport = Transport {
+            json: std::cell::RefCell::new(VecDeque::from([
+                JsonResponse {
+                    status_code: 200,
+                    body: serde_json::json!({"pairs":[
+                        {"chainId":"ethereum", "pairAddress":"unrelated",
+                         "baseToken":{"address":"0x0000000000000000000000000000000000000001"},
+                         "liquidity":{"usd":999999}},
+                        {"chainId":"robinhood", "pairAddress":"pool",
+                         "baseToken":{"address":address,"name":"Netanyahu","symbol":"BIBI"},
+                         "priceUsd":"0.000003256", "liquidity":{"usd":5174}}
+                    ]})
+                    .to_string(),
+                },
+                JsonResponse {
+                    status_code: 404,
+                    body: "{}".to_owned(),
+                },
+            ])),
+            post: std::cell::RefCell::new(VecDeque::new()),
+            binary: std::cell::RefCell::new(VecDeque::new()),
+        };
+        let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
+        let query = bot_core::token_signals::detect_signal_query(address).ok_or("missing query")?;
+        let signal = adapter.load_query(&query).signal.ok_or("missing signal")?;
+        assert_eq!(signal.token.chain_id, "robinhood");
+        assert_eq!(signal.token.address, address.to_ascii_lowercase());
+        assert_eq!(signal.pair.base_token.symbol, "BIBI");
+        assert!(signal.candles.is_empty());
+        assert!(adapter.render_photo(&signal).is_ok());
+        let caption = bot_core::token_signals::format_signal_caption(&signal, 0);
+        assert!(caption.contains("#ROBINHOOD"));
+        assert!(caption.contains("https://dexscreener.com/robinhood/pool"));
+        assert!(!caption.contains("solscan.io"));
+        assert!(!caption.contains("etherscan.io"));
+        assert!(adapter.cache.writes.iter().any(
+            |(key, _)| key == &format!("token_signal:address:{}", address.to_ascii_lowercase())
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn address_load_uses_first_ranked_pair_with_candles_and_compatible_cache_keys() {
         let pair = |address: &str, liquidity: i64| {
             serde_json::json!({
@@ -903,7 +1190,7 @@ mod tests {
             tag: "ETH".to_owned(),
             address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48".to_owned(),
         };
-        let load = adapter.load_query(&SignalQuery::Address(token));
+        let load = adapter.load_token(&token);
         assert_eq!(
             load.signal
                 .as_ref()

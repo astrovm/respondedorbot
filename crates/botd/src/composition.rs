@@ -356,6 +356,7 @@ where
         execution.diagnostics.extend(crypto.diagnostics);
         execution.diagnostics.extend(stocks.diagnostics);
         MarketPriceLoad {
+            no_assets_found: execution.no_assets_found,
             text: execution.text,
             diagnostics: execution.diagnostics,
         }

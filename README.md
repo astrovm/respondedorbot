@@ -116,7 +116,12 @@ exits.
 
 `/prices` checks CoinMarketCap first, then Yahoo Finance for unresolved symbols
 and company names. Full Solana/EVM addresses and `$ticker` messages use token
-cards when available.
+cards when available. Crypto commands such as `/c timba`, `/c $timba`, and
+`/c <address>` use the same token cards, with pump.fun as a fallback for tokens
+not listed on DexScreener. Price commands also accept explicit addresses and
+`$ticker` queries; multi-asset queries and conversion options retain their
+existing price behavior. `/p timba` (and other price aliases) tries token cards
+when ordinary crypto and stock lookup cannot resolve the symbol.
 
 ## Test it
 
