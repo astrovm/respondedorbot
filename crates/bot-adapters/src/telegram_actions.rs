@@ -827,7 +827,7 @@ mod tests {
             .and_then(|value| value.get("commands"))
             .and_then(serde_json::Value::as_str)
             .and_then(|value| serde_json::from_str::<Vec<serde_json::Value>>(value).ok());
-        assert_eq!(commands.as_ref().map(Vec::len), Some(68));
+        assert_eq!(commands.as_ref().map(Vec::len), Some(74));
         assert!(
             commands.is_some_and(|commands| commands.iter().any(|command| {
                 command.get("command") == Some(&serde_json::json!("help"))

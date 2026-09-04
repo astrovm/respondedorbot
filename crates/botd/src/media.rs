@@ -121,14 +121,6 @@ pub trait MediaProcessor {
         input: &[u8],
         duration_hint_seconds: Option<f64>,
     ) -> Result<Option<PreparedAudio>, String>;
-
-    fn prepare_external_audio(
-        &mut self,
-        input: &[u8],
-        duration_hint_seconds: Option<f64>,
-    ) -> Result<Option<PreparedAudio>, String> {
-        self.prepare_audio(input, duration_hint_seconds)
-    }
 }
 
 pub trait VisionProvider {

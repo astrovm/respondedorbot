@@ -75,6 +75,7 @@ use bot_adapters::yahoo_finance::{
     ReqwestYahooFinanceTransport, TransportFailureKind as YahooTransportFailureKind,
     YahooFinanceTransport, load_quote as load_yahoo_quote, load_symbol as load_yahoo_symbol,
 };
+use bot_adapters::youtube_transcript::ReqwestYoutubeTranscriptTransport;
 use bot_core::ai_reserve::VISION_OUTPUT_TOKEN_LIMIT;
 use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup, ChargeHistoryPage};
 use bot_core::chat_config::ChatConfig;
@@ -1417,6 +1418,8 @@ pub struct NativeRuntimeOptions<'a> {
     pub groq_free_api_key: Option<String>,
     pub groq_api_key: Option<String>,
     pub firecrawl_api_key: Option<String>,
+    pub supadata_api_key: Option<String>,
+    pub apify_api_key: Option<String>,
     pub system_prompt: Option<String>,
     pub trigger_words: Option<Vec<String>>,
     pub active_operations: ActiveOperationRegistry,
@@ -1439,6 +1442,8 @@ struct OwnedNativeRuntimeOptions {
     groq_free_api_key: Option<String>,
     groq_api_key: Option<String>,
     firecrawl_api_key: Option<String>,
+    supadata_api_key: Option<String>,
+    apify_api_key: Option<String>,
     system_prompt: Option<String>,
     trigger_words: Option<Vec<String>>,
     active_operations: ActiveOperationRegistry,
@@ -1462,6 +1467,8 @@ impl OwnedNativeRuntimeOptions {
             groq_free_api_key: options.groq_free_api_key,
             groq_api_key: options.groq_api_key,
             firecrawl_api_key: options.firecrawl_api_key,
+            supadata_api_key: options.supadata_api_key,
+            apify_api_key: options.apify_api_key,
             system_prompt: options.system_prompt,
             trigger_words: options.trigger_words,
             active_operations: options.active_operations,
@@ -1485,6 +1492,8 @@ impl OwnedNativeRuntimeOptions {
             groq_free_api_key: self.groq_free_api_key.clone(),
             groq_api_key: self.groq_api_key.clone(),
             firecrawl_api_key: self.firecrawl_api_key.clone(),
+            supadata_api_key: self.supadata_api_key.clone(),
+            apify_api_key: self.apify_api_key.clone(),
             system_prompt: self.system_prompt.clone(),
             trigger_words: self.trigger_words.clone(),
             active_operations: self.active_operations.clone(),
@@ -1699,7 +1708,6 @@ fn build_native_dispatcher(
 ) -> Result<ConcreteNativeDispatcher, CompositionError> {
     let conversation_coinmarketcap_key = options.coinmarketcap_key.clone();
     let conversation_firecrawl_key = options.firecrawl_api_key.clone();
-    let youtube_firecrawl_key = options.firecrawl_api_key.clone();
     let groq_free_api_key = options.groq_free_api_key.clone();
     let groq_api_key = options.groq_api_key.clone();
     let action_transport =
@@ -1881,39 +1889,13 @@ fn build_native_dispatcher(
                 ),
                 crate::native_ai::VISION_MODEL,
             );
-            let youtube: Option<Box<dyn YoutubeContextRuntime>> = youtube_firecrawl_key
-                .filter(|key| !key.is_empty())
-                .map(|firecrawl_key| {
-                    let transcription = FallbackTranscriptionProvider::new(
-                        ReqwestGroqTranscriptionTransport::new().map_err(|error| {
-                            CompositionError::MediaProviderTransport(error.to_string())
-                        })?,
-                        ReqwestOpenRouterTransport::new()
-                            .map_err(CompositionError::OpenRouterChatTransport)?,
-                        TranscriptionProviderConfig {
-                            groq_accounts,
-                            openrouter_api_key: Some(api_key.clone()),
-                            openrouter_base_url: openrouter_base_url.clone(),
-                            groq_model: crate::native_ai::GROQ_TRANSCRIPTION_MODEL.to_owned(),
-                            openrouter_model: crate::native_ai::OPENROUTER_TRANSCRIPTION_MODEL
-                                .to_owned(),
-                            default_backoff_seconds: 60,
-                        },
-                    );
-                    Ok::<Box<dyn YoutubeContextRuntime>, CompositionError>(Box::new(
-                        NativeYoutubeContext::new(
-                            ReqwestFirecrawlTransport::new().map_err(|error| {
-                                CompositionError::MediaProviderTransport(error.to_string())
-                            })?,
-                            RedisMediaCache::new(options.redis_endpoint.clone()),
-                            FfmpegMediaProcessor::default(),
-                            transcription,
-                            std::thread::sleep,
-                            &firecrawl_key,
-                        ),
-                    ))
-                })
-                .transpose()?;
+            let youtube: Box<dyn YoutubeContextRuntime> = Box::new(NativeYoutubeContext::new(
+                ReqwestYoutubeTranscriptTransport::new()
+                    .map_err(|error| CompositionError::MediaProviderTransport(error.to_string()))?,
+                RedisMediaCache::new(options.redis_endpoint.clone()),
+                options.supadata_api_key.clone(),
+                options.apify_api_key.clone(),
+            ));
             let compaction_scheduler = production_compaction_scheduler(
                 RedisCompactionQueue::new(options.redis_endpoint)
                     .map_err(|error| CompositionError::ConversationState(error.to_string()))?,
@@ -1941,9 +1923,7 @@ fn build_native_dispatcher(
             )
             .with_media(Box::new(media))
             .with_compaction_scheduler(Box::new(compaction_scheduler));
-            if let Some(youtube) = youtube {
-                conversation = conversation.with_youtube(youtube);
-            }
+            conversation = conversation.with_youtube(youtube);
             dispatcher.with_ai_conversation_source(Box::new(conversation))
         }
         _ => dispatcher,
@@ -3328,6 +3308,8 @@ mod tests {
             groq_free_api_key: None,
             groq_api_key: None,
             firecrawl_api_key: None,
+            supadata_api_key: None,
+            apify_api_key: None,
             system_prompt: None,
             trigger_words: None,
             active_operations: ActiveOperationRegistry::default(),
@@ -3349,6 +3331,8 @@ mod tests {
             groq_free_api_key: None,
             groq_api_key: None,
             firecrawl_api_key: None,
+            supadata_api_key: None,
+            apify_api_key: None,
             system_prompt: None,
             trigger_words: None,
             active_operations: ActiveOperationRegistry::default(),
@@ -3370,6 +3354,8 @@ mod tests {
             groq_free_api_key: Some("synthetic-groq-free-key".to_owned()),
             groq_api_key: Some("synthetic-groq-paid-key".to_owned()),
             firecrawl_api_key: Some("synthetic-firecrawl-key".to_owned()),
+            supadata_api_key: Some("synthetic-supadata-key".to_owned()),
+            apify_api_key: Some("synthetic-apify-key".to_owned()),
             system_prompt: Some("synthetic persona".to_owned()),
             trigger_words: Some(vec!["synthetic".to_owned()]),
             active_operations: ActiveOperationRegistry::default(),
@@ -3401,6 +3387,8 @@ mod tests {
             groq_free_api_key: Some("synthetic-audio-free-key".to_owned()),
             groq_api_key: Some("synthetic-audio-paid-key".to_owned()),
             firecrawl_api_key: Some("synthetic-search-key".to_owned()),
+            supadata_api_key: Some("synthetic-supadata-key".to_owned()),
+            apify_api_key: Some("synthetic-apify-key".to_owned()),
             system_prompt: Some("synthetic system prompt".to_owned()),
             trigger_words: Some(vec!["synthetic".to_owned()]),
             active_operations: ActiveOperationRegistry::default(),
