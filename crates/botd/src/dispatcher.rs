@@ -3143,11 +3143,17 @@ where
                 && let Some(quote) = &rows[0].1
                 && let Some(source) = self.stock_price_source.as_mut()
                 && let Ok(photo) = source.render_chart(quote, timestamp)
-                && matches!(self.actions.try_photo(TelegramAction::SendPhoto {
-                    chat_id, photo: photo.into(), reply_to_message_id: Some(message_id),
-                    caption: text.clone(), parse_mode: None, reply_markup: None,
-                }), Ok(Some(ref receipt)) if receipt.message_id.is_some())
+                && let Ok(Some(receipt)) = self.actions.try_photo(TelegramAction::SendPhoto {
+                    chat_id,
+                    photo: photo.into(),
+                    reply_to_message_id: Some(message_id),
+                    caption: text.clone(),
+                    parse_mode: None,
+                    reply_markup: None,
+                })
+                && receipt.message_id.is_some()
             {
+                self.record_price_delivery(message, &text, receipt.message_id, timestamp);
                 return Ok(DispatchOutcome::Handled);
             }
             let mut message = SendMessage::new(chat_id, &text);
@@ -7968,7 +7974,7 @@ mod tests {
                 MarketPriceCommand::Unified,
                 true,
             ),
-            ("/c", "", MarketPriceCommand::CryptoOnly, false),
+            ("/c", "bitcoin", MarketPriceCommand::CryptoOnly, false),
         ] {
             let calls = Rc::new(RefCell::new(Vec::new()));
             let queries = Rc::new(RefCell::new(Vec::new()));
