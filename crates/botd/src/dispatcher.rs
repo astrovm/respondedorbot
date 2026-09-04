@@ -7854,6 +7854,76 @@ mod tests {
     }
 
     #[test]
+    fn stock_chart_delivery_records_the_quote() {
+        struct StockChart;
+        impl StockPriceSource for StockChart {
+            fn load(&mut self, _: &str, _: i64) -> StockQuotesLoad {
+                StockQuotesLoad {
+                    quotes: Some(vec![(
+                        "AAPL".into(),
+                        Some(StockQuote {
+                            symbol: "AAPL".into(),
+                            name: "Apple".into(),
+                            price: 100.0,
+                            currency: "USD".into(),
+                            exchange: "NMS".into(),
+                            variation: 1.0,
+                        }),
+                    )]),
+                    diagnostics: vec![],
+                }
+            }
+            fn render_chart(&mut self, _: &StockQuote, _: i64) -> Result<Vec<u8>, String> {
+                Ok(vec![1, 2, 3])
+            }
+        }
+        let mut dispatcher = dispatcher().with_stock_price_source(Box::new(StockChart));
+        assert_eq!(
+            dispatcher.dispatch(update("/s apple", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            matches!(dispatcher.actions.0.as_slice(), [TelegramAction::SendPhoto { caption, .. }] if caption.contains("AAPL"))
+        );
+        assert_eq!(dispatcher.state.incoming.len(), 1);
+        assert_eq!(dispatcher.state.outgoing.len(), 1);
+    }
+
+    #[test]
+    fn undelivered_market_photos_fall_back_to_recorded_text() {
+        for outcome in [PhotoOutcome::Skipped, PhotoOutcome::Unconfirmed] {
+            let mut dispatcher = NativeDispatcher::new(
+                Config {
+                    value: Ok(ChatConfig::default()),
+                    chat_ids: vec![],
+                },
+                PhotoActions { outcome },
+                State::default(),
+                values(),
+                random(),
+                authorization(),
+                "@mybot",
+            )
+            .with_market_price_source(Box::new(ChartPrices {
+                charts: Default::default(),
+                fail_chart: false,
+            }));
+            assert_eq!(
+                dispatcher.dispatch(update("/p apple", Some("es"))),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert_eq!(dispatcher.state.incoming.len(), 1);
+            assert_eq!(dispatcher.state.outgoing.len(), 1);
+            assert!(
+                dispatcher
+                    .state_diagnostics()
+                    .iter()
+                    .any(|line| line.contains("market chart unavailable"))
+            );
+        }
+    }
+
+    #[test]
     fn unavailable_market_charts_preserve_quotes_and_explain_the_fallback() {
         let mut dispatcher = dispatcher().with_market_price_source(Box::new(ChartPrices {
             charts: Default::default(),
