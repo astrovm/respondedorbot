@@ -22,7 +22,7 @@ static SOLANA_ADDRESS: LazyLock<Option<Regex>> =
 static EVM_ADDRESS: LazyLock<Option<Regex>> =
     LazyLock::new(|| Regex::new(r"^0x[a-fA-F0-9]{40}$").ok());
 static TOKEN_SYMBOL: LazyLock<Option<Regex>> =
-    LazyLock::new(|| Regex::new(r"^\$([A-Za-z][A-Za-z0-9]{1,31})$").ok());
+    LazyLock::new(|| Regex::new(r"^\$([A-Za-z0-9][A-Za-z0-9.\-]{0,31})$").ok());
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenAddress {
@@ -224,6 +224,45 @@ pub fn stable_signal_id(chat_id: i64, message_id: i64, requester_id: i64, now_un
         .collect()
 }
 
+fn optional_money(value: &Value, price: bool) -> String {
+    if value.is_null() {
+        "N/A".to_owned()
+    } else {
+        format_money(number(value), price)
+    }
+}
+fn optional_percentage(value: &Value) -> String {
+    if value.is_null() {
+        "N/A".to_owned()
+    } else {
+        format_percentage(number(value))
+    }
+}
+fn optional_count(value: &Value) -> String {
+    if value.is_null() {
+        "N/A".to_owned()
+    } else {
+        (number(value) as i64).to_string()
+    }
+}
+
+/// Compact token quote for mixed asset lists; unavailable values stay explicit.
+#[must_use]
+pub fn format_signal_quote(signal: &TokenSignal, timeframe: Option<&str>) -> String {
+    let timeframe = timeframe.unwrap_or("24h");
+    let change = match timeframe {
+        "1h" => &signal.pair.price_change.h1,
+        "24h" => &signal.pair.price_change.h24,
+        _ => &Value::Null,
+    };
+    format!(
+        "{}: {} USD ({} {timeframe})",
+        signal.pair.base_token.symbol,
+        optional_money(&signal.pair.price_usd, true),
+        optional_percentage(change)
+    )
+}
+
 fn number(value: &Value) -> f64 {
     value
         .as_f64()
@@ -299,7 +338,7 @@ pub fn choose_symbol_pair(pairs: &[TokenPair], symbol: &str) -> Option<TokenPair
         .filter(|pair| pair.base_token.symbol.to_ascii_lowercase() == normalized)
         .cloned()
         .collect::<Vec<_>>();
-    choose_best_pair(if exact.is_empty() { &supported } else { &exact })
+    choose_best_pair(&exact)
 }
 
 #[must_use]
@@ -400,6 +439,9 @@ fn grouped_integer(value: f64) -> String {
 #[must_use]
 pub fn format_money(value: f64, price: bool) -> String {
     if price {
+        if value != 0.0 && value.abs() < 0.00000001 {
+            return format!("${value:.3e}");
+        }
         let decimals = if value >= 1.0 {
             3
         } else if value >= 0.01 {
@@ -701,8 +743,8 @@ pub fn format_signal_caption(signal: &TokenSignal, now_unix: i64) -> String {
     } else {
         liquidity
     };
-    let buys = number(&pair.txns.h1.buys) as i64;
-    let sells = number(&pair.txns.h1.sells) as i64;
+    let buys = optional_count(&pair.txns.h1.buys);
+    let sells = optional_count(&pair.txns.h1.sells);
     let pump_ath = signal
         .pump
         .as_ref()
@@ -761,17 +803,25 @@ pub fn format_signal_caption(signal: &TokenSignal, now_unix: i64) -> String {
     let mut stats = vec![
         format!(
             "├ USD   <b>{}</b> ({})",
-            format_money(price, true),
-            format_percentage(number(&pair.price_change.h24))
+            optional_money(&pair.price_usd, true),
+            optional_percentage(&pair.price_change.h24)
         ),
-        format!("├ MC    <b>{}</b>", format_money(market_cap, false)),
         format!(
-            "├ Vol   <b>{}</b>",
-            format_money(number(&pair.volume.h24), false)
+            "├ MC    <b>{}</b>",
+            if pair.market_cap.is_null() && pair.fdv.is_null() {
+                "N/A".to_owned()
+            } else {
+                format_money(market_cap, false)
+            }
         ),
+        format!("├ Vol   <b>{}</b>", optional_money(&pair.volume.h24, false)),
         format!(
             "├ LP    <b>{}</b>",
-            format_money(displayed_liquidity, false)
+            if pair.liquidity.usd.is_null() {
+                "N/A".to_owned()
+            } else {
+                format_money(displayed_liquidity, false)
+            }
         ),
     ];
     if let Some(supply) = signal.supply.filter(|supply| *supply > 0.0) {
@@ -780,7 +830,7 @@ pub fn format_signal_caption(signal: &TokenSignal, now_unix: i64) -> String {
     }
     stats.push(format!(
         "├ 1H    <b>{}</b> 🟩 {buys} 🟥 {sells}",
-        format_percentage(number(&pair.price_change.h1))
+        optional_percentage(&pair.price_change.h1)
     ));
     stats.push(format!("└ ATH   <b>{ath_line}</b>"));
 
@@ -961,6 +1011,32 @@ mod tests {
             socials: BTreeMap::new(),
             pump: None,
         }
+    }
+
+    #[test]
+    fn cashtags_and_missing_data_are_not_silently_discarded_or_zeroed() {
+        for input in ["$F", "$1INCH", "$BRK.B", "$BTC"] {
+            assert!(matches!(
+                detect_signal_query(input),
+                Some(SignalQuery::Symbol(_))
+            ));
+        }
+        for input in ["$", "$two words", "$<bad>"] {
+            assert_eq!(detect_signal_query(input), None);
+        }
+        let mut s = signal();
+        s.pair.price_usd = serde_json::Value::Null;
+        s.pair.price_change = Default::default();
+        s.pair.volume = Default::default();
+        s.pair.liquidity = Default::default();
+        s.pair.txns = Default::default();
+        let caption = format_signal_caption(&s, 0);
+        assert!(caption.contains("USD   <b>N/A</b> (N/A)"));
+        assert!(caption.contains("Vol   <b>N/A</b>"));
+        assert!(caption.contains("LP    <b>N/A</b>"));
+        assert!(caption.contains("🟩 N/A 🟥 N/A"));
+        assert_ne!(format_money(0.00000000001, true), "$0");
+        assert_eq!(format_money(0.0, true), "$0");
     }
 
     #[test]

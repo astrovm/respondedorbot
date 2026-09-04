@@ -310,10 +310,18 @@ pub struct StockQuotesLoad {
 
 pub trait StockPriceSource {
     fn load(&mut self, query: &str, now_unix: i64) -> StockQuotesLoad;
+    fn render_chart(
+        &mut self,
+        _quote: &bot_core::stocks::StockQuote,
+        _now_unix: i64,
+    ) -> Result<Vec<u8>, String> {
+        Err("stock chart unavailable".to_owned())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarketPriceLoad {
+    pub chart: Option<bot_core::market_prices::MarketChart>,
     pub no_assets_found: bool,
     pub text: String,
     pub diagnostics: Vec<String>,
@@ -327,6 +335,13 @@ pub trait MarketPriceSource {
         locale: bot_core::locale::Locale,
         now_unix: i64,
     ) -> MarketPriceLoad;
+    fn render_chart(
+        &mut self,
+        _chart: &bot_core::market_prices::MarketChart,
+        _now_unix: i64,
+    ) -> Result<Vec<u8>, String> {
+        Err("market chart unavailable".to_owned())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -942,12 +957,230 @@ where
         }
     }
 
+    fn record_price_delivery(
+        &mut self,
+        message: &IncomingMessage,
+        text: &str,
+        sent_message_id: Option<MessageId>,
+        timestamp: i64,
+    ) {
+        let (Some(chat_id), Some(message_id), Some(user_id), Some(content)) = (
+            message.chat_id,
+            message.message_id,
+            message.sender_id,
+            message.content.as_ref(),
+        ) else {
+            return;
+        };
+        if let Ok(incoming) = prepare_incoming_command_state(IncomingCommandState {
+            chat_id,
+            message_id,
+            user_id,
+            first_name: message.sender_first_name.as_deref(),
+            username: message.sender_username.as_deref(),
+            text: &content.text,
+            is_group: is_group_chat_type(message.chat_type.as_deref()),
+            timestamp,
+        }) && let Err(error) = self.state.record_incoming(&incoming)
+        {
+            self.state_diagnostics
+                .push(format!("incoming price state: {error}"));
+        }
+        let command = parse_command(&content.text, &self.bot_name).command;
+        if let Ok(outgoing) = prepare_outgoing_command_state(OutgoingCommandState {
+            chat_id,
+            incoming_message_id: message_id,
+            sent_message_id,
+            text,
+            command: &command,
+            timestamp,
+        }) && let Err(error) = self.state.record_outgoing(&outgoing)
+        {
+            self.state_diagnostics
+                .push(format!("outgoing price state: {error}"));
+        }
+    }
+
+    fn dispatch_asset_prices(
+        &mut self,
+        message: &IncomingMessage,
+        text: &str,
+        command: MarketPriceCommand,
+        locale: bot_core::locale::Locale,
+        timestamp: i64,
+    ) -> OptionalNativeDispatchResult<Config, Actions, Random> {
+        use bot_core::price_queries::{PriceQuery, ProviderScope, parse_price_query};
+        let text = if text.trim().is_empty() && command == MarketPriceCommand::CryptoOnly {
+            "bitcoin"
+        } else {
+            text
+        };
+        let PriceQuery::Assets {
+            query,
+            timeframe,
+            conversion_requested: false,
+            provider_scope,
+            ..
+        } = parse_price_query(
+            text,
+            &["1h".into(), "24h".into(), "7d".into(), "30d".into()],
+        )
+        else {
+            return Ok(None);
+        };
+        if query.trim().is_empty()
+            || query
+                .split(|c: char| c.is_whitespace() || c == ',')
+                .any(|part| {
+                    matches!(
+                        part.to_ascii_lowercase().as_str(),
+                        "stables" | "stablecoins"
+                    ) || part.parse::<u64>().is_ok()
+                })
+        {
+            return Ok(None);
+        }
+        let (Some(chat_id), Some(message_id)) = (message.chat_id, message.message_id) else {
+            return Ok(Some(DispatchOutcome::Unsupported));
+        };
+        let requests = query
+            .split(',')
+            .map(str::trim)
+            .filter(|query| !query.is_empty())
+            .take(20)
+            .collect::<Vec<_>>();
+        if requests.is_empty() {
+            return Ok(None);
+        }
+        if self.market_price_source.is_none() && self.token_signal_source.is_none() {
+            return Err(DispatchError::MissingService(
+                if detect_signal_query(text).is_some() {
+                    "token signals"
+                } else {
+                    "market prices"
+                },
+            ));
+        }
+        let single = requests.len() == 1;
+        let mut lines = Vec::new();
+        for request in requests {
+            let detected = detect_signal_query(request);
+            let is_address = matches!(detected, Some(SignalQuery::Address(_)));
+            let mut market_query = match provider_scope {
+                Some(ProviderScope::Stock) => format!("stock:{request}"),
+                Some(ProviderScope::Crypto) => format!("crypto:{request}"),
+                None => request.to_owned(),
+            };
+            if let Some(timeframe) = &timeframe {
+                market_query.push_str(&format!(" {timeframe}"));
+            }
+            let load = if is_address && provider_scope != Some(ProviderScope::Stock) {
+                None
+            } else {
+                self.market_price_source
+                    .as_mut()
+                    .map(|source| source.load(&market_query, command, locale, timestamp))
+            };
+            if let Some(load) = &load {
+                self.state_diagnostics.extend(load.diagnostics.clone());
+            }
+            if let Some(load) = load.as_ref().filter(|load| !load.no_assets_found) {
+                if single && let Some(chart) = &load.chart {
+                    let photo = self
+                        .market_price_source
+                        .as_mut()
+                        .and_then(|source| source.render_chart(chart, timestamp).ok());
+                    if let Some(photo) = photo {
+                        let delivered = self.actions.try_photo(TelegramAction::SendPhoto {
+                            chat_id,
+                            photo: photo.into(),
+                            reply_to_message_id: Some(message_id),
+                            caption: load.text.clone(),
+                            parse_mode: None,
+                            reply_markup: None,
+                        });
+                        if let Ok(Some(receipt)) = delivered
+                            && receipt.message_id.is_some()
+                        {
+                            self.record_price_delivery(
+                                message,
+                                &load.text,
+                                receipt.message_id,
+                                timestamp,
+                            );
+                            return Ok(Some(DispatchOutcome::Handled));
+                        }
+                    }
+                    self.state_diagnostics.push(format!(
+                        "market chart unavailable or undelivered: {}",
+                        chart.symbol
+                    ));
+                    lines.push(format!(
+                        "{}\n{}",
+                        load.text,
+                        match locale {
+                            bot_core::locale::Locale::Es =>
+                                "gráfico no disponible; te dejo la cotización",
+                            bot_core::locale::Locale::En =>
+                                "Chart unavailable; showing the quote instead",
+                        }
+                    ));
+                    continue;
+                }
+                lines.push(load.text.clone());
+                continue;
+            }
+            let token_query = if provider_scope == Some(ProviderScope::Stock) {
+                None
+            } else {
+                detected.or_else(|| detect_signal_query(&format!("${request}")))
+            };
+            if let Some(token_query) = token_query
+                && self.token_signal_source.is_some()
+            {
+                if single {
+                    if let Some(outcome) = self.dispatch_token_signal_message(
+                        message,
+                        &token_query,
+                        timeframe.as_deref(),
+                        timestamp,
+                    )? {
+                        return Ok(Some(outcome));
+                    }
+                } else if let Some(source) = self.token_signal_source.as_mut() {
+                    let token_load = source.load(&token_query);
+                    self.state_diagnostics.extend(token_load.diagnostics);
+                    if let Some(signal) = token_load.signal {
+                        let quote = bot_core::token_signals::format_signal_quote(
+                            &signal,
+                            timeframe.as_deref(),
+                        );
+                        lines.push(quote);
+                        continue;
+                    }
+                }
+            }
+            lines.push(load.map(|load| load.text).unwrap_or_else(|| match locale {
+                bot_core::locale::Locale::Es => format!("no pude encontrar datos para {request}"),
+                bot_core::locale::Locale::En => format!("I could not find data for {request}"),
+            }));
+        }
+        let text = lines.join("\n");
+        let mut reply = SendMessage::new(chat_id, &text);
+        reply.reply_to_message_id = Some(message_id);
+        let receipt = self
+            .actions
+            .execute(TelegramAction::SendMessage(reply))
+            .map_err(DispatchError::Action)?;
+        self.record_price_delivery(message, &text, receipt.message_id, timestamp);
+        Ok(Some(DispatchOutcome::Handled))
+    }
+
     fn dispatch_token_signal_message(
         &mut self,
         message: &IncomingMessage,
         query: &SignalQuery,
-        market_fallback: Option<MarketPriceCommand>,
-        locale: bot_core::locale::Locale,
+        timeframe: Option<&str>,
         timestamp: i64,
     ) -> OptionalNativeDispatchResult<Config, Actions, Random> {
         let (Some(chat_id), Some(message_id), Some(sender_id)) =
@@ -961,22 +1194,12 @@ where
         let load = source.load(query);
         self.state_diagnostics.extend(load.diagnostics);
         let Some(signal) = load.signal else {
-            if let Some(command) = market_fallback
-                && let SignalQuery::Symbol(symbol) = query
-                && let Some(source) = self.market_price_source.as_mut()
-            {
-                let load = source.load(symbol, command, locale, timestamp);
-                self.state_diagnostics.extend(load.diagnostics);
-                let mut reply = SendMessage::new(chat_id, &load.text);
-                reply.reply_to_message_id = Some(message_id);
-                let _receipt = self
-                    .actions
-                    .execute(TelegramAction::SendMessage(reply))
-                    .map_err(DispatchError::Action)?;
-                return Ok(Some(DispatchOutcome::Handled));
-            }
             return Ok(None);
         };
+        let mut caption = format_signal_caption(&signal, timestamp);
+        if let Some(timeframe) = timeframe.filter(|timeframe| !matches!(*timeframe, "1h" | "24h")) {
+            caption.push_str(&format!("\n{timeframe} change: N/A"));
+        }
         let photo = match self
             .token_signal_source
             .as_mut()
@@ -992,7 +1215,15 @@ where
                         SignalQuery::Symbol(symbol) => symbol,
                     }
                 ));
-                return Ok(None);
+                let mut reply = SendMessage::new(chat_id, &caption);
+                reply.reply_to_message_id = Some(message_id);
+                reply.parse_mode = Some(ParseMode::Html);
+                let receipt = self
+                    .actions
+                    .execute(TelegramAction::SendMessage(reply))
+                    .map_err(DispatchError::Action)?;
+                self.record_price_delivery(message, &caption, receipt.message_id, timestamp);
+                return Ok(Some(DispatchOutcome::Handled));
             }
         };
         let signal_id = stable_signal_id(chat_id.0, message_id.0, sender_id.0, timestamp);
@@ -1000,7 +1231,7 @@ where
             chat_id,
             photo: photo.into(),
             reply_to_message_id: Some(message_id),
-            caption: format_signal_caption(&signal, timestamp),
+            caption: caption.clone(),
             parse_mode: Some(ParseMode::Html),
             reply_markup: Some(build_signal_keyboard(
                 &signal_id,
@@ -1014,7 +1245,15 @@ where
                     "token signal photo delivery failed chat_id={} signal_id={signal_id}",
                     chat_id.0
                 ));
-                return Ok(None);
+                let mut reply = SendMessage::new(chat_id, &caption);
+                reply.reply_to_message_id = Some(message_id);
+                reply.parse_mode = Some(ParseMode::Html);
+                let receipt = self
+                    .actions
+                    .execute(TelegramAction::SendMessage(reply))
+                    .map_err(DispatchError::Action)?;
+                self.record_price_delivery(message, &caption, receipt.message_id, timestamp);
+                return Ok(Some(DispatchOutcome::Handled));
             }
         };
         let Some(sent_message_id) = receipt.message_id else {
@@ -1022,8 +1261,17 @@ where
                 "token signal photo delivery was unconfirmed chat_id={} signal_id={signal_id}",
                 chat_id.0
             ));
-            return Ok(None);
+            let mut reply = SendMessage::new(chat_id, &caption);
+            reply.reply_to_message_id = Some(message_id);
+            reply.parse_mode = Some(ParseMode::Html);
+            let receipt = self
+                .actions
+                .execute(TelegramAction::SendMessage(reply))
+                .map_err(DispatchError::Action)?;
+            self.record_price_delivery(message, &caption, receipt.message_id, timestamp);
+            return Ok(Some(DispatchOutcome::Handled));
         };
+        self.record_price_delivery(message, &caption, Some(sent_message_id), timestamp);
         let state = SignalState {
             chat_id: chat_id.0.to_string(),
             message_id: sent_message_id.0,
@@ -2408,11 +2656,11 @@ where
             message.chat_type.as_deref().unwrap_or_default(),
         );
         let timestamp = self.runtime_values.unix_timestamp();
-        if let Some(query) = detect_signal_query(&content.text)
-            && let Some(outcome) = self.dispatch_token_signal_message(
+        if detect_signal_query(&content.text).is_some()
+            && let Some(outcome) = self.dispatch_asset_prices(
                 message,
-                &query,
-                Some(MarketPriceCommand::Unified),
+                &content.text,
+                MarketPriceCommand::Unified,
                 locale,
                 timestamp,
             )?
@@ -2865,16 +3113,13 @@ where
             message.disable_web_page_preview = true;
             StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if let Some(command) = classify_market_price_command(&parsed.command) {
-            let query = detect_signal_query(&parsed.message_text).or_else(|| {
-                (command == MarketPriceCommand::CryptoOnly)
-                    .then(|| detect_signal_query(&format!("${}", parsed.message_text.trim())))
-                    .flatten()
-            });
-            if self.token_signal_source.is_some()
-                && let Some(query) = query
-                && let Some(outcome) =
-                    self.dispatch_token_signal_message(message, &query, None, locale, timestamp)?
-            {
+            if let Some(outcome) = self.dispatch_asset_prices(
+                message,
+                &parsed.message_text,
+                command,
+                locale,
+                timestamp,
+            )? {
                 return Ok(outcome);
             }
             let Some(source) = self.market_price_source.as_mut() else {
@@ -2882,17 +3127,6 @@ where
             };
             let load = source.load(&parsed.message_text, command, locale, timestamp);
             self.state_diagnostics.extend(load.diagnostics);
-            if command == MarketPriceCommand::Unified
-                && load.no_assets_found
-                && self.token_signal_source.is_some()
-                && detect_signal_query(&parsed.message_text).is_none()
-                && let Some(query) =
-                    detect_signal_query(&format!("${}", parsed.message_text.trim()))
-                && let Some(outcome) =
-                    self.dispatch_token_signal_message(message, &query, None, locale, timestamp)?
-            {
-                return Ok(outcome);
-            }
             let mut message = SendMessage::new(chat_id, &load.text);
             message.reply_to_message_id = Some(message_id);
             StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
@@ -2903,6 +3137,19 @@ where
             let load = source.load(&parsed.message_text, timestamp);
             self.state_diagnostics.extend(load.diagnostics);
             let text = render_stock_quotes(load.quotes.as_deref(), locale);
+            if !parsed.message_text.trim().is_empty()
+                && let Some(rows) = &load.quotes
+                && rows.len() == 1
+                && let Some(quote) = &rows[0].1
+                && let Some(source) = self.stock_price_source.as_mut()
+                && let Ok(photo) = source.render_chart(quote, timestamp)
+                && matches!(self.actions.try_photo(TelegramAction::SendPhoto {
+                    chat_id, photo: photo.into(), reply_to_message_id: Some(message_id),
+                    caption: text.clone(), parse_mode: None, reply_markup: None,
+                }), Ok(Some(ref receipt)) if receipt.message_id.is_some())
+            {
+                return Ok(DispatchOutcome::Handled);
+            }
             let mut message = SendMessage::new(chat_id, &text);
             message.reply_to_message_id = Some(message_id);
             StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
@@ -5793,6 +6040,7 @@ mod tests {
         )
         .with_market_price_source(Box::new(MarketPrices {
             result: MarketPriceLoad {
+                chart: None,
                 no_assets_found: false,
                 text: "BTC: 50000 USD (+2.5% 24h)".to_owned(),
                 diagnostics: vec!["synthetic stale CMC cache".to_owned()],
@@ -7468,6 +7716,152 @@ mod tests {
         );
     }
 
+    struct ChartPrices {
+        charts: Rc<RefCell<Vec<String>>>,
+        fail_chart: bool,
+    }
+    impl super::MarketPriceSource for ChartPrices {
+        fn load(
+            &mut self,
+            query: &str,
+            _: bot_core::market_prices::MarketPriceCommand,
+            _: bot_core::locale::Locale,
+            _: i64,
+        ) -> MarketPriceLoad {
+            let key = query.trim_start_matches('$').to_ascii_lowercase();
+            let symbol = match key.as_str() {
+                "btc" | "bitcoin" => Some("BTC"),
+                "apple" | "aapl" => Some("AAPL"),
+                "f" => Some("F"),
+                _ => None,
+            };
+            MarketPriceLoad {
+                chart: symbol.map(|symbol| bot_core::market_prices::MarketChart {
+                    symbol: symbol.to_owned(),
+                    name: symbol.to_owned(),
+                    yahoo_symbol: if symbol == "BTC" {
+                        "BTC-USD".to_owned()
+                    } else {
+                        symbol.to_owned()
+                    },
+                }),
+                no_assets_found: symbol.is_none(),
+                text: symbol.map_or_else(
+                    || "missing".to_owned(),
+                    |symbol| format!("{symbol}: 123 USD"),
+                ),
+                diagnostics: Vec::new(),
+            }
+        }
+        fn render_chart(
+            &mut self,
+            chart: &bot_core::market_prices::MarketChart,
+            _: i64,
+        ) -> Result<Vec<u8>, String> {
+            self.charts.borrow_mut().push(chart.yahoo_symbol.clone());
+            if self.fail_chart {
+                Err("history unavailable".to_owned())
+            } else {
+                Ok(b"market-chart".to_vec())
+            }
+        }
+    }
+
+    #[test]
+    fn single_assets_get_canonical_charts_and_mixed_lists_resolve_tokens() {
+        for (input, photo, expected) in [
+            ("/c", true, "BTC"),
+            ("/c bitcoin", true, "BTC"),
+            ("/c btc", true, "BTC"),
+            ("/p apple", true, "AAPL"),
+            ("/p $apple", true, "AAPL"),
+            ("$BTC", true, "BTC"),
+            ("$F", true, "F"),
+            ("/p btc,timba", false, "TIMBA"),
+            ("/c bitcoin,timba", false, "TIMBA"),
+            ("/p btc,unknown", false, "missing"),
+            ("/c stables", false, "missing"),
+            ("/c stablecoins", false, "missing"),
+        ] {
+            let charts = Rc::new(RefCell::new(Vec::new()));
+            let queries = Rc::new(RefCell::new(Vec::new()));
+            let mut signal = token_signal();
+            signal.pair.base_token.symbol = "TIMBA".to_owned();
+            let token_load = if input.contains("unknown") {
+                None
+            } else {
+                Some(signal)
+            };
+            let mut dispatcher = dispatcher()
+                .with_market_price_source(Box::new(ChartPrices {
+                    charts: Rc::clone(&charts),
+                    fail_chart: false,
+                }))
+                .with_token_signal_source(Box::new(Signals {
+                    query_load: TokenSignalLoad {
+                        signal: token_load,
+                        diagnostics: Vec::new(),
+                    },
+                    token_load: TokenSignalLoad {
+                        signal: None,
+                        diagnostics: Vec::new(),
+                    },
+                    photo: Ok(vec![1]),
+                    state: None,
+                    queries: Rc::clone(&queries),
+                    saved: Default::default(),
+                }));
+            assert_eq!(
+                dispatcher.dispatch(update(input, Some("en"))),
+                Ok(DispatchOutcome::Handled),
+                "{input}"
+            );
+            if photo {
+                assert!(
+                    matches!(dispatcher.actions.0.as_slice(), [TelegramAction::SendPhoto { caption, reply_to_message_id: Some(MessageId(7)), .. }] if caption.contains(expected)),
+                    "{input}"
+                );
+                assert!(queries.borrow().is_empty());
+                assert_eq!(charts.borrow().len(), 1);
+            } else {
+                assert!(
+                    matches!(dispatcher.actions.0.as_slice(), [TelegramAction::SendMessage(reply)] if reply.text.contains(expected)),
+                    "{input}"
+                );
+                assert!(charts.borrow().is_empty());
+                if input.contains("timba") {
+                    assert_eq!(
+                        queries.borrow().as_slice(),
+                        &[SignalQuery::Symbol("timba".to_owned())]
+                    );
+                    assert!(
+                        matches!(dispatcher.actions.0.first(), Some(TelegramAction::SendMessage(reply)) if reply.text.contains("BTC:"))
+                    );
+                }
+                if input.contains("stables") || input.contains("stablecoins") {
+                    assert!(queries.borrow().is_empty());
+                }
+            }
+            assert_eq!(dispatcher.state.incoming.len(), 1);
+            assert_eq!(dispatcher.state.outgoing.len(), 1);
+        }
+    }
+
+    #[test]
+    fn unavailable_market_charts_preserve_quotes_and_explain_the_fallback() {
+        let mut dispatcher = dispatcher().with_market_price_source(Box::new(ChartPrices {
+            charts: Default::default(),
+            fail_chart: true,
+        }));
+        assert_eq!(
+            dispatcher.dispatch(update("/p apple", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            matches!(dispatcher.actions.0.as_slice(), [TelegramAction::SendMessage(reply)] if reply.text.contains("AAPL:") && reply.text.contains("Chart unavailable"))
+        );
+    }
+
     #[test]
     fn token_commands_send_cards_for_mints_symbols_cashtags_and_aliases() {
         let mint = "F3A1baCgv4TF79TSjdMTvpMDtNv8DJvHZwNc9DG8pump";
@@ -7512,6 +7906,7 @@ mod tests {
                 }))
                 .with_market_price_source(Box::new(MarketPrices {
                     result: MarketPriceLoad {
+                        chart: None,
                         no_assets_found: true,
                         text: "missing".to_owned(),
                         diagnostics: Vec::new(),
@@ -7533,10 +7928,7 @@ mod tests {
                     SignalQuery::Symbol("timba".to_owned())
                 };
                 assert_eq!(queries.borrow().as_slice(), &[expected]);
-                assert_eq!(
-                    market_calls.borrow().len(),
-                    usize::from(argument == "timba" && command.starts_with("/p"))
-                );
+                assert_eq!(market_calls.borrow().len(), usize::from(argument != mint));
                 assert!(matches!(dispatcher.actions.0.as_slice(),
                     [TelegramAction::SendPhoto { caption, reply_to_message_id: Some(MessageId(7)), .. }]
                     if caption.contains("TIMBA")));
@@ -7608,7 +8000,8 @@ mod tests {
             }))
             .with_market_price_source(Box::new(MarketPrices {
                 result: MarketPriceLoad {
-                    no_assets_found: text == "/p timba",
+                    chart: None,
+                    no_assets_found: token_lookup,
                     text: "market fallback".to_owned(),
                     diagnostics: Vec::new(),
                 },
@@ -7619,11 +8012,15 @@ mod tests {
                 Ok(DispatchOutcome::Handled)
             );
             assert_eq!(queries.borrow().len(), usize::from(token_lookup));
-            assert_eq!(calls.borrow().len(), 1);
-            assert_eq!(calls.borrow()[0].0, argument);
-            assert_eq!(calls.borrow()[0].1, scope);
+            if argument.starts_with("0x") {
+                assert!(calls.borrow().is_empty());
+            } else {
+                assert_eq!(calls.borrow().len(), 1);
+                assert_eq!(calls.borrow()[0].0, argument);
+                assert_eq!(calls.borrow()[0].1, scope);
+            }
             assert!(matches!(dispatcher.actions.0.as_slice(),
-                [TelegramAction::SendMessage(message)] if message.text == "market fallback"));
+                [TelegramAction::SendMessage(message)] if message.text == "market fallback" || argument.starts_with("0x")));
         }
     }
 
@@ -7660,6 +8057,7 @@ mod tests {
         }))
         .with_market_price_source(Box::new(MarketPrices {
             result: MarketPriceLoad {
+                chart: None,
                 no_assets_found: false,
                 text: "NVDA: 123.45 USD (+1.25% 24h)".to_owned(),
                 diagnostics: Vec::new(),
@@ -7679,7 +8077,7 @@ mod tests {
                 bot_core::locale::Locale::En,
                 _
             )]
-                if query == "nvda"
+                if query == "$NVDA"
         ));
         assert!(matches!(
             dispatcher.actions.0.as_slice(),
@@ -7985,7 +8383,7 @@ mod tests {
     }
 
     #[test]
-    fn token_signal_message_failures_fall_through_without_losing_diagnostics() {
+    fn token_signal_message_failures_reply_with_available_data_and_diagnostics() {
         let address = "J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump";
         let (ai, _observations) = ai_source(Ok(AiPreparation::silent()));
         let mut missing = dispatcher()
@@ -8042,6 +8440,9 @@ mod tests {
                 .any(|entry| entry.contains("token signal photo failed"))
         );
 
+        assert!(
+            matches!(render_failed.actions.0.as_slice(), [TelegramAction::SendMessage(reply)] if reply.text.contains("Synthetic Token"))
+        );
         let mut save_failed = dispatcher().with_token_signal_source(Box::new(FallibleSignals {
             query_load: TokenSignalLoad {
                 signal: Some(signal),
@@ -8094,7 +8495,7 @@ mod tests {
             }));
             assert_eq!(
                 delivery_failed.dispatch(update(address, Some("en"))),
-                Err(DispatchError::MissingService("AI conversation"))
+                Ok(DispatchOutcome::Handled)
             );
             assert!(
                 delivery_failed

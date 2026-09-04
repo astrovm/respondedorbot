@@ -228,6 +228,7 @@ mod tests {
         let mut tool = CryptoPricesTool::new(
             MarketSource {
                 load: MarketPriceLoad {
+                    chart: None,
                     no_assets_found: false,
                     text: "BTC: 70000 USD".to_owned(),
                     diagnostics: vec!["synthetic provider note".to_owned()],
@@ -397,6 +398,7 @@ mod tests {
         let mut crypto = CryptoPricesTool::new(
             MarketSource {
                 load: MarketPriceLoad {
+                    chart: None,
                     no_assets_found: false,
                     text: String::new(),
                     diagnostics: Vec::new(),

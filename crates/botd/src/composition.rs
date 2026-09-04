@@ -356,10 +356,27 @@ where
         execution.diagnostics.extend(crypto.diagnostics);
         execution.diagnostics.extend(stocks.diagnostics);
         MarketPriceLoad {
+            chart: execution.chart,
             no_assets_found: execution.no_assets_found,
             text: execution.text,
             diagnostics: execution.diagnostics,
         }
+    }
+    fn render_chart(
+        &mut self,
+        chart: &bot_core::market_prices::MarketChart,
+        now_unix: i64,
+    ) -> Result<Vec<u8>, String> {
+        let load = load_yahoo_quote(
+            &self.stocks.yahoo_transport,
+            &mut self.stocks.cache,
+            &chart.yahoo_symbol,
+            now_unix,
+        );
+        let mut quote = load.quote.ok_or("market chart quote unavailable")?;
+        quote.symbol = chart.symbol.clone();
+        quote.name = chart.name.clone();
+        bot_adapters::token_signal::render_market_chart(&quote, &load.candles)
     }
 }
 
@@ -670,6 +687,15 @@ where
             quotes: Some(self.resolve_missing(quotes, now_unix, &mut diagnostics)),
             diagnostics,
         }
+    }
+    fn render_chart(&mut self, quote: &StockQuote, now_unix: i64) -> Result<Vec<u8>, String> {
+        let load = load_yahoo_quote(
+            &self.yahoo_transport,
+            &mut self.cache,
+            &quote.symbol,
+            now_unix,
+        );
+        bot_adapters::token_signal::render_market_chart(quote, &load.candles)
     }
 }
 

@@ -492,7 +492,11 @@ where
 
     pub fn load_token(&mut self, token: &TokenAddress) -> TokenSignalLoad {
         let mut diagnostics = Vec::new();
-        let pairs = self.pairs(token, &mut diagnostics);
+        let pairs = self
+            .pairs(token, &mut diagnostics)
+            .into_iter()
+            .filter(|pair| token_from_pair(pair).as_ref() == Some(token))
+            .collect::<Vec<_>>();
         if pairs.is_empty() {
             let signal = self
                 .pump_json(token, &mut diagnostics)
@@ -592,6 +596,9 @@ where
             let Some(token) = token_from_pair(&pair) else {
                 continue;
             };
+            if token != initial_token || pair.pair_address == initial_pair.pair_address {
+                continue;
+            }
             if pair.pair_address.is_empty() {
                 continue;
             }
@@ -732,6 +739,43 @@ pub fn render_signal_chart(
     width: u32,
     height: u32,
 ) -> Result<Vec<u8>, String> {
+    render_price_chart(&signal.pair, &signal.candles, None, None, width, height)
+}
+
+/// Render daily market candles using the same drawing engine as token cards.
+pub fn render_market_chart(
+    quote: &bot_core::stocks::StockQuote,
+    candles: &[Vec<f64>],
+) -> Result<Vec<u8>, String> {
+    if candles.is_empty() {
+        return Err("historical chart data unavailable".to_owned());
+    }
+    let pair = TokenPair {
+        price_usd: json!(quote.price),
+        ..TokenPair::default()
+    };
+    let title = format!(
+        "{} — {} | {} {} | 5D · daily candles",
+        quote.symbol, quote.name, quote.price, quote.currency
+    );
+    render_price_chart(
+        &pair,
+        candles,
+        Some(&title),
+        Some(&quote.currency),
+        1_280,
+        900,
+    )
+}
+
+fn render_price_chart(
+    pair: &TokenPair,
+    candles: &[Vec<f64>],
+    heading: Option<&str>,
+    currency: Option<&str>,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, String> {
     if width < 120 || height < 120 {
         return Err("token chart dimensions are too small".to_owned());
     }
@@ -740,19 +784,26 @@ pub fn render_signal_chart(
     let right = i32::try_from(width).map_err(|_| "chart width is too large")? - 92;
     let top = 74_i32;
     let bottom = i32::try_from(height).map_err(|_| "chart height is too large")? - 82;
-    let price = flexible_number(&signal.pair.price_usd).unwrap_or(0.0);
-    let market_cap = flexible_number(&signal.pair.market_cap)
+    let price = flexible_number(&pair.price_usd).unwrap_or(0.0);
+    let market_cap = flexible_number(&pair.market_cap)
         .filter(|market_cap| *market_cap != 0.0)
-        .or_else(|| flexible_number(&signal.pair.fdv))
+        .or_else(|| flexible_number(&pair.fdv))
         .unwrap_or(0.0);
-    let symbol = if signal.pair.base_token.symbol.is_empty() {
+    let symbol = if pair.base_token.symbol.is_empty() {
         "TOKEN".to_owned()
     } else {
-        signal.pair.base_token.symbol.to_ascii_uppercase()
+        pair.base_token.symbol.to_ascii_uppercase()
     };
-    let price_text = format_money(price, true);
+    let price_label = |value| match currency {
+        Some(currency) => format!(
+            "{} {currency}",
+            format_money(value, true).trim_start_matches('$')
+        ),
+        None => format_money(value, true),
+    };
+    let price_text = price_label(price);
     if let Some(font) = chart_font(true) {
-        let change = flexible_number(&signal.pair.price_change.h24).unwrap_or(0.0);
+        let change = flexible_number(&pair.price_change.h24).unwrap_or(0.0);
         let sign = if change >= 0.0 { "+" } else { "" };
         let title = format!(
             "{symbol} (4H) Price: {price_text} ({sign}{change:.1}%) • MC: {}",
@@ -765,7 +816,7 @@ pub fn render_signal_chart(
             22,
             24.0,
             &font,
-            &title,
+            heading.unwrap_or(&title),
         );
     }
     for index in 0..6 {
@@ -776,8 +827,7 @@ pub fn render_signal_chart(
         let x = left + (right - left) * index / 6;
         draw_line(&mut image, x, top, x, bottom, Rgb([17, 24, 39]));
     }
-    let mut candles = signal
-        .candles
+    let mut candles = candles
         .iter()
         .filter(|candle| candle.len() >= 5)
         .cloned()
@@ -887,7 +937,11 @@ pub fn render_signal_chart(
                     y_for(ath).saturating_sub(28).max(top),
                     20.0,
                     &font,
-                    &format!("{} ATH", format_money(ath, true)),
+                    &format!(
+                        "{} {}",
+                        price_label(ath),
+                        if heading.is_some() { "5D high" } else { "ATH" }
+                    ),
                 );
             }
         }
@@ -910,6 +964,24 @@ fn encode_png(image: RgbImage) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn market_chart_renders_real_candles_and_rejects_missing_history() -> Result<(), String> {
+        let quote = bot_core::stocks::StockQuote {
+            symbol: "AAPL".into(),
+            name: "Apple".into(),
+            price: 100.0,
+            currency: "JPY".into(),
+            exchange: "TEST".into(),
+            variation: 1.0,
+        };
+        assert!(super::render_market_chart(&quote, &[]).is_err());
+        let png =
+            super::render_market_chart(&quote, &[vec![1.0, 99.0, 102.0, 98.0, 100.0, 1000.0]])
+                .map_err(|error| error.to_string())?;
+        assert!(png.starts_with(b"\x89PNG"));
+        Ok(())
+    }
+
     use std::collections::{BTreeMap, VecDeque};
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -922,6 +994,40 @@ mod tests {
         BinaryResponse, JsonResponse, ReqwestTokenSignalTransport, TokenSignalAdapter,
         TokenSignalCache, TokenSignalTransport, render_signal_chart,
     };
+
+    #[test]
+    fn missing_candles_never_switch_to_a_different_mint() -> Result<(), String> {
+        let a = "0x0000000000000000000000000000000000000001";
+        let b = "0x0000000000000000000000000000000000000002";
+        let pair = |mint: &str, pool: &str, liquidity: u64| {
+            json!({
+                "chainId":"ethereum", "pairAddress":pool,
+                "baseToken":{"address":mint,"symbol":"TIMBA"}, "liquidity":{"usd":liquidity}
+            })
+        };
+        let transport = Transport {
+            json: std::cell::RefCell::new(VecDeque::from([
+                JsonResponse { status_code:200, body:json!({"pairs":[pair(a,"primary",1000),pair(b,"other",500),pair(a,"alternate",100)]}).to_string() },
+                JsonResponse { status_code:200, body:json!({"data":{"attributes":{"ohlcv_list":[]}}}).to_string() },
+                JsonResponse { status_code:200, body:json!({"data":{"attributes":{"ohlcv_list":[[1,1,2,0.5,1.5]]}}}).to_string() },
+            ])), post: Default::default(), binary: Default::default(),
+        };
+        let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
+        let signal = adapter
+            .load_symbol("timba")
+            .signal
+            .ok_or("missing signal")?;
+        assert_eq!(signal.token.address, a);
+        assert_eq!(signal.pair.pair_address, "alternate");
+        assert!(
+            !adapter
+                .cache
+                .writes
+                .iter()
+                .any(|(key, _)| key.contains(":other:"))
+        );
+        Ok(())
+    }
 
     #[test]
     fn reqwest_transport_supports_json_get_post_and_binary_downloads() {
