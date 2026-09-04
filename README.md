@@ -11,6 +11,7 @@ manages AI credits, and runs scheduled tasks.
 
 - Chat with AI, memory, web search, tools, and provider fallback
 - Transcribe audio and describe images
+- Summarize YouTube videos from their existing captions
 - Summarize conversations
 - Show crypto, market, dollar, BCRA, weather, and Polymarket data
 - Manage Telegram Stars, AI credits, transfers, and charge history
