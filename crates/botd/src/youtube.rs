@@ -3,6 +3,8 @@
 use bot_adapters::youtube_transcript::{
     TranscriptOutcome, YoutubeTranscriptTransport, fetch_supadata_with, parse_apify,
 };
+use bot_core::ai_reserve::estimate_youtube_transcript_reserve_credit_units;
+use serde_json::{Value, json};
 use url::Url;
 
 use crate::media::MediaCache;
@@ -14,11 +16,18 @@ const TRANSCRIPT_CONTEXT_MAX_CHARS: usize = 60_000;
 pub struct YoutubePreparation {
     pub context: Option<String>,
     pub transcript: Option<String>,
+    pub billing_segment: Option<Value>,
     pub diagnostics: Vec<String>,
     pub failed: bool,
 }
 
 pub trait YoutubeContextRuntime {
+    fn reserve_credit_units(
+        &mut self,
+        message_text: &str,
+        reply_context: Option<&str>,
+    ) -> Result<Option<i64>, String>;
+
     fn prepare(
         &mut self,
         message_text: &str,
@@ -55,6 +64,31 @@ where
     Transport: YoutubeTranscriptTransport,
     Cache: MediaCache,
 {
+    fn reserve_credit_units(
+        &mut self,
+        message_text: &str,
+        reply_context: Option<&str>,
+    ) -> Result<Option<i64>, String> {
+        let Some((video_id, _)) =
+            youtube_video(message_text).or_else(|| reply_context.and_then(youtube_video))
+        else {
+            return Ok(None);
+        };
+        if self
+            .cache
+            .get(TRANSCRIPT_CACHE_PREFIX, &video_id)
+            .is_ok_and(|cached| cached.is_some_and(|text| !text.trim().is_empty()))
+        {
+            return Ok(Some(0));
+        }
+        if self.supadata_api_key.is_none() && self.apify_api_key.is_none() {
+            return Ok(Some(0));
+        }
+        estimate_youtube_transcript_reserve_credit_units()
+            .map(Some)
+            .map_err(|error| error.to_string())
+    }
+
     fn prepare(
         &mut self,
         message_text: &str,
@@ -68,7 +102,14 @@ where
         let mut diagnostics = Vec::new();
         match self.cache.get(TRANSCRIPT_CACHE_PREFIX, &video_id) {
             Ok(Some(transcript)) if !transcript.trim().is_empty() => {
-                return Ok(Some(success(&url, &video_id, "", &transcript, diagnostics)));
+                return Ok(Some(success(
+                    &url,
+                    &video_id,
+                    "",
+                    &transcript,
+                    None,
+                    diagnostics,
+                )));
             }
             Ok(_) => {}
             Err(error) => {
@@ -85,6 +126,7 @@ where
                             &url,
                             &language,
                             &text,
+                            "supadata",
                             diagnostics,
                         )));
                     }
@@ -104,6 +146,7 @@ where
                             &url,
                             &language,
                             &text,
+                            "apify",
                             diagnostics,
                         )));
                     }
@@ -121,6 +164,7 @@ where
         Ok(Some(YoutubePreparation {
             context: None,
             transcript: None,
+            billing_segment: None,
             diagnostics,
             failed: true,
         }))
@@ -137,6 +181,7 @@ where
         url: &str,
         language: &str,
         transcript: &str,
+        provider: &str,
         mut diagnostics: Vec<String>,
     ) -> YoutubePreparation {
         if let Err(error) = self
@@ -145,7 +190,14 @@ where
         {
             diagnostics.push(format!("YouTube transcript cache write failed: {error}"));
         }
-        success(url, video_id, language, transcript, diagnostics)
+        success(
+            url,
+            video_id,
+            language,
+            transcript,
+            Some(provider),
+            diagnostics,
+        )
     }
 }
 
@@ -160,11 +212,22 @@ fn success(
     video_id: &str,
     language: &str,
     transcript: &str,
+    provider: Option<&str>,
     diagnostics: Vec<String>,
 ) -> YoutubePreparation {
     YoutubePreparation {
         context: Some(transcript_context(url, video_id, language, transcript)),
         transcript: Some(transcript.to_owned()),
+        billing_segment: provider.map(|provider| {
+            json!({
+                "kind": "youtube_transcript",
+                "source": provider,
+                "metadata": {
+                    "provider": provider,
+                    "video_id": video_id,
+                }
+            })
+        }),
         diagnostics,
         failed: false,
     }
@@ -352,11 +415,15 @@ mod tests {
             true,
             true,
         );
+        assert_eq!(
+            runtime.reserve_credit_units("summarize", Some("https://youtu.be/abc123def45")),
+            Ok(Some(0))
+        );
         let prepared = runtime
             .prepare("summarize", Some("https://youtu.be/abc123def45"))
             .ok()
             .flatten();
-        assert!(prepared.is_some_and(|value| {
+        assert!(prepared.as_ref().is_some_and(|value| {
             !value.failed
                 && value.transcript.as_deref() == Some("cached transcript")
                 && value
@@ -377,11 +444,15 @@ mod tests {
             ..Transport::default()
         };
         let mut runtime = runtime(transport, Cache::default(), true, true);
+        assert_eq!(
+            runtime.reserve_credit_units("summarize https://youtu.be/abc123def45", None),
+            Ok(Some(60))
+        );
         let prepared = runtime
             .prepare("summarize https://youtu.be/abc123def45", None)
             .ok()
             .flatten();
-        assert!(prepared.is_some_and(|value| {
+        assert!(prepared.as_ref().is_some_and(|value| {
             value.transcript.as_deref() == Some("native transcript")
                 && value
                     .context
@@ -390,6 +461,12 @@ mod tests {
         }));
         assert_eq!(*runtime.transport.calls.borrow(), ["supadata"]);
         assert_eq!(runtime.cache.writes[0].0, TRANSCRIPT_CACHE_PREFIX);
+        assert_eq!(
+            prepared
+                .and_then(|value| value.billing_segment)
+                .and_then(|segment| segment.get("source").cloned()),
+            Some(json!("supadata"))
+        );
     }
 
     #[test]
@@ -408,7 +485,7 @@ mod tests {
             .prepare("https://youtube.com/watch?v=abc123def45", None)
             .ok()
             .flatten();
-        assert!(prepared.is_some_and(|value| {
+        assert!(prepared.as_ref().is_some_and(|value| {
             !value.failed
                 && value.transcript.as_deref() == Some("texto nativo")
                 && value.diagnostics[0].contains("Supadata")
@@ -418,6 +495,12 @@ mod tests {
                     .is_some_and(|context| context.contains("texto nativo"))
         }));
         assert_eq!(*runtime.transport.calls.borrow(), ["supadata", "apify"]);
+        assert_eq!(
+            prepared
+                .and_then(|value| value.billing_segment)
+                .and_then(|segment| segment.get("source").cloned()),
+            Some(json!("apify"))
+        );
     }
 
     #[test]

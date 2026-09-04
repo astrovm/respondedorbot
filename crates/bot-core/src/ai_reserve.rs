@@ -5,7 +5,8 @@ use thiserror::Error;
 use crate::provider_pricing::{
     CREDIT_UNIT_USD_MICROS, DEEPSEEK_MODEL, FIRECRAWL_SEARCH_MAX_CREDITS,
     FIRECRAWL_STANDARD_USD_MICROS_PER_CREDIT, GROQ_TRANSCRIPTION_MIN_SECONDS,
-    GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR, TokenPricing, reservation_token_pricing,
+    GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR, TokenPricing,
+    YOUTUBE_TRANSCRIPT_USD_MICROS_PER_SUCCESS, reservation_token_pricing,
 };
 
 pub const CHAT_OUTPUT_TOKEN_LIMIT: i64 = 1_024;
@@ -180,6 +181,10 @@ pub fn estimate_firecrawl_reserve_credit_units() -> Result<i64, ReserveEstimateE
     .max(1))
 }
 
+pub fn estimate_youtube_transcript_reserve_credit_units() -> Result<i64, ReserveEstimateError> {
+    credit_units_from_usd_micros(YOUTUBE_TRANSCRIPT_USD_MICROS_PER_SUCCESS)
+}
+
 pub fn credit_units_from_usd_micros(usd_micros: i128) -> Result<i64, ReserveEstimateError> {
     if usd_micros <= 0 {
         return Ok(0);
@@ -206,7 +211,7 @@ mod tests {
         credit_units_from_usd_micros, estimate_chat_reserve_credit_units,
         estimate_firecrawl_reserve_credit_units, estimate_message_tokens, estimate_nested_tokens,
         estimate_text_tokens, estimate_transcription_reserve_credit_units,
-        estimate_vision_reserve_credit_units,
+        estimate_vision_reserve_credit_units, estimate_youtube_transcript_reserve_credit_units,
     };
 
     fn text(value: &str) -> TokenEstimateValue {
@@ -272,6 +277,7 @@ mod tests {
             assert_eq!(credit_units_from_usd_micros(micros), Ok(expected));
         }
         assert_eq!(estimate_firecrawl_reserve_credit_units(), Ok(34));
+        assert_eq!(estimate_youtube_transcript_reserve_credit_units(), Ok(60));
         assert_eq!(estimate_transcription_reserve_credit_units(0.0), Ok(1));
         assert_eq!(estimate_transcription_reserve_credit_units(1.0), Ok(7));
         assert_eq!(

@@ -12,6 +12,7 @@ Rust is the sole billing reader and writer. PostgreSQL remains the system of rec
 - Provider usage segments use stable identifiers and idempotent insertion.
 - Settlement is exact-once. It charges actual incurred usage, refunds unused reservation, and records debt when required.
 - Failed delivery still settles incurred provider usage; a call with no usage refunds its hold.
+- Successful uncached YouTube transcripts cost 0.60 displayed credits for either Supadata or Apify; cached transcripts and unsuccessful retrievals cost nothing.
 - Telegram Stars payment payloads and provider charge identifiers are replay protected.
 - Onboarding grants, administrator credits, transfers, and maintenance writes are transactional.
 - Reconciliation reads durable operation and segment state and cannot duplicate completed settlement.
