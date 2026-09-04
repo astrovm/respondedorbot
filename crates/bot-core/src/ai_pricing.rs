@@ -6,7 +6,7 @@ use thiserror::Error;
 use crate::provider_pricing::{
     CREDIT_UNIT_USD_MICROS, FIRECRAWL_STANDARD_USD_MICROS_PER_CREDIT,
     GROQ_TRANSCRIPTION_MIN_SECONDS, GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR, PRICING_VERSION,
-    published_token_pricing,
+    YOUTUBE_TRANSCRIPT_USD_MICROS_PER_SUCCESS, published_token_pricing,
 };
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -528,6 +528,28 @@ pub fn calculate_billing_for_segments(segments: &Value) -> Result<Value, AiPrici
         let reported = reported_cost(usage, usage_reconciled)?;
         let (search_cost, tool_cost) = firecrawl_cost(metadata, &kind)?;
 
+        if kind == "youtube_transcript" {
+            let usd_micros = i64::try_from(YOUTUBE_TRANSCRIPT_USD_MICROS_PER_SUCCESS)
+                .map_err(|_| AiPricingError::Overflow)?;
+            total = total.add(ExactDecimal::from_ratio(i128::from(usd_micros), 0))?;
+            tool_breakdown.push(json!({
+                "tool": "youtube_transcript",
+                "provider": provider,
+                "count": 1,
+                "usd_micros": usd_micros,
+            }));
+            segment_breakdown.push(json!({
+                "segment_index": segment_index,
+                "kind": kind,
+                "model": model,
+                "provider": if provider.is_empty() { "unknown" } else { &provider },
+                "pricing_basis": "youtube_transcript_standard",
+                "cost_complete": true,
+                "usd_micros_exact": usd_micros.to_string(),
+            }));
+            continue;
+        }
+
         if matches!(kind.as_str(), "web_search" | "youtube_audio")
             && let Some(tool_cost) = tool_cost
         {
@@ -793,6 +815,26 @@ mod tests {
         assert_eq!(output["raw_usd_micros_exact"], "4150");
         assert_eq!(output["charged_credit_units"], 83);
         assert_eq!(output["tool_breakdown"][0]["tool"], "youtube_audio");
+        Ok(())
+    }
+
+    #[test]
+    fn prices_supadata_and_apify_transcripts_at_the_same_rate() -> Result<(), AiPricingError> {
+        for provider in ["supadata", "apify"] {
+            let output = calculate_billing_for_segments(&json!([{
+                "kind": "youtube_transcript",
+                "source": provider,
+                "metadata": {"provider": provider}
+            }]))?;
+            assert_eq!(output["raw_usd_micros_exact"], "3000");
+            assert_eq!(output["charged_credit_units"], 60);
+            assert_eq!(output["tool_breakdown"][0]["tool"], "youtube_transcript");
+            assert_eq!(output["tool_breakdown"][0]["provider"], provider);
+            assert_eq!(
+                output["segment_breakdown"][0]["pricing_basis"],
+                "youtube_transcript_standard"
+            );
+        }
         Ok(())
     }
 

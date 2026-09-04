@@ -1,6 +1,6 @@
 //! Provider model names and published prices used by billing and reservations.
 
-pub const PRICING_VERSION: &str = "2026-09-01";
+pub const PRICING_VERSION: &str = "2026-09-04";
 pub const CREDIT_UNIT_USD_MICROS: i128 = 50;
 
 pub const DEEPSEEK_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
@@ -12,6 +12,7 @@ pub const FIRECRAWL_SEARCH_MAX_CREDITS: i128 = 2;
 pub const FIRECRAWL_STANDARD_USD_MICROS_PER_CREDIT: i128 = 830;
 pub const GROQ_TRANSCRIPTION_MIN_SECONDS: f64 = 10.0;
 pub const GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR: f64 = 111_000.0;
+pub const YOUTUBE_TRANSCRIPT_USD_MICROS_PER_SUCCESS: i128 = 3_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TokenPricing {

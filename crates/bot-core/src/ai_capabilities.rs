@@ -18,7 +18,7 @@ const CAPABILITIES_ES: &str = r#"CAPACIDADES DEL BOT:
 - /bcra, /variables: variables económicas del BCRA
 - /eleccion, /elecciones, /election, /elections: top 10 de elecciones globales en Polymarket por liquidez
 - /rulo, /devo, /powerlaw, /rainbow, /satoshi, /sat, /sats: rulo desde oficial, arbitraje tarjeta/crypto, power law, rainbow chart y sats
-- /transcribe, /describe: transcribo voice/audio/video/video_note y describo fotos o stickers respondiendo al mensaje; también puedo procesar media cuando me hablan
+- /transcribe, /transcript, /describe: transcribo voice/audio/video/video_note o subtítulos de YouTube y describo fotos, stickers o GIF respondiendo al mensaje; también puedo procesar media cuando me hablan
 - links: arreglo links de X/Twitter, Bluesky, Instagram y Reddit según config; leo metadata, tweets y transcripts de YouTube como contexto
 - /tarea, /tareas, /task, /tasks: agendo recordatorios y tareas recurrentes por lenguaje natural; cualquiera de los comandos lista sin texto y crea con texto
 - /resumen, /summary, /tldr: resumo el chat, guardo resumen acumulado y recupero mensajes relevantes para responder con contexto
@@ -46,7 +46,7 @@ const CAPABILITIES_EN: &str = r#"BOT CAPABILITIES:
 - /bcra, /variables: economic variables from Argentina's central bank
 - /eleccion, /elecciones, /election, /elections: top global election markets on Polymarket by liquidity
 - /rulo, /devo, /powerlaw, /rainbow, /satoshi, /sat, /sats: official-rate, card/crypto, power-law, rainbow-chart, and satoshi tools
-- /transcribe, /describe: transcribe audio and video or describe images and stickers
+- /transcribe, /transcript, /describe: transcribe audio, video, or YouTube captions; describe images, stickers, or GIFs
 - links: fix supported social links and read linked content as context
 - /tarea, /tareas, /task, /tasks: create reminders and recurring tasks with natural language
 - /resumen, /summary, /tldr: summarize chats and retrieve relevant prior messages

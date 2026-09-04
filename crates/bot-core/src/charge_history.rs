@@ -322,6 +322,8 @@ fn label(locale: Locale, kind: &str) -> &'static str {
         (Locale::Es, "image") => "imagen",
         (Locale::En, "image") => "image",
         (_, "web") => "web",
+        (Locale::Es, "transcript") => "transcripción",
+        (Locale::En, "transcript") => "transcript",
         (Locale::Es, "tool") => "herramienta",
         (Locale::En, "tool") => "tool",
         (Locale::Es, "memory") => "memoria",
@@ -375,6 +377,11 @@ fn raw_components(metadata: &Map<String, Value>, locale: Locale) -> Vec<(String,
         if tool == "web_search" {
             web_count = web_count.saturating_add(count);
             web_micros = web_micros.saturating_add(integer(item.get("usd_micros")).max(0));
+        } else if tool == "youtube_transcript" {
+            add(
+                label(locale, "transcript").to_owned(),
+                integer(item.get("usd_micros")),
+            );
         } else {
             add(
                 label(locale, "tool").to_owned(),
@@ -441,6 +448,8 @@ fn activity(metadata: &Map<String, Value>, event_type: &str, locale: Locale) -> 
     let usage_tag = text(metadata, "usage_tag");
     if event_type == "memory_compaction_settlement" || usage_tag.contains("memory_compaction") {
         label(locale, "memory")
+    } else if usage_tag.contains("youtube_transcript") {
+        label(locale, "transcript")
     } else if usage_tag.contains("transcribe") || usage_tag.contains("audio") {
         label(locale, "audio")
     } else if usage_tag.contains("image") || usage_tag.contains("vision") {
@@ -844,6 +853,41 @@ mod tests {
         assert_eq!(
             keyboard.inline_keyboard[0][0].callback_data.as_deref(),
             Some("chg:55:2:o:29:-180")
+        );
+    }
+
+    #[test]
+    fn renders_youtube_transcript_charge_in_each_locale() {
+        let page = ChargeHistoryPage {
+            groups: vec![ChargeHistoryGroup {
+                cursor_id: 30,
+                created_at: "2026-08-26T17:32:00+00:00".to_owned(),
+                entries: vec![ChargeHistoryEntry {
+                    id: 30,
+                    event_type: "ai_settlement_result".to_owned(),
+                    metadata: json!({
+                        "charged_credit_units_total": 60,
+                        "tool_breakdown": [{
+                            "tool": "youtube_transcript",
+                            "provider": "supadata",
+                            "count": 1,
+                            "usd_micros": 3000
+                        }]
+                    }),
+                }],
+            }],
+            has_newer: false,
+            has_older: false,
+            newer_cursor: Some(30),
+            older_cursor: Some(30),
+        };
+        assert_eq!(
+            render_charge_history_page(&page, 55, 10, -180, Locale::Es).0,
+            "Gastos IA\n\n26/08 14:32 · transcripción · 0.60 cr"
+        );
+        assert_eq!(
+            render_charge_history_page(&page, 55, 10, -180, Locale::En).0,
+            "AI expenses\n\n26/08 14:32 · transcript · 0.60 cr"
         );
     }
 

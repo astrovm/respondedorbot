@@ -128,9 +128,9 @@ const COMMAND_GROUPS: &[CommandGroup] = &[
         description_en: "show all commands",
     },
     CommandGroup {
-        aliases: &["transcribe", "describe"],
-        description_es: "te transcribo audio o describo imagen",
-        description_en: "transcribe audio or describe an image",
+        aliases: &["transcribe", "transcript", "describe"],
+        description_es: "transcribo audio o YouTube y describo imágenes o GIF",
+        description_en: "transcribe audio or YouTube and describe images or GIFs",
     },
     CommandGroup {
         aliases: &["bcra", "variables"],
@@ -235,15 +235,15 @@ mod tests {
         for (locale, expected_hash) in [
             (
                 Locale::Es,
-                "22d36d4b74b8b5bd82396df746b65f5e578fedc9aa559dd8263c1f7d4c7e7689",
+                "10b4affa0ff7788639e40830864167163a3a2b0d2898039f5f784752508450a7",
             ),
             (
                 Locale::En,
-                "54ee805dce011953abe578fc3cf8903788e1c001f2f41dcb1a9ca00b93f89c1b",
+                "85fe6c0b368a678df15bb41ec2d659ab9005a0ec4362ddbd15b817b1c5300d98",
             ),
         ] {
             let commands = telegram_commands(locale);
-            assert_eq!(commands.len(), 74);
+            assert_eq!(commands.len(), 75);
             let encoded = serde_json::to_string(&commands);
             assert!(encoded.is_ok());
             let digest = encoded.map(|value| sha256_hex(&value));
@@ -282,6 +282,6 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(languages, [(74, None), (74, Some("es")), (74, Some("en"))]);
+        assert_eq!(languages, [(75, None), (75, Some("es")), (75, Some("en"))]);
     }
 }

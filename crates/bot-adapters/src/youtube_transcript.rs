@@ -589,6 +589,81 @@ mod tests {
     }
 
     #[test]
+    fn supadata_accepts_completion_on_the_last_poll() {
+        let mut jobs =
+            vec![json_response(200, json!({"status": "active"})); SUPADATA_JOB_POLL_ATTEMPTS - 1];
+        jobs.push(json_response(
+            200,
+            json!({
+                "status": "completed", "content": "complete synthetic captions", "lang": "en"
+            }),
+        ));
+        let transport = PollTransport {
+            start: RefCell::new(Some(json_response(202, json!({"jobId": "synthetic-job"})))),
+            jobs: RefCell::new(jobs),
+        };
+        let mut polls = 0;
+        assert_eq!(
+            fetch_supadata_with(
+                &transport,
+                "synthetic-key",
+                "https://youtu.be/synthetic",
+                |_| polls += 1
+            ),
+            Ok(TranscriptOutcome::Success {
+                text: "complete synthetic captions".to_owned(),
+                language: "en".to_owned(),
+            })
+        );
+        assert_eq!(polls, SUPADATA_JOB_POLL_ATTEMPTS);
+        assert!(transport.jobs.borrow().is_empty());
+    }
+
+    #[test]
+    fn supadata_job_errors_stop_polling_without_returning_captions() {
+        for (response, detail) in [
+            (
+                HttpResponse {
+                    status_code: 503,
+                    body: json!({"message": "temporarily unavailable"}).to_string(),
+                },
+                "HTTP 503",
+            ),
+            (
+                HttpResponse {
+                    status_code: 200,
+                    body: "not JSON".to_owned(),
+                },
+                "invalid JSON",
+            ),
+            (
+                HttpResponse {
+                    status_code: 200,
+                    body: json!({"status": "completed"}).to_string(),
+                },
+                "no native captions",
+            ),
+        ] {
+            let transport = PollTransport {
+                start: RefCell::new(Some(json_response(202, json!({"jobId": "synthetic-job"})))),
+                jobs: RefCell::new(vec![Ok(response)]),
+            };
+            let mut polls = 0;
+            let result = fetch_supadata_with(
+                &transport,
+                "synthetic-key",
+                "https://youtu.be/synthetic",
+                |_| polls += 1,
+            );
+            assert!(
+                matches!(result, Ok(TranscriptOutcome::Unavailable { detail: actual }) if actual.contains(detail))
+            );
+            assert_eq!(polls, 1);
+            assert!(transport.jobs.borrow().is_empty());
+        }
+    }
+
+    #[test]
     fn parses_apify_segments_without_translation() {
         let outcome = parse_apify(HttpResponse {
             status_code: 201,
@@ -752,6 +827,29 @@ mod tests {
             ));
             assert!(server.join().is_ok());
         }
+    }
+
+    #[test]
+    fn transport_rejects_truncated_response_bodies() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+            let mut request = [0_u8; 1_024];
+            assert!(stream.read(&mut request).is_ok_and(|size| size > 0));
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{\"content\":")
+                .unwrap_or_else(|_| unreachable!());
+        });
+        let transport = ReqwestYoutubeTranscriptTransport::with_urls(
+            &format!("http://{address}/transcript"),
+            &format!("http://{address}/transcript"),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert!(matches!(
+            transport.supadata("synthetic-key", "https://youtu.be/synthetic"),
+            Err(TranscriptTransportError::Other(_))
+        ));
+        assert!(server.join().is_ok());
     }
 
     #[test]

@@ -824,6 +824,51 @@ mod tests {
     }
 
     #[test]
+    fn document_action_uploads_complete_transcript_through_http() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+        let transcript = "synthetic transcript 🦀\n".repeat(300);
+        let expected = transcript.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+            let request = read_complete_http_request(&mut stream);
+            let request = String::from_utf8(request).unwrap_or_else(|_| unreachable!());
+            assert!(request.starts_with("POST /botsynthetic-token/sendDocument HTTP/1.1"));
+            assert!(request.contains("name=\"document\"; filename=\"transcript.txt\""));
+            assert!(request.contains("text/plain; charset=utf-8"));
+            assert!(request.contains(&expected));
+            assert!(request.contains("name=\"reply_to_message_id\"\r\n\r\n7"));
+            let body = r#"{"ok":true,"result":{"message_id":45}}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap_or_else(|_| unreachable!());
+        });
+        let transport = ReqwestTelegramTransport::with_api_base(&format!("http://{address}"))
+            .unwrap_or_else(|_| unreachable!());
+        let outcome = crate::telegram_actions::execute_with(
+            &transport,
+            "synthetic-token",
+            bot_core::telegram_actions::TelegramAction::SendDocument {
+                chat_id: bot_core::telegram_input::ChatId(42),
+                document: transcript.into_bytes().into(),
+                file_name: "transcript.txt".to_owned(),
+                reply_to_message_id: Some(bot_core::telegram_input::MessageId(7)),
+                caption: "synthetic transcript".to_owned(),
+            },
+        );
+        assert!(server.join().is_ok());
+        assert_eq!(
+            outcome,
+            Ok(crate::telegram_actions::ActionOutcome::Completed {
+                message_id: Some(45)
+            })
+        );
+    }
+
+    #[test]
     fn reqwest_transport_covers_json_multipart_and_binary_http_boundaries() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
         let address = listener.local_addr().unwrap_or_else(|_| unreachable!());

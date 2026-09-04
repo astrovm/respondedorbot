@@ -161,7 +161,8 @@ fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
                 Some(Value::Object(payload)),
             )
         }
-        TelegramAction::SendVideo { .. }
+        TelegramAction::SendDocument { .. }
+        | TelegramAction::SendVideo { .. }
         | TelegramAction::SendPhoto { .. }
         | TelegramAction::EditMessagePhoto { .. } => return Err(ActionError::InvalidAction),
         TelegramAction::SendInvoice {
@@ -310,6 +311,37 @@ pub fn execute_with<T: TelegramTransport>(
     action: TelegramAction,
 ) -> Result<ActionOutcome, ActionError> {
     let multipart = match action {
+        TelegramAction::SendDocument {
+            chat_id,
+            document,
+            file_name,
+            reply_to_message_id,
+            caption,
+        } => {
+            let mut fields = vec![
+                ("chat_id".to_owned(), chat_id.0.to_string()),
+                (
+                    "caption".to_owned(),
+                    caption.chars().take(1024).collect::<String>(),
+                ),
+            ];
+            if let Some(reply_to_message_id) = reply_to_message_id {
+                fields.push((
+                    "reply_to_message_id".to_owned(),
+                    reply_to_message_id.0.to_string(),
+                ));
+            }
+            Some(TelegramMultipartRequest {
+                token: token.to_owned(),
+                endpoint: "sendDocument".to_owned(),
+                fields,
+                file_field: "document".to_owned(),
+                file_name,
+                file_bytes: document,
+                content_type: "text/plain; charset=utf-8".to_owned(),
+                timeout: Duration::from_secs(60),
+            })
+        }
         TelegramAction::SendVideo {
             chat_id,
             video,
@@ -484,11 +516,22 @@ mod tests {
     struct Transport {
         response: RefCell<Option<Result<HttpResponse, TransportFailureKind>>>,
         requests: RefCell<Vec<TelegramRequest>>,
+        multipart_requests: RefCell<Vec<TelegramMultipartRequest>>,
     }
 
     impl TelegramTransport for Transport {
         fn send(&self, request: &TelegramRequest) -> Result<HttpResponse, TransportFailureKind> {
             self.requests.borrow_mut().push(request.clone());
+            self.response
+                .borrow_mut()
+                .take()
+                .unwrap_or(Err(TransportFailureKind::Request))
+        }
+        fn send_action_multipart(
+            &self,
+            request: &TelegramMultipartRequest,
+        ) -> Result<HttpResponse, TransportFailureKind> {
+            self.multipart_requests.borrow_mut().push(request.clone());
             self.response
                 .borrow_mut()
                 .take()
@@ -507,6 +550,7 @@ mod tests {
                 body: body.to_owned(),
             }))),
             requests: RefCell::new(Vec::new()),
+            multipart_requests: RefCell::new(Vec::new()),
         }
     }
 
@@ -596,6 +640,124 @@ mod tests {
                 .contains(&("supports_streaming".to_owned(), "true".to_owned()))
         );
         assert_eq!(requests[0].timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn document_upload_preserves_complete_utf8_text() {
+        let transport = transport(r#"{"ok":true,"result":{"message_id":45}}"#);
+        let text = "texto sintético 🦀".repeat(300);
+        assert_eq!(
+            execute_with(
+                &transport,
+                "synthetic-token",
+                TelegramAction::SendDocument {
+                    chat_id: ChatId(42),
+                    document: text.as_bytes().to_vec().into(),
+                    file_name: "transcript.txt".to_owned(),
+                    reply_to_message_id: Some(MessageId(7)),
+                    caption: "full transcript".to_owned(),
+                },
+            ),
+            Ok(ActionOutcome::Completed {
+                message_id: Some(45)
+            })
+        );
+        let requests = transport.multipart_requests.borrow();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].endpoint, "sendDocument");
+        assert_eq!(requests[0].file_field, "document");
+        assert_eq!(requests[0].file_name, "transcript.txt");
+        assert_eq!(requests[0].file_bytes.as_ref(), text.as_bytes());
+        assert_eq!(requests[0].timeout, Duration::from_secs(60));
+        assert_eq!(requests[0].token, "synthetic-token");
+        assert_eq!(requests[0].fields.len(), 3);
+        assert!(
+            requests[0]
+                .fields
+                .contains(&("chat_id".to_owned(), "42".to_owned()))
+        );
+        assert_eq!(requests[0].content_type, "text/plain; charset=utf-8");
+        assert!(
+            requests[0]
+                .fields
+                .contains(&("caption".to_owned(), "full transcript".to_owned()))
+        );
+        assert!(
+            requests[0]
+                .fields
+                .contains(&("reply_to_message_id".to_owned(), "7".to_owned()))
+        );
+    }
+
+    #[test]
+    fn document_upload_preserves_delivery_failures_and_bounds_caption() {
+        for (status, body, expected) in [
+            (
+                429,
+                r#"{"ok":false,"parameters":{"retry_after":7}}"#,
+                Ok(ActionOutcome::RateLimited {
+                    retry_after_seconds: Some(7),
+                }),
+            ),
+            (
+                429,
+                "not json",
+                Ok(ActionOutcome::RateLimited {
+                    retry_after_seconds: None,
+                }),
+            ),
+            (
+                403,
+                r#"{"ok":false,"description":"bot blocked"}"#,
+                Ok(ActionOutcome::Failed {
+                    status_code: Some(403),
+                    description: "bot blocked".to_owned(),
+                }),
+            ),
+            (200, "not json", Err(ActionError::InvalidResponse)),
+            (
+                200,
+                r#"{"ok":true,"result":true}"#,
+                Ok(ActionOutcome::Completed { message_id: None }),
+            ),
+        ] {
+            let transport = transport_with_status(status, body);
+            let action = TelegramAction::SendDocument {
+                chat_id: ChatId(42),
+                document: b"complete synthetic transcript".to_vec().into(),
+                file_name: "transcript.txt".to_owned(),
+                reply_to_message_id: None,
+                caption: "🦀".repeat(1100),
+            };
+            assert_eq!(
+                execute_with(&transport, "synthetic-token", action.clone()),
+                expected
+            );
+            let requests = transport.multipart_requests.borrow();
+            assert_eq!(requests.len(), 1);
+            assert!(
+                !requests[0]
+                    .fields
+                    .iter()
+                    .any(|(key, _)| key == "reply_to_message_id")
+            );
+            assert!(
+                requests[0]
+                    .fields
+                    .contains(&("caption".to_owned(), "🦀".repeat(1024)))
+            );
+            assert_eq!(
+                requests[0].file_bytes.as_ref(),
+                b"complete synthetic transcript"
+            );
+            drop(requests);
+            assert_eq!(
+                execute_with(&transport, "synthetic-token", action),
+                Ok(ActionOutcome::TransportFailed(
+                    TransportFailureKind::Request
+                ))
+            );
+        }
     }
 
     #[test]
@@ -714,20 +876,14 @@ mod tests {
 
     #[test]
     fn multipart_transport_failures_remain_typed() {
-        struct FailedTransport;
-
-        impl TelegramTransport for FailedTransport {
-            fn send(
-                &self,
-                _request: &TelegramRequest,
-            ) -> Result<HttpResponse, TransportFailureKind> {
-                Err(TransportFailureKind::Request)
-            }
-        }
+        let transport = transport("");
+        transport
+            .response
+            .replace(Some(Err(TransportFailureKind::Request)));
 
         assert_eq!(
             execute_with(
-                &FailedTransport,
+                &transport,
                 "synthetic-token",
                 TelegramAction::SendPhoto {
                     chat_id: ChatId(42),
@@ -827,7 +983,7 @@ mod tests {
             .and_then(|value| value.get("commands"))
             .and_then(serde_json::Value::as_str)
             .and_then(|value| serde_json::from_str::<Vec<serde_json::Value>>(value).ok());
-        assert_eq!(commands.as_ref().map(Vec::len), Some(74));
+        assert_eq!(commands.as_ref().map(Vec::len), Some(75));
         assert!(
             commands.is_some_and(|commands| commands.iter().any(|command| {
                 command.get("command") == Some(&serde_json::json!("help"))
@@ -1011,6 +1167,7 @@ mod tests {
         let transport_error = Transport {
             response: RefCell::new(Some(Err(TransportFailureKind::Timeout))),
             requests: RefCell::new(Vec::new()),
+            multipart_requests: RefCell::new(Vec::new()),
         };
         assert_eq!(
             execute_with(

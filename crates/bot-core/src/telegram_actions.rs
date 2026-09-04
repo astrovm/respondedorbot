@@ -61,6 +61,13 @@ pub enum TelegramAction {
         language_code: Option<String>,
     },
     SendMessage(SendMessage),
+    SendDocument {
+        chat_id: ChatId,
+        document: Arc<[u8]>,
+        file_name: String,
+        reply_to_message_id: Option<MessageId>,
+        caption: String,
+    },
     SendAnimation {
         chat_id: ChatId,
         animation: String,

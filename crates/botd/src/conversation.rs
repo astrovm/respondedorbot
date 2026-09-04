@@ -170,7 +170,11 @@ struct PreparedConversationMedia {
 
 #[derive(Debug, Default)]
 struct PreparedYoutubeContext {
+    matched: bool,
     context: Option<String>,
+    transcript: Option<String>,
+    segments: Vec<Value>,
+    reserve_decision: Option<ReserveDecision>,
     diagnostics: Vec<String>,
     failed: bool,
 }
@@ -418,18 +422,56 @@ where
     fn prepare_youtube(
         &mut self,
         input: &AiConversationInput,
+        operation_id: &str,
     ) -> Result<PreparedYoutubeContext, String> {
-        let Some(runtime) = self.youtube.as_mut() else {
+        let Some(reserve_amount) = self
+            .youtube
+            .as_mut()
+            .map(|runtime| {
+                runtime.reserve_credit_units(&input.message_text, input.reply_context.as_deref())
+            })
+            .transpose()?
+            .flatten()
+        else {
             return Ok(PreparedYoutubeContext::default());
         };
+        let reserve_decision = if reserve_amount > 0 {
+            Some(self.reserve(input, operation_id, "youtube_transcript", reserve_amount, 0)?)
+        } else {
+            None
+        };
+        if reserve_decision
+            .as_ref()
+            .is_some_and(|decision| !decision.authorized)
+        {
+            return Ok(PreparedYoutubeContext {
+                matched: true,
+                reserve_decision,
+                ..PreparedYoutubeContext::default()
+            });
+        }
+        let runtime = self
+            .youtube
+            .as_mut()
+            .ok_or_else(|| "YouTube runtime disappeared".to_owned())?;
         match runtime.prepare(&input.message_text, input.reply_context.as_deref()) {
             Ok(Some(preparation)) => Ok(PreparedYoutubeContext {
+                matched: true,
                 context: preparation.context,
+                transcript: preparation.transcript,
+                segments: preparation.billing_segment.into_iter().collect(),
+                reserve_decision,
                 diagnostics: preparation.diagnostics,
                 failed: preparation.failed,
             }),
-            Ok(None) => Ok(PreparedYoutubeContext::default()),
+            Ok(None) => Ok(PreparedYoutubeContext {
+                matched: true,
+                reserve_decision,
+                ..PreparedYoutubeContext::default()
+            }),
             Err(error) => Ok(PreparedYoutubeContext {
+                matched: true,
+                reserve_decision,
                 diagnostics: vec![format!("YouTube transcript preparation failed: {error}")],
                 failed: true,
                 ..PreparedYoutubeContext::default()
@@ -523,6 +565,9 @@ where
         &mut self,
         input: AiConversationInput,
     ) -> Result<AiPreparation, String> {
+        if let Some(preparation) = self.prepare_youtube_media_command(&input)? {
+            return Ok(preparation);
+        }
         let operation_id = operation_id(&input);
         let selected = input
             .audio_file_id
@@ -616,10 +661,10 @@ where
                     ));
                 }
             }
-            let prompt = if input.visual_media_kind.as_deref() == Some("sticker") {
-                sticker_prompt(input.locale)
-            } else {
-                media_prompt(kind, input.locale)
+            let prompt = match input.visual_media_kind.as_deref() {
+                Some("sticker") => sticker_prompt(input.locale),
+                Some("animation") => gif_prompt(input.locale),
+                _ => media_prompt(kind, input.locale),
             };
             match self
                 .media
@@ -679,6 +724,76 @@ where
             completion_id: Some(operation_id),
             diagnostics,
         })
+    }
+
+    fn prepare_youtube_media_command(
+        &mut self,
+        input: &AiConversationInput,
+    ) -> Result<Option<AiPreparation>, String> {
+        let operation_id = operation_id(input);
+        let preparation = self.prepare_youtube(input, &operation_id)?;
+        if !preparation.matched {
+            return Ok(None);
+        }
+        if let Some(decision) = preparation
+            .reserve_decision
+            .as_ref()
+            .filter(|decision| !decision.authorized)
+        {
+            return Ok(Some(AiPreparation::reply(
+                Self::insufficient(input.locale, input, decision),
+                None,
+            )));
+        }
+        let segments = preparation.segments;
+        let Some(transcript) = preparation
+            .transcript
+            .filter(|text| !text.trim().is_empty())
+        else {
+            if preparation.reserve_decision.is_some() {
+                self.settle_immediately(
+                    input,
+                    &operation_id,
+                    "youtube_transcript_unavailable_refund",
+                )?;
+            }
+            return Ok(Some(AiPreparation::Reply {
+                text: youtube_context_error(input.locale).to_owned(),
+                completion_id: None,
+                diagnostics: preparation.diagnostics,
+            }));
+        };
+        let text = youtube_command_success(input.locale, &transcript);
+        if segments.is_empty() {
+            if preparation.reserve_decision.is_some() {
+                self.settle_immediately(
+                    input,
+                    &operation_id,
+                    "youtube_transcript_cache_hit_refund",
+                )?;
+            }
+            return Ok(Some(AiPreparation::Reply {
+                text,
+                completion_id: None,
+                diagnostics: preparation.diagnostics,
+            }));
+        }
+        self.pending.insert(
+            operation_id.clone(),
+            PendingConversation {
+                input: input.clone(),
+                text: text.clone(),
+                segments,
+                kind: PendingKind::MediaCommand,
+                compaction_plan: None,
+                compaction_payer: None,
+            },
+        );
+        Ok(Some(AiPreparation::Reply {
+            text,
+            completion_id: Some(operation_id),
+            diagnostics: preparation.diagnostics,
+        }))
     }
 
     fn prepare_summary_command_transaction(
@@ -910,8 +1025,20 @@ where
             });
         }
 
-        let prepared_youtube = self.prepare_youtube(&input)?;
-        let mut segments = Vec::new();
+        let prepared_youtube = self.prepare_youtube(&input, &operation_id)?;
+        if let Some(decision) = prepared_youtube
+            .reserve_decision
+            .as_ref()
+            .filter(|decision| !decision.authorized)
+        {
+            self.settle_immediately(&input, &operation_id, "youtube_transcript_reserve_failed")?;
+            return Ok(if input.spontaneous {
+                AiPreparation::silent()
+            } else {
+                AiPreparation::reply(Self::insufficient(input.locale, &input, decision), None)
+            });
+        }
+        let mut segments = prepared_youtube.segments;
         let mut diagnostics = prepared_youtube.diagnostics;
         if prepared_youtube.failed {
             if input.spontaneous {
@@ -1065,14 +1192,19 @@ where
             cleaned
         };
         if input.spontaneous && fallback && !has_failure_fallback {
+            let actual_credit_units = segments.is_empty().then_some(0);
             record_and_settle_with_actual(
                 &mut self.billing,
                 &input,
                 &operation_id,
                 &segments,
                 false,
-                "ai_response_failed_refund",
-                Some(0),
+                if actual_credit_units.is_some() {
+                    "ai_response_failed_refund"
+                } else {
+                    "ai_response_provider_usage_before_fallback"
+                },
+                actual_credit_units,
             )?;
             return Ok(AiPreparation::Silent { diagnostics });
         }
@@ -1131,7 +1263,7 @@ where
         &mut self,
         input: AiConversationInput,
     ) -> Result<Option<AiPreparation>, String> {
-        if self.media.is_none() {
+        if self.media.is_none() && self.youtube.is_none() {
             Ok(None)
         } else {
             let operation_id = operation_id(&input);
@@ -1170,8 +1302,15 @@ where
                     provider_failed: true,
                 },
                 _,
-                _,
+                true,
             ) => "ai_response_failed_refund",
+            (
+                PendingKind::Conversation {
+                    provider_failed: true,
+                },
+                _,
+                false,
+            ) => "ai_response_provider_usage_before_fallback",
             (
                 PendingKind::Conversation {
                     provider_failed: false,
@@ -1205,14 +1344,21 @@ where
                 "summary_stream_provider_usage_before_delivery_failure"
             }
         };
-        let waive_charge = matches!(
-            pending.kind,
+        let waive_charge = match pending.kind {
             PendingKind::Conversation {
-                provider_failed: true
-            } | PendingKind::SummaryCommand {
-                provider_failed: true
+                provider_failed: true,
+            } => pending.segments.is_empty(),
+            PendingKind::SummaryCommand {
+                provider_failed: true,
+            } => true,
+            PendingKind::Conversation {
+                provider_failed: false,
             }
-        );
+            | PendingKind::MediaCommand
+            | PendingKind::SummaryCommand {
+                provider_failed: false,
+            } => false,
+        };
         record_and_settle_with_actual(
             &mut self.billing,
             &pending.input,
@@ -1269,17 +1415,34 @@ fn sticker_prompt(locale: Locale) -> &'static str {
     }
 }
 
+fn gif_prompt(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Es => {
+            "describí lo que ves en este GIF en detalle, en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino"
+        }
+        Locale::En => "Describe this GIF in detail in English, without markdown or emojis.",
+    }
+}
+
 fn media_command_reply_required(locale: Locale) -> &'static str {
     match locale {
-        Locale::Es => "respondeme un audio, video, imagen o sticker y te digo qué carajo hay ahí",
-        Locale::En => "reply to an audio, video, image, or sticker and I will process it",
+        Locale::Es => {
+            "respondeme un audio, video, imagen, sticker, GIF o link de YouTube y te digo qué carajo hay ahí"
+        }
+        Locale::En => {
+            "reply to audio, video, an image, sticker, GIF, or YouTube link and I will process it"
+        }
     }
 }
 
 fn media_command_none(locale: Locale) -> &'static str {
     match locale {
-        Locale::Es => "ese mensaje no tiene audio, video, imagen ni sticker para laburar",
-        Locale::En => "that message has no audio, video, image, or sticker to process",
+        Locale::Es => {
+            "ese mensaje no tiene audio, video, imagen, sticker, GIF ni link de YouTube para laburar"
+        }
+        Locale::En => {
+            "that message has no audio, video, image, sticker, GIF, or YouTube link to process"
+        }
     }
 }
 
@@ -1287,6 +1450,14 @@ fn youtube_context_error(locale: Locale) -> &'static str {
     match locale {
         Locale::Es => "no pude obtener los subtítulos de ese video de YouTube, probá más tarde",
         Locale::En => "I could not retrieve captions for that YouTube video, try again later",
+    }
+}
+
+fn youtube_command_success(locale: Locale, text: &str) -> String {
+    let text = sanitize_summary_text(text);
+    match locale {
+        Locale::Es => format!("🎬 transcripción de YouTube: {text}"),
+        Locale::En => format!("🎬 YouTube transcript: {text}"),
     }
 }
 
@@ -1309,6 +1480,12 @@ fn media_command_prepare_error(
             }
             (MediaKind::Image, Some("sticker"), Locale::En) => {
                 "I could not download the sticker, send it again".to_owned()
+            }
+            (MediaKind::Image, Some("animation"), Locale::Es) => {
+                "no pude bajar el GIF, mandalo de nuevo".to_owned()
+            }
+            (MediaKind::Image, Some("animation"), Locale::En) => {
+                "I could not download the GIF, send it again".to_owned()
             }
             (MediaKind::Image, _, Locale::Es) => {
                 "no pude bajar la imagen, mandala de nuevo".to_owned()
@@ -1341,6 +1518,12 @@ fn media_command_provider_error(
         (MediaKind::Image, Some("sticker"), Locale::En) => {
             "I could not describe the sticker, try again later"
         }
+        (MediaKind::Image, Some("animation"), Locale::Es) => {
+            "no pude sacar qué mierda tiene el GIF, probá más tarde"
+        }
+        (MediaKind::Image, Some("animation"), Locale::En) => {
+            "I could not describe the GIF, try again later"
+        }
         (MediaKind::Image, _, Locale::Es) => {
             "no pude sacar qué mierda tiene la imagen, probá más tarde"
         }
@@ -1362,7 +1545,11 @@ fn media_command_success(
             format!("🎨 en el sticker veo: {text}")
         }
         (MediaKind::Image, Some("sticker"), Locale::En) => format!("🎨 sticker: {text}"),
-        (MediaKind::Image, _, Locale::Es) => format!("🖼️ en la imagen veo: {text}"),
+        (MediaKind::Image, Some("animation"), Locale::Es) => {
+            format!("🎞️ en el GIF veo: {text}")
+        }
+        (MediaKind::Image, Some("animation"), Locale::En) => format!("🎞️ GIF: {text}"),
+        (MediaKind::Image, _, Locale::Es) => text,
         (MediaKind::Image, _, Locale::En) => format!("🖼️ image: {text}"),
     }
 }
@@ -1813,17 +2000,38 @@ mod tests {
 
     struct Youtube {
         fail: bool,
+        cached: bool,
     }
 
     impl YoutubeContextRuntime for Youtube {
+        fn reserve_credit_units(
+            &mut self,
+            message_text: &str,
+            reply_context: Option<&str>,
+        ) -> Result<Option<i64>, String> {
+            let has_youtube = message_text.contains("youtu")
+                || reply_context.is_some_and(|context| context.contains("youtu"));
+            Ok(has_youtube.then_some(if self.cached { 0 } else { 60 }))
+        }
+
         fn prepare(
             &mut self,
-            _message_text: &str,
+            message_text: &str,
             reply_context: Option<&str>,
         ) -> Result<Option<YoutubePreparation>, String> {
-            Ok(reply_context.map(|_| YoutubePreparation {
+            let has_youtube = message_text.contains("youtu")
+                || reply_context.is_some_and(|context| context.contains("youtu"));
+            Ok(has_youtube.then(|| YoutubePreparation {
                 context: (!self.fail)
                     .then(|| "YOUTUBE VIDEO TRANSCRIPT:\nsynthetic transcript".to_owned()),
+                transcript: (!self.fail).then(|| "synthetic transcript".to_owned()),
+                billing_segment: (!self.fail && !self.cached).then(|| {
+                    json!({
+                        "kind": "youtube_transcript",
+                        "source": "supadata",
+                        "metadata": {"provider": "supadata"}
+                    })
+                }),
                 diagnostics: if self.fail {
                     vec!["synthetic YouTube failure".to_owned()]
                 } else {
@@ -1904,6 +2112,40 @@ mod tests {
                 kind: prepared.kind(),
                 file_id: "sticker-1".to_owned(),
                 text: "**synthetic** [sticker](https://example.test)".to_owned(),
+                billing_segment: None,
+                cached: true,
+            })
+        }
+    }
+
+    struct GifMedia;
+
+    impl MediaRuntime for GifMedia {
+        fn prepare(
+            &mut self,
+            kind: MediaKind,
+            file_id: &str,
+            duration_hint_seconds: Option<f64>,
+        ) -> Result<crate::media::PreparedMedia, String> {
+            assert_eq!(kind, MediaKind::Image);
+            assert_eq!(duration_hint_seconds, None);
+            Ok(crate::media::PreparedMedia::Cached {
+                kind,
+                file_id: file_id.to_owned(),
+                text: "synthetic GIF description".to_owned(),
+            })
+        }
+
+        fn execute(
+            &mut self,
+            prepared: crate::media::PreparedMedia,
+            prompt: &str,
+        ) -> Result<MediaExecution, String> {
+            assert!(prompt.starts_with("Describe this GIF"));
+            Ok(MediaExecution {
+                kind: prepared.kind(),
+                file_id: "synthetic-gif".to_owned(),
+                text: "synthetic GIF description".to_owned(),
                 billing_segment: None,
                 cached: true,
             })
@@ -2337,12 +2579,15 @@ mod tests {
     }
 
     #[test]
-    fn youtube_reply_context_uses_free_caption_context() {
+    fn youtube_reply_context_reserves_and_charges_caption_context() {
         let mut service = conversation(
             vec![Ok(round("synthetic answer", None))],
             Billing::default(),
         )
-        .with_youtube(Box::new(Youtube { fail: false }));
+        .with_youtube(Box::new(Youtube {
+            fail: false,
+            cached: false,
+        }));
         let mut request = input();
         request.reply_context = Some("https://youtube.com/live/synthetic-video".to_owned());
         request.has_reply = true;
@@ -2363,11 +2608,16 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(prompt.contains("YOUTUBE VIDEO TRANSCRIPT:\nsynthetic transcript"));
-        assert_eq!(service.billing.reserves.len(), 1);
+        assert_eq!(service.billing.reserves.len(), 2);
         assert_eq!(
             service.billing.reserves[0].metadata["usage_tag"],
             "ai_response_base"
         );
+        assert_eq!(
+            service.billing.reserves[1].metadata["usage_tag"],
+            "youtube_transcript"
+        );
+        assert_eq!(service.billing.reserves[1].amount, 60);
         assert!(
             service
                 .complete_delivery(AiDelivery {
@@ -2377,15 +2627,22 @@ mod tests {
                 })
                 .is_ok()
         );
-        assert_eq!(service.billing.segments.len(), 1);
-        assert_eq!(service.billing.settlements[0].actual_credit_units, 2);
+        assert_eq!(service.billing.segments.len(), 2);
+        assert_eq!(
+            service.billing.segments[0].segment["kind"],
+            "youtube_transcript"
+        );
+        assert_eq!(service.billing.settlements[0].actual_credit_units, 62);
     }
 
     #[test]
     fn youtube_caption_failure_is_specific_silent_when_spontaneous_and_free() {
         for spontaneous in [false, true] {
-            let mut service = conversation(Vec::new(), Billing::default())
-                .with_youtube(Box::new(Youtube { fail: true }));
+            let mut service =
+                conversation(Vec::new(), Billing::default()).with_youtube(Box::new(Youtube {
+                    fail: true,
+                    cached: false,
+                }));
             let mut request = input();
             request.reply_context = Some("https://youtu.be/synthetic-video".to_owned());
             request.spontaneous = spontaneous;
@@ -2769,6 +3026,113 @@ mod tests {
     }
 
     #[test]
+    fn transcript_alias_charges_direct_and_replied_youtube_links_without_ai_calls() {
+        for (message_text, reply_context) in [
+            ("https://youtu.be/synthetic-video", None),
+            (
+                "",
+                Some("Synthetic: https://www.youtube.com/watch?v=synthetic-video".to_owned()),
+            ),
+        ] {
+            let mut service = conversation(Vec::new(), Billing::default())
+                .with_media(Box::new(Media))
+                .with_youtube(Box::new(Youtube {
+                    fail: false,
+                    cached: false,
+                }));
+            let mut request = input();
+            request.command = "/transcript".to_owned();
+            request.message_text = message_text.to_owned();
+            request.reply_context = reply_context;
+
+            let Ok(Some(AiPreparation::Reply {
+                text,
+                completion_id: Some(completion_id),
+                ..
+            })) = service.prepare_media_command(request)
+            else {
+                unreachable!();
+            };
+            assert_eq!(text, "🎬 YouTube transcript: synthetic transcript");
+            assert_eq!(service.billing.reserves.len(), 1);
+            assert_eq!(service.billing.reserves[0].amount, 60);
+            assert_eq!(
+                service.billing.reserves[0].metadata["usage_tag"],
+                "youtube_transcript"
+            );
+            assert!(
+                service
+                    .complete_delivery(AiDelivery {
+                        completion_id,
+                        delivered: true,
+                        sent_message_id: Some(MessageId(99)),
+                    })
+                    .is_ok()
+            );
+            assert_eq!(service.billing.segments.len(), 1);
+            assert_eq!(service.billing.settlements[0].actual_credit_units, 60);
+            assert!(service.provider.prompts.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn youtube_command_cache_hits_are_free_and_failures_refund() {
+        let mut request = input();
+        request.command = "/transcript".to_owned();
+        request.message_text = "https://youtu.be/synthetic-video".to_owned();
+
+        let mut cached =
+            conversation(Vec::new(), Billing::default()).with_youtube(Box::new(Youtube {
+                fail: false,
+                cached: true,
+            }));
+        assert!(matches!(
+            cached.prepare_media_command(request.clone()),
+            Ok(Some(AiPreparation::Reply {
+                completion_id: None,
+                ..
+            }))
+        ));
+        assert!(cached.billing.reserves.is_empty());
+        assert!(cached.billing.settlements.is_empty());
+
+        let mut failed =
+            conversation(Vec::new(), Billing::default()).with_youtube(Box::new(Youtube {
+                fail: true,
+                cached: false,
+            }));
+        assert!(matches!(
+            failed.prepare_media_command(request),
+            Ok(Some(AiPreparation::Reply {
+                completion_id: None,
+                ..
+            }))
+        ));
+        assert_eq!(failed.billing.reserves[0].amount, 60);
+        assert_eq!(failed.billing.settlements[0].actual_credit_units, 0);
+        assert_eq!(
+            failed.billing.settlements[0].reason,
+            "youtube_transcript_unavailable_refund"
+        );
+    }
+
+    #[test]
+    fn transcript_alias_describes_telegram_gifs() {
+        let mut service =
+            conversation(Vec::new(), Billing::default()).with_media(Box::new(GifMedia));
+        let mut request = input();
+        request.command = "/transcript".to_owned();
+        request.visual_media_kind = Some("animation".to_owned());
+        request.photo_file_id = Some("synthetic-gif".to_owned());
+
+        assert!(matches!(
+            service.prepare_media_command(request),
+            Ok(Some(AiPreparation::Reply { ref text, .. }))
+                if text == "🎞️ GIF: synthetic GIF description"
+        ));
+    }
+
+    #[test]
     fn explicit_media_command_preserves_reply_help_and_refunds_after_delivery() {
         let mut service = conversation(Vec::new(), Billing::default()).with_media(Box::new(Media));
         let preparation = service.prepare_media_command(input());
@@ -2782,7 +3146,7 @@ mod tests {
         };
         assert_eq!(
             text,
-            "reply to an audio, video, image, or sticker and I will process it"
+            "reply to audio, video, an image, sticker, GIF, or YouTube link and I will process it"
         );
         assert_eq!(
             service.complete_delivery(AiDelivery {
@@ -3080,7 +3444,7 @@ mod tests {
                 },
                 true,
                 vec![segment.clone()],
-                "ai_response_failed_refund",
+                "ai_response_provider_usage_before_fallback",
             ),
             (
                 PendingKind::Conversation {
@@ -3147,13 +3511,19 @@ mod tests {
             assert_eq!(service.billing.settlements[0].reason, expected_reason);
             if matches!(
                 kind,
-                PendingKind::Conversation {
-                    provider_failed: true
-                } | PendingKind::SummaryCommand {
+                PendingKind::SummaryCommand {
                     provider_failed: true
                 }
             ) {
                 assert_eq!(service.billing.settlements[0].actual_credit_units, 0);
+                assert_eq!(service.billing.segments.len(), 1);
+            } else if matches!(
+                kind,
+                PendingKind::Conversation {
+                    provider_failed: true
+                }
+            ) {
+                assert!(service.billing.settlements[0].actual_credit_units > 0);
                 assert_eq!(service.billing.segments.len(), 1);
             }
         }
@@ -3213,9 +3583,9 @@ mod tests {
         ));
         assert_eq!(
             fallback.billing.settlements[0].reason,
-            "ai_response_failed_refund"
+            "ai_response_provider_usage_before_fallback"
         );
-        assert_eq!(fallback.billing.settlements[0].actual_credit_units, 0);
+        assert_eq!(fallback.billing.settlements[0].actual_credit_units, 2);
 
         let mut missing_round = conversation(Vec::new(), Billing::default());
         assert!(matches!(
@@ -3613,10 +3983,10 @@ mod tests {
             }),
             Ok(())
         );
-        assert_eq!(service.billing.settlements[0].actual_credit_units, 0);
+        assert_eq!(service.billing.settlements[0].actual_credit_units, 1);
         assert_eq!(
             service.billing.settlements[0].reason,
-            "ai_response_failed_refund"
+            "ai_response_provider_usage_before_fallback"
         );
         assert!(service.state.outgoing.is_empty());
     }
@@ -3662,6 +4032,10 @@ mod tests {
             assert!(!media_command_provider_error(kind, visual_kind, locale).is_empty());
             assert!(!media_command_success(kind, visual_kind, locale, "**synthetic**").is_empty());
         }
+        assert_eq!(
+            media_command_success(MediaKind::Image, None, Locale::Es, "**synthetic**"),
+            "synthetic"
+        );
         assert!(
             !media_command_prepare_error(
                 MediaKind::Audio,
