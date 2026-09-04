@@ -13,6 +13,7 @@ const TRANSCRIPT_CONTEXT_MAX_CHARS: usize = 60_000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct YoutubePreparation {
     pub context: Option<String>,
+    pub transcript: Option<String>,
     pub diagnostics: Vec<String>,
     pub failed: bool,
 }
@@ -119,6 +120,7 @@ where
         }
         Ok(Some(YoutubePreparation {
             context: None,
+            transcript: None,
             diagnostics,
             failed: true,
         }))
@@ -162,6 +164,7 @@ fn success(
 ) -> YoutubePreparation {
     YoutubePreparation {
         context: Some(transcript_context(url, video_id, language, transcript)),
+        transcript: Some(transcript.to_owned()),
         diagnostics,
         failed: false,
     }
@@ -355,8 +358,10 @@ mod tests {
             .flatten();
         assert!(prepared.is_some_and(|value| {
             !value.failed
+                && value.transcript.as_deref() == Some("cached transcript")
                 && value
                     .context
+                    .as_deref()
                     .is_some_and(|context| context.contains("cached transcript"))
         }));
         assert!(runtime.transport.calls.borrow().is_empty());
@@ -377,9 +382,11 @@ mod tests {
             .ok()
             .flatten();
         assert!(prepared.is_some_and(|value| {
-            value
-                .context
-                .is_some_and(|context| context.contains("Caption language: en"))
+            value.transcript.as_deref() == Some("native transcript")
+                && value
+                    .context
+                    .as_deref()
+                    .is_some_and(|context| context.contains("Caption language: en"))
         }));
         assert_eq!(*runtime.transport.calls.borrow(), ["supadata"]);
         assert_eq!(runtime.cache.writes[0].0, TRANSCRIPT_CACHE_PREFIX);
@@ -403,9 +410,11 @@ mod tests {
             .flatten();
         assert!(prepared.is_some_and(|value| {
             !value.failed
+                && value.transcript.as_deref() == Some("texto nativo")
                 && value.diagnostics[0].contains("Supadata")
                 && value
                     .context
+                    .as_deref()
                     .is_some_and(|context| context.contains("texto nativo"))
         }));
         assert_eq!(*runtime.transport.calls.borrow(), ["supadata", "apify"]);
@@ -424,7 +433,10 @@ mod tests {
             .ok()
             .flatten();
         assert!(prepared.is_some_and(|value| {
-            value.failed && value.context.is_none() && value.diagnostics.len() == 2
+            value.failed
+                && value.context.is_none()
+                && value.transcript.is_none()
+                && value.diagnostics.len() == 2
         }));
 
         let mut unconfigured = runtime(Transport::default(), Cache::default(), false, false);

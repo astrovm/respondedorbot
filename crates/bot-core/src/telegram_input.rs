@@ -145,6 +145,12 @@ fn visual_file_id(message: &Map<String, Value>) -> Result<Option<String>, Telegr
     if let Some(sticker) = message.get("sticker").filter(|value| python_truthy(value)) {
         return sticker_file_id(sticker);
     }
+    if let Some(animation) = message
+        .get("animation")
+        .filter(|value| python_truthy(value))
+    {
+        return file_id(animation).map(Some);
+    }
     let replied = match message.get("reply_to_message") {
         Some(Value::Object(replied)) => replied,
         Some(value) if python_truthy(value) => return Err(TelegramInputError::InvalidMedia),
@@ -159,6 +165,12 @@ fn visual_file_id(message: &Map<String, Value>) -> Result<Option<String>, Telegr
     }
     if let Some(sticker) = replied.get("sticker").filter(|value| python_truthy(value)) {
         return sticker_file_id(sticker);
+    }
+    if let Some(animation) = replied
+        .get("animation")
+        .filter(|value| python_truthy(value))
+    {
+        return file_id(animation).map(Some);
     }
     Ok(None)
 }
@@ -284,6 +296,27 @@ mod tests {
                 audio_file_id: Some("replied-video".to_owned()),
             })
         );
+    }
+
+    #[test]
+    fn extracts_direct_and_replied_telegram_animations_as_visual_media() {
+        for payload in [
+            json!({"animation": {"file_id": "synthetic-animation"}}),
+            json!({
+                "reply_to_message": {
+                    "animation": {"file_id": "synthetic-animation"}
+                }
+            }),
+        ] {
+            assert_eq!(
+                extract_message_content(&payload),
+                Ok(MessageContent {
+                    text: String::new(),
+                    photo_file_id: Some("synthetic-animation".to_owned()),
+                    audio_file_id: None,
+                })
+            );
+        }
     }
 
     #[test]

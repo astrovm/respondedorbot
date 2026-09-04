@@ -326,8 +326,9 @@ impl FfmpegMediaProcessor {
 impl MediaProcessor for FfmpegMediaProcessor {
     fn prepare_image(&mut self, input: &[u8]) -> Result<Option<PreparedImage>, String> {
         let size = self.max_image_size;
-        let filter =
-            format!("scale='min({size},iw)':'min({size},ih)':force_original_aspect_ratio=decrease");
+        let filter = format!(
+            "thumbnail=30,scale='min({size},iw)':'min({size},ih)':force_original_aspect_ratio=decrease"
+        );
         let output = Self::run(
             &self.ffmpeg,
             &[
@@ -341,6 +342,8 @@ impl MediaProcessor for FfmpegMediaProcessor {
                 "image2pipe".to_owned(),
                 "-vcodec".to_owned(),
                 "webp".to_owned(),
+                "-frames:v".to_owned(),
+                "1".to_owned(),
                 "pipe:1".to_owned(),
             ],
             input,
@@ -1004,6 +1007,15 @@ mod tests {
         assert_eq!(image.mime, "image/webp");
         assert!(image.bytes.starts_with(b"RIFF"));
         assert_eq!(image.bytes.get(8..12), Some(b"WEBP".as_slice()));
+
+        let gif = b"GIF89a\x01\0\x01\0\x80\0\0\0\0\0\xff\xff\xff!\xf9\x04\x01\0\0\0\0,\0\0\0\0\x01\0\x01\0\0\x02\x02D\x01\0;";
+        let gif_frame = processor
+            .prepare_image(gif)
+            .unwrap_or_else(|_| unreachable!())
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(gif_frame.mime, "image/webp");
+        assert!(gif_frame.bytes.starts_with(b"RIFF"));
+        assert_eq!(gif_frame.bytes.get(8..12), Some(b"WEBP".as_slice()));
 
         let wav = pcm_wav(8_000, &[0; 800]);
         let audio = processor

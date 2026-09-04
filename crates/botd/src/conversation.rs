@@ -523,6 +523,9 @@ where
         &mut self,
         input: AiConversationInput,
     ) -> Result<AiPreparation, String> {
+        if let Some(preparation) = self.prepare_youtube_media_command(&input) {
+            return Ok(preparation);
+        }
         let operation_id = operation_id(&input);
         let selected = input
             .audio_file_id
@@ -616,10 +619,10 @@ where
                     ));
                 }
             }
-            let prompt = if input.visual_media_kind.as_deref() == Some("sticker") {
-                sticker_prompt(input.locale)
-            } else {
-                media_prompt(kind, input.locale)
+            let prompt = match input.visual_media_kind.as_deref() {
+                Some("sticker") => sticker_prompt(input.locale),
+                Some("animation") => gif_prompt(input.locale),
+                _ => media_prompt(kind, input.locale),
             };
             match self
                 .media
@@ -678,6 +681,40 @@ where
             text,
             completion_id: Some(operation_id),
             diagnostics,
+        })
+    }
+
+    fn prepare_youtube_media_command(
+        &mut self,
+        input: &AiConversationInput,
+    ) -> Option<AiPreparation> {
+        let runtime = self.youtube.as_mut()?;
+        let preparation = match runtime.prepare(&input.message_text, input.reply_context.as_deref())
+        {
+            Ok(Some(preparation)) => preparation,
+            Ok(None) => return None,
+            Err(error) => {
+                return Some(AiPreparation::Reply {
+                    text: youtube_context_error(input.locale).to_owned(),
+                    completion_id: None,
+                    diagnostics: vec![format!("YouTube transcript command failed: {error}")],
+                });
+            }
+        };
+        let Some(transcript) = preparation
+            .transcript
+            .filter(|text| !text.trim().is_empty())
+        else {
+            return Some(AiPreparation::Reply {
+                text: youtube_context_error(input.locale).to_owned(),
+                completion_id: None,
+                diagnostics: preparation.diagnostics,
+            });
+        };
+        Some(AiPreparation::Reply {
+            text: youtube_command_success(input.locale, &transcript),
+            completion_id: None,
+            diagnostics: preparation.diagnostics,
         })
     }
 
@@ -1131,7 +1168,7 @@ where
         &mut self,
         input: AiConversationInput,
     ) -> Result<Option<AiPreparation>, String> {
-        if self.media.is_none() {
+        if self.media.is_none() && self.youtube.is_none() {
             Ok(None)
         } else {
             let operation_id = operation_id(&input);
@@ -1269,17 +1306,34 @@ fn sticker_prompt(locale: Locale) -> &'static str {
     }
 }
 
+fn gif_prompt(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Es => {
+            "describí lo que ves en este GIF en detalle, en minúsculas, sin emojis, sin markdown, en lenguaje coloquial argentino"
+        }
+        Locale::En => "Describe this GIF in detail in English, without markdown or emojis.",
+    }
+}
+
 fn media_command_reply_required(locale: Locale) -> &'static str {
     match locale {
-        Locale::Es => "respondeme un audio, video, imagen o sticker y te digo qué carajo hay ahí",
-        Locale::En => "reply to an audio, video, image, or sticker and I will process it",
+        Locale::Es => {
+            "respondeme un audio, video, imagen, sticker, GIF o link de YouTube y te digo qué carajo hay ahí"
+        }
+        Locale::En => {
+            "reply to audio, video, an image, sticker, GIF, or YouTube link and I will process it"
+        }
     }
 }
 
 fn media_command_none(locale: Locale) -> &'static str {
     match locale {
-        Locale::Es => "ese mensaje no tiene audio, video, imagen ni sticker para laburar",
-        Locale::En => "that message has no audio, video, image, or sticker to process",
+        Locale::Es => {
+            "ese mensaje no tiene audio, video, imagen, sticker, GIF ni link de YouTube para laburar"
+        }
+        Locale::En => {
+            "that message has no audio, video, image, sticker, GIF, or YouTube link to process"
+        }
     }
 }
 
@@ -1287,6 +1341,14 @@ fn youtube_context_error(locale: Locale) -> &'static str {
     match locale {
         Locale::Es => "no pude obtener los subtítulos de ese video de YouTube, probá más tarde",
         Locale::En => "I could not retrieve captions for that YouTube video, try again later",
+    }
+}
+
+fn youtube_command_success(locale: Locale, text: &str) -> String {
+    let text = sanitize_summary_text(text);
+    match locale {
+        Locale::Es => format!("🎬 transcripción de YouTube: {text}"),
+        Locale::En => format!("🎬 YouTube transcript: {text}"),
     }
 }
 
@@ -1309,6 +1371,12 @@ fn media_command_prepare_error(
             }
             (MediaKind::Image, Some("sticker"), Locale::En) => {
                 "I could not download the sticker, send it again".to_owned()
+            }
+            (MediaKind::Image, Some("animation"), Locale::Es) => {
+                "no pude bajar el GIF, mandalo de nuevo".to_owned()
+            }
+            (MediaKind::Image, Some("animation"), Locale::En) => {
+                "I could not download the GIF, send it again".to_owned()
             }
             (MediaKind::Image, _, Locale::Es) => {
                 "no pude bajar la imagen, mandala de nuevo".to_owned()
@@ -1341,6 +1409,12 @@ fn media_command_provider_error(
         (MediaKind::Image, Some("sticker"), Locale::En) => {
             "I could not describe the sticker, try again later"
         }
+        (MediaKind::Image, Some("animation"), Locale::Es) => {
+            "no pude sacar qué mierda tiene el GIF, probá más tarde"
+        }
+        (MediaKind::Image, Some("animation"), Locale::En) => {
+            "I could not describe the GIF, try again later"
+        }
         (MediaKind::Image, _, Locale::Es) => {
             "no pude sacar qué mierda tiene la imagen, probá más tarde"
         }
@@ -1362,6 +1436,10 @@ fn media_command_success(
             format!("🎨 en el sticker veo: {text}")
         }
         (MediaKind::Image, Some("sticker"), Locale::En) => format!("🎨 sticker: {text}"),
+        (MediaKind::Image, Some("animation"), Locale::Es) => {
+            format!("🎞️ en el GIF veo: {text}")
+        }
+        (MediaKind::Image, Some("animation"), Locale::En) => format!("🎞️ GIF: {text}"),
         (MediaKind::Image, _, Locale::Es) => format!("🖼️ en la imagen veo: {text}"),
         (MediaKind::Image, _, Locale::En) => format!("🖼️ image: {text}"),
     }
@@ -1818,12 +1896,15 @@ mod tests {
     impl YoutubeContextRuntime for Youtube {
         fn prepare(
             &mut self,
-            _message_text: &str,
+            message_text: &str,
             reply_context: Option<&str>,
         ) -> Result<Option<YoutubePreparation>, String> {
-            Ok(reply_context.map(|_| YoutubePreparation {
+            let has_youtube = message_text.contains("youtu")
+                || reply_context.is_some_and(|context| context.contains("youtu"));
+            Ok(has_youtube.then(|| YoutubePreparation {
                 context: (!self.fail)
                     .then(|| "YOUTUBE VIDEO TRANSCRIPT:\nsynthetic transcript".to_owned()),
+                transcript: (!self.fail).then(|| "synthetic transcript".to_owned()),
                 diagnostics: if self.fail {
                     vec!["synthetic YouTube failure".to_owned()]
                 } else {
@@ -1904,6 +1985,40 @@ mod tests {
                 kind: prepared.kind(),
                 file_id: "sticker-1".to_owned(),
                 text: "**synthetic** [sticker](https://example.test)".to_owned(),
+                billing_segment: None,
+                cached: true,
+            })
+        }
+    }
+
+    struct GifMedia;
+
+    impl MediaRuntime for GifMedia {
+        fn prepare(
+            &mut self,
+            kind: MediaKind,
+            file_id: &str,
+            duration_hint_seconds: Option<f64>,
+        ) -> Result<crate::media::PreparedMedia, String> {
+            assert_eq!(kind, MediaKind::Image);
+            assert_eq!(duration_hint_seconds, None);
+            Ok(crate::media::PreparedMedia::Cached {
+                kind,
+                file_id: file_id.to_owned(),
+                text: "synthetic GIF description".to_owned(),
+            })
+        }
+
+        fn execute(
+            &mut self,
+            prepared: crate::media::PreparedMedia,
+            prompt: &str,
+        ) -> Result<MediaExecution, String> {
+            assert!(prompt.starts_with("Describe this GIF"));
+            Ok(MediaExecution {
+                kind: prepared.kind(),
+                file_id: "synthetic-gif".to_owned(),
+                text: "synthetic GIF description".to_owned(),
                 billing_segment: None,
                 cached: true,
             })
@@ -2769,6 +2884,53 @@ mod tests {
     }
 
     #[test]
+    fn transcript_alias_supports_direct_and_replied_youtube_links_without_ai_billing() {
+        for (message_text, reply_context) in [
+            ("https://youtu.be/synthetic-video", None),
+            (
+                "",
+                Some("Synthetic: https://www.youtube.com/watch?v=synthetic-video".to_owned()),
+            ),
+        ] {
+            let mut service = conversation(Vec::new(), Billing::default())
+                .with_media(Box::new(Media))
+                .with_youtube(Box::new(Youtube { fail: false }));
+            let mut request = input();
+            request.command = "/transcript".to_owned();
+            request.message_text = message_text.to_owned();
+            request.reply_context = reply_context;
+
+            assert!(matches!(
+                service.prepare_media_command(request),
+                Ok(Some(AiPreparation::Reply {
+                    ref text,
+                    completion_id: None,
+                    ..
+                })) if text == "🎬 YouTube transcript: synthetic transcript"
+            ));
+            assert!(service.billing.reserves.is_empty());
+            assert!(service.billing.settlements.is_empty());
+            assert!(service.provider.prompts.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn transcript_alias_describes_telegram_gifs() {
+        let mut service =
+            conversation(Vec::new(), Billing::default()).with_media(Box::new(GifMedia));
+        let mut request = input();
+        request.command = "/transcript".to_owned();
+        request.visual_media_kind = Some("animation".to_owned());
+        request.photo_file_id = Some("synthetic-gif".to_owned());
+
+        assert!(matches!(
+            service.prepare_media_command(request),
+            Ok(Some(AiPreparation::Reply { ref text, .. }))
+                if text == "🎞️ GIF: synthetic GIF description"
+        ));
+    }
+
+    #[test]
     fn explicit_media_command_preserves_reply_help_and_refunds_after_delivery() {
         let mut service = conversation(Vec::new(), Billing::default()).with_media(Box::new(Media));
         let preparation = service.prepare_media_command(input());
@@ -2782,7 +2944,7 @@ mod tests {
         };
         assert_eq!(
             text,
-            "reply to an audio, video, image, or sticker and I will process it"
+            "reply to audio, video, an image, sticker, GIF, or YouTube link and I will process it"
         );
         assert_eq!(
             service.complete_delivery(AiDelivery {

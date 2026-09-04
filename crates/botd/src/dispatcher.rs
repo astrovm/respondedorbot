@@ -2414,7 +2414,10 @@ where
             return Err(DispatchError::MissingService("AI conversation"));
         }
         let parsed = parse_command(&content.text, &self.bot_name);
-        if matches!(parsed.command.as_str(), "/transcribe" | "/describe") {
+        if matches!(
+            parsed.command.as_str(),
+            "/transcribe" | "/transcript" | "/describe"
+        ) {
             return self.dispatch_media_command(
                 message,
                 &config,
@@ -4503,7 +4506,7 @@ mod tests {
             "@mybot",
         )
         .with_ai_conversation_source(Box::new(source));
-        let mut incoming = update("/transcribe", Some("en"));
+        let mut incoming = update("/transcript", Some("en"));
         let IncomingEvent::Message(message) = &mut incoming.event else {
             return;
         };
@@ -4518,7 +4521,7 @@ mod tests {
         assert_eq!(dispatcher.dispatch(incoming), Ok(DispatchOutcome::Handled));
         let prepared = prepared.borrow();
         assert_eq!(prepared.len(), 1);
-        assert_eq!(prepared[0].command, "/transcribe");
+        assert_eq!(prepared[0].command, "/transcript");
         assert!(prepared[0].has_reply);
         assert_eq!(prepared[0].audio_file_id.as_deref(), Some("voice-1"));
         assert_eq!(prepared[0].audio_duration_seconds, Some(4.0));
@@ -4529,7 +4532,7 @@ mod tests {
             dispatcher.state.outgoing[0]
                 .metadata
                 .as_ref()
-                .is_some_and(|metadata| metadata.payload.contains("/transcribe"))
+                .is_some_and(|metadata| metadata.payload.contains("/transcript"))
         );
         let [TelegramAction::SendMessage(message)] = dispatcher.actions.0.as_slice() else {
             return;

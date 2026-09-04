@@ -197,7 +197,7 @@ fn parse_message(payload: &Map<String, Value>) -> IncomingMessage {
         .and_then(|reply| extract_message_content(&Value::Object(reply.clone())).ok())
         .map(|content| content.text)
         .filter(|text| !text.is_empty());
-    let visual_media_kind = media_kind(payload, &["photo", "sticker"]);
+    let visual_media_kind = media_kind(payload, &["photo", "sticker", "animation"]);
     let audio_media_kind = media_kind(payload, &["voice", "audio", "video", "video_note"]);
     let audio_duration_seconds = media_object(payload, &["voice", "audio", "video", "video_note"])
         .and_then(|media| media.get("duration"))
@@ -520,7 +520,7 @@ mod tests {
     fn captioned_media_command_keeps_direct_audio_without_a_reply() {
         let actual = parse_response(
             200,
-            r#"{"ok":true,"result":[{"update_id":30,"message":{"message_id":9,"chat":{"id":42,"type":"private"},"from":{"id":88},"caption":" /transcribe ","voice":{"file_id":"direct-voice","duration":4}}}]}"#,
+            r#"{"ok":true,"result":[{"update_id":30,"message":{"message_id":9,"chat":{"id":42,"type":"private"},"from":{"id":88},"caption":" /transcribe ","voice":{"file_id":"direct-voice","duration":"4"}}}]}"#,
         );
         let Ok(PollOutcome::Updates(updates)) = actual else {
             return;
@@ -538,6 +538,29 @@ mod tests {
                 .as_ref()
                 .map(|content| (content.text.as_str(), content.audio_file_id.as_deref())),
             Some(("/transcribe", Some("direct-voice")))
+        );
+    }
+
+    #[test]
+    fn telegram_animation_is_exposed_as_visual_media() {
+        let actual = parse_response(
+            200,
+            r#"{"ok":true,"result":[{"update_id":31,"message":{"message_id":10,"chat":{"id":42,"type":"private"},"from":{"id":88},"caption":"/transcript","animation":{"file_id":"synthetic-animation"}}}]}"#,
+        );
+        let Ok(PollOutcome::Updates(updates)) = actual else {
+            return;
+        };
+        let IncomingEvent::Message(message) = &updates[0].event else {
+            return;
+        };
+
+        assert_eq!(message.visual_media_kind.as_deref(), Some("animation"));
+        assert_eq!(
+            message
+                .content
+                .as_ref()
+                .and_then(|content| content.photo_file_id.as_deref()),
+            Some("synthetic-animation")
         );
     }
 
