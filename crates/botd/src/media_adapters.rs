@@ -184,7 +184,7 @@ impl FfmpegMediaProcessor {
         };
         thread::scope(|scope| {
             let writer = scope.spawn(move || {
-                let result = stdin.write_all(input).map_err(|error| error.to_string());
+                let result = stdin.write_all(input);
                 drop(stdin);
                 result
             });
@@ -224,8 +224,13 @@ impl FfmpegMediaProcessor {
                 .join()
                 .map_err(|_| "media output reader panicked".to_owned())??;
             let status = status?;
-            write_result?;
             if status.success() && !output.is_empty() {
+                // Frame extraction can finish before the entire animation is consumed.
+                if let Err(error) = write_result
+                    && error.kind() != std::io::ErrorKind::BrokenPipe
+                {
+                    return Err(error.to_string());
+                }
                 Ok(output)
             } else {
                 Err(format!("{program} could not process media"))
@@ -326,8 +331,9 @@ impl FfmpegMediaProcessor {
 impl MediaProcessor for FfmpegMediaProcessor {
     fn prepare_image(&mut self, input: &[u8]) -> Result<Option<PreparedImage>, String> {
         let size = self.max_image_size;
-        let filter =
-            format!("scale='min({size},iw)':'min({size},ih)':force_original_aspect_ratio=decrease");
+        let filter = format!(
+            "thumbnail=30,scale='min({size},iw)':'min({size},ih)':force_original_aspect_ratio=decrease"
+        );
         let output = Self::run(
             &self.ffmpeg,
             &[
@@ -341,6 +347,8 @@ impl MediaProcessor for FfmpegMediaProcessor {
                 "image2pipe".to_owned(),
                 "-vcodec".to_owned(),
                 "webp".to_owned(),
+                "-frames:v".to_owned(),
+                "1".to_owned(),
                 "pipe:1".to_owned(),
             ],
             input,
@@ -948,6 +956,22 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn early_input_closure_requires_successful_nonempty_output() {
+        for script in ["printf frame; exit 7", "exit 0"] {
+            let result = FfmpegMediaProcessor::run_bounded(
+                "sh",
+                &["-c".to_owned(), script.to_owned()],
+                &vec![1; 2 * 1024 * 1024],
+                Duration::from_secs(5),
+                2 * 1024 * 1024,
+                1024,
+            );
+            assert_eq!(result, Err("sh could not process media".to_owned()));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn media_process_kills_timed_out_children() {
         let started = Instant::now();
         let result = FfmpegMediaProcessor::run_bounded(
@@ -990,6 +1014,40 @@ mod tests {
     }
 
     #[test]
+    fn extracts_one_frame_from_a_large_animation() -> Result<(), String> {
+        let generated = Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x240:rate=15:duration=5",
+                "-f",
+                "gif",
+                "pipe:1",
+            ])
+            .output()
+            .map_err(|error| error.to_string())?;
+        assert!(generated.status.success());
+        assert!(generated.stdout.len() > 256 * 1024);
+        let frame = FfmpegMediaProcessor::default()
+            .prepare_image(&generated.stdout)?
+            .ok_or("valid animation did not produce a frame")?;
+        assert_eq!(frame.mime, "image/webp");
+        let pixels = FfmpegMediaProcessor::run(
+            "ffmpeg",
+            &[
+                "-v", "error", "-i", "pipe:0", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
+            ]
+            .map(str::to_owned),
+            &frame.bytes,
+        )?;
+        assert_eq!(pixels.len(), 320 * 240 * 3);
+        Ok(())
+    }
+
+    #[test]
     fn installed_ffmpeg_normalizes_real_image_and_audio_payloads() -> Result<(), String> {
         let version = Command::new("ffmpeg")
             .arg("-version")
@@ -1004,6 +1062,15 @@ mod tests {
         assert_eq!(image.mime, "image/webp");
         assert!(image.bytes.starts_with(b"RIFF"));
         assert_eq!(image.bytes.get(8..12), Some(b"WEBP".as_slice()));
+
+        let gif = b"GIF89a\x01\0\x01\0\x80\0\0\0\0\0\xff\xff\xff!\xf9\x04\x01\0\0\0\0,\0\0\0\0\x01\0\x01\0\0\x02\x02D\x01\0;";
+        let gif_frame = processor
+            .prepare_image(gif)
+            .unwrap_or_else(|_| unreachable!())
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(gif_frame.mime, "image/webp");
+        assert!(gif_frame.bytes.starts_with(b"RIFF"));
+        assert_eq!(gif_frame.bytes.get(8..12), Some(b"WEBP".as_slice()));
 
         let wav = pcm_wav(8_000, &[0; 800]);
         let audio = processor

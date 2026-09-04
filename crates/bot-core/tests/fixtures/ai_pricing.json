@@ -131,6 +131,22 @@
       }
     },
     {
+      "name": "youtube_transcript",
+      "segments": [{
+        "kind": "youtube_transcript",
+        "source": "supadata",
+        "metadata": {"provider": "supadata"}
+      }],
+      "expected": {
+        "raw_usd_micros": 3000,
+        "raw_usd_micros_exact": "3000",
+        "charged_credit_units": 60,
+        "pricing_complete": true,
+        "pricing_basis": "youtube_transcript_standard",
+        "tool_usd_micros": 3000
+      }
+    },
+    {
       "name": "internal_cache_is_free_and_complete",
       "segments": [{"kind": "summary", "model": "deepseek/deepseek-v4-flash-0731", "source": "cache", "cached": true}],
       "expected": {

@@ -42,7 +42,7 @@ mercado:
   ejemplo: /devo 0.5, 100
 
 media:
-- /transcribe, /describe: transcribo voice/audio/video/video_note y describo fotos o stickers respondiendo al mensaje; también puedo procesar media cuando me hablan
+- /transcribe, /transcript, /describe: transcribo voice/audio/video/video_note o subtítulos de YouTube y describo fotos, stickers o GIF respondiendo al mensaje; también puedo procesar media cuando me hablan
 
 links:
 - links: arreglo links de X/Twitter, Bluesky, Instagram y Reddit según config; leo metadata, tweets y transcripts de YouTube como contexto
@@ -114,7 +114,7 @@ markets:
   example: /devo 0.5, 100
 
 media:
-- /transcribe, /describe: transcribe audio and video or describe images and stickers
+- /transcribe, /transcript, /describe: transcribe audio, video, or YouTube captions; describe images, stickers, or GIFs
 
 links:
 - links: fix supported social links and read linked content as context

@@ -10,7 +10,7 @@ manages AI credits, and runs scheduled tasks.
 ## What it can do
 
 - Chat with AI, memory, web search, tools, and provider fallback
-- Transcribe audio and describe images
+- Transcribe audio or YouTube captions and describe images or GIFs
 - Summarize YouTube videos from their existing captions
 - Summarize conversations
 - Show crypto, market, dollar, BCRA, weather, and Polymarket data
@@ -84,7 +84,7 @@ exits.
 | --- | --- |
 | `/ask`, `/pregunta`, `/che`, `/gordo` | Chat with AI |
 | `/resumen`, `/summary`, `/tldr` | Summarize the conversation |
-| `/transcribe`, `/describe` | Transcribe audio or describe images |
+| `/transcribe`, `/transcript`, `/describe` | Transcribe audio or YouTube captions; describe images or GIFs |
 
 ### Data
 
