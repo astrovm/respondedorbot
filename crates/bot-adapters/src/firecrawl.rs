@@ -851,6 +851,15 @@ mod tests {
                 })
                 .is_err()
         );
+        let malformed = ReqwestFirecrawlTransport::with_search_url("://invalid")
+            .unwrap_or_else(|_| unreachable!());
+        assert!(matches!(
+            malformed.post(&SearchRequest {
+                query: "synthetic query".to_owned(),
+                api_key: "synthetic-key".to_owned(),
+            }),
+            Err(TransportError::Other(_))
+        ));
     }
 
     #[test]
