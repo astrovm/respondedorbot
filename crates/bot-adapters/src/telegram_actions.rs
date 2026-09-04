@@ -161,7 +161,8 @@ fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
                 Some(Value::Object(payload)),
             )
         }
-        TelegramAction::SendVideo { .. }
+        TelegramAction::SendDocument { .. }
+        | TelegramAction::SendVideo { .. }
         | TelegramAction::SendPhoto { .. }
         | TelegramAction::EditMessagePhoto { .. } => return Err(ActionError::InvalidAction),
         TelegramAction::SendInvoice {
@@ -310,6 +311,37 @@ pub fn execute_with<T: TelegramTransport>(
     action: TelegramAction,
 ) -> Result<ActionOutcome, ActionError> {
     let multipart = match action {
+        TelegramAction::SendDocument {
+            chat_id,
+            document,
+            file_name,
+            reply_to_message_id,
+            caption,
+        } => {
+            let mut fields = vec![
+                ("chat_id".to_owned(), chat_id.0.to_string()),
+                (
+                    "caption".to_owned(),
+                    caption.chars().take(1024).collect::<String>(),
+                ),
+            ];
+            if let Some(reply_to_message_id) = reply_to_message_id {
+                fields.push((
+                    "reply_to_message_id".to_owned(),
+                    reply_to_message_id.0.to_string(),
+                ));
+            }
+            Some(TelegramMultipartRequest {
+                token: token.to_owned(),
+                endpoint: "sendDocument".to_owned(),
+                fields,
+                file_field: "document".to_owned(),
+                file_name,
+                file_bytes: document,
+                content_type: "text/plain; charset=utf-8".to_owned(),
+                timeout: Duration::from_secs(60),
+            })
+        }
         TelegramAction::SendVideo {
             chat_id,
             video,
@@ -596,6 +628,70 @@ mod tests {
                 .contains(&("supports_streaming".to_owned(), "true".to_owned()))
         );
         assert_eq!(requests[0].timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn document_upload_preserves_complete_utf8_text() {
+        struct DocumentTransport {
+            requests: RefCell<Vec<TelegramMultipartRequest>>,
+        }
+        impl TelegramTransport for DocumentTransport {
+            fn send(
+                &self,
+                _request: &TelegramRequest,
+            ) -> Result<HttpResponse, TransportFailureKind> {
+                Err(TransportFailureKind::Request)
+            }
+
+            fn send_action_multipart(
+                &self,
+                request: &TelegramMultipartRequest,
+            ) -> Result<HttpResponse, TransportFailureKind> {
+                self.requests.borrow_mut().push(request.clone());
+                Ok(HttpResponse {
+                    status_code: 200,
+                    body: r#"{"ok":true,"result":{"message_id":45}}"#.to_owned(),
+                })
+            }
+        }
+
+        let transport = DocumentTransport {
+            requests: RefCell::new(Vec::new()),
+        };
+        let text = "texto sintético 🦀".repeat(300);
+        assert_eq!(
+            execute_with(
+                &transport,
+                "synthetic-token",
+                TelegramAction::SendDocument {
+                    chat_id: ChatId(42),
+                    document: text.as_bytes().to_vec().into(),
+                    file_name: "transcript.txt".to_owned(),
+                    reply_to_message_id: Some(MessageId(7)),
+                    caption: "full transcript".to_owned(),
+                },
+            ),
+            Ok(ActionOutcome::Completed {
+                message_id: Some(45)
+            })
+        );
+        let requests = transport.requests.borrow();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].endpoint, "sendDocument");
+        assert_eq!(requests[0].file_field, "document");
+        assert_eq!(requests[0].file_name, "transcript.txt");
+        assert_eq!(requests[0].file_bytes.as_ref(), text.as_bytes());
+        assert_eq!(requests[0].content_type, "text/plain; charset=utf-8");
+        assert!(
+            requests[0]
+                .fields
+                .contains(&("caption".to_owned(), "full transcript".to_owned()))
+        );
+        assert!(
+            requests[0]
+                .fields
+                .contains(&("reply_to_message_id".to_owned(), "7".to_owned()))
+        );
     }
 
     #[test]

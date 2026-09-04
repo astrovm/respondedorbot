@@ -919,7 +919,8 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 fn telegram_action_chat_id(action: &TelegramAction) -> Option<i64> {
     match action {
         TelegramAction::SendMessage(message) => Some(message.chat_id.0),
-        TelegramAction::SendAnimation { chat_id, .. }
+        TelegramAction::SendDocument { chat_id, .. }
+        | TelegramAction::SendAnimation { chat_id, .. }
         | TelegramAction::SendVideo { chat_id, .. }
         | TelegramAction::SendPhoto { chat_id, .. }
         | TelegramAction::EditMessagePhoto { chat_id, .. }
@@ -3026,6 +3027,16 @@ mod tests {
 
     #[test]
     fn telegram_action_chat_identity_excludes_callback_only_actions() {
+        assert_eq!(
+            super::telegram_action_chat_id(&TelegramAction::SendDocument {
+                chat_id: ChatId(41),
+                document: Arc::from(b"synthetic transcript".as_slice()),
+                file_name: "transcript.txt".to_owned(),
+                reply_to_message_id: None,
+                caption: "synthetic transcript".to_owned(),
+            }),
+            Some(41)
+        );
         assert_eq!(
             super::telegram_action_chat_id(&TelegramAction::SendTyping {
                 chat_id: ChatId(42),

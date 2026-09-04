@@ -62,7 +62,9 @@ use bot_core::task_commands::{
     TaskCallbackParse, can_delete_task, parse_task_callback, render_task_list, task_delete_failed,
     task_delete_forbidden, task_deleted, task_load_failed, task_not_found,
 };
-use bot_core::telegram_actions::{ParseMode, SendMessage, TelegramAction};
+use bot_core::telegram_actions::{
+    MAX_TELEGRAM_TEXT_LENGTH, ParseMode, SendMessage, TelegramAction,
+};
 use bot_core::telegram_callbacks::{
     CallbackContext, CallbackContextOutcome, CallbackRoute, parse_callback_context,
 };
@@ -2118,9 +2120,23 @@ where
                 .push(format!("incoming media command state plan: {error}")),
         }
 
-        let mut response = SendMessage::new(chat_id, &text);
-        response.reply_to_message_id = Some(message_id);
-        let receipt = match self.actions.execute(TelegramAction::SendMessage(response)) {
+        let action = if completion_id.is_none() && text.chars().count() > MAX_TELEGRAM_TEXT_LENGTH {
+            TelegramAction::SendDocument {
+                chat_id,
+                document: text.as_bytes().to_vec().into(),
+                file_name: "youtube-transcript.txt".to_owned(),
+                reply_to_message_id: Some(message_id),
+                caption: match locale {
+                    bot_core::locale::Locale::Es => "🎬 transcripción de YouTube".to_owned(),
+                    bot_core::locale::Locale::En => "🎬 YouTube transcript".to_owned(),
+                },
+            }
+        } else {
+            let mut response = SendMessage::new(chat_id, &text);
+            response.reply_to_message_id = Some(message_id);
+            TelegramAction::SendMessage(response)
+        };
+        let receipt = match self.actions.execute(action) {
             Ok(receipt) => receipt,
             Err(error) => {
                 if let Some(completion_id) = completion_id
@@ -3237,7 +3253,7 @@ mod tests {
     use bot_adapters::telegram_polling::{IncomingEvent, IncomingMessage, IncomingUpdate};
     use bot_core::chat_config::ChatConfig;
     use bot_core::command_state::{IncomingCommandWritePlan, OutgoingCommandWritePlan};
-    use bot_core::telegram_actions::TelegramAction;
+    use bot_core::telegram_actions::{MAX_TELEGRAM_TEXT_LENGTH, TelegramAction};
     use bot_core::telegram_input::{ChatId, MessageContent, MessageId, UserId};
     use bot_core::telegram_payments::StarPaymentRecord;
     use bot_core::token_signals::{
@@ -4547,6 +4563,56 @@ mod tests {
             }]
         );
         assert_eq!(dispatcher.state_diagnostics(), ["media diagnostic"]);
+    }
+
+    #[test]
+    fn long_youtube_transcript_is_sent_as_a_complete_text_document() {
+        let transcript = "texto sintético 🦀 ".repeat(300);
+        assert!(transcript.chars().count() > MAX_TELEGRAM_TEXT_LENGTH);
+        let (mut source, (_prepared, _ignored, deliveries)) =
+            ai_source(Ok(AiPreparation::silent()));
+        source.media_preparation = Some(Ok(AiPreparation::Reply {
+            text: transcript.clone(),
+            completion_id: None,
+            diagnostics: Vec::new(),
+        }));
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_ai_conversation_source(Box::new(source));
+
+        assert_eq!(
+            dispatcher.dispatch(update("/transcript https://youtu.be/synthetic", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        let [
+            TelegramAction::SendDocument {
+                document,
+                file_name,
+                reply_to_message_id,
+                caption,
+                ..
+            },
+        ] = dispatcher.actions.0.as_slice()
+        else {
+            return;
+        };
+        assert_eq!(document.as_ref(), transcript.as_bytes());
+        assert_eq!(file_name, "youtube-transcript.txt");
+        assert_eq!(*reply_to_message_id, Some(MessageId(7)));
+        assert_eq!(caption, "🎬 transcripción de YouTube");
+        assert!(deliveries.borrow().is_empty());
+        assert_eq!(dispatcher.state.incoming.len(), 1);
+        assert_eq!(dispatcher.state.outgoing.len(), 1);
     }
 
     #[test]
