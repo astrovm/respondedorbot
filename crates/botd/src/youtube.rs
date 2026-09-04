@@ -1,7 +1,7 @@
 //! Native YouTube caption context for AI conversations.
 
 use bot_adapters::youtube_transcript::{
-    TranscriptOutcome, YoutubeTranscriptTransport, parse_apify, parse_supadata,
+    TranscriptOutcome, YoutubeTranscriptTransport, fetch_supadata_with, parse_apify,
 };
 use url::Url;
 
@@ -76,8 +76,8 @@ where
         }
 
         if let Some(api_key) = self.supadata_api_key.as_deref() {
-            match self.transport.supadata(api_key, &url) {
-                Ok(response) => match parse_supadata(response) {
+            match fetch_supadata_with(&self.transport, api_key, &url, std::thread::sleep) {
+                Ok(outcome) => match outcome {
                     TranscriptOutcome::Success { text, language } => {
                         return Ok(Some(self.cache_and_build(
                             &video_id,
@@ -278,6 +278,11 @@ mod tests {
     impl YoutubeTranscriptTransport for Transport {
         fn supadata(&self, _: &str, _: &str) -> Result<HttpResponse, TranscriptTransportError> {
             self.calls.borrow_mut().push("supadata".to_owned());
+            self.supadata.borrow_mut().remove(0)
+        }
+
+        fn supadata_job(&self, _: &str, _: &str) -> Result<HttpResponse, TranscriptTransportError> {
+            self.calls.borrow_mut().push("supadata_job".to_owned());
             self.supadata.borrow_mut().remove(0)
         }
 

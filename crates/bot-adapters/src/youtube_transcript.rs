@@ -12,6 +12,9 @@ const SUPADATA_URL: &str = "https://api.supadata.ai/v1/transcript";
 const APIFY_URL: &str =
     "https://api.apify.com/v2/acts/apihq~youtube-transcript-scraper/run-sync-get-dataset-items";
 const RESPONSE_MAX_BYTES: u64 = 2_000_000;
+const SUPADATA_JOB_POLL_ATTEMPTS: usize = 30;
+const SUPADATA_JOB_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const SUPADATA_JOB_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpResponse {
@@ -36,6 +39,12 @@ pub trait YoutubeTranscriptTransport {
         video_url: &str,
     ) -> Result<HttpResponse, TranscriptTransportError>;
 
+    fn supadata_job(
+        &self,
+        api_key: &str,
+        job_id: &str,
+    ) -> Result<HttpResponse, TranscriptTransportError>;
+
     fn apify(
         &self,
         api_key: &str,
@@ -47,6 +56,12 @@ pub trait YoutubeTranscriptTransport {
 pub enum TranscriptOutcome {
     Success { text: String, language: String },
     Unavailable { detail: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SupadataOutcome {
+    Terminal(TranscriptOutcome),
+    Pending { job_id: String },
 }
 
 pub struct ReqwestYoutubeTranscriptTransport {
@@ -113,6 +128,30 @@ impl YoutubeTranscriptTransport for ReqwestYoutubeTranscriptTransport {
             .map_err(classify_reqwest_error)?;
         response_from(response)
     }
+
+    fn supadata_job(
+        &self,
+        api_key: &str,
+        job_id: &str,
+    ) -> Result<HttpResponse, TranscriptTransportError> {
+        let mut url = reqwest::Url::parse(&self.supadata_url)
+            .map_err(|error| TranscriptTransportError::Other(error.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|_| {
+                TranscriptTransportError::Other(
+                    "Supadata transcript URL cannot contain a job path".to_owned(),
+                )
+            })?
+            .push(job_id);
+        let response = self
+            .client
+            .get(url)
+            .header("x-api-key", api_key)
+            .timeout(SUPADATA_JOB_REQUEST_TIMEOUT)
+            .send()
+            .map_err(classify_reqwest_error)?;
+        response_from(response)
+    }
 }
 
 fn response_from(
@@ -154,25 +193,108 @@ fn classify_reqwest_error(error: reqwest::Error) -> TranscriptTransportError {
     }
 }
 
-#[must_use]
-pub fn parse_supadata(response: HttpResponse) -> TranscriptOutcome {
+fn parse_supadata(response: HttpResponse) -> SupadataOutcome {
     let payload = match provider_payload(&response) {
         Ok(payload) => payload,
-        Err(detail) => return TranscriptOutcome::Unavailable { detail },
+        Err(detail) => {
+            return SupadataOutcome::Terminal(TranscriptOutcome::Unavailable { detail });
+        }
     };
-    let text = payload
-        .get("content")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|text| !text.is_empty());
-    let Some(text) = text else {
+    if response.status_code == 202 {
+        return payload
+            .get("jobId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|job_id| !job_id.is_empty())
+            .map_or_else(
+                || {
+                    SupadataOutcome::Terminal(TranscriptOutcome::Unavailable {
+                        detail: "Supadata accepted a transcript job without an ID".to_owned(),
+                    })
+                },
+                |job_id| SupadataOutcome::Pending {
+                    job_id: job_id.to_owned(),
+                },
+            );
+    }
+    SupadataOutcome::Terminal(supadata_success(&payload))
+}
+
+fn parse_supadata_job(response: HttpResponse, job_id: &str) -> SupadataOutcome {
+    let payload = match provider_payload(&response) {
+        Ok(payload) => payload,
+        Err(detail) => {
+            return SupadataOutcome::Terminal(TranscriptOutcome::Unavailable { detail });
+        }
+    };
+    match payload.get("status").and_then(Value::as_str) {
+        Some("queued" | "active") => SupadataOutcome::Pending {
+            job_id: job_id.to_owned(),
+        },
+        Some("completed") => SupadataOutcome::Terminal(supadata_success(&payload)),
+        Some("failed") => SupadataOutcome::Terminal(TranscriptOutcome::Unavailable {
+            detail: response_detail(&payload),
+        }),
+        Some(status) => SupadataOutcome::Terminal(TranscriptOutcome::Unavailable {
+            detail: format!("Supadata returned unknown transcript job status: {status}"),
+        }),
+        None => SupadataOutcome::Terminal(TranscriptOutcome::Unavailable {
+            detail: "Supadata returned no transcript job status".to_owned(),
+        }),
+    }
+}
+
+pub fn fetch_supadata_with<T, S>(
+    transport: &T,
+    api_key: &str,
+    video_url: &str,
+    mut sleep: S,
+) -> Result<TranscriptOutcome, TranscriptTransportError>
+where
+    T: YoutubeTranscriptTransport,
+    S: FnMut(Duration),
+{
+    let mut outcome = parse_supadata(transport.supadata(api_key, video_url)?);
+    for _ in 0..SUPADATA_JOB_POLL_ATTEMPTS {
+        let job_id = match outcome {
+            SupadataOutcome::Terminal(terminal) => return Ok(terminal),
+            SupadataOutcome::Pending { job_id } => job_id,
+        };
+        sleep(SUPADATA_JOB_POLL_INTERVAL);
+        outcome = parse_supadata_job(transport.supadata_job(api_key, &job_id)?, &job_id);
+    }
+    Ok(match outcome {
+        SupadataOutcome::Pending { .. } => TranscriptOutcome::Unavailable {
+            detail: "Supadata transcript job did not finish within 30 seconds".to_owned(),
+        },
+        SupadataOutcome::Terminal(terminal) => terminal,
+    })
+}
+
+fn supadata_success(payload: &Value) -> TranscriptOutcome {
+    let text = transcript_text(payload.get("content"));
+    if text.is_empty() {
         return TranscriptOutcome::Unavailable {
             detail: "Supadata returned no native captions".to_owned(),
         };
-    };
+    }
     TranscriptOutcome::Success {
-        text: text.to_owned(),
-        language: language(&payload),
+        text,
+        language: language(payload),
+    }
+}
+
+fn transcript_text(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(text)) => text.trim().to_owned(),
+        Some(Value::Array(segments)) => segments
+            .iter()
+            .filter_map(|segment| segment.get("text").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
     }
 }
 
@@ -261,6 +383,7 @@ fn response_detail(payload: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
@@ -276,24 +399,192 @@ mod tests {
                 status_code: 200,
                 body: json!({"content": " native transcript ", "lang": "en"}).to_string(),
             }),
-            TranscriptOutcome::Success {
+            SupadataOutcome::Terminal(TranscriptOutcome::Success {
                 text: "native transcript".to_owned(),
                 language: "en".to_owned(),
-            }
+            })
         );
         assert!(matches!(
             parse_supadata(HttpResponse {
                 status_code: 429,
                 body: json!({"error": "quota reached"}).to_string(),
             }),
-            TranscriptOutcome::Unavailable { detail } if detail.contains("quota reached")
+            SupadataOutcome::Terminal(TranscriptOutcome::Unavailable { detail })
+                if detail.contains("quota reached")
         ));
         assert!(matches!(
             parse_supadata(HttpResponse {
                 status_code: 200,
                 body: json!({"content": ""}).to_string(),
             }),
-            TranscriptOutcome::Unavailable { detail } if detail.contains("no native captions")
+            SupadataOutcome::Terminal(TranscriptOutcome::Unavailable { detail })
+                if detail.contains("no native captions")
+        ));
+        assert_eq!(
+            parse_supadata(HttpResponse {
+                status_code: 202,
+                body: json!({"jobId": "synthetic-job"}).to_string(),
+            }),
+            SupadataOutcome::Pending {
+                job_id: "synthetic-job".to_owned(),
+            }
+        );
+        assert!(matches!(
+            parse_supadata(HttpResponse {
+                status_code: 202,
+                body: json!({}).to_string(),
+            }),
+            SupadataOutcome::Terminal(TranscriptOutcome::Unavailable { detail })
+                if detail.contains("without an ID")
+        ));
+    }
+
+    #[test]
+    fn parses_supadata_job_states_and_segment_results() {
+        for status in ["queued", "active"] {
+            assert_eq!(
+                parse_supadata_job(
+                    HttpResponse {
+                        status_code: 200,
+                        body: json!({"status": status}).to_string(),
+                    },
+                    "synthetic-job",
+                ),
+                SupadataOutcome::Pending {
+                    job_id: "synthetic-job".to_owned(),
+                }
+            );
+        }
+        assert_eq!(
+            parse_supadata_job(
+                HttpResponse {
+                    status_code: 200,
+                    body: json!({
+                        "status": "completed",
+                        "content": [{"text": " first "}, {"text": "second"}],
+                        "lang": "es"
+                    })
+                    .to_string(),
+                },
+                "synthetic-job",
+            ),
+            SupadataOutcome::Terminal(TranscriptOutcome::Success {
+                text: "first\nsecond".to_owned(),
+                language: "es".to_owned(),
+            })
+        );
+        assert!(matches!(
+            parse_supadata_job(
+                HttpResponse {
+                    status_code: 200,
+                    body: json!({
+                        "status": "failed",
+                        "error": {"message": "native captions unavailable"}
+                    })
+                    .to_string(),
+                },
+                "synthetic-job",
+            ),
+            SupadataOutcome::Terminal(TranscriptOutcome::Unavailable { detail })
+                if detail == "native captions unavailable"
+        ));
+        for body in [json!({"status": "unexpected"}), json!({})] {
+            assert!(matches!(
+                parse_supadata_job(
+                    HttpResponse {
+                        status_code: 200,
+                        body: body.to_string(),
+                    },
+                    "synthetic-job",
+                ),
+                SupadataOutcome::Terminal(TranscriptOutcome::Unavailable { .. })
+            ));
+        }
+    }
+
+    struct PollTransport {
+        start: RefCell<Option<Result<HttpResponse, TranscriptTransportError>>>,
+        jobs: RefCell<Vec<Result<HttpResponse, TranscriptTransportError>>>,
+    }
+
+    impl YoutubeTranscriptTransport for PollTransport {
+        fn supadata(&self, _: &str, _: &str) -> Result<HttpResponse, TranscriptTransportError> {
+            self.start.borrow_mut().take().unwrap_or_else(|| {
+                Err(TranscriptTransportError::Other(
+                    "unexpected start request".to_owned(),
+                ))
+            })
+        }
+
+        fn supadata_job(&self, _: &str, _: &str) -> Result<HttpResponse, TranscriptTransportError> {
+            self.jobs.borrow_mut().remove(0)
+        }
+
+        fn apify(&self, _: &str, _: &str) -> Result<HttpResponse, TranscriptTransportError> {
+            Err(TranscriptTransportError::Other(
+                "unexpected Apify request".to_owned(),
+            ))
+        }
+    }
+
+    fn json_response(
+        status_code: u16,
+        body: Value,
+    ) -> Result<HttpResponse, TranscriptTransportError> {
+        Ok(HttpResponse {
+            status_code,
+            body: body.to_string(),
+        })
+    }
+
+    #[test]
+    fn polls_supadata_jobs_until_completion() {
+        let transport = PollTransport {
+            start: RefCell::new(Some(json_response(202, json!({"jobId": "synthetic-job"})))),
+            jobs: RefCell::new(vec![
+                json_response(200, json!({"status": "queued"})),
+                json_response(200, json!({"status": "active"})),
+                json_response(
+                    200,
+                    json!({"status": "completed", "content": "transcript", "lang": "en"}),
+                ),
+            ]),
+        };
+        let delays = RefCell::new(Vec::new());
+        let outcome = fetch_supadata_with(
+            &transport,
+            "synthetic-key",
+            "https://youtu.be/synthetic",
+            |delay| delays.borrow_mut().push(delay),
+        );
+        assert_eq!(
+            outcome,
+            Ok(TranscriptOutcome::Success {
+                text: "transcript".to_owned(),
+                language: "en".to_owned(),
+            })
+        );
+        assert_eq!(*delays.borrow(), vec![SUPADATA_JOB_POLL_INTERVAL; 3]);
+    }
+
+    #[test]
+    fn bounded_supadata_polling_returns_an_explicit_timeout() {
+        let transport = PollTransport {
+            start: RefCell::new(Some(json_response(202, json!({"jobId": "synthetic-job"})))),
+            jobs: RefCell::new(
+                (0..SUPADATA_JOB_POLL_ATTEMPTS)
+                    .map(|_| json_response(200, json!({"status": "active"})))
+                    .collect(),
+            ),
+        };
+        assert!(matches!(
+            fetch_supadata_with(
+                &transport,
+                "synthetic-key",
+                "https://youtu.be/synthetic",
+                |_| {}
+            ),
+            Ok(TranscriptOutcome::Unavailable { detail }) if detail.contains("within 30 seconds")
         ));
     }
 
@@ -354,16 +645,22 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
         let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
         let server = thread::spawn(move || {
-            for expected in ["GET /supadata?", "POST /apify?"] {
+            for expected in [
+                "GET /supadata?",
+                "GET /supadata/synthetic-job HTTP/1.1",
+                "POST /apify?",
+            ] {
                 let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
                 let mut request = [0_u8; 8_192];
                 let bytes = stream.read(&mut request).unwrap_or_default();
                 let request = String::from_utf8_lossy(&request[..bytes]);
                 assert!(request.starts_with(expected));
-                if expected.starts_with("GET") {
+                if expected == "GET /supadata?" {
                     assert!(request.contains("x-api-key: synthetic-supadata"));
                     assert!(request.contains("mode=native"));
                     assert!(request.contains("text=true"));
+                } else if expected.starts_with("GET") {
+                    assert!(request.contains("x-api-key: synthetic-supadata"));
                 } else {
                     assert!(request.contains("authorization: Bearer synthetic-apify"));
                     assert!(request.contains(r#"{"metadata":true,"videoId":"video123"}"#));
@@ -387,6 +684,11 @@ mod tests {
                 .supadata("synthetic-supadata", "https://youtu.be/video123")
                 .is_ok()
         );
+        assert!(
+            transport
+                .supadata_job("synthetic-supadata", "synthetic-job")
+                .is_ok()
+        );
         assert!(transport.apify("synthetic-apify", "video123").is_ok());
         assert!(server.join().is_ok());
 
@@ -403,6 +705,10 @@ mod tests {
             .unwrap_or_else(|_| unreachable!());
         assert!(matches!(
             malformed.apify("synthetic", "video123"),
+            Err(TranscriptTransportError::Other(_))
+        ));
+        assert!(matches!(
+            malformed.supadata_job("synthetic", "synthetic-job"),
             Err(TranscriptTransportError::Other(_))
         ));
     }
