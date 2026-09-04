@@ -392,7 +392,7 @@ mod tests {
         }
     }
 
-    struct Processor(Option<PreparedAudio>);
+    struct Processor(Result<Option<PreparedAudio>, String>);
 
     impl MediaProcessor for Processor {
         fn prepare_image(
@@ -407,7 +407,7 @@ mod tests {
             _: &[u8],
             _: Option<f64>,
         ) -> Result<Option<PreparedAudio>, String> {
-            Ok(self.0.clone())
+            self.0.clone()
         }
     }
 
@@ -447,10 +447,10 @@ mod tests {
                 }))),
             },
             cache,
-            Processor(Some(PreparedAudio {
+            Processor(Ok(Some(PreparedAudio {
                 bytes: vec![4],
                 duration_seconds: 30.0,
-            })),
+            }))),
             Transcriber(Some(MediaProviderResult {
                 text: "synthetic transcript".to_owned(),
                 billing_segment: json!({"kind":"transcribe","model":"whisper-large-v3","audio_seconds":30.0,"usage":{},"source":"groq"}),
@@ -479,6 +479,71 @@ mod tests {
             None
         );
         assert_eq!(youtube_video("https://youtube.com/live/x"), None);
+        assert_eq!(
+            youtube_video("https://youtube.com/channel/abc123def45"),
+            None
+        );
+    }
+
+    #[test]
+    fn preparation_and_transcription_failures_are_explicit_and_non_panicking() {
+        let mut absent = runtime(Cache::default());
+        assert_eq!(absent.plan("synthetic text", None), Ok(None));
+
+        let plan = || YoutubePlan::Fetch {
+            video_id: "abc123def45".to_owned(),
+            url: "https://youtu.be/abc123def45".to_owned(),
+        };
+        let mut extraction = runtime(Cache::default());
+        extraction.transport.scrape = RefCell::new(Some(Ok(HttpResponse {
+            status_code: 200,
+            body: json!({"success": false, "message": "synthetic rejection"}).to_string(),
+        })));
+        assert!(extraction.prepare(plan()).is_ok_and(|failed| {
+            failed.diagnostics[0].contains("audio extraction failed")
+                && failed.billing_segments.is_empty()
+        }));
+
+        let mut download = runtime(Cache::default());
+        download.transport.download = RefCell::new(Some(Err(TransportError::Other(
+            "synthetic download failure".to_owned(),
+        ))));
+        assert!(download.prepare(plan()).is_ok_and(|failed| {
+            failed.diagnostics[0].contains("synthetic download failure")
+                && failed.billing_segments.len() == 1
+        }));
+
+        let mut undecodable = runtime(Cache::default());
+        undecodable.processor.0 = Ok(None);
+        assert!(
+            undecodable
+                .prepare(plan())
+                .is_ok_and(|failed| failed.diagnostics[0].contains("could not be decoded"))
+        );
+
+        let mut processing = runtime(Cache::default());
+        processing.processor.0 = Err("synthetic processing failure".to_owned());
+        assert!(
+            processing
+                .prepare(plan())
+                .is_ok_and(|failed| failed.diagnostics[0].contains("synthetic processing failure"))
+        );
+
+        let mut empty = runtime(Cache::default());
+        assert_eq!(empty.processor.prepare_image(&[]), Ok(None));
+        empty.transcription.0 = Some(MediaProviderResult {
+            text: "  ".to_owned(),
+            billing_segment: json!({"kind": "transcribe"}),
+        });
+        let execution = empty
+            .prepare(plan())
+            .and_then(|prepared| {
+                prepared
+                    .prepared_audio
+                    .ok_or_else(|| "missing prepared audio".to_owned())
+            })
+            .and_then(|prepared| empty.execute(prepared));
+        assert!(execution.is_err());
     }
 
     #[test]
