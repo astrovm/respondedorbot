@@ -14,7 +14,10 @@ const STABLECOINS: [&str; 26] = [
     "NUARS", "PAXG", "PYUSD", "RAI", "SUSD", "TUSD", "USDC", "USDD", "USDM", "USDP", "USDT", "UXD",
     "XAUT", "XSGD",
 ];
-const UNAMBIGUOUS_CRYPTO_SYMBOLS: [&str; 4] = ["BTC", "ETH", "SATS", "XMR"];
+const UNAMBIGUOUS_CRYPTO_SYMBOLS: [&str; 12] = [
+    "BTC", "BITCOIN", "ETH", "ETHEREUM", "SATS", "XMR", "MONERO", "SOL", "SOLANA", "BNB", "XRP",
+    "DOGE",
+];
 const SUPPORTED_CURRENCIES: [&str; 35] = [
     "ARS", "AUD", "BRL", "BTC", "BUSD", "CAD", "CHF", "CLP", "CNY", "COP", "CZK", "DAI", "DKK",
     "ETH", "EUR", "GBP", "HKD", "ILS", "INR", "ISK", "JPY", "KRW", "MXN", "NZD", "PEN", "SATS",
@@ -61,8 +64,54 @@ pub trait UnifiedStockProvider {
     fn lookup(&mut self, query: &str) -> Result<Option<StockLookupRows>, String>;
 }
 
+/// Identity selected by market resolution, used to fetch a chart without searching again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarketChart {
+    pub symbol: String,
+    pub name: String,
+    pub yahoo_symbol: String,
+}
+
+fn stock_chart(quote: &StockQuote) -> MarketChart {
+    MarketChart {
+        symbol: quote.symbol.clone(),
+        name: quote.name.clone(),
+        yahoo_symbol: quote.symbol.clone(),
+    }
+}
+
+fn company_matches(query: &str, quote: &StockQuote) -> bool {
+    let normalized = |value: &str| {
+        value
+            .to_ascii_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|word| {
+                !word.is_empty()
+                    && !matches!(
+                        *word,
+                        "inc"
+                            | "incorporated"
+                            | "corp"
+                            | "corporation"
+                            | "ltd"
+                            | "limited"
+                            | "plc"
+                            | "company"
+                            | "co"
+                    )
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    quote
+        .symbol
+        .eq_ignore_ascii_case(query.trim().trim_start_matches('$'))
+        || normalized(&quote.name) == normalized(query)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarketPriceExecution {
+    pub chart: Option<MarketChart>,
     pub no_assets_found: bool,
     pub text: String,
     pub diagnostics: Vec<String>,
@@ -91,6 +140,7 @@ pub fn execute_market_price_command<C: CryptoMarketProvider, S: UnifiedStockProv
     let query = parse_price_query(text, &valid);
     let mut diagnostics = Vec::new();
     let mut no_assets_found = false;
+    let mut chart = None;
     let rendered = match query {
         PriceQuery::UnsupportedTimeframe { timeframe } => invalid_timeframe(&timeframe, locale),
         PriceQuery::AmountConversion(request) => {
@@ -110,7 +160,7 @@ pub fn execute_market_price_command<C: CryptoMarketProvider, S: UnifiedStockProv
                 if modifiers_unsupported(timeframe.as_deref(), conversion_requested) {
                     stock_modifier_error(&query, locale)
                 } else {
-                    stock_only(&query, locale, stocks, &mut diagnostics, true)
+                    stock_only(&query, locale, stocks, &mut diagnostics, true, &mut chart)
                 }
             } else {
                 assets(
@@ -126,11 +176,13 @@ pub fn execute_market_price_command<C: CryptoMarketProvider, S: UnifiedStockProv
                     stocks,
                     &mut diagnostics,
                     &mut no_assets_found,
+                    &mut chart,
                 )
             }
         }
     };
     MarketPriceExecution {
+        chart,
         no_assets_found,
         text: rendered,
         diagnostics,
@@ -150,20 +202,24 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
     stocks: &mut S,
     diagnostics: &mut Vec<String>,
     no_assets_found: &mut bool,
+    chart: &mut Option<MarketChart>,
 ) -> String {
     let listed = match crypto.listings(target_parameter) {
         Ok(rows) => rows,
         Err(error) => {
             diagnostics.push(format!("CoinMarketCap listings: {error}"));
             if !crypto_only && !contains_unambiguous_crypto_symbol(raw_query) {
-                let stock = stock_only(raw_query, locale, stocks, diagnostics, false);
+                let stock = stock_only(raw_query, locale, stocks, diagnostics, false, chart);
                 if !stock.is_empty() {
                     if modifiers_unsupported(timeframe, conversion_requested) {
+                        *chart = None;
                         return stock_modifier_error(raw_query, locale);
                     }
                     return stock;
                 }
             }
+            // A provider outage must not substitute a DEX namesake for a known native coin.
+            *no_assets_found = !contains_unambiguous_crypto_symbol(raw_query);
             return load_error(locale);
         }
     };
@@ -199,6 +255,23 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
         unique_assets(&mut selection.rows);
         selection.count = selection.rows.len();
     }
+    // A company-name match must not be shadowed by a similarly named cryptocurrency.
+    if !crypto_only
+        && selection.requested.len() == 1
+        && !selection.rows.is_empty()
+        && !contains_unambiguous_crypto_symbol(raw_query)
+        && let Ok(Some(rows)) = stocks.lookup(raw_query)
+        && let Some(quote) = rows
+            .iter()
+            .filter_map(|(_, quote)| quote.as_ref())
+            .find(|quote| company_matches(raw_query, quote))
+    {
+        if modifiers_unsupported(timeframe, conversion_requested) {
+            return stock_modifier_error(raw_query, locale);
+        }
+        *chart = Some(stock_chart(quote));
+        return format_stocks(std::slice::from_ref(quote));
+    }
     let mut unresolved = missing_tokens(&selection.rows, &selection.explicit_requested);
     let mut stock_quotes = Vec::new();
     if !crypto_only && !unresolved.is_empty() {
@@ -222,7 +295,19 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
             Err(error) => diagnostics.push(format!("stock fallback: {error}")),
         }
     }
+    if selection.rows.len() + stock_quotes.len() == 1 && unresolved.is_empty() {
+        *chart = if let Some(asset) = selection.rows.first() {
+            Some(MarketChart {
+                symbol: asset.symbol.clone(),
+                name: asset.name.clone(),
+                yahoo_symbol: format!("{}-USD", asset.symbol.to_ascii_uppercase()),
+            })
+        } else {
+            stock_quotes.first().map(stock_chart)
+        };
+    }
     if !stock_quotes.is_empty() && modifiers_unsupported(timeframe, conversion_requested) {
+        *chart = None;
         let error = stock_modifier_error(
             &stock_quotes
                 .iter()
@@ -297,6 +382,21 @@ fn select_assets(text: &str, listed: &[CryptoAsset]) -> Selection {
             count: if top_n == 0 { 10 } else { top_n },
             requested: Vec::new(),
             explicit_requested: Vec::new(),
+        };
+    }
+    let single = normalized(text);
+    if !text.contains(',')
+        && let Some(asset) = listed.iter().find(|asset| {
+            normalized(&asset.symbol) == single
+                || normalized(&asset.name) == single
+                || normalized(&asset.slug) == single
+        })
+    {
+        return Selection {
+            rows: vec![asset.clone()],
+            count: 1,
+            requested: vec![single.clone()],
+            explicit_requested: vec![single],
         };
     }
     let raw_tokens = text
@@ -543,6 +643,7 @@ fn stock_only<S: UnifiedStockProvider>(
     stocks: &mut S,
     diagnostics: &mut Vec<String>,
     missing_error: bool,
+    chart: &mut Option<MarketChart>,
 ) -> String {
     if query.trim().is_empty() {
         return if missing_error {
@@ -563,6 +664,9 @@ fn stock_only<S: UnifiedStockProvider>(
         .iter()
         .filter_map(|(_, quote)| quote.clone())
         .collect::<Vec<_>>();
+    if quotes.len() == 1 && resolved.len() == 1 {
+        *chart = quotes.first().map(stock_chart);
+    }
     let mut parts = Vec::new();
     let text = format_stocks(&quotes);
     if !text.is_empty() {
@@ -741,6 +845,80 @@ mod tests {
             exchange: "Synthetic".to_owned(),
             variation: 1.25,
         }
+    }
+
+    #[test]
+    fn canonical_bitcoin_and_apple_beat_namesake_tokens() {
+        let mut bitcoin = coin("BTC", 79_000.0);
+        bitcoin.name = "Bitcoin".to_owned();
+        bitcoin.slug = "bitcoin".to_owned();
+        let result = execute_market_price_command(
+            "bitcoin",
+            MarketPriceCommand::CryptoOnly,
+            Locale::En,
+            &mut Crypto {
+                listings: vec![vec![bitcoin, coin("BITCOIN", 0.001)]],
+                quotes: vec![],
+            },
+            &mut Stocks::default(),
+        );
+        assert!(result.text.starts_with("BTC:"));
+        assert!(!result.text.contains("BITCOIN:"));
+        assert_eq!(
+            result
+                .chart
+                .as_ref()
+                .map(|chart| chart.yahoo_symbol.as_str()),
+            Some("BTC-USD")
+        );
+        let mut apple = stock("AAPL");
+        apple.name = "Apple Inc.".to_owned();
+        let result = execute_market_price_command(
+            "apple",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut Crypto {
+                listings: vec![vec![]],
+                quotes: vec![vec![coin("APPLE", 0.00008273)]],
+            },
+            &mut Stocks(vec![("apple".to_owned(), Some(apple))]),
+        );
+        assert!(result.text.starts_with("AAPL:"));
+        assert!(!result.text.contains("APPLE:"));
+        assert_eq!(
+            result
+                .chart
+                .as_ref()
+                .map(|chart| chart.yahoo_symbol.as_str()),
+            Some("AAPL")
+        );
+    }
+
+    #[test]
+    fn failed_market_provider_keeps_token_fallback_available() {
+        struct Failed;
+        impl CryptoMarketProvider for Failed {
+            fn listings(&mut self, _: &str) -> Result<Vec<CryptoAsset>, String> {
+                Err("outage".to_owned())
+            }
+            fn quotes(
+                &mut self,
+                _: &[String],
+                _: &str,
+                _: bool,
+            ) -> Result<Vec<CryptoAsset>, String> {
+                Ok(vec![])
+            }
+        }
+        let result = execute_market_price_command(
+            "timba",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut Failed,
+            &mut Stocks::default(),
+        );
+        assert!(result.no_assets_found);
+        assert!(result.chart.is_none());
     }
 
     #[test]

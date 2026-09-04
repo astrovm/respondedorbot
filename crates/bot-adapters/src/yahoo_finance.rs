@@ -145,6 +145,7 @@ fn search_cache_key(query: &str) -> String {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct YahooQuoteLoad {
+    pub candles: Vec<Vec<f64>>,
     pub quote: Option<StockQuote>,
     pub diagnostics: Vec<String>,
 }
@@ -190,7 +191,49 @@ pub fn load_quote<T: YahooFinanceTransport, C: RequestCache>(
     if quote.is_none() {
         diagnostics.push(format!("Yahoo chart had no usable quote for {symbol}"));
     }
-    YahooQuoteLoad { quote, diagnostics }
+    let candles = load.data.as_ref().map(parse_candles).unwrap_or_default();
+    YahooQuoteLoad {
+        candles,
+        quote,
+        diagnostics,
+    }
+}
+
+fn parse_candles(value: &serde_json::Value) -> Vec<Vec<f64>> {
+    let Some(result) = value.pointer("/chart/result/0") else {
+        return Vec::new();
+    };
+    let Some(timestamps) = result
+        .get("timestamp")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let Some(quote) = result.pointer("/indicators/quote/0") else {
+        return Vec::new();
+    };
+    timestamps
+        .iter()
+        .enumerate()
+        .filter_map(|(index, timestamp)| {
+            let mut row = vec![timestamp.as_f64()?];
+            for key in ["open", "high", "low", "close"] {
+                let value = quote.get(key)?.get(index)?.as_f64()?;
+                if !value.is_finite() || value <= 0.0 {
+                    return None;
+                }
+                row.push(value);
+            }
+            row.push(
+                quote
+                    .get("volume")
+                    .and_then(|v| v.get(index))
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(0.0),
+            );
+            Some(row)
+        })
+        .collect()
 }
 
 #[must_use]
@@ -318,6 +361,24 @@ mod tests {
 
     fn chart() -> &'static str {
         r#"{"chart":{"result":[{"meta":{"symbol":"BZ=F","regularMarketPrice":98.15,"chartPreviousClose":107.6,"currency":"USD"},"indicators":{"quote":[{"close":[107.6,98.15]}]}}]}}"#
+    }
+
+    #[test]
+    fn candle_parser_skips_missing_prices_and_keeps_real_ohlc() {
+        let payload = serde_json::json!({"chart":{"result":[{
+            "timestamp":[100,200,300], "indicators":{"quote":[{
+                "open":[10,null,20],"high":[12,15,22],"low":[9,10,19],"close":[11,12,21],"volume":[1,2,3]
+            }]}
+        }]}});
+        let candles = super::parse_candles(&payload);
+        assert_eq!(
+            candles,
+            vec![
+                vec![100.0, 10.0, 12.0, 9.0, 11.0, 1.0],
+                vec![300.0, 20.0, 22.0, 19.0, 21.0, 3.0]
+            ]
+        );
+        assert!(super::parse_candles(&serde_json::json!({})).is_empty());
     }
 
     #[test]

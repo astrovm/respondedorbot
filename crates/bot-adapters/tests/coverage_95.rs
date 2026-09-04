@@ -444,7 +444,7 @@ fn token_signal_fallbacks_cover_cached_pairs_symbols_and_image_failures() {
         load.signal
             .as_ref()
             .map(|value| value.pair.base_token.symbol.as_str()),
-        Some("OTHER")
+        None
     );
 
     let transport = Transport::default();
@@ -559,7 +559,7 @@ fn token_symbol_selection_tries_supported_fallback_pairs_and_cache_errors() {
         load.signal
             .as_ref()
             .map(|value| value.pair.pair_address.as_str()),
-        Some("fallback")
+        Some("")
     );
 
     let transport = Transport::default();

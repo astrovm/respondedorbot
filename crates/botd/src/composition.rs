@@ -356,10 +356,27 @@ where
         execution.diagnostics.extend(crypto.diagnostics);
         execution.diagnostics.extend(stocks.diagnostics);
         MarketPriceLoad {
+            chart: execution.chart,
             no_assets_found: execution.no_assets_found,
             text: execution.text,
             diagnostics: execution.diagnostics,
         }
+    }
+    fn render_chart(
+        &mut self,
+        chart: &bot_core::market_prices::MarketChart,
+        now_unix: i64,
+    ) -> Result<Vec<u8>, String> {
+        let load = load_yahoo_quote(
+            &self.stocks.yahoo_transport,
+            &mut self.stocks.cache,
+            &chart.yahoo_symbol,
+            now_unix,
+        );
+        let mut quote = load.quote.ok_or("market chart quote unavailable")?;
+        quote.symbol = chart.symbol.clone();
+        quote.name = chart.name.clone();
+        bot_adapters::token_signal::render_market_chart(&quote, &load.candles)
     }
 }
 
@@ -670,6 +687,15 @@ where
             quotes: Some(self.resolve_missing(quotes, now_unix, &mut diagnostics)),
             diagnostics,
         }
+    }
+    fn render_chart(&mut self, quote: &StockQuote, now_unix: i64) -> Result<Vec<u8>, String> {
+        let load = load_yahoo_quote(
+            &self.yahoo_transport,
+            &mut self.cache,
+            &quote.symbol,
+            now_unix,
+        );
+        bot_adapters::token_signal::render_market_chart(quote, &load.candles)
     }
 }
 
@@ -3766,7 +3792,7 @@ mod tests {
     }
 
     #[test]
-    fn native_market_source_combines_provider_output_and_diagnostics() {
+    fn native_market_source_combines_provider_output_and_diagnostics() -> Result<(), String> {
         use bot_core::market_prices::MarketPriceCommand;
 
         let row = r#"{"id":1,"symbol":"EXM","name":"Synthetic Asset","slug":"synthetic-asset","quote":{"USD":{"price":42,"percent_change_24h":1}}}"#;
@@ -3810,6 +3836,54 @@ mod tests {
         assert!(load.text.contains("EXM"));
         assert!(load.text.contains("42"));
         assert!(load.diagnostics.is_empty());
+        let chart = load.chart.ok_or("resolved asset has no chart identity")?;
+        assert!(source.render_chart(&chart, 1_700_000_000).is_err());
+        let response = || {
+            Ok(YahooHttpResponse {
+            status_code: 200,
+            body: r#"{"chart":{"result":[{"meta":{"symbol":"EXM-USD","regularMarketPrice":42,"chartPreviousClose":40,"currency":"USD"},"timestamp":[1700000000],"indicators":{"quote":[{"open":[40],"high":[44],"low":[39],"close":[42],"volume":[1000]}]}}]}}"#.to_owned(),
+        })
+        };
+        source
+            .stocks
+            .yahoo_transport
+            .chart_responses
+            .borrow_mut()
+            .push(response());
+        let png = source.render_chart(&chart, 1_700_000_000)?;
+        assert!(png.starts_with(b"\x89PNG"));
+        assert_eq!(
+            source
+                .stocks
+                .yahoo_transport
+                .charts
+                .borrow()
+                .last()
+                .map(|request| request.symbol.as_str()),
+            Some("EXM-USD")
+        );
+        let quote = bot_core::stocks::StockQuote {
+            symbol: "EXM".into(),
+            name: "Example".into(),
+            price: 42.0,
+            currency: "USD".into(),
+            exchange: "TEST".into(),
+            variation: 5.0,
+        };
+        assert!(source.stocks.render_chart(&quote, 1_700_000_000).is_err());
+        source
+            .stocks
+            .yahoo_transport
+            .chart_responses
+            .borrow_mut()
+            .push(response());
+        assert!(
+            source
+                .stocks
+                .render_chart(&quote, 1_700_000_000)?
+                .starts_with(b"\x89PNG")
+        );
+        Ok(())
     }
 
     #[test]
