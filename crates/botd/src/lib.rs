@@ -36,3 +36,4 @@ pub mod telegram_stream;
 pub mod tool_output;
 pub mod tool_requests;
 pub mod web_fetch_tool;
+pub mod youtube;

@@ -9,6 +9,7 @@ pub const GROQ_CHAT_MODEL: &str = "openai/gpt-oss-120b";
 pub const GROQ_TRANSCRIPTION_MODEL: &str = "whisper-large-v3";
 
 pub const FIRECRAWL_SEARCH_MAX_CREDITS: i128 = 2;
+pub const FIRECRAWL_AUDIO_CREDITS: i128 = 5;
 pub const FIRECRAWL_STANDARD_USD_MICROS_PER_CREDIT: i128 = 830;
 pub const GROQ_TRANSCRIPTION_MIN_SECONDS: f64 = 10.0;
 pub const GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR: f64 = 111_000.0;
