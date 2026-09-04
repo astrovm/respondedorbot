@@ -31,7 +31,7 @@ mercado:
   ejemplo: $GLORP
 - /dolar, /dollar, /usd: cotizaciones del dólar y variaciones por ventana
   ejemplo: /usd 1h
-- /acciones, /stocks: precios de acciones por símbolo o empresa desde Yahoo Finance
+- /accion, /acciones, /stock, /stocks: precios de acciones por símbolo o empresa desde Yahoo Finance
   ejemplo: /acciones aapl tsla
   ejemplo: /acciones Mercado Libre
 - /petroleo, /oil: precio Brent y WTI
@@ -102,7 +102,7 @@ markets:
   example: $GLORP
 - /dolar, /dollar, /usd: dollar exchange rates and changes by time window
   example: /usd 1h
-- /acciones, /stocks: stock prices by symbol or company from Yahoo Finance
+- /accion, /acciones, /stock, /stocks: stock prices by symbol or company from Yahoo Finance
   example: /stocks aapl tsla
   example: /stocks Mercado Libre
 - /petroleo, /oil: Brent and WTI oil prices

@@ -73,7 +73,7 @@ const COMMAND_GROUPS: &[CommandGroup] = &[
         description_en: "Brent and WTI oil prices",
     },
     CommandGroup {
-        aliases: &["acciones", "stocks"],
+        aliases: &["accion", "acciones", "stock", "stocks"],
         description_es: "precios por símbolo o empresa [aapl tsla]",
         description_en: "stock prices by symbol or company [aapl tsla]",
     },
@@ -231,19 +231,19 @@ mod tests {
     }
 
     #[test]
-    fn menus_match_exact_python_catalog_hashes() {
+    fn menus_match_exact_catalog_hashes() {
         for (locale, expected_hash) in [
             (
                 Locale::Es,
-                "cc099b308920198d77c335e18d36c7624aa341c16b38f61739aea7adcfb6353c",
+                "0b03536c5001ef64897d4aca89fa01ca420ad75e43a6bc42c295f042bfc87f1e",
             ),
             (
                 Locale::En,
-                "64b82be145ce44593507e030a1b075714ab1a967e55917d81a991cb8e96f17d3",
+                "ba6767e7b594eb2cf418fd064da4d9b4dc60611372e9532af786dcacece34e5a",
             ),
         ] {
             let commands = telegram_commands(locale);
-            assert_eq!(commands.len(), 68);
+            assert_eq!(commands.len(), 70);
             let encoded = serde_json::to_string(&commands);
             assert!(encoded.is_ok());
             let digest = encoded.map(|value| sha256_hex(&value));
@@ -282,6 +282,6 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(languages, [(68, None), (68, Some("es")), (68, Some("en"))]);
+        assert_eq!(languages, [(70, None), (70, Some("es")), (70, Some("en"))]);
     }
 }

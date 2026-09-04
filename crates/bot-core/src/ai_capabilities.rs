@@ -12,7 +12,7 @@ const CAPABILITIES_ES: &str = r#"CAPACIDADES DEL BOT:
 - /clima, /weather: clima actual para cualquier ciudad o ubicación
 - token cards: si el mensaje completo es un address Solana/EVM o un $ticker, mando card con chart/imagen, stats, socials, links y botones; si el $ticker no es un token, busco su precio de mercado
 - /dolar, /dollar, /usd: cotizaciones del dólar y variaciones por ventana
-- /acciones, /stocks: precios de acciones por símbolo o empresa desde Yahoo Finance
+- /accion, /acciones, /stock, /stocks: precios de acciones por símbolo o empresa desde Yahoo Finance
 - /petroleo, /oil: precio Brent y WTI
 - /bcra, /variables: variables económicas del BCRA
 - /eleccion, /elecciones, /election, /elections: top 10 de elecciones globales en Polymarket por liquidez
@@ -39,7 +39,7 @@ const CAPABILITIES_EN: &str = r#"BOT CAPABILITIES:
 - /clima, /weather: current weather for any city or location
 - token cards: send a Solana or EVM address, or a $ticker, for a market card; unknown token cashtags fall back to market prices
 - /dolar, /dollar, /usd: dollar exchange rates and changes by time window
-- /acciones, /stocks: stock prices by symbol or company from Yahoo Finance
+- /accion, /acciones, /stock, /stocks: stock prices by symbol or company from Yahoo Finance
 - /petroleo, /oil: Brent and WTI oil prices
 - /bcra, /variables: economic variables from Argentina's central bank
 - /eleccion, /elecciones, /election, /elections: top global election markets on Polymarket by liquidity

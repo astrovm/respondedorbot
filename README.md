@@ -94,7 +94,7 @@ exits.
 | `/crypto`, `/criptos` | Crypto prices and conversions |
 | `/clima`, `/weather` | Current weather |
 | `/dolar`, `/dollar`, `/usd` | Dollar rates |
-| `/acciones`, `/stocks` | Stock prices |
+| `/accion`, `/acciones`, `/stock`, `/stocks` | Stock prices |
 | `/petroleo`, `/oil` | Oil prices |
 | `/eleccion`, `/elections` | Polymarket elections |
 | `/bcra`, `/variables` | BCRA variables |
