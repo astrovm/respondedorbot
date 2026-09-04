@@ -428,8 +428,16 @@ fn model_cost(
     })
 }
 
-fn firecrawl_cost(metadata: &Map<String, Value>) -> Result<(i64, Option<Value>), AiPricingError> {
-    let requests = python_int(metadata.get("web_search_requests")).unwrap_or(0);
+fn firecrawl_cost(
+    metadata: &Map<String, Value>,
+    kind: &str,
+) -> Result<(i64, Option<Value>), AiPricingError> {
+    let (request_key, tool) = if kind == "youtube_audio" {
+        ("firecrawl_audio_requests", "youtube_audio")
+    } else {
+        ("web_search_requests", "web_search")
+    };
+    let requests = python_int(metadata.get(request_key)).unwrap_or(0);
     let credits = python_int(metadata.get("firecrawl_credits_used"))
         .unwrap_or(0)
         .max(0);
@@ -443,7 +451,7 @@ fn firecrawl_cost(metadata: &Map<String, Value>) -> Result<(i64, Option<Value>),
     Ok((
         usd_micros,
         Some(json!({
-            "tool": "web_search",
+            "tool": tool,
             "count": requests,
             "usd_micros": usd_micros,
         })),
@@ -516,9 +524,9 @@ pub fn calculate_billing_for_segments(segments: &Value) -> Result<Value, AiPrici
         let usage_reconciled =
             metadata.get("usage_reconciled").and_then(Value::as_bool) == Some(true);
         let reported = reported_cost(usage, usage_reconciled)?;
-        let (search_cost, tool_cost) = firecrawl_cost(metadata)?;
+        let (search_cost, tool_cost) = firecrawl_cost(metadata, &kind)?;
 
-        if kind == "web_search"
+        if matches!(kind.as_str(), "web_search" | "youtube_audio")
             && let Some(tool_cost) = tool_cost
         {
             tool_breakdown.push(tool_cost);
@@ -767,6 +775,22 @@ mod tests {
         assert_eq!(output["model_breakdown"][0]["usd_micros"], 0);
         assert_eq!(output["model_breakdown"][1]["usd_micros"], 413);
         assert_eq!(output["tool_breakdown"][0]["usd_micros"], 1660);
+        Ok(())
+    }
+
+    #[test]
+    fn prices_firecrawl_youtube_audio_extraction() -> Result<(), AiPricingError> {
+        let output = calculate_billing_for_segments(&json!([{
+            "kind": "youtube_audio",
+            "source": "firecrawl",
+            "metadata": {
+                "firecrawl_audio_requests": 1,
+                "firecrawl_credits_used": 5
+            }
+        }]))?;
+        assert_eq!(output["raw_usd_micros_exact"], "4150");
+        assert_eq!(output["charged_credit_units"], 83);
+        assert_eq!(output["tool_breakdown"][0]["tool"], "youtube_audio");
         Ok(())
     }
 

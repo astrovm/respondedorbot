@@ -129,6 +129,7 @@ use crate::task_tools::{
 };
 use crate::tool_requests::{ExternalToolbox, ValidatedNativeToolPorts};
 use crate::web_fetch_tool::WebFetchTool;
+use crate::youtube::{NativeYoutubeContext, YoutubeContextRuntime};
 
 impl AdminCreditSink for BillingRepository {
     fn mint(&mut self, user_id: i64, amount: i64) -> Result<i64, String> {
@@ -1698,6 +1699,7 @@ fn build_native_dispatcher(
 ) -> Result<ConcreteNativeDispatcher, CompositionError> {
     let conversation_coinmarketcap_key = options.coinmarketcap_key.clone();
     let conversation_firecrawl_key = options.firecrawl_api_key.clone();
+    let youtube_firecrawl_key = options.firecrawl_api_key.clone();
     let groq_free_api_key = options.groq_free_api_key.clone();
     let groq_api_key = options.groq_api_key.clone();
     let action_transport =
@@ -1837,14 +1839,15 @@ fn build_native_dispatcher(
                 &openrouter_base_url,
                 crate::native_ai::PRIMARY_CHAT_MODEL,
             );
-            let groq_accounts = [("free", groq_free_api_key), ("paid", groq_api_key)]
-                .into_iter()
-                .filter_map(|(account, api_key)| {
-                    api_key
-                        .filter(|key| !key.is_empty())
-                        .map(|key| (account.to_owned(), key))
-                })
-                .collect();
+            let groq_accounts: Vec<(String, String)> =
+                [("free", groq_free_api_key), ("paid", groq_api_key)]
+                    .into_iter()
+                    .filter_map(|(account, api_key)| {
+                        api_key
+                            .filter(|key| !key.is_empty())
+                            .map(|key| (account.to_owned(), key))
+                    })
+                    .collect();
             let media = NativeMedia::new(
                 TelegramMediaFiles::new(
                     ReqwestTelegramTransport::new().map_err(CompositionError::MediaTransport)?,
@@ -1867,7 +1870,7 @@ fn build_native_dispatcher(
                     ReqwestOpenRouterTransport::new()
                         .map_err(CompositionError::OpenRouterChatTransport)?,
                     TranscriptionProviderConfig {
-                        groq_accounts,
+                        groq_accounts: groq_accounts.clone(),
                         openrouter_api_key: Some(api_key.clone()),
                         openrouter_base_url: openrouter_base_url.clone(),
                         groq_model: crate::native_ai::GROQ_TRANSCRIPTION_MODEL.to_owned(),
@@ -1878,13 +1881,46 @@ fn build_native_dispatcher(
                 ),
                 crate::native_ai::VISION_MODEL,
             );
+            let youtube: Option<Box<dyn YoutubeContextRuntime>> = youtube_firecrawl_key
+                .filter(|key| !key.is_empty())
+                .map(|firecrawl_key| {
+                    let transcription = FallbackTranscriptionProvider::new(
+                        ReqwestGroqTranscriptionTransport::new().map_err(|error| {
+                            CompositionError::MediaProviderTransport(error.to_string())
+                        })?,
+                        ReqwestOpenRouterTransport::new()
+                            .map_err(CompositionError::OpenRouterChatTransport)?,
+                        TranscriptionProviderConfig {
+                            groq_accounts,
+                            openrouter_api_key: Some(api_key.clone()),
+                            openrouter_base_url: openrouter_base_url.clone(),
+                            groq_model: crate::native_ai::GROQ_TRANSCRIPTION_MODEL.to_owned(),
+                            openrouter_model: crate::native_ai::OPENROUTER_TRANSCRIPTION_MODEL
+                                .to_owned(),
+                            default_backoff_seconds: 60,
+                        },
+                    );
+                    Ok::<Box<dyn YoutubeContextRuntime>, CompositionError>(Box::new(
+                        NativeYoutubeContext::new(
+                            ReqwestFirecrawlTransport::new().map_err(|error| {
+                                CompositionError::MediaProviderTransport(error.to_string())
+                            })?,
+                            RedisMediaCache::new(options.redis_endpoint.clone()),
+                            FfmpegMediaProcessor::default(),
+                            transcription,
+                            std::thread::sleep,
+                            &firecrawl_key,
+                        ),
+                    ))
+                })
+                .transpose()?;
             let compaction_scheduler = production_compaction_scheduler(
                 RedisCompactionQueue::new(options.redis_endpoint)
                     .map_err(|error| CompositionError::ConversationState(error.to_string()))?,
                 options.database_url,
                 &system_prompt,
             );
-            let conversation = NativeConversation::new(
+            let mut conversation = NativeConversation::new(
                 provider,
                 ProductionToolFactory::new(
                     options.redis_endpoint,
@@ -1905,6 +1941,9 @@ fn build_native_dispatcher(
             )
             .with_media(Box::new(media))
             .with_compaction_scheduler(Box::new(compaction_scheduler));
+            if let Some(youtube) = youtube {
+                conversation = conversation.with_youtube(youtube);
+            }
             dispatcher.with_ai_conversation_source(Box::new(conversation))
         }
         _ => dispatcher,
