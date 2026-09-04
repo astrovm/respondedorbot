@@ -257,6 +257,14 @@ pub fn token_from_pair(pair: &TokenPair) -> Option<TokenAddress> {
     let (network, tag) = match pair.chain_id.as_str() {
         "solana" => ("solana", "SOL"),
         "ethereum" => ("eth", "ETH"),
+        chain
+            if !chain.is_empty()
+                && EVM_ADDRESS.as_ref().is_some_and(|pattern| {
+                    pattern.is_match(&pair.base_token.address.to_ascii_lowercase())
+                }) =>
+        {
+            (chain, "")
+        }
         _ => return None,
     };
     if pair.base_token.address.is_empty() {
@@ -265,8 +273,12 @@ pub fn token_from_pair(pair: &TokenPair) -> Option<TokenAddress> {
     Some(TokenAddress {
         chain_id: pair.chain_id.clone(),
         network: network.to_owned(),
-        tag: tag.to_owned(),
-        address: if pair.chain_id == "ethereum" {
+        tag: if tag.is_empty() {
+            pair.chain_id.to_ascii_uppercase()
+        } else {
+            tag.to_owned()
+        },
+        address: if pair.chain_id != "solana" {
             pair.base_token.address.to_ascii_lowercase()
         } else {
             pair.base_token.address.clone()
@@ -540,6 +552,25 @@ fn encoded_query(value: &str) -> String {
 fn link_rows(signal: &TokenSignal, symbol: &str) -> [String; 2] {
     let token = &signal.token;
     let pair = &signal.pair;
+    if !matches!(token.chain_id.as_str(), "ethereum" | "solana") {
+        let dex = format!(
+            "https://dexscreener.com/{}/{}",
+            token.chain_id,
+            if pair.pair_address.is_empty() {
+                &token.address
+            } else {
+                &pair.pair_address
+            }
+        );
+        let search = format!(
+            "https://x.com/search?f=live&q={}&src=typed_query",
+            encoded_query(&format!("(${symbol} OR {})", token.address))
+        );
+        return [
+            [html_link("DS", &dex), html_link("Xs", &search)].join("•"),
+            String::new(),
+        ];
+    }
     let explorer = if token.chain_id == "ethereum" {
         format!("https://etherscan.io/address/{}", token.address)
     } else {
@@ -569,14 +600,24 @@ fn link_rows(signal: &TokenSignal, symbol: &str) -> [String; 2] {
     } else {
         html_link("DS", &pair.url)
     };
-    let primary = [
-        html_link("DEF", &defined),
-        dexscreener,
-        html_link("GT", &gecko),
-        html_link("EXP", &explorer),
-        html_link("Xs", &x_search),
-    ]
-    .join("•");
+    let primary = if pair.pair_address.is_empty() && pair.url.starts_with("https://pump.fun/coin/")
+    {
+        [
+            html_link("PF", &pair.url),
+            html_link("EXP", &explorer),
+            html_link("Xs", &x_search),
+        ]
+        .join("•")
+    } else {
+        [
+            html_link("DEF", &defined),
+            dexscreener,
+            html_link("GT", &gecko),
+            html_link("EXP", &explorer),
+            html_link("Xs", &x_search),
+        ]
+        .join("•")
+    };
     let trade = if token.chain_id == "ethereum" {
         [
             html_link(
