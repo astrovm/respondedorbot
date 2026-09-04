@@ -6,7 +6,6 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bot_adapters::firecrawl::FIRECRAWL_AUDIO_MAX_BYTES;
 use bot_adapters::media_provider::{
     GroqTranscriptionTransport, MediaProviderError, MediaProviderResult,
     ReqwestGroqTranscriptionTransport, VisionRequest, describe_image_with,
@@ -358,14 +357,6 @@ impl MediaProcessor for FfmpegMediaProcessor {
         duration_hint_seconds: Option<f64>,
     ) -> Result<Option<PreparedAudio>, String> {
         self.prepare_audio_bounded(input, duration_hint_seconds, TELEGRAM_FILE_MAX_BYTES)
-    }
-
-    fn prepare_external_audio(
-        &mut self,
-        input: &[u8],
-        duration_hint_seconds: Option<f64>,
-    ) -> Result<Option<PreparedAudio>, String> {
-        self.prepare_audio_bounded(input, duration_hint_seconds, FIRECRAWL_AUDIO_MAX_BYTES)
     }
 }
 
@@ -1021,12 +1012,6 @@ mod tests {
             .unwrap_or_else(|| unreachable!());
         assert!(audio.bytes.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]));
         assert!((0.08..=0.2).contains(&audio.duration_seconds));
-        let external = processor
-            .prepare_external_audio(&wav, None)
-            .unwrap_or_else(|_| unreachable!())
-            .unwrap_or_else(|| unreachable!());
-        assert!(external.bytes.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]));
-        assert!((0.08..=0.2).contains(&external.duration_seconds));
         Ok(())
     }
 }

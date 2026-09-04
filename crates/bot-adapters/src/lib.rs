@@ -42,3 +42,4 @@ pub mod token_signal;
 pub mod weather;
 pub mod web_fetch;
 pub mod yahoo_finance;
+pub mod youtube_transcript;

@@ -11,8 +11,9 @@ ia:
   ejemplo: buscá qué pasó con...
 
 mercado:
-- /prices, /price, /precios, /precio, /presios, /presio, /bresio, /bresios, /brecio, /brecios, /c, /crypto, /criptos: precios crypto, acciones y otros activos; /crypto limita la búsqueda a crypto
-  ejemplo: /c nvda
+- /p, /prices, /price, /precios, /precio, /presios, /presio, /bresio, /bresios, /brecio, /brecios: precios crypto, acciones y otros activos
+- /c, /cripto, /criptos, /crypto, /cryptos: precios solo de crypto
+  ejemplo: /p nvda
   ejemplo: /precio btc nvda
   ejemplo: /precio stock:META
   ejemplo: /prices btc eth xmr
@@ -31,7 +32,7 @@ mercado:
   ejemplo: $GLORP
 - /dolar, /dollar, /usd: cotizaciones del dólar y variaciones por ventana
   ejemplo: /usd 1h
-- /acciones, /stocks: precios de acciones por símbolo o empresa desde Yahoo Finance
+- /s, /accion, /acciones, /stock, /stocks: precios de acciones por símbolo o empresa desde Yahoo Finance
   ejemplo: /acciones aapl tsla
   ejemplo: /acciones Mercado Libre
 - /petroleo, /oil: precio Brent y WTI
@@ -82,8 +83,9 @@ AI:
   example: search what happened with...
 
 markets:
-- /prices, /price, /precios, /precio, /presios, /presio, /bresio, /bresios, /brecio, /brecios, /c, /crypto, /criptos: crypto, stock, and other asset prices; /crypto limits lookup to crypto
-  example: /c nvda
+- /p, /prices, /price, /precios, /precio, /presios, /presio, /bresio, /bresios, /brecio, /brecios: crypto, stock, and other asset prices
+- /c, /cripto, /criptos, /crypto, /cryptos: crypto-only prices
+  example: /p nvda
   example: /price btc nvda
   example: /price stock:META
   example: /prices btc eth xmr
@@ -102,7 +104,7 @@ markets:
   example: $GLORP
 - /dolar, /dollar, /usd: dollar exchange rates and changes by time window
   example: /usd 1h
-- /acciones, /stocks: stock prices by symbol or company from Yahoo Finance
+- /s, /accion, /acciones, /stock, /stocks: stock prices by symbol or company from Yahoo Finance
   example: /stocks aapl tsla
   example: /stocks Mercado Libre
 - /petroleo, /oil: Brent and WTI oil prices

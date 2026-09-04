@@ -49,6 +49,8 @@ pub struct ProductionConfig {
     groq_free_api_key: Option<String>,
     groq_api_key: Option<String>,
     firecrawl_api_key: Option<String>,
+    supadata_api_key: Option<String>,
+    apify_api_key: Option<String>,
     pub system_prompt: String,
     pub trigger_words: Vec<String>,
     pub reconciliation_interval: Duration,
@@ -116,6 +118,8 @@ impl fmt::Debug for ProductionConfig {
             .field("groq_free_configured", &self.groq_free_api_key.is_some())
             .field("groq_configured", &self.groq_api_key.is_some())
             .field("firecrawl_configured", &self.firecrawl_api_key.is_some())
+            .field("supadata_configured", &self.supadata_api_key.is_some())
+            .field("apify_configured", &self.apify_api_key.is_some())
             .field("system_prompt", &"[REDACTED]")
             .field("trigger_words", &self.trigger_words)
             .field("reconciliation_interval", &self.reconciliation_interval)
@@ -425,6 +429,8 @@ impl ProductionConfig {
             groq_free_api_key: optional_trimmed(&lookup, "GROQ_FREE_API_KEY"),
             groq_api_key: optional_trimmed(&lookup, "GROQ_API_KEY"),
             firecrawl_api_key: optional_trimmed(&lookup, "FIRECRAWL_API_KEY"),
+            supadata_api_key: optional_trimmed(&lookup, "SUPADATA_API_KEY"),
+            apify_api_key: optional_trimmed(&lookup, "APIFY_API_KEY"),
             system_prompt,
             trigger_words,
             reconciliation_interval,
@@ -465,6 +471,16 @@ impl ProductionConfig {
     #[must_use]
     pub fn firecrawl_api_key(&self) -> Option<&str> {
         self.firecrawl_api_key.as_deref()
+    }
+
+    #[must_use]
+    pub fn supadata_api_key(&self) -> Option<&str> {
+        self.supadata_api_key.as_deref()
+    }
+
+    #[must_use]
+    pub fn apify_api_key(&self) -> Option<&str> {
+        self.apify_api_key.as_deref()
     }
 
     #[must_use]
@@ -766,6 +782,8 @@ mod tests {
                 ("GROQ_FREE_API_KEY", "groq-free-secret"),
                 ("GROQ_API_KEY", "groq-secret"),
                 ("FIRECRAWL_API_KEY", "firecrawl-secret"),
+                ("SUPADATA_API_KEY", "supadata-secret"),
+                ("APIFY_API_KEY", "apify-secret"),
                 ("BOT_SYSTEM_PROMPT", "prompt-secret"),
                 ("BOT_TRIGGER_WORDS", " gordo, test, ,bot "),
                 ("FRIENDLY_INSTANCE_NAME", "VPS"),
@@ -798,6 +816,8 @@ mod tests {
             "groq-free-secret",
             "groq-secret",
             "firecrawl-secret",
+            "supadata-secret",
+            "apify-secret",
             "prompt-secret",
         ] {
             assert!(!debug.contains(secret));

@@ -11,6 +11,7 @@ manages AI credits, and runs scheduled tasks.
 
 - Chat with AI, memory, web search, tools, and provider fallback
 - Transcribe audio and describe images
+- Summarize YouTube videos from their existing captions
 - Summarize conversations
 - Show crypto, market, dollar, BCRA, weather, and Polymarket data
 - Manage Telegram Stars, AI credits, transfers, and charge history
@@ -89,11 +90,11 @@ exits.
 
 | Command | Purpose |
 | --- | --- |
-| `/prices`, `/precios`, `/c` | Crypto and traditional markets |
-| `/crypto`, `/criptos` | Crypto prices and conversions |
+| `/p`, `/prices`, `/precios` | Crypto and traditional markets |
+| `/c`, `/cripto`, `/criptos`, `/crypto`, `/cryptos` | Crypto prices and conversions |
 | `/clima`, `/weather` | Current weather |
 | `/dolar`, `/dollar`, `/usd` | Dollar rates |
-| `/acciones`, `/stocks` | Stock prices |
+| `/s`, `/accion`, `/acciones`, `/stock`, `/stocks` | Stock prices |
 | `/petroleo`, `/oil` | Oil prices |
 | `/eleccion`, `/elections` | Polymarket elections |
 | `/bcra`, `/variables` | BCRA variables |

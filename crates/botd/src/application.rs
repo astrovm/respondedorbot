@@ -137,6 +137,8 @@ fn build_operational_reporter(
         config.groq_free_api_key(),
         config.groq_api_key(),
         config.firecrawl_api_key(),
+        config.supadata_api_key(),
+        config.apify_api_key(),
         Some(config.system_prompt.as_str()),
     ]
     .into_iter()
@@ -184,6 +186,8 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
         groq_free_api_key: config.groq_free_api_key().map(str::to_owned),
         groq_api_key: config.groq_api_key().map(str::to_owned),
         firecrawl_api_key: config.firecrawl_api_key().map(str::to_owned),
+        supadata_api_key: config.supadata_api_key().map(str::to_owned),
+        apify_api_key: config.apify_api_key().map(str::to_owned),
         system_prompt: Some(config.system_prompt.clone()),
         trigger_words: Some(config.trigger_words.clone()),
         active_operations: active_operations.clone(),

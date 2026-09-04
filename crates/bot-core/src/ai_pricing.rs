@@ -432,6 +432,8 @@ fn firecrawl_cost(
     metadata: &Map<String, Value>,
     kind: &str,
 ) -> Result<(i64, Option<Value>), AiPricingError> {
+    // `youtube_audio` is no longer produced, but old immutable ledger segments
+    // still need exact pricing during reconciliation and history reads.
     let (request_key, tool) = if kind == "youtube_audio" {
         ("firecrawl_audio_requests", "youtube_audio")
     } else {

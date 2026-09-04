@@ -8,11 +8,12 @@ const CAPABILITIES_ES: &str = r#"CAPACIDADES DEL BOT:
 - si existe comando exacto para algo, sugerilo con el comando exacto
 - /ask, /pregunta, /che, /gordo: te contesto mensajes normales; en grupos respondo si me mencionan, me responden, usan trigger random o mandan comando ia
 - búsqueda web nativa: en mensajes normales puedo buscar en internet cuando hace falta
-- /prices, /price, /precios, /precio, /presios, /presio, /bresio, /bresios, /brecio, /brecios, /c, /crypto, /criptos: precios crypto, acciones y otros activos; /crypto limita la búsqueda a crypto
+- /p, /prices, /price, /precios, /precio, /presios, /presio, /bresio, /bresios, /brecio, /brecios: precios crypto, acciones y otros activos
+- /c, /cripto, /criptos, /crypto, /cryptos: precios solo de crypto
 - /clima, /weather: clima actual para cualquier ciudad o ubicación
 - token cards: si el mensaje completo es un address Solana/EVM o un $ticker, mando card con chart/imagen, stats, socials, links y botones; si el $ticker no es un token, busco su precio de mercado
 - /dolar, /dollar, /usd: cotizaciones del dólar y variaciones por ventana
-- /acciones, /stocks: precios de acciones por símbolo o empresa desde Yahoo Finance
+- /s, /accion, /acciones, /stock, /stocks: precios de acciones por símbolo o empresa desde Yahoo Finance
 - /petroleo, /oil: precio Brent y WTI
 - /bcra, /variables: variables económicas del BCRA
 - /eleccion, /elecciones, /election, /elections: top 10 de elecciones globales en Polymarket por liquidez
@@ -35,11 +36,12 @@ const CAPABILITIES_EN: &str = r#"BOT CAPABILITIES:
 - when an exact command exists, suggest that exact command
 - /ask, /pregunta, /che, /gordo: I answer normal messages; in groups I respond to mentions, replies, random triggers, and AI commands
 - web search: I can search the web when a current answer needs it
-- /prices, /price, /precios, /precio, /presios, /presio, /bresio, /bresios, /brecio, /brecios, /c, /crypto, /criptos: crypto, stock, and other asset prices; /crypto limits lookup to crypto
+- /p, /prices, /price, /precios, /precio, /presios, /presio, /bresio, /bresios, /brecio, /brecios: crypto, stock, and other asset prices
+- /c, /cripto, /criptos, /crypto, /cryptos: crypto-only prices
 - /clima, /weather: current weather for any city or location
 - token cards: send a Solana or EVM address, or a $ticker, for a market card; unknown token cashtags fall back to market prices
 - /dolar, /dollar, /usd: dollar exchange rates and changes by time window
-- /acciones, /stocks: stock prices by symbol or company from Yahoo Finance
+- /s, /accion, /acciones, /stock, /stocks: stock prices by symbol or company from Yahoo Finance
 - /petroleo, /oil: Brent and WTI oil prices
 - /bcra, /variables: economic variables from Argentina's central bank
 - /eleccion, /elecciones, /election, /elections: top global election markets on Polymarket by liquidity
