@@ -616,6 +616,67 @@ where
         }
     }
 
+    pub fn render_period_photo(
+        &mut self,
+        signal: &TokenSignal,
+        period: &str,
+        now: i64,
+    ) -> Result<Vec<u8>, String> {
+        let range =
+            bot_core::price_queries::ChartPeriod::parse(period).ok_or("invalid chart period")?;
+        let (unit, aggregate, step) = match range.seconds {
+            0..=3600 => ("minute", 1, 60),
+            3601..=86400 => ("minute", 5, 300),
+            86401..=604800 => ("hour", 1, 3600),
+            604801..=5184000 => ("hour", 4, 14400),
+            _ => ("day", 1, 86400),
+        };
+        let limit = ((range.seconds + step - 1) / step + 1).min(1000);
+        let url = format!(
+            "https://api.geckoterminal.com/api/v2/networks/{}/pools/{}/ohlcv/{unit}",
+            signal.token.network, signal.pair.pair_address
+        );
+        let key = format!(
+            "token_signal:history:{}:{}:{period}",
+            signal.token.network, signal.pair.pair_address
+        );
+        let raw = self.cached_json(
+            &key,
+            60,
+            "token chart history",
+            |transport| {
+                transport.get_json(
+                    &url,
+                    &[
+                        ("aggregate", aggregate.to_string()),
+                        ("limit", limit.to_string()),
+                        ("currency", "usd".into()),
+                        ("before_timestamp", now.to_string()),
+                    ],
+                )
+            },
+            |value| value.pointer("/data/attributes/ohlcv_list").cloned(),
+            &mut Vec::new(),
+        );
+        let candles: Vec<Vec<f64>> = raw
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default();
+        let candles: Vec<_> = candles
+            .into_iter()
+            .filter(|row| {
+                row.len() >= 5 && row[0] >= (now - range.seconds) as f64 && row[0] <= now as f64
+            })
+            .collect();
+        if candles.is_empty() {
+            return Err("requested token history unavailable".into());
+        }
+        let title = format!(
+            "{} | {period} available history",
+            signal.pair.base_token.symbol
+        );
+        render_price_chart(&signal.pair, &candles, Some(&title), None, 1280, 900)
+    }
+
     pub fn render_photo(&self, signal: &TokenSignal) -> Result<Vec<u8>, String> {
         if has_usable_chart(signal) {
             return render_signal_chart(signal, 1_280, 900);
@@ -747,6 +808,14 @@ pub fn render_market_chart(
     quote: &bot_core::stocks::StockQuote,
     candles: &[Vec<f64>],
 ) -> Result<Vec<u8>, String> {
+    render_market_chart_for_period(quote, candles, "5d")
+}
+
+pub fn render_market_chart_for_period(
+    quote: &bot_core::stocks::StockQuote,
+    candles: &[Vec<f64>],
+    period: &str,
+) -> Result<Vec<u8>, String> {
     if candles.is_empty() {
         return Err("historical chart data unavailable".to_owned());
     }
@@ -755,7 +824,7 @@ pub fn render_market_chart(
         ..TokenPair::default()
     };
     let title = format!(
-        "{} — {} | {} {} | 5D · daily candles",
+        "{} — {} | {} {} | {period} history",
         quote.symbol, quote.name, quote.price, quote.currency
     );
     render_price_chart(
@@ -940,8 +1009,32 @@ fn render_price_chart(
                     &format!(
                         "{} {}",
                         price_label(ath),
-                        if heading.is_some() { "5D high" } else { "ATH" }
+                        if heading.is_some() {
+                            "Period high"
+                        } else {
+                            "ATH"
+                        }
                     ),
+                );
+            }
+        }
+    }
+    if let Some(font) = chart_font(false) {
+        for (candle, x) in [
+            (candles.first(), left),
+            (candles.last(), right.saturating_sub(180)),
+        ] {
+            if let Some(candle) = candle
+                && let Some(date) = chrono::DateTime::from_timestamp(candle[0] as i64, 0)
+            {
+                draw_text_mut(
+                    &mut image,
+                    Rgb([170, 185, 205]),
+                    x,
+                    bottom + 24,
+                    18.0,
+                    &font,
+                    &date.format("%Y-%m-%d %H:%M UTC").to_string(),
                 );
             }
         }
@@ -1117,6 +1210,68 @@ mod tests {
                 .pop_front()
                 .ok_or_else(|| "synthetic image unavailable".to_owned())
         }
+    }
+
+    #[test]
+    fn token_history_ranges_choose_granularity_and_keep_identity() -> Result<(), String> {
+        struct History(std::cell::RefCell<Vec<String>>);
+        impl TokenSignalTransport for History {
+            fn get_json(
+                &self,
+                url: &str,
+                query: &[(&str, String)],
+            ) -> Result<JsonResponse, String> {
+                self.0.borrow_mut().push(format!("{url} {query:?}"));
+                Ok(JsonResponse { status_code: 200, body: json!({"data":{"attributes":{"ohlcv_list":[[1799999970,1,2,0.5,1.5,100],[1,1,2,0.5,1.5,100]]}}}).to_string() })
+            }
+            fn post_json(&self, _: &str, _: &serde_json::Value) -> Result<JsonResponse, String> {
+                Err("unused".into())
+            }
+            fn get_binary(&self, _: &str) -> Result<BinaryResponse, String> {
+                Err("unused".into())
+            }
+        }
+        let mut adapter = TokenSignalAdapter::new(History(Default::default()), Cache::default());
+        let signal = TokenSignal {
+            token: TokenAddress {
+                chain_id: "solana".into(),
+                network: "solana".into(),
+                tag: "SOL".into(),
+                address: "mint".into(),
+            },
+            pair: bot_core::token_signals::TokenPair {
+                pair_address: "fixed-pool".into(),
+                ..Default::default()
+            },
+            candles: vec![],
+            supply: None,
+            token_image_url: None,
+            socials: BTreeMap::new(),
+            pump: None,
+        };
+        for period in ["1h", "1d", "7d", "1m", "1y", "5y"] {
+            assert!(
+                adapter
+                    .render_period_photo(&signal, period, 1_800_000_000)?
+                    .starts_with(b"\x89PNG")
+            );
+        }
+        let calls = adapter.transport.0.borrow();
+        assert!(calls[0].contains("fixed-pool/ohlcv/minute"));
+        assert!(calls[2].contains("fixed-pool/ohlcv/hour"));
+        assert!(calls[4].contains("fixed-pool/ohlcv/day"));
+        drop(calls);
+        assert!(
+            adapter
+                .render_period_photo(&signal, "bad", 1_800_000_000)
+                .is_err()
+        );
+        assert!(
+            adapter
+                .render_period_photo(&signal, "2m", 1_900_000_000)
+                .is_err()
+        );
+        Ok(())
     }
 
     #[test]

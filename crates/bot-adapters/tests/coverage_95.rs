@@ -471,6 +471,7 @@ fn token_signal_fallbacks_cover_cached_pairs_symbols_and_image_failures() {
 #[test]
 fn token_signal_state_round_trips_and_reports_storage_failures() {
     let state = SignalState {
+        chart_period: None,
         chat_id: "synthetic-chat".to_owned(),
         message_id: 2,
         source_message_id: 1,
