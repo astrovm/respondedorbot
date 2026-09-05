@@ -8596,6 +8596,13 @@ mod tests {
         assert!(
             matches!(render_failed.actions.0.as_slice(), [TelegramAction::SendMessage(reply)] if reply.text.contains("Synthetic Token"))
         );
+        assert_eq!(
+            render_failed.dispatch(update(&format!("/c {address} 1m"), Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            matches!(render_failed.actions.0.last(), Some(TelegramAction::SendMessage(reply)) if reply.text.contains("Chart range: 1m") && reply.text.contains("Synthetic Token"))
+        );
         let mut save_failed = dispatcher().with_token_signal_source(Box::new(FallibleSignals {
             query_load: TokenSignalLoad {
                 signal: Some(signal),
