@@ -185,10 +185,18 @@ pub fn load_chart<T: YahooFinanceTransport, C: RequestCache>(
     let window = timeframe
         .and_then(bot_core::price_queries::ChartPeriod::parse)
         .map(|period| {
+            let interval = period.yahoo_interval();
+            let step = match interval {
+                "1m" => 60,
+                "15m" => 900,
+                "1h" => 3600,
+                "1d" => 86400,
+                _ => 604800,
+            };
             (
-                now_unix - period.seconds,
+                (now_unix - period.seconds).div_euclid(step) * step,
                 now_unix,
-                period.yahoo_interval().to_owned(),
+                interval.to_owned(),
             )
         });
     let request = YahooChartRequest {
