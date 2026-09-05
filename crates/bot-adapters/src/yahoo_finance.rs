@@ -432,7 +432,7 @@ mod tests {
         let requests = transport.requests.borrow();
         assert_eq!(
             requests[0].window,
-            Some((1_799_999_940, 1_800_000_000, "1m".into()))
+            Some((1_797_408_000, 1_800_000_000, "1h".into()))
         );
         assert_eq!(
             requests[1].window,

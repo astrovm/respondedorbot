@@ -127,8 +127,8 @@ exact match. DexScreener and pump.fun supply token cards. Missing chart history
 or photo delivery falls back to the available quote/card text, and missing
 metrics are shown as N/A.
 
-Chart ranges use `m` (minutes), `h` (hours), `d` (days), `w` (weeks),
-`mo` (30 days), and `y` (365 days), for example `/c bitcoin 1m`,
+Chart ranges use `h` (hours), `d` (days), `w` (weeks),
+`m` or `mo` (30-day months), and `y` (365-day years), for example `/c bitcoin 1m`,
 `/c bitcoin 7d`, `/p apple 1y`, or `/s AAPL 5y`. Candle granularity is
 selected automatically. Charts label the dates actually returned by the
 provider; newly created tokens and unavailable history cannot fill an older

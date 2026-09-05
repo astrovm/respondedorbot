@@ -1249,7 +1249,7 @@ mod tests {
             socials: BTreeMap::new(),
             pump: None,
         };
-        for period in ["1m", "1d", "7d", "1mo", "1y", "5y"] {
+        for period in ["1h", "1d", "7d", "1m", "1y", "5y"] {
             assert!(
                 adapter
                     .render_period_photo(&signal, period, 1_800_000_000)?

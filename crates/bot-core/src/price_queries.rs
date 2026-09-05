@@ -312,7 +312,7 @@ mod tests {
     }
 }
 
-/// Explicit chart duration. `m` means minutes; `mo` means 30 days.
+/// Explicit chart duration. `m` and `mo` both mean 30 days.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChartPeriod {
     pub seconds: i64,
@@ -325,11 +325,10 @@ impl ChartPeriod {
         let split = value.find(|c: char| !c.is_ascii_digit())?;
         let count = value[..split].parse::<i64>().ok()?;
         let unit = match &value[split..] {
-            "m" => 60,
+            "m" | "mo" => 30 * 86400,
             "h" => 3600,
             "d" => 86400,
             "w" => 7 * 86400,
-            "mo" => 30 * 86400,
             "y" => 365 * 86400,
             _ => return None,
         };
@@ -355,7 +354,7 @@ mod chart_period_tests {
     #[test]
     fn ranges_are_unambiguous_bounded_and_choose_usable_candles() {
         for (input, seconds, interval) in [
-            ("1m", 60, "1m"),
+            ("1m", 2592000, "1h"),
             ("2h", 7200, "1m"),
             ("2d", 172800, "15m"),
             ("1w", 604800, "15m"),
