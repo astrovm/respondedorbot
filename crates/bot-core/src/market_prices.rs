@@ -67,6 +67,7 @@ pub trait UnifiedStockProvider {
 /// Identity selected by market resolution, used to fetch a chart without searching again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarketChart {
+    pub timeframe: Option<String>,
     pub symbol: String,
     pub name: String,
     pub yahoo_symbol: String,
@@ -74,6 +75,7 @@ pub struct MarketChart {
 
 fn stock_chart(quote: &StockQuote) -> MarketChart {
     MarketChart {
+        timeframe: None,
         symbol: quote.symbol.clone(),
         name: quote.name.clone(),
         yahoo_symbol: quote.symbol.clone(),
@@ -298,6 +300,7 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
     if selection.rows.len() + stock_quotes.len() == 1 && unresolved.is_empty() {
         *chart = if let Some(asset) = selection.rows.first() {
             Some(MarketChart {
+                timeframe: timeframe.map(str::to_owned),
                 symbol: asset.symbol.clone(),
                 name: asset.name.clone(),
                 yahoo_symbol: format!("{}-USD", asset.symbol.to_ascii_uppercase()),

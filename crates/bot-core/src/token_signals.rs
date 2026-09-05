@@ -143,6 +143,8 @@ pub struct TokenSignal {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SignalState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chart_period: Option<String>,
     pub chat_id: String,
     pub message_id: i64,
     pub source_message_id: i64,
@@ -1135,6 +1137,7 @@ mod tests {
     #[test]
     fn signal_identity_state_and_pair_boundaries_are_stable() {
         let state = SignalState {
+            chart_period: None,
             chat_id: "-1001".to_owned(),
             message_id: 20,
             source_message_id: 19,
