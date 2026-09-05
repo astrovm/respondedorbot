@@ -132,7 +132,10 @@ Chart ranges use `h` (hours), `d` (days), `w` (weeks),
 `/c bitcoin 7d`, `/p apple 1y`, or `/s AAPL 5y`. Candle granularity is
 selected automatically. Charts label the dates actually returned by the
 provider; newly created tokens and unavailable history cannot fill an older
-requested range. Quote percentage changes remain explicitly labeled separately.
+requested range. For a single cryptocurrency or stock with an explicit range,
+the caption uses the chart provider’s current quote and percentage change from
+the first available candle’s opening price, labeled with that range. Without an
+explicit range, the caption keeps the default daily change.
 
 ## Test it
 

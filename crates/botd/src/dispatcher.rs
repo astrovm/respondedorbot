@@ -327,6 +327,12 @@ pub struct MarketPriceLoad {
     pub diagnostics: Vec<String>,
 }
 
+/// Chart media and an optional quote measured over its requested range.
+pub struct MarketChartRender {
+    pub photo: Vec<u8>,
+    pub caption: Option<String>,
+}
+
 pub trait MarketPriceSource {
     fn load(
         &mut self,
@@ -339,7 +345,7 @@ pub trait MarketPriceSource {
         &mut self,
         _chart: &bot_core::market_prices::MarketChart,
         _now_unix: i64,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<MarketChartRender, String> {
         Err("market chart unavailable".to_owned())
     }
 }
@@ -1104,16 +1110,20 @@ where
             }
             if let Some(load) = load.as_ref().filter(|load| !load.no_assets_found) {
                 if single && let Some(chart) = &load.chart {
+                    let mut caption = load.text.clone();
                     let photo = self
                         .market_price_source
                         .as_mut()
                         .and_then(|source| source.render_chart(chart, timestamp).ok());
-                    if let Some(photo) = photo {
+                    if let Some(rendered) = photo {
+                        if let Some(chart_caption) = rendered.caption {
+                            caption = chart_caption;
+                        }
                         let delivered = self.actions.try_photo(TelegramAction::SendPhoto {
                             chat_id,
-                            photo: photo.into(),
+                            photo: rendered.photo.into(),
                             reply_to_message_id: Some(message_id),
-                            caption: load.text.clone(),
+                            caption: caption.clone(),
                             parse_mode: None,
                             reply_markup: None,
                         });
@@ -1122,7 +1132,7 @@ where
                         {
                             self.record_price_delivery(
                                 message,
-                                &load.text,
+                                &caption,
                                 receipt.message_id,
                                 timestamp,
                             );
@@ -1135,7 +1145,7 @@ where
                     ));
                     lines.push(format!(
                         "{}\n{}",
-                        load.text,
+                        caption,
                         match locale {
                             bot_core::locale::Locale::Es =>
                                 "gráfico no disponible; te dejo la cotización",
@@ -7806,7 +7816,7 @@ mod tests {
             &mut self,
             chart: &bot_core::market_prices::MarketChart,
             _: i64,
-        ) -> Result<Vec<u8>, String> {
+        ) -> Result<super::MarketChartRender, String> {
             self.charts.borrow_mut().push(format!(
                 "{}:{}",
                 chart.yahoo_symbol,
@@ -7815,7 +7825,13 @@ mod tests {
             if self.fail_chart {
                 Err("history unavailable".to_owned())
             } else {
-                Ok(b"market-chart".to_vec())
+                Ok(super::MarketChartRender {
+                    photo: b"market-chart".to_vec(),
+                    caption: chart
+                        .timeframe
+                        .as_ref()
+                        .map(|period| format!("{}: 123 USD (+5.00% {period})", chart.symbol)),
+                })
             }
         }
     }
@@ -7920,8 +7936,15 @@ mod tests {
                 assert_eq!(*charts.borrow(), vec![format!("{symbol}:{period}")]);
                 assert!(matches!(
                     dispatcher.actions.0.as_slice(),
-                    [TelegramAction::SendPhoto { .. }]
+                    [TelegramAction::SendPhoto { caption, .. }]
+                        if caption.ends_with(&format!("(+5.00% {period})"))
                 ));
+                assert!(
+                    dispatcher.state.outgoing[0]
+                        .message
+                        .text
+                        .ends_with(&format!("(+5.00% {period})"))
+                );
             }
         }
     }
