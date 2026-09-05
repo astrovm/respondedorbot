@@ -366,7 +366,7 @@ where
         &mut self,
         chart: &bot_core::market_prices::MarketChart,
         now_unix: i64,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<crate::dispatcher::MarketChartRender, String> {
         let load = bot_adapters::yahoo_finance::load_chart(
             &self.stocks.yahoo_transport,
             &mut self.stocks.cache,
@@ -377,11 +377,15 @@ where
         let mut quote = load.quote.ok_or("market chart quote unavailable")?;
         quote.symbol = chart.symbol.clone();
         quote.name = chart.name.clone();
-        bot_adapters::token_signal::render_market_chart_for_period(
+        let photo = bot_adapters::token_signal::render_market_chart_for_period(
             &quote,
             &load.candles,
             chart.timeframe.as_deref().unwrap_or("5d"),
-        )
+        )?;
+        let caption = chart.timeframe.as_deref().map(|period| {
+            bot_adapters::token_signal::market_chart_caption(&quote, &load.candles, period)
+        });
+        Ok(crate::dispatcher::MarketChartRender { photo, caption })
     }
 }
 
@@ -3871,7 +3875,19 @@ mod tests {
             .borrow_mut()
             .push(response());
         let png = source.render_chart(&chart, 1_700_000_000)?;
-        assert!(png.starts_with(b"\x89PNG"));
+        assert!(png.photo.starts_with(b"\x89PNG"));
+        assert!(png.caption.is_none());
+        let mut ranged_chart = chart.clone();
+        ranged_chart.timeframe = Some("1m".to_owned());
+        source
+            .stocks
+            .yahoo_transport
+            .chart_responses
+            .borrow_mut()
+            .push(response());
+        let ranged = source.render_chart(&ranged_chart, 1_700_000_000)?;
+        assert!(ranged.photo.starts_with(b"\x89PNG"));
+        assert_eq!(ranged.caption.as_deref(), Some("EXM: 42 USD (+5.00% 1m)"));
         assert_eq!(
             source
                 .stocks

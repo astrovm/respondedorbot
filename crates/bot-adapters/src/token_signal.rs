@@ -811,6 +811,27 @@ pub fn render_market_chart(
     render_market_chart_for_period(quote, candles, "5d")
 }
 
+/// Compare the current chart quote with the first available candle's opening price.
+/// Missing history is never replaced with the quote provider's daily variation.
+#[must_use]
+pub fn market_chart_caption(
+    quote: &bot_core::stocks::StockQuote,
+    candles: &[Vec<f64>],
+    period: &str,
+) -> String {
+    let change = candles
+        .first()
+        .and_then(|candle| candle.get(1))
+        .filter(|open| open.is_finite() && **open > 0.0)
+        .map(|open| (quote.price / open - 1.0) * 100.0)
+        .filter(|change| change.is_finite())
+        .map_or_else(|| "N/A".to_owned(), |change| format!("{change:+.2}%"));
+    format!(
+        "{}: {} {} ({change} {period})",
+        quote.symbol, quote.price, quote.currency
+    )
+}
+
 pub fn render_market_chart_for_period(
     quote: &bot_core::stocks::StockQuote,
     candles: &[Vec<f64>],
@@ -1057,6 +1078,44 @@ fn encode_png(image: RgbImage) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn market_caption_uses_requested_history_instead_of_daily_variation() {
+        let mut quote = bot_core::stocks::StockQuote {
+            symbol: "BTC".into(),
+            name: "Bitcoin".into(),
+            price: 120.0,
+            currency: "USD".into(),
+            exchange: String::new(),
+            variation: -1.53,
+        };
+        let candles = vec![
+            vec![1.0, 100.0, 110.0, 90.0, 105.0],
+            vec![2.0, 105.0, 125.0, 100.0, 120.0],
+        ];
+        for period in ["1m", "7d", "2h", "1y"] {
+            assert_eq!(
+                super::market_chart_caption(&quote, &candles, period),
+                format!("BTC: 120 USD (+20.00% {period})")
+            );
+        }
+        quote.price = 80.0;
+        assert_eq!(
+            super::market_chart_caption(&quote, &candles, "1m"),
+            "BTC: 80 USD (-20.00% 1m)"
+        );
+        for missing in [
+            vec![],
+            vec![vec![]],
+            vec![vec![1.0, 0.0]],
+            vec![vec![1.0, f64::NAN]],
+        ] {
+            assert_eq!(
+                super::market_chart_caption(&quote, &missing, "1m"),
+                "BTC: 80 USD (N/A 1m)"
+            );
+        }
+    }
+
     #[test]
     fn market_chart_renders_real_candles_and_rejects_missing_history() -> Result<(), String> {
         let quote = bot_core::stocks::StockQuote {
