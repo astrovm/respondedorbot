@@ -375,6 +375,15 @@ pub trait TokenSignalSource {
 
     fn render_photo(&mut self, signal: &TokenSignal) -> Result<Vec<u8>, String>;
 
+    fn render_period_photo(
+        &mut self,
+        _signal: &TokenSignal,
+        _period: &str,
+        _now: i64,
+    ) -> Result<Vec<u8>, String> {
+        Err("requested token history unavailable".into())
+    }
+
     fn load_state(&mut self, signal_id: &str) -> Result<Option<SignalState>, String>;
 
     fn save_state(&mut self, signal_id: &str, state: &SignalState) -> Result<(), String>;
@@ -1015,16 +1024,19 @@ where
         } else {
             text
         };
+        let mut valid_periods = vec!["1h".into(), "24h".into(), "7d".into(), "30d".into()];
+        if let Some(candidate) = text.split_whitespace().last()
+            && bot_core::price_queries::ChartPeriod::parse(candidate).is_some()
+        {
+            valid_periods.push(candidate.to_ascii_lowercase());
+        }
         let PriceQuery::Assets {
             query,
             timeframe,
             conversion_requested: false,
             provider_scope,
             ..
-        } = parse_price_query(
-            text,
-            &["1h".into(), "24h".into(), "7d".into(), "30d".into()],
-        )
+        } = parse_price_query(text, &valid_periods)
         else {
             return Ok(None);
         };
@@ -1071,16 +1083,22 @@ where
                 Some(ProviderScope::Crypto) => format!("crypto:{request}"),
                 None => request.to_owned(),
             };
-            if let Some(timeframe) = &timeframe {
+            if !single
+                && let Some(timeframe) = &timeframe
+                && matches!(timeframe.as_str(), "1h" | "24h" | "7d" | "30d")
+            {
                 market_query.push_str(&format!(" {timeframe}"));
             }
-            let load = if is_address && provider_scope != Some(ProviderScope::Stock) {
+            let mut load = if is_address && provider_scope != Some(ProviderScope::Stock) {
                 None
             } else {
                 self.market_price_source
                     .as_mut()
                     .map(|source| source.load(&market_query, command, locale, timestamp))
             };
+            if let Some(chart) = load.as_mut().and_then(|load| load.chart.as_mut()) {
+                chart.timeframe.clone_from(&timeframe);
+            }
             if let Some(load) = &load {
                 self.state_diagnostics.extend(load.diagnostics.clone());
             }
@@ -1197,14 +1215,16 @@ where
             return Ok(None);
         };
         let mut caption = format_signal_caption(&signal, timestamp);
-        if let Some(timeframe) = timeframe.filter(|timeframe| !matches!(*timeframe, "1h" | "24h")) {
-            caption.push_str(&format!("\n{timeframe} change: N/A"));
+        if let Some(period) = timeframe {
+            caption.push_str(&format!("\nChart range: {period}"));
         }
         let photo = match self
             .token_signal_source
             .as_mut()
-            .and_then(|source| source.render_photo(&signal).ok())
-        {
+            .and_then(|source| match timeframe {
+                Some(period) => source.render_period_photo(&signal, period, timestamp).ok(),
+                None => source.render_photo(&signal).ok(),
+            }) {
             Some(photo) => photo,
             None => {
                 self.state_diagnostics.push(format!(
@@ -1273,6 +1293,7 @@ where
         };
         self.record_price_delivery(message, &caption, Some(sent_message_id), timestamp);
         let state = SignalState {
+            chart_period: timeframe.map(str::to_owned),
             chat_id: chat_id.0.to_string(),
             message_id: sent_message_id.0,
             source_message_id: message_id.0,
@@ -1448,7 +1469,10 @@ where
         };
         let photo = self.token_signal_source.as_mut().map_or_else(
             || Err("native token-signal source disappeared".to_owned()),
-            |source| source.render_photo(&signal),
+            |source| match state.chart_period.as_deref() {
+                Some(period) => source.render_period_photo(&signal, period, timestamp),
+                None => source.render_photo(&signal),
+            },
         );
         let edited = match photo {
             Ok(photo) => match self.actions.try_edit(TelegramAction::EditMessagePhoto {
@@ -3131,6 +3155,21 @@ where
             message.reply_to_message_id = Some(message_id);
             StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if classify_stock_command(&parsed.command) {
+            if parsed
+                .message_text
+                .split_whitespace()
+                .last()
+                .is_some_and(|period| bot_core::price_queries::ChartPeriod::parse(period).is_some())
+                && let Some(outcome) = self.dispatch_asset_prices(
+                    message,
+                    &format!("stock:{}", parsed.message_text),
+                    MarketPriceCommand::Unified,
+                    locale,
+                    timestamp,
+                )?
+            {
+                return Ok(outcome);
+            }
             let Some(source) = self.stock_price_source.as_mut() else {
                 return Err(DispatchError::MissingService("stock prices"));
             };
@@ -7734,7 +7773,10 @@ mod tests {
             _: bot_core::locale::Locale,
             _: i64,
         ) -> MarketPriceLoad {
-            let key = query.trim_start_matches('$').to_ascii_lowercase();
+            let key = query
+                .trim_start_matches("stock:")
+                .trim_start_matches('$')
+                .to_ascii_lowercase();
             let symbol = match key.as_str() {
                 "btc" | "bitcoin" => Some("BTC"),
                 "apple" | "aapl" => Some("AAPL"),
@@ -7743,6 +7785,7 @@ mod tests {
             };
             MarketPriceLoad {
                 chart: symbol.map(|symbol| bot_core::market_prices::MarketChart {
+                    timeframe: None,
                     symbol: symbol.to_owned(),
                     name: symbol.to_owned(),
                     yahoo_symbol: if symbol == "BTC" {
@@ -7764,7 +7807,11 @@ mod tests {
             chart: &bot_core::market_prices::MarketChart,
             _: i64,
         ) -> Result<Vec<u8>, String> {
-            self.charts.borrow_mut().push(chart.yahoo_symbol.clone());
+            self.charts.borrow_mut().push(format!(
+                "{}:{}",
+                chart.yahoo_symbol,
+                chart.timeframe.as_deref().unwrap_or("default")
+            ));
             if self.fail_chart {
                 Err("history unavailable".to_owned())
             } else {
@@ -7850,6 +7897,32 @@ mod tests {
             }
             assert_eq!(dispatcher.state.incoming.len(), 1);
             assert_eq!(dispatcher.state.outgoing.len(), 1);
+        }
+    }
+
+    #[test]
+    fn explicit_ranges_reach_the_chart_instead_of_becoming_assets() {
+        for (command, asset, symbol) in [
+            ("/c", "bitcoin", "BTC-USD"),
+            ("/p", "apple", "AAPL"),
+            ("/s", "apple", "AAPL"),
+        ] {
+            for period in ["1m", "2h", "7d", "1w", "1mo", "1y", "5y"] {
+                let charts = Rc::new(RefCell::new(Vec::new()));
+                let mut dispatcher = dispatcher().with_market_price_source(Box::new(ChartPrices {
+                    charts: Rc::clone(&charts),
+                    fail_chart: false,
+                }));
+                assert_eq!(
+                    dispatcher.dispatch(update(&format!("{command} {asset} {period}"), Some("en"))),
+                    Ok(DispatchOutcome::Handled)
+                );
+                assert_eq!(*charts.borrow(), vec![format!("{symbol}:{period}")]);
+                assert!(matches!(
+                    dispatcher.actions.0.as_slice(),
+                    [TelegramAction::SendPhoto { .. }]
+                ));
+            }
         }
     }
 
@@ -8029,7 +8102,7 @@ mod tests {
                 MarketPriceCommand::CryptoOnly,
                 false,
             ),
-            ("/c btc 7d", "btc 7d", MarketPriceCommand::CryptoOnly, false),
+            ("/c btc 7d", "btc", MarketPriceCommand::CryptoOnly, false),
             (
                 "/c 2 btc to usd",
                 "2 btc to usd",
@@ -8168,6 +8241,7 @@ mod tests {
         let signal = token_signal();
         let saved = Rc::new(RefCell::new(Vec::new()));
         let state = SignalState {
+            chart_period: None,
             chat_id: "-42".to_owned(),
             message_id: 7,
             source_message_id: 6,
@@ -8227,6 +8301,7 @@ mod tests {
     fn token_signal_callback_enforces_owner_and_refresh_cooldown() {
         let signal = token_signal();
         let base_state = SignalState {
+            chart_period: None,
             chat_id: "-42".to_owned(),
             message_id: 7,
             source_message_id: 6,
@@ -8328,6 +8403,7 @@ mod tests {
 
         let signal = token_signal();
         let state = SignalState {
+            chart_period: None,
             chat_id: "-42".to_owned(),
             message_id: 7,
             source_message_id: 6,
@@ -8381,6 +8457,7 @@ mod tests {
     fn token_signal_refresh_reports_no_data_render_and_state_write_failures() {
         let signal = token_signal();
         let state = SignalState {
+            chart_period: None,
             chat_id: "-42".to_owned(),
             message_id: 7,
             source_message_id: 6,

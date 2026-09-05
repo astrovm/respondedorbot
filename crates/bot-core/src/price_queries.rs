@@ -311,3 +311,64 @@ mod tests {
         }
     }
 }
+
+/// Explicit chart duration. `m` means minutes; `mo` means 30 days.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChartPeriod {
+    pub seconds: i64,
+}
+
+impl ChartPeriod {
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.to_ascii_lowercase();
+        let split = value.find(|c: char| !c.is_ascii_digit())?;
+        let count = value[..split].parse::<i64>().ok()?;
+        let unit = match &value[split..] {
+            "m" => 60,
+            "h" => 3600,
+            "d" => 86400,
+            "w" => 7 * 86400,
+            "mo" => 30 * 86400,
+            "y" => 365 * 86400,
+            _ => return None,
+        };
+        let seconds = count.checked_mul(unit)?;
+        (seconds > 0 && seconds <= 100 * 365 * 86400).then_some(Self { seconds })
+    }
+
+    #[must_use]
+    pub fn yahoo_interval(self) -> &'static str {
+        match self.seconds {
+            0..=86400 => "1m",
+            86401..=604800 => "15m",
+            604801..=5184000 => "1h",
+            5184001..=63072000 => "1d",
+            _ => "1wk",
+        }
+    }
+}
+
+#[cfg(test)]
+mod chart_period_tests {
+    use super::ChartPeriod;
+    #[test]
+    fn ranges_are_unambiguous_bounded_and_choose_usable_candles() {
+        for (input, seconds, interval) in [
+            ("1m", 60, "1m"),
+            ("2h", 7200, "1m"),
+            ("2d", 172800, "15m"),
+            ("1w", 604800, "15m"),
+            ("1mo", 2592000, "1h"),
+            ("1y", 31536000, "1d"),
+            ("5y", 157680000, "1wk"),
+        ] {
+            let period = ChartPeriod::parse(input);
+            assert_eq!(period.map(|p| p.seconds), Some(seconds));
+            assert_eq!(period.map(ChartPeriod::yahoo_interval), Some(interval));
+        }
+        for input in ["0m", "-1d", "9999999999999999999999y", "101y", "1q", "btc"] {
+            assert!(ChartPeriod::parse(input).is_none(), "{input}");
+        }
+    }
+}

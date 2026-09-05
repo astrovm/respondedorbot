@@ -20,6 +20,7 @@ const CACHE_TTL_SECONDS: i64 = 300;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct YahooChartRequest {
     pub symbol: String,
+    pub window: Option<(i64, i64, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,10 +81,18 @@ impl ReqwestYahooFinanceTransport {
 
 impl YahooFinanceTransport for ReqwestYahooFinanceTransport {
     fn chart(&self, request: &YahooChartRequest) -> Result<HttpResponse, TransportFailureKind> {
+        let query = match &request.window {
+            Some((start, end, interval)) => vec![
+                ("period1", start.to_string()),
+                ("period2", end.to_string()),
+                ("interval", interval.clone()),
+            ],
+            None => vec![("range", "5d".into()), ("interval", "1d".into())],
+        };
         let response = self
             .client
             .get(format!("{}/{}", self.chart_url, request.symbol))
-            .query(&[("range", "5d"), ("interval", "1d")])
+            .query(&query)
             .header("User-Agent", "Mozilla/5.0")
             .send()
             .map_err(classify_error)?;
@@ -163,12 +172,36 @@ pub fn load_quote<T: YahooFinanceTransport, C: RequestCache>(
     symbol: &str,
     now_unix: i64,
 ) -> YahooQuoteLoad {
+    load_chart(transport, cache, symbol, now_unix, None)
+}
+
+pub fn load_chart<T: YahooFinanceTransport, C: RequestCache>(
+    transport: &T,
+    cache: &mut C,
+    symbol: &str,
+    now_unix: i64,
+    timeframe: Option<&str>,
+) -> YahooQuoteLoad {
+    let window = timeframe
+        .and_then(bot_core::price_queries::ChartPeriod::parse)
+        .map(|period| {
+            (
+                now_unix - period.seconds,
+                now_unix,
+                period.yahoo_interval().to_owned(),
+            )
+        });
     let request = YahooChartRequest {
         symbol: symbol.to_owned(),
+        window,
+    };
+    let key = match timeframe {
+        Some(period) => format!("{}:history:{period}", cache_key(symbol)),
+        None => cache_key(symbol),
     };
     let load = load_cached_json(
         cache,
-        &cache_key(symbol),
+        &key,
         CACHE_TTL_SECONDS,
         now_unix,
         &format!("Yahoo chart request symbol={symbol}"),
@@ -364,6 +397,48 @@ mod tests {
     }
 
     #[test]
+    fn chart_ranges_change_the_request_and_cache_key() {
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::from([
+                response(chart()),
+                response(chart()),
+                response(chart()),
+            ])),
+            requests: RefCell::default(),
+            searches: RefCell::default(),
+        };
+        let mut cache = Cache::default();
+        for period in ["1m", "7d", "5y"] {
+            assert!(
+                super::load_chart(
+                    &transport,
+                    &mut cache,
+                    "BTC-USD",
+                    1_800_000_000,
+                    Some(period)
+                )
+                .quote
+                .is_some()
+            );
+        }
+        let requests = transport.requests.borrow();
+        assert_eq!(
+            requests[0].window,
+            Some((1_799_999_940, 1_800_000_000, "1m".into()))
+        );
+        assert_eq!(
+            requests[1].window,
+            Some((1_799_395_200, 1_800_000_000, "15m".into()))
+        );
+        assert_eq!(
+            requests[2].window.as_ref().map(|w| w.2.as_str()),
+            Some("1wk")
+        );
+        assert_ne!(cache.writes[0].0, cache.writes[1].0);
+        assert_ne!(cache.writes[1].0, cache.writes[2].0);
+    }
+
+    #[test]
     fn candle_parser_skips_missing_prices_and_keeps_real_ohlc() {
         let payload = serde_json::json!({"chart":{"result":[{
             "timestamp":[100,200,300], "indicators":{"quote":[{
@@ -521,6 +596,7 @@ mod tests {
             transport
                 .chart(&YahooChartRequest {
                     symbol: "EXM".to_owned(),
+                    window: None,
                 })
                 .map(|response| response.status_code),
             Ok(200)
@@ -544,6 +620,7 @@ mod tests {
             unavailable
                 .chart(&YahooChartRequest {
                     symbol: "EXM".to_owned(),
+                    window: None,
                 })
                 .is_err()
         );

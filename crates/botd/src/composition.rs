@@ -367,16 +367,21 @@ where
         chart: &bot_core::market_prices::MarketChart,
         now_unix: i64,
     ) -> Result<Vec<u8>, String> {
-        let load = load_yahoo_quote(
+        let load = bot_adapters::yahoo_finance::load_chart(
             &self.stocks.yahoo_transport,
             &mut self.stocks.cache,
             &chart.yahoo_symbol,
             now_unix,
+            chart.timeframe.as_deref(),
         );
         let mut quote = load.quote.ok_or("market chart quote unavailable")?;
         quote.symbol = chart.symbol.clone();
         quote.name = chart.name.clone();
-        bot_adapters::token_signal::render_market_chart(&quote, &load.candles)
+        bot_adapters::token_signal::render_market_chart_for_period(
+            &quote,
+            &load.candles,
+            chart.timeframe.as_deref().unwrap_or("5d"),
+        )
     }
 }
 
@@ -1318,6 +1323,15 @@ where
         signal: &bot_core::token_signals::TokenSignal,
     ) -> Result<Vec<u8>, String> {
         TokenSignalAdapter::render_photo(self, signal)
+    }
+
+    fn render_period_photo(
+        &mut self,
+        signal: &bot_core::token_signals::TokenSignal,
+        period: &str,
+        now: i64,
+    ) -> Result<Vec<u8>, String> {
+        TokenSignalAdapter::render_period_photo(self, signal, period, now)
     }
 
     fn load_state(
@@ -2983,7 +2997,13 @@ mod tests {
                 .is_ok_and(|image| image.starts_with(b"\x89PNG"))
         );
 
+        assert!(
+            TokenSignalSource::render_period_photo(&mut adapter, &signal, "7d", 1_800_000_000)
+                .is_err()
+        );
+
         let state = SignalState {
+            chart_period: None,
             chat_id: "synthetic-chat".to_owned(),
             message_id: 2,
             source_message_id: 1,
