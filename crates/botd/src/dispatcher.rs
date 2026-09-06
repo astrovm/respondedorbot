@@ -1224,10 +1224,7 @@ where
         let Some(signal) = load.signal else {
             return Ok(None);
         };
-        let mut caption = format_signal_caption(&signal, timestamp);
-        if let Some(period) = timeframe {
-            caption.push_str(&format!("\nChart range: {period}"));
-        }
+        let caption = format_signal_caption(&signal, timestamp);
         let photo = match self
             .token_signal_source
             .as_mut()
@@ -4448,6 +4445,15 @@ mod tests {
         }
 
         fn render_photo(&mut self, _signal: &TokenSignal) -> Result<Vec<u8>, String> {
+            self.photo.clone()
+        }
+
+        fn render_period_photo(
+            &mut self,
+            _: &TokenSignal,
+            _: &str,
+            _: i64,
+        ) -> Result<Vec<u8>, String> {
             self.photo.clone()
         }
 
@@ -8559,6 +8565,33 @@ mod tests {
     }
 
     #[test]
+    fn token_range_is_kept_for_refresh_without_caption_annotation() {
+        let saved = Rc::new(RefCell::new(Vec::new()));
+        let mut dispatcher = dispatcher().with_token_signal_source(Box::new(Signals {
+            query_load: TokenSignalLoad {
+                signal: Some(token_signal()),
+                diagnostics: vec![],
+            },
+            token_load: TokenSignalLoad {
+                signal: None,
+                diagnostics: vec![],
+            },
+            photo: Ok(vec![1]),
+            state: None,
+            queries: Default::default(),
+            saved: Rc::clone(&saved),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(update("/c timba 1h", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            matches!(dispatcher.actions.0.as_slice(), [TelegramAction::SendPhoto { caption, .. }] if !caption.contains("Chart range:"))
+        );
+        assert_eq!(saved.borrow()[0].1.chart_period.as_deref(), Some("1h"));
+    }
+
+    #[test]
     fn token_signal_message_failures_reply_with_available_data_and_diagnostics() {
         let address = "J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump";
         let (ai, _observations) = ai_source(Ok(AiPreparation::silent()));
@@ -8624,7 +8657,7 @@ mod tests {
             Ok(DispatchOutcome::Handled)
         );
         assert!(
-            matches!(render_failed.actions.0.last(), Some(TelegramAction::SendMessage(reply)) if reply.text.contains("Chart range: 1m") && reply.text.contains("Synthetic Token"))
+            matches!(render_failed.actions.0.last(), Some(TelegramAction::SendMessage(reply)) if !reply.text.contains("Chart range:") && reply.text.contains("Synthetic Token"))
         );
         let mut save_failed = dispatcher().with_token_signal_source(Box::new(FallibleSignals {
             query_load: TokenSignalLoad {

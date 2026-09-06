@@ -616,6 +616,64 @@ where
         }
     }
 
+    fn pump_period_candles(
+        &mut self,
+        signal: &TokenSignal,
+        interval: &str,
+        limit: i64,
+        period: &str,
+        now: i64,
+    ) -> Vec<Vec<f64>> {
+        let url = format!(
+            "https://swap-api.pump.fun/v2/coins/{}/candles",
+            signal.token.address
+        );
+        let key = format!(
+            "token_signal:pump-history:{}:{period}",
+            signal.token.address
+        );
+        let created = signal
+            .pump
+            .as_ref()
+            .and_then(|pump| flexible_number(&pump.created_timestamp))
+            .unwrap_or(0.0) as i64;
+        self.cached_json(
+            &key,
+            60,
+            "pump.fun chart history",
+            |transport| {
+                transport.get_json(
+                    &url,
+                    &[
+                        ("interval", interval.to_owned()),
+                        ("limit", limit.to_string()),
+                        ("currency", "USD".to_owned()),
+                        ("createdTs", created.to_string()),
+                        ("beforeTs", now.to_string()),
+                    ],
+                )
+            },
+            Some,
+            &mut Vec::new(),
+        )
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|value| {
+            let mut row = vec![flexible_number(value.get("timestamp")?)? / 1000.0];
+            for key in ["open", "high", "low", "close"] {
+                let price = flexible_number(value.get(key)?)?;
+                if !price.is_finite() || price <= 0.0 {
+                    return None;
+                }
+                row.push(price);
+            }
+            row.push(value.get("volume").and_then(flexible_number).unwrap_or(0.0));
+            Some(row)
+        })
+        .collect()
+    }
+
     pub fn render_period_photo(
         &mut self,
         signal: &TokenSignal,
@@ -632,35 +690,51 @@ where
             _ => ("day", 1, 86400),
         };
         let limit = ((range.seconds + step - 1) / step + 1).min(1000);
-        let url = format!(
-            "https://api.geckoterminal.com/api/v2/networks/{}/pools/{}/ohlcv/{unit}",
-            signal.token.network, signal.pair.pair_address
-        );
-        let key = format!(
-            "token_signal:history:{}:{}:{period}",
-            signal.token.network, signal.pair.pair_address
-        );
-        let raw = self.cached_json(
-            &key,
-            60,
-            "token chart history",
-            |transport| {
-                transport.get_json(
-                    &url,
-                    &[
-                        ("aggregate", aggregate.to_string()),
-                        ("limit", limit.to_string()),
-                        ("currency", "usd".into()),
-                        ("before_timestamp", now.to_string()),
-                    ],
-                )
-            },
-            |value| value.pointer("/data/attributes/ohlcv_list").cloned(),
-            &mut Vec::new(),
-        );
-        let candles: Vec<Vec<f64>> = raw
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or_default();
+        let pump_history = signal.token.chain_id == "solana"
+            && signal.pump.is_some()
+            && signal.pair.pair_address.is_empty();
+        let candles = if pump_history {
+            let interval = match unit {
+                "minute" => format!("{aggregate}m"),
+                "hour" => format!("{aggregate}h"),
+                _ => "1d".to_owned(),
+            };
+            self.pump_period_candles(signal, &interval, limit, period, now)
+        } else {
+            let url = format!(
+                "https://api.geckoterminal.com/api/v2/networks/{}/pools/{}/ohlcv/{unit}",
+                signal.token.network, signal.pair.pair_address
+            );
+            let key = format!(
+                "token_signal:history:{}:{}:{period}",
+                signal.token.network, signal.pair.pair_address
+            );
+            let raw = self.cached_json(
+                &key,
+                60,
+                "token chart history",
+                |transport| {
+                    transport.get_json(
+                        &url,
+                        &[
+                            ("aggregate", aggregate.to_string()),
+                            ("limit", limit.to_string()),
+                            ("currency", "usd".into()),
+                            ("before_timestamp", now.to_string()),
+                        ],
+                    )
+                },
+                |value| value.pointer("/data/attributes/ohlcv_list").cloned(),
+                &mut Vec::new(),
+            );
+            raw.and_then(|value| serde_json::from_value::<Vec<Vec<f64>>>(value).ok())
+                .unwrap_or_default()
+        };
+        let last_known = candles
+            .iter()
+            .filter(|row| row.len() >= 5 && row[0] < (now - range.seconds) as f64)
+            .max_by(|a, b| a[0].total_cmp(&b[0]))
+            .map(|row| row[4]);
         let candles: Vec<_> = candles
             .into_iter()
             .filter(|row| {
@@ -668,6 +742,26 @@ where
             })
             .collect();
         if candles.is_empty() {
+            if pump_history && let Some(price) = last_known {
+                let flat = vec![
+                    vec![
+                        (now - range.seconds) as f64,
+                        price,
+                        price,
+                        price,
+                        price,
+                        0.0,
+                    ],
+                    vec![now as f64, price, price, price, price, 0.0],
+                ];
+                let title = format!(
+                    "{} | {period} | last available trade price",
+                    signal.pair.base_token.symbol
+                );
+                let mut pair = signal.pair.clone();
+                pair.price_usd = json!(price);
+                return render_price_chart(&pair, &flat, Some(&title), None, 1280, 900);
+            }
             return Err("requested token history unavailable".into());
         }
         let title = format!(
@@ -1019,6 +1113,7 @@ fn render_price_chart(
                 .iter()
                 .map(|candle| candle[2])
                 .max_by(f64::total_cmp)
+                .filter(|_| high > low)
             {
                 draw_text_mut(
                     &mut image,
@@ -1269,6 +1364,85 @@ mod tests {
                 .pop_front()
                 .ok_or_else(|| "synthetic image unavailable".to_owned())
         }
+    }
+
+    #[test]
+    fn pump_history_renders_recent_and_idle_tokens_without_a_dex_pool() -> Result<(), String> {
+        struct PumpHistory(serde_json::Value);
+        impl TokenSignalTransport for PumpHistory {
+            fn get_json(
+                &self,
+                url: &str,
+                query: &[(&str, String)],
+            ) -> Result<JsonResponse, String> {
+                assert_eq!(url, "https://swap-api.pump.fun/v2/coins/timba-mint/candles");
+                assert!(query.contains(&("currency", "USD".to_owned())));
+                assert!(query.contains(&("createdTs", "1700000000000".to_owned())));
+                assert!(query.contains(&("beforeTs", "1800000000".to_owned())));
+                Ok(JsonResponse {
+                    status_code: 200,
+                    body: self.0.to_string(),
+                })
+            }
+            fn post_json(&self, _: &str, _: &serde_json::Value) -> Result<JsonResponse, String> {
+                Err("unused".into())
+            }
+            fn get_binary(&self, _: &str) -> Result<BinaryResponse, String> {
+                Err("unused".into())
+            }
+        }
+        let signal = TokenSignal {
+            token: TokenAddress {
+                chain_id: "solana".into(),
+                network: "solana".into(),
+                tag: "SOL".into(),
+                address: "timba-mint".into(),
+            },
+            pair: Default::default(),
+            candles: vec![],
+            supply: None,
+            token_image_url: None,
+            socials: BTreeMap::new(),
+            pump: Some(
+                serde_json::from_value(json!({"created_timestamp":1700000000000_i64}))
+                    .map_err(|e| e.to_string())?,
+            ),
+        };
+        let candle = |timestamp| json!({"timestamp": timestamp, "open":"0.000005", "high":"0.000006", "low":"0.000004", "close":"0.00000525", "volume":"3.97"});
+        for timestamp in [1799999970000_i64, 1799900000000] {
+            let mut adapter =
+                TokenSignalAdapter::new(PumpHistory(json!([candle(timestamp)])), Cache::default());
+            let parsed = adapter.pump_period_candles(&signal, "1m", 61, "1h", 1800000000);
+            assert_eq!(
+                parsed,
+                vec![vec![
+                    timestamp as f64 / 1000.0,
+                    0.000005,
+                    0.000006,
+                    0.000004,
+                    0.00000525,
+                    3.97
+                ]]
+            );
+            assert!(
+                adapter
+                    .render_period_photo(&signal, "1h", 1800000000)?
+                    .starts_with(b"\x89PNG")
+            );
+        }
+        for missing in [
+            json!([]),
+            json!([candle(1800000060000_i64)]),
+            json!([{"timestamp":1799999970000_i64,"open":"bad"}]),
+        ] {
+            let mut adapter = TokenSignalAdapter::new(PumpHistory(missing), Cache::default());
+            assert!(
+                adapter
+                    .render_period_photo(&signal, "1h", 1800000000)
+                    .is_err()
+            );
+        }
+        Ok(())
     }
 
     #[test]
