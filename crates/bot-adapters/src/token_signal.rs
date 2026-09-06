@@ -697,7 +697,7 @@ where
             let interval = match unit {
                 "minute" => format!("{aggregate}m"),
                 "hour" => format!("{aggregate}h"),
-                _ => "1d".to_owned(),
+                _ => "24h".to_owned(),
             };
             self.pump_period_candles(signal, &interval, limit, period, now)
         } else {
@@ -1368,7 +1368,7 @@ mod tests {
 
     #[test]
     fn pump_history_renders_recent_and_idle_tokens_without_a_dex_pool() -> Result<(), String> {
-        struct PumpHistory(serde_json::Value);
+        struct PumpHistory(serde_json::Value, &'static str);
         impl TokenSignalTransport for PumpHistory {
             fn get_json(
                 &self,
@@ -1376,6 +1376,7 @@ mod tests {
                 query: &[(&str, String)],
             ) -> Result<JsonResponse, String> {
                 assert_eq!(url, "https://swap-api.pump.fun/v2/coins/timba-mint/candles");
+                assert!(query.contains(&("interval", self.1.to_owned())));
                 assert!(query.contains(&("currency", "USD".to_owned())));
                 assert!(query.contains(&("createdTs", "1700000000000".to_owned())));
                 assert!(query.contains(&("beforeTs", "1800000000".to_owned())));
@@ -1410,8 +1411,10 @@ mod tests {
         };
         let candle = |timestamp| json!({"timestamp": timestamp, "open":"0.000005", "high":"0.000006", "low":"0.000004", "close":"0.00000525", "volume":"3.97"});
         for timestamp in [1799999970000_i64, 1799900000000] {
-            let mut adapter =
-                TokenSignalAdapter::new(PumpHistory(json!([candle(timestamp)])), Cache::default());
+            let mut adapter = TokenSignalAdapter::new(
+                PumpHistory(json!([candle(timestamp)]), "1m"),
+                Cache::default(),
+            );
             let parsed = adapter.pump_period_candles(&signal, "1m", 61, "1h", 1800000000);
             assert_eq!(
                 parsed,
@@ -1430,12 +1433,31 @@ mod tests {
                     .starts_with(b"\x89PNG")
             );
         }
+        for (period, interval) in [
+            ("1h", "1m"),
+            ("1d", "5m"),
+            ("7d", "1h"),
+            ("60d", "4h"),
+            ("61d", "24h"),
+            ("1y", "24h"),
+            ("5y", "24h"),
+        ] {
+            let mut adapter = TokenSignalAdapter::new(
+                PumpHistory(json!([candle(1799999970000_i64)]), interval),
+                Cache::default(),
+            );
+            assert!(
+                adapter
+                    .render_period_photo(&signal, period, 1800000000)?
+                    .starts_with(b"\x89PNG")
+            );
+        }
         for missing in [
             json!([]),
             json!([candle(1800000060000_i64)]),
             json!([{"timestamp":1799999970000_i64,"open":"bad"}]),
         ] {
-            let mut adapter = TokenSignalAdapter::new(PumpHistory(missing), Cache::default());
+            let mut adapter = TokenSignalAdapter::new(PumpHistory(missing, "1m"), Cache::default());
             assert!(
                 adapter
                     .render_period_photo(&signal, "1h", 1800000000)
