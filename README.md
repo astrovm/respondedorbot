@@ -125,7 +125,9 @@ Full Solana/EVM addresses and `$ticker` messages share the command resolver.
 Addresses preserve case and pin the token identity; symbol searches require an
 exact match. DexScreener and pump.fun supply token cards. Missing chart history
 or photo delivery falls back to the available quote/card text, and missing
-metrics are shown as N/A.
+metrics are shown as N/A. Pump.fun bonding-curve tokens use pump.fun’s candle feed
+for explicit chart ranges. When only an older trade is available, the chart
+shows its price across the window and labels it “last available trade price”.
 
 Chart ranges use `h` (hours), `d` (days), `w` (weeks),
 `m` or `mo` (30-day months), and `y` (365-day years), for example `/c bitcoin 1m`,
