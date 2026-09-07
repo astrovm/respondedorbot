@@ -11,6 +11,7 @@ use reqwest::blocking::multipart::{Form, Part};
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
+use url::Url;
 
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 const MAX_RESPONSE_BYTES: u64 = 1_048_576;
@@ -151,19 +152,25 @@ impl ReqwestTelegramTransport {
             transport
         })
     }
+
+    fn api_url(&self, token: &str, endpoint: &str) -> Result<Url, TransportFailureKind> {
+        let mut url = Url::parse(&self.api_base).map_err(|_| TransportFailureKind::Request)?;
+        let bot_path = format!("bot{token}");
+        url.path_segments_mut()
+            .map_err(|_| TransportFailureKind::Request)?
+            .push(&bot_path)
+            .push(endpoint);
+        Ok(url)
+    }
 }
 
 impl TelegramTransport for ReqwestTelegramTransport {
     fn send(&self, request: &TelegramRequest) -> Result<HttpResponse, TransportFailureKind> {
-        let url = format!(
-            "{}/bot{}/{}",
-            self.api_base, request.token, request.endpoint
-        );
         // Telegram requires the bot token in this URL path. Production uses
         // the fixed HTTPS API base above, so this is not cleartext transport.
+        let url = self.api_url(&request.token, &request.endpoint)?;
         let mut builder = self
             .client
-            // lgtm [rust/cleartext-transmission]
             .request(request.method.clone(), url)
             .timeout(request.timeout);
         if let Some(params) = &request.params {
@@ -188,10 +195,7 @@ impl TelegramMultipartTransport for ReqwestTelegramTransport {
         &self,
         request: &TelegramMultipartRequest,
     ) -> Result<HttpResponse, TransportFailureKind> {
-        let url = format!(
-            "{}/bot{}/{}",
-            self.api_base, request.token, request.endpoint
-        );
+        let url = self.api_url(&request.token, &request.endpoint)?;
         let mut form = Form::new();
         for (name, value) in &request.fields {
             form = form.text(name.clone(), value.clone());
@@ -203,11 +207,8 @@ impl TelegramMultipartTransport for ReqwestTelegramTransport {
             .mime_str(&request.content_type)
             .map_err(|_| TransportFailureKind::Request)?;
         form = form.part(request.file_field.clone(), part);
-        // Telegram requires the bot token in this URL path. Production uses
-        // the fixed HTTPS API base above, so this is not cleartext transport.
         read_response(
             self.client
-                // lgtm [rust/cleartext-transmission]
                 .post(url)
                 .timeout(request.timeout)
                 .multipart(form)
