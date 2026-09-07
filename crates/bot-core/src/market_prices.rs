@@ -431,10 +431,11 @@ pub fn execute_market_price_candidate<C: CryptoMarketProvider>(
     };
     let text = conversion.map_or_else(
         || {
-            format_assets(
+            format_assets_with_timeframe(
                 std::slice::from_ref(&asset),
                 target_symbol,
                 target_parameter,
+                timeframe,
             )
         },
         |conversion| format_selected_conversion(&asset, target_parameter, conversion),
@@ -615,7 +616,7 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
         let mut candidates = selection
             .rows
             .iter()
-            .map(|asset| market_candidate(asset, target_symbol, target_parameter))
+            .map(|asset| market_candidate(asset, target_symbol, target_parameter, timeframe))
             .collect::<Vec<_>>();
         candidates.sort_by(|left, right| {
             left.name
@@ -660,10 +661,11 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
                 .join(", "),
             locale,
         );
-        let crypto_text = format_assets(
+        let crypto_text = format_assets_with_timeframe(
             &selection.rows[..selection.rows.len().min(selection.count)],
             target_symbol,
             target_parameter,
+            timeframe,
         );
         return if crypto_text.is_empty() {
             error
@@ -679,10 +681,11 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
         return missing_assets(&unresolved, locale);
     }
     let mut parts = Vec::new();
-    let crypto_text = format_assets(
+    let crypto_text = format_assets_with_timeframe(
         &selection.rows[..selection.rows.len().min(selection.count)],
         target_symbol,
         target_parameter,
+        timeframe,
     );
     if !crypto_text.is_empty() {
         parts.push(crypto_text);
@@ -1274,7 +1277,7 @@ fn format_or_select_conversion(
     if candidates.len() > 1 {
         let mut market_candidates = candidates
             .iter()
-            .map(|asset| market_candidate(asset, display_currency, quote_parameter))
+            .map(|asset| market_candidate(asset, display_currency, quote_parameter, None))
             .collect::<Vec<_>>();
         market_candidates.sort_by(|left, right| {
             left.name
@@ -1315,7 +1318,26 @@ fn format_or_select_conversion(
     )
 }
 
-fn format_assets(rows: &[CryptoAsset], display: &str, parameter: &str) -> String {
+fn quote_change_for_timeframe<'a>(
+    quote: &CryptoQuote,
+    timeframe: Option<&'a str>,
+) -> (Option<f64>, &'a str) {
+    match timeframe {
+        Some("1h") => (quote.percent_change_1h, "1h"),
+        Some("24h") => (quote.percent_change_24h, "24h"),
+        Some("7d") => (quote.percent_change_7d, "7d"),
+        Some("30d") => (quote.percent_change_30d, "30d"),
+        Some(period) => (None, period),
+        None => (quote.percent_change_24h, "24h"),
+    }
+}
+
+fn format_assets_with_timeframe(
+    rows: &[CryptoAsset],
+    display: &str,
+    parameter: &str,
+    timeframe: Option<&str>,
+) -> String {
     rows.iter()
         .filter_map(|asset| {
             let quote = asset
@@ -1328,7 +1350,7 @@ fn format_assets(rows: &[CryptoAsset], display: &str, parameter: &str) -> String
                 } else {
                     1.0
                 };
-            let change = quote.percent_change_24h;
+            let (change, period) = quote_change_for_timeframe(quote, timeframe);
             let fixed = format!("{price:.12}");
             let decimals = fixed.split('.').nth(1).unwrap_or("");
             let zeros = decimals
@@ -1345,14 +1367,19 @@ fn format_assets(rows: &[CryptoAsset], display: &str, parameter: &str) -> String
                 trimmed(price, zeros + 4),
                 display,
                 change,
-                "24h"
+                period
             ))
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn market_candidate(asset: &CryptoAsset, display: &str, parameter: &str) -> MarketCandidate {
+fn market_candidate(
+    asset: &CryptoAsset,
+    display: &str,
+    parameter: &str,
+    timeframe: Option<&str>,
+) -> MarketCandidate {
     let (price, change) = asset
         .quotes
         .get(parameter)
@@ -1363,15 +1390,17 @@ fn market_candidate(asset: &CryptoAsset, display: &str, parameter: &str) -> Mark
             } else {
                 1.0
             };
-            (
-                trimmed(quote.price * multiplier, 12),
-                quote.percent_change_24h.map_or_else(
-                    || "N/A".to_owned(),
-                    |value| format!("{}%", signed_trimmed(value, 2)),
-                ),
-            )
+            let (value, period) = quote_change_for_timeframe(quote, timeframe);
+            let change = value.map_or_else(
+                || format!("N/A {period}"),
+                |value| format!("{}% {period}", signed_trimmed(value, 2)),
+            );
+            (trimmed(quote.price * multiplier, 12), change)
         })
-        .unwrap_or_else(|| ("N/A".to_owned(), "N/A".to_owned()));
+        .unwrap_or_else(|| {
+            let period = timeframe.unwrap_or("24h");
+            ("N/A".to_owned(), format!("N/A {period}"))
+        });
     MarketCandidate {
         id: asset.id.clone(),
         symbol: asset.symbol.clone(),
@@ -1749,7 +1778,7 @@ mod tests {
     }
 
     #[test]
-    fn every_chart_period_keeps_the_quote_change_at_24h() {
+    fn every_chart_period_uses_the_requested_change_period() {
         for period in ["1h", "2h", "7d", "1m", "1mo", "1w", "1y", "5y"] {
             let result = execute_market_price_command(
                 &format!("btc {period}"),
@@ -1761,7 +1790,12 @@ mod tests {
                 },
                 &mut Stocks::default(),
             );
-            assert_eq!(result.text, "BTC: 50000 USD (+2.5% 24h)", "{period}");
+            let expected = match period {
+                "1h" => "BTC: 50000 USD (+1% 1h)".to_owned(),
+                "7d" => "BTC: 50000 USD (+7% 7d)".to_owned(),
+                _ => format!("BTC: 50000 USD (N/A {period})"),
+            };
+            assert_eq!(result.text, expected, "{period}");
             assert_eq!(
                 result
                     .chart
@@ -2020,7 +2054,7 @@ mod tests {
         );
         assert_eq!(
             result.text,
-            "BTC: 50000 USD (+2.5% 24h)\nNVDA: las acciones solo soportan moneda nativa y variación 24h"
+            "BTC: 50000 USD (+7% 7d)\nNVDA: las acciones solo soportan moneda nativa y variación 24h"
         );
         let result = execute_market_price_command(
             "btc 2h",
@@ -2032,7 +2066,7 @@ mod tests {
             },
             &mut Stocks::default(),
         );
-        assert_eq!(result.text, "BTC: 50000 USD (+2.5% 24h)");
+        assert_eq!(result.text, "BTC: 50000 USD (N/A 2h)");
         assert_eq!(
             result
                 .chart
@@ -2335,7 +2369,7 @@ mod tests {
                 quotes: vec![vec![asset.clone()]],
             },
         );
-        assert_eq!(result.text, "LIBRA: 1.5 USD (+2.5% 24h)");
+        assert_eq!(result.text, "LIBRA: 1.5 USD (+7% 7d)");
         let chart = result
             .chart
             .as_ref()

@@ -83,7 +83,7 @@ use bot_core::telegram_payments::{
 use bot_core::token_signals::{
     SIGNAL_REFRESH_COOLDOWN_SECONDS, SignalQuery, SignalState, TokenAddress, TokenSignal,
     build_signal_keyboard, callback_text as signal_callback_text, detect_signal_query,
-    format_signal_caption, has_usable_chart, stable_signal_id,
+    format_signal_caption_for_period, has_usable_chart, stable_signal_id,
 };
 use bot_core::weather::{
     WeatherObservation, classify_weather_command, render_weather, requested_location,
@@ -441,7 +441,7 @@ fn market_selection_command(command: &str) -> MarketPriceCommand {
     }
 }
 
-/// Chart media and an optional daily quote caption.
+/// Chart media and an optional quote caption for the requested period.
 pub struct MarketChartRender {
     pub photo: Vec<u8>,
     pub caption: Option<String>,
@@ -1542,7 +1542,11 @@ where
                                 },
                             );
                             if let Some(photo) = token_photo {
-                                let token_caption = format_signal_caption(&signal, timestamp);
+                                let token_caption = format_signal_caption_for_period(
+                                    &signal,
+                                    timestamp,
+                                    timeframe.as_deref(),
+                                );
                                 let delivered = self.actions.try_photo(TelegramAction::SendPhoto {
                                     chat_id,
                                     photo: photo.into(),
@@ -1731,7 +1735,7 @@ where
         let Some(signal) = load.signal else {
             return Ok(None);
         };
-        let caption = format_signal_caption(&signal, timestamp);
+        let caption = format_signal_caption_for_period(&signal, timestamp, timeframe);
         let photo = match self
             .token_signal_source
             .as_mut()
@@ -2007,7 +2011,11 @@ where
                 chat_id: ChatId(chat_id),
                 message_id: MessageId(context.message_id),
                 photo: photo.into(),
-                caption: format_signal_caption(&signal, timestamp),
+                caption: format_signal_caption_for_period(
+                    &signal,
+                    timestamp,
+                    state.chart_period.as_deref(),
+                ),
                 parse_mode: Some(ParseMode::Html),
                 reply_markup: Some(build_signal_keyboard(
                     signal_id,
@@ -2283,7 +2291,11 @@ where
                         }
                     });
                     if let Some(photo) = photo {
-                        let caption = format_signal_caption(&signal, timestamp);
+                        let caption = format_signal_caption_for_period(
+                            &signal,
+                            timestamp,
+                            stored.selection.timeframe.as_deref(),
+                        );
                         match self.actions.try_photo(TelegramAction::SendPhoto {
                             chat_id: ChatId(chat_id_value),
                             photo: photo.into(),
@@ -8789,7 +8801,7 @@ mod tests {
                     caption: chart
                         .timeframe
                         .as_ref()
-                        .map(|_| format!("{}: 123 USD (+5.00% 24h)", chart.symbol)),
+                        .map(|period| format!("{}: 123 USD (+5.00% {period})", chart.symbol)),
                 })
             }
         }
@@ -10889,13 +10901,13 @@ mod tests {
                 assert!(matches!(
                     dispatcher.actions.0.as_slice(),
                     [TelegramAction::SendPhoto { caption, .. }]
-                        if caption.ends_with("(+5.00% 24h)")
+                        if caption.ends_with(&format!("(+5.00% {period})"))
                 ));
                 assert!(
                     dispatcher.state.outgoing[0]
                         .message
                         .text
-                        .ends_with("(+5.00% 24h)")
+                        .ends_with(&format!("(+5.00% {period})"))
                 );
             }
         }

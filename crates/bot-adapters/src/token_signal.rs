@@ -905,21 +905,25 @@ pub fn render_market_chart(
     render_market_chart_for_period(quote, candles, "5d")
 }
 
-/// Keep chart captions aligned with the quote card's provider-supplied daily variation.
-/// Historical candles determine the drawing only; they do not relabel the quote change.
+/// Keep chart captions aligned with the requested chart period.
 #[must_use]
 pub fn market_chart_caption(
     quote: &bot_core::stocks::StockQuote,
     _candles: &[Vec<f64>],
-    _period: &str,
+    period: &str,
 ) -> String {
     let change = if quote.variation.is_finite() {
         format!("{:+.2}%", quote.variation)
     } else {
         "N/A".to_owned()
     };
+    let period = if period.trim().is_empty() {
+        "24h"
+    } else {
+        period
+    };
     format!(
-        "{}: {} {} ({change} 24h)",
+        "{}: {} {} ({change} {period})",
         quote.symbol, quote.price, quote.currency
     )
 }
@@ -1172,7 +1176,7 @@ fn encode_png(image: RgbImage) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn market_caption_uses_daily_variation_instead_of_requested_history() {
+    fn market_caption_uses_requested_period() {
         let mut quote = bot_core::stocks::StockQuote {
             symbol: "BTC".into(),
             name: "Bitcoin".into(),
@@ -1188,13 +1192,13 @@ mod tests {
         for period in ["1m", "7d", "2h", "1y"] {
             assert_eq!(
                 super::market_chart_caption(&quote, &candles, period),
-                "BTC: 120 USD (-1.53% 24h)"
+                format!("BTC: 120 USD (-1.53% {period})")
             );
         }
         quote.price = 80.0;
         assert_eq!(
             super::market_chart_caption(&quote, &candles, "1m"),
-            "BTC: 80 USD (-1.53% 24h)"
+            "BTC: 80 USD (-1.53% 1m)"
         );
         for missing in [
             vec![],
@@ -1204,7 +1208,7 @@ mod tests {
         ] {
             assert_eq!(
                 super::market_chart_caption(&quote, &missing, "1m"),
-                "BTC: 80 USD (-1.53% 24h)"
+                "BTC: 80 USD (-1.53% 1m)"
             );
         }
     }

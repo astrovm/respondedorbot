@@ -454,13 +454,14 @@ where
             &load.candles,
             chart.timeframe.as_deref().unwrap_or("5d"),
         )?;
-        // The chart response is used only for drawing.  Its previous-close
-        // comparison depends on the requested range and must not replace the
-        // independently fetched quote text (whose change is the provider's
-        // rolling 24h value).
+        let period = chart.timeframe.as_deref().unwrap_or("24h");
         Ok(crate::dispatcher::MarketChartRender {
             photo,
-            caption: None,
+            caption: Some(bot_adapters::token_signal::market_chart_caption(
+                &quote,
+                &load.candles,
+                period,
+            )),
         })
     }
 }
@@ -4041,7 +4042,7 @@ mod tests {
             .push(response());
         let png = source.render_chart(&chart, 1_700_000_000)?;
         assert!(png.photo.starts_with(b"\x89PNG"));
-        assert!(png.caption.is_none());
+        assert_eq!(png.caption.as_deref(), Some("EXM: 42 USD (+5.00% 24h)"));
         let mut ranged_chart = chart.clone();
         ranged_chart.timeframe = Some("1m".to_owned());
         source
@@ -4052,7 +4053,7 @@ mod tests {
             .push(response());
         let ranged = source.render_chart(&ranged_chart, 1_700_000_000)?;
         assert!(ranged.photo.starts_with(b"\x89PNG"));
-        assert!(ranged.caption.is_none());
+        assert_eq!(ranged.caption.as_deref(), Some("EXM: 42 USD (+5.00% 1m)"));
         assert_eq!(
             source
                 .stocks
