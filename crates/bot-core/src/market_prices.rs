@@ -125,6 +125,7 @@ pub fn format_market_selection(selection: &MarketSelection, locale: Locale) -> S
     let lines = selection
         .candidates
         .iter()
+        .take(10)
         .enumerate()
         .map(|(index, candidate)| {
             let name = if candidate.name.is_empty() {
@@ -839,6 +840,10 @@ fn select_assets(text: &str, listed: &[CryptoAsset]) -> Selection {
                     || normalized(&asset.slug) == single
             })
             .collect::<Vec<_>>();
+        let exact_symbol_matches = listed
+            .iter()
+            .filter(|asset| normalized(&asset.symbol) == single)
+            .collect::<Vec<_>>();
         // Canonical native symbols have an established interpretation. Keep
         // the existing preference for those names while exposing genuinely
         // ambiguous tickers (such as LIBRA) to the selection UI.
@@ -854,7 +859,13 @@ fn select_assets(text: &str, listed: &[CryptoAsset]) -> Selection {
                 explicit_requested: vec![single],
             };
         }
-        if exact_matches.len() == 1
+        // A single top-list symbol is not proof that the ticker is unique:
+        // CMC's symbol endpoint can contain lower-ranked namesakes.  Let the
+        // caller perform that discovery before deciding whether to show one
+        // quote or an identity menu.  Exact names/slugs remain direct when
+        // they do not also collide with a ticker.
+        if exact_symbol_matches.is_empty()
+            && exact_matches.len() == 1
             && let Some(asset) = exact_matches.first()
         {
             return Selection {
@@ -1799,6 +1810,82 @@ mod tests {
     }
 
     #[test]
+    fn a_top_list_ticker_is_checked_for_lower_ranked_namesakes() -> Result<(), String> {
+        let mut listed = coin("LIBRA", 0.007);
+        listed.id = "1001".to_owned();
+        listed.name = "Libra Finance".to_owned();
+        let mut namesake = coin("LIBRA", 0.00009);
+        namesake.id = "1002".to_owned();
+        namesake.name = "Libra Protocol".to_owned();
+        let result = execute_market_price_command(
+            "libra",
+            MarketPriceCommand::CryptoOnly,
+            Locale::En,
+            &mut Crypto {
+                listings: vec![vec![listed]],
+                quotes: vec![vec![namesake]],
+            },
+            &mut Stocks::default(),
+        );
+        let selection = result
+            .selection
+            .ok_or_else(|| "single top-list ticker was not disambiguated".to_owned())?;
+        assert_eq!(
+            selection
+                .candidates
+                .iter()
+                .map(|candidate| candidate.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["1001", "1002"]
+        );
+        assert!(result.text.is_empty());
+        assert!(result.chart.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn exact_names_and_unlisted_slugs_keep_their_identity() -> Result<(), String> {
+        let mut named = coin("LIBRA", 0.007);
+        named.name = "Libra Finance".to_owned();
+        named.slug = "libra-finance".to_owned();
+        let named_result = execute_market_price_command(
+            "libra finance",
+            MarketPriceCommand::CryptoOnly,
+            Locale::En,
+            &mut Crypto {
+                listings: vec![vec![named]],
+                quotes: Vec::new(),
+            },
+            &mut Stocks::default(),
+        );
+        assert_eq!(named_result.text, "LIBRA: 0.007 USD (+2.5% 24h)");
+
+        let mut fetched = coin("MYST", 0.25);
+        fetched.id = "777".to_owned();
+        fetched.name = "Mysterious Token".to_owned();
+        fetched.slug = "mysterious-token".to_owned();
+        let slug_result = execute_market_price_command(
+            "mysterious-token",
+            MarketPriceCommand::CryptoOnly,
+            Locale::En,
+            &mut Crypto {
+                listings: vec![Vec::new()],
+                quotes: vec![Vec::new(), vec![fetched]],
+            },
+            &mut Stocks::default(),
+        );
+        assert_eq!(slug_result.text, "MYST: 0.25 USD (+2.5% 24h)");
+        assert_eq!(
+            slug_result
+                .chart
+                .as_ref()
+                .map(|chart| chart.symbol.as_str()),
+            Some("MYST")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn unusable_quotes_are_reported_without_an_empty_or_fake_price_line() {
         let result = execute_market_price_command(
             "magaiba",
@@ -2212,6 +2299,177 @@ mod tests {
         fn quotes(&mut self, _: &[String], _: &str, _: bool) -> Result<Vec<CryptoAsset>, String> {
             Err("synthetic failure".to_owned())
         }
+    }
+
+    #[test]
+    fn candidate_resolution_is_identity_bound_and_preserves_contracts() -> Result<(), String> {
+        let contract = TokenAddress {
+            chain_id: "solana".to_owned(),
+            network: "solana".to_owned(),
+            tag: "SOL".to_owned(),
+            address: "F3A1baCgv4TF79TSjdMTvpMDtNv8DJvHZwNc9DG8pump".to_owned(),
+        };
+        let candidate = MarketCandidate {
+            id: "42".to_owned(),
+            symbol: "LIBRA".to_owned(),
+            name: "Libra Finance".to_owned(),
+            slug: "libra-finance".to_owned(),
+            price: "1.5".to_owned(),
+            change: "+2.5%".to_owned(),
+            contracts: vec![contract.clone()],
+        };
+        let mut asset = coin("LIBRA", 1.5);
+        asset.id = candidate.id.clone();
+        asset.symbol.clear();
+        asset.name.clear();
+        asset.slug.clear();
+        let result = execute_market_price_candidate(
+            &candidate,
+            Some("7d"),
+            "USD",
+            "USD",
+            None,
+            Locale::En,
+            &mut Crypto {
+                listings: Vec::new(),
+                quotes: vec![vec![asset.clone()]],
+            },
+        );
+        assert_eq!(result.text, "LIBRA: 1.5 USD (+2.5% 24h)");
+        let chart = result
+            .chart
+            .as_ref()
+            .ok_or_else(|| "candidate quote did not retain chart identity".to_owned())?;
+        assert_eq!(chart.timeframe.as_deref(), Some("7d"));
+        assert_eq!(chart.token.as_ref(), Some(&contract));
+
+        let conversion = MarketConversion {
+            amount: "2".to_owned(),
+            source_symbol: "LIBRA".to_owned(),
+            target_symbol: "USD".to_owned(),
+            reverse: false,
+        };
+        let converted = execute_market_price_candidate(
+            &candidate,
+            None,
+            "USD",
+            "USD",
+            Some(&conversion),
+            Locale::En,
+            &mut Crypto {
+                listings: Vec::new(),
+                quotes: vec![vec![asset]],
+            },
+        );
+        assert_eq!(converted.text, "2 LIBRA = 3 USD");
+        assert!(converted.chart.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_resolution_rejects_wrong_id_unusable_quote_and_provider_failure() {
+        let candidate = MarketCandidate {
+            id: "42".to_owned(),
+            symbol: "LIBRA".to_owned(),
+            name: "Libra Finance".to_owned(),
+            slug: "libra-finance".to_owned(),
+            price: "1".to_owned(),
+            change: "N/A".to_owned(),
+            contracts: Vec::new(),
+        };
+        let mut wrong_id = coin("LIBRA", 1.0);
+        wrong_id.id = "99".to_owned();
+        let wrong = execute_market_price_candidate(
+            &candidate,
+            None,
+            "USD",
+            "USD",
+            None,
+            Locale::En,
+            &mut Crypto {
+                listings: Vec::new(),
+                quotes: vec![vec![wrong_id]],
+            },
+        );
+        assert!(wrong.no_assets_found);
+        assert!(wrong.text.contains("usable quote"));
+
+        let mut unusable_asset = coin("LIBRA", 0.0);
+        unusable_asset.id = candidate.id.clone();
+        let unusable = execute_market_price_candidate(
+            &candidate,
+            None,
+            "USD",
+            "USD",
+            None,
+            Locale::En,
+            &mut Crypto {
+                listings: Vec::new(),
+                quotes: vec![vec![unusable_asset]],
+            },
+        );
+        assert!(unusable.no_assets_found);
+        assert!(unusable.text.contains("LIBRA"));
+
+        let failed = execute_market_price_candidate(
+            &candidate,
+            None,
+            "USD",
+            "USD",
+            None,
+            Locale::En,
+            &mut FailedCrypto,
+        );
+        assert!(failed.no_assets_found);
+        assert_eq!(
+            failed.diagnostics,
+            vec!["CoinMarketCap identity quote: synthetic failure"]
+        );
+    }
+
+    #[test]
+    fn market_selection_text_is_bounded_and_includes_candidate_identity() {
+        let contract = TokenAddress {
+            chain_id: "solana".to_owned(),
+            network: "solana".to_owned(),
+            tag: "SOL".to_owned(),
+            address: "123456789012345678901234567890123456789012".to_owned(),
+        };
+        let mut candidates = vec![MarketCandidate {
+            id: "".to_owned(),
+            symbol: "LIBRA".to_owned(),
+            name: String::new(),
+            slug: "libra-finance".to_owned(),
+            price: "0.007".to_owned(),
+            change: "N/A".to_owned(),
+            contracts: Vec::new(),
+        }];
+        candidates.extend((1..=10).map(|index| MarketCandidate {
+            id: index.to_string(),
+            symbol: "LIBRA".to_owned(),
+            name: format!("Libra {index}"),
+            slug: format!("libra-{index}"),
+            price: "0.007".to_owned(),
+            change: "N/A".to_owned(),
+            contracts: if index == 1 {
+                vec![contract.clone()]
+            } else {
+                Vec::new()
+            },
+        }));
+        let selection = MarketSelection {
+            query: "libra".to_owned(),
+            timeframe: None,
+            target_symbol: "USD".to_owned(),
+            target_parameter: "USD".to_owned(),
+            conversion: None,
+            candidates,
+        };
+        let text = format_market_selection(&selection, Locale::En);
+        assert!(text.chars().count() <= crate::telegram_actions::MAX_TELEGRAM_TEXT_LENGTH);
+        assert!(text.contains("libra-finance"));
+        assert!(text.contains("solana:SOL"));
+        assert!(!text.contains("11. Libra"));
     }
 
     #[test]

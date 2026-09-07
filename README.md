@@ -118,8 +118,9 @@ exits.
 `/c` keeps lookup restricted to crypto. Canonical assets take priority over DEX
 namesakes: `/c bitcoin` resolves BTC and `/p apple` resolves AAPL. Use `stock:` or
 `crypto:` to disambiguate. A single asset gets a chart; comma-separated lists
-such as `/p btc,timba` combine market and token quotes. Bare `/c` shows Bitcoin; bare `/p`, top-N lists, stablecoin lists, and conversion
-options retain their list behavior.
+such as `/p btc,timba` combine market and token quotes. Bare `/c`, `/p`, top-N
+lists, stablecoin lists, and conversion options retain their provider list
+behavior.
 
 Full Solana/EVM addresses and `$ticker` messages share the command resolver.
 Addresses preserve case and pin the token identity; symbol searches require an
@@ -135,9 +136,9 @@ Chart ranges use `h` (hours), `d` (days), `w` (weeks),
 selected automatically. Charts label the dates actually returned by the
 provider; newly created tokens and unavailable history cannot fill an older
 requested range. For a single cryptocurrency or stock with an explicit range,
-the caption uses the chart provider’s current quote and percentage change from
-the first available candle’s opening price, labeled with that range. Without an
-explicit range, the caption keeps the default daily change.
+the chart uses that history while the caption keeps the independently resolved
+quote and its provider-supplied 24h change. Without an explicit range, the
+caption keeps the same default daily change.
 
 ## Test it
 
