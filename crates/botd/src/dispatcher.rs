@@ -83,7 +83,7 @@ use bot_core::telegram_payments::{
 use bot_core::token_signals::{
     SIGNAL_REFRESH_COOLDOWN_SECONDS, SignalQuery, SignalState, TokenAddress, TokenSignal,
     build_signal_keyboard, callback_text as signal_callback_text, detect_signal_query,
-    format_signal_caption_for_period, has_usable_chart, stable_signal_id,
+    format_signal_caption_for_period, has_usable_chart, signal_market_values, stable_signal_id,
 };
 use bot_core::weather::{
     WeatherObservation, classify_weather_command, render_weather, requested_location,
@@ -377,6 +377,45 @@ fn market_selection_text(selection: &MarketSelection, locale: bot_core::locale::
     format_market_selection(selection, locale)
 }
 
+fn market_token_candidate(signal: &TokenSignal, timeframe: Option<&str>) -> MarketCandidate {
+    let (price, change) = signal_market_values(signal, timeframe);
+    let symbol = signal.pair.base_token.symbol.clone();
+    let name = if signal.pair.base_token.name.is_empty() {
+        symbol.clone()
+    } else {
+        signal.pair.base_token.name.clone()
+    };
+    MarketCandidate {
+        id: format!(
+            "token:{}:{}:{}",
+            signal.token.chain_id, signal.token.network, signal.token.address
+        ),
+        symbol: symbol.clone(),
+        name,
+        slug: symbol.to_ascii_lowercase(),
+        price,
+        change,
+        contracts: vec![signal.token.clone()],
+    }
+}
+
+fn token_signal_matches_query(signal: &TokenSignal, query: &SignalQuery) -> bool {
+    match query {
+        SignalQuery::Address(address) => {
+            address
+                .chain_id
+                .eq_ignore_ascii_case(&signal.token.chain_id)
+                && address.network.eq_ignore_ascii_case(&signal.token.network)
+                && address.address.eq_ignore_ascii_case(&signal.token.address)
+        }
+        SignalQuery::Symbol(symbol) => {
+            let symbol = symbol.trim_start_matches('$');
+            signal.pair.base_token.symbol.eq_ignore_ascii_case(symbol)
+                || signal.pair.base_token.name.eq_ignore_ascii_case(symbol)
+        }
+    }
+}
+
 fn market_selection_keyboard(
     selection_id: &str,
     selection: &MarketSelection,
@@ -393,23 +432,35 @@ fn market_selection_keyboard(
                 } else {
                     candidate.name.as_str()
                 };
-                let identity = candidate.id.strip_prefix("stock:").map_or_else(
-                    || {
-                        candidate
-                            .contracts
-                            .first()
-                            .map(|contract| {
-                                format!(
-                                    "{}:{} {}",
-                                    contract.chain_id,
-                                    contract.tag,
-                                    short_market_address(&contract.address)
-                                )
-                            })
-                            .unwrap_or_else(|| format!("CMC #{}", candidate.id))
-                    },
-                    |symbol| format!("Yahoo {symbol}"),
-                );
+                let identity = if let Some(symbol) = candidate.id.strip_prefix("stock:") {
+                    format!("Yahoo {symbol}")
+                } else if candidate.id.starts_with("token:") {
+                    candidate
+                        .contracts
+                        .first()
+                        .map(|contract| {
+                            format!(
+                                "{}:{} {}",
+                                contract.chain_id,
+                                contract.tag,
+                                short_market_address(&contract.address)
+                            )
+                        })
+                        .unwrap_or_else(|| "DEX token".to_owned())
+                } else {
+                    candidate
+                        .contracts
+                        .first()
+                        .map(|contract| {
+                            format!(
+                                "{}:{} {}",
+                                contract.chain_id,
+                                contract.tag,
+                                short_market_address(&contract.address)
+                            )
+                        })
+                        .unwrap_or_else(|| format!("CMC #{}", candidate.id))
+                };
                 let label =
                     shorten_market_button(&format!("{} {} · {}", index + 1, name, identity));
                 vec![InlineKeyboardButton {
@@ -1458,6 +1509,17 @@ where
         for request in requests {
             let detected = detect_signal_query(request);
             let is_address = matches!(detected, Some(SignalQuery::Address(_)));
+            let market_alias = request.trim().to_ascii_lowercase();
+            let token_query = if provider_scope == Some(ProviderScope::Stock)
+                || market_alias.is_empty()
+                || matches!(market_alias.as_str(), "stables" | "stablecoins")
+            {
+                None
+            } else {
+                detected
+                    .clone()
+                    .or_else(|| detect_signal_query(&format!("${request}")))
+            };
             let mut market_query = match provider_scope {
                 Some(ProviderScope::Stock) => format!("stock:{request}"),
                 Some(ProviderScope::Crypto) => format!("crypto:{request}"),
@@ -1478,6 +1540,64 @@ where
             }
             if let Some(load) = &load {
                 self.state_diagnostics.extend(load.diagnostics.clone());
+            }
+            let probe_token_signal = provider_scope != Some(ProviderScope::Stock)
+                && token_query.is_some()
+                && (load.as_ref().is_none_or(|load| {
+                    load.selection.is_some()
+                        || load.no_assets_found
+                        || load
+                            .chart
+                            .as_ref()
+                            .is_some_and(|chart| chart.candidate.is_some())
+                }));
+            let token_signal = if probe_token_signal {
+                token_query.as_ref().and_then(|token_query| {
+                    self.token_signal_source.as_mut().and_then(|source| {
+                        let load = source.load(token_query);
+                        self.state_diagnostics.extend(load.diagnostics);
+                        load.signal.filter(|signal| {
+                            self.market_price_source.is_none()
+                                || token_signal_matches_query(signal, token_query)
+                        })
+                    })
+                })
+            } else {
+                None
+            };
+            if let Some(signal) = token_signal.as_ref() {
+                let token_candidate = market_token_candidate(signal, timeframe.as_deref());
+                if let Some(load) = load.as_mut()
+                    && let Some(selection) = load.selection.as_mut()
+                {
+                    if !selection
+                        .candidates
+                        .iter()
+                        .any(|candidate| candidate.id == token_candidate.id)
+                    {
+                        selection.candidates.push(token_candidate);
+                    }
+                    selection.timeframe.clone_from(&timeframe);
+                } else if let Some(load) = load.as_ref()
+                    && let Some(chart) = load.chart.as_ref()
+                    && let Some(market_candidate) = chart.candidate.clone()
+                {
+                    let mut selection = MarketSelection {
+                        query: request.to_owned(),
+                        timeframe: timeframe.clone(),
+                        target_symbol: "USD".to_owned(),
+                        target_parameter: "USD".to_owned(),
+                        conversion: None,
+                        candidates: vec![market_candidate, token_candidate],
+                    };
+                    selection
+                        .candidates
+                        .dedup_by(|left, right| left.id == right.id);
+                    if selection.candidates.len() > 1 {
+                        pending_selections.push(selection);
+                        continue;
+                    }
+                }
             }
             if let Some(load) = load.as_ref()
                 && let Some(selection) = &load.selection
@@ -1621,39 +1741,23 @@ where
                 }
                 continue;
             }
-            let market_alias = request.trim().to_ascii_lowercase();
-            let token_query = if provider_scope == Some(ProviderScope::Stock)
-                || market_alias.is_empty()
-                || matches!(market_alias.as_str(), "stables" | "stablecoins")
-            {
-                None
-            } else {
-                detected.or_else(|| detect_signal_query(&format!("${request}")))
-            };
-            if let Some(token_query) = token_query
-                && self.token_signal_source.is_some()
-            {
+            if let Some(token_query) = token_query {
                 if single {
-                    if let Some(outcome) = self.dispatch_token_signal_message(
+                    if let Some(outcome) = self.dispatch_token_signal_loaded_message(
                         message,
                         &token_query,
+                        token_signal,
                         timeframe.as_deref(),
                         locale,
                         timestamp,
                     )? {
                         return Ok(Some(outcome));
                     }
-                } else if let Some(source) = self.token_signal_source.as_mut() {
-                    let token_load = source.load(&token_query);
-                    self.state_diagnostics.extend(token_load.diagnostics);
-                    if let Some(signal) = token_load.signal {
-                        let quote = bot_core::token_signals::format_signal_quote(
-                            &signal,
-                            timeframe.as_deref(),
-                        );
-                        lines.push(quote);
-                        continue;
-                    }
+                } else if let Some(signal) = token_signal {
+                    let quote =
+                        bot_core::token_signals::format_signal_quote(&signal, timeframe.as_deref());
+                    lines.push(quote);
+                    continue;
                 }
             }
             lines.push(
@@ -1726,10 +1830,11 @@ where
         Ok(Some(DispatchOutcome::Handled))
     }
 
-    fn dispatch_token_signal_message(
+    fn dispatch_token_signal_loaded_message(
         &mut self,
         message: &IncomingMessage,
         query: &SignalQuery,
+        signal: Option<TokenSignal>,
         timeframe: Option<&str>,
         locale: bot_core::locale::Locale,
         timestamp: i64,
@@ -1739,12 +1844,7 @@ where
         else {
             return Ok(Some(DispatchOutcome::Unsupported));
         };
-        let Some(source) = self.token_signal_source.as_mut() else {
-            return Err(DispatchError::MissingService("token signals"));
-        };
-        let load = source.load(query);
-        self.state_diagnostics.extend(load.diagnostics);
-        let Some(signal) = load.signal else {
+        let Some(signal) = signal else {
             return Ok(None);
         };
         let caption = format_signal_caption_for_period(&signal, timestamp, timeframe);
@@ -2185,6 +2285,18 @@ where
             return Ok(DispatchOutcome::Handled);
         };
         let timestamp = self.runtime_values.unix_timestamp();
+        if candidate.id.starts_with("token:") {
+            return self.dispatch_token_market_candidate(
+                context,
+                chat_id_value,
+                &key,
+                selection_id,
+                &stored,
+                &candidate,
+                locale,
+                timestamp,
+            );
+        }
         let command = market_selection_command(&stored.command);
         let mut load = self
             .market_price_source
@@ -2355,35 +2467,186 @@ where
                 timestamp,
             );
         }
-        {
-            let _ = self.actions.try_edit(TelegramAction::EditMessage {
-                chat_id: ChatId(chat_id_value),
-                message_id: MessageId(context.message_id),
-                text: match locale {
-                    bot_core::locale::Locale::Es => "selección procesada".to_owned(),
-                    bot_core::locale::Locale::En => "Selection processed".to_owned(),
-                },
-                reply_markup: Some(InlineKeyboardMarkup {
-                    inline_keyboard: Vec::new(),
-                }),
-            });
-        }
-        if let Err(error) = self
-            .market_price_source
-            .as_mut()
-            .map_or(Ok(()), |source| source.clear_selection(&key))
-        {
-            self.state_diagnostics.push(format!(
-                "market selection clear failed chat_id={} selection_id={selection_id}: {error}",
-                context.chat_id
-            ));
-        }
+        self.clear_market_selection_callback(context, chat_id_value, &key, selection_id, locale)?;
         self.answer_market_callback(
             context,
             locale,
             if delivered { "selected" } else { "quote" },
             false,
         )?;
+        Ok(DispatchOutcome::Handled)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_token_market_candidate(
+        &mut self,
+        context: &CallbackContext,
+        chat_id_value: i64,
+        selection_key: &str,
+        selection_id: &str,
+        stored: &StoredMarketSelection,
+        candidate: &MarketCandidate,
+        locale: bot_core::locale::Locale,
+        timestamp: i64,
+    ) -> NativeDispatchResult<Config, Actions, Random> {
+        let Some(token) = candidate.contracts.first().cloned() else {
+            self.answer_market_callback(context, locale, "retry", true)?;
+            return Ok(DispatchOutcome::Handled);
+        };
+        let command_name = if stored.command == "crypto" {
+            "/c"
+        } else {
+            "/p"
+        };
+        let load = self.token_signal_source.as_mut().map_or(
+            TokenSignalLoad {
+                signal: None,
+                diagnostics: vec!["token signal source disappeared".to_owned()],
+            },
+            |source| source.load_token(&token),
+        );
+        self.state_diagnostics.extend(load.diagnostics);
+        let Some(signal) = load.signal else {
+            let text = match locale {
+                bot_core::locale::Locale::Es => {
+                    format!(
+                        "no pude obtener una cotización usable para {}",
+                        candidate.symbol
+                    )
+                }
+                bot_core::locale::Locale::En => {
+                    format!("I could not obtain a usable quote for {}", candidate.symbol)
+                }
+            };
+            let mut reply = SendMessage::new(ChatId(chat_id_value), &text);
+            reply.reply_to_message_id = Some(MessageId(context.message_id));
+            let receipt = self
+                .actions
+                .execute(TelegramAction::SendMessage(reply))
+                .map_err(DispatchError::Action)?;
+            self.record_market_callback_delivery(
+                context,
+                &text,
+                receipt.message_id,
+                command_name,
+                timestamp,
+            );
+            self.clear_market_selection_callback(
+                context,
+                chat_id_value,
+                selection_key,
+                selection_id,
+                locale,
+            )?;
+            self.answer_market_callback(context, locale, "retry", true)?;
+            return Ok(DispatchOutcome::Handled);
+        };
+        let timeframe = stored.selection.timeframe.as_deref();
+        let caption = format_signal_caption_for_period(&signal, timestamp, timeframe);
+        let photo = self
+            .token_signal_source
+            .as_mut()
+            .and_then(|source| match timeframe {
+                Some(period) => source.render_period_photo(&signal, period, timestamp).ok(),
+                None if has_usable_chart(&signal) => source.render_photo(&signal).ok(),
+                None => None,
+            });
+        let signal_id = stable_signal_id(
+            chat_id_value,
+            context.message_id,
+            stored.requester_id,
+            timestamp,
+        );
+        let (delivered, delivered_text, sent_message_id) = if let Some(photo) = photo {
+            match self.actions.try_photo(TelegramAction::SendPhoto {
+                chat_id: ChatId(chat_id_value),
+                photo: photo.into(),
+                reply_to_message_id: Some(MessageId(context.message_id)),
+                caption: caption.clone(),
+                parse_mode: Some(ParseMode::Html),
+                reply_markup: Some(build_signal_keyboard(
+                    &signal_id,
+                    &signal.token,
+                    &signal.pair,
+                )),
+            }) {
+                Ok(Some(receipt)) if receipt.message_id.is_some() => {
+                    (true, caption.clone(), receipt.message_id)
+                }
+                Ok(_) | Err(_) => (false, caption.clone(), None),
+            }
+        } else {
+            (false, caption.clone(), None)
+        };
+        if delivered {
+            self.record_market_callback_delivery(
+                context,
+                &delivered_text,
+                sent_message_id,
+                command_name,
+                timestamp,
+            );
+        } else {
+            let mut reply = SendMessage::new(ChatId(chat_id_value), &caption);
+            reply.reply_to_message_id = Some(MessageId(context.message_id));
+            reply.parse_mode = Some(ParseMode::Html);
+            let receipt = self
+                .actions
+                .execute(TelegramAction::SendMessage(reply))
+                .map_err(DispatchError::Action)?;
+            self.record_market_callback_delivery(
+                context,
+                &caption,
+                receipt.message_id,
+                command_name,
+                timestamp,
+            );
+        }
+        self.clear_market_selection_callback(
+            context,
+            chat_id_value,
+            selection_key,
+            selection_id,
+            locale,
+        )?;
+        self.answer_market_callback(
+            context,
+            locale,
+            if delivered { "selected" } else { "quote" },
+            false,
+        )?;
+        Ok(DispatchOutcome::Handled)
+    }
+
+    fn clear_market_selection_callback(
+        &mut self,
+        context: &CallbackContext,
+        chat_id_value: i64,
+        selection_key: &str,
+        selection_id: &str,
+        locale: bot_core::locale::Locale,
+    ) -> NativeDispatchResult<Config, Actions, Random> {
+        if let Err(error) = self
+            .market_price_source
+            .as_mut()
+            .map_or(Ok(()), |source| source.clear_selection(selection_key))
+        {
+            self.state_diagnostics.push(format!(
+                "market selection clear failed chat_id={} selection_id={selection_id}: {error}",
+                context.chat_id
+            ));
+        }
+        let _ = self.actions.try_edit(TelegramAction::EditMessage {
+            chat_id: ChatId(chat_id_value),
+            message_id: MessageId(context.message_id),
+            text: match locale {
+                bot_core::locale::Locale::Es => "selección procesada".to_owned(),
+                bot_core::locale::Locale::En => "Selection processed".to_owned(),
+            },
+            reply_markup: Some(InlineKeyboardMarkup {
+                inline_keyboard: Vec::new(),
+            }),
+        });
         Ok(DispatchOutcome::Handled)
     }
 
@@ -4504,12 +4767,13 @@ mod tests {
         DollarMarketLoad, DollarMarketSource, DollarQuotesSource, ElectionLoad, ElectionSource,
         GreetingPoolLoad, GreetingPoolSource, GroupAuthorizationDecision, GroupAuthorizer,
         LinkReplacementLoad, LinkReplacementSource, MarketPriceLoad, MarketPriceSource,
-        MessageStateSink, NativeDispatcher, OilPriceSource, OilQuoteLoad, RandomSource,
-        RuloInputLoad, RuloSource, RuntimeValues, ScheduledTaskSource, StarPaymentReceipt,
-        StarPaymentSink, StockPriceSource, StockQuotesLoad, StoredMarketSelection, TokenSignalLoad,
-        TokenSignalSource, TransferResult, WeatherObservationLoad, WeatherSource,
-        market_selection_command, market_selection_id, market_selection_keyboard,
-        market_selection_text, short_market_address, shorten_market_button,
+        MarketSelection, MessageStateSink, NativeDispatcher, OilPriceSource, OilQuoteLoad,
+        RandomSource, RuloInputLoad, RuloSource, RuntimeValues, ScheduledTaskSource,
+        StarPaymentReceipt, StarPaymentSink, StockPriceSource, StockQuotesLoad,
+        StoredMarketSelection, TokenSignalLoad, TokenSignalSource, TransferResult,
+        WeatherObservationLoad, WeatherSource, market_selection_command, market_selection_id,
+        market_selection_key, market_selection_keyboard, market_selection_text,
+        short_market_address, shorten_market_button,
     };
     use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup};
     use bot_core::devo::DevoQuotes;
@@ -8788,6 +9052,7 @@ mod tests {
                         symbol.to_owned()
                     },
                     token: None,
+                    candidate: None,
                 }),
                 selection: None,
                 no_assets_found: symbol.is_none() && !stable_list,
@@ -9549,6 +9814,7 @@ mod tests {
                 name: "Libra Finance".to_owned(),
                 yahoo_symbol: "LIBRA-USD".to_owned(),
                 token,
+                candidate: None,
             }
         };
         let candidate_load = |chart: bot_core::market_prices::MarketChart| MarketPriceLoad {
@@ -9811,6 +10077,7 @@ mod tests {
                     name: "Libra Finance".to_owned(),
                     yahoo_symbol: "LIBRA-USD".to_owned(),
                     token: Some(token),
+                    candidate: None,
                 }),
                 selection: None,
                 no_assets_found: false,
@@ -10016,6 +10283,7 @@ mod tests {
                         name: "Synthetic".to_owned(),
                         yahoo_symbol: "SYN-USD".to_owned(),
                         token: None,
+                        candidate: None,
                     },
                     1_700_000_000,
                 )
@@ -10129,6 +10397,7 @@ mod tests {
                             name: "Synthetic".to_owned(),
                             yahoo_symbol: String::new(),
                             token: self.token.clone(),
+                            candidate: None,
                         }),
                     selection: None,
                     no_assets_found: false,
@@ -10917,6 +11186,487 @@ mod tests {
     }
 
     #[test]
+    fn unified_symbol_queries_offer_stock_and_token_candidates_together() {
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let market_candidate = bot_core::market_prices::MarketCandidate {
+            id: "stock:RKHNF".to_owned(),
+            symbol: "RKHNF".to_owned(),
+            name: "RKHNF".to_owned(),
+            slug: "rkhnf".to_owned(),
+            price: "0.13".to_owned(),
+            change: "+2.77% 1m".to_owned(),
+            contracts: Vec::new(),
+        };
+        let mut signal = token_signal();
+        signal.pair.base_token.symbol = "RKH".to_owned();
+        signal.pair.base_token.name = "Roaring Kity Hacked".to_owned();
+        let callback_signal = signal.clone();
+        let queries = Rc::new(RefCell::new(Vec::new()));
+        let mut dispatcher = dispatcher()
+            .with_market_price_source(Box::new(SelectableMarketPrices {
+                initial: MarketPriceLoad {
+                    chart: Some(bot_core::market_prices::MarketChart {
+                        timeframe: None,
+                        symbol: "RKHNF".to_owned(),
+                        name: "RKHNF".to_owned(),
+                        yahoo_symbol: "RKHNF".to_owned(),
+                        token: None,
+                        candidate: Some(market_candidate),
+                    }),
+                    selection: None,
+                    no_assets_found: false,
+                    text: "RKHNF: 0.13 USD (+2.77% 1m)".to_owned(),
+                    diagnostics: Vec::new(),
+                },
+                candidate: MarketPriceLoad {
+                    chart: None,
+                    selection: None,
+                    no_assets_found: false,
+                    text: "RKHNF: 0.13 USD (+2.77% 1m)".to_owned(),
+                    diagnostics: Vec::new(),
+                },
+                stored: Rc::clone(&stored),
+                selected: Rc::new(RefCell::new(Vec::new())),
+            }))
+            .with_token_signal_source(Box::new(Signals {
+                query_load: TokenSignalLoad {
+                    signal: Some(signal),
+                    diagnostics: Vec::new(),
+                },
+                token_load: TokenSignalLoad {
+                    signal: Some(callback_signal),
+                    diagnostics: Vec::new(),
+                },
+                photo: Ok(vec![1]),
+                state: None,
+                queries: Rc::clone(&queries),
+                saved: Default::default(),
+            }));
+
+        assert_eq!(
+            dispatcher.dispatch(update("/p rkh 1m", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            dispatcher.actions.0.first(),
+            Some(TelegramAction::SendMessage(_))
+        ));
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
+            return;
+        };
+        assert!(message.text.contains("Yahoo RKHNF"));
+        assert!(message.text.contains("Roaring Kity Hacked"));
+        assert_eq!(
+            message
+                .reply_markup
+                .as_ref()
+                .map(|markup| markup.inline_keyboard.len()),
+            Some(2)
+        );
+        assert_eq!(
+            queries.borrow().as_slice(),
+            &[SignalQuery::Symbol("rkh".to_owned())]
+        );
+        assert_eq!(stored.borrow().len(), 1);
+
+        let callback = dispatcher.actions.0.iter().find_map(|action| match action {
+            TelegramAction::SendMessage(message) => message
+                .reply_markup
+                .as_ref()?
+                .inline_keyboard
+                .get(1)?
+                .first()?
+                .callback_data
+                .clone(),
+            _ => None,
+        });
+        assert!(callback.is_some(), "token selection callback");
+        let Some(callback) = callback else {
+            return;
+        };
+        assert_eq!(
+            dispatcher.dispatch(callback_update_for_message(
+                &callback,
+                "private",
+                Some("en"),
+                700,
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(dispatcher.actions.0.iter().any(|action| matches!(
+            action,
+            TelegramAction::SendPhoto {
+                parse_mode: Some(bot_core::telegram_actions::ParseMode::Html),
+                ..
+            }
+        )));
+        assert!(stored.borrow().is_empty());
+    }
+
+    #[test]
+    fn crypto_symbol_queries_merge_direct_native_and_token_candidates() {
+        let market_candidate = bot_core::market_prices::MarketCandidate {
+            id: "123".to_owned(),
+            symbol: "RKH".to_owned(),
+            name: "Native RKH".to_owned(),
+            slug: "rkh".to_owned(),
+            price: "1.25".to_owned(),
+            change: "+2% 1m".to_owned(),
+            contracts: Vec::new(),
+        };
+        let mut signal = token_signal();
+        signal.pair.base_token.symbol = "RKH".to_owned();
+        signal.pair.base_token.name = "Roaring Kity Hacked".to_owned();
+        let mut dispatcher = dispatcher()
+            .with_market_price_source(Box::new(SelectableMarketPrices {
+                initial: MarketPriceLoad {
+                    chart: Some(bot_core::market_prices::MarketChart {
+                        timeframe: None,
+                        symbol: "RKH".to_owned(),
+                        name: "Native RKH".to_owned(),
+                        yahoo_symbol: String::new(),
+                        token: None,
+                        candidate: Some(market_candidate),
+                    }),
+                    selection: None,
+                    no_assets_found: false,
+                    text: "RKH: 1.25 USD (+2% 1m)".to_owned(),
+                    diagnostics: Vec::new(),
+                },
+                candidate: MarketPriceLoad {
+                    chart: None,
+                    selection: None,
+                    no_assets_found: false,
+                    text: "RKH: 1.25 USD (+2% 1m)".to_owned(),
+                    diagnostics: Vec::new(),
+                },
+                stored: Rc::new(RefCell::new(HashMap::new())),
+                selected: Rc::new(RefCell::new(Vec::new())),
+            }))
+            .with_token_signal_source(Box::new(Signals {
+                query_load: TokenSignalLoad {
+                    signal: Some(signal),
+                    diagnostics: Vec::new(),
+                },
+                token_load: TokenSignalLoad {
+                    signal: None,
+                    diagnostics: Vec::new(),
+                },
+                photo: Ok(vec![1]),
+                state: None,
+                queries: Rc::new(RefCell::new(Vec::new())),
+                saved: Default::default(),
+            }));
+
+        assert_eq!(
+            dispatcher.dispatch(update("/c rkh 1m", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
+            return;
+        };
+        assert!(message.text.contains("Native RKH"));
+        assert!(message.text.contains("Roaring Kity Hacked"));
+        assert_eq!(
+            message
+                .reply_markup
+                .as_ref()
+                .map(|markup| markup.inline_keyboard.len()),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn token_market_selection_callbacks_cover_missing_data_and_fallbacks() {
+        let token = TokenAddress {
+            chain_id: "solana".to_owned(),
+            network: "solana".to_owned(),
+            tag: "SOL".to_owned(),
+            address: "J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump".to_owned(),
+        };
+        let token_candidate = bot_core::market_prices::MarketCandidate {
+            id: "token:solana:solana:J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump".to_owned(),
+            symbol: "SYN".to_owned(),
+            name: "Synthetic Token".to_owned(),
+            slug: "syn".to_owned(),
+            price: "0.01".to_owned(),
+            change: "N/A 1m".to_owned(),
+            contracts: vec![token],
+        };
+        let selection_id = market_selection_id(-42, 7, 88, 1_672_531_200, 0);
+        let selection_key = market_selection_key(&selection_id);
+        let stored_value = |candidate: bot_core::market_prices::MarketCandidate,
+                            timeframe: Option<&str>,
+                            chat_id: &str,
+                            command: &str| {
+            serde_json::to_string(&StoredMarketSelection {
+                selection: MarketSelection {
+                    query: "syn".to_owned(),
+                    timeframe: timeframe.map(ToOwned::to_owned),
+                    target_symbol: "USD".to_owned(),
+                    target_parameter: "USD".to_owned(),
+                    conversion: None,
+                    candidates: vec![candidate],
+                },
+                chat_id: chat_id.to_owned(),
+                message_id: 700,
+                requester_id: 88,
+                command: command.to_owned(),
+            })
+            .ok()
+        };
+
+        let missing_stored = Rc::new(RefCell::new(HashMap::from([(
+            selection_key.clone(),
+            stored_value(token_candidate.clone(), Some("1m"), "-42", "unified").unwrap_or_default(),
+        )])));
+        let mut missing = dispatcher()
+            .with_market_price_source(Box::new(SelectableMarketPrices {
+                initial: MarketPriceLoad {
+                    chart: None,
+                    selection: None,
+                    no_assets_found: true,
+                    text: String::new(),
+                    diagnostics: Vec::new(),
+                },
+                candidate: MarketPriceLoad {
+                    chart: None,
+                    selection: None,
+                    no_assets_found: true,
+                    text: String::new(),
+                    diagnostics: Vec::new(),
+                },
+                stored: Rc::clone(&missing_stored),
+                selected: Rc::new(RefCell::new(Vec::new())),
+            }))
+            .with_token_signal_source(Box::new(Signals {
+                query_load: TokenSignalLoad {
+                    signal: None,
+                    diagnostics: Vec::new(),
+                },
+                token_load: TokenSignalLoad {
+                    signal: None,
+                    diagnostics: Vec::new(),
+                },
+                photo: Ok(vec![1]),
+                state: None,
+                queries: Rc::new(RefCell::new(Vec::new())),
+                saved: Default::default(),
+            }));
+        assert_eq!(
+            missing.dispatch(callback_update_for_message(
+                &format!("mkt:select:{selection_id}:0"),
+                "private",
+                Some("en"),
+                700,
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(missing.actions.0.iter().any(|action| matches!(
+            action,
+            TelegramAction::SendMessage(message) if message.text.contains("usable quote")
+        )));
+
+        let mut no_chart_signal = token_signal();
+        no_chart_signal.candles.clear();
+        let fallback_stored = Rc::new(RefCell::new(HashMap::from([(
+            selection_key.clone(),
+            stored_value(token_candidate.clone(), None, "-42", "crypto").unwrap_or_default(),
+        )])));
+        let mut fallback = dispatcher()
+            .with_market_price_source(Box::new(SelectableMarketPrices {
+                initial: MarketPriceLoad {
+                    chart: None,
+                    selection: None,
+                    no_assets_found: true,
+                    text: String::new(),
+                    diagnostics: Vec::new(),
+                },
+                candidate: MarketPriceLoad {
+                    chart: None,
+                    selection: None,
+                    no_assets_found: true,
+                    text: String::new(),
+                    diagnostics: Vec::new(),
+                },
+                stored: Rc::clone(&fallback_stored),
+                selected: Rc::new(RefCell::new(Vec::new())),
+            }))
+            .with_token_signal_source(Box::new(Signals {
+                query_load: TokenSignalLoad {
+                    signal: None,
+                    diagnostics: Vec::new(),
+                },
+                token_load: TokenSignalLoad {
+                    signal: Some(no_chart_signal),
+                    diagnostics: Vec::new(),
+                },
+                photo: Ok(vec![1]),
+                state: None,
+                queries: Rc::new(RefCell::new(Vec::new())),
+                saved: Default::default(),
+            }));
+        assert_eq!(
+            fallback.dispatch(callback_update_for_message(
+                &format!("mkt:select:{selection_id}:0"),
+                "private",
+                Some("en"),
+                700,
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(fallback.actions.0.iter().any(|action| matches!(
+            action,
+            TelegramAction::SendMessage(message)
+                if message.parse_mode == Some(bot_core::telegram_actions::ParseMode::Html)
+        )));
+
+        let mut no_contract_candidate = token_candidate.clone();
+        no_contract_candidate.contracts.clear();
+        let no_contract_stored = Rc::new(RefCell::new(HashMap::from([(
+            selection_key.clone(),
+            stored_value(no_contract_candidate, Some("1m"), "-42", "unified").unwrap_or_default(),
+        )])));
+        let mut no_contract =
+            dispatcher().with_market_price_source(Box::new(SelectableMarketPrices {
+                initial: MarketPriceLoad {
+                    chart: None,
+                    selection: None,
+                    no_assets_found: true,
+                    text: String::new(),
+                    diagnostics: Vec::new(),
+                },
+                candidate: MarketPriceLoad {
+                    chart: None,
+                    selection: None,
+                    no_assets_found: true,
+                    text: String::new(),
+                    diagnostics: Vec::new(),
+                },
+                stored: Rc::clone(&no_contract_stored),
+                selected: Rc::new(RefCell::new(Vec::new())),
+            }));
+        assert_eq!(
+            no_contract.dispatch(callback_update_for_message(
+                &format!("mkt:select:{selection_id}:0"),
+                "private",
+                Some("en"),
+                700,
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(no_contract.actions.0.iter().any(|action| matches!(
+            action,
+            TelegramAction::AnswerCallback {
+                show_alert: true,
+                ..
+            }
+        )));
+
+        let invalid_chat_stored = Rc::new(RefCell::new(HashMap::from([(
+            selection_key.clone(),
+            stored_value(token_candidate.clone(), Some("1m"), "invalid", "unified")
+                .unwrap_or_default(),
+        )])));
+        let mut invalid_chat =
+            dispatcher().with_market_price_source(Box::new(SelectableMarketPrices {
+                initial: MarketPriceLoad {
+                    chart: None,
+                    selection: None,
+                    no_assets_found: true,
+                    text: String::new(),
+                    diagnostics: Vec::new(),
+                },
+                candidate: MarketPriceLoad {
+                    chart: None,
+                    selection: None,
+                    no_assets_found: true,
+                    text: String::new(),
+                    diagnostics: Vec::new(),
+                },
+                stored: Rc::clone(&invalid_chat_stored),
+                selected: Rc::new(RefCell::new(Vec::new())),
+            }));
+        assert_eq!(
+            invalid_chat.dispatch(callback_update_with_context(
+                &format!("mkt:select:{selection_id}:0"),
+                json!("invalid"),
+                "private",
+                700,
+                Some(88),
+                Some("en"),
+                Some("callback-invalid-chat"),
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+
+        let photo_failure_stored = Rc::new(RefCell::new(HashMap::from([(
+            selection_key,
+            stored_value(token_candidate, Some("1m"), "-42", "unified").unwrap_or_default(),
+        )])));
+        let mut photo_failure = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            PhotoFailureActions {
+                actions: Vec::new(),
+            },
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_market_price_source(Box::new(SelectableMarketPrices {
+            initial: MarketPriceLoad {
+                chart: None,
+                selection: None,
+                no_assets_found: true,
+                text: String::new(),
+                diagnostics: Vec::new(),
+            },
+            candidate: MarketPriceLoad {
+                chart: None,
+                selection: None,
+                no_assets_found: true,
+                text: String::new(),
+                diagnostics: Vec::new(),
+            },
+            stored: Rc::clone(&photo_failure_stored),
+            selected: Rc::new(RefCell::new(Vec::new())),
+        }))
+        .with_token_signal_source(Box::new(Signals {
+            query_load: TokenSignalLoad {
+                signal: None,
+                diagnostics: Vec::new(),
+            },
+            token_load: TokenSignalLoad {
+                signal: Some(token_signal()),
+                diagnostics: Vec::new(),
+            },
+            photo: Ok(vec![1]),
+            state: None,
+            queries: Rc::new(RefCell::new(Vec::new())),
+            saved: Default::default(),
+        }));
+        assert_eq!(
+            photo_failure.dispatch(callback_update_for_message(
+                &format!("mkt:select:{selection_id}:0"),
+                "private",
+                Some("en"),
+                700,
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(photo_failure.actions.actions.iter().any(|action| matches!(
+            action,
+            TelegramAction::SendMessage(message)
+                if message.parse_mode == Some(bot_core::telegram_actions::ParseMode::Html)
+        )));
+    }
+
+    #[test]
     fn explicit_ranges_reach_the_chart_instead_of_becoming_assets() {
         for (command, asset, symbol) in [
             ("/c", "bitcoin", "BTC-USD"),
@@ -11000,6 +11750,7 @@ mod tests {
                         name: "Bitcoin".to_owned(),
                         yahoo_symbol: "BTC-USD".to_owned(),
                         token: None,
+                        candidate: None,
                     }),
                     selection: None,
                     no_assets_found: false,

@@ -163,6 +163,20 @@ fn candidate_identity(candidate: &MarketCandidate) -> String {
     if let Some(symbol) = candidate.id.strip_prefix("stock:") {
         return format!("Yahoo {}", shorten(symbol, 24));
     }
+    if candidate.id.starts_with("token:") {
+        return candidate
+            .contracts
+            .first()
+            .map(|contract| {
+                format!(
+                    "{}:{} {}",
+                    contract.chain_id,
+                    contract.tag,
+                    shorten_address(&contract.address)
+                )
+            })
+            .unwrap_or_else(|| "DEX token".to_owned());
+    }
     let mut parts = Vec::new();
     if !candidate.id.trim().is_empty() {
         parts.push(format!("CMC #{}", shorten(&candidate.id, 24)));
@@ -251,6 +265,10 @@ pub struct MarketChart {
     pub name: String,
     pub yahoo_symbol: String,
     pub token: Option<TokenAddress>,
+    /// The provider identity used to resolve this chart. Keeping it with the
+    /// chart lets the dispatcher build a mixed-provider selection when a
+    /// unified query also resolves a token signal.
+    pub candidate: Option<MarketCandidate>,
 }
 
 fn stock_chart(quote: &StockQuote, timeframe: Option<&str>) -> MarketChart {
@@ -260,6 +278,7 @@ fn stock_chart(quote: &StockQuote, timeframe: Option<&str>) -> MarketChart {
         name: quote.name.clone(),
         yahoo_symbol: quote.symbol.clone(),
         token: None,
+        candidate: Some(market_stock_candidate(quote, timeframe)),
     }
 }
 
@@ -474,6 +493,12 @@ pub fn execute_market_price_candidate<C: CryptoMarketProvider>(
         name: asset.name.clone(),
         yahoo_symbol: verified_yahoo_symbol(&asset).unwrap_or_default(),
         token: asset.contracts.first().cloned(),
+        candidate: Some(market_candidate(
+            &asset,
+            target_symbol,
+            target_parameter,
+            timeframe,
+        )),
     });
     MarketPriceExecution {
         chart,
@@ -745,6 +770,12 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
                 name: asset.name.clone(),
                 yahoo_symbol: verified_yahoo_symbol(asset).unwrap_or_default(),
                 token: asset.contracts.first().cloned(),
+                candidate: Some(market_candidate(
+                    asset,
+                    target_symbol,
+                    target_parameter,
+                    timeframe,
+                )),
             })
         } else {
             stock_quotes
