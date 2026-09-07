@@ -1,5 +1,6 @@
 //! Unified cryptocurrency and stock price command behavior.
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
@@ -37,6 +38,8 @@ pub enum MarketPriceCommand {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CryptoQuote {
     pub price: f64,
+    pub market_cap: Option<f64>,
+    pub volume_24h: Option<f64>,
     pub percent_change_1h: Option<f64>,
     pub percent_change_24h: Option<f64>,
     pub percent_change_7d: Option<f64>,
@@ -613,17 +616,12 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
         && selection.explicit_requested.len() == 1
         && selection.rows.len() > 1
     {
-        let mut candidates = selection
-            .rows
-            .iter()
+        let mut ranked_assets = selection.rows.iter().collect::<Vec<_>>();
+        ranked_assets.sort_by(|left, right| compare_market_assets(left, right, target_parameter));
+        let mut candidates = ranked_assets
+            .into_iter()
             .map(|asset| market_candidate(asset, target_symbol, target_parameter, timeframe))
             .collect::<Vec<_>>();
-        candidates.sort_by(|left, right| {
-            left.name
-                .to_ascii_lowercase()
-                .cmp(&right.name.to_ascii_lowercase())
-                .then_with(|| left.id.cmp(&right.id))
-        });
         candidates.truncate(10);
         *selection_result = Some(MarketSelection {
             query: raw_query.to_owned(),
@@ -1042,6 +1040,12 @@ fn merge_asset(existing: &mut CryptoAsset, incoming: CryptoAsset) {
         if !existing_quote.is_usable() && incoming_quote.is_usable() {
             existing_quote.price = incoming_quote.price;
         }
+        if incoming_quote.market_cap.is_some() {
+            existing_quote.market_cap = incoming_quote.market_cap;
+        }
+        if incoming_quote.volume_24h.is_some() {
+            existing_quote.volume_24h = incoming_quote.volume_24h;
+        }
         if incoming_quote.percent_change_1h.is_some() {
             existing_quote.percent_change_1h = incoming_quote.percent_change_1h;
         }
@@ -1374,6 +1378,46 @@ fn format_assets_with_timeframe(
         .join("\n")
 }
 
+fn compare_market_assets(
+    left: &CryptoAsset,
+    right: &CryptoAsset,
+    quote_parameter: &str,
+) -> Ordering {
+    // Prefer established assets, then use trading activity when market-cap
+    // data is tied or unavailable. Names and IDs only provide deterministic
+    // ordering after the market signals are exhausted.
+    let left_quote = left.quotes.get(quote_parameter);
+    let right_quote = right.quotes.get(quote_parameter);
+    compare_market_metric(
+        left_quote.and_then(|quote| quote.market_cap),
+        right_quote.and_then(|quote| quote.market_cap),
+    )
+    .then_with(|| {
+        compare_market_metric(
+            left_quote.and_then(|quote| quote.volume_24h),
+            right_quote.and_then(|quote| quote.volume_24h),
+        )
+    })
+    .then_with(|| {
+        left.name
+            .to_ascii_lowercase()
+            .cmp(&right.name.to_ascii_lowercase())
+    })
+    .then_with(|| left.id.cmp(&right.id))
+}
+
+fn compare_market_metric(left: Option<f64>, right: Option<f64>) -> Ordering {
+    match (
+        left.filter(|value| value.is_finite() && *value > 0.0),
+        right.filter(|value| value.is_finite() && *value > 0.0),
+    ) {
+        (Some(left), Some(right)) => right.total_cmp(&left),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
 fn market_candidate(
     asset: &CryptoAsset,
     display: &str,
@@ -1691,6 +1735,8 @@ mod tests {
                 "USD".to_owned(),
                 CryptoQuote {
                     price,
+                    market_cap: None,
+                    volume_24h: None,
                     percent_change_1h: Some(1.0),
                     percent_change_24h: Some(2.5),
                     percent_change_7d: Some(7.0),
@@ -1839,6 +1885,67 @@ mod tests {
                 .map(|candidate| candidate.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["1001", "1002"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ambiguous_tickers_prioritize_market_cap_then_volume() -> Result<(), String> {
+        let set_metrics = |asset: &mut CryptoAsset, market_cap, volume_24h| {
+            let quote = asset
+                .quotes
+                .get_mut("USD")
+                .ok_or_else(|| "missing USD quote".to_owned())?;
+            quote.market_cap = market_cap;
+            quote.volume_24h = volume_24h;
+            Ok::<_, String>(())
+        };
+        let mut cap_winner = coin("TRUMP", 2.0);
+        cap_winner.id = "1001".to_owned();
+        cap_winner.name = "Zeta Trump".to_owned();
+        set_metrics(&mut cap_winner, Some(200.0), Some(1.0))?;
+        let mut volume_tiebreaker = coin("TRUMP", 2.0);
+        volume_tiebreaker.id = "1002".to_owned();
+        volume_tiebreaker.name = "Alpha Trump".to_owned();
+        set_metrics(&mut volume_tiebreaker, Some(200.0), Some(50.0))?;
+        let mut lower_cap = coin("TRUMP", 2.0);
+        lower_cap.id = "1003".to_owned();
+        lower_cap.name = "Omega Trump".to_owned();
+        set_metrics(&mut lower_cap, Some(100.0), Some(999.0))?;
+        let mut volume_only = coin("TRUMP", 2.0);
+        volume_only.id = "1004".to_owned();
+        volume_only.name = "Beta Trump".to_owned();
+        set_metrics(&mut volume_only, None, Some(10.0))?;
+        let mut no_metrics = coin("TRUMP", 2.0);
+        no_metrics.id = "1005".to_owned();
+        no_metrics.name = "Aardvark Trump".to_owned();
+
+        let result = execute_market_price_command(
+            "$trump",
+            MarketPriceCommand::CryptoOnly,
+            Locale::En,
+            &mut Crypto {
+                listings: vec![vec![
+                    cap_winner,
+                    volume_tiebreaker,
+                    lower_cap,
+                    volume_only,
+                    no_metrics,
+                ]],
+                quotes: vec![],
+            },
+            &mut Stocks::default(),
+        );
+        let selection = result
+            .selection
+            .ok_or_else(|| "ambiguous ticker selection".to_owned())?;
+        assert_eq!(
+            selection
+                .candidates
+                .iter()
+                .map(|candidate| candidate.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["1002", "1001", "1003", "1004", "1005"]
         );
         Ok(())
     }

@@ -259,6 +259,8 @@ fn parse_asset(value: &Value) -> Option<CryptoAsset> {
                 currency.clone(),
                 CryptoQuote {
                     price: number(quote.get("price"))?,
+                    market_cap: number(quote.get("market_cap")),
+                    volume_24h: number(quote.get("volume_24h")),
                     percent_change_1h: number(quote.get("percent_change_1h")),
                     percent_change_24h: number(quote.get("percent_change_24h")),
                     percent_change_7d: number(quote.get("percent_change_7d")),
@@ -659,7 +661,7 @@ mod tests {
         let transport = MarketTransport {
             responses: RefCell::new(VecDeque::from([Ok(HttpResponse {
                 status_code: 200,
-                body: r#"{"data":{"BTC":[{"id":1,"symbol":"BTC","name":"Bitcoin","slug":"bitcoin","quote":{"USD":{"price":"50000.5","percent_change_24h":2.5}}}]}}"#.to_owned(),
+                body: r#"{"data":{"BTC":[{"id":1,"symbol":"BTC","name":"Bitcoin","slug":"bitcoin","quote":{"USD":{"price":"50000.5","market_cap":"123456789","volume_24h":456789,"percent_change_24h":2.5}}}]}}"#.to_owned(),
             })])),
             requests: RefCell::new(Vec::new()),
         };
@@ -671,6 +673,8 @@ mod tests {
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0].id, "1");
         assert_eq!(assets[0].quotes["USD"].price, 50_000.5);
+        assert_eq!(assets[0].quotes["USD"].market_cap, Some(123_456_789.0));
+        assert_eq!(assets[0].quotes["USD"].volume_24h, Some(456_789.0));
         assert!(load.diagnostics.is_empty());
         assert_eq!(transport.requests.borrow().as_slice(), &[request]);
         assert_eq!(cache.writes.len(), 1);
