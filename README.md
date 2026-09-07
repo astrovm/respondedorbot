@@ -136,9 +136,11 @@ Chart ranges use `h` (hours), `d` (days), `w` (weeks),
 selected automatically. Charts label the dates actually returned by the
 provider; newly created tokens and unavailable history cannot fill an older
 requested range. For a single cryptocurrency or stock with an explicit range,
-the chart uses that history while the caption keeps the independently resolved
-quote and its provider-supplied 24h change. Without an explicit range, the
-caption keeps the same default daily change.
+a successful chart caption derives its change from that range and labels it
+with the requested period. If the provider cannot supply usable history,
+delivery falls back to the available quote and says that the chart is
+unavailable. Without an explicit range, the caption keeps the default daily
+change.
 
 ## Test it
 

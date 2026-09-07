@@ -909,14 +909,25 @@ pub fn render_market_chart(
 #[must_use]
 pub fn market_chart_caption(
     quote: &bot_core::stocks::StockQuote,
-    _candles: &[Vec<f64>],
+    candles: &[Vec<f64>],
     period: &str,
 ) -> String {
-    let change = if quote.variation.is_finite() {
-        format!("{:+.2}%", quote.variation)
-    } else {
-        "N/A".to_owned()
-    };
+    let opening_price = candles
+        .iter()
+        .filter_map(|candle| {
+            let timestamp = candle.first().copied()?;
+            let opening_price = candle.get(1).copied()?;
+            (timestamp.is_finite() && opening_price.is_finite() && opening_price > 0.0)
+                .then_some((timestamp, opening_price))
+        })
+        .min_by(|(left, _), (right, _)| left.total_cmp(right))
+        .map(|(_, opening_price)| opening_price);
+    let change = opening_price
+        .and_then(|opening_price| {
+            let change = (quote.price / opening_price - 1.0) * 100.0;
+            change.is_finite().then(|| format!("{change:+.2}%"))
+        })
+        .unwrap_or_else(|| "N/A".to_owned());
     let period = if period.trim().is_empty() {
         "24h"
     } else {
@@ -1192,13 +1203,13 @@ mod tests {
         for period in ["1m", "7d", "2h", "1y"] {
             assert_eq!(
                 super::market_chart_caption(&quote, &candles, period),
-                format!("BTC: 120 USD (-1.53% {period})")
+                format!("BTC: 120 USD (+20.00% {period})")
             );
         }
         quote.price = 80.0;
         assert_eq!(
             super::market_chart_caption(&quote, &candles, "1m"),
-            "BTC: 80 USD (-1.53% 1m)"
+            "BTC: 80 USD (-20.00% 1m)"
         );
         for missing in [
             vec![],
@@ -1208,7 +1219,7 @@ mod tests {
         ] {
             assert_eq!(
                 super::market_chart_caption(&quote, &missing, "1m"),
-                "BTC: 80 USD (-1.53% 1m)"
+                "BTC: 80 USD (N/A 1m)"
             );
         }
     }

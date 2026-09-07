@@ -1448,10 +1448,7 @@ where
                 Some(ProviderScope::Crypto) => format!("crypto:{request}"),
                 None => request.to_owned(),
             };
-            if !single
-                && let Some(timeframe) = &timeframe
-                && matches!(timeframe.as_str(), "1h" | "24h" | "7d" | "30d")
-            {
+            if !single && let Some(timeframe) = &timeframe {
                 market_query.push_str(&format!(" {timeframe}"));
             }
             let mut load = if is_address && provider_scope != Some(ProviderScope::Stock) {
@@ -10911,6 +10908,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn mixed_explicit_ranges_reach_each_market_request() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mut dispatcher = dispatcher().with_market_price_source(Box::new(MarketPrices {
+            result: MarketPriceLoad {
+                chart: None,
+                selection: None,
+                no_assets_found: false,
+                text: "synthetic quote".to_owned(),
+                diagnostics: Vec::new(),
+            },
+            calls: Rc::clone(&calls),
+        }));
+
+        assert_eq!(
+            dispatcher.dispatch(update("/p btc,eth 1m", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            calls
+                .borrow()
+                .iter()
+                .map(|call| call.0.as_str())
+                .collect::<Vec<_>>(),
+            ["btc 1m", "eth 1m"]
+        );
     }
 
     #[test]
