@@ -657,7 +657,12 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
         && let Some(quote) = rows
             .iter()
             .filter_map(|(_, quote)| quote.as_ref())
-            .find(|quote| company_matches(raw_query, quote))
+            .find(|quote| {
+                company_matches(raw_query, quote)
+                    && !quote
+                        .symbol
+                        .eq_ignore_ascii_case(raw_query.trim().trim_start_matches('$'))
+            })
     {
         if conversion_requested {
             return stock_conversion_error(raw_query, locale);
@@ -2587,6 +2592,18 @@ mod tests {
                 .and_then(|chart| chart.timeframe.as_deref()),
             Some("1m")
         );
+
+        let exact_collision = execute_market_price_command(
+            "meta",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut Crypto {
+                listings: vec![vec![coin("META", 2.0)]],
+                quotes: Vec::new(),
+            },
+            &mut Stocks(vec![("META".to_owned(), Some(stock("META")))]),
+        );
+        assert!(exact_collision.selection.is_some());
     }
 
     struct FailedCrypto;
