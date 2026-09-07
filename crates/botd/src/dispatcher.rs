@@ -4482,8 +4482,10 @@ mod tests {
         LinkReplacementLoad, LinkReplacementSource, MarketPriceLoad, MarketPriceSource,
         MessageStateSink, NativeDispatcher, OilPriceSource, OilQuoteLoad, RandomSource,
         RuloInputLoad, RuloSource, RuntimeValues, ScheduledTaskSource, StarPaymentReceipt,
-        StarPaymentSink, StockPriceSource, StockQuotesLoad, TokenSignalLoad, TokenSignalSource,
-        TransferResult, WeatherObservationLoad, WeatherSource,
+        StarPaymentSink, StockPriceSource, StockQuotesLoad, StoredMarketSelection, TokenSignalLoad,
+        TokenSignalSource, TransferResult, WeatherObservationLoad, WeatherSource,
+        market_selection_command, market_selection_id, market_selection_keyboard,
+        market_selection_text, short_market_address, shorten_market_button,
     };
     use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup};
     use bot_core::devo::DevoQuotes;
@@ -4591,6 +4593,25 @@ mod tests {
                 DeliveryOutcome::Unconfirmed => Ok(ActionReceipt { message_id: None }),
                 DeliveryOutcome::Rejected => Err("synthetic delivery rejection"),
             }
+        }
+    }
+
+    struct PhotoFailureActions {
+        actions: Vec<TelegramAction>,
+    }
+
+    impl ActionSink for PhotoFailureActions {
+        type Error = &'static str;
+
+        fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
+            self.actions.push(action);
+            Ok(ActionReceipt {
+                message_id: Some(MessageId(700)),
+            })
+        }
+
+        fn try_photo(&mut self, _: TelegramAction) -> Result<Option<ActionReceipt>, Self::Error> {
+            Err("synthetic photo failure")
         }
     }
 
@@ -5047,6 +5068,41 @@ mod tests {
         ]);
         IncomingUpdate {
             update_id: 100,
+            event: IncomingEvent::CallbackQuery(callback),
+        }
+    }
+
+    fn callback_update_with_context(
+        data: &str,
+        chat_id: Value,
+        chat_type: &str,
+        message_id: i64,
+        user_id: Option<i64>,
+        language: Option<&str>,
+        callback_id: Option<&str>,
+    ) -> IncomingUpdate {
+        let mut callback = Map::from_iter([
+            ("data".to_owned(), json!(data)),
+            (
+                "from".to_owned(),
+                user_id.map_or_else(
+                    || json!({}),
+                    |id| json!({"id": id, "language_code": language}),
+                ),
+            ),
+            (
+                "message".to_owned(),
+                json!({
+                    "message_id": message_id,
+                    "chat": {"id": chat_id, "type": chat_type},
+                }),
+            ),
+        ]);
+        if let Some(callback_id) = callback_id {
+            callback.insert("id".to_owned(), json!(callback_id));
+        }
+        IncomingUpdate {
+            update_id: 101,
             event: IncomingEvent::CallbackQuery(callback),
         }
     }
@@ -8869,6 +8925,1496 @@ mod tests {
             self.stored.borrow_mut().remove(key);
             Ok(())
         }
+    }
+
+    struct SelectionStorageMarketPrices {
+        initial: MarketPriceLoad,
+        candidate: MarketPriceLoad,
+        stored: Rc<RefCell<HashMap<String, String>>>,
+        save_calls: Rc<RefCell<usize>>,
+        fail_save_at: Option<usize>,
+        fail_load: Option<String>,
+        fail_clear: Option<String>,
+        render_success: bool,
+        render_caption: Option<String>,
+    }
+
+    impl MarketPriceSource for SelectionStorageMarketPrices {
+        fn load(
+            &mut self,
+            _: &str,
+            _: bot_core::market_prices::MarketPriceCommand,
+            _: bot_core::locale::Locale,
+            _: i64,
+        ) -> MarketPriceLoad {
+            self.initial.clone()
+        }
+
+        fn load_candidate(
+            &mut self,
+            _: &bot_core::market_prices::MarketCandidate,
+            _: Option<&str>,
+            _: &str,
+            _: &str,
+            _: Option<&bot_core::market_prices::MarketConversion>,
+            _: bot_core::market_prices::MarketPriceCommand,
+            _: bot_core::locale::Locale,
+            _: i64,
+        ) -> MarketPriceLoad {
+            self.candidate.clone()
+        }
+
+        fn save_selection(&mut self, key: &str, value: &str, _: i64) -> Result<(), String> {
+            let mut calls = self.save_calls.borrow_mut();
+            *calls += 1;
+            if self.fail_save_at == Some(*calls) {
+                return Err(format!("synthetic save failure {}", *calls));
+            }
+            self.stored
+                .borrow_mut()
+                .insert(key.to_owned(), value.to_owned());
+            Ok(())
+        }
+
+        fn load_selection(&mut self, key: &str) -> Result<Option<String>, String> {
+            if let Some(error) = &self.fail_load {
+                return Err(error.clone());
+            }
+            Ok(self.stored.borrow().get(key).cloned())
+        }
+
+        fn clear_selection(&mut self, key: &str) -> Result<(), String> {
+            if let Some(error) = &self.fail_clear {
+                return Err(error.clone());
+            }
+            self.stored.borrow_mut().remove(key);
+            Ok(())
+        }
+
+        fn render_chart(
+            &mut self,
+            _: &bot_core::market_prices::MarketChart,
+            _: i64,
+        ) -> Result<super::MarketChartRender, String> {
+            if self.render_success {
+                Ok(super::MarketChartRender {
+                    photo: b"callback-chart".to_vec(),
+                    caption: self.render_caption.clone(),
+                })
+            } else {
+                Err("synthetic callback chart unavailable".to_owned())
+            }
+        }
+    }
+
+    fn market_selection_fixture(
+        timeframe: Option<&str>,
+    ) -> bot_core::market_prices::MarketSelection {
+        bot_core::market_prices::MarketSelection {
+            query: "libra".to_owned(),
+            timeframe: timeframe.map(ToOwned::to_owned),
+            target_symbol: "USD".to_owned(),
+            target_parameter: "USD".to_owned(),
+            conversion: None,
+            candidates: vec![bot_core::market_prices::MarketCandidate {
+                id: "1001".to_owned(),
+                symbol: "LIBRA".to_owned(),
+                name: "Libra Finance".to_owned(),
+                slug: "libra-finance".to_owned(),
+                price: "0.007".to_owned(),
+                change: "N/A".to_owned(),
+                contracts: Vec::new(),
+            }],
+        }
+    }
+
+    fn market_selection_load(timeframe: Option<&str>) -> MarketPriceLoad {
+        MarketPriceLoad {
+            chart: None,
+            selection: Some(market_selection_fixture(timeframe)),
+            no_assets_found: false,
+            text: String::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn market_candidate_quote() -> MarketPriceLoad {
+        MarketPriceLoad {
+            chart: None,
+            selection: None,
+            no_assets_found: false,
+            text: "LIBRA: 0.007 USD (N/A 24h)".to_owned(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn market_selection_persistence_handles_missing_context_and_delivery_failures() {
+        let mut no_chat = update("/p libra", Some("en"));
+        let IncomingEvent::Message(message) = &mut no_chat.event else {
+            unreachable!();
+        };
+        message.chat_id = None;
+        let selection = market_selection_fixture(None);
+        let mut missing_context = dispatcher();
+        assert_eq!(
+            missing_context.persist_market_selection(
+                message,
+                &selection,
+                bot_core::market_prices::MarketPriceCommand::Unified,
+                1_672_531_200,
+                "selection",
+                0,
+            ),
+            Ok(None)
+        );
+
+        let mut no_source = dispatcher();
+        let IncomingEvent::Message(message) = update("/p libra", Some("en")).event else {
+            unreachable!();
+        };
+        assert_eq!(
+            no_source.persist_market_selection(
+                &message,
+                &selection,
+                bot_core::market_prices::MarketPriceCommand::Unified,
+                1_672_531_200,
+                "selection",
+                0,
+            ),
+            Ok(None)
+        );
+        assert!(
+            no_source
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic == "market selection storage unavailable")
+        );
+
+        let failing_save = Rc::new(RefCell::new(0));
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let mut storage_failure =
+            dispatcher().with_market_price_source(Box::new(SelectionStorageMarketPrices {
+                initial: market_selection_load(None),
+                candidate: market_candidate_quote(),
+                stored: Rc::clone(&stored),
+                save_calls: Rc::clone(&failing_save),
+                fail_save_at: Some(1),
+                fail_load: None,
+                fail_clear: None,
+                render_success: false,
+                render_caption: None,
+            }));
+        assert_eq!(
+            storage_failure.dispatch(update("/p libra", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            storage_failure.actions.0.as_slice(),
+            [TelegramAction::SendMessage(message)] if message.reply_markup.is_none()
+        ));
+        assert!(
+            storage_failure
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.contains("market selection storage unavailable"))
+        );
+
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let mut rejected = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            DeliveryActions::new(DeliveryOutcome::Rejected),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_market_price_source(Box::new(SelectionStorageMarketPrices {
+            initial: market_selection_load(None),
+            candidate: market_candidate_quote(),
+            stored: Rc::clone(&stored),
+            save_calls: Rc::new(RefCell::new(0)),
+            fail_save_at: None,
+            fail_load: None,
+            fail_clear: Some("synthetic clear after rejection".to_owned()),
+            render_success: false,
+            render_caption: None,
+        }));
+        assert_eq!(
+            rejected.dispatch(update("/p libra", Some("en"))),
+            Err(DispatchError::Action("synthetic delivery rejection"))
+        );
+        assert_eq!(stored.borrow().len(), 1);
+        assert!(
+            rejected
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.contains("clear after send failure"))
+        );
+
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let mut unconfirmed = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            DeliveryActions::new(DeliveryOutcome::Unconfirmed),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_market_price_source(Box::new(SelectionStorageMarketPrices {
+            initial: market_selection_load(None),
+            candidate: market_candidate_quote(),
+            stored: Rc::clone(&stored),
+            save_calls: Rc::new(RefCell::new(0)),
+            fail_save_at: None,
+            fail_load: None,
+            fail_clear: Some("synthetic clear after unconfirmed".to_owned()),
+            render_success: false,
+            render_caption: None,
+        }));
+        assert_eq!(
+            unconfirmed.dispatch(update("/p libra", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(stored.borrow().len(), 1);
+        assert!(
+            unconfirmed
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.contains("delivery was unconfirmed"))
+        );
+        assert!(
+            unconfirmed
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.contains("clear after unconfirmed delivery"))
+        );
+
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let mut update_failure =
+            dispatcher().with_market_price_source(Box::new(SelectionStorageMarketPrices {
+                initial: market_selection_load(None),
+                candidate: market_candidate_quote(),
+                stored: Rc::clone(&stored),
+                save_calls: Rc::new(RefCell::new(0)),
+                fail_save_at: Some(2),
+                fail_load: None,
+                fail_clear: Some("synthetic clear after update".to_owned()),
+                render_success: false,
+                render_caption: None,
+            }));
+        assert_eq!(
+            update_failure.dispatch(update("/p libra", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(stored.borrow().len(), 1);
+        assert!(
+            update_failure
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.contains("market selection update unavailable"))
+        );
+        assert!(update_failure
+            .actions
+            .0
+            .iter()
+            .any(|action| matches!(action, TelegramAction::EditMessage { reply_markup: Some(markup), .. } if markup.inline_keyboard.is_empty())));
+    }
+
+    #[test]
+    fn market_callbacks_cover_expiry_ownership_authorization_and_invalid_state() {
+        let selection = market_selection_fixture(Some("7d"));
+        let candidate_quote = market_candidate_quote();
+        let source =
+            |stored: Rc<RefCell<HashMap<String, String>>>,
+             fail_load: Option<String>,
+             fail_clear: Option<String>| SelectionStorageMarketPrices {
+                initial: market_selection_load(Some("7d")),
+                candidate: candidate_quote.clone(),
+                stored,
+                save_calls: Rc::new(RefCell::new(0)),
+                fail_save_at: None,
+                fail_load,
+                fail_clear,
+                render_success: false,
+                render_caption: None,
+            };
+        let stored_value = |chat_id: &str, message_id: i64, requester_id: i64| {
+            let Ok(stored_value) = serde_json::to_string(&StoredMarketSelection {
+                selection: selection.clone(),
+                chat_id: chat_id.to_owned(),
+                message_id,
+                requester_id,
+                command: "unified".to_owned(),
+            }) else {
+                unreachable!("synthetic stored market selection must serialize")
+            };
+            stored_value
+        };
+
+        let mut malformed = dispatcher().with_market_price_source(Box::new(source(
+            Rc::new(RefCell::new(HashMap::new())),
+            None,
+            None,
+        )));
+        assert_eq!(
+            malformed.dispatch(callback_update("mkt:bad:id:0", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            malformed.actions.0.as_slice(),
+            [TelegramAction::AnswerCallback {
+                text: None,
+                show_alert: false,
+                ..
+            }]
+        ));
+
+        let mut expired = dispatcher().with_market_price_source(Box::new(source(
+            Rc::new(RefCell::new(HashMap::new())),
+            None,
+            None,
+        )));
+        assert_eq!(
+            expired.dispatch(callback_update(
+                "mkt:select:missing:0",
+                "private",
+                Some("en"),
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            expired.actions.0.as_slice(),
+            [TelegramAction::AnswerCallback {
+                text: Some(text),
+                show_alert: true,
+                ..
+            }] if text == "that selection expired"
+        ));
+
+        let mut read_failed = dispatcher().with_market_price_source(Box::new(source(
+            Rc::new(RefCell::new(HashMap::new())),
+            Some("synthetic selection read failure".to_owned()),
+            None,
+        )));
+        assert_eq!(
+            read_failed.dispatch(callback_update(
+                "mkt:select:read-failed:0",
+                "private",
+                Some("en"),
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            read_failed
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.contains("selection read failed"))
+        );
+
+        let stored = Rc::new(RefCell::new(HashMap::from([(
+            "market_selection:decode-failed".to_owned(),
+            "not-json".to_owned(),
+        )])));
+        let mut decode_failed =
+            dispatcher().with_market_price_source(Box::new(source(Rc::clone(&stored), None, None)));
+        assert_eq!(
+            decode_failed.dispatch(callback_update(
+                "mkt:select:decode-failed:0",
+                "private",
+                Some("en"),
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            decode_failed
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.contains("selection decode failed"))
+        );
+
+        let stored = Rc::new(RefCell::new(HashMap::from([(
+            "market_selection:wrong-chat".to_owned(),
+            stored_value("-99", 7, 88),
+        )])));
+        let mut wrong_chat =
+            dispatcher().with_market_price_source(Box::new(source(stored, None, None)));
+        assert_eq!(
+            wrong_chat.dispatch(callback_update(
+                "mkt:select:wrong-chat:0",
+                "private",
+                Some("en"),
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            wrong_chat.actions.0.as_slice(),
+            [TelegramAction::AnswerCallback {
+                text: Some(text),
+                show_alert: true,
+                ..
+            }] if text == "that selection belongs to someone else"
+        ));
+
+        let stored = Rc::new(RefCell::new(HashMap::from([(
+            "market_selection:private-owner".to_owned(),
+            stored_value("-42", 7, 999),
+        )])));
+        let mut private_owner =
+            dispatcher().with_market_price_source(Box::new(source(stored, None, None)));
+        assert_eq!(
+            private_owner.dispatch(callback_update(
+                "mkt:select:private-owner:0",
+                "private",
+                Some("en"),
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(private_owner.actions.0.iter().any(|action| matches!(
+            action,
+            TelegramAction::AnswerCallback {
+                text: Some(text),
+                show_alert: true,
+                ..
+            } if text == "that selection belongs to someone else"
+        )));
+
+        let stored = Rc::new(RefCell::new(HashMap::from([(
+            "market_selection:group-admin".to_owned(),
+            stored_value("-42", 7, 999),
+        )])));
+        let mut group_admin =
+            dispatcher().with_market_price_source(Box::new(source(Rc::clone(&stored), None, None)));
+        assert_eq!(
+            group_admin.dispatch(callback_update_with_context(
+                "mkt:select:group-admin:0",
+                json!(-42),
+                "group",
+                7,
+                Some(88),
+                Some("en"),
+                Some("callback-admin"),
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            group_admin
+                .authorization
+                .checks
+                .iter()
+                .any(|check| check == &("-42".to_owned(), "88".to_owned()))
+        );
+        assert!(stored.borrow().is_empty());
+        assert!(group_admin.actions.0.iter().any(|action| matches!(
+            action,
+            TelegramAction::SendMessage(message) if message.text.contains("LIBRA: 0.007")
+        )));
+
+        let stored = Rc::new(RefCell::new(HashMap::from([(
+            "market_selection:no-user".to_owned(),
+            stored_value("-42", 7, 999),
+        )])));
+        let mut no_user =
+            dispatcher().with_market_price_source(Box::new(source(stored, None, None)));
+        assert_eq!(
+            no_user.dispatch(callback_update_with_context(
+                "mkt:select:no-user:0",
+                json!(-42),
+                "supergroup",
+                7,
+                None,
+                Some("en"),
+                Some("callback-no-user"),
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            no_user.actions.0.last(),
+            Some(TelegramAction::AnswerCallback {
+                text: Some(text),
+                show_alert: true,
+                ..
+            }) if text == "esa selección es de otra persona"
+        ));
+
+        let stored = Rc::new(RefCell::new(HashMap::from([(
+            "market_selection:bad-chat-id".to_owned(),
+            stored_value("not-number", 7, 88),
+        )])));
+        let mut bad_chat_id =
+            dispatcher().with_market_price_source(Box::new(source(stored, None, None)));
+        assert_eq!(
+            bad_chat_id.dispatch(callback_update_with_context(
+                "mkt:select:bad-chat-id:0",
+                json!("not-number"),
+                "private",
+                7,
+                Some(88),
+                Some("en"),
+                Some("callback-bad-chat"),
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            bad_chat_id
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic == "invalid market callback chat id")
+        );
+
+        let stored = Rc::new(RefCell::new(HashMap::from([(
+            "market_selection:bad-index".to_owned(),
+            stored_value("-42", 7, 88),
+        )])));
+        let mut bad_index =
+            dispatcher().with_market_price_source(Box::new(source(stored, None, None)));
+        assert_eq!(
+            bad_index.dispatch(callback_update(
+                "mkt:select:bad-index:9",
+                "private",
+                Some("es"),
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            bad_index.actions.0.as_slice(),
+            [TelegramAction::AnswerCallback {
+                text: Some(text),
+                show_alert: true,
+                ..
+            }] if text == "opción inválida"
+        ));
+
+        let mut no_callback_id = dispatcher().with_market_price_source(Box::new(source(
+            Rc::new(RefCell::new(HashMap::new())),
+            None,
+            None,
+        )));
+        assert_eq!(
+            no_callback_id.dispatch(callback_update_with_context(
+                "mkt:select:missing:0",
+                json!(-42),
+                "private",
+                7,
+                Some(88),
+                Some("en"),
+                None,
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(no_callback_id.actions.0.is_empty());
+    }
+
+    #[test]
+    fn market_callbacks_deliver_chart_photos_and_fallbacks() {
+        let chart = |timeframe: Option<&str>, token: Option<TokenAddress>| {
+            bot_core::market_prices::MarketChart {
+                timeframe: timeframe.map(ToOwned::to_owned),
+                symbol: "LIBRA".to_owned(),
+                name: "Libra Finance".to_owned(),
+                yahoo_symbol: "LIBRA-USD".to_owned(),
+                token,
+            }
+        };
+        let candidate_load = |chart: bot_core::market_prices::MarketChart| MarketPriceLoad {
+            chart: Some(chart),
+            selection: None,
+            no_assets_found: false,
+            text: "LIBRA: 0.007 USD (+2.00% 24h)".to_owned(),
+            diagnostics: Vec::new(),
+        };
+        let callback = |timeframe: Option<&str>| {
+            let selection_id = market_selection_id(-42, 7, 88, 1_672_531_200, 0);
+            let data = format!("mkt:select:{selection_id}:0");
+            let _ = timeframe;
+            data
+        };
+
+        for render_caption in [Some("provider caption".to_owned()), None] {
+            let stored = Rc::new(RefCell::new(HashMap::new()));
+            let mut dispatcher =
+                dispatcher().with_market_price_source(Box::new(SelectionStorageMarketPrices {
+                    initial: market_selection_load(None),
+                    candidate: candidate_load(chart(None, None)),
+                    stored: Rc::clone(&stored),
+                    save_calls: Rc::new(RefCell::new(0)),
+                    fail_save_at: None,
+                    fail_load: None,
+                    fail_clear: None,
+                    render_success: true,
+                    render_caption,
+                }));
+            assert_eq!(
+                dispatcher.dispatch(update("/p libra", Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert_eq!(
+                dispatcher.dispatch(callback_update_for_message(
+                    &callback(None),
+                    "private",
+                    Some("en"),
+                    700,
+                )),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert!(stored.borrow().is_empty());
+            assert!(dispatcher.actions.0.iter().any(|action| matches!(
+                action,
+                TelegramAction::SendPhoto { photo, caption, parse_mode: None, .. }
+                    if photo.as_ref() == b"callback-chart"
+                        && (caption == "provider caption" || caption.contains("LIBRA: 0.007"))
+            )));
+            assert!(dispatcher.actions.0.iter().any(|action| matches!(
+                action,
+                TelegramAction::EditMessage { reply_markup: Some(markup), .. }
+                    if markup.inline_keyboard.is_empty()
+            )));
+            assert!(dispatcher.actions.0.iter().any(|action| matches!(
+                action,
+                TelegramAction::AnswerCallback {
+                    show_alert: false,
+                    ..
+                }
+            )));
+        }
+
+        for outcome in [PhotoOutcome::Skipped, PhotoOutcome::Unconfirmed] {
+            let stored = Rc::new(RefCell::new(HashMap::new()));
+            let mut dispatcher = NativeDispatcher::new(
+                Config {
+                    value: Ok(ChatConfig::default()),
+                    chat_ids: Vec::new(),
+                },
+                PhotoActions { outcome },
+                State::default(),
+                values(),
+                random(),
+                authorization(),
+                "@mybot",
+            )
+            .with_market_price_source(Box::new(SelectionStorageMarketPrices {
+                initial: market_selection_load(None),
+                candidate: candidate_load(chart(None, None)),
+                stored: Rc::clone(&stored),
+                save_calls: Rc::new(RefCell::new(0)),
+                fail_save_at: None,
+                fail_load: None,
+                fail_clear: None,
+                render_success: true,
+                render_caption: None,
+            }));
+            assert_eq!(
+                dispatcher.dispatch(update("/p libra", Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert_eq!(
+                dispatcher.dispatch(callback_update_for_message(
+                    &callback(None),
+                    "private",
+                    Some("en"),
+                    700,
+                )),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert!(
+                dispatcher
+                    .state_diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.contains("market chart photo delivery"))
+            );
+            assert!(stored.borrow().is_empty());
+        }
+
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let mut photo_failed = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            PhotoFailureActions {
+                actions: Vec::new(),
+            },
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_market_price_source(Box::new(SelectionStorageMarketPrices {
+            initial: market_selection_load(None),
+            candidate: candidate_load(chart(None, None)),
+            stored: Rc::clone(&stored),
+            save_calls: Rc::new(RefCell::new(0)),
+            fail_save_at: None,
+            fail_load: None,
+            fail_clear: None,
+            render_success: true,
+            render_caption: None,
+        }));
+        assert_eq!(
+            photo_failed.dispatch(update("/p libra", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            photo_failed.dispatch(callback_update_for_message(
+                &callback(None),
+                "private",
+                Some("en"),
+                700,
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            photo_failed
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.contains("market chart photo delivery failed"))
+        );
+        assert!(stored.borrow().is_empty());
+
+        for timeframe in [None, Some("7d")] {
+            let token = TokenAddress {
+                chain_id: "solana".to_owned(),
+                network: "solana".to_owned(),
+                tag: "SOL".to_owned(),
+                address: "J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump".to_owned(),
+            };
+            let stored = Rc::new(RefCell::new(HashMap::new()));
+            let mut dispatcher = dispatcher()
+                .with_market_price_source(Box::new(SelectionStorageMarketPrices {
+                    initial: market_selection_load(timeframe),
+                    candidate: candidate_load(chart(timeframe, Some(token))),
+                    stored: Rc::clone(&stored),
+                    save_calls: Rc::new(RefCell::new(0)),
+                    fail_save_at: None,
+                    fail_load: None,
+                    fail_clear: None,
+                    render_success: false,
+                    render_caption: None,
+                }))
+                .with_token_signal_source(Box::new(Signals {
+                    query_load: TokenSignalLoad {
+                        signal: None,
+                        diagnostics: Vec::new(),
+                    },
+                    token_load: TokenSignalLoad {
+                        signal: Some(token_signal()),
+                        diagnostics: vec!["callback token fallback".to_owned()],
+                    },
+                    photo: Ok(b"token-callback".to_vec()),
+                    state: None,
+                    queries: Rc::new(RefCell::new(Vec::new())),
+                    saved: Rc::new(RefCell::new(Vec::new())),
+                }));
+            let input = timeframe.map_or("/p libra", |period| {
+                if period == "7d" {
+                    "/p libra 7d"
+                } else {
+                    "/p libra"
+                }
+            });
+            assert_eq!(
+                dispatcher.dispatch(update(input, Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert_eq!(
+                dispatcher.dispatch(callback_update_for_message(
+                    &callback(timeframe),
+                    "private",
+                    Some("en"),
+                    700,
+                )),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert!(matches!(
+                dispatcher.actions.0.iter().find(|action| matches!(
+                    action,
+                    TelegramAction::SendPhoto { parse_mode: Some(bot_core::telegram_actions::ParseMode::Html), .. }
+                )),
+                Some(TelegramAction::SendPhoto { photo, .. }) if photo.as_ref() == b"token-callback"
+            ));
+            assert!(stored.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn market_callbacks_keep_selection_on_token_photo_failure_and_clear_failure_is_diagnostic() {
+        let selection = market_selection_fixture(Some("7d"));
+        let token = TokenAddress {
+            chain_id: "solana".to_owned(),
+            network: "solana".to_owned(),
+            tag: "SOL".to_owned(),
+            address: "J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump".to_owned(),
+        };
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            PhotoActions {
+                outcome: PhotoOutcome::Skipped,
+            },
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_market_price_source(Box::new(SelectionStorageMarketPrices {
+            initial: MarketPriceLoad {
+                chart: None,
+                selection: Some(selection),
+                no_assets_found: false,
+                text: String::new(),
+                diagnostics: Vec::new(),
+            },
+            candidate: MarketPriceLoad {
+                chart: Some(bot_core::market_prices::MarketChart {
+                    timeframe: Some("7d".to_owned()),
+                    symbol: "LIBRA".to_owned(),
+                    name: "Libra Finance".to_owned(),
+                    yahoo_symbol: "LIBRA-USD".to_owned(),
+                    token: Some(token),
+                }),
+                selection: None,
+                no_assets_found: false,
+                text: "LIBRA: 0.007 USD".to_owned(),
+                diagnostics: Vec::new(),
+            },
+            stored: Rc::clone(&stored),
+            save_calls: Rc::new(RefCell::new(0)),
+            fail_save_at: None,
+            fail_load: None,
+            fail_clear: Some("synthetic callback clear failure".to_owned()),
+            render_success: false,
+            render_caption: None,
+        }))
+        .with_token_signal_source(Box::new(Signals {
+            query_load: TokenSignalLoad {
+                signal: None,
+                diagnostics: Vec::new(),
+            },
+            token_load: TokenSignalLoad {
+                signal: Some(token_signal()),
+                diagnostics: Vec::new(),
+            },
+            photo: Ok(vec![1]),
+            state: None,
+            queries: Rc::new(RefCell::new(Vec::new())),
+            saved: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(update("/p libra 7d", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let selection_id = market_selection_id(-42, 7, 88, 1_672_531_200, 0);
+        assert_eq!(
+            dispatcher.dispatch(callback_update_for_message(
+                &format!("mkt:select:{selection_id}:0"),
+                "private",
+                Some("en"),
+                700,
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(dispatcher
+            .state_diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.contains("token chart photo delivery was unconfirmed")));
+        assert!(
+            dispatcher
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.contains("market selection clear failed"))
+        );
+        assert_eq!(stored.borrow().len(), 1);
+    }
+
+    #[test]
+    fn market_callbacks_localize_empty_candidate_quotes_and_history_failures() {
+        let selection = market_selection_fixture(None);
+        let Ok(stored_value) = serde_json::to_string(&StoredMarketSelection {
+            selection,
+            chat_id: "-42".to_owned(),
+            message_id: 7,
+            requester_id: 88,
+            command: "crypto".to_owned(),
+        }) else {
+            unreachable!("synthetic stored market selection must serialize")
+        };
+        let stored = Rc::new(RefCell::new(HashMap::from([(
+            "market_selection:empty-candidate".to_owned(),
+            stored_value,
+        )])));
+        let mut dispatcher =
+            dispatcher().with_market_price_source(Box::new(SelectionStorageMarketPrices {
+                initial: market_selection_load(None),
+                candidate: MarketPriceLoad {
+                    chart: None,
+                    selection: None,
+                    no_assets_found: true,
+                    text: String::new(),
+                    diagnostics: vec!["candidate quote unavailable".to_owned()],
+                },
+                stored,
+                save_calls: Rc::new(RefCell::new(0)),
+                fail_save_at: None,
+                fail_load: None,
+                fail_clear: None,
+                render_success: false,
+                render_caption: None,
+            }));
+        assert_eq!(
+            dispatcher.dispatch(callback_update_with_context(
+                "mkt:select:empty-candidate:0",
+                json!(-42),
+                "private",
+                7,
+                Some(88),
+                Some("es"),
+                Some("callback-empty"),
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [
+                TelegramAction::SendMessage(message),
+                TelegramAction::AnswerCallback { show_alert: true, .. }
+            ] if message.text.contains("no pude obtener una cotización usable")
+        ));
+        assert!(
+            dispatcher
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic == "candidate quote unavailable")
+        );
+    }
+
+    #[test]
+    fn market_selection_helpers_and_default_source_methods_are_covered() {
+        struct BareStock;
+        impl StockPriceSource for BareStock {
+            fn load(&mut self, _: &str, _: i64) -> StockQuotesLoad {
+                StockQuotesLoad {
+                    quotes: None,
+                    diagnostics: Vec::new(),
+                }
+            }
+        }
+
+        let quote = StockQuote {
+            symbol: "SYN".to_owned(),
+            name: "Synthetic".to_owned(),
+            price: 1.0,
+            currency: "USD".to_owned(),
+            exchange: "TEST".to_owned(),
+            variation: 0.0,
+        };
+        assert_eq!(
+            BareStock.render_chart(&quote, 1_700_000_000),
+            Err("stock chart unavailable".to_owned())
+        );
+
+        struct BareMarket;
+        impl MarketPriceSource for BareMarket {
+            fn load(
+                &mut self,
+                _: &str,
+                _: bot_core::market_prices::MarketPriceCommand,
+                _: bot_core::locale::Locale,
+                _: i64,
+            ) -> MarketPriceLoad {
+                MarketPriceLoad {
+                    chart: None,
+                    selection: None,
+                    no_assets_found: true,
+                    text: String::new(),
+                    diagnostics: Vec::new(),
+                }
+            }
+        }
+
+        let candidate = bot_core::market_prices::MarketCandidate {
+            id: "42".to_owned(),
+            symbol: "SYN".to_owned(),
+            name: String::new(),
+            slug: "synthetic".to_owned(),
+            price: "1".to_owned(),
+            change: "0".to_owned(),
+            contracts: vec![TokenAddress {
+                chain_id: "solana".to_owned(),
+                network: "mainnet".to_owned(),
+                tag: "SOL".to_owned(),
+                address: "J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump".to_owned(),
+            }],
+        };
+        let mut source = BareMarket;
+        let default = source.load_candidate(
+            &candidate,
+            Some("7d"),
+            "USD",
+            "USD",
+            None,
+            bot_core::market_prices::MarketPriceCommand::CryptoOnly,
+            bot_core::locale::Locale::En,
+            1_700_000_000,
+        );
+        assert!(default.no_assets_found);
+        assert_eq!(
+            default.diagnostics,
+            ["market candidate resolution unavailable"]
+        );
+        assert!(
+            source
+                .render_chart(
+                    &bot_core::market_prices::MarketChart {
+                        timeframe: None,
+                        symbol: "SYN".to_owned(),
+                        name: "Synthetic".to_owned(),
+                        yahoo_symbol: "SYN-USD".to_owned(),
+                        token: None,
+                    },
+                    1_700_000_000,
+                )
+                .is_err_and(|error| error == "market chart unavailable")
+        );
+        assert_eq!(
+            source.save_selection("key", "value", 60),
+            Err("market selection storage unavailable".to_owned())
+        );
+        assert_eq!(
+            source.load_selection("key"),
+            Err("market selection storage unavailable".to_owned())
+        );
+        assert_eq!(source.clear_selection("key"), Ok(()));
+
+        assert_eq!(short_market_address("short"), "short");
+        assert_eq!(short_market_address("123456789012345678"), "123456…5678");
+        assert_eq!(shorten_market_button("short"), "short");
+        assert_eq!(shorten_market_button(&"x".repeat(65)).chars().count(), 64);
+        assert_eq!(
+            market_selection_command("crypto"),
+            bot_core::market_prices::MarketPriceCommand::CryptoOnly
+        );
+        assert_eq!(
+            market_selection_command("unified"),
+            bot_core::market_prices::MarketPriceCommand::Unified
+        );
+
+        let mut candidates = vec![candidate];
+        candidates.push(bot_core::market_prices::MarketCandidate {
+            id: "43".to_owned(),
+            symbol: "LONG".to_owned(),
+            name: "x".repeat(80),
+            slug: "long".to_owned(),
+            price: "2".to_owned(),
+            change: "0".to_owned(),
+            contracts: Vec::new(),
+        });
+        for index in 2..12 {
+            candidates.push(bot_core::market_prices::MarketCandidate {
+                id: index.to_string(),
+                symbol: format!("S{index}"),
+                name: format!("Synthetic {index}"),
+                slug: format!("synthetic-{index}"),
+                price: "1".to_owned(),
+                change: "0".to_owned(),
+                contracts: Vec::new(),
+            });
+        }
+        let selection = bot_core::market_prices::MarketSelection {
+            query: "syn".to_owned(),
+            timeframe: None,
+            target_symbol: "USD".to_owned(),
+            target_parameter: "USD".to_owned(),
+            conversion: None,
+            candidates,
+        };
+        let keyboard = market_selection_keyboard("selection", &selection);
+        assert_eq!(keyboard.inline_keyboard.len(), 10);
+        assert!(keyboard.inline_keyboard.iter().all(|row| {
+            row.first()
+                .and_then(|button| button.callback_data.as_deref())
+                .is_some_and(|data| data.starts_with("mkt:select:selection:"))
+        }));
+        assert!(keyboard.inline_keyboard[1][0].text.ends_with("..."));
+        assert_eq!(
+            market_selection_text(&selection, bot_core::locale::Locale::En),
+            bot_core::market_prices::format_market_selection(
+                &selection,
+                bot_core::locale::Locale::En
+            )
+        );
+    }
+
+    #[test]
+    fn market_asset_fallbacks_cover_empty_quotes_and_verified_token_history() {
+        struct EmptyMarket {
+            with_chart: bool,
+            token: Option<TokenAddress>,
+        }
+
+        impl MarketPriceSource for EmptyMarket {
+            fn load(
+                &mut self,
+                _: &str,
+                _: bot_core::market_prices::MarketPriceCommand,
+                _: bot_core::locale::Locale,
+                _: i64,
+            ) -> MarketPriceLoad {
+                MarketPriceLoad {
+                    chart: self
+                        .with_chart
+                        .then(|| bot_core::market_prices::MarketChart {
+                            timeframe: None,
+                            symbol: "SYN".to_owned(),
+                            name: "Synthetic".to_owned(),
+                            yahoo_symbol: String::new(),
+                            token: self.token.clone(),
+                        }),
+                    selection: None,
+                    no_assets_found: false,
+                    text: String::new(),
+                    diagnostics: Vec::new(),
+                }
+            }
+        }
+
+        for (input, language, expected) in [
+            ("/p apple", "es", "gráfico no disponible"),
+            (
+                "/p apple,banana",
+                "en",
+                "I could not obtain a usable quote for",
+            ),
+        ] {
+            let mut dispatcher = dispatcher().with_market_price_source(Box::new(EmptyMarket {
+                with_chart: input == "/p apple",
+                token: None,
+            }));
+            assert_eq!(
+                dispatcher.dispatch(update(input, Some(language))),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert!(matches!(
+                dispatcher.actions.0.last(),
+                Some(TelegramAction::SendMessage(message)) if message.text.contains(expected)
+            ));
+        }
+
+        for input in ["/p apple", "/p apple 1h"] {
+            let token = TokenAddress {
+                chain_id: "solana".to_owned(),
+                network: "solana".to_owned(),
+                tag: "SOL".to_owned(),
+                address: "J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump".to_owned(),
+            };
+            let mut dispatcher = dispatcher()
+                .with_market_price_source(Box::new(EmptyMarket {
+                    with_chart: true,
+                    token: Some(token),
+                }))
+                .with_token_signal_source(Box::new(Signals {
+                    query_load: TokenSignalLoad {
+                        signal: None,
+                        diagnostics: Vec::new(),
+                    },
+                    token_load: TokenSignalLoad {
+                        signal: Some(token_signal()),
+                        diagnostics: vec!["token history fixture".to_owned()],
+                    },
+                    photo: Ok(vec![1, 2, 3]),
+                    state: None,
+                    queries: Rc::new(RefCell::new(Vec::new())),
+                    saved: Rc::new(RefCell::new(Vec::new())),
+                }));
+            assert_eq!(
+                dispatcher.dispatch(update(input, Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert!(matches!(
+                dispatcher.actions.0.as_slice(),
+                [TelegramAction::SendPhoto {
+                    parse_mode: Some(bot_core::telegram_actions::ParseMode::Html),
+                    ..
+                }]
+            ));
+            assert!(
+                dispatcher
+                    .state_diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic == "token history fixture")
+            );
+        }
+
+        let mut no_chart_signal = token_signal();
+        no_chart_signal.candles.clear();
+        let mut dispatcher = dispatcher()
+            .with_market_price_source(Box::new(EmptyMarket {
+                with_chart: true,
+                token: Some(TokenAddress {
+                    chain_id: "solana".to_owned(),
+                    network: "solana".to_owned(),
+                    tag: "SOL".to_owned(),
+                    address: "J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump".to_owned(),
+                }),
+            }))
+            .with_token_signal_source(Box::new(Signals {
+                query_load: TokenSignalLoad {
+                    signal: None,
+                    diagnostics: Vec::new(),
+                },
+                token_load: TokenSignalLoad {
+                    signal: Some(no_chart_signal),
+                    diagnostics: Vec::new(),
+                },
+                photo: Ok(vec![1]),
+                state: None,
+                queries: Rc::new(RefCell::new(Vec::new())),
+                saved: Rc::new(RefCell::new(Vec::new())),
+            }));
+        assert_eq!(
+            dispatcher.dispatch(update("/p apple", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [TelegramAction::SendMessage(message)] if message.text.contains("Chart unavailable")
+        ));
+
+        let mut undelivered_token = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            PhotoActions {
+                outcome: PhotoOutcome::Skipped,
+            },
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_market_price_source(Box::new(EmptyMarket {
+            with_chart: true,
+            token: Some(TokenAddress {
+                chain_id: "solana".to_owned(),
+                network: "solana".to_owned(),
+                tag: "SOL".to_owned(),
+                address: "J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump".to_owned(),
+            }),
+        }))
+        .with_token_signal_source(Box::new(Signals {
+            query_load: TokenSignalLoad {
+                signal: None,
+                diagnostics: Vec::new(),
+            },
+            token_load: TokenSignalLoad {
+                signal: Some(token_signal()),
+                diagnostics: Vec::new(),
+            },
+            photo: Ok(vec![1]),
+            state: None,
+            queries: Rc::new(RefCell::new(Vec::new())),
+            saved: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            undelivered_token.dispatch(update("/p apple", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            undelivered_token
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.contains("market chart unavailable or undelivered"))
+        );
+    }
+
+    #[test]
+    fn market_dispatch_boundaries_cover_query_guards_scopes_and_localized_fallbacks() {
+        let mut unsupported = update("/p 0h", Some("en"));
+        let IncomingEvent::Message(message) = &mut unsupported.event else {
+            unreachable!();
+        };
+        let mut query_guards = dispatcher();
+        assert_eq!(
+            query_guards.dispatch_asset_prices(
+                message,
+                "0h",
+                bot_core::market_prices::MarketPriceCommand::Unified,
+                bot_core::locale::Locale::En,
+                1_672_531_200,
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            query_guards.dispatch_asset_prices(
+                message,
+                "123",
+                bot_core::market_prices::MarketPriceCommand::Unified,
+                bot_core::locale::Locale::En,
+                1_672_531_200,
+            ),
+            Ok(None)
+        );
+        message.chat_id = None;
+        assert_eq!(
+            query_guards.dispatch_asset_prices(
+                message,
+                "btc",
+                bot_core::market_prices::MarketPriceCommand::Unified,
+                bot_core::locale::Locale::En,
+                1_672_531_200,
+            ),
+            Ok(Some(DispatchOutcome::Unsupported))
+        );
+
+        let IncomingEvent::Message(message) = update("/p btc", Some("en")).event else {
+            unreachable!();
+        };
+        let mut no_market = dispatcher();
+        assert_eq!(
+            no_market.dispatch_market_price_query(
+                &message,
+                "btc",
+                bot_core::market_prices::MarketPriceCommand::Unified,
+                bot_core::locale::Locale::En,
+                1_672_531_200,
+            ),
+            Err(DispatchError::MissingService("market prices"))
+        );
+        let mut no_chat = message.clone();
+        no_chat.chat_id = None;
+        assert_eq!(
+            no_market.dispatch_market_price_query(
+                &no_chat,
+                "btc",
+                bot_core::market_prices::MarketPriceCommand::Unified,
+                bot_core::locale::Locale::En,
+                1_672_531_200,
+            ),
+            Ok(Some(DispatchOutcome::Unsupported))
+        );
+
+        let mut no_sender = message.clone();
+        no_sender.sender_id = None;
+        let mut selection_fallback =
+            dispatcher().with_market_price_source(Box::new(MarketPrices {
+                result: market_selection_load(None),
+                calls: Rc::new(RefCell::new(Vec::new())),
+            }));
+        assert_eq!(
+            selection_fallback.dispatch_market_price_query(
+                &no_sender,
+                "libra",
+                bot_core::market_prices::MarketPriceCommand::CryptoOnly,
+                bot_core::locale::Locale::En,
+                1_672_531_200,
+            ),
+            Ok(Some(DispatchOutcome::Handled))
+        );
+        assert!(matches!(
+            selection_fallback.actions.0.as_slice(),
+            [TelegramAction::SendMessage(message)] if message.reply_markup.is_none()
+        ));
+
+        for (locale, expected) in [
+            (
+                bot_core::locale::Locale::Es,
+                "no pude obtener una cotización usable",
+            ),
+            (
+                bot_core::locale::Locale::En,
+                "I could not obtain a usable quote",
+            ),
+        ] {
+            let mut empty = dispatcher().with_market_price_source(Box::new(MarketPrices {
+                result: MarketPriceLoad {
+                    chart: None,
+                    selection: None,
+                    no_assets_found: true,
+                    text: String::new(),
+                    diagnostics: Vec::new(),
+                },
+                calls: Rc::new(RefCell::new(Vec::new())),
+            }));
+            assert_eq!(
+                empty.dispatch_market_price_query(
+                    &message,
+                    "btc",
+                    bot_core::market_prices::MarketPriceCommand::Unified,
+                    locale,
+                    1_672_531_200,
+                ),
+                Ok(Some(DispatchOutcome::Handled))
+            );
+            assert!(matches!(
+                empty.actions.0.as_slice(),
+                [TelegramAction::SendMessage(reply)] if reply.text == expected
+            ));
+        }
+
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mut scoped = dispatcher().with_market_price_source(Box::new(MarketPrices {
+            result: MarketPriceLoad {
+                chart: None,
+                selection: None,
+                no_assets_found: false,
+                text: "scoped quote".to_owned(),
+                diagnostics: Vec::new(),
+            },
+            calls: Rc::clone(&calls),
+        }));
+        assert_eq!(
+            scoped.dispatch_asset_prices(
+                &message,
+                "crypto:btc,eth 24h",
+                bot_core::market_prices::MarketPriceCommand::Unified,
+                bot_core::locale::Locale::En,
+                1_672_531_200,
+            ),
+            Ok(Some(DispatchOutcome::Handled))
+        );
+        assert_eq!(
+            calls
+                .borrow()
+                .iter()
+                .map(|call| call.0.as_str())
+                .collect::<Vec<_>>(),
+            ["crypto:btc 24h", "crypto:eth 24h"]
+        );
+
+        let mut empty_requests = dispatcher().with_market_price_source(Box::new(MarketPrices {
+            result: MarketPriceLoad {
+                chart: None,
+                selection: None,
+                no_assets_found: true,
+                text: String::new(),
+                diagnostics: Vec::new(),
+            },
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            empty_requests.dispatch_asset_prices(
+                &message,
+                ",,,",
+                bot_core::market_prices::MarketPriceCommand::Unified,
+                bot_core::locale::Locale::En,
+                1_672_531_200,
+            ),
+            Ok(None)
+        );
     }
 
     #[test]

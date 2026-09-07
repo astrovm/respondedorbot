@@ -3840,6 +3840,10 @@ mod tests {
                     status_code: 200,
                     body: asset(&format!(r#"{{"EXM":[{row}]}}"#)),
                 }),
+                Ok(CoinMarketCapHttpResponse {
+                    status_code: 200,
+                    body: asset(&format!(r#"{{"1":[{row}]}}"#)),
+                }),
             ]),
             requests: RefCell::new(Vec::new()),
         };
@@ -3858,6 +3862,12 @@ mod tests {
                 .map(|assets| assets[0].symbol.clone()),
             Ok("EXM".to_owned())
         );
+        assert_eq!(
+            source
+                .quotes_by_id(&["1".to_owned()], "USD")
+                .map(|assets| assets[0].symbol.clone()),
+            Ok("EXM".to_owned())
+        );
         assert!(source.diagnostics.is_empty());
         assert!(matches!(
             transport.requests.borrow()[0].kind,
@@ -3867,6 +3877,11 @@ mod tests {
             &transport.requests.borrow()[1].kind,
             MarketRequestKind::Quotes { identifiers, by_slug: false }
                 if identifiers == &["EXM".to_owned()]
+        ));
+        assert!(matches!(
+            &transport.requests.borrow()[2].kind,
+            MarketRequestKind::QuotesById { identifiers }
+                if identifiers == &["1".to_owned()]
         ));
 
         let failing = MarketTransportStub {
@@ -3906,6 +3921,10 @@ mod tests {
                     status_code: 200,
                     body: format!(r#"{{"data":{{"EXM":[{row}]}}}}"#),
                 }),
+                Ok(CoinMarketCapHttpResponse {
+                    status_code: 200,
+                    body: format!(r#"{{"data":{{"1":[{row}]}}}}"#),
+                }),
             ]),
             requests: RefCell::new(Vec::new()),
         };
@@ -3937,6 +3956,71 @@ mod tests {
         assert!(load.text.contains("42"));
         assert!(load.diagnostics.is_empty());
         let chart = load.chart.ok_or("resolved asset has no chart identity")?;
+        let candidate = bot_core::market_prices::MarketCandidate {
+            id: "1".to_owned(),
+            symbol: "EXM".to_owned(),
+            name: "Synthetic Asset".to_owned(),
+            slug: "synthetic-asset".to_owned(),
+            price: "42".to_owned(),
+            change: "1".to_owned(),
+            contracts: Vec::new(),
+        };
+        let candidate_load = source.load_candidate(
+            &candidate,
+            Some("7d"),
+            "USD",
+            "USD",
+            None,
+            MarketPriceCommand::CryptoOnly,
+            Locale::En,
+            1_700_000_000,
+        );
+        assert!(candidate_load.text.contains("EXM"));
+        assert!(candidate_load.diagnostics.is_empty());
+        assert_eq!(source.save_selection("market-key", "value", 60), Ok(()));
+        assert_eq!(source.load_selection("market-key"), Ok(None));
+        assert_eq!(source.clear_selection("market-key"), Ok(()));
+
+        struct FailingCache;
+        impl RequestCache for FailingCache {
+            type Error = &'static str;
+
+            fn get(&mut self, _: &str) -> Result<Option<String>, Self::Error> {
+                Err("synthetic cache get failure")
+            }
+
+            fn set(&mut self, _: &str, _: &str, _: i64) -> Result<(), Self::Error> {
+                Err("synthetic cache set failure")
+            }
+        }
+        let failing_stocks = super::YahooStockPriceSource {
+            yahoo_transport: StockYahooTransportStub {
+                chart_responses: RefCell::new(Vec::new()),
+                search_responses: RefCell::new(Vec::new()),
+                charts: RefCell::new(Vec::new()),
+                searches: RefCell::new(Vec::new()),
+            },
+            finviz_transport: FinvizTransportStub {
+                response: RefCell::new(None),
+            },
+            cache: WeatherCacheStub,
+        };
+        let mut failing_source = super::NativeMarketPriceSource {
+            transport: MarketTransportStub {
+                responses: RefCell::new(Vec::new()),
+                requests: RefCell::new(Vec::new()),
+            },
+            cache: FailingCache,
+            api_key: "synthetic-key".to_owned(),
+            stocks: failing_stocks,
+        };
+        assert!(
+            failing_source
+                .save_selection("market-key", "value", 60)
+                .is_err()
+        );
+        assert!(failing_source.load_selection("market-key").is_err());
+        assert!(failing_source.clear_selection("market-key").is_err());
         assert!(source.render_chart(&chart, 1_700_000_000).is_err());
         // The resolver intentionally leaves unknown identities without a
         // guessed Yahoo symbol. Supply a verified fixture target to exercise
