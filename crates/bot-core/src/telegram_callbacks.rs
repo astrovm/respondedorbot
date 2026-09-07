@@ -13,6 +13,7 @@ pub enum CallbackRoute {
     Charges,
     Task,
     Signal,
+    Market,
     Config,
     Unknown,
 }
@@ -79,6 +80,8 @@ pub fn classify_callback(data: &str) -> CallbackRoute {
         CallbackRoute::Task
     } else if data.starts_with("sig:") {
         CallbackRoute::Signal
+    } else if data.starts_with("mkt:") {
+        CallbackRoute::Market
     } else if data.starts_with("cfg:") {
         CallbackRoute::Config
     } else {
@@ -159,6 +162,7 @@ mod tests {
             ("chg:1:2", CallbackRoute::Charges),
             ("task:delete:id", CallbackRoute::Task),
             ("sig:refresh:id", CallbackRoute::Signal),
+            ("mkt:select:id:0", CallbackRoute::Market),
             ("cfg:link:off", CallbackRoute::Config),
             ("other", CallbackRoute::Unknown),
         ] {

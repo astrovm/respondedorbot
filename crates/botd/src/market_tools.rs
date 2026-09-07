@@ -2,7 +2,7 @@
 
 use bot_core::dollar::{DollarCommandPlan, invalid_timeframe_message, plan_dollar_command};
 use bot_core::locale::Locale;
-use bot_core::market_prices::MarketPriceCommand;
+use bot_core::market_prices::{MarketPriceCommand, format_market_selection};
 use bot_core::stocks::render_stock_quotes;
 use bot_core::weather::{render_weather, weather_load_error};
 
@@ -50,7 +50,18 @@ where
             self.locale,
             (self.now)(),
         );
-        ToolExecutionResult::with_diagnostics(load.text, load.diagnostics)
+        let output = if load.text.trim().is_empty() {
+            load.selection.as_ref().map_or_else(
+                || match self.locale {
+                    Locale::Es => "no pude obtener una cotización usable".to_owned(),
+                    Locale::En => "I could not obtain a usable quote".to_owned(),
+                },
+                |selection| format_market_selection(selection, self.locale),
+            )
+        } else {
+            load.text
+        };
+        ToolExecutionResult::with_diagnostics(output, load.diagnostics)
     }
 }
 
@@ -229,6 +240,7 @@ mod tests {
             MarketSource {
                 load: MarketPriceLoad {
                     chart: None,
+                    selection: None,
                     no_assets_found: false,
                     text: "BTC: 70000 USD".to_owned(),
                     diagnostics: vec!["synthetic provider note".to_owned()],
@@ -399,6 +411,7 @@ mod tests {
             MarketSource {
                 load: MarketPriceLoad {
                     chart: None,
+                    selection: None,
                     no_assets_found: false,
                     text: String::new(),
                     diagnostics: Vec::new(),

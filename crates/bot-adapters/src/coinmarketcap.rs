@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use bot_core::cache_policy::request_cache_history_key;
 use bot_core::market_prices::{CryptoAsset, CryptoQuote};
+use bot_core::token_signals::TokenAddress;
 use chrono::{DateTime, Utc};
 use reqwest::blocking::Client;
 use serde_json::Value;
@@ -112,6 +113,9 @@ pub enum MarketRequestKind {
         identifiers: Vec<String>,
         by_slug: bool,
     },
+    QuotesById {
+        identifiers: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +146,12 @@ impl CoinMarketCapMarketTransport for ReqwestCoinMarketCapTransport {
                 let parameter = if *by_slug { "slug" } else { "symbol" };
                 self.client.get(&self.quotes_url).query(&[
                     (parameter, identifiers.join(",")),
+                    ("convert", request.currency.clone()),
+                ])
+            }
+            MarketRequestKind::QuotesById { identifiers } => {
+                self.client.get(&self.quotes_url).query(&[
+                    ("id", identifiers.join(",")),
                     ("convert", request.currency.clone()),
                 ])
             }
@@ -192,6 +202,14 @@ fn market_cache_arguments(request: &MarketRequest) -> String {
                 ),
             )
         }
+        MarketRequestKind::QuotesById { identifiers } => (
+            QUOTES_URL,
+            format!(
+                "{{\"convert\": {}, \"id\": {}}}",
+                python_json_string(&request.currency),
+                python_json_string(&identifiers.join(","))
+            ),
+        ),
     };
     format!(
         "{{\"api_url\": \"{url}\", \"headers\": {{\"Accepts\": \"application/json\", \"X-CMC_PRO_API_KEY\": {}}}, \"parameters\": {parameters}}}",
@@ -255,14 +273,62 @@ fn parse_asset(value: &Value) -> Option<CryptoAsset> {
         name: text(object.get("name")),
         slug: text(object.get("slug")),
         quotes,
+        contracts: parse_contracts(object),
     })
+}
+
+fn parse_contracts(object: &serde_json::Map<String, Value>) -> Vec<TokenAddress> {
+    let platform = object.get("platform").and_then(Value::as_object);
+    let platform_name = platform
+        .and_then(|value| value.get("slug").or_else(|| value.get("name")))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let address = platform
+        .and_then(|value| {
+            value
+                .get("token_address")
+                .or_else(|| value.get("contract_address"))
+        })
+        .and_then(Value::as_str)
+        .or_else(|| object.get("contract_address").and_then(Value::as_str))
+        .filter(|value| !value.trim().is_empty());
+    let Some(address) = address else {
+        return Vec::new();
+    };
+    let (chain_id, network, tag) = if platform_name.contains("solana") {
+        ("solana", "solana", "SOL")
+    } else if platform_name.contains("ethereum") || platform_name == "eth" {
+        ("ethereum", "eth", "ETH")
+    } else if platform_name.contains("binance")
+        || platform_name.contains("bnb")
+        || platform_name == "bsc"
+    {
+        ("bsc", "bsc", "BNB")
+    } else if platform_name.contains("polygon") {
+        ("polygon", "polygon", "MATIC")
+    } else if platform_name.contains("arbitrum") {
+        ("arbitrum", "arbitrum", "ARB")
+    } else if platform_name == "base" {
+        ("base", "base", "ETH")
+    } else if platform_name.contains("avalanche") {
+        ("avalanche", "avalanche", "AVAX")
+    } else {
+        return Vec::new();
+    };
+    vec![TokenAddress {
+        chain_id: chain_id.to_owned(),
+        network: network.to_owned(),
+        tag: tag.to_owned(),
+        address: address.to_owned(),
+    }]
 }
 
 fn parse_market_assets(payload: &Value, kind: &MarketRequestKind) -> Option<Vec<CryptoAsset>> {
     let data = payload.get("data")?;
     let values = match kind {
         MarketRequestKind::Listings => data.as_array()?.iter().collect::<Vec<_>>(),
-        MarketRequestKind::Quotes { .. } => data
+        MarketRequestKind::Quotes { .. } | MarketRequestKind::QuotesById { .. } => data
             .as_object()?
             .values()
             .flat_map(|value| {
@@ -281,7 +347,7 @@ pub fn load_market_assets<T: CoinMarketCapMarketTransport, C: RequestCache>(
     request: &MarketRequest,
     now_unix: i64,
 ) -> MarketAssetsLoad {
-    if matches!(&request.kind, MarketRequestKind::Quotes { identifiers, .. } if identifiers.is_empty())
+    if matches!(&request.kind, MarketRequestKind::Quotes { identifiers, .. } | MarketRequestKind::QuotesById { identifiers } if identifiers.is_empty())
     {
         return MarketAssetsLoad {
             assets: Some(Vec::new()),
@@ -612,6 +678,41 @@ mod tests {
     }
 
     #[test]
+    fn identity_quotes_keep_contract_metadata_for_exact_token_chart_fallbacks() -> Result<(), String>
+    {
+        let request = MarketRequest {
+            api_key: "synthetic-secret".to_owned(),
+            currency: "USD".to_owned(),
+            kind: MarketRequestKind::QuotesById {
+                identifiers: vec!["123".to_owned()],
+            },
+        };
+        assert_eq!(
+            market_cache_arguments(&request),
+            "{\"api_url\": \"https://pro-api.coinmarketcap.com/v2/cryptocurrency/quotes/latest\", \"headers\": {\"Accepts\": \"application/json\", \"X-CMC_PRO_API_KEY\": \"synthetic-secret\"}, \"parameters\": {\"convert\": \"USD\", \"id\": \"123\"}}"
+        );
+        let transport = MarketTransport {
+            responses: RefCell::new(VecDeque::from([Ok(HttpResponse {
+                status_code: 200,
+                body: r#"{"data":{"123":[{"id":123,"symbol":"LIBRA","name":"Libra","slug":"libra","platform":{"slug":"solana","token_address":"So11111111111111111111111111111111111111112"},"quote":{"USD":{"price":0.01}}}]}}"#.to_owned(),
+            })])),
+            requests: RefCell::new(Vec::new()),
+        };
+        let load = load_market_assets(&transport, &mut Cache::default(), &request, 100);
+        let mut assets = load
+            .assets
+            .ok_or_else(|| "identity quote payload".to_owned())?;
+        let asset = assets.pop().ok_or_else(|| "identity asset".to_owned())?;
+        assert_eq!(asset.contracts[0].chain_id, "solana");
+        assert_eq!(
+            asset.contracts[0].address,
+            "So11111111111111111111111111111111111111112"
+        );
+        assert_eq!(transport.requests.borrow().as_slice(), &[request]);
+        Ok(())
+    }
+
+    #[test]
     fn market_load_uses_stale_cache_after_provider_failures() {
         let request = MarketRequest {
             api_key: "key".to_owned(),
@@ -773,6 +874,7 @@ mod tests {
                 ("/listings", "start=1&limit=100&convert=USD"),
                 ("/listings", "start=1&limit=100&convert=ARS"),
                 ("/quotes", "slug=bitcoin%2Cethereum&convert=USD"),
+                ("/quotes", "id=123%2C456&convert=USD"),
             ] {
                 let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
                 let mut request = [0_u8; 4_096];
@@ -825,6 +927,17 @@ mod tests {
                     kind: MarketRequestKind::Quotes {
                         identifiers: vec!["bitcoin".to_owned(), "ethereum".to_owned()],
                         by_slug: true,
+                    },
+                })
+                .is_ok()
+        );
+        assert!(
+            transport
+                .get_market(&MarketRequest {
+                    api_key: "synthetic-key".to_owned(),
+                    currency: "USD".to_owned(),
+                    kind: MarketRequestKind::QuotesById {
+                        identifiers: vec!["123".to_owned(), "456".to_owned()],
                     },
                 })
                 .is_ok()

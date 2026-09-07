@@ -905,21 +905,34 @@ pub fn render_market_chart(
     render_market_chart_for_period(quote, candles, "5d")
 }
 
-/// Compare the current chart quote with the first available candle's opening price.
-/// Missing history is never replaced with the quote provider's daily variation.
+/// Keep chart captions aligned with the requested chart period.
 #[must_use]
 pub fn market_chart_caption(
     quote: &bot_core::stocks::StockQuote,
     candles: &[Vec<f64>],
     period: &str,
 ) -> String {
-    let change = candles
-        .first()
-        .and_then(|candle| candle.get(1))
-        .filter(|open| open.is_finite() && **open > 0.0)
-        .map(|open| (quote.price / open - 1.0) * 100.0)
-        .filter(|change| change.is_finite())
-        .map_or_else(|| "N/A".to_owned(), |change| format!("{change:+.2}%"));
+    let opening_price = candles
+        .iter()
+        .filter_map(|candle| {
+            let timestamp = candle.first().copied()?;
+            let opening_price = candle.get(1).copied()?;
+            (timestamp.is_finite() && opening_price.is_finite() && opening_price > 0.0)
+                .then_some((timestamp, opening_price))
+        })
+        .min_by(|(left, _), (right, _)| left.total_cmp(right))
+        .map(|(_, opening_price)| opening_price);
+    let change = opening_price
+        .and_then(|opening_price| {
+            let change = (quote.price / opening_price - 1.0) * 100.0;
+            change.is_finite().then(|| format!("{change:+.2}%"))
+        })
+        .unwrap_or_else(|| "N/A".to_owned());
+    let period = if period.trim().is_empty() {
+        "24h"
+    } else {
+        period
+    };
     format!(
         "{}: {} {} ({change} {period})",
         quote.symbol, quote.price, quote.currency
@@ -1174,7 +1187,7 @@ fn encode_png(image: RgbImage) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn market_caption_uses_requested_history_instead_of_daily_variation() {
+    fn market_caption_uses_requested_period() {
         let mut quote = bot_core::stocks::StockQuote {
             symbol: "BTC".into(),
             name: "Bitcoin".into(),
