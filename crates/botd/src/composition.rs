@@ -85,14 +85,15 @@ use bot_core::command_state::{
 };
 use bot_core::links::replace_social_links;
 use bot_core::market_prices::{
-    CryptoAsset, CryptoMarketProvider, MarketPriceCommand, UnifiedStockProvider,
-    execute_market_price_command,
+    CryptoAsset, CryptoMarketProvider, MarketCandidate, MarketPriceCommand, UnifiedStockProvider,
+    execute_market_price_candidate, execute_market_price_command,
 };
 use bot_core::stocks::{StockQuery, StockQuote, plan_stock_query};
 use bot_core::telegram_actions::TelegramAction;
 use bot_core::telegram_commands::command_publication_actions;
 use bot_core::telegram_payments::StarPaymentRecord;
 use num_bigint::{BigInt, BigUint};
+use serde_json::Value;
 use thiserror::Error;
 
 use crate::chat_members_tool::ChatMembersTool;
@@ -212,6 +213,19 @@ impl<T: CoinMarketCapMarketTransport, C: RequestCache> CryptoMarketProvider
             MarketRequestKind::Quotes {
                 identifiers: identifiers.to_vec(),
                 by_slug,
+            },
+        )
+    }
+
+    fn quotes_by_id(
+        &mut self,
+        identifiers: &[String],
+        currency: &str,
+    ) -> Result<Vec<CryptoAsset>, String> {
+        self.load(
+            currency,
+            MarketRequestKind::QuotesById {
+                identifiers: identifiers.to_vec(),
             },
         )
     }
@@ -357,16 +371,70 @@ where
         execution.diagnostics.extend(stocks.diagnostics);
         MarketPriceLoad {
             chart: execution.chart,
+            selection: execution.selection,
             no_assets_found: execution.no_assets_found,
             text: execution.text,
             diagnostics: execution.diagnostics,
         }
+    }
+
+    fn load_candidate(
+        &mut self,
+        candidate: &MarketCandidate,
+        timeframe: Option<&str>,
+        target_parameter: &str,
+        _command: MarketPriceCommand,
+        locale: bot_core::locale::Locale,
+        now_unix: i64,
+    ) -> MarketPriceLoad {
+        let mut crypto = CachedCoinMarketCap {
+            transport: &self.transport,
+            cache: &mut self.cache,
+            api_key: &self.api_key,
+            now_unix,
+            diagnostics: Vec::new(),
+        };
+        let execution = execute_market_price_candidate(
+            candidate,
+            timeframe,
+            target_parameter,
+            locale,
+            &mut crypto,
+        );
+        let mut diagnostics = execution.diagnostics;
+        diagnostics.extend(crypto.diagnostics);
+        MarketPriceLoad {
+            chart: execution.chart,
+            selection: execution.selection,
+            no_assets_found: execution.no_assets_found,
+            text: execution.text,
+            diagnostics,
+        }
+    }
+
+    fn save_selection(&mut self, key: &str, value: &str, ttl_seconds: i64) -> Result<(), String> {
+        self.cache
+            .set(key, value, ttl_seconds)
+            .map_err(|error| error.to_string())
+    }
+
+    fn load_selection(&mut self, key: &str) -> Result<Option<String>, String> {
+        self.cache.get(key).map_err(|error| error.to_string())
+    }
+
+    fn clear_selection(&mut self, key: &str) -> Result<(), String> {
+        self.cache
+            .set(key, &Value::Null.to_string(), 1)
+            .map_err(|error| error.to_string())
     }
     fn render_chart(
         &mut self,
         chart: &bot_core::market_prices::MarketChart,
         now_unix: i64,
     ) -> Result<crate::dispatcher::MarketChartRender, String> {
+        if chart.yahoo_symbol.trim().is_empty() {
+            return Err("no verified market chart target".to_owned());
+        }
         let load = bot_adapters::yahoo_finance::load_chart(
             &self.stocks.yahoo_transport,
             &mut self.stocks.cache,
@@ -3862,6 +3930,11 @@ mod tests {
         assert!(load.diagnostics.is_empty());
         let chart = load.chart.ok_or("resolved asset has no chart identity")?;
         assert!(source.render_chart(&chart, 1_700_000_000).is_err());
+        // The resolver intentionally leaves unknown identities without a
+        // guessed Yahoo symbol. Supply a verified fixture target to exercise
+        // the renderer itself.
+        let mut chart = chart;
+        chart.yahoo_symbol = "EXM-USD".to_owned();
         let response = || {
             Ok(YahooHttpResponse {
             status_code: 200,

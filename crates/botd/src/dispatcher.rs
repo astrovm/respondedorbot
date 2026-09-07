@@ -42,7 +42,10 @@ use bot_core::links::{
     LinkActionContext, LinkMode, LinkReplacement, has_replaceable_link, plan_link_actions,
 };
 use bot_core::locale::resolve_locale;
-use bot_core::market_prices::{MarketPriceCommand, classify_market_price_command};
+use bot_core::market_prices::{
+    MarketCandidate, MarketPriceCommand, MarketSelection, classify_market_price_command,
+    format_market_selection,
+};
 use bot_core::polymarket::{ElectionEvent, classify_election_command, render_elections};
 use bot_core::random_selection::{RandomSelection, parse_random_selection};
 use bot_core::routing::{
@@ -63,7 +66,8 @@ use bot_core::task_commands::{
     task_delete_forbidden, task_deleted, task_load_failed, task_not_found,
 };
 use bot_core::telegram_actions::{
-    MAX_TELEGRAM_TEXT_LENGTH, ParseMode, SendMessage, TelegramAction,
+    InlineKeyboardButton, InlineKeyboardMarkup, MAX_TELEGRAM_TEXT_LENGTH, ParseMode, SendMessage,
+    TelegramAction,
 };
 use bot_core::telegram_callbacks::{
     CallbackContext, CallbackContextOutcome, CallbackRoute, parse_callback_context,
@@ -86,6 +90,7 @@ use bot_core::weather::{
     weather_load_error,
 };
 use num_bigint::BigInt;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
@@ -322,9 +327,61 @@ pub trait StockPriceSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarketPriceLoad {
     pub chart: Option<bot_core::market_prices::MarketChart>,
+    pub selection: Option<MarketSelection>,
     pub no_assets_found: bool,
     pub text: String,
     pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredMarketSelection {
+    selection: MarketSelection,
+    chat_id: String,
+    message_id: i64,
+    requester_id: i64,
+    command: String,
+}
+
+fn market_selection_key(selection_id: &str) -> String {
+    format!("market_selection:{selection_id}")
+}
+
+fn market_selection_text(selection: &MarketSelection, locale: bot_core::locale::Locale) -> String {
+    format_market_selection(selection, locale)
+}
+
+fn market_selection_keyboard(
+    selection_id: &str,
+    selection: &MarketSelection,
+) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup {
+        inline_keyboard: selection
+            .candidates
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| {
+                let label = if candidate.name.is_empty() {
+                    format!("{} {}", index + 1, candidate.symbol)
+                } else {
+                    format!("{} {}", index + 1, candidate.name)
+                };
+                vec![InlineKeyboardButton {
+                    text: label,
+                    url: None,
+                    callback_data: Some(format!("mkt:select:{selection_id}:{index}")),
+                    copy_text: None,
+                }]
+            })
+            .collect(),
+    }
+}
+
+fn market_selection_command(command: &str) -> MarketPriceCommand {
+    if command == "crypto" {
+        MarketPriceCommand::CryptoOnly
+    } else {
+        MarketPriceCommand::Unified
+    }
 }
 
 /// Chart media and an optional quote measured over its requested range.
@@ -341,12 +398,47 @@ pub trait MarketPriceSource {
         locale: bot_core::locale::Locale,
         now_unix: i64,
     ) -> MarketPriceLoad;
+
+    fn load_candidate(
+        &mut self,
+        _candidate: &MarketCandidate,
+        _timeframe: Option<&str>,
+        _target_parameter: &str,
+        _command: MarketPriceCommand,
+        _locale: bot_core::locale::Locale,
+        _now_unix: i64,
+    ) -> MarketPriceLoad {
+        MarketPriceLoad {
+            chart: None,
+            selection: None,
+            no_assets_found: true,
+            text: String::new(),
+            diagnostics: vec!["market candidate resolution unavailable".to_owned()],
+        }
+    }
     fn render_chart(
         &mut self,
         _chart: &bot_core::market_prices::MarketChart,
         _now_unix: i64,
     ) -> Result<MarketChartRender, String> {
         Err("market chart unavailable".to_owned())
+    }
+
+    fn save_selection(
+        &mut self,
+        _key: &str,
+        _value: &str,
+        _ttl_seconds: i64,
+    ) -> Result<(), String> {
+        Err("market selection storage unavailable".to_owned())
+    }
+
+    fn load_selection(&mut self, _key: &str) -> Result<Option<String>, String> {
+        Err("market selection storage unavailable".to_owned())
+    }
+
+    fn clear_selection(&mut self, _key: &str) -> Result<(), String> {
+        Ok(())
     }
 }
 
@@ -1108,9 +1200,75 @@ where
             if let Some(load) = &load {
                 self.state_diagnostics.extend(load.diagnostics.clone());
             }
+            if single
+                && let Some(load) = load.as_ref()
+                && let Some(selection) = &load.selection
+                && let Some(requester_id) = message.sender_id
+            {
+                let mut selection = selection.clone();
+                selection.timeframe.clone_from(&timeframe);
+                let selection_id =
+                    stable_signal_id(chat_id.0, message_id.0, requester_id.0, timestamp);
+                let stored = StoredMarketSelection {
+                    selection: selection.clone(),
+                    chat_id: chat_id.0.to_string(),
+                    message_id: message_id.0,
+                    requester_id: requester_id.0,
+                    command: if command == MarketPriceCommand::CryptoOnly {
+                        "crypto".to_owned()
+                    } else {
+                        "unified".to_owned()
+                    },
+                };
+                let key = market_selection_key(&selection_id);
+                if let Ok(encoded) = serde_json::to_string(&stored) {
+                    let saved = self
+                        .market_price_source
+                        .as_mut()
+                        .is_some_and(|source| source.save_selection(&key, &encoded, 3600).is_ok());
+                    if saved {
+                        let mut reply =
+                            SendMessage::new(chat_id, &market_selection_text(&selection, locale));
+                        reply.reply_to_message_id = Some(message_id);
+                        reply.reply_markup =
+                            Some(market_selection_keyboard(&selection_id, &selection));
+                        let receipt = self
+                            .actions
+                            .execute(TelegramAction::SendMessage(reply))
+                            .map_err(DispatchError::Action)?;
+                        self.record_price_delivery(
+                            message,
+                            &market_selection_text(&selection, locale),
+                            receipt.message_id,
+                            timestamp,
+                        );
+                        return Ok(Some(DispatchOutcome::Handled));
+                    }
+                    self.state_diagnostics
+                        .push("market selection storage unavailable".to_owned());
+                    lines.push(market_selection_text(&selection, locale));
+                    continue;
+                } else {
+                    self.state_diagnostics
+                        .push("market selection encode failed".to_owned());
+                    lines.push(market_selection_text(&selection, locale));
+                    continue;
+                }
+            }
             if let Some(load) = load.as_ref().filter(|load| !load.no_assets_found) {
                 if single && let Some(chart) = &load.chart {
-                    let mut caption = load.text.clone();
+                    let mut caption = if load.text.trim().is_empty() {
+                        match locale {
+                            bot_core::locale::Locale::Es => {
+                                format!("{}: cotización disponible", chart.symbol)
+                            }
+                            bot_core::locale::Locale::En => {
+                                format!("{}: quote available", chart.symbol)
+                            }
+                        }
+                    } else {
+                        load.text.clone()
+                    };
                     let photo = self
                         .market_price_source
                         .as_mut()
@@ -1139,6 +1297,47 @@ where
                             return Ok(Some(DispatchOutcome::Handled));
                         }
                     }
+                    // CMC may know an exact contract while Yahoo has no
+                    // symbol for a token. Use the verified token identity for
+                    // the historical chart before falling back to the quote.
+                    if let Some(token) = chart.token.as_ref()
+                        && let Some(source) = self.token_signal_source.as_mut()
+                    {
+                        let token_load = source.load_token(token);
+                        self.state_diagnostics.extend(token_load.diagnostics);
+                        if let Some(signal) = token_load.signal {
+                            let token_photo = self.token_signal_source.as_mut().and_then(
+                                |source| match timeframe.as_deref() {
+                                    Some(period) => {
+                                        source.render_period_photo(&signal, period, timestamp).ok()
+                                    }
+                                    None => source.render_photo(&signal).ok(),
+                                },
+                            );
+                            if let Some(photo) = token_photo {
+                                let token_caption = format_signal_caption(&signal, timestamp);
+                                let delivered = self.actions.try_photo(TelegramAction::SendPhoto {
+                                    chat_id,
+                                    photo: photo.into(),
+                                    reply_to_message_id: Some(message_id),
+                                    caption: token_caption.clone(),
+                                    parse_mode: Some(ParseMode::Html),
+                                    reply_markup: None,
+                                });
+                                if let Ok(Some(receipt)) = delivered
+                                    && receipt.message_id.is_some()
+                                {
+                                    self.record_price_delivery(
+                                        message,
+                                        &token_caption,
+                                        receipt.message_id,
+                                        timestamp,
+                                    );
+                                    return Ok(Some(DispatchOutcome::Handled));
+                                }
+                            }
+                        }
+                    }
                     self.state_diagnostics.push(format!(
                         "market chart unavailable or undelivered: {}",
                         chart.symbol
@@ -1155,7 +1354,28 @@ where
                     ));
                     continue;
                 }
-                lines.push(load.text.clone());
+                if !load.text.trim().is_empty() {
+                    lines.push(load.text.clone());
+                } else {
+                    lines.push(match locale {
+                        bot_core::locale::Locale::Es => {
+                            format!(
+                                "no pude obtener una cotización usable para {}",
+                                load.chart
+                                    .as_ref()
+                                    .map_or(request, |chart| chart.symbol.as_str())
+                            )
+                        }
+                        bot_core::locale::Locale::En => {
+                            format!(
+                                "I could not obtain a usable quote for {}",
+                                load.chart
+                                    .as_ref()
+                                    .map_or(request, |chart| chart.symbol.as_str())
+                            )
+                        }
+                    });
+                }
                 continue;
             }
             let token_query = if provider_scope == Some(ProviderScope::Stock) {
@@ -1188,10 +1408,28 @@ where
                     }
                 }
             }
-            lines.push(load.map(|load| load.text).unwrap_or_else(|| match locale {
-                bot_core::locale::Locale::Es => format!("no pude encontrar datos para {request}"),
-                bot_core::locale::Locale::En => format!("I could not find data for {request}"),
-            }));
+            lines.push(
+                load.map(|load| {
+                    if load.text.trim().is_empty() {
+                        match locale {
+                            bot_core::locale::Locale::Es => {
+                                format!("no pude obtener una cotización usable para {request}")
+                            }
+                            bot_core::locale::Locale::En => {
+                                format!("I could not obtain a usable quote for {request}")
+                            }
+                        }
+                    } else {
+                        load.text
+                    }
+                })
+                .unwrap_or_else(|| match locale {
+                    bot_core::locale::Locale::Es => {
+                        format!("no pude encontrar datos para {request}")
+                    }
+                    bot_core::locale::Locale::En => format!("I could not find data for {request}"),
+                }),
+            );
         }
         let text = lines.join("\n");
         let mut reply = SendMessage::new(chat_id, &text);
@@ -1544,6 +1782,275 @@ where
         Ok(DispatchOutcome::Handled)
     }
 
+    fn dispatch_market_callback(
+        &mut self,
+        context: &CallbackContext,
+    ) -> NativeDispatchResult<Config, Actions, Random> {
+        if self.market_price_source.is_none() {
+            return Err(DispatchError::MissingService("market prices"));
+        }
+        let config = self
+            .config
+            .get(&context.chat_id)
+            .map_err(DispatchError::Config)?;
+        let locale = resolve_locale(
+            Some(&config.language),
+            context.user_language_code.as_deref(),
+            &context.chat_type,
+        );
+        let mut parts = context.data.splitn(4, ':');
+        let valid_prefix = parts.next() == Some("mkt");
+        let action = parts.next().unwrap_or_default();
+        let selection_id = parts.next().unwrap_or_default();
+        let candidate_index = parts.next().and_then(|value| value.parse::<usize>().ok());
+        if !valid_prefix
+            || action != "select"
+            || selection_id.is_empty()
+            || candidate_index.is_none()
+        {
+            self.answer_callback_best_effort(context.callback_id.as_deref());
+            return Ok(DispatchOutcome::Handled);
+        }
+        let candidate_index = candidate_index.unwrap_or_default();
+        let key = market_selection_key(selection_id);
+        let stored_value = self
+            .market_price_source
+            .as_mut()
+            .map_or(Ok(None), |source| source.load_selection(&key));
+        let stored_value = match stored_value {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                self.answer_market_callback(context, locale, "expired", true)?;
+                return Ok(DispatchOutcome::Handled);
+            }
+            Err(error) => {
+                self.state_diagnostics.push(format!(
+                    "market selection read failed chat_id={} selection_id={selection_id}: {error}",
+                    context.chat_id
+                ));
+                self.answer_market_callback(context, locale, "expired", true)?;
+                return Ok(DispatchOutcome::Handled);
+            }
+        };
+        let stored = match serde_json::from_str::<StoredMarketSelection>(&stored_value) {
+            Ok(stored) => stored,
+            Err(error) => {
+                self.state_diagnostics.push(format!(
+                    "market selection decode failed chat_id={} selection_id={selection_id}: {error}",
+                    context.chat_id
+                ));
+                self.answer_market_callback(context, locale, "expired", true)?;
+                return Ok(DispatchOutcome::Handled);
+            }
+        };
+        if stored.chat_id != context.chat_id {
+            self.answer_market_callback(context, locale, "owner_only", true)?;
+            return Ok(DispatchOutcome::Handled);
+        }
+        let user_id = context.user_id;
+        let mut allowed = user_id.is_some_and(|id| id == stored.requester_id);
+        if !allowed && is_group_chat_type(Some(&context.chat_type)) {
+            let authorization = user_id.map_or(
+                GroupAuthorizationDecision {
+                    is_admin: false,
+                    diagnostics: Vec::new(),
+                },
+                |id| {
+                    self.authorization
+                        .authorize(&context.chat_id, &id.to_string())
+                },
+            );
+            self.state_diagnostics.extend(authorization.diagnostics);
+            allowed = authorization.is_admin;
+        }
+        if !allowed {
+            self.answer_market_callback(context, locale, "owner_only", true)?;
+            return Ok(DispatchOutcome::Handled);
+        }
+        let Ok(chat_id_value) = context.chat_id.parse::<i64>() else {
+            self.state_diagnostics
+                .push("invalid market callback chat id".to_owned());
+            self.answer_callback_best_effort(context.callback_id.as_deref());
+            return Ok(DispatchOutcome::Handled);
+        };
+        let Some(candidate) = stored.selection.candidates.get(candidate_index).cloned() else {
+            self.answer_market_callback(context, locale, "invalid", true)?;
+            return Ok(DispatchOutcome::Handled);
+        };
+        let timestamp = self.runtime_values.unix_timestamp();
+        let command = market_selection_command(&stored.command);
+        let mut load = self
+            .market_price_source
+            .as_mut()
+            .map(|source| {
+                source.load_candidate(
+                    &candidate,
+                    stored.selection.timeframe.as_deref(),
+                    &stored.selection.target_parameter,
+                    command,
+                    locale,
+                    timestamp,
+                )
+            })
+            .unwrap_or(MarketPriceLoad {
+                chart: None,
+                selection: None,
+                no_assets_found: true,
+                text: String::new(),
+                diagnostics: vec!["market price source disappeared".to_owned()],
+            });
+        self.state_diagnostics.append(&mut load.diagnostics);
+        let text = if load.text.trim().is_empty() {
+            match locale {
+                bot_core::locale::Locale::Es => {
+                    format!(
+                        "no pude obtener una cotización usable para {}",
+                        candidate.symbol
+                    )
+                }
+                bot_core::locale::Locale::En => {
+                    format!("I could not obtain a usable quote for {}", candidate.symbol)
+                }
+            }
+        } else {
+            load.text.clone()
+        };
+        let mut delivered = false;
+        if !load.no_assets_found
+            && let Some(chart) = load.chart.as_ref()
+        {
+            let rendered = self
+                .market_price_source
+                .as_mut()
+                .and_then(|source| source.render_chart(chart, timestamp).ok());
+            if let Some(rendered) = rendered {
+                let caption = rendered.caption.unwrap_or_else(|| text.clone());
+                delivered = self
+                    .actions
+                    .try_photo(TelegramAction::SendPhoto {
+                        chat_id: ChatId(chat_id_value),
+                        photo: rendered.photo.into(),
+                        reply_to_message_id: Some(MessageId(context.message_id)),
+                        caption,
+                        parse_mode: None,
+                        reply_markup: None,
+                    })
+                    .ok()
+                    .flatten()
+                    .is_some_and(|receipt| receipt.message_id.is_some());
+            }
+            if !delivered
+                && let Some(token) = chart.token.as_ref()
+                && let Some(source) = self.token_signal_source.as_mut()
+            {
+                let token_load = source.load_token(token);
+                self.state_diagnostics.extend(token_load.diagnostics);
+                if let Some(signal) = token_load.signal {
+                    let photo = self.token_signal_source.as_mut().and_then(|source| {
+                        match stored.selection.timeframe.as_deref() {
+                            Some(period) => {
+                                source.render_period_photo(&signal, period, timestamp).ok()
+                            }
+                            None => source.render_photo(&signal).ok(),
+                        }
+                    });
+                    if let Some(photo) = photo {
+                        let caption = format_signal_caption(&signal, timestamp);
+                        delivered = self
+                            .actions
+                            .try_photo(TelegramAction::SendPhoto {
+                                chat_id: ChatId(chat_id_value),
+                                photo: photo.into(),
+                                reply_to_message_id: Some(MessageId(context.message_id)),
+                                caption,
+                                parse_mode: Some(ParseMode::Html),
+                                reply_markup: None,
+                            })
+                            .ok()
+                            .flatten()
+                            .is_some_and(|receipt| receipt.message_id.is_some());
+                    }
+                }
+            }
+        }
+        if !delivered {
+            let chat_id = ChatId(chat_id_value);
+            let mut reply = SendMessage::new(chat_id, &text);
+            reply.reply_to_message_id = Some(MessageId(context.message_id));
+            let _receipt = self
+                .actions
+                .execute(TelegramAction::SendMessage(reply))
+                .map_err(DispatchError::Action)?;
+        }
+        {
+            let _ = self.actions.try_edit(TelegramAction::EditMessage {
+                chat_id: ChatId(chat_id_value),
+                message_id: MessageId(context.message_id),
+                text: match locale {
+                    bot_core::locale::Locale::Es => "selección procesada".to_owned(),
+                    bot_core::locale::Locale::En => "Selection processed".to_owned(),
+                },
+                reply_markup: Some(InlineKeyboardMarkup {
+                    inline_keyboard: Vec::new(),
+                }),
+            });
+        }
+        if let Err(error) = self
+            .market_price_source
+            .as_mut()
+            .map_or(Ok(()), |source| source.clear_selection(&key))
+        {
+            self.state_diagnostics.push(format!(
+                "market selection clear failed chat_id={} selection_id={selection_id}: {error}",
+                context.chat_id
+            ));
+        }
+        self.answer_market_callback(
+            context,
+            locale,
+            if delivered { "selected" } else { "quote" },
+            false,
+        )?;
+        Ok(DispatchOutcome::Handled)
+    }
+
+    fn answer_market_callback(
+        &mut self,
+        context: &CallbackContext,
+        locale: bot_core::locale::Locale,
+        kind: &str,
+        show_alert: bool,
+    ) -> NativeDispatchResult<Config, Actions, Random> {
+        let Some(callback_id) = context.callback_id.as_deref() else {
+            return Ok(DispatchOutcome::Handled);
+        };
+        let text = match (kind, locale) {
+            ("expired", bot_core::locale::Locale::Es) => "la selección venció",
+            ("expired", bot_core::locale::Locale::En) => "that selection expired",
+            ("owner_only", bot_core::locale::Locale::Es) => "esa selección es de otra persona",
+            ("owner_only", bot_core::locale::Locale::En) => {
+                "that selection belongs to someone else"
+            }
+            ("invalid", bot_core::locale::Locale::Es) => "opción inválida",
+            ("invalid", bot_core::locale::Locale::En) => "invalid option",
+            ("selected", bot_core::locale::Locale::Es) => "cotización cargada",
+            ("selected", bot_core::locale::Locale::En) => "quote loaded",
+            ("quote", bot_core::locale::Locale::Es) => "te dejé la cotización",
+            ("quote", bot_core::locale::Locale::En) => "showing the quote",
+            (_, bot_core::locale::Locale::Es) => "listo",
+            (_, bot_core::locale::Locale::En) => "done",
+        };
+        let _receipt = self
+            .actions
+            .execute(TelegramAction::AnswerCallback {
+                callback_id: callback_id.to_owned(),
+                text: Some(text.to_owned()),
+                show_alert,
+            })
+            .map_err(DispatchError::Action)?;
+        Ok(DispatchOutcome::Handled)
+    }
+
     fn dispatch_task_callback(
         &mut self,
         context: &CallbackContext,
@@ -1737,6 +2244,9 @@ where
         }
         if context.route == CallbackRoute::Signal {
             return self.dispatch_token_signal_callback(&context);
+        }
+        if context.route == CallbackRoute::Market {
+            return self.dispatch_market_callback(&context);
         }
         if context.route == CallbackRoute::Topup {
             let Ok(chat_id) = context.chat_id.parse::<i64>() else {
@@ -2687,7 +3197,15 @@ where
             message.chat_type.as_deref().unwrap_or_default(),
         );
         let timestamp = self.runtime_values.unix_timestamp();
-        if detect_signal_query(&content.text).is_some()
+        let cashtag_with_period = {
+            let mut parts = content.text.split_whitespace();
+            parts.next().and_then(detect_signal_query).is_some_and(|_| {
+                parts.next().is_some_and(|period| {
+                    bot_core::price_queries::ChartPeriod::parse(period).is_some()
+                }) && parts.next().is_none()
+            })
+        };
+        if (detect_signal_query(&content.text).is_some() || cashtag_with_period)
             && let Some(outcome) = self.dispatch_asset_prices(
                 message,
                 &content.text,
@@ -3158,7 +3676,22 @@ where
             };
             let load = source.load(&parsed.message_text, command, locale, timestamp);
             self.state_diagnostics.extend(load.diagnostics);
-            let mut message = SendMessage::new(chat_id, &load.text);
+            let text = if load.text.trim().is_empty() {
+                load.selection.as_ref().map_or_else(
+                    || match locale {
+                        bot_core::locale::Locale::Es => {
+                            "no pude obtener una cotización usable".to_owned()
+                        }
+                        bot_core::locale::Locale::En => {
+                            "I could not obtain a usable quote".to_owned()
+                        }
+                    },
+                    |selection| format_market_selection(selection, locale),
+                )
+            } else {
+                load.text
+            };
+            let mut message = SendMessage::new(chat_id, &text);
             message.reply_to_message_id = Some(message_id);
             StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if classify_stock_command(&parsed.command) {
@@ -6102,6 +6635,7 @@ mod tests {
         .with_market_price_source(Box::new(MarketPrices {
             result: MarketPriceLoad {
                 chart: None,
+                selection: None,
                 no_assets_found: false,
                 text: "BTC: 50000 USD (+2.5% 24h)".to_owned(),
                 diagnostics: vec!["synthetic stale CMC cache".to_owned()],
@@ -7809,7 +8343,9 @@ mod tests {
                     } else {
                         symbol.to_owned()
                     },
+                    token: None,
                 }),
+                selection: None,
                 no_assets_found: symbol.is_none(),
                 text: symbol.map_or_else(
                     || "missing".to_owned(),
@@ -7840,6 +8376,155 @@ mod tests {
                 })
             }
         }
+    }
+
+    struct SelectableMarketPrices {
+        initial: MarketPriceLoad,
+        candidate: MarketPriceLoad,
+        stored: Rc<RefCell<HashMap<String, String>>>,
+        selected: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl super::MarketPriceSource for SelectableMarketPrices {
+        fn load(
+            &mut self,
+            _: &str,
+            _: bot_core::market_prices::MarketPriceCommand,
+            _: bot_core::locale::Locale,
+            _: i64,
+        ) -> MarketPriceLoad {
+            self.initial.clone()
+        }
+
+        fn load_candidate(
+            &mut self,
+            candidate: &bot_core::market_prices::MarketCandidate,
+            timeframe: Option<&str>,
+            _: &str,
+            _: bot_core::market_prices::MarketPriceCommand,
+            _: bot_core::locale::Locale,
+            _: i64,
+        ) -> MarketPriceLoad {
+            self.selected.borrow_mut().push(format!(
+                "{}:{}",
+                candidate.id,
+                timeframe.unwrap_or_default()
+            ));
+            self.candidate.clone()
+        }
+
+        fn render_chart(
+            &mut self,
+            _: &bot_core::market_prices::MarketChart,
+            _: i64,
+        ) -> Result<super::MarketChartRender, String> {
+            Err("synthetic chart unavailable".to_owned())
+        }
+
+        fn save_selection(&mut self, key: &str, value: &str, _: i64) -> Result<(), String> {
+            self.stored
+                .borrow_mut()
+                .insert(key.to_owned(), value.to_owned());
+            Ok(())
+        }
+
+        fn load_selection(&mut self, key: &str) -> Result<Option<String>, String> {
+            Ok(self.stored.borrow().get(key).cloned())
+        }
+
+        fn clear_selection(&mut self, key: &str) -> Result<(), String> {
+            self.stored.borrow_mut().remove(key);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn ambiguous_market_selection_is_requester_bound_and_resolves_by_provider_id()
+    -> Result<(), String> {
+        let selection = bot_core::market_prices::MarketSelection {
+            query: "$libra".to_owned(),
+            timeframe: None,
+            target_symbol: "USD".to_owned(),
+            target_parameter: "USD".to_owned(),
+            candidates: vec![
+                bot_core::market_prices::MarketCandidate {
+                    id: "1001".to_owned(),
+                    symbol: "LIBRA".to_owned(),
+                    name: "Libra Finance".to_owned(),
+                    slug: "libra-finance".to_owned(),
+                    price: "0.007".to_owned(),
+                    change: "N/A".to_owned(),
+                    contracts: Vec::new(),
+                },
+                bot_core::market_prices::MarketCandidate {
+                    id: "1002".to_owned(),
+                    symbol: "LIBRA".to_owned(),
+                    name: "Libra Protocol".to_owned(),
+                    slug: "libra-protocol".to_owned(),
+                    price: "0.00009".to_owned(),
+                    change: "N/A".to_owned(),
+                    contracts: Vec::new(),
+                },
+            ],
+        };
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let selected = Rc::new(RefCell::new(Vec::new()));
+        let mut dispatcher =
+            dispatcher().with_market_price_source(Box::new(SelectableMarketPrices {
+                initial: MarketPriceLoad {
+                    chart: None,
+                    selection: Some(selection),
+                    no_assets_found: false,
+                    text: String::new(),
+                    diagnostics: Vec::new(),
+                },
+                candidate: MarketPriceLoad {
+                    chart: None,
+                    selection: None,
+                    no_assets_found: false,
+                    text: "LIBRA: 0.00009 USD (N/A 1h)".to_owned(),
+                    diagnostics: Vec::new(),
+                },
+                stored: Rc::clone(&stored),
+                selected: Rc::clone(&selected),
+            }));
+        assert_eq!(
+            dispatcher.dispatch(update("$libra 1h", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let callback_data = dispatcher
+            .actions
+            .0
+            .iter()
+            .find_map(|action| match action {
+                TelegramAction::SendMessage(message) => message
+                    .reply_markup
+                    .as_ref()
+                    .and_then(|keyboard| keyboard.inline_keyboard.get(1))
+                    .and_then(|row| row.first())
+                    .and_then(|button| button.callback_data.clone()),
+                _ => None,
+            })
+            .ok_or_else(|| "selection callback".to_owned())?;
+        assert!(callback_data.starts_with("mkt:select:"));
+        assert_eq!(
+            dispatcher.dispatch(callback_update(&callback_data, "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(selected.borrow().as_slice(), &["1002:1h"]);
+        assert!(stored.borrow().is_empty());
+        assert!(dispatcher.actions.0.iter().any(|action| matches!(
+            action,
+            TelegramAction::SendMessage(message) if message.text.contains("0.00009")
+        )));
+        assert!(dispatcher.actions.0.iter().any(|action| matches!(
+            action,
+            TelegramAction::AnswerCallback {
+                show_alert: false,
+                ..
+            }
+        )));
+        Ok(())
     }
 
     #[test]
@@ -8085,6 +8770,7 @@ mod tests {
                 .with_market_price_source(Box::new(MarketPrices {
                     result: MarketPriceLoad {
                         chart: None,
+                        selection: None,
                         no_assets_found: true,
                         text: "missing".to_owned(),
                         diagnostics: Vec::new(),
@@ -8179,6 +8865,7 @@ mod tests {
             .with_market_price_source(Box::new(MarketPrices {
                 result: MarketPriceLoad {
                     chart: None,
+                    selection: None,
                     no_assets_found: token_lookup,
                     text: "market fallback".to_owned(),
                     diagnostics: Vec::new(),
@@ -8236,6 +8923,7 @@ mod tests {
         .with_market_price_source(Box::new(MarketPrices {
             result: MarketPriceLoad {
                 chart: None,
+                selection: None,
                 no_assets_found: false,
                 text: "NVDA: 123.45 USD (+1.25% 24h)".to_owned(),
                 diagnostics: Vec::new(),
