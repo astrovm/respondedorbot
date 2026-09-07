@@ -260,6 +260,21 @@ pub fn format_signal_quote(signal: &TokenSignal, timeframe: Option<&str>) -> Str
     )
 }
 
+/// Values used when a token signal is shown alongside market-provider
+/// candidates in the unified asset-selection menu.
+#[must_use]
+pub fn signal_market_values(signal: &TokenSignal, timeframe: Option<&str>) -> (String, String) {
+    let price = number(&signal.pair.price_usd);
+    let price = if price.is_finite() && price > 0.0 {
+        format_money(price, true).trim_start_matches('$').to_owned()
+    } else {
+        "N/A".to_owned()
+    };
+    let (change, period) = signal_change_for_timeframe(signal, timeframe);
+    let change = change.map_or_else(|| "N/A".to_owned(), optional_percentage);
+    (price, format!("{change} {period}"))
+}
+
 fn signal_change_for_timeframe<'signal, 'period>(
     signal: &'signal TokenSignal,
     timeframe: Option<&'period str>,
