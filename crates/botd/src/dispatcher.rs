@@ -1448,7 +1448,7 @@ where
                 Some(ProviderScope::Crypto) => format!("crypto:{request}"),
                 None => request.to_owned(),
             };
-            if !single && let Some(timeframe) = &timeframe {
+            if let Some(timeframe) = &timeframe {
                 market_query.push_str(&format!(" {timeframe}"));
             }
             let mut load = if is_address && provider_scope != Some(ProviderScope::Stock) {
@@ -8749,6 +8749,9 @@ mod tests {
             _: i64,
         ) -> MarketPriceLoad {
             let key = query
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
                 .trim_start_matches("stock:")
                 .trim_start_matches('$')
                 .to_ascii_lowercase();
@@ -10939,6 +10942,114 @@ mod tests {
     }
 
     #[test]
+    fn single_explicit_range_reaches_fallback_quote_with_requested_period() {
+        struct PeriodAwareMarketPrices {
+            calls: Rc<RefCell<Vec<String>>>,
+        }
+
+        impl MarketPriceSource for PeriodAwareMarketPrices {
+            fn load(
+                &mut self,
+                query: &str,
+                _: bot_core::market_prices::MarketPriceCommand,
+                _: bot_core::locale::Locale,
+                _: i64,
+            ) -> MarketPriceLoad {
+                self.calls.borrow_mut().push(query.to_owned());
+                let period = query.split_whitespace().last().unwrap_or("24h");
+                MarketPriceLoad {
+                    chart: Some(bot_core::market_prices::MarketChart {
+                        timeframe: None,
+                        symbol: "BTC".to_owned(),
+                        name: "Bitcoin".to_owned(),
+                        yahoo_symbol: "BTC-USD".to_owned(),
+                        token: None,
+                    }),
+                    selection: None,
+                    no_assets_found: false,
+                    text: format!("BTC: 1 USD (+1.00% {period})"),
+                    diagnostics: Vec::new(),
+                }
+            }
+        }
+
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mut dispatcher =
+            dispatcher().with_market_price_source(Box::new(PeriodAwareMarketPrices {
+                calls: Rc::clone(&calls),
+            }));
+        assert_eq!(
+            dispatcher.dispatch(update("/p btc 1m", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(calls.borrow().as_slice(), ["btc 1m"]);
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [TelegramAction::SendMessage(message)]
+                if message.text.contains("BTC: 1 USD (+1.00% 1m)")
+                    && message.text.contains("Chart unavailable")
+        ));
+    }
+
+    #[test]
+    fn single_explicit_range_formats_selection_candidates_with_requested_period() {
+        struct PeriodAwareSelection {
+            calls: Rc<RefCell<Vec<String>>>,
+        }
+
+        impl MarketPriceSource for PeriodAwareSelection {
+            fn load(
+                &mut self,
+                query: &str,
+                _: bot_core::market_prices::MarketPriceCommand,
+                _: bot_core::locale::Locale,
+                _: i64,
+            ) -> MarketPriceLoad {
+                self.calls.borrow_mut().push(query.to_owned());
+                let period = query.split_whitespace().last().unwrap_or("24h");
+                MarketPriceLoad {
+                    chart: None,
+                    selection: Some(bot_core::market_prices::MarketSelection {
+                        query: "libra".to_owned(),
+                        timeframe: None,
+                        target_symbol: "USD".to_owned(),
+                        target_parameter: "USD".to_owned(),
+                        conversion: None,
+                        candidates: vec![bot_core::market_prices::MarketCandidate {
+                            id: "1".to_owned(),
+                            symbol: "LIBRA".to_owned(),
+                            name: "Libra Finance".to_owned(),
+                            slug: "libra-finance".to_owned(),
+                            price: "0.007".to_owned(),
+                            change: format!("N/A {period}"),
+                            contracts: Vec::new(),
+                        }],
+                    }),
+                    no_assets_found: false,
+                    text: String::new(),
+                    diagnostics: Vec::new(),
+                }
+            }
+        }
+
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mut dispatcher =
+            dispatcher().with_market_price_source(Box::new(PeriodAwareSelection {
+                calls: Rc::clone(&calls),
+            }));
+        assert_eq!(
+            dispatcher.dispatch(update("/p libra 1m", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(calls.borrow().as_slice(), ["libra 1m"]);
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [TelegramAction::SendMessage(message)]
+                if message.text.contains("N/A 1m") && !message.text.contains("N/A 24h")
+        ));
+    }
+
+    #[test]
     fn stock_chart_delivery_records_the_quote() {
         struct StockChart;
         impl StockPriceSource for StockChart {
@@ -11115,7 +11226,7 @@ mod tests {
                 MarketPriceCommand::CryptoOnly,
                 false,
             ),
-            ("/c btc 7d", "btc", MarketPriceCommand::CryptoOnly, false),
+            ("/c btc 7d", "btc 7d", MarketPriceCommand::CryptoOnly, false),
             (
                 "/c 2 btc to usd",
                 "2 btc to usd",
