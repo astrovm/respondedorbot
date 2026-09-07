@@ -98,9 +98,15 @@ pub struct MarketSelection {
 
 #[must_use]
 pub fn format_market_selection(selection: &MarketSelection, locale: Locale) -> String {
-    let heading = match locale {
-        Locale::Es => "Encontré varias monedas con ese ticker:",
-        Locale::En => "I found several coins with that ticker:",
+    let has_stock = selection
+        .candidates
+        .iter()
+        .any(|candidate| candidate.id.starts_with("stock:"));
+    let heading = match (has_stock, locale) {
+        (true, Locale::Es) => "Encontré varios activos con ese ticker:",
+        (true, Locale::En) => "I found several assets with that ticker:",
+        (false, Locale::Es) => "Encontré varias monedas con ese ticker:",
+        (false, Locale::En) => "I found several coins with that ticker:",
     };
     let conversion = selection
         .conversion
@@ -154,6 +160,9 @@ pub fn format_market_selection(selection: &MarketSelection, locale: Locale) -> S
 }
 
 fn candidate_identity(candidate: &MarketCandidate) -> String {
+    if let Some(symbol) = candidate.id.strip_prefix("stock:") {
+        return format!("Yahoo {}", shorten(symbol, 24));
+    }
     let mut parts = Vec::new();
     if !candidate.id.trim().is_empty() {
         parts.push(format!("CMC #{}", shorten(&candidate.id, 24)));
@@ -224,6 +233,14 @@ pub type StockLookupRows = Vec<(String, Option<StockQuote>)>;
 
 pub trait UnifiedStockProvider {
     fn lookup(&mut self, query: &str) -> Result<Option<StockLookupRows>, String>;
+
+    fn lookup_with_timeframe(
+        &mut self,
+        query: &str,
+        _timeframe: Option<&str>,
+    ) -> Result<Option<StockLookupRows>, String> {
+        self.lookup(query)
+    }
 }
 
 /// Identity selected by market resolution, used to fetch a chart without searching again.
@@ -236,9 +253,9 @@ pub struct MarketChart {
     pub token: Option<TokenAddress>,
 }
 
-fn stock_chart(quote: &StockQuote) -> MarketChart {
+fn stock_chart(quote: &StockQuote, timeframe: Option<&str>) -> MarketChart {
     MarketChart {
-        timeframe: None,
+        timeframe: timeframe.map(str::to_owned),
         symbol: quote.symbol.clone(),
         name: quote.name.clone(),
         yahoo_symbol: quote.symbol.clone(),
@@ -335,10 +352,18 @@ pub fn execute_market_price_command<C: CryptoMarketProvider, S: UnifiedStockProv
             if !supported_currency(&target_symbol) {
                 unsupported_currency(&target_symbol, locale)
             } else if provider_scope == Some(ProviderScope::Stock) {
-                if modifiers_unsupported(timeframe.as_deref(), conversion_requested) {
-                    stock_modifier_error(&query, locale)
+                if conversion_requested {
+                    stock_conversion_error(&query, locale)
                 } else {
-                    stock_only(&query, locale, stocks, &mut diagnostics, true, &mut chart)
+                    stock_only(
+                        &query,
+                        timeframe.as_deref(),
+                        locale,
+                        stocks,
+                        &mut diagnostics,
+                        true,
+                        &mut chart,
+                    )
                 }
             } else {
                 assets(
@@ -459,6 +484,49 @@ pub fn execute_market_price_candidate<C: CryptoMarketProvider>(
     }
 }
 
+/// Resolve a stock candidate selected from a mixed crypto/stock menu.
+pub fn execute_stock_candidate<S: UnifiedStockProvider>(
+    candidate: &MarketCandidate,
+    timeframe: Option<&str>,
+    locale: Locale,
+    stocks: &mut S,
+) -> MarketPriceExecution {
+    let symbol = candidate
+        .id
+        .strip_prefix("stock:")
+        .unwrap_or(&candidate.symbol);
+    let mut diagnostics = Vec::new();
+    let rows = match stocks.lookup_with_timeframe(symbol, timeframe) {
+        Ok(Some(rows)) => rows,
+        Ok(None) => Vec::new(),
+        Err(error) => {
+            diagnostics.push(format!("stock candidate lookup: {error}"));
+            Vec::new()
+        }
+    };
+    let quote = rows
+        .iter()
+        .filter_map(|(_, quote)| quote.as_ref())
+        .find(|quote| quote.symbol.eq_ignore_ascii_case(symbol))
+        .or_else(|| rows.iter().find_map(|(_, quote)| quote.as_ref()));
+    let Some(quote) = quote else {
+        return MarketPriceExecution {
+            chart: None,
+            selection: None,
+            no_assets_found: true,
+            text: quote_unavailable(&candidate.symbol, locale),
+            diagnostics,
+        };
+    };
+    MarketPriceExecution {
+        chart: Some(stock_chart(quote, timeframe)),
+        selection: None,
+        no_assets_found: false,
+        text: format_stocks(std::slice::from_ref(quote), timeframe),
+        diagnostics,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
     raw_query: &str,
@@ -480,11 +548,19 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
         Err(error) => {
             diagnostics.push(format!("CoinMarketCap listings: {error}"));
             if !crypto_only && !contains_unambiguous_crypto_symbol(raw_query) {
-                let stock = stock_only(raw_query, locale, stocks, diagnostics, false, chart);
+                let stock = stock_only(
+                    raw_query,
+                    timeframe,
+                    locale,
+                    stocks,
+                    diagnostics,
+                    false,
+                    chart,
+                );
                 if !stock.is_empty() {
-                    if modifiers_unsupported(timeframe, conversion_requested) {
+                    if conversion_requested {
                         *chart = None;
-                        return stock_modifier_error(raw_query, locale);
+                        return stock_conversion_error(raw_query, locale);
                     }
                     return stock;
                 }
@@ -577,23 +653,30 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
         && selection.requested.len() == 1
         && !selection.rows.is_empty()
         && !contains_unambiguous_crypto_symbol(raw_query)
-        && let Ok(Some(rows)) = stocks.lookup(raw_query)
+        && let Ok(Some(rows)) = stocks.lookup_with_timeframe(raw_query, timeframe)
         && let Some(quote) = rows
             .iter()
             .filter_map(|(_, quote)| quote.as_ref())
             .find(|quote| company_matches(raw_query, quote))
     {
-        if modifiers_unsupported(timeframe, conversion_requested) {
-            return stock_modifier_error(raw_query, locale);
+        if conversion_requested {
+            return stock_conversion_error(raw_query, locale);
         }
-        *chart = Some(stock_chart(quote));
-        return format_stocks(std::slice::from_ref(quote));
+        *chart = Some(stock_chart(quote, timeframe));
+        return format_stocks(std::slice::from_ref(quote), timeframe);
     }
     let mut unresolved = missing_tokens(&selection.rows, &selection.explicit_requested);
     let mut stock_quotes = Vec::new();
-    if !crypto_only && !unresolved.is_empty() {
-        let stock_query = stock_fallback_query(raw_query, &selection, &unresolved);
-        match stocks.lookup(&stock_query) {
+    let stock_probe_for_collision = !raw_query.contains(',')
+        && selection.explicit_requested.len() == 1
+        && !contains_unambiguous_crypto_symbol(raw_query);
+    if !crypto_only && (!unresolved.is_empty() || stock_probe_for_collision) {
+        let stock_query = if unresolved.is_empty() {
+            raw_query.to_owned()
+        } else {
+            stock_fallback_query(raw_query, &selection, &unresolved)
+        };
+        match stocks.lookup_with_timeframe(&stock_query, timeframe) {
             Ok(Some(resolved)) => {
                 let quotes = resolved
                     .iter()
@@ -614,7 +697,9 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
     }
     if !raw_query.contains(',')
         && selection.explicit_requested.len() == 1
-        && selection.rows.len() > 1
+        && !conversion_requested
+        && unresolved.is_empty()
+        && selection.rows.len() + stock_quotes.len() > 1
     {
         let mut ranked_assets = selection.rows.iter().collect::<Vec<_>>();
         ranked_assets.sort_by(|left, right| compare_market_assets(left, right, target_parameter));
@@ -622,6 +707,17 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
             .into_iter()
             .map(|asset| market_candidate(asset, target_symbol, target_parameter, timeframe))
             .collect::<Vec<_>>();
+        let mut stock_candidates = stock_quotes
+            .iter()
+            .map(|quote| market_stock_candidate(quote, timeframe))
+            .collect::<Vec<_>>();
+        stock_candidates.sort_by(|left, right| {
+            left.name
+                .to_ascii_lowercase()
+                .cmp(&right.name.to_ascii_lowercase())
+                .then_with(|| left.symbol.cmp(&right.symbol))
+        });
+        candidates.extend(stock_candidates);
         candidates.truncate(10);
         *selection_result = Some(MarketSelection {
             query: raw_query.to_owned(),
@@ -646,12 +742,14 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
                 token: asset.contracts.first().cloned(),
             })
         } else {
-            stock_quotes.first().map(stock_chart)
+            stock_quotes
+                .first()
+                .map(|quote| stock_chart(quote, timeframe))
         };
     }
-    if !stock_quotes.is_empty() && modifiers_unsupported(timeframe, conversion_requested) {
+    if !stock_quotes.is_empty() && conversion_requested {
         *chart = None;
-        let error = stock_modifier_error(
+        let error = stock_conversion_error(
             &stock_quotes
                 .iter()
                 .map(|quote| quote.symbol.as_str())
@@ -688,7 +786,7 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
     if !crypto_text.is_empty() {
         parts.push(crypto_text);
     }
-    let stock_text = format_stocks(&stock_quotes);
+    let stock_text = format_stocks(&stock_quotes, timeframe);
     if !stock_text.is_empty() {
         parts.push(stock_text);
     }
@@ -1456,6 +1554,19 @@ fn market_candidate(
     }
 }
 
+fn market_stock_candidate(quote: &StockQuote, timeframe: Option<&str>) -> MarketCandidate {
+    let period = timeframe.unwrap_or("24h");
+    MarketCandidate {
+        id: format!("stock:{}", quote.symbol),
+        symbol: quote.symbol.clone(),
+        name: quote.name.clone(),
+        slug: quote.symbol.to_ascii_lowercase(),
+        price: trimmed(quote.price, 12),
+        change: format_stock_change(quote.variation, period),
+        contracts: Vec::new(),
+    }
+}
+
 fn format_selected_conversion(
     asset: &CryptoAsset,
     target_parameter: &str,
@@ -1528,6 +1639,7 @@ fn verified_yahoo_symbol(asset: &CryptoAsset) -> Option<String> {
 
 fn stock_only<S: UnifiedStockProvider>(
     query: &str,
+    timeframe: Option<&str>,
     locale: Locale,
     stocks: &mut S,
     diagnostics: &mut Vec<String>,
@@ -1541,7 +1653,7 @@ fn stock_only<S: UnifiedStockProvider>(
             String::new()
         };
     }
-    let resolved = match stocks.lookup(query) {
+    let resolved = match stocks.lookup_with_timeframe(query, timeframe) {
         Ok(Some(resolved)) => resolved,
         Ok(None) => Vec::new(),
         Err(error) => {
@@ -1554,10 +1666,10 @@ fn stock_only<S: UnifiedStockProvider>(
         .filter_map(|(_, quote)| quote.clone())
         .collect::<Vec<_>>();
     if quotes.len() == 1 && resolved.len() == 1 {
-        *chart = quotes.first().map(stock_chart);
+        *chart = quotes.first().map(|quote| stock_chart(quote, timeframe));
     }
     let mut parts = Vec::new();
-    let text = format_stocks(&quotes);
+    let text = format_stocks(&quotes, timeframe);
     if !text.is_empty() {
         parts.push(text);
     }
@@ -1577,17 +1689,29 @@ fn stock_only<S: UnifiedStockProvider>(
     parts.join("\n")
 }
 
-fn format_stocks(quotes: &[StockQuote]) -> String {
+fn format_stocks(quotes: &[StockQuote], timeframe: Option<&str>) -> String {
+    let period = timeframe.unwrap_or("24h");
     quotes
         .iter()
         .map(|quote| {
             format!(
-                "{}: {:.2} {} ({:+.2}% 24h)",
-                quote.symbol, quote.price, quote.currency, quote.variation
+                "{}: {:.2} {} ({})",
+                quote.symbol,
+                quote.price,
+                quote.currency,
+                format_stock_change(quote.variation, period),
             )
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn format_stock_change(variation: f64, period: &str) -> String {
+    if variation.is_finite() {
+        format!("{variation:+.2}% {period}")
+    } else {
+        format!("N/A {period}")
+    }
 }
 
 fn requested_count(text: &str) -> usize {
@@ -1611,9 +1735,6 @@ fn normalized(value: &str) -> String {
 fn supported_currency(value: &str) -> bool {
     SUPPORTED_CURRENCIES.contains(&value)
 }
-fn modifiers_unsupported(timeframe: Option<&str>, conversion: bool) -> bool {
-    conversion || !matches!(timeframe, None | Some("24h"))
-}
 fn trimmed(value: f64, decimals: usize) -> String {
     format!("{value:.decimals$}")
         .trim_end_matches('0')
@@ -1630,11 +1751,11 @@ fn signed_trimmed(value: f64, decimals: usize) -> String {
 fn invalid_timeframe(value: &str, locale: Locale) -> String {
     match locale {
         Locale::Es => format!(
-            "timeframe '{value}' no soportado, uso: {}",
+            "timeframe '{value}' no soportado, uso: {} o N[h/d/w/m/mo/y]",
             TIMEFRAMES.join(", ")
         ),
         Locale::En => format!(
-            "unsupported timeframe '{value}', use: {}",
+            "unsupported timeframe '{value}', use: {} or N[h/d/w/m/mo/y]",
             TIMEFRAMES.join(", ")
         ),
     }
@@ -1673,11 +1794,11 @@ fn quote_unavailable(symbol: &str, locale: Locale) -> String {
         Locale::En => format!("I could not obtain a usable quote for {symbol}"),
     }
 }
-fn stock_modifier_error(value: &str, locale: Locale) -> String {
+fn stock_conversion_error(value: &str, locale: Locale) -> String {
     let value = value.to_uppercase();
     match locale {
-        Locale::Es => format!("{value}: las acciones solo soportan moneda nativa y variación 24h"),
-        Locale::En => format!("{value}: stocks only support native currency and 24h change"),
+        Locale::Es => format!("{value}: las acciones solo soportan moneda nativa"),
+        Locale::En => format!("{value}: stocks only support native currency"),
     }
 }
 
@@ -2161,7 +2282,7 @@ mod tests {
         );
         assert_eq!(
             result.text,
-            "BTC: 50000 USD (+7% 7d)\nNVDA: las acciones solo soportan moneda nativa y variación 24h"
+            "BTC: 50000 USD (+7% 7d)\nNVDA: 123.45 USD (+1.25% 7d)"
         );
         let result = execute_market_price_command(
             "btc 2h",
@@ -2414,10 +2535,7 @@ mod tests {
             &mut Crypto::default(),
             &mut Stocks::default(),
         );
-        assert_eq!(
-            result.text,
-            "NVDA: stocks only support native currency and 24h change"
-        );
+        assert_eq!(result.text, "NVDA: stocks only support native currency");
 
         let result = execute_market_price_command(
             "crypto:META",
@@ -2430,6 +2548,45 @@ mod tests {
             &mut Stocks(vec![("META".to_owned(), Some(stock("META")))]),
         );
         assert_eq!(result.text, "I could not find these assets: META");
+    }
+
+    #[test]
+    fn unified_lookup_offers_a_menu_for_crypto_and_stock_collisions() {
+        let result = execute_market_price_command(
+            "rkh 1m",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut Crypto {
+                listings: vec![vec![coin("RKH", 1.0)]],
+                quotes: Vec::new(),
+            },
+            &mut Stocks(vec![("RKH".to_owned(), Some(stock("RKHNF")))]),
+        );
+        assert!(result.text.is_empty());
+        let selection = result
+            .selection
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("collision should produce a selection"));
+        assert_eq!(selection.timeframe.as_deref(), Some("1m"));
+        assert_eq!(selection.candidates.len(), 2);
+        assert_eq!(selection.candidates[0].id, "RKH");
+        assert_eq!(selection.candidates[1].id, "stock:RKHNF");
+        assert!(format_market_selection(selection, Locale::En).contains("several assets"));
+
+        let selected = execute_stock_candidate(
+            &selection.candidates[1],
+            Some("1m"),
+            Locale::En,
+            &mut Stocks(vec![("RKHNF".to_owned(), Some(stock("RKHNF")))]),
+        );
+        assert_eq!(selected.text, "RKHNF: 123.45 USD (+1.25% 1m)");
+        assert_eq!(
+            selected
+                .chart
+                .as_ref()
+                .and_then(|chart| chart.timeframe.as_deref()),
+            Some("1m")
+        );
     }
 
     struct FailedCrypto;
