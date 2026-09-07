@@ -348,6 +348,10 @@ struct StoredMarketSelection {
     selection: MarketSelection,
     chat_id: String,
     message_id: i64,
+    /// The user's original message. The callback message is deleted after a
+    /// selection, so any replacement quote or chart must reply to this ID.
+    #[serde(default)]
+    source_message_id: Option<i64>,
     requester_id: i64,
     command: String,
 }
@@ -1293,6 +1297,7 @@ where
             // second write below replaces this with the bot's sent message id
             // once Telegram confirms delivery.
             message_id: message_id.0,
+            source_message_id: Some(message_id.0),
             requester_id: requester_id.0,
             command: if command == MarketPriceCommand::CryptoOnly {
                 "crypto".to_owned()
@@ -2341,9 +2346,10 @@ where
         } else {
             "/p"
         };
+        let reply_to_message_id = stored.source_message_id.map(MessageId);
         if load.no_assets_found || load.text.trim().is_empty() {
             let mut reply = SendMessage::new(ChatId(chat_id_value), &text);
-            reply.reply_to_message_id = Some(MessageId(context.message_id));
+            reply.reply_to_message_id = reply_to_message_id;
             let receipt = self
                 .actions
                 .execute(TelegramAction::SendMessage(reply))
@@ -2381,7 +2387,7 @@ where
                 match self.actions.try_photo(TelegramAction::SendPhoto {
                     chat_id: ChatId(chat_id_value),
                     photo: rendered.photo.into(),
-                    reply_to_message_id: Some(MessageId(context.message_id)),
+                    reply_to_message_id,
                     caption: caption.clone(),
                     parse_mode: None,
                     reply_markup: None,
@@ -2423,7 +2429,7 @@ where
                         match self.actions.try_photo(TelegramAction::SendPhoto {
                             chat_id: ChatId(chat_id_value),
                             photo: photo.into(),
-                            reply_to_message_id: Some(MessageId(context.message_id)),
+                            reply_to_message_id,
                             caption: caption.clone(),
                             parse_mode: Some(ParseMode::Html),
                             reply_markup: None,
@@ -2446,7 +2452,7 @@ where
         if !delivered {
             let chat_id = ChatId(chat_id_value);
             let mut reply = SendMessage::new(chat_id, &text);
-            reply.reply_to_message_id = Some(MessageId(context.message_id));
+            reply.reply_to_message_id = reply_to_message_id;
             let receipt = self
                 .actions
                 .execute(TelegramAction::SendMessage(reply))
@@ -2498,6 +2504,7 @@ where
         } else {
             "/p"
         };
+        let reply_to_message_id = stored.source_message_id.map(MessageId);
         let load = self.token_signal_source.as_mut().map_or(
             TokenSignalLoad {
                 signal: None,
@@ -2519,7 +2526,7 @@ where
                 }
             };
             let mut reply = SendMessage::new(ChatId(chat_id_value), &text);
-            reply.reply_to_message_id = Some(MessageId(context.message_id));
+            reply.reply_to_message_id = reply_to_message_id;
             let receipt = self
                 .actions
                 .execute(TelegramAction::SendMessage(reply))
@@ -2560,7 +2567,7 @@ where
             match self.actions.try_photo(TelegramAction::SendPhoto {
                 chat_id: ChatId(chat_id_value),
                 photo: photo.into(),
-                reply_to_message_id: Some(MessageId(context.message_id)),
+                reply_to_message_id,
                 caption: caption.clone(),
                 parse_mode: Some(ParseMode::Html),
                 reply_markup: Some(build_signal_keyboard(
@@ -2587,7 +2594,7 @@ where
             );
         } else {
             let mut reply = SendMessage::new(ChatId(chat_id_value), &caption);
-            reply.reply_to_message_id = Some(MessageId(context.message_id));
+            reply.reply_to_message_id = reply_to_message_id;
             reply.parse_mode = Some(ParseMode::Html);
             let receipt = self
                 .actions
@@ -9529,6 +9536,7 @@ mod tests {
                 selection: selection.clone(),
                 chat_id: chat_id.to_owned(),
                 message_id,
+                source_message_id: Some(message_id),
                 requester_id,
                 command: "unified".to_owned(),
             }) else {
@@ -9846,7 +9854,13 @@ mod tests {
             assert!(stored.borrow().is_empty());
             assert!(dispatcher.actions.0.iter().any(|action| matches!(
                 action,
-                TelegramAction::SendPhoto { photo, caption, parse_mode: None, .. }
+                TelegramAction::SendPhoto {
+                    photo,
+                    caption,
+                    parse_mode: None,
+                    reply_to_message_id: Some(MessageId(7)),
+                    ..
+                }
                     if photo.as_ref() == b"callback-chart"
                         && (caption == "provider caption" || caption.contains("LIBRA: 0.007"))
             )));
@@ -10017,7 +10031,11 @@ mod tests {
             assert!(matches!(
                 dispatcher.actions.0.iter().find(|action| matches!(
                     action,
-                    TelegramAction::SendPhoto { parse_mode: Some(bot_core::telegram_actions::ParseMode::Html), .. }
+                    TelegramAction::SendPhoto {
+                        parse_mode: Some(bot_core::telegram_actions::ParseMode::Html),
+                        reply_to_message_id: Some(MessageId(7)),
+                        ..
+                    }
                 )),
                 Some(TelegramAction::SendPhoto { photo, .. }) if photo.as_ref() == b"token-callback"
             ));
@@ -10127,6 +10145,7 @@ mod tests {
             selection,
             chat_id: "-42".to_owned(),
             message_id: 7,
+            source_message_id: Some(6),
             requester_id: 88,
             command: "crypto".to_owned(),
         }) else {
@@ -10171,7 +10190,8 @@ mod tests {
             [
                 TelegramAction::SendMessage(message),
                 TelegramAction::AnswerCallback { show_alert: true, .. }
-            ] if message.text.contains("no pude obtener una cotización usable")
+            ] if message.reply_to_message_id == Some(MessageId(6))
+                && message.text.contains("no pude obtener una cotización usable")
         ));
         assert!(
             dispatcher
@@ -11397,6 +11417,7 @@ mod tests {
                 },
                 chat_id: chat_id.to_owned(),
                 message_id: 700,
+                source_message_id: Some(6),
                 requester_id: 88,
                 command: command.to_owned(),
             })
@@ -11451,7 +11472,9 @@ mod tests {
         );
         assert!(missing.actions.0.iter().any(|action| matches!(
             action,
-            TelegramAction::SendMessage(message) if message.text.contains("usable quote")
+            TelegramAction::SendMessage(message)
+                if message.reply_to_message_id == Some(MessageId(6))
+                    && message.text.contains("usable quote")
         )));
 
         let mut no_chart_signal = token_signal();
@@ -11505,7 +11528,8 @@ mod tests {
         assert!(fallback.actions.0.iter().any(|action| matches!(
             action,
             TelegramAction::SendMessage(message)
-                if message.parse_mode == Some(bot_core::telegram_actions::ParseMode::Html)
+                if message.reply_to_message_id == Some(MessageId(6))
+                    && message.parse_mode == Some(bot_core::telegram_actions::ParseMode::Html)
         )));
 
         let mut no_contract_candidate = token_candidate.clone();
