@@ -85,8 +85,8 @@ use bot_core::command_state::{
 };
 use bot_core::links::replace_social_links;
 use bot_core::market_prices::{
-    CryptoAsset, CryptoMarketProvider, MarketCandidate, MarketPriceCommand, UnifiedStockProvider,
-    execute_market_price_candidate, execute_market_price_command,
+    CryptoAsset, CryptoMarketProvider, MarketCandidate, MarketConversion, MarketPriceCommand,
+    UnifiedStockProvider, execute_market_price_candidate, execute_market_price_command,
 };
 use bot_core::stocks::{StockQuery, StockQuote, plan_stock_query};
 use bot_core::telegram_actions::TelegramAction;
@@ -382,7 +382,9 @@ where
         &mut self,
         candidate: &MarketCandidate,
         timeframe: Option<&str>,
+        target_symbol: &str,
         target_parameter: &str,
+        conversion: Option<&MarketConversion>,
         _command: MarketPriceCommand,
         locale: bot_core::locale::Locale,
         now_unix: i64,
@@ -397,7 +399,9 @@ where
         let execution = execute_market_price_candidate(
             candidate,
             timeframe,
+            target_symbol,
             target_parameter,
+            conversion,
             locale,
             &mut crypto,
         );
@@ -3960,7 +3964,7 @@ mod tests {
             .push(response());
         let ranged = source.render_chart(&ranged_chart, 1_700_000_000)?;
         assert!(ranged.photo.starts_with(b"\x89PNG"));
-        assert_eq!(ranged.caption.as_deref(), Some("EXM: 42 USD (+5.00% 1m)"));
+        assert_eq!(ranged.caption.as_deref(), Some("EXM: 42 USD (+5.00% 24h)"));
         assert_eq!(
             source
                 .stocks

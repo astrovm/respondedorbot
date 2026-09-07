@@ -251,14 +251,10 @@ fn optional_count(value: &Value) -> String {
 /// Compact token quote for mixed asset lists; unavailable values stay explicit.
 #[must_use]
 pub fn format_signal_quote(signal: &TokenSignal, timeframe: Option<&str>) -> String {
-    let timeframe = timeframe.unwrap_or("24h");
-    let change = match timeframe {
-        "1h" => &signal.pair.price_change.h1,
-        "24h" => &signal.pair.price_change.h24,
-        _ => &Value::Null,
-    };
+    let _timeframe = timeframe;
+    let change = &signal.pair.price_change.h24;
     format!(
-        "{}: {} USD ({} {timeframe})",
+        "{}: {} USD ({} 24h)",
         signal.pair.base_token.symbol,
         optional_money(&signal.pair.price_usd, true),
         optional_percentage(change)
@@ -949,8 +945,8 @@ mod tests {
         PairTransactions, PairVolume, PairWebsite, PumpMetadata, SignalQuery, SignalState,
         TokenAddress, TokenPair, TokenSignal, age_text, build_signal_keyboard, callback_text,
         choose_best_pair, choose_symbol_pair, detect_signal_query, format_money,
-        format_signal_caption, has_usable_chart, pair_rank, signal_state_key, stable_signal_id,
-        token_from_pair, token_image_url, token_socials,
+        format_signal_caption, format_signal_quote, has_usable_chart, pair_rank, signal_state_key,
+        stable_signal_id, token_from_pair, token_image_url, token_socials,
     };
     use crate::locale::Locale;
 
@@ -1080,6 +1076,14 @@ mod tests {
             choose_symbol_pair(&[unrelated, exact.clone()], "glorp"),
             Some(exact)
         );
+    }
+
+    #[test]
+    fn compact_signal_quotes_keep_the_daily_change_when_a_history_range_is_requested() {
+        let signal = signal();
+        let quote = format_signal_quote(&signal, Some("1h"));
+        assert!(quote.contains("+2.3% 24h"));
+        assert!(!quote.contains("+5.1%"));
     }
 
     #[test]

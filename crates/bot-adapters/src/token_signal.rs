@@ -905,23 +905,21 @@ pub fn render_market_chart(
     render_market_chart_for_period(quote, candles, "5d")
 }
 
-/// Compare the current chart quote with the first available candle's opening price.
-/// Missing history is never replaced with the quote provider's daily variation.
+/// Keep chart captions aligned with the quote card's provider-supplied daily variation.
+/// Historical candles determine the drawing only; they do not relabel the quote change.
 #[must_use]
 pub fn market_chart_caption(
     quote: &bot_core::stocks::StockQuote,
-    candles: &[Vec<f64>],
-    period: &str,
+    _candles: &[Vec<f64>],
+    _period: &str,
 ) -> String {
-    let change = candles
-        .first()
-        .and_then(|candle| candle.get(1))
-        .filter(|open| open.is_finite() && **open > 0.0)
-        .map(|open| (quote.price / open - 1.0) * 100.0)
-        .filter(|change| change.is_finite())
-        .map_or_else(|| "N/A".to_owned(), |change| format!("{change:+.2}%"));
+    let change = if quote.variation.is_finite() {
+        format!("{:+.2}%", quote.variation)
+    } else {
+        "N/A".to_owned()
+    };
     format!(
-        "{}: {} {} ({change} {period})",
+        "{}: {} {} ({change} 24h)",
         quote.symbol, quote.price, quote.currency
     )
 }
@@ -1174,7 +1172,7 @@ fn encode_png(image: RgbImage) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn market_caption_uses_requested_history_instead_of_daily_variation() {
+    fn market_caption_uses_daily_variation_instead_of_requested_history() {
         let mut quote = bot_core::stocks::StockQuote {
             symbol: "BTC".into(),
             name: "Bitcoin".into(),
@@ -1190,13 +1188,13 @@ mod tests {
         for period in ["1m", "7d", "2h", "1y"] {
             assert_eq!(
                 super::market_chart_caption(&quote, &candles, period),
-                format!("BTC: 120 USD (+20.00% {period})")
+                "BTC: 120 USD (-1.53% 24h)"
             );
         }
         quote.price = 80.0;
         assert_eq!(
             super::market_chart_caption(&quote, &candles, "1m"),
-            "BTC: 80 USD (-20.00% 1m)"
+            "BTC: 80 USD (-1.53% 24h)"
         );
         for missing in [
             vec![],
@@ -1206,7 +1204,7 @@ mod tests {
         ] {
             assert_eq!(
                 super::market_chart_caption(&quote, &missing, "1m"),
-                "BTC: 80 USD (N/A 1m)"
+                "BTC: 80 USD (-1.53% 24h)"
             );
         }
     }

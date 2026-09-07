@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::locale::Locale;
 use crate::price_queries::{
-    AmountConversion, PriceQuery, ProviderScope, parse_price_query, price_query_parameter,
+    AmountConversion, ChartPeriod, PriceQuery, ProviderScope, parse_price_query,
+    price_query_parameter,
 };
 use crate::stocks::StockQuote;
 use crate::token_signals::TokenAddress;
@@ -71,11 +72,24 @@ pub struct MarketCandidate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarketConversion {
+    /// Serialized so callback state remains compatible with Eq and avoids
+    /// reformatting a user-supplied decimal amount after selection.
+    pub amount: String,
+    pub source_symbol: String,
+    pub target_symbol: String,
+    /// The selected asset is the quote currency in a reverse conversion.
+    pub reverse: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarketSelection {
     pub query: String,
     pub timeframe: Option<String>,
     pub target_symbol: String,
     pub target_parameter: String,
+    #[serde(default)]
+    pub conversion: Option<MarketConversion>,
     pub candidates: Vec<MarketCandidate>,
 }
 
@@ -85,6 +99,29 @@ pub fn format_market_selection(selection: &MarketSelection, locale: Locale) -> S
         Locale::Es => "Encontré varias monedas con ese ticker:",
         Locale::En => "I found several coins with that ticker:",
     };
+    let conversion = selection
+        .conversion
+        .as_ref()
+        .map_or_else(String::new, |conversion| {
+            format!(
+                "\n{} {} in {}:",
+                conversion.amount, conversion.source_symbol, conversion.target_symbol
+            )
+        });
+    let target = selection
+        .conversion
+        .as_ref()
+        .filter(|conversion| conversion.reverse)
+        .map_or_else(
+            || {
+                if selection.target_symbol.is_empty() {
+                    "USD".to_owned()
+                } else {
+                    selection.target_symbol.clone()
+                }
+            },
+            |conversion| conversion.source_symbol.clone(),
+        );
     let lines = selection
         .candidates
         .iter()
@@ -95,17 +132,70 @@ pub fn format_market_selection(selection: &MarketSelection, locale: Locale) -> S
             } else {
                 candidate.name.as_str()
             };
+            let identity = candidate_identity(candidate);
             format!(
-                "{}. {} ({}) — {} USD ({})",
+                "{}. {} ({}) — {} {} ({}; {})",
                 index + 1,
-                name,
-                candidate.symbol,
-                candidate.price,
-                candidate.change
+                shorten(name, 100),
+                shorten(&candidate.symbol, 24),
+                shorten(&candidate.price, 32),
+                target,
+                shorten(&candidate.change, 16),
+                identity,
             )
         })
         .collect::<Vec<_>>();
-    format!("{heading}\n{}", lines.join("\n"))
+    let text = format!("{heading}{conversion}\n{}", lines.join("\n"));
+    shorten(&text, crate::telegram_actions::MAX_TELEGRAM_TEXT_LENGTH)
+}
+
+fn candidate_identity(candidate: &MarketCandidate) -> String {
+    let mut parts = Vec::new();
+    if !candidate.id.trim().is_empty() {
+        parts.push(format!("CMC #{}", shorten(&candidate.id, 24)));
+    }
+    for contract in &candidate.contracts {
+        let address = shorten_address(&contract.address);
+        parts.push(format!(
+            "{}:{} {}",
+            contract.chain_id, contract.tag, address
+        ));
+    }
+    if parts.is_empty() {
+        shorten(&candidate.slug, 48)
+    } else {
+        parts.join(" / ")
+    }
+}
+
+fn shorten(value: &str, limit: usize) -> String {
+    let value = value.trim();
+    if value.chars().count() <= limit {
+        return value.to_owned();
+    }
+    let mut result = value
+        .chars()
+        .take(limit.saturating_sub(3))
+        .collect::<String>();
+    result.push_str("...");
+    result
+}
+
+fn shorten_address(value: &str) -> String {
+    let value = value.trim();
+    if value.chars().count() <= 18 {
+        return value.to_owned();
+    }
+    let start = value.chars().take(8).collect::<String>();
+    let end = value
+        .chars()
+        .rev()
+        .take(6)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("{start}…{end}")
 }
 
 pub trait CryptoMarketProvider {
@@ -209,7 +299,12 @@ pub fn execute_market_price_command<C: CryptoMarketProvider, S: UnifiedStockProv
     crypto: &mut C,
     stocks: &mut S,
 ) -> MarketPriceExecution {
-    let valid = TIMEFRAMES.map(str::to_owned);
+    let mut valid = TIMEFRAMES.map(str::to_owned).to_vec();
+    if let Some(period) = text.split_whitespace().last()
+        && ChartPeriod::parse(period).is_some()
+    {
+        valid.push(period.to_ascii_lowercase());
+    }
     let query = parse_price_query(text, &valid);
     let mut diagnostics = Vec::new();
     let mut no_assets_found = false;
@@ -217,9 +312,14 @@ pub fn execute_market_price_command<C: CryptoMarketProvider, S: UnifiedStockProv
     let mut selection = None;
     let rendered = match query {
         PriceQuery::UnsupportedTimeframe { timeframe } => invalid_timeframe(&timeframe, locale),
-        PriceQuery::AmountConversion(request) => {
-            convert_amount(&request, locale, crypto, &mut diagnostics)
-        }
+        PriceQuery::AmountConversion(request) => convert_amount(
+            &request,
+            locale,
+            crypto,
+            &mut diagnostics,
+            &mut no_assets_found,
+            &mut selection,
+        ),
         PriceQuery::Assets {
             query,
             timeframe,
@@ -268,7 +368,9 @@ pub fn execute_market_price_command<C: CryptoMarketProvider, S: UnifiedStockProv
 pub fn execute_market_price_candidate<C: CryptoMarketProvider>(
     candidate: &MarketCandidate,
     timeframe: Option<&str>,
+    target_symbol: &str,
     target_parameter: &str,
+    conversion: Option<&MarketConversion>,
     locale: Locale,
     crypto: &mut C,
 ) -> MarketPriceExecution {
@@ -286,7 +388,7 @@ pub fn execute_market_price_candidate<C: CryptoMarketProvider>(
             };
         }
     };
-    let Some(asset) = assets.into_iter().find(|asset| asset.id == candidate.id) else {
+    let Some(mut asset) = assets.into_iter().find(|asset| asset.id == candidate.id) else {
         return MarketPriceExecution {
             chart: None,
             selection: None,
@@ -295,6 +397,24 @@ pub fn execute_market_price_candidate<C: CryptoMarketProvider>(
             diagnostics,
         };
     };
+    if asset.symbol.is_empty() {
+        asset.symbol.clone_from(&candidate.symbol);
+    }
+    if asset.name.is_empty() {
+        asset.name.clone_from(&candidate.name);
+    }
+    if asset.slug.is_empty() {
+        asset.slug.clone_from(&candidate.slug);
+    }
+    for contract in &candidate.contracts {
+        if !asset.contracts.iter().any(|known| {
+            known.chain_id == contract.chain_id
+                && known.network == contract.network
+                && known.address.eq_ignore_ascii_case(&contract.address)
+        }) {
+            asset.contracts.push(contract.clone());
+        }
+    }
     let Some(_quote) = asset
         .quotes
         .get(target_parameter)
@@ -308,13 +428,17 @@ pub fn execute_market_price_candidate<C: CryptoMarketProvider>(
             diagnostics,
         };
     };
-    let text = format_assets(
-        std::slice::from_ref(&asset),
-        target_parameter,
-        target_parameter,
-        timeframe.unwrap_or("24h"),
+    let text = conversion.map_or_else(
+        || {
+            format_assets(
+                std::slice::from_ref(&asset),
+                target_symbol,
+                target_parameter,
+            )
+        },
+        |conversion| format_selected_conversion(&asset, target_parameter, conversion),
     );
-    let chart = Some(MarketChart {
+    let chart = conversion.is_none().then(|| MarketChart {
         timeframe: timeframe.map(str::to_owned),
         symbol: asset.symbol.clone(),
         name: asset.name.clone(),
@@ -366,44 +490,83 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
         }
     };
     let mut selection = select_assets(raw_query, &listed);
+    canonicalize_rows(&mut selection.rows, &selection.requested);
     retain_usable_quotes(&mut selection.rows, target_parameter, diagnostics);
     selection.count = selection.count.min(selection.rows.len());
-    let missing = missing_tokens(&selection.rows, &selection.requested);
-    if !missing.is_empty() {
+    let canonical_ids = missing_canonical_ids(&selection.rows, &selection.requested);
+    if !canonical_ids.is_empty() {
         let mut fetched = crypto
-            .quotes(&missing, target_parameter, false)
+            .quotes_by_id(&canonical_ids, target_parameter)
+            .unwrap_or_else(|error| {
+                diagnostics.push(format!("CoinMarketCap canonical identity quotes: {error}"));
+                Vec::new()
+            });
+        fetched.retain(|asset| canonical_ids.iter().any(|id| id == &asset.id));
+        merge_assets(&mut selection.rows, fetched);
+        canonicalize_rows(&mut selection.rows, &selection.requested);
+        retain_usable_quotes(&mut selection.rows, target_parameter, diagnostics);
+    }
+    let missing = missing_tokens(&selection.rows, &selection.requested);
+    let mut symbol_requests = missing
+        .iter()
+        .filter(|token| canonical_id_for_token(token).is_none())
+        .cloned()
+        .collect::<Vec<_>>();
+    symbol_requests.extend(explicit_symbol_requests(raw_query, &listed));
+    symbol_requests.sort();
+    symbol_requests.dedup();
+    if !symbol_requests.is_empty() {
+        let mut fetched = crypto
+            .quotes(&symbol_requests, target_parameter, false)
             .unwrap_or_else(|error| {
                 diagnostics.push(format!("CoinMarketCap symbol quotes: {error}"));
                 Vec::new()
             });
-        retain_requested_symbols(&mut fetched, &missing);
-        let still_missing = missing_usable_tokens(&fetched, &missing, target_parameter);
-        if !still_missing.is_empty() {
-            let slugs = still_missing
-                .iter()
-                .filter(|token| token.len() > 3)
-                .map(|token| token.to_lowercase())
-                .collect::<Vec<_>>();
-            if !slugs.is_empty() {
-                let mut slug_fetched = crypto
-                    .quotes(&slugs, target_parameter, true)
-                    .unwrap_or_else(|error| {
-                        diagnostics.push(format!("CoinMarketCap slug quotes: {error}"));
-                        Vec::new()
-                    });
-                retain_requested_slugs(&mut slug_fetched, &still_missing);
-                fetched.extend(slug_fetched);
-            }
-        }
-        selection.rows.extend(fetched);
-        unique_assets(&mut selection.rows);
-        retain_usable_quotes(&mut selection.rows, target_parameter, diagnostics);
-        selection.count = if selection.explicit_requested.is_empty() {
-            selection.count.min(selection.rows.len())
-        } else {
-            selection.rows.len()
-        };
+        retain_requested_symbols(&mut fetched, &symbol_requests);
+        merge_assets(&mut selection.rows, fetched);
     }
+    let still_missing =
+        missing_usable_tokens(&selection.rows, &selection.requested, target_parameter);
+    let single_token = raw_query
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .filter(|token| !token.is_empty())
+        .count()
+        == 1;
+    let slug_requests = explicit_slug_requests(raw_query, &listed)
+        .into_iter()
+        .collect::<HashSet<_>>();
+    if single_token {
+        let slugs = still_missing
+            .iter()
+            .filter(|token| {
+                token.len() > 3 && canonical_id_for_token(token).is_none() && {
+                    let listed_identity = listed
+                        .iter()
+                        .any(|asset| asset_tokens(asset).iter().any(|known| known == *token));
+                    slug_requests.contains(*token) || !listed_identity
+                }
+            })
+            .map(|token| token.to_lowercase())
+            .collect::<Vec<_>>();
+        if !slugs.is_empty() {
+            let mut slug_fetched = crypto
+                .quotes(&slugs, target_parameter, true)
+                .unwrap_or_else(|error| {
+                    diagnostics.push(format!("CoinMarketCap slug quotes: {error}"));
+                    Vec::new()
+                });
+            retain_requested_slugs(&mut slug_fetched, &still_missing);
+            merge_assets(&mut selection.rows, slug_fetched);
+        }
+    }
+    canonicalize_rows(&mut selection.rows, &selection.requested);
+    unique_assets(&mut selection.rows);
+    retain_usable_quotes(&mut selection.rows, target_parameter, diagnostics);
+    selection.count = if selection.explicit_requested.is_empty() {
+        selection.count.min(selection.rows.len())
+    } else {
+        selection.rows.len()
+    };
     // A company-name match must not be shadowed by a similarly named cryptocurrency.
     if !crypto_only
         && selection.requested.len() == 1
@@ -451,7 +614,7 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
         let mut candidates = selection
             .rows
             .iter()
-            .map(|asset| market_candidate(asset, target_parameter, timeframe.unwrap_or("24h")))
+            .map(|asset| market_candidate(asset, target_symbol, target_parameter))
             .collect::<Vec<_>>();
         candidates.sort_by(|left, right| {
             left.name
@@ -465,11 +628,15 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
             timeframe: timeframe.map(str::to_owned),
             target_symbol: target_symbol.to_owned(),
             target_parameter: target_parameter.to_owned(),
+            conversion: None,
             candidates,
         });
         return String::new();
     }
-    if selection.rows.len() + stock_quotes.len() == 1 && unresolved.is_empty() {
+    if !conversion_requested
+        && selection.rows.len() + stock_quotes.len() == 1
+        && unresolved.is_empty()
+    {
         *chart = if let Some(asset) = selection.rows.first() {
             Some(MarketChart {
                 timeframe: timeframe.map(str::to_owned),
@@ -496,7 +663,6 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
             &selection.rows[..selection.rows.len().min(selection.count)],
             target_symbol,
             target_parameter,
-            timeframe.unwrap_or("24h"),
         );
         return if crypto_text.is_empty() {
             error
@@ -516,7 +682,6 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
         &selection.rows[..selection.rows.len().min(selection.count)],
         target_symbol,
         target_parameter,
-        timeframe.unwrap_or("24h"),
     );
     if !crypto_text.is_empty() {
         parts.push(crypto_text);
@@ -538,9 +703,113 @@ fn contains_unambiguous_crypto_symbol(query: &str) -> bool {
         .map(normalized)
         .any(|token| {
             UNAMBIGUOUS_CRYPTO_SYMBOLS.contains(&token.as_str())
+                || canonical_id_for_token(&token).is_some()
                 || STABLECOINS.contains(&token.as_str())
                 || matches!(token.as_str(), "STABLES" | "STABLECOINS")
         })
+}
+
+fn canonical_id_for_token(token: &str) -> Option<&'static str> {
+    match normalized(token).as_str() {
+        "BTC" | "BITCOIN" | "SATS" => Some("1"),
+        "LTC" | "LITECOIN" => Some("2"),
+        "XRP" => Some("52"),
+        "DOGE" | "DOGECOIN" => Some("74"),
+        "XMR" | "MONERO" => Some("328"),
+        "ETH" | "ETHEREUM" => Some("1027"),
+        "BNB" => Some("1839"),
+        "SOL" | "SOLANA" => Some("5426"),
+        "ADA" | "CARDANO" => Some("2010"),
+        "TRX" | "TRON" => Some("1958"),
+        "BCH" => Some("1831"),
+        "LINK" | "CHAINLINK" => Some("1975"),
+        "MATIC" | "POLYGON" => Some("3890"),
+        "DOT" | "POLKADOT" => Some("6636"),
+        "UNI" | "UNISWAP" => Some("7083"),
+        "AVAX" | "AVALANCHE" => Some("5805"),
+        "SHIB" | "SHIBAINU" => Some("5994"),
+        _ => None,
+    }
+}
+
+fn canonicalize_rows(rows: &mut Vec<CryptoAsset>, requested: &[String]) {
+    let canonical = requested
+        .iter()
+        .filter_map(|token| canonical_id_for_token(token).map(|id| (token, id)))
+        .collect::<HashMap<_, _>>();
+    if canonical.is_empty() {
+        return;
+    }
+    rows.retain(|asset| {
+        !asset_tokens(asset)
+            .iter()
+            .any(|token| canonical.contains_key(token))
+            || canonical.values().any(|id| *id == asset.id.as_str())
+    });
+}
+
+fn missing_canonical_ids(rows: &[CryptoAsset], requested: &[String]) -> Vec<String> {
+    let present = rows
+        .iter()
+        .filter_map(|asset| (!asset.id.is_empty()).then_some(asset.id.as_str()))
+        .collect::<HashSet<_>>();
+    let mut ids = requested
+        .iter()
+        .filter_map(|token| canonical_id_for_token(token))
+        .filter(|id| !present.contains(id))
+        .map(str::to_owned)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids
+}
+
+fn explicit_symbol_requests(raw_query: &str, listed: &[CryptoAsset]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    raw_query
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .filter(|token| !token.is_empty())
+        .filter_map(|raw| {
+            let token = normalized(raw);
+            if token.is_empty() || canonical_id_for_token(&token).is_some() {
+                return None;
+            }
+            let exact_symbol = listed
+                .iter()
+                .any(|asset| normalized(&asset.symbol) == token);
+            if raw.trim_start().starts_with('$') || exact_symbol {
+                seen.insert(token.clone()).then_some(token)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn explicit_slug_requests(raw_query: &str, listed: &[CryptoAsset]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    raw_query
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .filter(|token| !token.is_empty())
+        .filter_map(|raw| {
+            let token = normalized(raw);
+            if token.len() <= 3
+                || token.is_empty()
+                || raw.trim_start().starts_with('$')
+                || canonical_id_for_token(&token).is_some()
+                || listed
+                    .iter()
+                    .any(|asset| normalized(&asset.symbol) == token)
+            {
+                return None;
+            }
+            let exact_identity = listed
+                .iter()
+                .any(|asset| normalized(&asset.name) == token || normalized(&asset.slug) == token);
+            exact_identity.then(|| seen.insert(token.clone()).then_some(token))?
+        })
+        .collect()
 }
 
 struct Selection {
@@ -574,7 +843,9 @@ fn select_assets(text: &str, listed: &[CryptoAsset]) -> Selection {
         // the existing preference for those names while exposing genuinely
         // ambiguous tickers (such as LIBRA) to the selection UI.
         if contains_unambiguous_crypto_symbol(text)
-            && let Some(asset) = exact_matches.first()
+            && let Some(asset) = canonical_id_for_token(&single)
+                .and_then(|id| exact_matches.iter().find(|asset| asset.id == id))
+                .or_else(|| exact_matches.first())
         {
             return Selection {
                 rows: vec![(*asset).clone()],
@@ -606,10 +877,8 @@ fn select_assets(text: &str, listed: &[CryptoAsset]) -> Selection {
     let mut identities = HashSet::new();
     for (index, coin) in listed.iter().enumerate() {
         let symbol = normalized(&coin.symbol);
-        let slug = normalized(&coin.slug);
         let exact_symbol = requested_set.contains(&symbol);
-        let exact_slug = slug.len() > 3 && requested_set.contains(&slug);
-        if !exact_symbol && !exact_slug && index >= top_n {
+        if !exact_symbol && index >= top_n {
             continue;
         }
         let identity = if coin.id.is_empty() {
@@ -671,7 +940,11 @@ fn missing_tokens(rows: &[CryptoAsset], requested: &[String]) -> Vec<String> {
     let matched = rows.iter().flat_map(asset_tokens).collect::<HashSet<_>>();
     requested
         .iter()
-        .filter(|token| !matched.contains(*token))
+        .filter(|token| {
+            !matched.contains(*token)
+                && canonical_id_for_token(token)
+                    .is_none_or(|id| !rows.iter().any(|asset| asset.id == id))
+        })
         .cloned()
         .collect()
 }
@@ -693,7 +966,18 @@ fn missing_usable_tokens(
         .collect::<HashSet<_>>();
     requested
         .iter()
-        .filter(|token| !matched.contains(*token))
+        .filter(|token| {
+            !matched.contains(*token)
+                && canonical_id_for_token(token).is_none_or(|id| {
+                    !rows.iter().any(|asset| {
+                        asset.id == id
+                            && asset
+                                .quotes
+                                .get(parameter)
+                                .is_some_and(CryptoQuote::is_usable)
+                    })
+                })
+        })
         .cloned()
         .collect()
 }
@@ -709,17 +993,79 @@ fn retain_requested_slugs(rows: &mut Vec<CryptoAsset>, requested: &[String]) {
 }
 
 fn unique_assets(rows: &mut Vec<CryptoAsset>) {
-    let mut seen = HashSet::new();
-    rows.retain(|coin| {
-        let identity = if !coin.id.is_empty() {
-            coin.id.clone()
-        } else if !coin.symbol.is_empty() {
-            coin.symbol.clone()
+    let mut unique = Vec::with_capacity(rows.len());
+    for asset in rows.drain(..) {
+        if let Some(existing) = unique.iter_mut().find(|existing: &&mut CryptoAsset| {
+            !asset.id.is_empty() && existing.id == asset.id
+                || asset.id.is_empty()
+                    && existing.id.is_empty()
+                    && existing.symbol == asset.symbol
+                    && existing.slug == asset.slug
+        }) {
+            merge_asset(existing, asset);
         } else {
-            coin.slug.clone()
+            unique.push(asset);
+        }
+    }
+    *rows = unique;
+}
+
+fn merge_asset(existing: &mut CryptoAsset, incoming: CryptoAsset) {
+    if existing.symbol.is_empty() {
+        existing.symbol = incoming.symbol.clone();
+    }
+    if existing.name.is_empty() {
+        existing.name = incoming.name.clone();
+    }
+    if existing.slug.is_empty() {
+        existing.slug = incoming.slug.clone();
+    }
+    for (currency, incoming_quote) in incoming.quotes {
+        let Some(existing_quote) = existing.quotes.get_mut(&currency) else {
+            existing.quotes.insert(currency, incoming_quote);
+            continue;
         };
-        !identity.is_empty() && seen.insert(identity)
-    });
+        if !existing_quote.is_usable() && incoming_quote.is_usable() {
+            existing_quote.price = incoming_quote.price;
+        }
+        if incoming_quote.percent_change_1h.is_some() {
+            existing_quote.percent_change_1h = incoming_quote.percent_change_1h;
+        }
+        if incoming_quote.percent_change_24h.is_some() {
+            existing_quote.percent_change_24h = incoming_quote.percent_change_24h;
+        }
+        if incoming_quote.percent_change_7d.is_some() {
+            existing_quote.percent_change_7d = incoming_quote.percent_change_7d;
+        }
+        if incoming_quote.percent_change_30d.is_some() {
+            existing_quote.percent_change_30d = incoming_quote.percent_change_30d;
+        }
+    }
+    for contract in incoming.contracts {
+        if !existing.contracts.iter().any(|known| {
+            known.chain_id == contract.chain_id
+                && known.network == contract.network
+                && known.address.eq_ignore_ascii_case(&contract.address)
+        }) {
+            existing.contracts.push(contract);
+        }
+    }
+}
+
+fn merge_assets(rows: &mut Vec<CryptoAsset>, incoming: Vec<CryptoAsset>) {
+    for asset in incoming {
+        if let Some(existing) = rows.iter_mut().find(|existing| {
+            !asset.id.is_empty() && existing.id == asset.id
+                || asset.id.is_empty()
+                    && existing.id.is_empty()
+                    && existing.symbol == asset.symbol
+                    && existing.slug == asset.slug
+        }) {
+            merge_asset(existing, asset);
+        } else {
+            rows.push(asset);
+        }
+    }
 }
 
 fn retain_usable_quotes(
@@ -780,6 +1126,8 @@ fn convert_amount<C: CryptoMarketProvider>(
     locale: Locale,
     crypto: &mut C,
     diagnostics: &mut Vec<String>,
+    no_assets_found: &mut bool,
+    selection_result: &mut Option<MarketSelection>,
 ) -> String {
     if !supported_currency(&request.target_symbol) {
         return unsupported_currency(&request.target_symbol, locale);
@@ -788,26 +1136,26 @@ fn convert_amount<C: CryptoMarketProvider>(
         Ok(rows) => rows,
         Err(error) => {
             diagnostics.push(format!("CoinMarketCap conversion listings: {error}"));
+            *no_assets_found = true;
             return load_error(locale);
         }
     };
-    if let Some(asset) = find_asset(&listed, &request.source_symbol)
-        && let Some(quote) = asset
-            .quotes
-            .get(&request.target_parameter)
-            .filter(|quote| quote.is_usable())
-    {
-        let multiplier = if request.target_symbol == "SATS" {
-            100_000_000.0
-        } else {
-            1.0
-        };
-        return format!(
-            "{} {} = {} {}",
-            trimmed(request.amount, 8),
-            asset.symbol.to_uppercase(),
-            trimmed(request.amount * quote.price * multiplier, 8),
-            request.target_symbol
+    let direct = conversion_candidates(
+        listed,
+        &request.source_symbol,
+        &request.target_parameter,
+        crypto,
+        diagnostics,
+    );
+    if !direct.is_empty() {
+        return format_or_select_conversion(
+            request,
+            &direct,
+            false,
+            &request.target_symbol,
+            &request.target_parameter,
+            locale,
+            selection_result,
         );
     }
     let source_parameter = price_query_parameter(&request.source_symbol);
@@ -817,41 +1165,146 @@ fn convert_amount<C: CryptoMarketProvider>(
             diagnostics.push(format!(
                 "CoinMarketCap reverse conversion listings: {error}"
             ));
+            *no_assets_found = true;
             return load_error(locale);
         }
     };
-    let Some(asset) = find_asset(&reversed, &request.target_symbol) else {
-        return unsupported_pair(locale);
-    };
-    let Some(quote) = asset
-        .quotes
-        .get(&source_parameter)
-        .filter(|quote| quote.is_usable())
-    else {
-        return unsupported_pair(locale);
-    };
-    let amount = if request.source_symbol == "SATS" {
-        request.amount / 100_000_000.0
+    let reversed = conversion_candidates(
+        reversed,
+        &request.target_symbol,
+        &source_parameter,
+        crypto,
+        diagnostics,
+    );
+    if reversed.is_empty() {
+        *no_assets_found = true;
+        unsupported_pair(locale)
     } else {
-        request.amount
-    };
-    format!(
-        "{} {} = {} {}",
-        trimmed(request.amount, 8),
-        request.source_symbol,
-        trimmed(amount / quote.price, 8),
-        asset.symbol.to_uppercase()
+        format_or_select_conversion(
+            request,
+            &reversed,
+            true,
+            &request.source_symbol,
+            &source_parameter,
+            locale,
+            selection_result,
+        )
+    }
+}
+
+fn conversion_candidates<C: CryptoMarketProvider>(
+    listed: Vec<CryptoAsset>,
+    token: &str,
+    currency: &str,
+    crypto: &mut C,
+    diagnostics: &mut Vec<String>,
+) -> Vec<CryptoAsset> {
+    let token = normalized(token);
+    let canonical_id = canonical_id_for_token(&token);
+    let has_exact_symbol = listed
+        .iter()
+        .any(|asset| normalized(&asset.symbol) == token);
+    let mut candidates = listed
+        .into_iter()
+        .filter(|asset| {
+            if let Some(id) = canonical_id {
+                return asset.id == id;
+            }
+            if has_exact_symbol {
+                normalized(&asset.symbol) == token
+            } else {
+                normalized(&asset.name) == token || normalized(&asset.slug) == token
+            }
+        })
+        .collect::<Vec<_>>();
+    if canonical_id.is_some() || has_exact_symbol || candidates.is_empty() {
+        let mut fetched = if let Some(id) = canonical_id {
+            crypto
+                .quotes_by_id(&[id.to_owned()], currency)
+                .unwrap_or_else(|error| {
+                    diagnostics.push(format!("CoinMarketCap conversion identity quotes: {error}"));
+                    Vec::new()
+                })
+        } else {
+            crypto
+                .quotes(std::slice::from_ref(&token), currency, false)
+                .unwrap_or_else(|error| {
+                    diagnostics.push(format!("CoinMarketCap conversion symbol quotes: {error}"));
+                    Vec::new()
+                })
+        };
+        if canonical_id.is_some() {
+            fetched.retain(|asset| canonical_id == Some(asset.id.as_str()));
+        } else {
+            retain_requested_symbols(&mut fetched, std::slice::from_ref(&token));
+        }
+        merge_assets(&mut candidates, fetched);
+    }
+    candidates.retain(|asset| {
+        asset
+            .quotes
+            .get(currency)
+            .is_some_and(CryptoQuote::is_usable)
+    });
+    unique_assets(&mut candidates);
+    candidates
+}
+
+#[allow(clippy::too_many_arguments)]
+fn format_or_select_conversion(
+    request: &AmountConversion,
+    candidates: &[CryptoAsset],
+    reverse: bool,
+    display_currency: &str,
+    quote_parameter: &str,
+    locale: Locale,
+    selection_result: &mut Option<MarketSelection>,
+) -> String {
+    if candidates.len() > 1 {
+        let mut market_candidates = candidates
+            .iter()
+            .map(|asset| market_candidate(asset, display_currency, quote_parameter))
+            .collect::<Vec<_>>();
+        market_candidates.sort_by(|left, right| {
+            left.name
+                .to_ascii_lowercase()
+                .cmp(&right.name.to_ascii_lowercase())
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        market_candidates.truncate(10);
+        *selection_result = Some(MarketSelection {
+            query: format!(
+                "{} {} {}",
+                request.amount, request.source_symbol, request.target_symbol
+            ),
+            timeframe: None,
+            target_symbol: request.target_symbol.clone(),
+            target_parameter: quote_parameter.to_owned(),
+            conversion: Some(MarketConversion {
+                amount: trimmed(request.amount, 8),
+                source_symbol: request.source_symbol.clone(),
+                target_symbol: request.target_symbol.clone(),
+                reverse,
+            }),
+            candidates: market_candidates,
+        });
+        return String::new();
+    }
+    candidates.first().map_or_else(
+        || unsupported_pair(locale),
+        |asset| {
+            let conversion = MarketConversion {
+                amount: trimmed(request.amount, 8),
+                source_symbol: request.source_symbol.clone(),
+                target_symbol: request.target_symbol.clone(),
+                reverse,
+            };
+            format_selected_conversion(asset, quote_parameter, &conversion)
+        },
     )
 }
 
-fn find_asset<'a>(assets: &'a [CryptoAsset], token: &str) -> Option<&'a CryptoAsset> {
-    let token = normalized(token);
-    assets
-        .iter()
-        .find(|asset| normalized(&asset.symbol) == token || normalized(&asset.name) == token)
-}
-
-fn format_assets(rows: &[CryptoAsset], display: &str, parameter: &str, timeframe: &str) -> String {
+fn format_assets(rows: &[CryptoAsset], display: &str, parameter: &str) -> String {
     rows.iter()
         .filter_map(|asset| {
             let quote = asset
@@ -864,12 +1317,7 @@ fn format_assets(rows: &[CryptoAsset], display: &str, parameter: &str, timeframe
                 } else {
                     1.0
                 };
-            let change = match timeframe {
-                "1h" => quote.percent_change_1h,
-                "7d" => quote.percent_change_7d,
-                "30d" => quote.percent_change_30d,
-                _ => quote.percent_change_24h,
-            };
+            let change = quote.percent_change_24h;
             let fixed = format!("{price:.12}");
             let decimals = fixed.split('.').nth(1).unwrap_or("");
             let zeros = decimals
@@ -886,28 +1334,27 @@ fn format_assets(rows: &[CryptoAsset], display: &str, parameter: &str, timeframe
                 trimmed(price, zeros + 4),
                 display,
                 change,
-                timeframe
+                "24h"
             ))
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn market_candidate(asset: &CryptoAsset, parameter: &str, timeframe: &str) -> MarketCandidate {
+fn market_candidate(asset: &CryptoAsset, display: &str, parameter: &str) -> MarketCandidate {
     let (price, change) = asset
         .quotes
         .get(parameter)
         .filter(|quote| quote.is_usable())
         .map(|quote| {
-            let change = match timeframe {
-                "1h" => quote.percent_change_1h,
-                "7d" => quote.percent_change_7d,
-                "30d" => quote.percent_change_30d,
-                _ => quote.percent_change_24h,
+            let multiplier = if display == "SATS" {
+                100_000_000.0
+            } else {
+                1.0
             };
             (
-                trimmed(quote.price, 12),
-                change.map_or_else(
+                trimmed(quote.price * multiplier, 12),
+                quote.percent_change_24h.map_or_else(
                     || "N/A".to_owned(),
                     |value| format!("{}%", signed_trimmed(value, 2)),
                 ),
@@ -925,25 +1372,72 @@ fn market_candidate(asset: &CryptoAsset, parameter: &str, timeframe: &str) -> Ma
     }
 }
 
+fn format_selected_conversion(
+    asset: &CryptoAsset,
+    target_parameter: &str,
+    conversion: &MarketConversion,
+) -> String {
+    let Some(amount) = conversion
+        .amount
+        .parse::<f64>()
+        .ok()
+        .filter(|amount| amount.is_finite() && *amount >= 0.0)
+    else {
+        return String::new();
+    };
+    let Some(quote) = asset
+        .quotes
+        .get(target_parameter)
+        .filter(|quote| quote.is_usable())
+    else {
+        return String::new();
+    };
+    let source_amount = if conversion.source_symbol == "SATS" {
+        amount / 100_000_000.0
+    } else {
+        amount
+    };
+    let target_amount = if conversion.reverse {
+        source_amount / quote.price
+    } else {
+        source_amount * quote.price
+    } * if conversion.target_symbol == "SATS" {
+        100_000_000.0
+    } else {
+        1.0
+    };
+    if !target_amount.is_finite() {
+        return String::new();
+    }
+    format!(
+        "{} {} = {} {}",
+        conversion.amount,
+        conversion.source_symbol,
+        trimmed(target_amount, 8),
+        conversion.target_symbol
+    )
+}
+
 fn verified_yahoo_symbol(asset: &CryptoAsset) -> Option<String> {
     let symbol = match asset.id.as_str() {
         "1" => "BTC-USD",
+        "2" => "LTC-USD",
         "52" => "XRP-USD",
         "74" => "DOGE-USD",
-        "1027" => "ETH-USD",
-        "1839" => "BNB-USD",
         "328" => "XMR-USD",
+        "1027" => "ETH-USD",
+        "1831" => "BCH-USD",
+        "1839" => "BNB-USD",
+        "1958" => "TRX-USD",
+        "1975" => "LINK-USD",
+        "2010" => "ADA-USD",
+        "3890" => "MATIC-USD",
         "5426" => "SOL-USD",
-        _ => match normalized(&asset.symbol).as_str() {
-            "BTC" => "BTC-USD",
-            "XRP" => "XRP-USD",
-            "DOGE" => "DOGE-USD",
-            "ETH" => "ETH-USD",
-            "BNB" => "BNB-USD",
-            "XMR" => "XMR-USD",
-            "SOL" => "SOL-USD",
-            _ => return None,
-        },
+        "5805" => "AVAX-USD",
+        "5994" => "SHIB-USD",
+        "6636" => "DOT-USD",
+        "7083" => "UNI-USD",
+        _ => return None,
     };
     Some(symbol.to_owned())
 }
@@ -1136,8 +1630,20 @@ mod tests {
         }
     }
     fn coin(symbol: &str, price: f64) -> CryptoAsset {
+        let id = match symbol {
+            "BTC" => "1",
+            "LTC" => "2",
+            "XRP" => "52",
+            "DOGE" => "74",
+            "XMR" => "328",
+            "ETH" => "1027",
+            "BNB" => "1839",
+            "SOL" => "5426",
+            "ADA" => "2010",
+            _ => symbol,
+        };
         CryptoAsset {
-            id: symbol.to_owned(),
+            id: id.to_owned(),
             symbol: symbol.to_owned(),
             name: symbol.to_owned(),
             slug: symbol.to_lowercase(),
@@ -1211,6 +1717,49 @@ mod tests {
                 .map(|chart| chart.yahoo_symbol.as_str()),
             Some("AAPL")
         );
+    }
+
+    #[test]
+    fn empty_crypto_queries_return_the_provider_top_list_without_a_bitcoin_default() {
+        let result = execute_market_price_command(
+            "",
+            MarketPriceCommand::CryptoOnly,
+            Locale::En,
+            &mut Crypto {
+                listings: vec![vec![coin("BTC", 50_000.0), coin("ETH", 2_500.0)]],
+                quotes: Vec::new(),
+            },
+            &mut Stocks::default(),
+        );
+        assert!(result.text.contains("BTC: 50000 USD"));
+        assert!(result.text.contains("ETH: 2500 USD"));
+        assert!(result.chart.is_none());
+        assert!(!result.no_assets_found);
+    }
+
+    #[test]
+    fn every_chart_period_keeps_the_quote_change_at_24h() {
+        for period in ["1h", "2h", "7d", "1m", "1mo", "1w", "1y", "5y"] {
+            let result = execute_market_price_command(
+                &format!("btc {period}"),
+                MarketPriceCommand::CryptoOnly,
+                Locale::En,
+                &mut Crypto {
+                    listings: vec![vec![coin("BTC", 50_000.0)]],
+                    quotes: Vec::new(),
+                },
+                &mut Stocks::default(),
+            );
+            assert_eq!(result.text, "BTC: 50000 USD (+2.5% 24h)", "{period}");
+            assert_eq!(
+                result
+                    .chart
+                    .as_ref()
+                    .and_then(|chart| chart.timeframe.as_deref()),
+                Some(period),
+                "{period}"
+            );
+        }
     }
 
     #[test]
@@ -1384,18 +1933,25 @@ mod tests {
         );
         assert_eq!(
             result.text,
-            "BTC: 50000 USD (+7% 7d)\nNVDA: las acciones solo soportan moneda nativa y variación 24h"
+            "BTC: 50000 USD (+2.5% 24h)\nNVDA: las acciones solo soportan moneda nativa y variación 24h"
         );
         let result = execute_market_price_command(
             "btc 2h",
             MarketPriceCommand::CryptoOnly,
             Locale::En,
-            &mut Crypto::default(),
+            &mut Crypto {
+                listings: vec![vec![coin("BTC", 50_000.0)]],
+                quotes: Vec::new(),
+            },
             &mut Stocks::default(),
         );
+        assert_eq!(result.text, "BTC: 50000 USD (+2.5% 24h)");
         assert_eq!(
-            result.text,
-            "unsupported timeframe '2h', use: 1h, 24h, 7d, 30d"
+            result
+                .chart
+                .as_ref()
+                .and_then(|chart| chart.timeframe.as_deref()),
+            Some("2h")
         );
     }
 
@@ -1433,6 +1989,33 @@ mod tests {
             &mut Stocks::default(),
         );
         assert_eq!(result.text, "2000 HKD = 256.41025641 USDT");
+    }
+
+    #[test]
+    fn converts_satoshi_amounts_in_both_directions() {
+        let result = execute_market_price_command(
+            "1 sats in usd",
+            MarketPriceCommand::CryptoOnly,
+            Locale::En,
+            &mut Crypto {
+                listings: vec![vec![coin("BTC", 50_000.0)]],
+                quotes: Vec::new(),
+            },
+            &mut Stocks::default(),
+        );
+        assert_eq!(result.text, "1 SATS = 0.0005 USD");
+
+        let result = execute_market_price_command(
+            "1 usd in sats",
+            MarketPriceCommand::CryptoOnly,
+            Locale::En,
+            &mut Crypto {
+                listings: vec![Vec::new(), vec![coin("BTC", 50_000.0)]],
+                quotes: Vec::new(),
+            },
+            &mut Stocks::default(),
+        );
+        assert_eq!(result.text, "1 USD = 2000 SATS");
     }
 
     #[test]
