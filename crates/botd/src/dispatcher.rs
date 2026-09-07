@@ -9951,6 +9951,12 @@ mod tests {
             BareStock.render_chart(&quote, 1_700_000_000),
             Err("stock chart unavailable".to_owned())
         );
+        assert_eq!(
+            BareStock
+                .load_with_timeframe("SYN", Some("1m"), 1_700_000_000)
+                .quotes,
+            None
+        );
 
         struct BareMarket;
         impl MarketPriceSource for BareMarket {
@@ -10048,6 +10054,15 @@ mod tests {
             change: "0".to_owned(),
             contracts: Vec::new(),
         });
+        candidates.push(bot_core::market_prices::MarketCandidate {
+            id: "stock:EXM-USD".to_owned(),
+            symbol: "EXM-USD".to_owned(),
+            name: "Example stock".to_owned(),
+            slug: "exm-usd".to_owned(),
+            price: "42".to_owned(),
+            change: "+5% 1m".to_owned(),
+            contracts: Vec::new(),
+        });
         for index in 2..12 {
             candidates.push(bot_core::market_prices::MarketCandidate {
                 id: index.to_string(),
@@ -10075,6 +10090,12 @@ mod tests {
                 .is_some_and(|data| data.starts_with("mkt:select:selection:"))
         }));
         assert!(keyboard.inline_keyboard[1][0].text.ends_with("..."));
+        assert!(
+            keyboard
+                .inline_keyboard
+                .iter()
+                .any(|row| row[0].text.contains("Yahoo EXM-USD"))
+        );
         assert_eq!(
             market_selection_text(&selection, bot_core::locale::Locale::En),
             bot_core::market_prices::format_market_selection(

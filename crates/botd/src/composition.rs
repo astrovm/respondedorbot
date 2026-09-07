@@ -4032,6 +4032,45 @@ mod tests {
         );
         assert!(candidate_load.text.contains("EXM"));
         assert!(candidate_load.diagnostics.is_empty());
+
+        source
+            .stocks
+            .yahoo_transport
+            .chart_responses
+            .borrow_mut()
+            .push(Ok(YahooHttpResponse {
+                status_code: 200,
+                body: r#"{"chart":{"result":[{"meta":{"symbol":"EXM-USD","regularMarketPrice":42,"chartPreviousClose":40,"currency":"USD"},"timestamp":[1700000000],"indicators":{"quote":[{"open":[40],"high":[44],"low":[39],"close":[42],"volume":[1000]}]}}]}}"#
+                    .to_owned(),
+            }));
+        let stock_candidate = bot_core::market_prices::MarketCandidate {
+            id: "stock:EXM-USD".to_owned(),
+            symbol: "EXM-USD".to_owned(),
+            name: "Example stock".to_owned(),
+            slug: "exm-usd".to_owned(),
+            price: "42".to_owned(),
+            change: "+5% 1m".to_owned(),
+            contracts: Vec::new(),
+        };
+        let stock_candidate_load = source.load_candidate(
+            &stock_candidate,
+            Some("1m"),
+            "USD",
+            "USD",
+            None,
+            MarketPriceCommand::Unified,
+            Locale::En,
+            1_700_000_000,
+        );
+        assert_eq!(stock_candidate_load.text, "EXM-USD: 42.00 USD (+5.00% 1m)");
+        assert_eq!(
+            stock_candidate_load
+                .chart
+                .as_ref()
+                .and_then(|chart| chart.timeframe.as_deref()),
+            Some("1m")
+        );
+        assert!(stock_candidate_load.diagnostics.is_empty());
         assert_eq!(source.save_selection("market-key", "value", 60), Ok(()));
         assert_eq!(source.load_selection("market-key"), Ok(None));
         assert_eq!(source.clear_selection("market-key"), Ok(()));
