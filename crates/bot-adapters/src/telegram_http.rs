@@ -163,7 +163,7 @@ impl TelegramTransport for ReqwestTelegramTransport {
         // the fixed HTTPS API base above, so this is not cleartext transport.
         let mut builder = self
             .client
-            // codeql[rust/cleartext-transmission]
+            // lgtm [rust/cleartext-transmission]
             .request(request.method.clone(), url)
             .timeout(request.timeout);
         if let Some(params) = &request.params {
@@ -207,7 +207,7 @@ impl TelegramMultipartTransport for ReqwestTelegramTransport {
         // the fixed HTTPS API base above, so this is not cleartext transport.
         read_response(
             self.client
-                // codeql[rust/cleartext-transmission]
+                // lgtm [rust/cleartext-transmission]
                 .post(url)
                 .timeout(request.timeout)
                 .multipart(form)
