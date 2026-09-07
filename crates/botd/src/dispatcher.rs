@@ -315,6 +315,16 @@ pub struct StockQuotesLoad {
 
 pub trait StockPriceSource {
     fn load(&mut self, query: &str, now_unix: i64) -> StockQuotesLoad;
+
+    fn load_with_timeframe(
+        &mut self,
+        query: &str,
+        _timeframe: Option<&str>,
+        now_unix: i64,
+    ) -> StockQuotesLoad {
+        self.load(query, now_unix)
+    }
+
     fn render_chart(
         &mut self,
         _quote: &bot_core::stocks::StockQuote,
@@ -383,18 +393,23 @@ fn market_selection_keyboard(
                 } else {
                     candidate.name.as_str()
                 };
-                let identity = candidate
-                    .contracts
-                    .first()
-                    .map(|contract| {
-                        format!(
-                            "{}:{} {}",
-                            contract.chain_id,
-                            contract.tag,
-                            short_market_address(&contract.address)
-                        )
-                    })
-                    .unwrap_or_else(|| format!("CMC #{}", candidate.id));
+                let identity = candidate.id.strip_prefix("stock:").map_or_else(
+                    || {
+                        candidate
+                            .contracts
+                            .first()
+                            .map(|contract| {
+                                format!(
+                                    "{}:{} {}",
+                                    contract.chain_id,
+                                    contract.tag,
+                                    short_market_address(&contract.address)
+                                )
+                            })
+                            .unwrap_or_else(|| format!("CMC #{}", candidate.id))
+                    },
+                    |symbol| format!("Yahoo {symbol}"),
+                );
                 let label =
                     shorten_market_button(&format!("{} {} · {}", index + 1, name, identity));
                 vec![InlineKeyboardButton {

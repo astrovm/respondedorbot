@@ -87,6 +87,7 @@ use bot_core::links::replace_social_links;
 use bot_core::market_prices::{
     CryptoAsset, CryptoMarketProvider, MarketCandidate, MarketConversion, MarketPriceCommand,
     UnifiedStockProvider, execute_market_price_candidate, execute_market_price_command,
+    execute_stock_candidate,
 };
 use bot_core::stocks::{StockQuery, StockQuote, plan_stock_query};
 use bot_core::telegram_actions::TelegramAction;
@@ -270,6 +271,18 @@ where
         self.diagnostics.extend(load.diagnostics);
         Ok(load.quotes)
     }
+
+    fn lookup_with_timeframe(
+        &mut self,
+        query: &str,
+        timeframe: Option<&str>,
+    ) -> Result<Option<Vec<(String, Option<StockQuote>)>>, String> {
+        let load = self
+            .source
+            .load_with_timeframe(query, timeframe, self.now_unix);
+        self.diagnostics.extend(load.diagnostics);
+        Ok(load.quotes)
+    }
 }
 
 struct NativeMarketPriceSource<T, C, Y, F, S> {
@@ -389,6 +402,23 @@ where
         locale: bot_core::locale::Locale,
         now_unix: i64,
     ) -> MarketPriceLoad {
+        if candidate.id.starts_with("stock:") {
+            let mut stocks = UnifiedStocks {
+                source: &mut self.stocks,
+                now_unix,
+                diagnostics: Vec::new(),
+            };
+            let execution = execute_stock_candidate(candidate, timeframe, locale, &mut stocks);
+            let mut diagnostics = execution.diagnostics;
+            diagnostics.extend(stocks.diagnostics);
+            return MarketPriceLoad {
+                chart: execution.chart,
+                selection: execution.selection,
+                no_assets_found: execution.no_assets_found,
+                text: execution.text,
+                diagnostics,
+            };
+        }
         let mut crypto = CachedCoinMarketCap {
             transport: &self.transport,
             cache: &mut self.cache,
@@ -649,13 +679,20 @@ where
     F: FinvizTransport,
     C: RequestCache + StockPoolCache,
 {
-    fn quote(
+    fn quote_with_timeframe(
         &mut self,
         symbol: &str,
+        timeframe: Option<&str>,
         now_unix: i64,
         diagnostics: &mut Vec<String>,
     ) -> Option<StockQuote> {
-        let load = load_yahoo_quote(&self.yahoo_transport, &mut self.cache, symbol, now_unix);
+        let load = bot_adapters::yahoo_finance::load_chart(
+            &self.yahoo_transport,
+            &mut self.cache,
+            symbol,
+            now_unix,
+            timeframe,
+        );
         diagnostics.extend(load.diagnostics);
         load.quote
     }
@@ -674,6 +711,7 @@ where
     fn resolve_missing(
         &mut self,
         quotes: Vec<(String, Option<StockQuote>)>,
+        timeframe: Option<&str>,
         now_unix: i64,
         diagnostics: &mut Vec<String>,
     ) -> Vec<(String, Option<StockQuote>)> {
@@ -682,7 +720,7 @@ where
             .map(|(query, quote)| {
                 let quote = quote.or_else(|| {
                     let symbol = self.resolve(&query, now_unix, diagnostics)?;
-                    self.quote(&symbol, now_unix, diagnostics)
+                    self.quote_with_timeframe(&symbol, timeframe, now_unix, diagnostics)
                 });
                 (query, quote)
             })
@@ -697,6 +735,15 @@ where
     C: RequestCache + StockPoolCache,
 {
     fn load(&mut self, query: &str, now_unix: i64) -> StockQuotesLoad {
+        self.load_with_timeframe(query, None, now_unix)
+    }
+
+    fn load_with_timeframe(
+        &mut self,
+        query: &str,
+        timeframe: Option<&str>,
+        now_unix: i64,
+    ) -> StockQuotesLoad {
         let plan = plan_stock_query(query);
         let mut diagnostics = Vec::new();
         let queries = if plan.needs_top_stocks {
@@ -725,7 +772,14 @@ where
         for item in queries {
             let quote = item
                 .is_symbol
-                .then(|| self.quote(&item.normalized, now_unix, &mut diagnostics))
+                .then(|| {
+                    self.quote_with_timeframe(
+                        &item.normalized,
+                        timeframe,
+                        now_unix,
+                        &mut diagnostics,
+                    )
+                })
                 .flatten();
             quotes.push((item.original, quote));
         }
@@ -735,7 +789,7 @@ where
             .collect::<Vec<_>>();
         if !plan.full_query_fallback || direct_quotes.len() == quotes.len() {
             return StockQuotesLoad {
-                quotes: Some(self.resolve_missing(quotes, now_unix, &mut diagnostics)),
+                quotes: Some(self.resolve_missing(quotes, timeframe, now_unix, &mut diagnostics)),
                 diagnostics,
             };
         }
@@ -750,7 +804,7 @@ where
         if full_quote.is_none()
             && let Some(symbol) = resolved
         {
-            full_quote = self.quote(&symbol, now_unix, &mut diagnostics);
+            full_quote = self.quote_with_timeframe(&symbol, timeframe, now_unix, &mut diagnostics);
         }
         if let Some(full_quote) = full_quote
             && (direct_quotes.is_empty()
@@ -770,7 +824,7 @@ where
             };
         }
         StockQuotesLoad {
-            quotes: Some(self.resolve_missing(quotes, now_unix, &mut diagnostics)),
+            quotes: Some(self.resolve_missing(quotes, timeframe, now_unix, &mut diagnostics)),
             diagnostics,
         }
     }
@@ -4352,6 +4406,39 @@ mod tests {
             source.yahoo_transport.searches.borrow()[0].query,
             "Apple Inc"
         );
+    }
+
+    #[test]
+    fn stock_source_uses_requested_timeframe_for_quote_variation() -> Result<(), &'static str> {
+        let transport = StockYahooTransportStub {
+            chart_responses: RefCell::new(vec![Ok(YahooHttpResponse {
+                status_code: 200,
+                body: r#"{"chart":{"result":[{"meta":{"symbol":"RKHNF","regularMarketPrice":130,"chartPreviousClose":129,"currency":"USD"},"timestamp":[100,200],"indicators":{"quote":[{"open":[100,110],"high":[105,135],"low":[95,105],"close":[102,130],"volume":[10,20]}]}}]}}"#
+                    .to_owned(),
+            })]),
+            search_responses: RefCell::default(),
+            charts: RefCell::default(),
+            searches: RefCell::default(),
+        };
+        let mut source = YahooStockPriceSource {
+            yahoo_transport: transport,
+            finviz_transport: FinvizTransportStub {
+                response: RefCell::new(None),
+            },
+            cache: WeatherCacheStub,
+        };
+        let load = source.load_with_timeframe("RKHNF", Some("1m"), 1_800_000_000);
+        let quote = load
+            .quotes
+            .and_then(|quotes| quotes.into_iter().next())
+            .and_then(|(_, quote)| quote)
+            .ok_or("missing ranged stock quote")?;
+        assert!((quote.variation - 30.0).abs() < 1e-9);
+        assert_eq!(
+            source.yahoo_transport.charts.borrow()[0].window,
+            Some((1_797_408_000, 1_800_000_000, "1h".to_owned()))
+        );
+        Ok::<(), &str>(())
     }
 
     #[test]
