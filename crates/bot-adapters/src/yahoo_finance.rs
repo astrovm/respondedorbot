@@ -224,15 +224,33 @@ pub fn load_chart<T: YahooFinanceTransport, C: RequestCache>(
         },
         || transport.before_retry(),
     );
-    let quote = load
+    let mut quote = load
         .data
         .as_ref()
         .and_then(|data| parse_yahoo_quote(&json!({"data": data}), symbol));
+    let candles = load.data.as_ref().map(parse_candles).unwrap_or_default();
+    if timeframe.is_some()
+        && let Some(quote) = quote.as_mut()
+    {
+        let opening_price = candles
+            .iter()
+            .filter_map(|candle| {
+                let timestamp = candle.first().copied()?;
+                let opening_price = candle.get(1).copied()?;
+                (timestamp.is_finite() && opening_price.is_finite() && opening_price > 0.0)
+                    .then_some((timestamp, opening_price))
+            })
+            .min_by(|(left, _), (right, _)| left.total_cmp(right))
+            .map(|(_, opening_price)| opening_price);
+        quote.variation = opening_price
+            .map(|opening_price| (quote.price / opening_price - 1.0) * 100.0)
+            .filter(|variation| variation.is_finite())
+            .unwrap_or(f64::NAN);
+    }
     let mut diagnostics = load.diagnostics;
     if quote.is_none() {
         diagnostics.push(format!("Yahoo chart had no usable quote for {symbol}"));
     }
-    let candles = load.data.as_ref().map(parse_candles).unwrap_or_default();
     YahooQuoteLoad {
         candles,
         quote,
@@ -444,6 +462,29 @@ mod tests {
         );
         assert_ne!(cache.writes[0].0, cache.writes[1].0);
         assert_ne!(cache.writes[1].0, cache.writes[2].0);
+    }
+
+    #[test]
+    fn ranged_quotes_use_the_first_candle_for_the_requested_variation() {
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::from([response(
+                r#"{"chart":{"result":[{"meta":{"symbol":"RKHNF","regularMarketPrice":130,"chartPreviousClose":129,"currency":"USD"},"timestamp":[100,200],"indicators":{"quote":[{"open":[100,110],"high":[105,135],"low":[95,105],"close":[102,130],"volume":[10,20]}]}}]}}"#,
+            )])),
+            requests: RefCell::default(),
+            searches: RefCell::default(),
+        };
+        let load = super::load_chart(
+            &transport,
+            &mut Cache::default(),
+            "RKHNF",
+            1_800_000_000,
+            Some("1m"),
+        );
+        assert!(
+            load.quote
+                .as_ref()
+                .is_some_and(|quote| (quote.variation - 30.0).abs() < 1e-9)
+        );
     }
 
     #[test]
