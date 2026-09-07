@@ -251,18 +251,26 @@ fn optional_count(value: &Value) -> String {
 /// Compact token quote for mixed asset lists; unavailable values stay explicit.
 #[must_use]
 pub fn format_signal_quote(signal: &TokenSignal, timeframe: Option<&str>) -> String {
-    let timeframe = timeframe.unwrap_or("24h");
-    let change = match timeframe {
-        "1h" => &signal.pair.price_change.h1,
-        "24h" => &signal.pair.price_change.h24,
-        _ => &Value::Null,
-    };
+    let (change, period) = signal_change_for_timeframe(signal, timeframe);
     format!(
-        "{}: {} USD ({} {timeframe})",
+        "{}: {} USD ({} {period})",
         signal.pair.base_token.symbol,
         optional_money(&signal.pair.price_usd, true),
-        optional_percentage(change)
+        change.map_or_else(|| "N/A".to_owned(), optional_percentage)
     )
+}
+
+fn signal_change_for_timeframe<'signal, 'period>(
+    signal: &'signal TokenSignal,
+    timeframe: Option<&'period str>,
+) -> (Option<&'signal Value>, &'period str) {
+    match timeframe {
+        Some("1h") => (Some(&signal.pair.price_change.h1), "1h"),
+        Some("24h") => (Some(&signal.pair.price_change.h24), "24h"),
+        Some("1d") => (Some(&signal.pair.price_change.h24), "1d"),
+        Some(period) => (None, period),
+        None => (Some(&signal.pair.price_change.h24), "24h"),
+    }
 }
 
 fn number(value: &Value) -> f64 {
@@ -719,6 +727,15 @@ fn ath(candles: &[Vec<f64>]) -> Option<(f64, i64)> {
 
 #[must_use]
 pub fn format_signal_caption(signal: &TokenSignal, now_unix: i64) -> String {
+    format_signal_caption_for_period(signal, now_unix, None)
+}
+
+#[must_use]
+pub fn format_signal_caption_for_period(
+    signal: &TokenSignal,
+    now_unix: i64,
+    timeframe: Option<&str>,
+) -> String {
     let pair = &signal.pair;
     let name = if pair.base_token.name.is_empty() {
         "Token"
@@ -802,11 +819,14 @@ pub fn format_signal_caption(signal: &TokenSignal, now_unix: i64) -> String {
         || format!("#{}", signal.token.tag),
         |progress| format!("#{} (Pump @ {progress:.0}%)", signal.token.tag),
     );
+    let (change, period) = signal_change_for_timeframe(signal, timeframe);
+    let change = change.map_or_else(|| "N/A".to_owned(), optional_percentage);
+    let change = timeframe.map_or(change.clone(), |_| format!("{change} {period}"));
     let mut stats = vec![
         format!(
             "├ USD   <b>{}</b> ({})",
             optional_money(&pair.price_usd, true),
-            optional_percentage(&pair.price_change.h24)
+            change
         ),
         format!(
             "├ MC    <b>{}</b>",
@@ -949,8 +969,9 @@ mod tests {
         PairTransactions, PairVolume, PairWebsite, PumpMetadata, SignalQuery, SignalState,
         TokenAddress, TokenPair, TokenSignal, age_text, build_signal_keyboard, callback_text,
         choose_best_pair, choose_symbol_pair, detect_signal_query, format_money,
-        format_signal_caption, has_usable_chart, pair_rank, signal_state_key, stable_signal_id,
-        token_from_pair, token_image_url, token_socials,
+        format_signal_caption, format_signal_caption_for_period, format_signal_quote,
+        has_usable_chart, pair_rank, signal_state_key, stable_signal_id, token_from_pair,
+        token_image_url, token_socials,
     };
     use crate::locale::Locale;
 
@@ -1080,6 +1101,25 @@ mod tests {
             choose_symbol_pair(&[unrelated, exact.clone()], "glorp"),
             Some(exact)
         );
+    }
+
+    #[test]
+    fn compact_signal_quotes_use_the_requested_period() {
+        let signal = signal();
+        let quote = format_signal_quote(&signal, Some("1h"));
+        assert!(quote.contains("+5.1% 1h"));
+        assert!(!quote.contains("+2.3% 24h"));
+        let unavailable = format_signal_quote(&signal, Some("7d"));
+        assert!(unavailable.contains("N/A 7d"));
+    }
+
+    #[test]
+    fn signal_captions_use_the_requested_period_when_supplied() {
+        let signal = signal();
+        let caption = format_signal_caption_for_period(&signal, 1_720_000_000, Some("1h"));
+        assert!(caption.contains("USD   <b>$0.0106</b> (+5.1% 1h)"));
+        let unavailable = format_signal_caption_for_period(&signal, 1_720_000_000, Some("7d"));
+        assert!(unavailable.contains("USD   <b>$0.0106</b> (N/A 7d)"));
     }
 
     #[test]

@@ -85,14 +85,15 @@ use bot_core::command_state::{
 };
 use bot_core::links::replace_social_links;
 use bot_core::market_prices::{
-    CryptoAsset, CryptoMarketProvider, MarketPriceCommand, UnifiedStockProvider,
-    execute_market_price_command,
+    CryptoAsset, CryptoMarketProvider, MarketCandidate, MarketConversion, MarketPriceCommand,
+    UnifiedStockProvider, execute_market_price_candidate, execute_market_price_command,
 };
 use bot_core::stocks::{StockQuery, StockQuote, plan_stock_query};
 use bot_core::telegram_actions::TelegramAction;
 use bot_core::telegram_commands::command_publication_actions;
 use bot_core::telegram_payments::StarPaymentRecord;
 use num_bigint::{BigInt, BigUint};
+use serde_json::Value;
 use thiserror::Error;
 
 use crate::chat_members_tool::ChatMembersTool;
@@ -212,6 +213,19 @@ impl<T: CoinMarketCapMarketTransport, C: RequestCache> CryptoMarketProvider
             MarketRequestKind::Quotes {
                 identifiers: identifiers.to_vec(),
                 by_slug,
+            },
+        )
+    }
+
+    fn quotes_by_id(
+        &mut self,
+        identifiers: &[String],
+        currency: &str,
+    ) -> Result<Vec<CryptoAsset>, String> {
+        self.load(
+            currency,
+            MarketRequestKind::QuotesById {
+                identifiers: identifiers.to_vec(),
             },
         )
     }
@@ -357,16 +371,74 @@ where
         execution.diagnostics.extend(stocks.diagnostics);
         MarketPriceLoad {
             chart: execution.chart,
+            selection: execution.selection,
             no_assets_found: execution.no_assets_found,
             text: execution.text,
             diagnostics: execution.diagnostics,
         }
+    }
+
+    fn load_candidate(
+        &mut self,
+        candidate: &MarketCandidate,
+        timeframe: Option<&str>,
+        target_symbol: &str,
+        target_parameter: &str,
+        conversion: Option<&MarketConversion>,
+        _command: MarketPriceCommand,
+        locale: bot_core::locale::Locale,
+        now_unix: i64,
+    ) -> MarketPriceLoad {
+        let mut crypto = CachedCoinMarketCap {
+            transport: &self.transport,
+            cache: &mut self.cache,
+            api_key: &self.api_key,
+            now_unix,
+            diagnostics: Vec::new(),
+        };
+        let execution = execute_market_price_candidate(
+            candidate,
+            timeframe,
+            target_symbol,
+            target_parameter,
+            conversion,
+            locale,
+            &mut crypto,
+        );
+        let mut diagnostics = execution.diagnostics;
+        diagnostics.extend(crypto.diagnostics);
+        MarketPriceLoad {
+            chart: execution.chart,
+            selection: execution.selection,
+            no_assets_found: execution.no_assets_found,
+            text: execution.text,
+            diagnostics,
+        }
+    }
+
+    fn save_selection(&mut self, key: &str, value: &str, ttl_seconds: i64) -> Result<(), String> {
+        self.cache
+            .set(key, value, ttl_seconds)
+            .map_err(|error| error.to_string())
+    }
+
+    fn load_selection(&mut self, key: &str) -> Result<Option<String>, String> {
+        self.cache.get(key).map_err(|error| error.to_string())
+    }
+
+    fn clear_selection(&mut self, key: &str) -> Result<(), String> {
+        self.cache
+            .set(key, &Value::Null.to_string(), 1)
+            .map_err(|error| error.to_string())
     }
     fn render_chart(
         &mut self,
         chart: &bot_core::market_prices::MarketChart,
         now_unix: i64,
     ) -> Result<crate::dispatcher::MarketChartRender, String> {
+        if chart.yahoo_symbol.trim().is_empty() {
+            return Err("no verified market chart target".to_owned());
+        }
         let load = bot_adapters::yahoo_finance::load_chart(
             &self.stocks.yahoo_transport,
             &mut self.stocks.cache,
@@ -382,10 +454,15 @@ where
             &load.candles,
             chart.timeframe.as_deref().unwrap_or("5d"),
         )?;
-        let caption = chart.timeframe.as_deref().map(|period| {
-            bot_adapters::token_signal::market_chart_caption(&quote, &load.candles, period)
-        });
-        Ok(crate::dispatcher::MarketChartRender { photo, caption })
+        let period = chart.timeframe.as_deref().unwrap_or("24h");
+        Ok(crate::dispatcher::MarketChartRender {
+            photo,
+            caption: Some(bot_adapters::token_signal::market_chart_caption(
+                &quote,
+                &load.candles,
+                period,
+            )),
+        })
     }
 }
 
@@ -3764,6 +3841,10 @@ mod tests {
                     status_code: 200,
                     body: asset(&format!(r#"{{"EXM":[{row}]}}"#)),
                 }),
+                Ok(CoinMarketCapHttpResponse {
+                    status_code: 200,
+                    body: asset(&format!(r#"{{"1":[{row}]}}"#)),
+                }),
             ]),
             requests: RefCell::new(Vec::new()),
         };
@@ -3782,6 +3863,12 @@ mod tests {
                 .map(|assets| assets[0].symbol.clone()),
             Ok("EXM".to_owned())
         );
+        assert_eq!(
+            source
+                .quotes_by_id(&["1".to_owned()], "USD")
+                .map(|assets| assets[0].symbol.clone()),
+            Ok("EXM".to_owned())
+        );
         assert!(source.diagnostics.is_empty());
         assert!(matches!(
             transport.requests.borrow()[0].kind,
@@ -3791,6 +3878,11 @@ mod tests {
             &transport.requests.borrow()[1].kind,
             MarketRequestKind::Quotes { identifiers, by_slug: false }
                 if identifiers == &["EXM".to_owned()]
+        ));
+        assert!(matches!(
+            &transport.requests.borrow()[2].kind,
+            MarketRequestKind::QuotesById { identifiers }
+                if identifiers == &["1".to_owned()]
         ));
 
         let failing = MarketTransportStub {
@@ -3830,6 +3922,10 @@ mod tests {
                     status_code: 200,
                     body: format!(r#"{{"data":{{"EXM":[{row}]}}}}"#),
                 }),
+                Ok(CoinMarketCapHttpResponse {
+                    status_code: 200,
+                    body: format!(r#"{{"data":{{"1":[{row}]}}}}"#),
+                }),
             ]),
             requests: RefCell::new(Vec::new()),
         };
@@ -3861,7 +3957,77 @@ mod tests {
         assert!(load.text.contains("42"));
         assert!(load.diagnostics.is_empty());
         let chart = load.chart.ok_or("resolved asset has no chart identity")?;
+        let candidate = bot_core::market_prices::MarketCandidate {
+            id: "1".to_owned(),
+            symbol: "EXM".to_owned(),
+            name: "Synthetic Asset".to_owned(),
+            slug: "synthetic-asset".to_owned(),
+            price: "42".to_owned(),
+            change: "1".to_owned(),
+            contracts: Vec::new(),
+        };
+        let candidate_load = source.load_candidate(
+            &candidate,
+            Some("7d"),
+            "USD",
+            "USD",
+            None,
+            MarketPriceCommand::CryptoOnly,
+            Locale::En,
+            1_700_000_000,
+        );
+        assert!(candidate_load.text.contains("EXM"));
+        assert!(candidate_load.diagnostics.is_empty());
+        assert_eq!(source.save_selection("market-key", "value", 60), Ok(()));
+        assert_eq!(source.load_selection("market-key"), Ok(None));
+        assert_eq!(source.clear_selection("market-key"), Ok(()));
+
+        struct FailingCache;
+        impl RequestCache for FailingCache {
+            type Error = &'static str;
+
+            fn get(&mut self, _: &str) -> Result<Option<String>, Self::Error> {
+                Err("synthetic cache get failure")
+            }
+
+            fn set(&mut self, _: &str, _: &str, _: i64) -> Result<(), Self::Error> {
+                Err("synthetic cache set failure")
+            }
+        }
+        let failing_stocks = super::YahooStockPriceSource {
+            yahoo_transport: StockYahooTransportStub {
+                chart_responses: RefCell::new(Vec::new()),
+                search_responses: RefCell::new(Vec::new()),
+                charts: RefCell::new(Vec::new()),
+                searches: RefCell::new(Vec::new()),
+            },
+            finviz_transport: FinvizTransportStub {
+                response: RefCell::new(None),
+            },
+            cache: WeatherCacheStub,
+        };
+        let mut failing_source = super::NativeMarketPriceSource {
+            transport: MarketTransportStub {
+                responses: RefCell::new(Vec::new()),
+                requests: RefCell::new(Vec::new()),
+            },
+            cache: FailingCache,
+            api_key: "synthetic-key".to_owned(),
+            stocks: failing_stocks,
+        };
+        assert!(
+            failing_source
+                .save_selection("market-key", "value", 60)
+                .is_err()
+        );
+        assert!(failing_source.load_selection("market-key").is_err());
+        assert!(failing_source.clear_selection("market-key").is_err());
         assert!(source.render_chart(&chart, 1_700_000_000).is_err());
+        // The resolver intentionally leaves unknown identities without a
+        // guessed Yahoo symbol. Supply a verified fixture target to exercise
+        // the renderer itself.
+        let mut chart = chart;
+        chart.yahoo_symbol = "EXM-USD".to_owned();
         let response = || {
             Ok(YahooHttpResponse {
             status_code: 200,
@@ -3876,7 +4042,7 @@ mod tests {
             .push(response());
         let png = source.render_chart(&chart, 1_700_000_000)?;
         assert!(png.photo.starts_with(b"\x89PNG"));
-        assert!(png.caption.is_none());
+        assert_eq!(png.caption.as_deref(), Some("EXM: 42 USD (+5.00% 24h)"));
         let mut ranged_chart = chart.clone();
         ranged_chart.timeframe = Some("1m".to_owned());
         source
