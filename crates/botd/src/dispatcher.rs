@@ -2467,7 +2467,7 @@ where
                 timestamp,
             );
         }
-        self.clear_market_selection_callback(context, chat_id_value, &key, selection_id, locale)?;
+        self.clear_market_selection_callback(context, chat_id_value, &key, selection_id)?;
         self.answer_market_callback(
             context,
             locale,
@@ -2536,7 +2536,6 @@ where
                 chat_id_value,
                 selection_key,
                 selection_id,
-                locale,
             )?;
             self.answer_market_callback(context, locale, "retry", true)?;
             return Ok(DispatchOutcome::Handled);
@@ -2602,13 +2601,7 @@ where
                 timestamp,
             );
         }
-        self.clear_market_selection_callback(
-            context,
-            chat_id_value,
-            selection_key,
-            selection_id,
-            locale,
-        )?;
+        self.clear_market_selection_callback(context, chat_id_value, selection_key, selection_id)?;
         self.answer_market_callback(
             context,
             locale,
@@ -2624,7 +2617,6 @@ where
         chat_id_value: i64,
         selection_key: &str,
         selection_id: &str,
-        locale: bot_core::locale::Locale,
     ) -> NativeDispatchResult<Config, Actions, Random> {
         if let Err(error) = self
             .market_price_source
@@ -2636,16 +2628,9 @@ where
                 context.chat_id
             ));
         }
-        let _ = self.actions.try_edit(TelegramAction::EditMessage {
+        let _ = self.actions.execute(TelegramAction::DeleteMessage {
             chat_id: ChatId(chat_id_value),
             message_id: MessageId(context.message_id),
-            text: match locale {
-                bot_core::locale::Locale::Es => "selección procesada".to_owned(),
-                bot_core::locale::Locale::En => "Selection processed".to_owned(),
-            },
-            reply_markup: Some(InlineKeyboardMarkup {
-                inline_keyboard: Vec::new(),
-            }),
         });
         Ok(DispatchOutcome::Handled)
     }
@@ -9867,8 +9852,10 @@ mod tests {
             )));
             assert!(dispatcher.actions.0.iter().any(|action| matches!(
                 action,
-                TelegramAction::EditMessage { reply_markup: Some(markup), .. }
-                    if markup.inline_keyboard.is_empty()
+                TelegramAction::DeleteMessage {
+                    chat_id: ChatId(-42),
+                    message_id: MessageId(700),
+                }
             )));
             assert!(dispatcher.actions.0.iter().any(|action| matches!(
                 action,
