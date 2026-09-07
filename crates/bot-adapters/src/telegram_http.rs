@@ -159,8 +159,11 @@ impl TelegramTransport for ReqwestTelegramTransport {
             "{}/bot{}/{}",
             self.api_base, request.token, request.endpoint
         );
+        // Telegram requires the bot token in this URL path. Production uses
+        // the fixed HTTPS API base above, so this is not cleartext transport.
         let mut builder = self
             .client
+            // codeql[rust/cleartext-transmission]
             .request(request.method.clone(), url)
             .timeout(request.timeout);
         if let Some(params) = &request.params {
@@ -200,8 +203,11 @@ impl TelegramMultipartTransport for ReqwestTelegramTransport {
             .mime_str(&request.content_type)
             .map_err(|_| TransportFailureKind::Request)?;
         form = form.part(request.file_field.clone(), part);
+        // Telegram requires the bot token in this URL path. Production uses
+        // the fixed HTTPS API base above, so this is not cleartext transport.
         read_response(
             self.client
+                // codeql[rust/cleartext-transmission]
                 .post(url)
                 .timeout(request.timeout)
                 .multipart(form)
