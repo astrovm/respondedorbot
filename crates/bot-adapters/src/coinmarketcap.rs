@@ -874,6 +874,7 @@ mod tests {
                 ("/listings", "start=1&limit=100&convert=USD"),
                 ("/listings", "start=1&limit=100&convert=ARS"),
                 ("/quotes", "slug=bitcoin%2Cethereum&convert=USD"),
+                ("/quotes", "id=123%2C456&convert=USD"),
             ] {
                 let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
                 let mut request = [0_u8; 4_096];
@@ -926,6 +927,17 @@ mod tests {
                     kind: MarketRequestKind::Quotes {
                         identifiers: vec!["bitcoin".to_owned(), "ethereum".to_owned()],
                         by_slug: true,
+                    },
+                })
+                .is_ok()
+        );
+        assert!(
+            transport
+                .get_market(&MarketRequest {
+                    api_key: "synthetic-key".to_owned(),
+                    currency: "USD".to_owned(),
+                    kind: MarketRequestKind::QuotesById {
+                        identifiers: vec!["123".to_owned(), "456".to_owned()],
                     },
                 })
                 .is_ok()
