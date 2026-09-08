@@ -380,6 +380,19 @@ fn yahoo_candidate_relevance(query: &str, candidate: &StockSearchCandidate) -> u
     yahoo_relevance(query, &candidate.symbol, &candidate.name)
 }
 
+/// Whether a provider candidate's display name identifies `query` as a
+/// company-name search rather than a ticker-shaped query.
+#[must_use]
+pub fn yahoo_candidate_name_matches_query(query: &str, candidate: &StockSearchCandidate) -> bool {
+    let query_words = normalized_search_text(query);
+    let name_words = normalized_search_text(&candidate.name);
+    !query_words.is_empty()
+        && (name_words == query_words
+            || name_words
+                .strip_prefix(&query_words)
+                .is_some_and(|remainder| remainder.starts_with(' ')))
+}
+
 /// Rank search results without choosing a single fuzzy winner.
 pub fn rank_yahoo_candidates(query: &str, candidates: &mut [StockSearchCandidate]) {
     candidates.sort_by(|left, right| {
@@ -473,9 +486,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        StockQuery, StockQueryPlan, classify_oil_command, classify_stock_command,
-        parse_yahoo_quote, plan_stock_query, rank_yahoo_candidates, render_oil_quotes,
-        render_stock_quotes, select_yahoo_candidates, select_yahoo_symbol,
+        StockQuery, StockQueryPlan, StockSearchCandidate, classify_oil_command,
+        classify_stock_command, parse_yahoo_quote, plan_stock_query, rank_yahoo_candidates,
+        render_oil_quotes, render_stock_quotes, select_yahoo_candidates, select_yahoo_symbol,
+        yahoo_candidate_name_matches_query,
     };
     use crate::locale::Locale;
 
@@ -575,6 +589,18 @@ mod tests {
         assert_eq!(candidates[0].name, "Rockhopper Exploration plc");
         assert_eq!(candidates[0].exchange, "London");
         assert_eq!(candidates[0].asset_type, "Equity");
+    }
+
+    #[test]
+    fn yahoo_candidate_names_distinguish_company_punctuation_from_tickers() {
+        let company = StockSearchCandidate {
+            symbol: "RR.L".to_owned(),
+            name: "Rolls-Royce Holdings plc".to_owned(),
+            exchange: "London".to_owned(),
+            asset_type: "Equity".to_owned(),
+        };
+        assert!(yahoo_candidate_name_matches_query("Rolls-Royce", &company));
+        assert!(!yahoo_candidate_name_matches_query("BRK-B", &company));
     }
 
     #[test]
