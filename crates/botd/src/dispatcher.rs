@@ -399,6 +399,9 @@ fn market_token_candidate(signal: &TokenSignal, timeframe: Option<&str>) -> Mark
         slug: symbol.to_ascii_lowercase(),
         price,
         change,
+        currency: String::new(),
+        exchange: String::new(),
+        asset_type: String::new(),
         contracts: vec![signal.token.clone()],
     }
 }
@@ -485,7 +488,14 @@ fn market_selection_keyboard(
                     candidate.name.as_str()
                 };
                 let identity = if let Some(symbol) = candidate.id.strip_prefix("stock:") {
-                    format!("Yahoo {symbol}")
+                    let mut parts = vec![format!("Yahoo {symbol}")];
+                    if !candidate.exchange.trim().is_empty() {
+                        parts.push(candidate.exchange.clone());
+                    }
+                    if !candidate.asset_type.trim().is_empty() {
+                        parts.push(candidate.asset_type.clone());
+                    }
+                    parts.join(" · ")
                 } else if candidate.id.starts_with("token:") {
                     candidate
                         .contracts
@@ -4423,11 +4433,8 @@ where
             message.reply_to_message_id = Some(message_id);
             StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if classify_stock_command(&parsed.command) {
-            if parsed
-                .message_text
-                .split_whitespace()
-                .last()
-                .is_some_and(|period| bot_core::price_queries::ChartPeriod::parse(period).is_some())
+            if !parsed.message_text.trim().is_empty()
+                && self.market_price_source.is_some()
                 && let Some(outcome) = self.dispatch_asset_prices(
                     message,
                     &format!("stock:{}", parsed.message_text),
@@ -7443,6 +7450,7 @@ mod tests {
             price: 205.5,
             currency: "USD".to_owned(),
             exchange: "NMS".to_owned(),
+            asset_type: String::new(),
             variation: 1.25,
         };
         let config = Config {
@@ -7629,6 +7637,7 @@ mod tests {
             price,
             currency: "USD".to_owned(),
             exchange: String::new(),
+            asset_type: String::new(),
             variation,
         };
         let config = Config {
@@ -9522,6 +9531,9 @@ mod tests {
                 slug: "libra-finance".to_owned(),
                 price: "0.007".to_owned(),
                 change: "N/A".to_owned(),
+                currency: String::new(),
+                exchange: String::new(),
+                asset_type: String::new(),
                 contracts: Vec::new(),
             }],
         }
@@ -10434,6 +10446,7 @@ mod tests {
             price: 1.0,
             currency: "USD".to_owned(),
             exchange: "TEST".to_owned(),
+            asset_type: String::new(),
             variation: 0.0,
         };
         assert_eq!(
@@ -10473,6 +10486,9 @@ mod tests {
             slug: "synthetic".to_owned(),
             price: "1".to_owned(),
             change: "0".to_owned(),
+            currency: String::new(),
+            exchange: String::new(),
+            asset_type: String::new(),
             contracts: vec![TokenAddress {
                 chain_id: "solana".to_owned(),
                 network: "mainnet".to_owned(),
@@ -10542,6 +10558,9 @@ mod tests {
             slug: "long".to_owned(),
             price: "2".to_owned(),
             change: "0".to_owned(),
+            currency: String::new(),
+            exchange: String::new(),
+            asset_type: String::new(),
             contracts: Vec::new(),
         });
         candidates.push(bot_core::market_prices::MarketCandidate {
@@ -10551,6 +10570,9 @@ mod tests {
             slug: "exm-usd".to_owned(),
             price: "42".to_owned(),
             change: "+5% 1m".to_owned(),
+            currency: "USD".to_owned(),
+            exchange: "Synthetic".to_owned(),
+            asset_type: "Equity".to_owned(),
             contracts: Vec::new(),
         });
         for index in 2..12 {
@@ -10561,6 +10583,9 @@ mod tests {
                 slug: format!("synthetic-{index}"),
                 price: "1".to_owned(),
                 change: "0".to_owned(),
+                currency: String::new(),
+                exchange: String::new(),
+                asset_type: String::new(),
                 contracts: Vec::new(),
             });
         }
@@ -10625,6 +10650,9 @@ mod tests {
                 slug: id.to_ascii_lowercase(),
                 price: "1".to_owned(),
                 change: "N/A".to_owned(),
+                currency: String::new(),
+                exchange: String::new(),
+                asset_type: String::new(),
                 contracts,
             };
         let dex_candidate = candidate(
@@ -10689,6 +10717,9 @@ mod tests {
             slug: "synthetic".to_owned(),
             price: "0.01".to_owned(),
             change: "N/A 7d".to_owned(),
+            currency: String::new(),
+            exchange: String::new(),
+            asset_type: String::new(),
             contracts: vec![token.clone()],
         };
         let rendered = Rc::new(RefCell::new(Vec::new()));
@@ -10832,6 +10863,9 @@ mod tests {
                         slug: "synthetic".to_owned(),
                         price: "1".to_owned(),
                         change: "N/A 7d".to_owned(),
+                        currency: String::new(),
+                        exchange: String::new(),
+                        asset_type: String::new(),
                         contracts: Vec::new(),
                     }],
                 }),
@@ -11026,6 +11060,9 @@ mod tests {
                         slug: "synthetic".to_owned(),
                         price: "1".to_owned(),
                         change: "N/A 7d".to_owned(),
+                        currency: String::new(),
+                        exchange: String::new(),
+                        asset_type: String::new(),
                         contracts: Vec::new(),
                     }],
                 }),
@@ -11505,6 +11542,9 @@ mod tests {
                     slug: "libra-finance".to_owned(),
                     price: "0.007".to_owned(),
                     change: "N/A".to_owned(),
+                    currency: String::new(),
+                    exchange: String::new(),
+                    asset_type: String::new(),
                     contracts: Vec::new(),
                 },
                 bot_core::market_prices::MarketCandidate {
@@ -11514,6 +11554,9 @@ mod tests {
                     slug: "libra-protocol".to_owned(),
                     price: "0.00009".to_owned(),
                     change: "N/A".to_owned(),
+                    currency: String::new(),
+                    exchange: String::new(),
+                    asset_type: String::new(),
                     contracts: Vec::new(),
                 },
             ],
@@ -11603,6 +11646,9 @@ mod tests {
             slug: name.to_ascii_lowercase().replace(' ', "-"),
             price: "0.007".to_owned(),
             change: "N/A".to_owned(),
+            currency: String::new(),
+            exchange: String::new(),
+            asset_type: String::new(),
             contracts: Vec::new(),
         };
         let selection = |query: &str, candidates: Vec<bot_core::market_prices::MarketCandidate>| {
@@ -11761,6 +11807,9 @@ mod tests {
                 slug: "libra-finance".to_owned(),
                 price: "0.007".to_owned(),
                 change: "N/A".to_owned(),
+                currency: String::new(),
+                exchange: String::new(),
+                asset_type: String::new(),
                 contracts: Vec::new(),
             }],
         };
@@ -11949,6 +11998,9 @@ mod tests {
             slug: "rkhnf".to_owned(),
             price: "0.13".to_owned(),
             change: "+2.77% 1m".to_owned(),
+            currency: "USD".to_owned(),
+            exchange: "Synthetic".to_owned(),
+            asset_type: "Equity".to_owned(),
             contracts: Vec::new(),
         };
         let mut signal = token_signal();
@@ -12058,6 +12110,108 @@ mod tests {
     }
 
     #[test]
+    fn stock_command_preserves_listing_identity_through_selection_callback() {
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let selected = Rc::new(RefCell::new(Vec::new()));
+        let london = bot_core::market_prices::MarketCandidate {
+            id: "stock:RKH.L".to_owned(),
+            symbol: "RKH.L".to_owned(),
+            name: "Rockhopper Exploration plc".to_owned(),
+            slug: "rkh.l".to_owned(),
+            price: "12.5".to_owned(),
+            change: "+25.00% 1m".to_owned(),
+            currency: "GBp".to_owned(),
+            exchange: "London".to_owned(),
+            asset_type: "Equity".to_owned(),
+            contracts: Vec::new(),
+        };
+        let otc = bot_core::market_prices::MarketCandidate {
+            id: "stock:RKHNF".to_owned(),
+            symbol: "RKHNF".to_owned(),
+            name: "Rockhaven Resources Ltd.".to_owned(),
+            slug: "rkhnf".to_owned(),
+            price: "0.13".to_owned(),
+            change: "+2.77% 1m".to_owned(),
+            currency: "USD".to_owned(),
+            exchange: "OTC Markets".to_owned(),
+            asset_type: "Equity".to_owned(),
+            contracts: Vec::new(),
+        };
+        let mut dispatcher =
+            dispatcher().with_market_price_source(Box::new(SelectableMarketPrices {
+                initial: MarketPriceLoad {
+                    chart: None,
+                    selection: Some(bot_core::market_prices::MarketSelection {
+                        query: "rkh".to_owned(),
+                        timeframe: Some("1m".to_owned()),
+                        target_symbol: "USD".to_owned(),
+                        target_parameter: "USD".to_owned(),
+                        conversion: None,
+                        candidates: vec![london.clone(), otc],
+                    }),
+                    no_assets_found: false,
+                    text: String::new(),
+                    diagnostics: Vec::new(),
+                },
+                candidate: MarketPriceLoad {
+                    chart: Some(bot_core::market_prices::MarketChart {
+                        timeframe: Some("1m".to_owned()),
+                        symbol: london.symbol.clone(),
+                        name: london.name.clone(),
+                        yahoo_symbol: london.symbol.clone(),
+                        token: None,
+                        candidate: Some(london),
+                    }),
+                    selection: None,
+                    no_assets_found: false,
+                    text: "RKH.L: 12.50 GBp (+25.00% 1m)".to_owned(),
+                    diagnostics: Vec::new(),
+                },
+                stored: Rc::clone(&stored),
+                selected: Rc::clone(&selected),
+            }));
+
+        assert_eq!(
+            dispatcher.dispatch(update("/s rkh 1m", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
+            return;
+        };
+        assert!(message.text.contains("RKH.L"));
+        assert!(message.text.contains("London"));
+        assert!(message.text.contains("GBp"));
+        assert_eq!(
+            message
+                .reply_markup
+                .as_ref()
+                .map(|markup| markup.inline_keyboard.len()),
+            Some(2)
+        );
+
+        let Some(callback) = message
+            .reply_markup
+            .as_ref()
+            .and_then(|markup| markup.inline_keyboard.first())
+            .and_then(|row| row.first())
+            .and_then(|button| button.callback_data.clone())
+        else {
+            return;
+        };
+        assert_eq!(
+            dispatcher.dispatch(callback_update_for_message(
+                &callback,
+                "private",
+                Some("en"),
+                700,
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(selected.borrow().as_slice(), ["stock:RKH.L:1m"]);
+        assert!(stored.borrow().is_empty());
+    }
+
+    #[test]
     fn crypto_symbol_queries_merge_direct_native_and_token_candidates() {
         let market_candidate = bot_core::market_prices::MarketCandidate {
             id: "123".to_owned(),
@@ -12066,6 +12220,9 @@ mod tests {
             slug: "rkh".to_owned(),
             price: "1.25".to_owned(),
             change: "+2% 1m".to_owned(),
+            currency: String::new(),
+            exchange: String::new(),
+            asset_type: String::new(),
             contracts: Vec::new(),
         };
         let mut signal = token_signal();
@@ -12145,6 +12302,9 @@ mod tests {
             slug: "syn".to_owned(),
             price: "0.01".to_owned(),
             change: "N/A 1m".to_owned(),
+            currency: String::new(),
+            exchange: String::new(),
+            asset_type: String::new(),
             contracts: vec![token],
         };
         let selection_id = market_selection_id(-42, 7, 88, 1_672_531_200, 0);
@@ -12567,6 +12727,9 @@ mod tests {
                             slug: "libra-finance".to_owned(),
                             price: "0.007".to_owned(),
                             change: format!("N/A {period}"),
+                            currency: String::new(),
+                            exchange: String::new(),
+                            asset_type: String::new(),
                             contracts: Vec::new(),
                         }],
                     }),
@@ -12608,6 +12771,7 @@ mod tests {
                             price: 100.0,
                             currency: "USD".into(),
                             exchange: "NMS".into(),
+                            asset_type: String::new(),
                             variation: 1.0,
                         }),
                     )]),
