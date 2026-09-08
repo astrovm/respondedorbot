@@ -89,7 +89,7 @@ use bot_core::market_prices::{
     UnifiedStockProvider, execute_market_price_candidate, execute_market_price_command,
     execute_stock_candidate,
 };
-use bot_core::stocks::{StockQuery, StockQuote, plan_stock_query};
+use bot_core::stocks::{StockQuery, StockQuote, StockSearchCandidate, plan_stock_query};
 use bot_core::telegram_actions::TelegramAction;
 use bot_core::telegram_commands::command_publication_actions;
 use bot_core::telegram_payments::StarPaymentRecord;
@@ -697,15 +697,52 @@ where
         load.quote
     }
 
-    fn resolve(
+    fn quote_with_candidate(
+        &mut self,
+        candidate: &StockSearchCandidate,
+        timeframe: Option<&str>,
+        now_unix: i64,
+        diagnostics: &mut Vec<String>,
+    ) -> Option<StockQuote> {
+        let mut quote =
+            self.quote_with_timeframe(&candidate.symbol, timeframe, now_unix, diagnostics)?;
+        if !candidate.name.is_empty() {
+            quote.name.clone_from(&candidate.name);
+        }
+        if !candidate.exchange.is_empty() {
+            quote.exchange.clone_from(&candidate.exchange);
+        }
+        quote.asset_type.clone_from(&candidate.asset_type);
+        Some(quote)
+    }
+
+    fn resolve_candidates(
         &mut self,
         query: &str,
         now_unix: i64,
         diagnostics: &mut Vec<String>,
-    ) -> Option<String> {
+    ) -> Vec<StockSearchCandidate> {
         let load = load_yahoo_symbol(&self.yahoo_transport, &mut self.cache, query, now_unix);
         diagnostics.extend(load.diagnostics);
-        load.symbol
+        load.candidates
+    }
+
+    fn candidates_for_query(
+        candidates: Vec<StockSearchCandidate>,
+        query: &str,
+    ) -> Vec<StockSearchCandidate> {
+        let normalized = query.trim().trim_start_matches('$');
+        let exchange_qualified = normalized
+            .chars()
+            .any(|character| matches!(character, '.' | '=' | '^' | '-'));
+        if exchange_qualified
+            && let Some(exact) = candidates
+                .iter()
+                .find(|candidate| candidate.symbol.eq_ignore_ascii_case(normalized))
+        {
+            return vec![exact.clone()];
+        }
+        candidates
     }
 
     fn resolve_missing(
@@ -715,16 +752,33 @@ where
         now_unix: i64,
         diagnostics: &mut Vec<String>,
     ) -> Vec<(String, Option<StockQuote>)> {
-        quotes
-            .into_iter()
-            .map(|(query, quote)| {
-                let quote = quote.or_else(|| {
-                    let symbol = self.resolve(&query, now_unix, diagnostics)?;
-                    self.quote_with_timeframe(&symbol, timeframe, now_unix, diagnostics)
-                });
-                (query, quote)
-            })
-            .collect()
+        let mut resolved = Vec::new();
+        for (query, quote) in quotes {
+            if quote.is_some() {
+                resolved.push((query, quote));
+                continue;
+            }
+            let candidates = Self::candidates_for_query(
+                self.resolve_candidates(&query, now_unix, diagnostics),
+                &query,
+            );
+            let mut candidate_quotes = candidates
+                .iter()
+                .filter_map(|candidate| {
+                    self.quote_with_candidate(candidate, timeframe, now_unix, diagnostics)
+                })
+                .collect::<Vec<_>>();
+            if candidate_quotes.is_empty() {
+                resolved.push((query, None));
+            } else {
+                resolved.extend(
+                    candidate_quotes
+                        .drain(..)
+                        .map(|quote| (query.clone(), Some(quote))),
+                );
+            }
+        }
+        resolved
     }
 }
 
@@ -794,28 +848,37 @@ where
             };
         }
 
-        let resolved = self.resolve(&plan.raw_query, now_unix, &mut diagnostics);
-        let mut full_quote = resolved.as_ref().and_then(|symbol| {
-            direct_quotes
+        let candidates = Self::candidates_for_query(
+            self.resolve_candidates(&plan.raw_query, now_unix, &mut diagnostics),
+            &plan.raw_query,
+        );
+        let full_quotes = candidates
+            .iter()
+            .filter_map(|candidate| {
+                self.quote_with_candidate(candidate, timeframe, now_unix, &mut diagnostics)
+            })
+            .collect::<Vec<_>>();
+        if !full_quotes.is_empty() {
+            let mut resolved = quotes
                 .iter()
-                .find(|quote| quote.symbol.eq_ignore_ascii_case(symbol))
-                .cloned()
-        });
-        if full_quote.is_none()
-            && let Some(symbol) = resolved
-        {
-            full_quote = self.quote_with_timeframe(&symbol, timeframe, now_unix, &mut diagnostics);
-        }
-        if let Some(full_quote) = full_quote
-            && (direct_quotes.is_empty()
-                || !direct_quotes
+                .filter_map(|(query, quote)| {
+                    quote.clone().map(|quote| (query.clone(), Some(quote)))
+                })
+                .collect::<Vec<_>>();
+            for quote in full_quotes {
+                if !direct_quotes
                     .iter()
-                    .any(|quote| quote.symbol.eq_ignore_ascii_case(&full_quote.symbol)))
-        {
-            return StockQuotesLoad {
-                quotes: Some(vec![(plan.raw_query, Some(full_quote))]),
-                diagnostics,
-            };
+                    .any(|direct| direct.symbol.eq_ignore_ascii_case(&quote.symbol))
+                {
+                    resolved.push((plan.raw_query.clone(), Some(quote)));
+                }
+            }
+            if !resolved.is_empty() {
+                return StockQuotesLoad {
+                    quotes: Some(resolved),
+                    diagnostics,
+                };
+            }
         }
         if direct_quotes.is_empty() {
             return StockQuotesLoad {
@@ -4018,6 +4081,9 @@ mod tests {
             slug: "synthetic-asset".to_owned(),
             price: "42".to_owned(),
             change: "1".to_owned(),
+            currency: String::new(),
+            exchange: String::new(),
+            asset_type: String::new(),
             contracts: Vec::new(),
         };
         let candidate_load = source.load_candidate(
@@ -4050,6 +4116,9 @@ mod tests {
             slug: "exm-usd".to_owned(),
             price: "42".to_owned(),
             change: "+5% 1m".to_owned(),
+            currency: "USD".to_owned(),
+            exchange: "TEST".to_owned(),
+            asset_type: "Equity".to_owned(),
             contracts: Vec::new(),
         };
         let stock_candidate_load = source.load_candidate(
@@ -4163,6 +4232,7 @@ mod tests {
             price: 42.0,
             currency: "USD".into(),
             exchange: "TEST".into(),
+            asset_type: String::new(),
             variation: 5.0,
         };
         assert!(source.stocks.render_chart(&quote, 1_700_000_000).is_err());
@@ -4444,6 +4514,82 @@ mod tests {
         assert_eq!(
             source.yahoo_transport.searches.borrow()[0].query,
             "Apple Inc"
+        );
+    }
+
+    #[test]
+    fn stock_source_preserves_multiple_yahoo_listings_for_selection() {
+        let chart = |symbol: &str, name: &str, exchange: &str, currency: &str| {
+            Ok(YahooHttpResponse {
+                status_code: 200,
+                body: serde_json::json!({
+                    "chart": {
+                        "result": [{
+                            "meta": {
+                                "symbol": symbol,
+                                "shortName": name,
+                                "regularMarketPrice": 12.5,
+                                "chartPreviousClose": 10,
+                                "currency": currency,
+                                "exchangeName": exchange,
+                            }
+                        }]
+                    }
+                })
+                .to_string(),
+            })
+        };
+        let transport = StockYahooTransportStub {
+            chart_responses: RefCell::new(vec![
+                Ok(YahooHttpResponse {
+                    status_code: 200,
+                    body: r#"{"chart":{"result":[]}}"#.to_owned(),
+                }),
+                chart("RKH.L", "Rockhopper Exploration plc", "London", "GBp"),
+                chart("RKHNF", "Rockhaven Resources Ltd.", "OTC Markets", "USD"),
+            ]),
+            search_responses: RefCell::new(vec![Ok(YahooHttpResponse {
+                status_code: 200,
+                body: r#"{"quotes":[
+                    {"quoteType":"EQUITY","symbol":"RKHNF","longname":"Rockhaven Resources Ltd.","exchDisp":"OTC Markets"},
+                    {"quoteType":"EQUITY","symbol":"RKH.L","longname":"Rockhopper Exploration plc","exchDisp":"London"}
+                ]}"#
+                    .to_owned(),
+            })]),
+            charts: RefCell::default(),
+            searches: RefCell::default(),
+        };
+        let mut source = YahooStockPriceSource {
+            yahoo_transport: transport,
+            finviz_transport: FinvizTransportStub {
+                response: RefCell::new(None),
+            },
+            cache: WeatherCacheStub,
+        };
+
+        let load = source.load_with_timeframe("rkh", Some("1m"), 100);
+        let quotes = load.quotes.unwrap_or_default();
+        assert_eq!(quotes.len(), 2);
+        assert_eq!(quotes[0].0, "rkh");
+        assert_eq!(
+            quotes[0].1.as_ref().map(|quote| quote.symbol.as_str()),
+            Some("RKH.L")
+        );
+        assert_eq!(
+            quotes[0].1.as_ref().map(|quote| quote.exchange.as_str()),
+            Some("London")
+        );
+        assert_eq!(
+            quotes[0].1.as_ref().map(|quote| quote.asset_type.as_str()),
+            Some("Equity")
+        );
+        assert_eq!(
+            quotes[0].1.as_ref().map(|quote| quote.currency.as_str()),
+            Some("GBp")
+        );
+        assert_eq!(
+            quotes[1].1.as_ref().map(|quote| quote.symbol.as_str()),
+            Some("RKHNF")
         );
     }
 

@@ -17,7 +17,21 @@ pub struct StockQuote {
     pub price: f64,
     pub currency: String,
     pub exchange: String,
+    pub asset_type: String,
     pub variation: f64,
+}
+
+/// A provider search result before its current quote is loaded.
+///
+/// Yahoo returns several listings for a short ticker. Keeping the provider's
+/// full symbol and display metadata here lets callers rank and present those
+/// listings without guessing which exchange the user meant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StockSearchCandidate {
+    pub symbol: String,
+    pub name: String,
+    pub exchange: String,
+    pub asset_type: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -193,8 +207,7 @@ pub fn parse_yahoo_quote(response: &Value, fallback_symbol: &str) -> Option<Stoc
         .to_owned();
     let currency = text(meta.and_then(|value| value.get("currency")))
         .filter(|value| !value.is_empty())
-        .unwrap_or("USD")
-        .to_uppercase();
+        .map_or_else(|| "USD".to_owned(), normalize_currency);
     let exchange = text(meta.and_then(|value| value.get("exchangeName")))
         .unwrap_or_default()
         .to_owned();
@@ -204,30 +217,190 @@ pub fn parse_yahoo_quote(response: &Value, fallback_symbol: &str) -> Option<Stoc
         price: current,
         currency,
         exchange,
+        asset_type: String::new(),
         variation: ((current - previous_close) / previous_close) * 100.0,
     })
 }
 
+fn normalize_currency(value: &str) -> String {
+    let bytes = value.as_bytes();
+    if bytes.len() == 3
+        && bytes[0].eq_ignore_ascii_case(&b'g')
+        && bytes[1].eq_ignore_ascii_case(&b'b')
+        && bytes[2] == b'p'
+    {
+        "GBp".to_owned()
+    } else {
+        value.to_uppercase()
+    }
+}
+
+#[must_use]
+pub fn select_yahoo_candidates(response: &Value) -> Vec<StockSearchCandidate> {
+    let Some(quotes) = response
+        .get("data")
+        .and_then(|data| data.get("quotes"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+    for quote in quotes {
+        let Some(quote) = quote.as_object() else {
+            continue;
+        };
+        let Some(asset_type) = quote
+            .get("quoteType")
+            .and_then(Value::as_str)
+            .and_then(yahoo_asset_type)
+        else {
+            continue;
+        };
+        let Some(symbol) = quote
+            .get("symbol")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|symbol| !symbol.is_empty())
+        else {
+            continue;
+        };
+        let name = quote
+            .get("longname")
+            .and_then(Value::as_str)
+            .or_else(|| quote.get("shortname").and_then(Value::as_str))
+            .map_or_else(String::new, |name| name.trim().to_owned());
+        let exchange = quote
+            .get("exchDisp")
+            .and_then(Value::as_str)
+            .or_else(|| quote.get("exchange").and_then(Value::as_str))
+            .map_or_else(String::new, |exchange| exchange.trim().to_owned());
+        if let Some(existing) =
+            candidates
+                .iter_mut()
+                .find(|candidate: &&mut StockSearchCandidate| {
+                    candidate.symbol.eq_ignore_ascii_case(symbol)
+                        && candidate.exchange.eq_ignore_ascii_case(&exchange)
+                        && candidate.asset_type.eq_ignore_ascii_case(asset_type)
+                })
+        {
+            if existing.name.is_empty() && !name.is_empty() {
+                existing.name.clone_from(&name);
+            }
+            if existing.exchange.is_empty() && !exchange.is_empty() {
+                existing.exchange.clone_from(&exchange);
+            }
+            continue;
+        }
+        candidates.push(StockSearchCandidate {
+            symbol: symbol.to_owned(),
+            name,
+            exchange,
+            asset_type: asset_type.to_owned(),
+        });
+    }
+    candidates
+}
+
+fn yahoo_asset_type(value: &str) -> Option<&'static str> {
+    match value {
+        "EQUITY" => Some("Equity"),
+        "ETF" => Some("ETF"),
+        "MUTUALFUND" => Some("Mutual fund"),
+        "INDEX" => Some("Index"),
+        "FUTURE" => Some("Future"),
+        _ => None,
+    }
+}
+
+fn normalized_search_text(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches('$')
+        .to_ascii_lowercase()
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| {
+            !word.is_empty()
+                && !matches!(
+                    *word,
+                    "inc"
+                        | "incorporated"
+                        | "corp"
+                        | "corporation"
+                        | "ltd"
+                        | "limited"
+                        | "plc"
+                        | "company"
+                        | "co"
+                )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn normalized_ticker(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches('$')
+        .to_ascii_uppercase()
+        .replace(' ', "")
+}
+
+fn yahoo_symbol_base(symbol: &str) -> Option<&str> {
+    let (base, suffix) = symbol.rsplit_once('.')?;
+    (!base.is_empty() && !suffix.is_empty()).then_some(base)
+}
+
+fn yahoo_candidate_relevance(query: &str, candidate: &StockSearchCandidate) -> u8 {
+    let ticker = normalized_ticker(query);
+    let symbol = normalized_ticker(&candidate.symbol);
+    if symbol == ticker {
+        return 0;
+    }
+    if yahoo_symbol_base(&symbol).is_some_and(|base| base == ticker) {
+        return 1;
+    }
+    let words = normalized_search_text(query);
+    let name = normalized_search_text(&candidate.name);
+    if !words.is_empty() && name == words {
+        return 2;
+    }
+    if !ticker.is_empty() && symbol.starts_with(&ticker) {
+        return 3;
+    }
+    if !words.is_empty() && name.starts_with(&words) {
+        return 4;
+    }
+    if !words.is_empty() && name.contains(&words) {
+        return 5;
+    }
+    6
+}
+
+/// Rank search results without choosing a single fuzzy winner.
+pub fn rank_yahoo_candidates(query: &str, candidates: &mut [StockSearchCandidate]) {
+    candidates.sort_by(|left, right| {
+        yahoo_candidate_relevance(query, left)
+            .cmp(&yahoo_candidate_relevance(query, right))
+            .then_with(|| normalized_ticker(&left.symbol).cmp(&normalized_ticker(&right.symbol)))
+            .then_with(|| {
+                left.exchange
+                    .to_ascii_lowercase()
+                    .cmp(&right.exchange.to_ascii_lowercase())
+            })
+            .then_with(|| {
+                left.name
+                    .to_ascii_lowercase()
+                    .cmp(&right.name.to_ascii_lowercase())
+            })
+            .then_with(|| left.asset_type.cmp(&right.asset_type))
+    });
+}
+
 #[must_use]
 pub fn select_yahoo_symbol(response: &Value) -> Option<String> {
-    const ALLOWED_TYPES: [&str; 5] = ["EQUITY", "ETF", "MUTUALFUND", "INDEX", "FUTURE"];
-    response
-        .get("data")?
-        .get("quotes")?
-        .as_array()?
-        .iter()
-        .filter_map(Value::as_object)
-        .find_map(|quote| {
-            let quote_type = quote.get("quoteType")?.as_str()?;
-            if !ALLOWED_TYPES.contains(&quote_type) {
-                return None;
-            }
-            quote
-                .get("symbol")?
-                .as_str()
-                .filter(|symbol| !symbol.is_empty())
-                .map(str::to_owned)
-        })
+    select_yahoo_candidates(response)
+        .first()
+        .map(|candidate| candidate.symbol.clone())
 }
 
 #[must_use]
@@ -281,8 +454,8 @@ mod tests {
 
     use super::{
         StockQuery, StockQueryPlan, classify_oil_command, classify_stock_command,
-        parse_yahoo_quote, plan_stock_query, render_oil_quotes, render_stock_quotes,
-        select_yahoo_symbol,
+        parse_yahoo_quote, plan_stock_query, rank_yahoo_candidates, render_oil_quotes,
+        render_stock_quotes, select_yahoo_candidates, select_yahoo_symbol,
     };
     use crate::locale::Locale;
 
@@ -299,6 +472,7 @@ mod tests {
                 price: 123.45,
                 currency: "ARS".to_owned(),
                 exchange: "Synthetic".to_owned(),
+                asset_type: String::new(),
                 variation: 2.875000000000002,
             })
         );
@@ -317,6 +491,7 @@ mod tests {
                 price: 12.0,
                 currency: "USD".to_owned(),
                 exchange: String::new(),
+                asset_type: String::new(),
                 variation: 20.0,
             })
         );
@@ -357,6 +532,41 @@ mod tests {
         ]}});
         assert_eq!(select_yahoo_symbol(&response), Some("EXM".to_owned()));
         assert_eq!(select_yahoo_symbol(&json!([])), None);
+    }
+
+    #[test]
+    fn yahoo_search_preserves_supported_candidates_and_ranks_exchange_matches() {
+        let response = json!({"data":{"quotes":[
+            {"quoteType":"CRYPTOCURRENCY","symbol":"RKH-USD"},
+            {"quoteType":"EQUITY","symbol":"RKHNF","longname":"Rockhaven Resources Ltd.","exchange":"PNK","exchDisp":"OTC Markets"},
+            {"quoteType":"EQUITY","symbol":"RKH.L","longname":"Rockhopper Exploration plc","exchange":"LSE","exchDisp":"London"},
+            {"quoteType":"EQUITY","symbol":"RKHL.XC","longname":"Rockhopper Exploration plc","exchange":"CXE","exchDisp":"CXE"},
+            {"quoteType":"ETF","symbol":"RKHX","shortname":"RKH ETF","exchange":"NMS"}
+        ]}});
+        let mut candidates = select_yahoo_candidates(&response);
+        rank_yahoo_candidates("rkh", &mut candidates);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.symbol.as_str())
+                .collect::<Vec<_>>(),
+            ["RKH.L", "RKHL.XC", "RKHNF", "RKHX"]
+        );
+        assert_eq!(candidates[0].name, "Rockhopper Exploration plc");
+        assert_eq!(candidates[0].exchange, "London");
+        assert_eq!(candidates[0].asset_type, "Equity");
+    }
+
+    #[test]
+    fn quote_parser_preserves_penny_sterling_units() {
+        let quote = parse_yahoo_quote(
+            &json!({"data":{"chart":{"result":[{"meta":{"symbol":"RKH.L","regularMarketPrice":12.5,"chartPreviousClose":10,"currency":"GBp","exchangeName":"London"},"indicators":{"quote":[{"close":[10,12.5]}]}}]}}}),
+            "RKH.L",
+        );
+        assert_eq!(
+            quote.as_ref().map(|quote| quote.currency.as_str()),
+            Some("GBp")
+        );
     }
 
     #[test]
@@ -409,6 +619,7 @@ mod tests {
             price: 98.15,
             currency: "USD".to_owned(),
             exchange: String::new(),
+            asset_type: String::new(),
             variation: -8.782_527_881_040_9,
         };
         let wti = super::StockQuote {
@@ -417,6 +628,7 @@ mod tests {
             price: 95.0,
             currency: "USD".to_owned(),
             exchange: String::new(),
+            asset_type: String::new(),
             variation: 0.0,
         };
         assert_eq!(
@@ -451,6 +663,7 @@ mod tests {
             price: 12.5,
             currency: "USD".to_owned(),
             exchange: "Synthetic".to_owned(),
+            asset_type: String::new(),
             variation: -1.25,
         };
         let entries = vec![

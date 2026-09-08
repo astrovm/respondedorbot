@@ -3,7 +3,10 @@
 use std::thread;
 use std::time::Duration;
 
-use bot_core::stocks::{StockQuote, parse_yahoo_quote, select_yahoo_symbol};
+use bot_core::stocks::{
+    StockQuote, StockSearchCandidate, parse_yahoo_quote, rank_yahoo_candidates,
+    select_yahoo_candidates,
+};
 use reqwest::blocking::Client;
 use serde_json::json;
 use std::sync::OnceLock;
@@ -16,6 +19,9 @@ const CHART_URL: &str = "https://query1.finance.yahoo.com/v8/finance/chart";
 const SEARCH_URL: &str = "https://query1.finance.yahoo.com/v1/finance/search";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const CACHE_TTL_SECONDS: i64 = 300;
+const BASIC_SEARCH_QUOTES_COUNT: usize = 5;
+const EXPANDED_SEARCH_QUOTES_COUNT: usize = 20;
+const MAX_SEARCH_CANDIDATES: usize = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct YahooChartRequest {
@@ -45,6 +51,17 @@ pub trait YahooFinanceTransport {
     fn chart(&self, request: &YahooChartRequest) -> Result<HttpResponse, TransportFailureKind>;
 
     fn search(&self, request: &YahooSearchRequest) -> Result<HttpResponse, TransportFailureKind>;
+
+    /// Request a larger bounded result page when the provider's first page is
+    /// full. Test transports can use the default implementation, while the
+    /// HTTP transport sends the requested page size to Yahoo.
+    fn search_with_limit(
+        &self,
+        request: &YahooSearchRequest,
+        _quotes_count: usize,
+    ) -> Result<HttpResponse, TransportFailureKind> {
+        self.search(request)
+    }
 
     fn before_retry(&self) {}
 }
@@ -77,6 +94,30 @@ impl ReqwestYahooFinanceTransport {
             transport
         })
     }
+
+    fn search_with_quotes_count(
+        &self,
+        request: &YahooSearchRequest,
+        quotes_count: usize,
+    ) -> Result<HttpResponse, TransportFailureKind> {
+        let quotes_count = quotes_count.to_string();
+        let response = self
+            .client
+            .get(&self.search_url)
+            .query(&[
+                ("q", request.query.as_str()),
+                ("quotesCount", quotes_count.as_str()),
+                ("newsCount", "0"),
+            ])
+            .header("User-Agent", "Mozilla/5.0")
+            .send()
+            .map_err(classify_error)?;
+        let status_code = response.status().as_u16();
+        response
+            .text()
+            .map(|body| HttpResponse { status_code, body })
+            .map_err(classify_error)
+    }
 }
 
 impl YahooFinanceTransport for ReqwestYahooFinanceTransport {
@@ -104,22 +145,15 @@ impl YahooFinanceTransport for ReqwestYahooFinanceTransport {
     }
 
     fn search(&self, request: &YahooSearchRequest) -> Result<HttpResponse, TransportFailureKind> {
-        let response = self
-            .client
-            .get(&self.search_url)
-            .query(&[
-                ("q", request.query.as_str()),
-                ("quotesCount", "5"),
-                ("newsCount", "0"),
-            ])
-            .header("User-Agent", "Mozilla/5.0")
-            .send()
-            .map_err(classify_error)?;
-        let status_code = response.status().as_u16();
-        response
-            .text()
-            .map(|body| HttpResponse { status_code, body })
-            .map_err(classify_error)
+        self.search_with_quotes_count(request, BASIC_SEARCH_QUOTES_COUNT)
+    }
+
+    fn search_with_limit(
+        &self,
+        request: &YahooSearchRequest,
+        quotes_count: usize,
+    ) -> Result<HttpResponse, TransportFailureKind> {
+        self.search_with_quotes_count(request, quotes_count)
     }
 
     fn before_retry(&self) {
@@ -144,12 +178,16 @@ fn cache_key(symbol: &str) -> String {
     python_request_cache_key(&arguments)
 }
 
-fn search_cache_key(query: &str) -> String {
+fn search_cache_key_with_limit(query: &str, quotes_count: usize) -> String {
     let arguments = format!(
-        "{{\"api_url\": \"{SEARCH_URL}\", \"headers\": {{\"User-Agent\": \"Mozilla/5.0\"}}, \"parameters\": {{\"newsCount\": 0, \"q\": {}, \"quotesCount\": 5}}}}",
-        python_json_string(query)
+        "{{\"api_url\": \"{SEARCH_URL}\", \"headers\": {{\"User-Agent\": \"Mozilla/5.0\"}}, \"parameters\": {{\"newsCount\": 0, \"q\": {}, \"quotesCount\": {quotes_count}}}}}",
+        python_json_string(query),
     );
     python_request_cache_key(&arguments)
+}
+
+fn search_cache_key(query: &str) -> String {
+    search_cache_key_with_limit(query, BASIC_SEARCH_QUOTES_COUNT)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -162,6 +200,7 @@ pub struct YahooQuoteLoad {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct YahooSymbolLoad {
     pub symbol: Option<String>,
+    pub candidates: Vec<StockSearchCandidate>,
     pub diagnostics: Vec<String>,
 }
 
@@ -305,6 +344,7 @@ pub fn load_symbol<T: YahooFinanceTransport, C: RequestCache>(
     let normalized = query.trim().trim_start_matches('$');
     let compact = normalized.replace(' ', "");
     let mut diagnostics = Vec::new();
+    let mut candidates = Vec::new();
     for (index, search_query) in [normalized, compact.as_str()].into_iter().enumerate() {
         if index == 1 && compact == normalized {
             continue;
@@ -330,20 +370,66 @@ pub fn load_symbol<T: YahooFinanceTransport, C: RequestCache>(
             || transport.before_retry(),
         );
         diagnostics.extend(load.diagnostics);
-        if let Some(symbol) = load
+        let found = load
             .data
             .as_ref()
-            .and_then(|data| select_yahoo_symbol(&json!({"data": data})))
-        {
-            return YahooSymbolLoad {
-                symbol: Some(symbol),
-                diagnostics,
-            };
+            .map(|data| select_yahoo_candidates(&json!({"data": data})))
+            .unwrap_or_default();
+        let page_was_full = load
+            .data
+            .as_ref()
+            .and_then(|data| data.get("quotes"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|quotes| quotes.len() >= BASIC_SEARCH_QUOTES_COUNT);
+        candidates.extend(found);
+        if page_was_full {
+            let expanded = load_cached_json(
+                cache,
+                &search_cache_key_with_limit(search_query, EXPANDED_SEARCH_QUOTES_COUNT),
+                CACHE_TTL_SECONDS,
+                now_unix,
+                &format!(
+                    "Yahoo expanded search request query={search_query} quotes={EXPANDED_SEARCH_QUOTES_COUNT}"
+                ),
+                || {
+                    transport
+                        .search_with_limit(&request, EXPANDED_SEARCH_QUOTES_COUNT)
+                        .map(|response| JsonHttpResponse {
+                            status_code: response.status_code,
+                            body: response.body,
+                        })
+                        .map_err(|error| format!("transport {error:?}"))
+                },
+                || transport.before_retry(),
+            );
+            diagnostics.extend(expanded.diagnostics);
+            if let Some(data) = expanded.data.as_ref() {
+                candidates.extend(select_yahoo_candidates(&json!({"data": data})));
+            }
+        }
+        if !candidates.is_empty() {
+            break;
         }
     }
-    diagnostics.push(format!("Yahoo search had no usable symbol for {query}"));
+    let mut unique = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        if !unique.iter().any(|known: &StockSearchCandidate| {
+            known.symbol.eq_ignore_ascii_case(&candidate.symbol)
+                && known.exchange.eq_ignore_ascii_case(&candidate.exchange)
+                && known.asset_type.eq_ignore_ascii_case(&candidate.asset_type)
+        }) {
+            unique.push(candidate);
+        }
+    }
+    let mut candidates = unique;
+    rank_yahoo_candidates(normalized, &mut candidates);
+    candidates.truncate(MAX_SEARCH_CANDIDATES);
+    if candidates.is_empty() {
+        diagnostics.push(format!("Yahoo search had no usable symbol for {query}"));
+    }
     YahooSymbolLoad {
-        symbol: None,
+        symbol: candidates.first().map(|candidate| candidate.symbol.clone()),
+        candidates,
         diagnostics,
     }
 }
@@ -584,6 +670,66 @@ mod tests {
                 .map(|request| request.query.as_str())
                 .collect::<Vec<_>>(),
             ["Apple Inc", "AppleInc"]
+        );
+    }
+
+    #[test]
+    fn search_load_preserves_and_ranks_multiple_yahoo_listings() {
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::from([response(
+                r#"{"quotes":[
+                    {"quoteType":"EQUITY","symbol":"RKHNF","longname":"Rockhaven Resources Ltd.","exchDisp":"OTC Markets"},
+                    {"quoteType":"EQUITY","symbol":"RKH.L","longname":"Rockhopper Exploration plc","exchDisp":"London"},
+                    {"quoteType":"CRYPTOCURRENCY","symbol":"RKH-USD"}
+                ]}"#,
+            )])),
+            requests: RefCell::default(),
+            searches: RefCell::default(),
+        };
+        let load = load_symbol(&transport, &mut Cache::default(), "rkh", 100);
+        assert_eq!(load.symbol.as_deref(), Some("RKH.L"));
+        assert_eq!(
+            load.candidates
+                .iter()
+                .map(|candidate| candidate.symbol.as_str())
+                .collect::<Vec<_>>(),
+            ["RKH.L", "RKHNF"]
+        );
+        assert_eq!(load.candidates[0].exchange, "London");
+        assert_eq!(load.candidates[0].asset_type, "Equity");
+    }
+
+    #[test]
+    fn full_search_page_uses_one_bounded_expansion_for_omitted_candidates() {
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::from([
+                response(
+                    r#"{"quotes":[
+                        {"quoteType":"EQUITY","symbol":"A1"},
+                        {"quoteType":"EQUITY","symbol":"A2"},
+                        {"quoteType":"EQUITY","symbol":"A3"},
+                        {"quoteType":"EQUITY","symbol":"A4"},
+                        {"quoteType":"EQUITY","symbol":"A5"}
+                    ]}"#,
+                ),
+                response(
+                    r#"{"quotes":[
+                        {"quoteType":"EQUITY","symbol":"A1"},
+                        {"quoteType":"EQUITY","symbol":"A5"},
+                        {"quoteType":"EQUITY","symbol":"RKH.L","longname":"Rockhopper Exploration plc","exchDisp":"London"}
+                    ]}"#,
+                ),
+            ])),
+            requests: RefCell::default(),
+            searches: RefCell::default(),
+        };
+        let load = load_symbol(&transport, &mut Cache::default(), "rkh", 100);
+        assert_eq!(load.symbol.as_deref(), Some("RKH.L"));
+        assert_eq!(transport.searches.borrow().len(), 2);
+        assert!(
+            load.candidates
+                .iter()
+                .any(|candidate| candidate.symbol == "RKH.L")
         );
     }
 
