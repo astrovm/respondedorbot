@@ -274,6 +274,16 @@ pub trait UnifiedStockProvider {
     ) -> Result<Option<StockLookupRows>, String> {
         self.lookup(query)
     }
+
+    /// Resolve a previously selected stock identity without fuzzy discovery.
+    /// Providers with a dedicated exact path should override this method.
+    fn lookup_exact_with_timeframe(
+        &mut self,
+        query: &str,
+        timeframe: Option<&str>,
+    ) -> Result<Option<StockLookupRows>, String> {
+        self.lookup_with_timeframe(query, timeframe)
+    }
 }
 
 /// Identity selected by market resolution, used to fetch a chart without searching again.
@@ -541,7 +551,7 @@ pub fn execute_stock_candidate<S: UnifiedStockProvider>(
         .strip_prefix("stock:")
         .unwrap_or(&candidate.symbol);
     let mut diagnostics = Vec::new();
-    let rows = match stocks.lookup_with_timeframe(symbol, timeframe) {
+    let rows = match stocks.lookup_exact_with_timeframe(symbol, timeframe) {
         Ok(Some(rows)) => rows,
         Ok(None) => Vec::new(),
         Err(error) => {
@@ -553,8 +563,9 @@ pub fn execute_stock_candidate<S: UnifiedStockProvider>(
         .iter()
         .filter_map(|(_, quote)| quote.as_ref())
         .find(|quote| quote.symbol.eq_ignore_ascii_case(symbol))
-        .or_else(|| rows.iter().find_map(|(_, quote)| quote.as_ref()));
+        .cloned();
     let Some(quote) = quote else {
+        diagnostics.push(format!("stock candidate identity unavailable: {symbol}"));
         return MarketPriceExecution {
             chart: None,
             selection: None,
@@ -564,10 +575,10 @@ pub fn execute_stock_candidate<S: UnifiedStockProvider>(
         };
     };
     MarketPriceExecution {
-        chart: Some(stock_chart(quote, timeframe)),
+        chart: Some(stock_chart(&quote, timeframe)),
         selection: None,
         no_assets_found: false,
-        text: format_stocks(std::slice::from_ref(quote), timeframe),
+        text: format_stocks(std::slice::from_ref(&quote), timeframe),
         diagnostics,
     }
 }
@@ -2735,6 +2746,32 @@ mod tests {
                 .as_ref()
                 .and_then(|chart| chart.timeframe.as_deref()),
             Some("1m")
+        );
+
+        let selected_bare = execute_stock_candidate(
+            &MarketCandidate {
+                id: "stock:RKH".to_owned(),
+                symbol: "RKH".to_owned(),
+                name: "Rockhopper".to_owned(),
+                slug: "rkh".to_owned(),
+                price: "N/A".to_owned(),
+                change: "N/A".to_owned(),
+                currency: "USD".to_owned(),
+                exchange: "".to_owned(),
+                asset_type: "Equity".to_owned(),
+                contracts: Vec::new(),
+            },
+            Some("1m"),
+            Locale::En,
+            &mut Stocks(vec![("RKH".to_owned(), Some(stock("RKHNF")))]),
+        );
+        assert!(selected_bare.no_assets_found);
+        assert!(selected_bare.chart.is_none());
+        assert!(
+            selected_bare
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("identity unavailable"))
         );
 
         let exact_collision = execute_market_price_command(

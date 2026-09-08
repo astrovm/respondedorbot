@@ -350,9 +350,9 @@ fn yahoo_symbol_base(symbol: &str) -> Option<&str> {
     (!base.is_empty() && !suffix.is_empty()).then_some(base)
 }
 
-fn yahoo_candidate_relevance(query: &str, candidate: &StockSearchCandidate) -> u8 {
+fn yahoo_relevance(query: &str, symbol: &str, name: &str) -> u8 {
     let ticker = normalized_ticker(query);
-    let symbol = normalized_ticker(&candidate.symbol);
+    let symbol = normalized_ticker(symbol);
     if symbol == ticker {
         return 0;
     }
@@ -360,7 +360,7 @@ fn yahoo_candidate_relevance(query: &str, candidate: &StockSearchCandidate) -> u
         return 1;
     }
     let words = normalized_search_text(query);
-    let name = normalized_search_text(&candidate.name);
+    let name = normalized_search_text(name);
     if !words.is_empty() && name == words {
         return 2;
     }
@@ -374,6 +374,10 @@ fn yahoo_candidate_relevance(query: &str, candidate: &StockSearchCandidate) -> u
         return 5;
     }
     6
+}
+
+fn yahoo_candidate_relevance(query: &str, candidate: &StockSearchCandidate) -> u8 {
+    yahoo_relevance(query, &candidate.symbol, &candidate.name)
 }
 
 /// Rank search results without choosing a single fuzzy winner.
@@ -393,6 +397,22 @@ pub fn rank_yahoo_candidates(query: &str, candidates: &mut [StockSearchCandidate
                     .cmp(&right.name.to_ascii_lowercase())
             })
             .then_with(|| left.asset_type.cmp(&right.asset_type))
+    });
+}
+
+/// Rank loaded stock quotes using the same identity relevance as Yahoo search.
+pub fn rank_stock_quotes(query: &str, quotes: &mut [StockQuote]) {
+    quotes.sort_by(|left, right| {
+        yahoo_relevance(query, &left.symbol, &left.name)
+            .cmp(&yahoo_relevance(query, &right.symbol, &right.name))
+            .then_with(|| normalized_ticker(&left.symbol).cmp(&normalized_ticker(&right.symbol)))
+            .then_with(|| {
+                left.exchange
+                    .to_ascii_lowercase()
+                    .cmp(&right.exchange.to_ascii_lowercase())
+            })
+            .then_with(|| left.asset_type.cmp(&right.asset_type))
+            .then_with(|| left.name.cmp(&right.name))
     });
 }
 
