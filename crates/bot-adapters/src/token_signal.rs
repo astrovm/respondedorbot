@@ -1194,6 +1194,7 @@ mod tests {
             price: 120.0,
             currency: "USD".into(),
             exchange: String::new(),
+            asset_type: String::new(),
             variation: -1.53,
         };
         let candles = vec![
@@ -1232,6 +1233,7 @@ mod tests {
             price: 100.0,
             currency: "JPY".into(),
             exchange: "TEST".into(),
+            asset_type: String::new(),
             variation: 1.0,
         };
         assert!(super::render_market_chart(&quote, &[]).is_err());

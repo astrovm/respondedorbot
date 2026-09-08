@@ -71,6 +71,12 @@ pub struct MarketCandidate {
     pub slug: String,
     pub price: String,
     pub change: String,
+    #[serde(default)]
+    pub currency: String,
+    #[serde(default)]
+    pub exchange: String,
+    #[serde(default)]
+    pub asset_type: String,
     pub contracts: Vec<TokenAddress>,
 }
 
@@ -143,13 +149,19 @@ pub fn format_market_selection(selection: &MarketSelection, locale: Locale) -> S
                 candidate.name.as_str()
             };
             let identity = candidate_identity(candidate);
+            let display_currency =
+                if candidate.id.starts_with("stock:") && !candidate.currency.trim().is_empty() {
+                    candidate.currency.as_str()
+                } else {
+                    target.as_str()
+                };
             format!(
                 "{}. {} ({}) — {} {} ({}; {})",
                 index + 1,
                 shorten(name, 100),
                 shorten(&candidate.symbol, 24),
                 shorten(&candidate.price, 32),
-                target,
+                display_currency,
                 shorten(&candidate.change, 16),
                 identity,
             )
@@ -161,7 +173,14 @@ pub fn format_market_selection(selection: &MarketSelection, locale: Locale) -> S
 
 fn candidate_identity(candidate: &MarketCandidate) -> String {
     if let Some(symbol) = candidate.id.strip_prefix("stock:") {
-        return format!("Yahoo {}", shorten(symbol, 24));
+        let mut identity = vec![format!("Yahoo {}", shorten(symbol, 24))];
+        if !candidate.exchange.trim().is_empty() {
+            identity.push(shorten(&candidate.exchange, 24));
+        }
+        if !candidate.asset_type.trim().is_empty() {
+            identity.push(shorten(&candidate.asset_type, 24));
+        }
+        return identity.join(" · ");
     }
     if candidate.id.starts_with("token:") {
         return candidate
@@ -254,6 +273,16 @@ pub trait UnifiedStockProvider {
         _timeframe: Option<&str>,
     ) -> Result<Option<StockLookupRows>, String> {
         self.lookup(query)
+    }
+
+    /// Resolve a previously selected stock identity without fuzzy discovery.
+    /// Providers with a dedicated exact path should override this method.
+    fn lookup_exact_with_timeframe(
+        &mut self,
+        query: &str,
+        timeframe: Option<&str>,
+    ) -> Result<Option<StockLookupRows>, String> {
+        self.lookup_with_timeframe(query, timeframe)
     }
 }
 
@@ -382,6 +411,7 @@ pub fn execute_market_price_command<C: CryptoMarketProvider, S: UnifiedStockProv
                         &mut diagnostics,
                         true,
                         &mut chart,
+                        &mut selection,
                     )
                 }
             } else {
@@ -521,7 +551,7 @@ pub fn execute_stock_candidate<S: UnifiedStockProvider>(
         .strip_prefix("stock:")
         .unwrap_or(&candidate.symbol);
     let mut diagnostics = Vec::new();
-    let rows = match stocks.lookup_with_timeframe(symbol, timeframe) {
+    let rows = match stocks.lookup_exact_with_timeframe(symbol, timeframe) {
         Ok(Some(rows)) => rows,
         Ok(None) => Vec::new(),
         Err(error) => {
@@ -533,8 +563,9 @@ pub fn execute_stock_candidate<S: UnifiedStockProvider>(
         .iter()
         .filter_map(|(_, quote)| quote.as_ref())
         .find(|quote| quote.symbol.eq_ignore_ascii_case(symbol))
-        .or_else(|| rows.iter().find_map(|(_, quote)| quote.as_ref()));
+        .cloned();
     let Some(quote) = quote else {
+        diagnostics.push(format!("stock candidate identity unavailable: {symbol}"));
         return MarketPriceExecution {
             chart: None,
             selection: None,
@@ -544,10 +575,10 @@ pub fn execute_stock_candidate<S: UnifiedStockProvider>(
         };
     };
     MarketPriceExecution {
-        chart: Some(stock_chart(quote, timeframe)),
+        chart: Some(stock_chart(&quote, timeframe)),
         selection: None,
         no_assets_found: false,
-        text: format_stocks(std::slice::from_ref(quote), timeframe),
+        text: format_stocks(std::slice::from_ref(&quote), timeframe),
         diagnostics,
     }
 }
@@ -581,6 +612,7 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
                     diagnostics,
                     false,
                     chart,
+                    selection_result,
                 );
                 if !stock.is_empty() {
                     if conversion_requested {
@@ -673,28 +705,6 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
     } else {
         selection.rows.len()
     };
-    // A company-name match must not be shadowed by a similarly named cryptocurrency.
-    if !crypto_only
-        && selection.requested.len() == 1
-        && !selection.rows.is_empty()
-        && !contains_unambiguous_crypto_symbol(raw_query)
-        && let Ok(Some(rows)) = stocks.lookup_with_timeframe(raw_query, timeframe)
-        && let Some(quote) = rows
-            .iter()
-            .filter_map(|(_, quote)| quote.as_ref())
-            .find(|quote| {
-                company_matches(raw_query, quote)
-                    && !quote
-                        .symbol
-                        .eq_ignore_ascii_case(raw_query.trim().trim_start_matches('$'))
-            })
-    {
-        if conversion_requested {
-            return stock_conversion_error(raw_query, locale);
-        }
-        *chart = Some(stock_chart(quote, timeframe));
-        return format_stocks(std::slice::from_ref(quote), timeframe);
-    }
     let mut unresolved = missing_tokens(&selection.rows, &selection.explicit_requested);
     let mut stock_quotes = Vec::new();
     let stock_probe_for_collision = !raw_query.contains(',')
@@ -708,10 +718,12 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
         };
         match stocks.lookup_with_timeframe(&stock_query, timeframe) {
             Ok(Some(resolved)) => {
-                let quotes = resolved
-                    .iter()
-                    .filter_map(|(_, quote)| quote.clone())
-                    .collect::<Vec<_>>();
+                let quotes = unique_stock_quotes(
+                    resolved
+                        .iter()
+                        .filter_map(|(_, quote)| quote.clone())
+                        .collect::<Vec<_>>(),
+                );
                 if !quotes.is_empty() {
                     unresolved = resolved
                         .iter()
@@ -725,8 +737,29 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
             Err(error) => diagnostics.push(format!("stock fallback: {error}")),
         }
     }
+    // A unique company-name match must not be shadowed by a similarly named
+    // cryptocurrency. Multiple stock listings remain selectable instead of
+    // being collapsed into an arbitrary exchange.
+    if !crypto_only
+        && selection.requested.len() == 1
+        && !selection.rows.is_empty()
+        && stock_quotes.len() == 1
+        && !contains_unambiguous_crypto_symbol(raw_query)
+        && let Some(quote) = stock_quotes.first()
+        && company_matches(raw_query, quote)
+        && !quote
+            .symbol
+            .eq_ignore_ascii_case(raw_query.trim().trim_start_matches('$'))
+    {
+        if conversion_requested {
+            return stock_conversion_error(raw_query, locale);
+        }
+        *chart = Some(stock_chart(quote, timeframe));
+        return format_stocks(std::slice::from_ref(quote), timeframe);
+    }
+    let stock_search_is_ambiguous = stock_quotes.len() > 1;
     if !raw_query.contains(',')
-        && selection.explicit_requested.len() == 1
+        && (selection.explicit_requested.len() == 1 || stock_search_is_ambiguous)
         && !conversion_requested
         && unresolved.is_empty()
         && selection.rows.len() + stock_quotes.len() > 1
@@ -737,16 +770,11 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
             .into_iter()
             .map(|asset| market_candidate(asset, target_symbol, target_parameter, timeframe))
             .collect::<Vec<_>>();
-        let mut stock_candidates = stock_quotes
+        stock_quotes.sort_by(|left, right| compare_stock_quotes(raw_query, left, right));
+        let stock_candidates = stock_quotes
             .iter()
             .map(|quote| market_stock_candidate(quote, timeframe))
             .collect::<Vec<_>>();
-        stock_candidates.sort_by(|left, right| {
-            left.name
-                .to_ascii_lowercase()
-                .cmp(&right.name.to_ascii_lowercase())
-                .then_with(|| left.symbol.cmp(&right.symbol))
-        });
         candidates.extend(stock_candidates);
         candidates.truncate(10);
         *selection_result = Some(MarketSelection {
@@ -1586,6 +1614,9 @@ fn market_candidate(
         slug: asset.slug.clone(),
         price,
         change,
+        currency: String::new(),
+        exchange: String::new(),
+        asset_type: String::new(),
         contracts: asset.contracts.clone(),
     }
 }
@@ -1599,6 +1630,13 @@ fn market_stock_candidate(quote: &StockQuote, timeframe: Option<&str>) -> Market
         slug: quote.symbol.to_ascii_lowercase(),
         price: trimmed(quote.price, 12),
         change: format_stock_change(quote.variation, period),
+        currency: quote.currency.clone(),
+        exchange: quote.exchange.clone(),
+        asset_type: if quote.asset_type.trim().is_empty() {
+            "Equity".to_owned()
+        } else {
+            quote.asset_type.clone()
+        },
         contracts: Vec::new(),
     }
 }
@@ -1673,6 +1711,45 @@ fn verified_yahoo_symbol(asset: &CryptoAsset) -> Option<String> {
     Some(symbol.to_owned())
 }
 
+fn compare_stock_quotes(query: &str, left: &StockQuote, right: &StockQuote) -> Ordering {
+    let query_text = query;
+    let query = normalized(query_text);
+    let relevance =
+        |quote: &StockQuote| {
+            let symbol = normalized(&quote.symbol);
+            if symbol == query {
+                return 0;
+            }
+            if quote.symbol.rsplit_once('.').is_some_and(|(base, suffix)| {
+                !base.is_empty() && !suffix.is_empty() && base == query
+            }) {
+                return 1;
+            }
+            if company_matches(query_text, quote) {
+                return 2;
+            }
+            if !query.is_empty() && symbol.starts_with(&query) {
+                return 3;
+            }
+            let name = quote.name.to_ascii_lowercase();
+            let query_words = query.to_ascii_lowercase();
+            if !query_words.is_empty() && name.starts_with(&query_words) {
+                return 4;
+            }
+            if !query_words.is_empty() && name.contains(&query_words) {
+                return 5;
+            }
+            6
+        };
+    relevance(left)
+        .cmp(&relevance(right))
+        .then_with(|| normalized(&left.symbol).cmp(&normalized(&right.symbol)))
+        .then_with(|| left.exchange.cmp(&right.exchange))
+        .then_with(|| left.asset_type.cmp(&right.asset_type))
+        .then_with(|| left.name.cmp(&right.name))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn stock_only<S: UnifiedStockProvider>(
     query: &str,
     timeframe: Option<&str>,
@@ -1681,6 +1758,7 @@ fn stock_only<S: UnifiedStockProvider>(
     diagnostics: &mut Vec<String>,
     missing_error: bool,
     chart: &mut Option<MarketChart>,
+    selection_result: &mut Option<MarketSelection>,
 ) -> String {
     if query.trim().is_empty() {
         return if missing_error {
@@ -1697,11 +1775,31 @@ fn stock_only<S: UnifiedStockProvider>(
             Vec::new()
         }
     };
-    let quotes = resolved
-        .iter()
-        .filter_map(|(_, quote)| quote.clone())
-        .collect::<Vec<_>>();
-    if quotes.len() == 1 && resolved.len() == 1 {
+    let quotes = unique_stock_quotes(
+        resolved
+            .iter()
+            .filter_map(|(_, quote)| quote.clone())
+            .collect::<Vec<_>>(),
+    );
+    if quotes.len() > 1 && !query.contains(',') {
+        let mut quotes = quotes;
+        quotes.sort_by(|left, right| compare_stock_quotes(query, left, right));
+        let mut candidates = quotes
+            .iter()
+            .map(|quote| market_stock_candidate(quote, timeframe))
+            .collect::<Vec<_>>();
+        candidates.truncate(10);
+        *selection_result = Some(MarketSelection {
+            query: query.to_owned(),
+            timeframe: timeframe.map(str::to_owned),
+            target_symbol: "USD".to_owned(),
+            target_parameter: "USD".to_owned(),
+            conversion: None,
+            candidates,
+        });
+        return String::new();
+    }
+    if quotes.len() == 1 && resolved.iter().filter(|(_, quote)| quote.is_some()).count() == 1 {
         *chart = quotes.first().map(|quote| stock_chart(quote, timeframe));
     }
     let mut parts = Vec::new();
@@ -1723,6 +1821,21 @@ fn stock_only<S: UnifiedStockProvider>(
         parts.push(missing_assets(&missing, locale));
     }
     parts.join("\n")
+}
+
+fn unique_stock_quotes(quotes: Vec<StockQuote>) -> Vec<StockQuote> {
+    let mut unique = Vec::with_capacity(quotes.len());
+    for quote in quotes {
+        let duplicate = unique.iter().any(|known: &StockQuote| {
+            known.symbol.eq_ignore_ascii_case(&quote.symbol)
+                && known.exchange.eq_ignore_ascii_case(&quote.exchange)
+                && known.asset_type.eq_ignore_ascii_case(&quote.asset_type)
+        });
+        if !duplicate {
+            unique.push(quote);
+        }
+    }
+    unique
 }
 
 fn format_stocks(quotes: &[StockQuote], timeframe: Option<&str>) -> String {
@@ -1863,7 +1976,7 @@ mod tests {
             })
         }
     }
-    #[derive(Default)]
+    #[derive(Default, Clone)]
     struct Stocks(Vec<(String, Option<StockQuote>)>);
     impl UnifiedStockProvider for Stocks {
         fn lookup(&mut self, _: &str) -> Result<Option<Vec<(String, Option<StockQuote>)>>, String> {
@@ -1911,8 +2024,18 @@ mod tests {
             price: 123.45,
             currency: "USD".to_owned(),
             exchange: "Synthetic".to_owned(),
+            asset_type: String::new(),
             variation: 1.25,
         }
+    }
+
+    fn listed_stock(symbol: &str, name: &str, exchange: &str, currency: &str) -> StockQuote {
+        let mut quote = stock(symbol);
+        quote.name = name.to_owned();
+        quote.exchange = exchange.to_owned();
+        quote.currency = currency.to_owned();
+        quote.asset_type = "Equity".to_owned();
+        quote
     }
 
     #[test]
@@ -2306,6 +2429,7 @@ mod tests {
                 price: 123.45,
                 currency: "USD".to_owned(),
                 exchange: String::new(),
+                asset_type: String::new(),
                 variation: 1.25,
             }),
         )]);
@@ -2624,6 +2748,32 @@ mod tests {
             Some("1m")
         );
 
+        let selected_bare = execute_stock_candidate(
+            &MarketCandidate {
+                id: "stock:RKH".to_owned(),
+                symbol: "RKH".to_owned(),
+                name: "Rockhopper".to_owned(),
+                slug: "rkh".to_owned(),
+                price: "N/A".to_owned(),
+                change: "N/A".to_owned(),
+                currency: "USD".to_owned(),
+                exchange: "".to_owned(),
+                asset_type: "Equity".to_owned(),
+                contracts: Vec::new(),
+            },
+            Some("1m"),
+            Locale::En,
+            &mut Stocks(vec![("RKH".to_owned(), Some(stock("RKHNF")))]),
+        );
+        assert!(selected_bare.no_assets_found);
+        assert!(selected_bare.chart.is_none());
+        assert!(
+            selected_bare
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("identity unavailable"))
+        );
+
         let exact_collision = execute_market_price_command(
             "meta",
             MarketPriceCommand::Unified,
@@ -2635,6 +2785,144 @@ mod tests {
             &mut Stocks(vec![("META".to_owned(), Some(stock("META")))]),
         );
         assert!(exact_collision.selection.is_some());
+    }
+
+    #[test]
+    fn stock_discovery_keeps_rkh_listings_ranked_and_scoped() {
+        let rockhaven = listed_stock("RKHNF", "Rockhaven Resources Ltd.", "OTC Markets", "USD");
+        let rockhopper = listed_stock("RKH.L", "Rockhopper Exploration plc", "London", "GBp");
+        let rockhopper_cxe = listed_stock("RKHL.XC", "Rockhopper Exploration plc", "CXE", "EUR");
+        let duplicate_rockhopper = rockhopper.clone();
+        let stocks = Stocks(vec![
+            ("rkh".to_owned(), Some(rockhaven)),
+            ("rkh".to_owned(), Some(rockhopper)),
+            ("rkh".to_owned(), Some(rockhopper_cxe)),
+            ("rkh".to_owned(), Some(duplicate_rockhopper)),
+        ]);
+        let result = execute_market_price_command(
+            "rkh 1m",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut Crypto {
+                listings: vec![vec![coin("RKH", 1.0)]],
+                quotes: Vec::new(),
+            },
+            &mut stocks.clone(),
+        );
+        assert!(
+            result.selection.is_some(),
+            "mixed RKH lookup should be selectable"
+        );
+        let Some(selection) = result.selection else {
+            return;
+        };
+        let stock_candidates = selection
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.id.starts_with("stock:"))
+            .collect::<Vec<_>>();
+        assert_eq!(stock_candidates.len(), 3);
+        assert_eq!(stock_candidates[0].symbol, "RKH.L");
+        assert_eq!(stock_candidates[0].exchange, "London");
+        assert_eq!(stock_candidates[0].asset_type, "Equity");
+        assert_eq!(stock_candidates[0].currency, "GBp");
+        let menu = format_market_selection(&selection, Locale::En);
+        assert!(menu.contains("Rockhopper Exploration plc"));
+        assert!(menu.contains("RKH.L"));
+        assert!(menu.contains("London"));
+        assert!(menu.contains("Equity"));
+        assert!(menu.contains("GBp"));
+
+        let mut stock_only = stocks.clone();
+        let scoped = execute_market_price_command(
+            "stock:rkh 1m",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut Crypto::default(),
+            &mut stock_only,
+        );
+        assert!(scoped.selection.is_some());
+        assert!(scoped.text.is_empty());
+
+        let mut exact_stocks = Stocks(vec![(
+            "RKH.L".to_owned(),
+            Some(listed_stock(
+                "RKH.L",
+                "Rockhopper Exploration plc",
+                "London",
+                "GBp",
+            )),
+        )]);
+        let exact = execute_market_price_command(
+            "stock:RKH.L 1m",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut Crypto::default(),
+            &mut exact_stocks,
+        );
+        assert_eq!(exact.text, "RKH.L: 123.45 GBp (+1.25% 1m)");
+        assert_eq!(
+            exact
+                .chart
+                .as_ref()
+                .map(|chart| chart.yahoo_symbol.as_str()),
+            Some("RKH.L")
+        );
+
+        let mut crypto_only_stocks = stocks;
+        let crypto_only = execute_market_price_command(
+            "rkh 1m",
+            MarketPriceCommand::CryptoOnly,
+            Locale::En,
+            &mut Crypto {
+                listings: vec![vec![coin("RKH", 1.0)]],
+                quotes: Vec::new(),
+            },
+            &mut crypto_only_stocks,
+        );
+        assert!(!crypto_only.text.contains("RKH.L"));
+        assert!(crypto_only.selection.is_none());
+    }
+
+    #[test]
+    fn company_name_search_keeps_distinct_stock_exchanges_selectable() {
+        let mut stocks = Stocks(vec![
+            (
+                "Rockhopper Exploration".to_owned(),
+                Some(listed_stock(
+                    "RKH.L",
+                    "Rockhopper Exploration plc",
+                    "London",
+                    "GBp",
+                )),
+            ),
+            (
+                "Rockhopper Exploration".to_owned(),
+                Some(listed_stock(
+                    "R4Y.F",
+                    "Rockhopper Exploration plc",
+                    "Frankfurt",
+                    "EUR",
+                )),
+            ),
+        ]);
+        let result = execute_market_price_command(
+            "Rockhopper Exploration 1m",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut Crypto::default(),
+            &mut stocks,
+        );
+        assert!(
+            result.selection.is_some(),
+            "company-name search should show listings"
+        );
+        let Some(selection) = result.selection else {
+            return;
+        };
+        assert_eq!(selection.candidates.len(), 2);
+        assert_eq!(selection.candidates[0].symbol, "R4Y.F");
+        assert_eq!(selection.candidates[1].symbol, "RKH.L");
     }
 
     struct FailedCrypto;
@@ -2662,6 +2950,9 @@ mod tests {
             slug: "libra-finance".to_owned(),
             price: "1.5".to_owned(),
             change: "+2.5%".to_owned(),
+            currency: String::new(),
+            exchange: String::new(),
+            asset_type: String::new(),
             contracts: vec![contract.clone()],
         };
         let mut asset = coin("LIBRA", 1.5);
@@ -2721,6 +3012,9 @@ mod tests {
             slug: "libra-finance".to_owned(),
             price: "1".to_owned(),
             change: "N/A".to_owned(),
+            currency: String::new(),
+            exchange: String::new(),
+            asset_type: String::new(),
             contracts: Vec::new(),
         };
         let mut wrong_id = coin("LIBRA", 1.0);
@@ -2788,6 +3082,9 @@ mod tests {
             slug: "libra-finance".to_owned(),
             price: "0.007".to_owned(),
             change: "N/A".to_owned(),
+            currency: String::new(),
+            exchange: String::new(),
+            asset_type: String::new(),
             contracts: Vec::new(),
         }];
         candidates.extend((1..=10).map(|index| MarketCandidate {
@@ -2797,6 +3094,9 @@ mod tests {
             slug: format!("libra-{index}"),
             price: "0.007".to_owned(),
             change: "N/A".to_owned(),
+            currency: String::new(),
+            exchange: String::new(),
+            asset_type: String::new(),
             contracts: if index == 1 {
                 vec![contract.clone()]
             } else {

@@ -89,7 +89,10 @@ use bot_core::market_prices::{
     UnifiedStockProvider, execute_market_price_candidate, execute_market_price_command,
     execute_stock_candidate,
 };
-use bot_core::stocks::{StockQuery, StockQuote, plan_stock_query};
+use bot_core::stocks::{
+    StockQuery, StockQuote, StockSearchCandidate, plan_stock_query, rank_stock_quotes,
+    yahoo_candidate_name_matches_query,
+};
 use bot_core::telegram_actions::TelegramAction;
 use bot_core::telegram_commands::command_publication_actions;
 use bot_core::telegram_payments::StarPaymentRecord;
@@ -280,6 +283,18 @@ where
         let load = self
             .source
             .load_with_timeframe(query, timeframe, self.now_unix);
+        self.diagnostics.extend(load.diagnostics);
+        Ok(load.quotes)
+    }
+
+    fn lookup_exact_with_timeframe(
+        &mut self,
+        query: &str,
+        timeframe: Option<&str>,
+    ) -> Result<Option<Vec<(String, Option<StockQuote>)>>, String> {
+        let load = self
+            .source
+            .load_exact_with_timeframe(query, timeframe, self.now_unix);
         self.diagnostics.extend(load.diagnostics);
         Ok(load.quotes)
     }
@@ -697,15 +712,100 @@ where
         load.quote
     }
 
-    fn resolve(
+    fn quote_with_candidate(
+        &mut self,
+        candidate: &StockSearchCandidate,
+        timeframe: Option<&str>,
+        now_unix: i64,
+        diagnostics: &mut Vec<String>,
+    ) -> Option<StockQuote> {
+        let mut quote =
+            self.quote_with_timeframe(&candidate.symbol, timeframe, now_unix, diagnostics)?;
+        if !quote.symbol.eq_ignore_ascii_case(&candidate.symbol) {
+            diagnostics.push(format!(
+                "Yahoo chart symbol mismatch requested={} returned={}",
+                candidate.symbol, quote.symbol
+            ));
+            return None;
+        }
+        if !candidate.name.is_empty() {
+            quote.name.clone_from(&candidate.name);
+        }
+        if !candidate.exchange.is_empty() {
+            quote.exchange.clone_from(&candidate.exchange);
+        }
+        quote.asset_type.clone_from(&candidate.asset_type);
+        Some(quote)
+    }
+
+    fn load_exact_with_timeframe(
+        &mut self,
+        query: &str,
+        timeframe: Option<&str>,
+        now_unix: i64,
+    ) -> StockQuotesLoad {
+        let symbol = query.trim().trim_start_matches('$');
+        let mut diagnostics = Vec::new();
+        let quote = if symbol.is_empty() {
+            None
+        } else {
+            self.quote_with_timeframe(symbol, timeframe, now_unix, &mut diagnostics)
+                .filter(|quote| {
+                    if quote.symbol.eq_ignore_ascii_case(symbol) {
+                        true
+                    } else {
+                        diagnostics.push(format!(
+                            "Yahoo chart symbol mismatch requested={symbol} returned={}",
+                            quote.symbol
+                        ));
+                        false
+                    }
+                })
+        };
+        StockQuotesLoad {
+            quotes: Some(vec![(symbol.to_owned(), quote)]),
+            diagnostics,
+        }
+    }
+
+    fn resolve_candidates(
         &mut self,
         query: &str,
         now_unix: i64,
         diagnostics: &mut Vec<String>,
-    ) -> Option<String> {
+    ) -> Vec<StockSearchCandidate> {
         let load = load_yahoo_symbol(&self.yahoo_transport, &mut self.cache, query, now_unix);
         diagnostics.extend(load.diagnostics);
-        load.symbol
+        load.candidates
+    }
+
+    fn candidates_for_query(
+        candidates: Vec<StockSearchCandidate>,
+        query: &str,
+    ) -> Vec<StockSearchCandidate> {
+        let normalized = query.trim().trim_start_matches('$');
+        let qualified = is_qualified_symbol_query(normalized);
+        let punctuation = has_provider_punctuation(normalized);
+        let exact = candidates
+            .iter()
+            .find(|candidate| candidate.symbol.eq_ignore_ascii_case(normalized))
+            .cloned();
+        if let Some(exact) = exact
+            && (qualified || punctuation)
+        {
+            return vec![exact];
+        }
+        if punctuation
+            && candidates
+                .iter()
+                .any(|candidate| yahoo_candidate_name_matches_query(normalized, candidate))
+        {
+            return candidates;
+        }
+        if qualified || punctuation {
+            return Vec::new();
+        }
+        candidates
     }
 
     fn resolve_missing(
@@ -713,19 +813,125 @@ where
         quotes: Vec<(String, Option<StockQuote>)>,
         timeframe: Option<&str>,
         now_unix: i64,
+        discover_bare_tickers: bool,
         diagnostics: &mut Vec<String>,
     ) -> Vec<(String, Option<StockQuote>)> {
-        quotes
-            .into_iter()
-            .map(|(query, quote)| {
-                let quote = quote.or_else(|| {
-                    let symbol = self.resolve(&query, now_unix, diagnostics)?;
-                    self.quote_with_timeframe(&symbol, timeframe, now_unix, diagnostics)
-                });
-                (query, quote)
-            })
-            .collect()
+        let mut resolved = Vec::new();
+        for (query, quote) in quotes {
+            let discover = quote.is_none()
+                || (discover_bare_tickers
+                    && (is_bare_ticker_query(&query) || is_ambiguous_punctuation_query(&query)));
+            if !discover {
+                resolved.push((query, quote));
+                continue;
+            }
+            let candidates = Self::candidates_for_query(
+                self.resolve_candidates(&query, now_unix, diagnostics),
+                &query,
+            );
+            let candidate_quotes = candidates
+                .iter()
+                .filter_map(|candidate| {
+                    self.quote_with_candidate(candidate, timeframe, now_unix, diagnostics)
+                })
+                .collect::<Vec<_>>();
+            let mut merged = unique_discovered_quotes(candidate_quotes);
+            if let Some(direct_quote) = quote
+                && !merged
+                    .iter()
+                    .any(|candidate| candidate.symbol.eq_ignore_ascii_case(&direct_quote.symbol))
+            {
+                merged.push(direct_quote);
+            }
+            if merged.is_empty() {
+                resolved.push((query, None));
+                continue;
+            }
+            rank_stock_quotes(&query, &mut merged);
+            merged.truncate(10);
+            resolved.extend(merged.into_iter().map(|quote| (query.clone(), Some(quote))));
+        }
+        resolved
     }
+}
+
+fn is_bare_ticker_query(query: &str) -> bool {
+    let normalized = query.trim().trim_start_matches('$');
+    !normalized.is_empty()
+        && normalized
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+}
+
+fn is_ascii_symbol_component(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+}
+
+fn is_qualified_symbol_query(query: &str) -> bool {
+    let normalized = query.trim().trim_start_matches('$');
+    if normalized.is_empty() || normalized.chars().any(char::is_whitespace) {
+        return false;
+    }
+    if let Some(index) = normalized.strip_prefix('^') {
+        return is_ascii_symbol_component(index);
+    }
+    if let Some((base, suffix)) = normalized.split_once('=') {
+        return !suffix.contains('=')
+            && is_ascii_symbol_component(base)
+            && is_ascii_symbol_component(suffix);
+    }
+    if let Some((base, suffix)) = normalized.split_once('.') {
+        return !suffix.contains('.')
+            && is_ascii_symbol_component(base)
+            && is_ascii_symbol_component(suffix);
+    }
+    let mut parts = normalized.split('-');
+    let Some(base) = parts.next() else {
+        return false;
+    };
+    let Some(suffix) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && base.chars().count() <= 4
+        && suffix.chars().count() <= 4
+        && is_ascii_symbol_component(base)
+        && is_ascii_symbol_component(suffix)
+}
+
+fn has_provider_punctuation(query: &str) -> bool {
+    let normalized = query.trim().trim_start_matches('$');
+    !normalized.is_empty()
+        && !normalized.chars().any(char::is_whitespace)
+        && normalized
+            .chars()
+            .any(|character| matches!(character, '.' | '=' | '^' | '-'))
+}
+
+fn is_ambiguous_punctuation_query(query: &str) -> bool {
+    has_provider_punctuation(query) && !is_qualified_symbol_query(query)
+}
+
+fn requires_symbol_identity_match(query: &str) -> bool {
+    is_qualified_symbol_query(query) || is_ambiguous_punctuation_query(query)
+}
+
+fn unique_discovered_quotes(quotes: Vec<StockQuote>) -> Vec<StockQuote> {
+    let mut unique = Vec::with_capacity(quotes.len());
+    for quote in quotes {
+        let duplicate = unique.iter().any(|known: &StockQuote| {
+            known.symbol.eq_ignore_ascii_case(&quote.symbol)
+                && known.exchange.eq_ignore_ascii_case(&quote.exchange)
+                && known.asset_type.eq_ignore_ascii_case(&quote.asset_type)
+        });
+        if !duplicate {
+            unique.push(quote);
+        }
+    }
+    unique
 }
 
 impl<T, F, C> StockPriceSource for YahooStockPriceSource<T, F, C>
@@ -781,6 +987,21 @@ where
                     )
                 })
                 .flatten();
+            let quote = if requires_symbol_identity_match(&item.normalized) {
+                quote.filter(|quote| {
+                    if quote.symbol.eq_ignore_ascii_case(&item.normalized) {
+                        true
+                    } else {
+                        diagnostics.push(format!(
+                            "Yahoo chart symbol mismatch requested={} returned={}",
+                            item.normalized, quote.symbol
+                        ));
+                        false
+                    }
+                })
+            } else {
+                quote
+            };
             quotes.push((item.original, quote));
         }
         let direct_quotes = quotes
@@ -789,33 +1010,48 @@ where
             .collect::<Vec<_>>();
         if !plan.full_query_fallback || direct_quotes.len() == quotes.len() {
             return StockQuotesLoad {
-                quotes: Some(self.resolve_missing(quotes, timeframe, now_unix, &mut diagnostics)),
+                quotes: Some(self.resolve_missing(
+                    quotes,
+                    timeframe,
+                    now_unix,
+                    !plan.needs_top_stocks,
+                    &mut diagnostics,
+                )),
                 diagnostics,
             };
         }
 
-        let resolved = self.resolve(&plan.raw_query, now_unix, &mut diagnostics);
-        let mut full_quote = resolved.as_ref().and_then(|symbol| {
-            direct_quotes
+        let candidates = Self::candidates_for_query(
+            self.resolve_candidates(&plan.raw_query, now_unix, &mut diagnostics),
+            &plan.raw_query,
+        );
+        let full_quotes = candidates
+            .iter()
+            .filter_map(|candidate| {
+                self.quote_with_candidate(candidate, timeframe, now_unix, &mut diagnostics)
+            })
+            .collect::<Vec<_>>();
+        if !full_quotes.is_empty() {
+            let mut resolved = quotes
                 .iter()
-                .find(|quote| quote.symbol.eq_ignore_ascii_case(symbol))
-                .cloned()
-        });
-        if full_quote.is_none()
-            && let Some(symbol) = resolved
-        {
-            full_quote = self.quote_with_timeframe(&symbol, timeframe, now_unix, &mut diagnostics);
-        }
-        if let Some(full_quote) = full_quote
-            && (direct_quotes.is_empty()
-                || !direct_quotes
+                .filter_map(|(query, quote)| {
+                    quote.clone().map(|quote| (query.clone(), Some(quote)))
+                })
+                .collect::<Vec<_>>();
+            for quote in full_quotes {
+                if !direct_quotes
                     .iter()
-                    .any(|quote| quote.symbol.eq_ignore_ascii_case(&full_quote.symbol)))
-        {
-            return StockQuotesLoad {
-                quotes: Some(vec![(plan.raw_query, Some(full_quote))]),
-                diagnostics,
-            };
+                    .any(|direct| direct.symbol.eq_ignore_ascii_case(&quote.symbol))
+                {
+                    resolved.push((plan.raw_query.clone(), Some(quote)));
+                }
+            }
+            if !resolved.is_empty() {
+                return StockQuotesLoad {
+                    quotes: Some(resolved),
+                    diagnostics,
+                };
+            }
         }
         if direct_quotes.is_empty() {
             return StockQuotesLoad {
@@ -824,7 +1060,13 @@ where
             };
         }
         StockQuotesLoad {
-            quotes: Some(self.resolve_missing(quotes, timeframe, now_unix, &mut diagnostics)),
+            quotes: Some(self.resolve_missing(
+                quotes,
+                timeframe,
+                now_unix,
+                !plan.needs_top_stocks,
+                &mut diagnostics,
+            )),
             diagnostics,
         }
     }
@@ -4018,6 +4260,9 @@ mod tests {
             slug: "synthetic-asset".to_owned(),
             price: "42".to_owned(),
             change: "1".to_owned(),
+            currency: String::new(),
+            exchange: String::new(),
+            asset_type: String::new(),
             contracts: Vec::new(),
         };
         let candidate_load = source.load_candidate(
@@ -4050,6 +4295,9 @@ mod tests {
             slug: "exm-usd".to_owned(),
             price: "42".to_owned(),
             change: "+5% 1m".to_owned(),
+            currency: "USD".to_owned(),
+            exchange: "TEST".to_owned(),
+            asset_type: "Equity".to_owned(),
             contracts: Vec::new(),
         };
         let stock_candidate_load = source.load_candidate(
@@ -4163,6 +4411,7 @@ mod tests {
             price: 42.0,
             currency: "USD".into(),
             exchange: "TEST".into(),
+            asset_type: String::new(),
             variation: 5.0,
         };
         assert!(source.stocks.render_chart(&quote, 1_700_000_000).is_err());
@@ -4423,10 +4672,10 @@ mod tests {
             },
             cache: WeatherCacheStub,
         };
-        let load = source.load("Apple Inc", 100);
+        let load = source.load("Apple Inc.", 100);
         let quotes = load.quotes.unwrap_or_default();
         assert_eq!(quotes.len(), 1);
-        assert_eq!(quotes[0].0, "Apple Inc");
+        assert_eq!(quotes[0].0, "Apple Inc.");
         assert_eq!(
             quotes[0].1.as_ref().map(|quote| quote.symbol.as_str()),
             Some("AAPL")
@@ -4439,12 +4688,382 @@ mod tests {
                 .iter()
                 .map(|request| request.symbol.as_str())
                 .collect::<Vec<_>>(),
-            ["APPLE", "INC", "AAPL"]
+            ["APPLE", "INC.", "AAPL"]
         );
         assert_eq!(
             source.yahoo_transport.searches.borrow()[0].query,
-            "Apple Inc"
+            "Apple Inc."
         );
+    }
+
+    #[test]
+    fn stock_source_discovers_hyphenated_companies_but_keeps_hyphenated_tickers_exact() {
+        let empty_chart = || {
+            Ok::<YahooHttpResponse, YahooFailure>(YahooHttpResponse {
+                status_code: 200,
+                body: r#"{"chart":{"result":[]}}"#.to_owned(),
+            })
+        };
+        let chart = |symbol: &str, name: &str, exchange: &str| {
+            Ok::<YahooHttpResponse, YahooFailure>(YahooHttpResponse {
+                status_code: 200,
+                body: serde_json::json!({
+                    "chart": {
+                        "result": [{
+                            "meta": {
+                                "symbol": symbol,
+                                "shortName": name,
+                                "regularMarketPrice": 12.5,
+                                "chartPreviousClose": 10,
+                                "currency": "USD",
+                                "exchangeName": exchange,
+                            }
+                        }]
+                    }
+                })
+                .to_string(),
+            })
+        };
+        let source = |charts, search_body: &str| YahooStockPriceSource {
+            yahoo_transport: StockYahooTransportStub {
+                chart_responses: RefCell::new(charts),
+                search_responses: RefCell::new(vec![Ok(YahooHttpResponse {
+                    status_code: 200,
+                    body: search_body.to_owned(),
+                })]),
+                charts: RefCell::default(),
+                searches: RefCell::default(),
+            },
+            finviz_transport: FinvizTransportStub {
+                response: RefCell::new(None),
+            },
+            cache: WeatherCacheStub,
+        };
+
+        let mut rolls_royce = source(
+            vec![
+                empty_chart(),
+                chart("RR.L", "Rolls-Royce Holdings plc", "London"),
+                chart("RYCEF", "Rolls-Royce Holdings plc", "OTC Markets"),
+            ],
+            r#"{"quotes":[
+                {"quoteType":"EQUITY","symbol":"RR.L","longname":"Rolls-Royce Holdings plc","exchDisp":"London"},
+                {"quoteType":"EQUITY","symbol":"RYCEF","longname":"Rolls-Royce Holdings plc","exchDisp":"OTC Markets"}
+            ]}"#,
+        );
+        let rolls = rolls_royce.load_with_timeframe("Rolls-Royce", Some("1m"), 100);
+        assert_eq!(
+            rolls
+                .quotes
+                .as_ref()
+                .into_iter()
+                .flatten()
+                .filter_map(|(_, quote)| quote.as_ref().map(|quote| quote.symbol.as_str()))
+                .collect::<Vec<_>>(),
+            ["RR.L", "RYCEF"]
+        );
+        assert_eq!(
+            rolls_royce.yahoo_transport.searches.borrow()[0].query,
+            "Rolls-Royce"
+        );
+
+        struct EmptyCrypto;
+        impl bot_core::market_prices::CryptoMarketProvider for EmptyCrypto {
+            fn listings(
+                &mut self,
+                _: &str,
+            ) -> Result<Vec<bot_core::market_prices::CryptoAsset>, String> {
+                Ok(Vec::new())
+            }
+
+            fn quotes(
+                &mut self,
+                _: &[String],
+                _: &str,
+                _: bool,
+            ) -> Result<Vec<bot_core::market_prices::CryptoAsset>, String> {
+                Ok(Vec::new())
+            }
+        }
+        let mut unified_source = source(
+            vec![
+                empty_chart(),
+                chart("RR.L", "Rolls-Royce Holdings plc", "London"),
+                chart("RYCEF", "Rolls-Royce Holdings plc", "OTC Markets"),
+            ],
+            r#"{"quotes":[
+                {"quoteType":"EQUITY","symbol":"RR.L","longname":"Rolls-Royce Holdings plc","exchDisp":"London"},
+                {"quoteType":"EQUITY","symbol":"RYCEF","longname":"Rolls-Royce Holdings plc","exchDisp":"OTC Markets"}
+            ]}"#,
+        );
+        let mut unified_stocks = super::UnifiedStocks {
+            source: &mut unified_source,
+            now_unix: 100,
+            diagnostics: Vec::new(),
+        };
+        let mut crypto = EmptyCrypto;
+        let unified = super::execute_market_price_command(
+            "Rolls-Royce",
+            bot_core::market_prices::MarketPriceCommand::Unified,
+            Locale::En,
+            &mut crypto,
+            &mut unified_stocks,
+        );
+        let selection = unified
+            .selection
+            .unwrap_or_else(|| unreachable!("hyphenated company selection"));
+        assert_eq!(
+            selection
+                .candidates
+                .iter()
+                .map(|candidate| candidate.symbol.as_str())
+                .collect::<Vec<_>>(),
+            ["RR.L", "RYCEF"]
+        );
+
+        let mut berkshire = source(
+            vec![
+                empty_chart(),
+                chart("BRK-A", "Berkshire Hathaway Inc.", "NYSE"),
+                chart("BRK-B", "Berkshire Hathaway Inc.", "NYSE"),
+            ],
+            r#"{"quotes":[
+                {"quoteType":"EQUITY","symbol":"BRK-A","longname":"Berkshire Hathaway Inc.","exchDisp":"NYSE"},
+                {"quoteType":"EQUITY","symbol":"BRK-B","longname":"Berkshire Hathaway Inc.","exchDisp":"NYSE"}
+            ]}"#,
+        );
+        let berkshire_load = berkshire.load_with_timeframe("Berkshire-Hathaway", Some("1m"), 100);
+        assert_eq!(
+            berkshire_load
+                .quotes
+                .as_ref()
+                .into_iter()
+                .flatten()
+                .filter_map(|(_, quote)| quote.as_ref().map(|quote| quote.symbol.as_str()))
+                .collect::<Vec<_>>(),
+            ["BRK-A", "BRK-B"]
+        );
+
+        let mut ticker = source(
+            vec![
+                empty_chart(),
+                chart("BRK-B", "Berkshire Hathaway Inc.", "NYSE"),
+            ],
+            r#"{"quotes":[
+                {"quoteType":"EQUITY","symbol":"BRK-A","longname":"Berkshire Hathaway Inc.","exchDisp":"NYSE"},
+                {"quoteType":"EQUITY","symbol":"BRK-B","longname":"Berkshire Hathaway Inc.","exchDisp":"NYSE"}
+            ]}"#,
+        );
+        let ticker_load = ticker.load_with_timeframe("BRK-B", Some("1m"), 100);
+        assert_eq!(
+            ticker_load
+                .quotes
+                .as_ref()
+                .into_iter()
+                .flatten()
+                .filter_map(|(_, quote)| quote.as_ref().map(|quote| quote.symbol.as_str()))
+                .collect::<Vec<_>>(),
+            ["BRK-B"]
+        );
+    }
+
+    #[test]
+    fn stock_source_preserves_multiple_yahoo_listings_for_selection() {
+        let chart = |symbol: &str, name: &str, exchange: &str, currency: &str| {
+            Ok(YahooHttpResponse {
+                status_code: 200,
+                body: serde_json::json!({
+                    "chart": {
+                        "result": [{
+                            "meta": {
+                                "symbol": symbol,
+                                "shortName": name,
+                                "regularMarketPrice": 12.5,
+                                "chartPreviousClose": 10,
+                                "currency": currency,
+                                "exchangeName": exchange,
+                            }
+                        }]
+                    }
+                })
+                .to_string(),
+            })
+        };
+        let transport = StockYahooTransportStub {
+            chart_responses: RefCell::new(vec![
+                chart("RKHNF", "Rockhaven Resources Ltd.", "OTC Markets", "USD"),
+                chart("RKH.L", "Rockhopper Exploration plc", "London", "GBp"),
+                chart("RKHNF", "Rockhaven Resources Ltd.", "OTC Markets", "USD"),
+            ]),
+            search_responses: RefCell::new(vec![Ok(YahooHttpResponse {
+                status_code: 200,
+                body: r#"{"quotes":[
+                    {"quoteType":"EQUITY","symbol":"RKHNF","longname":"Rockhaven Resources Ltd.","exchDisp":"OTC Markets"},
+                    {"quoteType":"EQUITY","symbol":"RKH.L","longname":"Rockhopper Exploration plc","exchDisp":"London"}
+                ]}"#
+                    .to_owned(),
+            })]),
+            charts: RefCell::default(),
+            searches: RefCell::default(),
+        };
+        let mut source = YahooStockPriceSource {
+            yahoo_transport: transport,
+            finviz_transport: FinvizTransportStub {
+                response: RefCell::new(None),
+            },
+            cache: WeatherCacheStub,
+        };
+
+        let load = source.load_with_timeframe("rkh", Some("1m"), 100);
+        let quotes = load.quotes.unwrap_or_default();
+        assert_eq!(quotes.len(), 2);
+        assert_eq!(quotes[0].0, "rkh");
+        assert_eq!(
+            quotes[0].1.as_ref().map(|quote| quote.symbol.as_str()),
+            Some("RKH.L")
+        );
+        assert_eq!(
+            quotes[0].1.as_ref().map(|quote| quote.exchange.as_str()),
+            Some("London")
+        );
+        assert_eq!(
+            quotes[0].1.as_ref().map(|quote| quote.asset_type.as_str()),
+            Some("Equity")
+        );
+        assert_eq!(
+            quotes[0].1.as_ref().map(|quote| quote.currency.as_str()),
+            Some("GBp")
+        );
+        assert_eq!(
+            quotes[1].1.as_ref().map(|quote| quote.symbol.as_str()),
+            Some("RKHNF")
+        );
+    }
+
+    #[test]
+    fn stock_source_keeps_direct_bare_quote_when_discovery_fails() {
+        let transport = StockYahooTransportStub {
+            chart_responses: RefCell::new(vec![Ok(YahooHttpResponse {
+                status_code: 200,
+                body: r#"{"chart":{"result":[{"meta":{"symbol":"RKHNF","regularMarketPrice":12.5,"chartPreviousClose":10,"currency":"USD"}}]}}"#.to_owned(),
+            })]),
+            search_responses: RefCell::new(vec![
+                Err(YahooFailure::Timeout),
+                Err(YahooFailure::Connection),
+            ]),
+            charts: RefCell::default(),
+            searches: RefCell::default(),
+        };
+        let mut source = YahooStockPriceSource {
+            yahoo_transport: transport,
+            finviz_transport: FinvizTransportStub {
+                response: RefCell::new(None),
+            },
+            cache: WeatherCacheStub,
+        };
+
+        let load = source.load_with_timeframe("rkh", Some("1m"), 100);
+        let quotes = load.quotes.unwrap_or_default();
+        assert_eq!(quotes.len(), 1);
+        assert_eq!(
+            quotes[0].1.as_ref().map(|quote| quote.symbol.as_str()),
+            Some("RKHNF")
+        );
+        assert_eq!(source.yahoo_transport.searches.borrow().len(), 2);
+    }
+
+    #[test]
+    fn stock_source_keeps_qualified_and_selected_symbols_exact() {
+        let mut qualified_success = YahooStockPriceSource {
+            yahoo_transport: StockYahooTransportStub {
+                chart_responses: RefCell::new(vec![Ok(YahooHttpResponse {
+                    status_code: 200,
+                    body: r#"{"chart":{"result":[{"meta":{"symbol":"RKH.L","regularMarketPrice":0.8,"chartPreviousClose":0.7,"currency":"GBp"}}]}}"#.to_owned(),
+                })]),
+                search_responses: RefCell::default(),
+                charts: RefCell::default(),
+                searches: RefCell::default(),
+            },
+            finviz_transport: FinvizTransportStub {
+                response: RefCell::new(None),
+            },
+            cache: WeatherCacheStub,
+        };
+        let exact = qualified_success.load_with_timeframe("RKH.L", Some("1m"), 100);
+        assert_eq!(
+            exact
+                .quotes
+                .as_ref()
+                .and_then(|quotes| quotes[0].1.as_ref())
+                .map(|quote| quote.symbol.as_str()),
+            Some("RKH.L")
+        );
+        assert!(
+            qualified_success
+                .yahoo_transport
+                .searches
+                .borrow()
+                .is_empty()
+        );
+
+        let mut qualified_failure = YahooStockPriceSource {
+            yahoo_transport: StockYahooTransportStub {
+                chart_responses: RefCell::new(vec![Ok(YahooHttpResponse {
+                    status_code: 200,
+                    body: r#"{"chart":{"result":[]}}"#.to_owned(),
+                })]),
+                search_responses: RefCell::new(vec![Ok(YahooHttpResponse {
+                    status_code: 200,
+                    body: r#"{"quotes":[{"quoteType":"EQUITY","symbol":"RKHNF","longname":"Rockhaven Resources Ltd."}]}"#.to_owned(),
+                })]),
+                charts: RefCell::default(),
+                searches: RefCell::default(),
+            },
+            finviz_transport: FinvizTransportStub {
+                response: RefCell::new(None),
+            },
+            cache: WeatherCacheStub,
+        };
+        let failed = qualified_failure.load_with_timeframe("RKH.L", Some("1m"), 100);
+        assert!(
+            failed
+                .quotes
+                .as_ref()
+                .and_then(|quotes| quotes[0].1.as_ref())
+                .is_none()
+        );
+        assert_eq!(qualified_failure.yahoo_transport.searches.borrow().len(), 1);
+
+        let mut selected_bare = YahooStockPriceSource {
+            yahoo_transport: StockYahooTransportStub {
+                chart_responses: RefCell::new(vec![Ok(YahooHttpResponse {
+                    status_code: 200,
+                    body: r#"{"chart":{"result":[{"meta":{"symbol":"RKHNF","regularMarketPrice":12.5,"chartPreviousClose":10,"currency":"USD"}}]}}"#.to_owned(),
+                })]),
+                search_responses: RefCell::default(),
+                charts: RefCell::default(),
+                searches: RefCell::default(),
+            },
+            finviz_transport: FinvizTransportStub {
+                response: RefCell::new(None),
+            },
+            cache: WeatherCacheStub,
+        };
+        let selected = selected_bare.load_exact_with_timeframe("RKH", Some("1m"), 100);
+        assert!(
+            selected
+                .quotes
+                .as_ref()
+                .and_then(|quotes| quotes[0].1.as_ref())
+                .is_none()
+        );
+        assert!(
+            selected
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("symbol mismatch"))
+        );
+        assert!(selected_bare.yahoo_transport.searches.borrow().is_empty());
     }
 
     #[test]

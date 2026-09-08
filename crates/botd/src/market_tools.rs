@@ -287,6 +287,7 @@ mod tests {
             price: 200.0,
             currency: "USD".to_owned(),
             exchange: "NMS".to_owned(),
+            asset_type: String::new(),
             variation: 1.5,
         };
         let mut tool = StockPricesTool::new(
