@@ -3,9 +3,7 @@
 use crate::chat_config::ChatConfig;
 use crate::command_parsing::parse_command;
 use crate::locale::Locale;
-use crate::telegram_actions::{
-    InlineKeyboardButton, InlineKeyboardMarkup, SendMessage, TelegramAction,
-};
+use crate::telegram_actions::{SendMessage, TelegramAction};
 use crate::telegram_input::{ChatId, MessageId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,25 +14,6 @@ pub enum LanguageCommandPlan {
         action: TelegramAction,
         updated_config: Option<ChatConfig>,
     },
-}
-
-fn language_keyboard() -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup {
-        inline_keyboard: vec![vec![
-            InlineKeyboardButton {
-                text: "Español".to_owned(),
-                url: None,
-                callback_data: Some("cfg:language:es".to_owned()),
-                copy_text: None,
-            },
-            InlineKeyboardButton {
-                text: "English".to_owned(),
-                url: None,
-                callback_data: Some("cfg:language:en".to_owned()),
-                copy_text: None,
-            },
-        ]],
-    }
 }
 
 #[must_use]
@@ -84,7 +63,23 @@ pub fn plan_language_command(
     };
     let mut message = SendMessage::new(chat_id, &text);
     message.reply_to_message_id = Some(message_id);
-    message.reply_markup = Some(language_keyboard());
+    let effective_config = updated_config.as_ref().unwrap_or(config);
+    let effective_locale = if effective_config.language == "en" {
+        Locale::En
+    } else if effective_config.language == "es" {
+        Locale::Es
+    } else {
+        locale
+    };
+    message.reply_markup = Some(
+        crate::config_command::render_config_page(
+            effective_config,
+            effective_locale,
+            false,
+            "language",
+        )
+        .1,
+    );
     LanguageCommandPlan::Action {
         action: TelegramAction::SendMessage(message),
         updated_config,

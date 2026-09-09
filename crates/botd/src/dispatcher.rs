@@ -81,7 +81,7 @@ use bot_core::telegram_payments::{
 };
 use bot_core::token_signals::{
     SIGNAL_REFRESH_COOLDOWN_SECONDS, SignalQuery, SignalState, TokenAddress, TokenSignal,
-    build_signal_keyboard, callback_text as signal_callback_text, detect_signal_query,
+    build_signal_keyboard_localized, callback_text as signal_callback_text, detect_signal_query,
     format_signal_caption_for_period, has_usable_chart, signal_market_values, stable_signal_id,
 };
 use bot_core::weather::{
@@ -2033,10 +2033,11 @@ where
             reply_to_message_id: Some(message_id),
             caption: caption.clone(),
             parse_mode: Some(ParseMode::Html),
-            reply_markup: Some(build_signal_keyboard(
+            reply_markup: Some(build_signal_keyboard_localized(
                 &signal_id,
                 &signal.token,
                 &signal.pair,
+                locale,
             )),
         }) {
             Ok(Some(receipt)) => receipt,
@@ -2264,10 +2265,11 @@ where
                     state.chart_period.as_deref(),
                 ),
                 parse_mode: Some(ParseMode::Html),
-                reply_markup: Some(build_signal_keyboard(
+                reply_markup: Some(build_signal_keyboard_localized(
                     signal_id,
                     &signal.token,
                     &signal.pair,
+                    locale,
                 )),
             }) {
                 Ok(edited) => edited,
@@ -2724,10 +2726,11 @@ where
                 reply_to_message_id,
                 caption: caption.clone(),
                 parse_mode: Some(ParseMode::Html),
-                reply_markup: Some(build_signal_keyboard(
+                reply_markup: Some(build_signal_keyboard_localized(
                     &signal_id,
                     &signal.token,
                     &signal.pair,
+                    locale,
                 )),
             }) {
                 Ok(Some(receipt)) if receipt.message_id.is_some() => {
@@ -2866,10 +2869,23 @@ where
             context.user_language_code.as_deref(),
             &context.chat_type,
         );
-        let TaskCallbackParse::Delete(task_id) = parse_task_callback(&context.data) else {
+        let parsed = parse_task_callback(&context.data);
+        if parsed == TaskCallbackParse::Close {
+            self.answer_callback_best_effort(context.callback_id.as_deref());
+            if let Ok(chat_id) = context.chat_id.parse::<i64>() {
+                self.actions
+                    .execute(TelegramAction::DeleteMessage {
+                        chat_id: ChatId(chat_id),
+                        message_id: MessageId(context.message_id),
+                    })
+                    .map_err(DispatchError::Action)?;
+            }
+            return Ok(DispatchOutcome::Handled);
+        }
+        if parsed == TaskCallbackParse::Guard {
             self.answer_callback_best_effort(context.callback_id.as_deref());
             return Ok(DispatchOutcome::Handled);
-        };
+        }
         let Some(source) = self.scheduled_task_source.as_mut() else {
             return Err(DispatchError::MissingService("scheduled tasks"));
         };
@@ -2893,6 +2909,27 @@ where
                 return Ok(DispatchOutcome::Handled);
             }
         };
+        if let TaskCallbackParse::Page(page) = parsed {
+            let view = bot_core::task_commands::render_task_page(&tasks, locale, page);
+            self.answer_callback_best_effort(context.callback_id.as_deref());
+            if let Ok(chat_id) = context.chat_id.parse::<i64>() {
+                self.actions
+                    .try_edit(TelegramAction::EditMessage {
+                        chat_id: ChatId(chat_id),
+                        message_id: MessageId(context.message_id),
+                        text: view.text,
+                        reply_markup: view.keyboard,
+                    })
+                    .map_err(DispatchError::Action)?;
+            }
+            return Ok(DispatchOutcome::Handled);
+        }
+        let (task_id, detail) = match parsed {
+            TaskCallbackParse::Delete(id) => (id, None),
+            TaskCallbackParse::View(id) => (id, Some(false)),
+            TaskCallbackParse::Confirm(id) => (id, Some(true)),
+            _ => return Ok(DispatchOutcome::Handled),
+        };
         let Some(target) = tasks.iter().find(|task| task.id == task_id).cloned() else {
             if let Some(callback_id) = context.callback_id.as_deref() {
                 let _receipt = self
@@ -2906,6 +2943,21 @@ where
             }
             return Ok(DispatchOutcome::Handled);
         };
+        if let Some(confirm) = detail {
+            let view = bot_core::task_commands::render_task_detail(&target, locale, confirm);
+            self.answer_callback_best_effort(context.callback_id.as_deref());
+            if let Ok(chat_id) = context.chat_id.parse::<i64>() {
+                self.actions
+                    .try_edit(TelegramAction::EditMessage {
+                        chat_id: ChatId(chat_id),
+                        message_id: MessageId(context.message_id),
+                        text: view.text,
+                        reply_markup: view.keyboard,
+                    })
+                    .map_err(DispatchError::Action)?;
+            }
+            return Ok(DispatchOutcome::Handled);
+        }
         let is_group = is_group_chat_type(Some(&context.chat_type));
         let authorization = if is_group {
             context.user_id.map_or(
@@ -3038,6 +3090,27 @@ where
             }
             return Ok(DispatchOutcome::Handled);
         };
+        if context.data == "topup:close" || context.data.starts_with("chg:close:") {
+            let allowed = if context.data == "topup:close" {
+                context.chat_type == "private"
+            } else {
+                context
+                    .data
+                    .strip_prefix("chg:close:")
+                    .and_then(|id| id.parse::<i64>().ok())
+                    .is_some_and(|id| context.user_id == Some(id))
+            };
+            self.answer_callback_best_effort(context.callback_id.as_deref());
+            if allowed && let Ok(chat_id) = context.chat_id.parse::<i64>() {
+                self.actions
+                    .execute(TelegramAction::DeleteMessage {
+                        chat_id: ChatId(chat_id),
+                        message_id: MessageId(context.message_id),
+                    })
+                    .map_err(DispatchError::Action)?;
+            }
+            return Ok(DispatchOutcome::Handled);
+        }
         if let Some(page) = context.data.strip_prefix("help:") {
             let Ok(id) = context.chat_id.parse::<i64>() else {
                 self.answer_callback_best_effort(context.callback_id.as_deref());
@@ -9209,7 +9282,7 @@ mod tests {
             Some(TelegramAction::SendMessage(_))
         ));
         if let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() {
-            assert!(message.text.starts_with("• [task0001] synthetic reminder"));
+            assert!(message.text.starts_with("Tareas"));
             assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
             let callback = message
                 .reply_markup
@@ -9217,7 +9290,7 @@ mod tests {
                 .and_then(|keyboard| keyboard.inline_keyboard.first())
                 .and_then(|row| row.first())
                 .and_then(|button| button.callback_data.as_deref());
-            assert_eq!(callback, Some("task:del:task0001"));
+            assert_eq!(callback, Some("task:view:task0001"));
         }
 
         assert_eq!(
@@ -9308,7 +9381,7 @@ mod tests {
         );
         assert!(caption.contains("Synthetic Token"));
         assert_eq!(
-            keyboard.inline_keyboard[0][2]
+            keyboard.inline_keyboard[0][1]
                 .copy_text
                 .as_ref()
                 .map(|copy| copy.text.as_str()),
@@ -13935,6 +14008,70 @@ mod tests {
     }
 
     #[test]
+    fn task_navigation_and_close_never_cancel_a_task() -> Result<(), TaskStateError> {
+        let cancellations = Rc::new(RefCell::new(Vec::new()));
+        let mut dispatcher = dispatcher().with_scheduled_task_source(Box::new(Tasks {
+            lists: vec![vec![scheduled_task(88)?]],
+            cancellations: Rc::clone(&cancellations),
+        }));
+        for data in [
+            "task:page:0",
+            "task:page:999",
+            "task:view:task0001",
+            "task:ask:task0001",
+            "task:close",
+            "task:unknown:task0001",
+        ] {
+            assert_eq!(
+                dispatcher.dispatch(callback_update(data, "private", Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert!(cancellations.borrow().is_empty());
+        }
+        assert!(dispatcher.actions.0.iter().any(|a| matches!(a, TelegramAction::EditMessage { text, .. } if text.contains("Cancelar esta tarea") || text.contains("Cancel this task"))));
+        assert!(
+            dispatcher
+                .actions
+                .0
+                .iter()
+                .any(|a| matches!(a, TelegramAction::DeleteMessage { .. }))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn credit_menu_close_does_not_create_invoices_or_load_history() {
+        for (data, chat_type, allowed) in [
+            ("topup:close", "private", true),
+            ("topup:close", "group", false),
+            ("chg:close:88", "private", true),
+            ("chg:close:99", "private", false),
+            ("chg:close:invalid", "private", false),
+        ] {
+            let mut dispatcher = dispatcher();
+            assert_eq!(
+                dispatcher.dispatch(callback_update(data, chat_type, Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert_eq!(
+                dispatcher
+                    .actions
+                    .0
+                    .iter()
+                    .any(|a| matches!(a, TelegramAction::DeleteMessage { .. })),
+                allowed
+            );
+            assert!(
+                !dispatcher
+                    .actions
+                    .0
+                    .iter()
+                    .any(|a| matches!(a, TelegramAction::SendMessage(_)))
+            );
+        }
+    }
+
+    #[test]
     fn task_owner_can_delete_in_group_and_message_is_refreshed() -> Result<(), TaskStateError> {
         let cancellations = Rc::new(RefCell::new(Vec::new()));
         let mut denied_admin = authorization();
@@ -14609,13 +14746,13 @@ mod tests {
         let Some(TelegramAction::SendMessage(command)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert_eq!(command.text, "elegí cuánto querés cargar:");
+        assert_eq!(command.text, "Créditos\n\nElegí cuánto querés cargar.");
         assert_eq!(
             command
                 .reply_markup
                 .as_ref()
                 .map(|markup| markup.inline_keyboard.len()),
-            Some(6)
+            Some(7)
         );
         assert_eq!(dispatcher.state.incoming.len(), 1);
         assert_eq!(dispatcher.state.outgoing.len(), 1);
