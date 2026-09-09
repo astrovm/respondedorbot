@@ -1188,7 +1188,10 @@ mod tests {
                     "model": "resolved/model",
                     "provider": "Synthetic",
                     "service_tier": "paid",
-                    "choices": [{"delta": {"content": "holá "}}]
+                    "choices": [{"delta": {
+                        "content": "holá ",
+                        "reasoning": "thinking"
+                    }}]
                 })
             ),
             format!(
@@ -1196,6 +1199,7 @@ mod tests {
                 json!({
                     "choices": [{"delta": {
                         "content": "mundo",
+                        "reasoning_content": "legacy",
                         "tool_calls": [{
                             "index": 0,
                             "id": "call-1",
@@ -1222,6 +1226,7 @@ mod tests {
                     }
                 })
             ),
+            format!("data: {}\n\n", json!({"id": "heartbeat"})),
             "data: [DONE]\n\n".to_owned(),
         ]
         .concat();
@@ -1249,17 +1254,19 @@ mod tests {
             },
         );
         assert_eq!(result, Ok(()));
-        assert_eq!(events.len(), 4);
+        assert_eq!(events.len(), 5);
         let ChatStreamEvent::Chunk(first) = &events[0] else {
             return;
         };
         assert_eq!(first.text, "holá ");
+        assert_eq!(first.reasoning, "thinking");
         assert_eq!(first.generation_id.as_deref(), Some("gen-1"));
         assert_eq!(first.model.as_deref(), Some("resolved/model"));
         let ChatStreamEvent::Chunk(second) = &events[1] else {
             return;
         };
         assert_eq!(second.text, "mundo");
+        assert_eq!(second.reasoning, "legacy");
         assert_eq!(second.tool_call_fragments[0].name.as_deref(), Some("wea"));
         let ChatStreamEvent::Chunk(final_chunk) = &events[2] else {
             return;
@@ -1270,7 +1277,14 @@ mod tests {
         );
         assert_eq!(final_chunk.finish_reason.as_deref(), Some("tool_calls"));
         assert_eq!(final_chunk.usage["cost"], "0.001");
-        assert_eq!(events[3], ChatStreamEvent::Done);
+        assert!(matches!(
+            &events[3],
+            ChatStreamEvent::Chunk(chunk)
+                if chunk.text.is_empty()
+                    && chunk.reasoning.is_empty()
+                    && chunk.reasoning_details.is_empty()
+        ));
+        assert_eq!(events[4], ChatStreamEvent::Done);
         let requests = transport.requests.borrow();
         assert_eq!(
             requests[0].url,
