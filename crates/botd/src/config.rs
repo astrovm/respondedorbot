@@ -173,7 +173,7 @@ pub enum ConfigError {
     MissingOpenRouterApiKey,
     #[error("ADMIN_CHAT_ID must be an integer")]
     InvalidAdminUserId,
-    #[error("BOT_SYSTEM_PROMPT not set and workspace/SOUL.md or workspace/RULES.md is missing")]
+    #[error("workspace/SOUL.md and workspace/RULES.md must both exist and contain text")]
     MissingSystemPrompt,
     #[error("could not read the workspace prompt: {0}")]
     WorkspacePrompt(String),
@@ -335,8 +335,10 @@ fn read_workspace_prompt() -> Result<Option<String>, ConfigError> {
     ] {
         match fs::read_to_string(path) {
             Ok(value) if !value.trim().is_empty() => parts.push(value.trim().to_owned()),
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => return Err(ConfigError::MissingSystemPrompt),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ConfigError::MissingSystemPrompt);
+            }
             Err(error) => return Err(ConfigError::WorkspacePrompt(error.to_string())),
         }
     }
@@ -373,10 +375,9 @@ impl ProductionConfig {
             .ok_or(ConfigError::MissingCoinMarketCapKey)?;
         let openrouter_api_key = optional_trimmed(&lookup, "OPENROUTER_API_KEY")
             .ok_or(ConfigError::MissingOpenRouterApiKey)?;
-        let system_prompt = match optional_trimmed(&lookup, "BOT_SYSTEM_PROMPT") {
-            Some(value) => value,
-            None => prompt()?.ok_or(ConfigError::MissingSystemPrompt)?,
-        };
+        let system_prompt = prompt()?
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(ConfigError::MissingSystemPrompt)?;
         let trigger_words = optional_trimmed(&lookup, "BOT_TRIGGER_WORDS")
             .map(|value| {
                 value
@@ -730,7 +731,6 @@ mod tests {
                 ("TELEGRAM_TOKEN", "token"),
                 ("TELEGRAM_USERNAME", "bot"),
                 ("SUPABASE_POSTGRES_URL", &invalid_url),
-                ("BOT_SYSTEM_PROMPT", "prompt"),
                 ("COINMARKETCAP_KEY", "cmc"),
                 ("OPENROUTER_API_KEY", "openrouter"),
             ],
@@ -784,7 +784,6 @@ mod tests {
                 ("FIRECRAWL_API_KEY", "firecrawl-secret"),
                 ("SUPADATA_API_KEY", "supadata-secret"),
                 ("APIFY_API_KEY", "apify-secret"),
-                ("BOT_SYSTEM_PROMPT", "prompt-secret"),
                 ("BOT_TRIGGER_WORDS", " gordo, test, ,bot "),
                 ("FRIENDLY_INSTANCE_NAME", "VPS"),
                 ("AI_RECONCILIATION_INTERVAL_SECONDS", "1"),
@@ -792,7 +791,7 @@ mod tests {
                 ("AI_RECONCILIATION_SAFETY_CREDIT_UNITS", "-5"),
                 ("AI_RECONCILIATION_STALE_SECONDS", "4"),
             ],
-            Some("unused"),
+            Some("prompt-secret"),
         );
         assert!(config.is_ok());
         let Some(config) = config.ok() else {
@@ -830,7 +829,6 @@ mod tests {
             ("TELEGRAM_TOKEN", "token"),
             ("TELEGRAM_USERNAME", "bot"),
             ("SUPABASE_POSTGRES_URL", SYNTHETIC_DATABASE_URL),
-            ("BOT_SYSTEM_PROMPT", "prompt"),
             ("COINMARKETCAP_KEY", "cmc"),
             ("OPENROUTER_API_KEY", "openrouter"),
             ("ADMIN_CHAT_ID", "not-a-number"),
@@ -844,13 +842,12 @@ mod tests {
                 ("TELEGRAM_TOKEN", "token"),
                 ("TELEGRAM_USERNAME", "bot"),
                 ("SUPABASE_POSTGRES_URL", SYNTHETIC_DATABASE_URL),
-                ("BOT_SYSTEM_PROMPT", "prompt"),
                 ("COINMARKETCAP_KEY", "cmc"),
                 ("OPENROUTER_API_KEY", "openrouter"),
                 ("AI_RECONCILIATION_INTERVAL_SECONDS", "invalid"),
                 ("AI_RECONCILIATION_RETRY_SECONDS", "invalid"),
             ],
-            None,
+            Some("synthetic prompt"),
         );
         assert_eq!(
             config.map(|config| (

@@ -244,10 +244,8 @@ where
 
     for logical_round in 0..max_rounds {
         let mut retry = 0;
-        let mut buffered_text = Vec::new();
         let round =
             loop {
-                buffered_text.clear();
                 let round =
                     provider.stream_round_events(&result.messages, &schemas, &mut |event| {
                         match event {
@@ -255,12 +253,7 @@ where
                                 on_event(ChatToolLoopEvent::ReasoningDelta(text))
                             }
                             ProviderStreamEvent::TextDelta(text) => {
-                                if include_intermediate_text {
-                                    on_event(ChatToolLoopEvent::FinalText(text))
-                                } else {
-                                    buffered_text.push(text);
-                                    Ok(())
-                                }
+                                on_event(ChatToolLoopEvent::FinalText(text))
                             }
                         }
                     });
@@ -323,16 +316,6 @@ where
             .cloned()
             .collect::<Vec<_>>();
         if known_calls.is_empty() {
-            if !include_intermediate_text {
-                for text in &buffered_text {
-                    emit_event(
-                        &mut on_event,
-                        &result,
-                        &round,
-                        ChatToolLoopEvent::FinalText(text.clone()),
-                    )?;
-                }
-            }
             result.text.push_str(&round.text);
             trace(
                 operation_id,
@@ -841,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn event_loop_holds_intermediate_text_until_tool_calls_are_classified() {
+    fn event_loop_resets_provisional_text_when_tool_calls_arrive() {
         let provider = Provider {
             rounds: RefCell::new(vec![
                 Ok(round(
@@ -872,6 +855,7 @@ mod tests {
         assert_eq!(
             events,
             [
+                ChatToolLoopEvent::FinalText("checking".to_owned()),
                 ChatToolLoopEvent::ResetToTrace,
                 ChatToolLoopEvent::ToolCall {
                     id: "call-1".to_owned(),
@@ -890,7 +874,7 @@ mod tests {
     }
 
     #[test]
-    fn event_loop_emits_final_text_after_provider_round_returns() {
+    fn event_loop_emits_text_before_provider_round_returns() {
         struct StreamingProvider {
             order: Rc<RefCell<Vec<&'static str>>>,
         }
@@ -933,7 +917,7 @@ mod tests {
         )
         .unwrap_or_else(|error| *error.partial);
 
-        assert_eq!(&*order.borrow(), &["provider_returned", "final_text"]);
+        assert_eq!(&*order.borrow(), &["final_text", "provider_returned"]);
         assert_eq!(result.text, "streamed");
     }
 

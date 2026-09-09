@@ -511,12 +511,13 @@ mod tests {
                 "TELEGRAM_USERNAME" => Some("synthetic_test_bot".to_owned()),
                 "COINMARKETCAP_KEY" => Some("synthetic-market-key".to_owned()),
                 "OPENROUTER_API_KEY" => Some("synthetic-ai-key".to_owned()),
-                "BOT_SYSTEM_PROMPT" => Some("synthetic system prompt".to_owned()),
                 "ADMIN_CHAT_ID" => admin.map(str::to_owned),
                 _ => None,
             };
-            ProductionConfig::from_lookup_and_prompt(lookup, || Ok(None))
-                .unwrap_or_else(|_| unreachable!())
+            ProductionConfig::from_lookup_and_prompt(lookup, || {
+                Ok(Some("synthetic system prompt".to_owned()))
+            })
+            .unwrap_or_else(|_| unreachable!())
         }
 
         assert!(build_operational_reporter(&config(None)).is_ok());
