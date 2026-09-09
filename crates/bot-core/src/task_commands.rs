@@ -195,13 +195,37 @@ pub fn render_task_list(tasks: &[ScheduledTask], locale: Locale) -> TaskListView
 pub fn render_task_page(tasks: &[ScheduledTask], locale: Locale, page: usize) -> TaskListView {
     let pages = tasks.len().div_ceil(5).max(1);
     let page = page.min(pages - 1);
+    let labels = tasks
+        .iter()
+        .map(|task| {
+            let text = no_mention(&task.text)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let name = if text.chars().count() > 28 {
+                format!("{}…", text.chars().take(27).collect::<String>())
+            } else {
+                text
+            };
+            format!(
+                "{} · {name}",
+                local_time(task.next_run_at, task.timezone_offset)
+            )
+        })
+        .collect::<Vec<_>>();
     let mut rows = tasks
         .iter()
+        .enumerate()
         .skip(page * 5)
         .take(5)
-        .map(|task| {
-            let name = no_mention(&task.text).chars().take(40).collect::<String>();
-            vec![button(name, format!("task:view:{}", task.id.as_str()))]
+        .map(|(index, task)| {
+            let label = &labels[index];
+            let label = if labels.iter().filter(|other| *other == label).count() > 1 {
+                format!("{} · {label}", index + 1)
+            } else {
+                label.clone()
+            };
+            vec![button(label, format!("task:view:{}", task.id.as_str()))]
         })
         .collect::<Vec<_>>();
     if pages > 1 {
@@ -424,6 +448,29 @@ mod tests {
     }
 
     #[test]
+    fn task_labels_distinguish_times_and_truncated_duplicates() -> Result<(), TaskStateError> {
+        let mut first = task("task0001", TaskSchedule::Once, 1_777_523_400)?;
+        first.text = "A long reminder with the same opening and first ending".into();
+        let mut second = first.clone();
+        second.id = TaskId::new("task0002")?;
+        second.next_run_at = first.next_run_at.map(|time| time + 3600);
+        let mut third = first.clone();
+        third.id = TaskId::new("task0003")?;
+        third.text = "A long reminder with the same opening and second ending".into();
+        let view = super::render_task_page(&[first, second, third], Locale::En, 0);
+        let rows = view.keyboard.map_or(Vec::new(), |k| k.inline_keyboard);
+        assert!(rows[0][0].text.contains("30/04 01:30"));
+        assert!(rows[1][0].text.contains("30/04 02:30"));
+        assert!(rows[0][0].text.ends_with('…'));
+        assert_ne!(rows[0][0].text, rows[2][0].text);
+        assert_eq!(
+            rows[2][0].callback_data.as_deref(),
+            Some("task:view:task0003")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn task_pages_keep_ids_in_callbacks_and_require_explicit_cancel() -> Result<(), TaskStateError>
     {
         let tasks = (0..7)
@@ -477,7 +524,7 @@ mod tests {
         let keyboard = list
             .keyboard
             .map_or(Vec::new(), |value| value.inline_keyboard);
-        assert_eq!(keyboard[0][0].text, "avisar a @\u{200b}user");
+        assert_eq!(keyboard[0][0].text, "30/04 01:30 · avisar a @\u{200b}user");
         assert_eq!(
             keyboard[0][0].callback_data.as_deref(),
             Some("task:view:once0001")
@@ -602,7 +649,7 @@ mod tests {
                 .and_then(|keyboard| keyboard.inline_keyboard.into_iter().next())
                 .and_then(|row| row.into_iter().next())
                 .map(|button| button.text),
-            Some("avisar a @\u{200b}user".to_owned())
+            Some("30/04 01:30 · avisar a @\u{200b}user".to_owned())
         );
         assert_eq!(task_not_found(Locale::En), "that task does not exist");
         assert_eq!(

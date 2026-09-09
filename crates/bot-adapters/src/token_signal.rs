@@ -935,6 +935,15 @@ pub fn render_market_chart_for_period(
     )
 }
 
+// Fit the complete numeric value and currency inside the right margin.
+fn chart_label_size(font: &FontArc, text: &str, preferred: f32, available: u32) -> f32 {
+    let mut size = preferred;
+    while imageproc::drawing::text_size(size, font, text).0 > available {
+        size *= 0.95;
+    }
+    size
+}
+
 fn render_price_chart(
     pair: &TokenPair,
     candles: &[Vec<f64>],
@@ -1075,7 +1084,12 @@ fn render_price_chart(
                         Rgb([170, 185, 205]),
                         right + 12,
                         y - 12,
-                        24.0,
+                        chart_label_size(
+                            &font,
+                            &price_label(value),
+                            24.0,
+                            width.saturating_sub((right + 24) as u32),
+                        ),
                         &font,
                         &price_label(value),
                     );
@@ -1086,7 +1100,12 @@ fn render_price_chart(
                 Rgb([54, 224, 195]),
                 right + 12,
                 current_y - 12,
-                26.0,
+                chart_label_size(
+                    &font,
+                    &price_text,
+                    26.0,
+                    width.saturating_sub((right + 24) as u32),
+                ),
                 &font,
                 &price_text,
             );
@@ -1130,6 +1149,21 @@ fn encode_png(image: RgbImage) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn chart_price_labels_fit_without_losing_currency_or_precision() {
+        let Some(font) = super::chart_font(false) else {
+            return;
+        };
+        for label in ["123456.789 USD", "1500000.123 ARS", "0.00000679 USD"] {
+            for preferred in [24.0, 26.0] {
+                let size = super::chart_label_size(&font, label, preferred, 176);
+                assert!(imageproc::drawing::text_size(size, &font, label).0 <= 176);
+                assert!(size <= preferred);
+            }
+        }
+        assert_eq!(super::chart_label_size(&font, "$1", 26.0, 176), 26.0);
+    }
+
     #[test]
     fn market_caption_uses_requested_period() {
         let mut quote = bot_core::stocks::StockQuote {
