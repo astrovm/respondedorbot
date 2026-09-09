@@ -97,7 +97,7 @@ use crate::ai_dispatch::{
     AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, reply_context,
 };
 use crate::runtime::UpdateHandler;
-use crate::telegram_stream::{StreamFinalizeError, TelegramStream};
+use crate::telegram_stream::{StreamFinalizeError, TelegramAiStream};
 
 pub trait ChatConfigSource {
     type Error;
@@ -3621,10 +3621,10 @@ where
             let Some(source) = self.ai_conversation_source.as_mut() else {
                 return Err(DispatchError::MissingService("AI conversation"));
             };
-            let mut stream = TelegramStream::new(&mut self.actions, chat_id, message_id);
-            let preparation = source.prepare_streaming(input, &mut |token| {
+            let mut stream = TelegramAiStream::new(&mut self.actions, chat_id, message_id);
+            let preparation = source.prepare_streaming_events(input, &mut |event| {
                 stream
-                    .feed(token)
+                    .feed(event)
                     .map_err(|_error| "Telegram rejected the initial streamed response".to_owned())
             });
             match preparation {
@@ -3949,12 +3949,13 @@ where
             let Some(source) = self.ai_conversation_source.as_mut() else {
                 return Err(DispatchError::MissingService("AI conversation"));
             };
-            let mut stream = TelegramStream::new(&mut self.actions, chat_id, message_id);
-            let preparation = source.prepare_summary_command_streaming(input, &mut |token| {
-                stream
-                    .feed(token)
-                    .map_err(|_error| "Telegram rejected the initial summary stream".to_owned())
-            });
+            let mut stream = TelegramAiStream::new(&mut self.actions, chat_id, message_id);
+            let preparation =
+                source.prepare_summary_command_streaming_events(input, &mut |event| {
+                    stream
+                        .feed(event)
+                        .map_err(|_error| "Telegram rejected the initial summary stream".to_owned())
+                });
             match preparation {
                 Err(error) => {
                     stream.cancel();
