@@ -285,8 +285,8 @@ pub fn build_conversation_prompt(input: &ConversationPromptInput) -> Vec<PromptM
     if input.enable_web_search {
         parts.push(
             match input.locale {
-                Locale::Es => "- si no estás seguro de un dato actual, podés buscarlo en internet",
-                Locale::En => "- use web search when you are unsure about a current fact",
+                Locale::Es => "- para datos que cambian con el tiempo, consultá herramientas antes de responder; si no podés verificarlos, decilo",
+                Locale::En => "- for facts that change over time, consult tools before answering; if you cannot verify them, say so",
             }
             .to_owned(),
         );
@@ -387,7 +387,7 @@ mod tests {
         assert!(final_prompt.contains("LINKS:\n- https://example.test"));
         assert!(final_prompt.contains("MESSAGE:\nwhat happened?\n\nINSTRUCTIONS:"));
         assert!(
-            final_prompt.ends_with("- use web search when you are unsure about a current fact")
+            final_prompt.ends_with("- for facts that change over time, consult tools before answering; if you cannot verify them, say so")
         );
     }
 
@@ -410,7 +410,7 @@ mod tests {
         assert!(prompt.contains("- Chat: private\n"));
         assert!(!prompt.contains("Synthetic Chat"));
         assert!(!prompt.contains("MENSAJE AL QUE RESPONDE"));
-        assert!(!prompt.contains("buscarlo en internet"));
+        assert!(!prompt.contains("consultá herramientas antes de responder"));
     }
 
     #[test]
