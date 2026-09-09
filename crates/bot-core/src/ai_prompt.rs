@@ -285,8 +285,8 @@ pub fn build_conversation_prompt(input: &ConversationPromptInput) -> Vec<PromptM
     if input.enable_web_search {
         parts.push(
             match input.locale {
-                Locale::Es => "- para datos que cambian con el tiempo, consultá herramientas antes de responder; si no podés verificarlos, decilo",
-                Locale::En => "- for facts that change over time, consult tools before answering; if you cannot verify them, say so",
+                Locale::Es => "- para fechas y horarios, buscá con el año y la fecha actual; si aparece una fecha pasada o fuentes contradictorias, usá web_fetch sobre una fuente oficial antes de responder; si el conflicto sigue, decilo y no elijas una fecha al azar",
+                Locale::En => "- for dates and times, search with the year and current date; if a date is past or sources conflict, use web_fetch on an official source before answering; if the conflict remains, say so and do not pick a date at random",
             }
             .to_owned(),
         );
@@ -387,8 +387,25 @@ mod tests {
         assert!(final_prompt.contains("LINKS:\n- https://example.test"));
         assert!(final_prompt.contains("MESSAGE:\nwhat happened?\n\nINSTRUCTIONS:"));
         assert!(
-            final_prompt.ends_with("- for facts that change over time, consult tools before answering; if you cannot verify them, say so")
+            final_prompt.ends_with("- for dates and times, search with the year and current date; if a date is past or sources conflict, use web_fetch on an official source before answering; if the conflict remains, say so and do not pick a date at random")
         );
+    }
+
+    #[test]
+    fn schedule_questions_require_source_verification_when_dates_conflict() {
+        let mut value = input(Locale::Es);
+        value.message_text = "cuando es boca river".to_owned();
+        let messages = build_conversation_prompt(&value);
+        let Some(PromptMessage {
+            content: PromptContent::Text(prompt),
+            ..
+        }) = messages.last()
+        else {
+            return;
+        };
+        assert!(prompt.contains(
+            "- para fechas y horarios, buscá con el año y la fecha actual; si aparece una fecha pasada o fuentes contradictorias, usá web_fetch sobre una fuente oficial antes de responder; si el conflicto sigue, decilo y no elijas una fecha al azar"
+        ));
     }
 
     #[test]
