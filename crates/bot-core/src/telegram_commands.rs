@@ -199,6 +199,25 @@ pub fn telegram_commands(locale: Locale) -> Vec<TelegramCommand> {
 }
 
 #[must_use]
+pub fn primary_telegram_commands(locale: Locale) -> Vec<TelegramCommand> {
+    telegram_commands(locale)
+        .into_iter()
+        .filter(|command| {
+            COMMAND_GROUPS.iter().any(|group| {
+                let primary = if group.aliases.contains(&"p") {
+                    "p"
+                } else if group.aliases.contains(&"s") {
+                    "s"
+                } else {
+                    group.aliases[0]
+                };
+                command.command == primary
+            })
+        })
+        .collect()
+}
+
+#[must_use]
 pub fn command_publication_actions() -> Vec<TelegramAction> {
     [
         (None, Locale::Es),
@@ -207,7 +226,7 @@ pub fn command_publication_actions() -> Vec<TelegramAction> {
     ]
     .into_iter()
     .map(|(language_code, locale)| TelegramAction::SetCommands {
-        commands: telegram_commands(locale),
+        commands: primary_telegram_commands(locale),
         language_code: language_code.map(ToOwned::to_owned),
     })
     .collect()
@@ -269,6 +288,22 @@ mod tests {
     }
 
     #[test]
+    fn primary_menu_keeps_aliases_out_of_picker_only() {
+        let commands = super::primary_telegram_commands(Locale::En);
+        for name in ["p", "c", "s", "help", "config"] {
+            assert!(commands.iter().any(|c| c.command == name));
+        }
+        for alias in ["prices", "precios", "settings", "tldr"] {
+            assert!(!commands.iter().any(|c| c.command == alias));
+            assert!(
+                telegram_commands(Locale::En)
+                    .iter()
+                    .any(|c| c.command == alias)
+            );
+        }
+    }
+
+    #[test]
     fn publication_plans_default_spanish_and_english_menus() {
         let actions = command_publication_actions();
         assert_eq!(actions.len(), 3);
@@ -282,6 +317,6 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(languages, [(75, None), (75, Some("es")), (75, Some("en"))]);
+        assert_eq!(languages, [(31, None), (31, Some("es")), (31, Some("en"))]);
     }
 }
