@@ -219,7 +219,7 @@ pub(crate) fn tool_schema(tool: NativeTool) -> Value {
             }),
         ),
         NativeTool::WebSearch => (
-            "Search the public web with Firecrawl. Use it for current facts or when the user asks you to search. The result contains source URLs and descriptions.",
+            "Search the public web with Firecrawl. Results are discovery snippets; for dates and schedules, use web_fetch on an official source if a date is past or sources conflict before answering.",
             json!({
                 "type": "object",
                 "properties": {"query": {"type": "string", "description": "A concise web search query", "maxLength": 500}},
