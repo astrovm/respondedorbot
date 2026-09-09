@@ -72,6 +72,7 @@ impl OpenRouterStreamTransport for LegacyReasoningTransport {
         _request: &HttpRequest,
         on_bytes: &mut dyn FnMut(&[u8]) -> Result<(), OpenRouterChatError>,
     ) -> Result<(), OpenRouterChatError> {
+        on_bytes(b"data: {\"choices\":[{\"delta\":{\"reasoning\":\"checking\"}}]}\n\n")?;
         on_bytes(b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"checking\"}}]}\n\n")?;
         on_bytes(b"data: [DONE]\n\n")
     }
@@ -98,9 +99,15 @@ fn openrouter_stream_preserves_legacy_reasoning_content() {
         ),
         Ok(())
     );
+    assert_eq!(events.len(), 3);
     assert!(matches!(
-        events.first(),
-        Some(openrouter_chat::ChatStreamEvent::Chunk(chunk))
+        &events[0],
+        openrouter_chat::ChatStreamEvent::Chunk(chunk)
+            if chunk.reasoning == "checking" && chunk.reasoning_details.is_empty()
+    ));
+    assert!(matches!(
+        &events[1],
+        openrouter_chat::ChatStreamEvent::Chunk(chunk)
             if chunk.reasoning == "checking" && chunk.reasoning_details.is_empty()
     ));
 }
