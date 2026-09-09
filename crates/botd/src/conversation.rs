@@ -1127,6 +1127,7 @@ where
         }
 
         let loop_result = run_chat_tool_loop(
+            &operation_id,
             &self.provider,
             &mut tools,
             &messages,

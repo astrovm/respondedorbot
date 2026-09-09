@@ -142,6 +142,24 @@ delivery falls back to the available quote and says that the chart is
 unavailable. Without an explicit range, the caption keeps the default daily
 change.
 
+## Inspect AI tool logs
+
+Foreground AI conversations emit single-line `AI trace:` JSON records to stderr,
+captured by the container journal. Each record includes the operation ID and
+provider round. Events show available tools, provider generation IDs, requested
+tool calls, execution duration, and the final executed-tool count (including zero).
+Search events include the query, up to five source URLs/titles/snippets, empty
+results or an error, and the provider request ID when available.
+
+```bash
+podman logs --since 15m --timestamps systemd-respondedorbot 2>&1 | grep 'AI trace:'
+```
+
+Match `operation_id` across records to follow one conversation turn. Search
+queries and snippets are logged with length limits; URL credentials, query
+parameters, and fragments are omitted. Other tool outputs, chat history, and
+assistant response bodies are not logged. These records are not sent to Telegram.
+
 ## Test it
 
 Run the same checks used by pull requests:
