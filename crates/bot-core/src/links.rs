@@ -294,10 +294,26 @@ pub fn plan_link_actions(
     let buttons = replacement
         .original_links
         .iter()
-        .map(|url| InlineKeyboardButton {
-            text: match context.locale {
-                Locale::Es => "abrir en la app".to_owned(),
-                Locale::En => "open in app".to_owned(),
+        .enumerate()
+        .map(|(index, url)| InlineKeyboardButton {
+            text: {
+                let host = Url::parse(url)
+                    .ok()
+                    .and_then(|url| url.host_str().map(ToOwned::to_owned))
+                    .unwrap_or_default();
+                let site = match host.trim_start_matches("www.") {
+                    "x.com" | "twitter.com" => "X",
+                    "bsky.app" => "Bluesky",
+                    "instagram.com" => "Instagram",
+                    "reddit.com" | "old.reddit.com" => "Reddit",
+                    other => other,
+                };
+                let verb = crate::menu_ui::localized(context.locale, "Abrir", "Open");
+                if replacement.original_links.len() > 1 {
+                    format!("{verb} {site} · {}", index + 1)
+                } else {
+                    format!("{verb} {site}")
+                }
             },
             url: Some(url.clone()),
             callback_data: None,
@@ -533,7 +549,7 @@ mod tests {
                 .reply_markup
                 .as_ref()
                 .map(|markup| markup.inline_keyboard[0][0].text.as_str()),
-            Some("abrir en la app")
+            Some("Abrir X")
         );
         assert!(reply.delete_original.is_none());
         assert!(reply.stored_text.ends_with("LINKS DEL MENSAJE"));
@@ -566,7 +582,7 @@ mod tests {
                 .reply_markup
                 .as_ref()
                 .map(|markup| markup.inline_keyboard[0][0].text.as_str()),
-            Some("open in app")
+            Some("Open X")
         );
         assert_eq!(
             delete.delete_original,

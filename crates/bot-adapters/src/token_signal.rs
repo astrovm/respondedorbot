@@ -757,7 +757,7 @@ where
                     vec![now as f64, price, price, price, price, 0.0],
                 ];
                 let title = format!(
-                    "{} | {period} | last available trade price",
+                    "{} · {period}\nLast available trade price",
                     signal.pair.base_token.symbol
                 );
                 let mut pair = signal.pair.clone();
@@ -767,7 +767,7 @@ where
             return Err("requested token history unavailable".into());
         }
         let title = format!(
-            "{} | {period} available history",
+            "{} · {period}\nAvailable history",
             signal.pair.base_token.symbol
         );
         render_price_chart(&signal.pair, &candles, Some(&title), None, 1280, 900)
@@ -960,10 +960,7 @@ pub fn render_market_chart_for_period(
         price_usd: json!(quote.price),
         ..TokenPair::default()
     };
-    let title = format!(
-        "{} — {} | {} {} | {period} history",
-        quote.symbol, quote.name, quote.price, quote.currency
-    );
+    let title = format!("{} · {period}\n{}", quote.symbol, quote.name);
     render_price_chart(
         &pair,
         candles,
@@ -982,19 +979,15 @@ fn render_price_chart(
     width: u32,
     height: u32,
 ) -> Result<Vec<u8>, String> {
-    if width < 120 || height < 120 {
+    if width < 320 || height < 240 {
         return Err("token chart dimensions are too small".to_owned());
     }
     let mut image = RgbImage::from_pixel(width, height, Rgb([7, 9, 18]));
     let left = 56_i32;
-    let right = i32::try_from(width).map_err(|_| "chart width is too large")? - 92;
-    let top = 74_i32;
+    let right = i32::try_from(width).map_err(|_| "chart width is too large")? - 200;
+    let top = 130_i32;
     let bottom = i32::try_from(height).map_err(|_| "chart height is too large")? - 82;
     let price = flexible_number(&pair.price_usd).unwrap_or(0.0);
-    let market_cap = flexible_number(&pair.market_cap)
-        .filter(|market_cap| *market_cap != 0.0)
-        .or_else(|| flexible_number(&pair.fdv))
-        .unwrap_or(0.0);
     let symbol = if pair.base_token.symbol.is_empty() {
         "TOKEN".to_owned()
     } else {
@@ -1009,21 +1002,26 @@ fn render_price_chart(
     };
     let price_text = price_label(price);
     if let Some(font) = chart_font(true) {
-        let change = flexible_number(&pair.price_change.h24).unwrap_or(0.0);
-        let sign = if change >= 0.0 { "+" } else { "" };
-        let title = format!(
-            "{symbol} (4H) Price: {price_text} ({sign}{change:.1}%) • MC: {}",
-            format_money(market_cap, false)
-        );
-        draw_text_mut(
-            &mut image,
-            Rgb([220, 231, 244]),
-            24,
-            22,
-            24.0,
-            &font,
-            heading.unwrap_or(&title),
-        );
+        let title = format!("{symbol}\n{price_text}");
+        for (index, line) in heading.unwrap_or(&title).lines().take(2).enumerate() {
+            let font_size = if index == 0 { 38.0 } else { 28.0 };
+            let mut label = line.to_owned();
+            while imageproc::drawing::text_size(font_size, &font, &label).0
+                > width.saturating_sub(48)
+                && label.chars().count() > 1
+            {
+                label.pop();
+            }
+            draw_text_mut(
+                &mut image,
+                Rgb([220, 231, 244]),
+                24,
+                18 + index as i32 * 46,
+                font_size,
+                &font,
+                &label,
+            );
+        }
     }
     for index in 0..6 {
         let y = top + (bottom - top) * index / 5;
@@ -1068,7 +1066,7 @@ fn render_price_chart(
             .fold(f64::NEG_INFINITY, f64::max);
         let mut range = high - low;
         if !range.is_finite() || range.abs() <= f64::EPSILON {
-            range = high.abs().max(1.0) * 0.02;
+            range = high.abs().max(1e-12) * 0.02;
         }
         let minimum = low - range * 0.08;
         let maximum = high + range * 0.08;
@@ -1104,7 +1102,7 @@ fn render_price_chart(
         } else {
             candles.last().map_or(0.0, |candle| candle[4])
         };
-        let current_y = y_for(current);
+        let current_y = y_for(current).clamp(top, bottom);
         draw_line(
             &mut image,
             left,
@@ -1113,54 +1111,37 @@ fn render_price_chart(
             current_y,
             Rgb([0, 184, 148]),
         );
-        fill_rectangle(
-            &mut image,
-            right.saturating_sub(190),
-            current_y.saturating_sub(24),
-            right,
-            current_y.saturating_add(24),
-            Rgb([14, 143, 125]),
-        );
-        if let Some(font) = chart_font(true) {
+        if let Some(font) = chart_font(false) {
+            for index in 0..6 {
+                let value = maximum - span * f64::from(index) / 5.0;
+                let y = top + (bottom - top) * index / 5;
+                if (y - current_y).abs() > 32 {
+                    draw_text_mut(
+                        &mut image,
+                        Rgb([170, 185, 205]),
+                        right + 12,
+                        y - 12,
+                        24.0,
+                        &font,
+                        &price_label(value),
+                    );
+                }
+            }
             draw_text_mut(
                 &mut image,
-                Rgb([234, 255, 249]),
-                right.saturating_sub(184),
-                current_y.saturating_sub(18),
-                18.0,
+                Rgb([54, 224, 195]),
+                right + 12,
+                current_y - 12,
+                26.0,
                 &font,
                 &price_text,
             );
-            if let Some(ath) = candles
-                .iter()
-                .map(|candle| candle[2])
-                .max_by(f64::total_cmp)
-                .filter(|_| high > low)
-            {
-                draw_text_mut(
-                    &mut image,
-                    Rgb([54, 224, 195]),
-                    right.saturating_sub(220),
-                    y_for(ath).saturating_sub(28).max(top),
-                    20.0,
-                    &font,
-                    &format!(
-                        "{} {}",
-                        price_label(ath),
-                        if heading.is_some() {
-                            "Period high"
-                        } else {
-                            "ATH"
-                        }
-                    ),
-                );
-            }
         }
     }
     if let Some(font) = chart_font(false) {
         for (candle, x) in [
             (candles.first(), left),
-            (candles.last(), right.saturating_sub(180)),
+            (candles.last(), right.saturating_sub(250)),
         ] {
             if let Some(candle) = candle
                 && let Some(date) = chrono::DateTime::from_timestamp(candle[0] as i64, 0)
@@ -1170,7 +1151,7 @@ fn render_price_chart(
                     Rgb([170, 185, 205]),
                     x,
                     bottom + 24,
-                    18.0,
+                    24.0,
                     &font,
                     &date.format("%Y-%m-%d %H:%M UTC").to_string(),
                 );

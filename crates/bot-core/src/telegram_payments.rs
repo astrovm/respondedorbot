@@ -71,14 +71,18 @@ fn topup_keyboard(locale: Locale) -> InlineKeyboardMarkup {
                 let credits = format_credit_units(CreditUnits::new(*credits_awarded));
                 vec![InlineKeyboardButton {
                     text: match locale {
-                        Locale::Es => format!("{credits} créditos - {xtr_amount} ⭐"),
-                        Locale::En => format!("{credits} credits - {xtr_amount} ⭐"),
+                        Locale::Es => format!("{credits} créditos · {xtr_amount} ⭐"),
+                        Locale::En => format!("{credits} credits · {xtr_amount} ⭐"),
                     },
                     url: None,
                     callback_data: Some(format!("topup:{id}")),
                     copy_text: None,
                 }]
             })
+            .chain(std::iter::once(vec![crate::menu_ui::close(
+                locale,
+                "topup:close",
+            )]))
             .collect(),
     }
 }
@@ -119,8 +123,8 @@ pub fn plan_topup_command(
     } else {
         (
             match locale {
-                Locale::Es => "elegí cuánto querés cargar:",
-                Locale::En => "choose how much you want to add:",
+                Locale::Es => "Créditos\n\nElegí cuánto querés cargar.",
+                Locale::En => "Credits\n\nChoose how much to add.",
             }
             .to_owned(),
             Some(topup_keyboard(locale)),
@@ -712,7 +716,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(private)) = private else {
             return;
         };
-        assert_eq!(private.text, "choose how much you want to add:");
+        assert_eq!(private.text, "Credits\n\nChoose how much to add.");
         assert_eq!(private.reply_to_message_id, Some(MessageId(7)));
         let keyboard =
             private
@@ -720,12 +724,12 @@ mod tests {
                 .unwrap_or(crate::telegram_actions::InlineKeyboardMarkup {
                     inline_keyboard: Vec::new(),
                 });
-        assert_eq!(keyboard.inline_keyboard.len(), 6);
+        assert_eq!(keyboard.inline_keyboard.len(), 7);
         assert_eq!(
             keyboard.inline_keyboard[0][0].callback_data.as_deref(),
             Some("topup:p50")
         );
-        assert_eq!(keyboard.inline_keyboard[0][0].text, "50.00 credits - 25 ⭐");
+        assert_eq!(keyboard.inline_keyboard[0][0].text, "50.00 credits · 25 ⭐");
 
         for (chat_type, available, bot_name, locale, expected) in [
             (

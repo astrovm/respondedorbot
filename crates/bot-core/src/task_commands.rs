@@ -3,8 +3,9 @@
 use chrono::{FixedOffset, TimeZone, Utc, Weekday};
 
 use crate::locale::Locale;
+use crate::menu_ui::{back, button, close, localized};
 use crate::scheduled_tasks::{ScheduledTask, TaskId, TaskSchedule};
-use crate::telegram_actions::{InlineKeyboardButton, InlineKeyboardMarkup};
+use crate::telegram_actions::InlineKeyboardMarkup;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskListView {
@@ -15,20 +16,37 @@ pub struct TaskListView {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TaskCallbackParse {
     Delete(TaskId),
+    View(TaskId),
+    Confirm(TaskId),
+    Page(usize),
+    Close,
     Guard,
 }
 
 #[must_use]
 pub fn parse_task_callback(data: &str) -> TaskCallbackParse {
+    if data == "task:close" {
+        return TaskCallbackParse::Close;
+    }
     let mut parts = data.splitn(3, ':');
-    let (Some(prefix), Some(_action), Some(task_id)) = (parts.next(), parts.next(), parts.next())
+    let (Some("task"), Some(action), Some(value)) = (parts.next(), parts.next(), parts.next())
     else {
         return TaskCallbackParse::Guard;
     };
-    if prefix != "task" {
-        return TaskCallbackParse::Guard;
+    if action == "page" {
+        return value
+            .parse()
+            .map_or(TaskCallbackParse::Guard, TaskCallbackParse::Page);
     }
-    TaskId::new(task_id).map_or(TaskCallbackParse::Guard, TaskCallbackParse::Delete)
+    let Ok(id) = TaskId::new(value) else {
+        return TaskCallbackParse::Guard;
+    };
+    match action {
+        "del" => TaskCallbackParse::Delete(id),
+        "view" => TaskCallbackParse::View(id),
+        "ask" => TaskCallbackParse::Confirm(id),
+        _ => TaskCallbackParse::Guard,
+    }
 }
 
 #[must_use]
@@ -170,40 +188,100 @@ pub fn format_task_summary(task: &ScheduledTask, locale: Locale) -> String {
 
 #[must_use]
 pub fn render_task_list(tasks: &[ScheduledTask], locale: Locale) -> TaskListView {
-    if tasks.is_empty() {
-        return TaskListView {
-            text: match locale {
-                Locale::Es => "no hay tareas",
-                Locale::En => "there are no tasks",
-            }
-            .to_owned(),
-            keyboard: None,
-        };
-    }
-    let text = tasks
+    render_task_page(tasks, locale, 0)
+}
+
+#[must_use]
+pub fn render_task_page(tasks: &[ScheduledTask], locale: Locale, page: usize) -> TaskListView {
+    let pages = tasks.len().div_ceil(5).max(1);
+    let page = page.min(pages - 1);
+    let mut rows = tasks
         .iter()
-        .map(|task| format!("• {}", format_task_summary(task, locale)))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let keyboard = InlineKeyboardMarkup {
-        inline_keyboard: tasks
-            .iter()
-            .map(|task| {
-                vec![InlineKeyboardButton {
-                    text: match locale {
-                        Locale::Es => format!("borrar {}", task.id.as_str()),
-                        Locale::En => format!("delete {}", task.id.as_str()),
-                    },
-                    url: None,
-                    callback_data: Some(format!("task:del:{}", task.id.as_str())),
-                    copy_text: None,
-                }]
-            })
-            .collect(),
+        .skip(page * 5)
+        .take(5)
+        .map(|task| {
+            let name = no_mention(&task.text).chars().take(40).collect::<String>();
+            vec![button(name, format!("task:view:{}", task.id.as_str()))]
+        })
+        .collect::<Vec<_>>();
+    if pages > 1 {
+        let mut navigation = Vec::new();
+        if page > 0 {
+            navigation.push(button("‹", format!("task:page:{}", page - 1)));
+        }
+        navigation.push(button(
+            format!("{} / {pages}", page + 1),
+            format!("task:page:{page}"),
+        ));
+        if page + 1 < pages {
+            navigation.push(button("›", format!("task:page:{}", page + 1)));
+        }
+        rows.push(navigation);
+    }
+    rows.push(vec![close(locale, "task:close")]);
+    TaskListView {
+        text: if tasks.is_empty() {
+            localized(locale, "no hay tareas", "there are no tasks").to_owned()
+        } else {
+            localized(
+                locale,
+                "Tareas\n\nElegí una tarea para ver sus detalles.",
+                "Tasks\n\nChoose a task to see its details.",
+            )
+            .to_owned()
+        },
+        keyboard: Some(InlineKeyboardMarkup {
+            inline_keyboard: rows,
+        }),
+    }
+}
+
+#[must_use]
+pub fn render_task_detail(task: &ScheduledTask, locale: Locale, confirm: bool) -> TaskListView {
+    let summary = format_task_summary(task, locale);
+    let summary = summary
+        .strip_prefix(&format!("[{}] ", task.id.as_str()))
+        .unwrap_or(&summary);
+    let text = if confirm {
+        format!(
+            "{}\n\n{summary}",
+            localized(locale, "¿Cancelar esta tarea?", "Cancel this task?")
+        )
+    } else {
+        summary.to_owned()
     };
+    let action = if confirm { "del" } else { "ask" };
+    let label = localized(
+        locale,
+        if confirm {
+            "Sí, cancelar tarea"
+        } else {
+            "Cancelar tarea"
+        },
+        if confirm {
+            "Yes, cancel task"
+        } else {
+            "Cancel task"
+        },
+    );
     TaskListView {
         text,
-        keyboard: Some(keyboard),
+        keyboard: Some(InlineKeyboardMarkup {
+            inline_keyboard: vec![
+                vec![button(label, format!("task:{action}:{}", task.id.as_str()))],
+                vec![
+                    back(
+                        locale,
+                        if confirm {
+                            format!("task:view:{}", task.id.as_str())
+                        } else {
+                            "task:page:0".to_owned()
+                        },
+                    ),
+                    close(locale, "task:close"),
+                ],
+            ],
+        }),
     }
 }
 
@@ -346,17 +424,63 @@ mod tests {
     }
 
     #[test]
+    fn task_pages_keep_ids_in_callbacks_and_require_explicit_cancel() -> Result<(), TaskStateError>
+    {
+        let tasks = (0..7)
+            .map(|i| task(&format!("task{i:04}"), TaskSchedule::Once, 1_777_523_400))
+            .collect::<Result<Vec<_>, _>>()?;
+        let page = super::render_task_page(&tasks, Locale::En, 1);
+        let rows = page.keyboard.map_or(Vec::new(), |k| k.inline_keyboard);
+        assert_eq!(
+            rows[0][0].callback_data.as_deref(),
+            Some("task:view:task0005")
+        );
+        assert_eq!(rows.len(), 4);
+        for (data, expected) in [
+            ("task:view:task0005", 0),
+            ("task:ask:task0005", 1),
+            ("task:del:task0005", 2),
+        ] {
+            let parsed = parse_task_callback(data);
+            assert!(matches!(
+                (expected, parsed),
+                (0, TaskCallbackParse::View(_))
+                    | (1, TaskCallbackParse::Confirm(_))
+                    | (2, TaskCallbackParse::Delete(_))
+            ));
+        }
+        for locale in [Locale::Es, Locale::En] {
+            for confirm in [false, true] {
+                let detail = super::render_task_detail(&tasks[5], locale, confirm);
+                assert!(!detail.text.contains("task0005"));
+                assert!(detail.keyboard.is_some());
+            }
+        }
+        assert_eq!(
+            parse_task_callback("task:bogus:task0005"),
+            TaskCallbackParse::Guard
+        );
+        assert_eq!(
+            parse_task_callback("task:page:invalid"),
+            TaskCallbackParse::Guard
+        );
+        assert_eq!(parse_task_callback("task:close"), TaskCallbackParse::Close);
+        Ok(())
+    }
+
+    #[test]
     fn renders_list_keyboard_and_empty_state() -> Result<(), TaskStateError> {
         let item = task("once0001", TaskSchedule::Once, 1_777_523_400)?;
         let list = render_task_list(&[item], Locale::Es);
-        assert!(list.text.starts_with("• [once0001]"));
+        assert!(list.text.starts_with("Tareas"));
+        assert!(!list.text.contains("once0001"));
         let keyboard = list
             .keyboard
             .map_or(Vec::new(), |value| value.inline_keyboard);
-        assert_eq!(keyboard[0][0].text, "borrar once0001");
+        assert_eq!(keyboard[0][0].text, "avisar a @\u{200b}user");
         assert_eq!(
             keyboard[0][0].callback_data.as_deref(),
-            Some("task:del:once0001")
+            Some("task:view:once0001")
         );
         assert_eq!(render_task_list(&[], Locale::En).text, "there are no tasks");
         Ok(())
@@ -478,7 +602,7 @@ mod tests {
                 .and_then(|keyboard| keyboard.inline_keyboard.into_iter().next())
                 .and_then(|row| row.into_iter().next())
                 .map(|button| button.text),
-            Some("delete weekly02".to_owned())
+            Some("avisar a @\u{200b}user".to_owned())
         );
         assert_eq!(task_not_found(Locale::En), "that task does not exist");
         assert_eq!(
