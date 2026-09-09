@@ -803,7 +803,7 @@ mod tests {
         ChatCompletionRequest, ChatMessage, ChatRole, ChatStreamEvent, HttpRequest, HttpResponse,
         OpenRouterChatError, OpenRouterStreamTransport, OpenRouterTransport,
         ReqwestOpenRouterTransport, ToolCall, ToolFunctionCall, complete_with,
-        parse_chat_completion, stream_with,
+        parse_chat_completion, parse_sse_frame, stream_with,
     };
 
     fn serve_once(
@@ -1279,6 +1279,20 @@ mod tests {
         assert_eq!(requests[0].bearer_token, "synthetic-key");
         let request_body: Value = serde_json::from_str(&requests[0].body).unwrap_or(Value::Null);
         assert_eq!(request_body["stream"], true);
+    }
+
+    #[test]
+    fn stream_accepts_the_legacy_reasoning_content_field() {
+        let event =
+            parse_sse_frame(br#"data: {"choices":[{"delta":{"reasoning_content":"checking"}}]}"#)
+                .unwrap_or_else(|_| unreachable!())
+                .unwrap_or_else(|| unreachable!());
+        let ChatStreamEvent::Chunk(chunk) = event else {
+            unreachable!();
+        };
+
+        assert_eq!(chunk.reasoning, "checking");
+        assert!(chunk.reasoning_details.is_empty());
     }
 
     #[test]
