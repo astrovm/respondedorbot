@@ -1695,13 +1695,6 @@ where
         }
     }
 
-    fn render_photo(
-        &mut self,
-        signal: &bot_core::token_signals::TokenSignal,
-    ) -> Result<Vec<u8>, String> {
-        TokenSignalAdapter::render_photo(self, signal)
-    }
-
     fn render_period_photo(
         &mut self,
         signal: &bot_core::token_signals::TokenSignal,
@@ -3374,8 +3367,8 @@ mod tests {
             pump: None,
         };
         assert!(
-            TokenSignalSource::render_photo(&mut adapter, &signal)
-                .is_ok_and(|image| image.starts_with(b"\x89PNG"))
+            TokenSignalSource::render_period_photo(&mut adapter, &signal, "24h", 1_800_000_000)
+                .is_err()
         );
 
         assert!(
