@@ -16,7 +16,8 @@ use bot_adapters::hacker_news::ReqwestHackerNewsTransport;
 use bot_adapters::link_preview;
 use bot_adapters::link_preview::ReqwestLinkPreviewTransport;
 use bot_adapters::openrouter_chat::{
-    self, ChatCompletionRequest, OpenRouterChatError, ReqwestOpenRouterTransport,
+    self, ChatCompletionRequest, ChatMessage, ChatRole, HttpRequest, OpenRouterChatError,
+    OpenRouterStreamTransport, ReqwestOpenRouterTransport,
 };
 use bot_adapters::openrouter_generation::ReqwestGenerationTransport;
 use bot_adapters::polymarket::ReqwestPolymarketTransport;
@@ -61,6 +62,47 @@ fn production_http_transports_construct_without_contacting_providers() {
     assert!(ReqwestWeatherTransport::new().is_ok());
     assert!(ReqwestWebFetchTransport::new().is_ok());
     assert!(ReqwestYahooFinanceTransport::new().is_ok());
+}
+
+struct LegacyReasoningTransport;
+
+impl OpenRouterStreamTransport for LegacyReasoningTransport {
+    fn post_stream(
+        &self,
+        _request: &HttpRequest,
+        on_bytes: &mut dyn FnMut(&[u8]) -> Result<(), OpenRouterChatError>,
+    ) -> Result<(), OpenRouterChatError> {
+        on_bytes(b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"checking\"}}]}\n\n")?;
+        on_bytes(b"data: [DONE]\n\n")
+    }
+}
+
+#[test]
+fn openrouter_stream_preserves_legacy_reasoning_content() {
+    let mut request = ChatCompletionRequest::new(
+        "synthetic/model",
+        vec![ChatMessage::text(ChatRole::User, "synthetic question")],
+    );
+    request.stream = true;
+    let mut events = Vec::new();
+    assert_eq!(
+        openrouter_chat::stream_with(
+            &LegacyReasoningTransport,
+            "synthetic-key",
+            "https://synthetic.invalid/api/v1",
+            &request,
+            |event| {
+                events.push(event);
+                Ok(())
+            },
+        ),
+        Ok(())
+    );
+    assert!(matches!(
+        events.first(),
+        Some(openrouter_chat::ChatStreamEvent::Chunk(chunk))
+            if chunk.reasoning == "checking" && chunk.reasoning_details.is_empty()
+    ));
 }
 
 #[test]
