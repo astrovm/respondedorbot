@@ -556,9 +556,6 @@ mod tests {
             .feed(AiStreamEvent::Thought("checking the match".to_owned()))
             .unwrap_or_else(|_| unreachable!());
         stream
-            .feed(AiStreamEvent::FinalText("candidate".to_owned()))
-            .unwrap_or_else(|_| unreachable!());
-        stream
             .feed(AiStreamEvent::ResetToTrace)
             .unwrap_or_else(|_| unreachable!());
         stream
@@ -590,24 +587,16 @@ mod tests {
         ));
         assert!(matches!(
             &actions.actions[1],
-            TelegramAction::EditMessage { text, .. } if text == "candidate"
-        ));
-        assert!(matches!(
-            &actions.actions[2],
-            TelegramAction::EditMessage { text, .. } if text == "💭 checking the match"
-        ));
-        assert!(matches!(
-            &actions.actions[3],
             TelegramAction::EditMessage { text, .. }
                 if text == "💭 checking the match\n\n🔧 web_search(query=\"cuando juegan river y huracán\")"
         ));
         assert!(matches!(
-            &actions.actions[4],
+            &actions.actions[2],
             TelegramAction::EditMessage { text, .. }
                 if text == "💭 checking the match\n\n🔧 web_search(query=\"cuando juegan river y huracán\")\n\n✅ web_search → fixture result"
         ));
         assert!(matches!(
-            &actions.actions[5],
+            &actions.actions[3],
             TelegramAction::EditMessage { text, .. } if text == "River juega el sábado"
         ));
     }
