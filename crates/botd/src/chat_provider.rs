@@ -119,9 +119,14 @@ impl<Transport: OpenRouterStreamTransport> OpenRouterChatStreamer<Transport> {
                 let ChatStreamEvent::Chunk(chunk) = event else {
                     return Ok(());
                 };
-                if !chunk.reasoning.is_empty() {
-                    on_event(ProviderStreamEvent::ReasoningDelta(chunk.reasoning.clone()))?;
-                    result.reasoning.push_str(&chunk.reasoning);
+                let reasoning = if !chunk.reasoning.is_empty() {
+                    chunk.reasoning.clone()
+                } else {
+                    reasoning_details_text(&chunk.reasoning_details)
+                };
+                if !reasoning.is_empty() {
+                    on_event(ProviderStreamEvent::ReasoningDelta(reasoning.clone()))?;
+                    result.reasoning.push_str(&reasoning);
                 }
                 if !chunk.text.is_empty() {
                     on_event(ProviderStreamEvent::TextDelta(chunk.text.clone()))?;
@@ -238,6 +243,12 @@ fn openrouter_message(message: &PromptMessage) -> ChatMessage {
         )),
         PromptContent::Empty => None,
     };
+    let reasoning_details = message.reasoning_details.clone();
+    let reasoning = if reasoning_details.is_empty() {
+        message.reasoning.clone()
+    } else {
+        None
+    };
     ChatMessage {
         role: match message.role {
             PromptRole::System => ChatRole::System,
@@ -246,8 +257,8 @@ fn openrouter_message(message: &PromptMessage) -> ChatMessage {
             PromptRole::Tool => ChatRole::Tool,
         },
         content,
-        reasoning: message.reasoning.clone(),
-        reasoning_details: message.reasoning_details.clone(),
+        reasoning,
+        reasoning_details,
         name: None,
         tool_call_id: message.tool_call_id.clone(),
         tool_calls: message
@@ -256,6 +267,18 @@ fn openrouter_message(message: &PromptMessage) -> ChatMessage {
             .map(openrouter_tool_call)
             .collect(),
     }
+}
+
+fn reasoning_details_text(details: &[Value]) -> String {
+    details
+        .iter()
+        .filter_map(|detail| {
+            detail
+                .get("text")
+                .and_then(Value::as_str)
+                .or_else(|| detail.get("summary").and_then(Value::as_str))
+        })
+        .collect()
 }
 
 fn openrouter_tool_call(call: &bot_core::ai_prompt::PromptToolCall) -> ToolCall {
@@ -345,6 +368,22 @@ mod tests {
         if done {
             body.push_str("data: [DONE]\n\n");
         }
+        body.as_bytes().chunks(5).map(<[u8]>::to_vec).collect()
+    }
+
+    fn details_only_stream_body() -> Vec<Vec<u8>> {
+        let body = format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            json!({
+                "choices": [{"delta": {
+                    "reasoning_details": [
+                        {"type": "reasoning.summary", "summary": "checking "},
+                        {"type": "reasoning.text", "text": "details"}
+                    ],
+                    "content": "answer"
+                }}]
+            })
+        );
         body.as_bytes().chunks(5).map(<[u8]>::to_vec).collect()
     }
 
@@ -537,7 +576,7 @@ mod tests {
             .unwrap_or(Value::Null);
         assert_eq!(body["messages"][0]["role"], "assistant");
         assert!(body["messages"][0]["content"].is_null());
-        assert_eq!(body["messages"][0]["reasoning"], "checking");
+        assert!(body["messages"][0].get("reasoning").is_none());
         assert_eq!(
             body["messages"][0]["reasoning_details"][0]["type"],
             "reasoning.text"
@@ -545,5 +584,36 @@ mod tests {
         assert_eq!(body["messages"][0]["tool_calls"][0]["id"], "synthetic-call");
         assert_eq!(body["messages"][1]["role"], "tool");
         assert_eq!(body["messages"][1]["tool_call_id"], "synthetic-call");
+    }
+
+    #[test]
+    fn stream_round_events_exposes_textual_reasoning_details_without_legacy_field() {
+        let transport = Transport {
+            chunks: details_only_stream_body(),
+            failure: None,
+            requests: RefCell::new(Vec::new()),
+        };
+        let provider = OpenRouterChatStreamer::new(
+            transport,
+            "synthetic-key",
+            "https://synthetic.invalid/api/v1",
+            "requested/model",
+        );
+        let mut events = Vec::new();
+        let result = provider
+            .stream_round_events(&messages(), &[], |event| {
+                events.push(event);
+                Ok(())
+            })
+            .unwrap_or_else(|error| error.partial.as_ref().clone());
+
+        assert_eq!(
+            events,
+            [
+                ProviderStreamEvent::ReasoningDelta("checking details".to_owned()),
+                ProviderStreamEvent::TextDelta("answer".to_owned()),
+            ]
+        );
+        assert_eq!(result.reasoning, "checking details");
     }
 }

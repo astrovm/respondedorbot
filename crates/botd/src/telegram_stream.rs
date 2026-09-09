@@ -259,6 +259,7 @@ pub struct TelegramAiStream<'a, Actions> {
     last_trace_line: Option<TraceLineKind>,
     final_started: bool,
     final_message_started: bool,
+    force_next_trace_update: bool,
 }
 
 impl<'a, Actions: ActionSink> TelegramAiStream<'a, Actions> {
@@ -294,6 +295,7 @@ impl<'a, Actions: ActionSink> TelegramAiStream<'a, Actions> {
             last_trace_line: None,
             final_started: false,
             final_message_started: false,
+            force_next_trace_update: false,
         }
     }
 
@@ -303,14 +305,24 @@ impl<'a, Actions: ActionSink> TelegramAiStream<'a, Actions> {
                 self.append_thought(&text);
                 self.stream.replace(&self.trace, false)
             }
+            AiStreamEvent::ResetToTrace => {
+                let had_final_text = self.final_started;
+                self.final_started = false;
+                self.final_message_started = false;
+                self.final_text.clear();
+                self.force_next_trace_update = had_final_text && self.trace.trim().is_empty();
+                self.stream.replace(&self.trace, true)
+            }
             AiStreamEvent::ToolCall {
                 name, arguments, ..
             } if !self.final_started => {
+                let force = self.force_next_trace_update;
+                self.force_next_trace_update = false;
                 self.append_trace_line(
                     TraceLineKind::ToolCall,
                     &format!("🔧 {}({})", name, format_tool_arguments(&arguments)),
                 );
-                self.stream.replace(&self.trace, false)
+                self.stream.replace(&self.trace, force)
             }
             AiStreamEvent::ToolResult { name, output, .. } if !self.final_started => {
                 let output = bounded_text(output.trim(), MAX_TOOL_OUTPUT_CHARS);
@@ -544,6 +556,12 @@ mod tests {
             .feed(AiStreamEvent::Thought("checking the match".to_owned()))
             .unwrap_or_else(|_| unreachable!());
         stream
+            .feed(AiStreamEvent::FinalText("candidate".to_owned()))
+            .unwrap_or_else(|_| unreachable!());
+        stream
+            .feed(AiStreamEvent::ResetToTrace)
+            .unwrap_or_else(|_| unreachable!());
+        stream
             .feed(AiStreamEvent::ToolCall {
                 id: "call-1".to_owned(),
                 name: "web_search".to_owned(),
@@ -572,16 +590,24 @@ mod tests {
         ));
         assert!(matches!(
             &actions.actions[1],
+            TelegramAction::EditMessage { text, .. } if text == "candidate"
+        ));
+        assert!(matches!(
+            &actions.actions[2],
+            TelegramAction::EditMessage { text, .. } if text == "💭 checking the match"
+        ));
+        assert!(matches!(
+            &actions.actions[3],
             TelegramAction::EditMessage { text, .. }
                 if text == "💭 checking the match\n\n🔧 web_search(query=\"cuando juegan river y huracán\")"
         ));
         assert!(matches!(
-            &actions.actions[2],
+            &actions.actions[4],
             TelegramAction::EditMessage { text, .. }
                 if text == "💭 checking the match\n\n🔧 web_search(query=\"cuando juegan river y huracán\")\n\n✅ web_search → fixture result"
         ));
         assert!(matches!(
-            &actions.actions[3],
+            &actions.actions[5],
             TelegramAction::EditMessage { text, .. } if text == "River juega el sábado"
         ));
     }

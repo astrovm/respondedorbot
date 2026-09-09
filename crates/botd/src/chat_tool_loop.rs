@@ -70,6 +70,7 @@ pub trait NativeToolRuntime {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatToolLoopEvent {
     ReasoningDelta(String),
+    ResetToTrace,
     ToolCall {
         id: String,
         name: String,
@@ -183,6 +184,7 @@ where
         |event| match event {
             ChatToolLoopEvent::FinalText(text) => on_text(&text),
             ChatToolLoopEvent::ReasoningDelta(_)
+            | ChatToolLoopEvent::ResetToTrace
             | ChatToolLoopEvent::ToolCall { .. }
             | ChatToolLoopEvent::ToolResult { .. } => Ok(()),
         },
@@ -242,64 +244,63 @@ where
 
     for logical_round in 0..max_rounds {
         let mut retry = 0;
-        let mut buffered_text = Vec::new();
-        let round =
-            loop {
-                buffered_text.clear();
-                let round =
-                    provider.stream_round_events(&result.messages, &schemas, &mut |event| {
-                        match event {
-                            ProviderStreamEvent::ReasoningDelta(text) => {
-                                on_event(ChatToolLoopEvent::ReasoningDelta(text))
-                            }
-                            ProviderStreamEvent::TextDelta(text) => {
-                                buffered_text.push(text);
-                                Ok(())
-                            }
-                        }
-                    });
-                match round {
-                    Ok(round) => break round,
-                    Err(error) => {
-                        result.provider_rounds += 1;
-                        trace(
-                            operation_id,
-                            result.provider_rounds,
-                            "provider_error",
-                            json!({
-                                "error_kind": provider_error_kind(&error.source),
-                                "provider": round_trace(&error.partial),
-                            }),
-                        );
-                        record_failed_round(&mut result, &error.partial);
-                        let retry_delay = (retry < MAX_PROVIDER_RETRIES
-                            && retryable_provider_error(&error.source)
-                            && error.partial.text.is_empty()
-                            && error.partial.tool_calls.is_empty()
-                            && !round_has_billable_usage(&error.partial))
-                        .then(|| provider_retry_delay(&error.source, retry))
-                        .flatten();
-                        if let Some(delay) = retry_delay {
-                            result.diagnostics.push(format!(
-                                "AI provider retry: round={} attempt={} error_kind={} delay_ms={}",
-                                logical_round + 1,
-                                retry + 1,
-                                provider_error_kind(&error.source),
-                                delay.as_millis(),
-                            ));
-                            wait_before_retry(delay);
-                            retry += 1;
-                            continue;
-                        }
-                        return Err(ChatToolLoopError {
-                            source: error.source,
-                            failed_round: error.partial,
-                            provider_rounds: result.provider_rounds,
-                            partial: Box::new(result),
-                        });
+        let round = loop {
+            let round = provider.stream_round_events(&result.messages, &schemas, &mut |event| {
+                match event {
+                    ProviderStreamEvent::ReasoningDelta(text) => {
+                        on_event(ChatToolLoopEvent::ReasoningDelta(text))
+                    }
+                    ProviderStreamEvent::TextDelta(text) => {
+                        // Stream a candidate immediately. If this round later
+                        // confirms tool calls, the caller resets the draft to the
+                        // reasoning/tool trace before continuing.
+                        on_event(ChatToolLoopEvent::FinalText(text))
                     }
                 }
-            };
+            });
+            match round {
+                Ok(round) => break round,
+                Err(error) => {
+                    result.provider_rounds += 1;
+                    trace(
+                        operation_id,
+                        result.provider_rounds,
+                        "provider_error",
+                        json!({
+                            "error_kind": provider_error_kind(&error.source),
+                            "provider": round_trace(&error.partial),
+                        }),
+                    );
+                    record_failed_round(&mut result, &error.partial);
+                    let retry_delay = (retry < MAX_PROVIDER_RETRIES
+                        && retryable_provider_error(&error.source)
+                        && error.partial.text.is_empty()
+                        && error.partial.reasoning.is_empty()
+                        && error.partial.tool_calls.is_empty()
+                        && !round_has_billable_usage(&error.partial))
+                    .then(|| provider_retry_delay(&error.source, retry))
+                    .flatten();
+                    if let Some(delay) = retry_delay {
+                        result.diagnostics.push(format!(
+                            "AI provider retry: round={} attempt={} error_kind={} delay_ms={}",
+                            logical_round + 1,
+                            retry + 1,
+                            provider_error_kind(&error.source),
+                            delay.as_millis(),
+                        ));
+                        wait_before_retry(delay);
+                        retry += 1;
+                        continue;
+                    }
+                    return Err(ChatToolLoopError {
+                        source: error.source,
+                        failed_round: error.partial,
+                        provider_rounds: result.provider_rounds,
+                        partial: Box::new(result),
+                    });
+                }
+            }
+        };
         result.provider_rounds += 1;
         trace(
             operation_id,
@@ -316,14 +317,6 @@ where
             .cloned()
             .collect::<Vec<_>>();
         if known_calls.is_empty() {
-            for text in buffered_text {
-                emit_event(
-                    &mut on_event,
-                    &result,
-                    &round,
-                    ChatToolLoopEvent::FinalText(text),
-                )?;
-            }
             result.text.push_str(&round.text);
             trace(
                 operation_id,
@@ -338,15 +331,14 @@ where
         }
 
         if include_intermediate_text {
-            for text in &buffered_text {
-                emit_event(
-                    &mut on_event,
-                    &result,
-                    &round,
-                    ChatToolLoopEvent::FinalText(text.clone()),
-                )?;
-            }
             result.text.push_str(&round.text);
+        } else {
+            emit_event(
+                &mut on_event,
+                &result,
+                &round,
+                ChatToolLoopEvent::ResetToTrace,
+            )?;
         }
         result
             .messages
@@ -637,6 +629,7 @@ fn prompt_tool_call(call: &StreamToolCall) -> PromptToolCall {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::rc::Rc;
 
     use bot_core::ai_prompt::{PromptContent, PromptRole};
 
@@ -832,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn event_loop_emits_tool_activity_before_only_the_final_text() {
+    fn event_loop_streams_text_then_resets_before_tool_activity() {
         let provider = Provider {
             rounds: RefCell::new(vec![
                 Ok(round(
@@ -863,6 +856,8 @@ mod tests {
         assert_eq!(
             events,
             [
+                ChatToolLoopEvent::FinalText("checking".to_owned()),
+                ChatToolLoopEvent::ResetToTrace,
                 ChatToolLoopEvent::ToolCall {
                     id: "call-1".to_owned(),
                     name: "calculate".to_owned(),
@@ -877,6 +872,54 @@ mod tests {
             ]
         );
         assert_eq!(result.text, "answer");
+    }
+
+    #[test]
+    fn event_loop_forwards_final_text_before_provider_round_returns() {
+        struct StreamingProvider {
+            order: Rc<RefCell<Vec<&'static str>>>,
+        }
+
+        impl ChatRoundStream for StreamingProvider {
+            fn stream_round(
+                &self,
+                _messages: &[PromptMessage],
+                _tools: &[Value],
+                on_text: &mut dyn FnMut(&str) -> Result<(), OpenRouterChatError>,
+            ) -> Result<ChatRoundResult, ChatRoundError> {
+                let round = round("streamed", Vec::new(), json!({"round": 1}));
+                on_text(&round.text).map_err(|source| ChatRoundError {
+                    source,
+                    partial: Box::new(round.clone()),
+                })?;
+                self.order.borrow_mut().push("provider_returned");
+                Ok(round)
+            }
+        }
+
+        let order = Rc::new(RefCell::new(Vec::new()));
+        let provider = StreamingProvider {
+            order: Rc::clone(&order),
+        };
+        let mut tools = Tools::default();
+        let result = run_chat_tool_loop_events(
+            "test-operation",
+            &provider,
+            &mut tools,
+            &[],
+            false,
+            1,
+            |event| {
+                if matches!(event, ChatToolLoopEvent::FinalText(_)) {
+                    order.borrow_mut().push("final_text");
+                }
+                Ok(())
+            },
+        )
+        .unwrap_or_else(|error| *error.partial);
+
+        assert_eq!(&*order.borrow(), &["final_text", "provider_returned"]);
+        assert_eq!(result.text, "streamed");
     }
 
     #[test]
@@ -999,6 +1042,38 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn does_not_retry_after_a_partial_reasoning_round() {
+        let mut partial = round("", Vec::new(), json!({"pending": true}));
+        partial.reasoning = "visible reasoning".to_owned();
+        let provider = Provider {
+            rounds: RefCell::new(vec![
+                Err(ChatRoundError {
+                    source: OpenRouterChatError::IncompleteStream,
+                    partial: Box::new(partial),
+                }),
+                Ok(round("unexpected retry", Vec::new(), json!({"round": 2}))),
+            ]),
+            observed: RefCell::new(Vec::new()),
+        };
+        let mut tools = Tools::default();
+
+        let error = run_chat_tool_loop_events(
+            "test-operation",
+            &provider,
+            &mut tools,
+            &[],
+            false,
+            DEFAULT_MAX_TOOL_ROUNDS,
+            |_event| Ok(()),
+        )
+        .err()
+        .unwrap_or_else(|| unreachable!());
+
+        assert_eq!(error.provider_rounds, 1);
+        assert_eq!(provider.observed.borrow().len(), 1);
     }
 
     #[test]

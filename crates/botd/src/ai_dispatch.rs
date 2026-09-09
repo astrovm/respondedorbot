@@ -6,6 +6,7 @@ use bot_core::telegram_input::{ChatId, MessageId, UserId};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AiStreamEvent {
     Thought(String),
+    ResetToTrace,
     ToolCall {
         id: String,
         name: String,

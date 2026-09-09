@@ -1144,6 +1144,7 @@ where
             |event| {
                 let event = match event {
                     ChatToolLoopEvent::ReasoningDelta(text) => AiStreamEvent::Thought(text),
+                    ChatToolLoopEvent::ResetToTrace => AiStreamEvent::ResetToTrace,
                     ChatToolLoopEvent::ToolCall {
                         id,
                         name,
@@ -1270,6 +1271,7 @@ where
         let mut on_event = |event: AiStreamEvent| match event {
             AiStreamEvent::FinalText(text) => on_token(&text),
             AiStreamEvent::Thought(_)
+            | AiStreamEvent::ResetToTrace
             | AiStreamEvent::ToolCall { .. }
             | AiStreamEvent::ToolResult { .. } => Ok(()),
         };
@@ -1309,6 +1311,7 @@ where
         let mut on_event = |event: AiStreamEvent| match event {
             AiStreamEvent::FinalText(text) => on_token(&text),
             AiStreamEvent::Thought(_)
+            | AiStreamEvent::ResetToTrace
             | AiStreamEvent::ToolCall { .. }
             | AiStreamEvent::ToolResult { .. } => Ok(()),
         };
