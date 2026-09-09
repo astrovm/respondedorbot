@@ -13,7 +13,6 @@ use crate::dispatcher::{ActionReceipt, ActionSink};
 const DEFAULT_MIN_EDIT_INTERVAL_SECONDS: f64 = 0.3;
 const DEFAULT_MIN_CHARS_BETWEEN_EDITS: usize = 15;
 const MAX_TRACE_HEAD_CHARS: usize = 800;
-const MAX_TOOL_OUTPUT_CHARS: usize = 1_200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamDelivery {
@@ -247,7 +246,6 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
 enum TraceLineKind {
     Thought,
     ToolCall,
-    ToolResult,
 }
 
 /// Shows only the latest reasoning block or tool activity in one replaceable
@@ -322,15 +320,11 @@ impl<'a, Actions: ActionSink> TelegramAiStream<'a, Actions> {
                 );
                 self.stream.replace(&self.trace, true)
             }
-            AiStreamEvent::ToolResult { name, output, .. } if !self.final_started => {
-                let output = bounded_text(output.trim(), MAX_TOOL_OUTPUT_CHARS);
-                let line = if output.is_empty() {
-                    format!("✅ {name}")
-                } else {
-                    format!("✅ {name} → {output}")
-                };
-                self.replace_trace_line(TraceLineKind::ToolResult, &line);
-                self.stream.replace(&self.trace, true)
+            // Tool results stay internal; keep the visible trace anchored to the call
+            // so the next reasoning block replaces it instead of extending old text.
+            AiStreamEvent::ToolResult { .. } if !self.final_started => {
+                self.last_trace_line = Some(TraceLineKind::ToolCall);
+                Ok(())
             }
             AiStreamEvent::FinalText(text) => {
                 self.final_started = true;
@@ -414,16 +408,6 @@ fn format_tool_value(value: &Value) -> String {
         Value::String(value) => serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_owned()),
         _ => serde_json::to_string(value).unwrap_or_else(|_| "null".to_owned()),
     }
-}
-
-fn bounded_text(text: &str, max_chars: usize) -> String {
-    let chars = text.chars().collect::<Vec<_>>();
-    if chars.len() <= max_chars {
-        return text.to_owned();
-    }
-    let mut bounded = chars[..max_chars.saturating_sub(1)].to_vec();
-    bounded.push('…');
-    bounded.into_iter().collect()
 }
 
 #[cfg(test)]
@@ -581,11 +565,6 @@ mod tests {
         ));
         assert!(matches!(
             &actions.actions[2],
-            TelegramAction::EditMessage { text, .. }
-                if text == "✅ web_search → fixture result"
-        ));
-        assert!(matches!(
-            &actions.actions[3],
             TelegramAction::EditMessage { text, .. } if text == "River juega el sábado"
         ));
     }
@@ -674,7 +653,6 @@ mod tests {
                 "💭 a long initial reasoning block",
                 "🔧 web_search(query=\"synthetic fixture\")",
                 "🔧 calculate()",
-                "✅ calculate → 2",
                 "💭 done",
                 "answer",
             ]
@@ -717,7 +695,6 @@ mod tests {
             [
                 "💭 first ",
                 "💭 first thought",
-                "✅ calculate → 2",
                 "💭 next ",
                 "💭 next thought"
             ]
