@@ -3,7 +3,7 @@
 use crate::base_conversion::{BaseConversion, convert_base};
 use crate::command_normalization::{normalize_command_text, preprocess_command_text};
 use crate::command_parsing::parse_command;
-use crate::help_catalog::render_help_text;
+use crate::help_catalog::render_help_page;
 use crate::locale::Locale;
 use crate::telegram_actions::{SendMessage, TelegramAction};
 use crate::telegram_input::{ChatId, MessageId};
@@ -94,7 +94,9 @@ pub fn plan_stateless_command_with_reply(
 ) -> StatelessCommandPlan {
     let parsed = parse_command(message_text, bot_name);
     if parsed.command == "/help" {
-        let mut message = SendMessage::new(chat_id, render_help_text(locale));
+        let (text, keyboard) = render_help_page(locale, "home");
+        let mut message = SendMessage::new(chat_id, &text);
+        message.reply_markup = Some(keyboard);
         message.reply_to_message_id = Some(message_id);
         return StatelessCommandPlan::Action(TelegramAction::SendMessage(message));
     }
@@ -216,9 +218,7 @@ mod tests {
             "@bot",
             Locale::Es,
         ));
-        assert!(spanish.is_some_and(|text| {
-            text.starts_with("esto es lo que sé hacer, boludo:") && text.contains("/transfer")
-        }));
+        assert!(spanish.is_some_and(|text| { text == "Ayuda\n\n¿Qué querés hacer?" }));
         let english = message_text(plan_stateless_command(
             ChatId(1),
             MessageId(2),
@@ -226,9 +226,7 @@ mod tests {
             "@bot",
             Locale::En,
         ));
-        assert!(english.is_some_and(|text| {
-            text.starts_with("what I can do:") && text.contains("/weather London")
-        }));
+        assert!(english.is_some_and(|text| { text == "Help\n\nWhat would you like to do?" }));
     }
 
     #[test]

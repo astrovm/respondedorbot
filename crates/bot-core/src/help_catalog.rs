@@ -1,181 +1,117 @@
-//! Localized, dependency-free help catalog used by `/help`.
+//! Localized help categories for the interactive `/help` menu.
 
 use crate::locale::Locale;
 
-const HELP_ES: &str = r#"esto es lo que sé hacer, boludo:
-
-ia:
-- /ask, /pregunta, /che, /gordo: te contesto mensajes normales; en grupos respondo si me mencionan, me responden, usan trigger random o mandan comando ia
-  ejemplo: /gordo explicame esto
-- búsqueda web nativa: en mensajes normales puedo buscar en internet cuando hace falta
-  ejemplo: buscá qué pasó con...
-
-mercado:
-- /p, /prices, /price, /precios, /precio, /presios, /presio, /bresio, /bresios, /brecio, /brecios: precios crypto, acciones y otros activos
-- /c, /cripto, /criptos, /crypto, /cryptos: precios solo de crypto
-  ejemplo: /p apple
-  ejemplo: /p btc,timba
-  ejemplo: /precio btc nvda
-  ejemplo: /precio stock:META
-  ejemplo: /prices btc eth xmr
-  ejemplo: /prices 20
-  ejemplo: /prices 100 in eur
-  ejemplo: /prices btc 7d
-  ejemplo: /prices stables
-
-general:
-- /clima, /weather: clima actual para cualquier ciudad o ubicación
-  ejemplo: /clima Córdoba, Argentina
-
-mercado:
-- token cards: si el mensaje completo es un address Solana/EVM o un $ticker, uso el mismo buscador de precios; un activo lleva gráfico y los tokens llevan card con stats, socials y links
-  ejemplo: J8PS...pump
-  ejemplo: $GLORP
-- /dolar, /dollar, /usd: cotizaciones del dólar y variaciones por ventana
-  ejemplo: /usd 1h
-- /s, /accion, /acciones, /stock, /stocks: precios de acciones por símbolo o empresa desde Yahoo Finance
-  ejemplo: /acciones aapl tsla
-  ejemplo: /acciones Mercado Libre
-- /petroleo, /oil: precio Brent y WTI
-- /bcra, /variables: variables económicas del BCRA
-- /eleccion, /elecciones, /election, /elections: top 10 de elecciones globales en Polymarket por liquidez
-- /rulo, /devo, /powerlaw, /rainbow, /satoshi, /sat, /sats: rulo desde oficial, arbitraje tarjeta/crypto, power law, rainbow chart y sats
-  ejemplo: /devo 0.5, 100
-
-media:
-- /transcribe, /transcript, /describe: transcribo voice/audio/video/video_note o subtítulos de YouTube y describo fotos, stickers o GIF respondiendo al mensaje; también puedo procesar media cuando me hablan
-
-links:
-- links: arreglo links de X/Twitter, Bluesky, Instagram y Reddit según config; leo metadata, tweets y transcripts de YouTube como contexto
-
-productividad:
-- /tarea, /tareas, /task, /tasks: agendo recordatorios y tareas recurrentes por lenguaje natural; cualquiera de los comandos lista sin texto y crea con texto
-  ejemplo: /tarea mañana recordame pagar el alquiler
-  ejemplo: /tasks
-
-memoria:
-- /resumen, /summary, /tldr: resumo el chat, guardo resumen acumulado y recupero mensajes relevantes para responder con contexto
-  ejemplo: /resumen focus en crypto
-
-utilidades:
-- /convertbase, /random, /time, /comando, /command, /instance: random, conversión de bases, comandos Telegram, timestamp e instancia
-  ejemplo: /random pizza, carne, sushi
-  ejemplo: /convertbase 101, 2, 10
-- /gm, /gn: gif random de buenos días o buenas noches
-
-config:
-- /config, /configs, /settings: config por chat: idioma, links, followups, timezone, random replies y límite gratis por usuario/hora
-- /language, /idioma: cambiá entre español e inglés
-
-créditos:
-- /topup, /balance, /charges, /history, /gastos, /transfer: saldo, historial de gastos, topup con Telegram Stars y transferencia de créditos personales al grupo
-  ejemplo: /charges 10
-  ejemplo: /transfer 1.5
-
-utilidades:
-- /help: muestro comandos y features"#;
-
-const HELP_EN: &str = r#"what I can do:
-
-AI:
-- /ask, /pregunta, /che, /gordo: I answer normal messages; in groups I respond to mentions, replies, random triggers, and AI commands
-  example: /gordo explain this
-- web search: I can search the web when a current answer needs it
-  example: search what happened with...
-
-markets:
-- /p, /prices, /price, /precios, /precio, /presios, /presio, /bresio, /bresios, /brecio, /brecios: crypto, stock, and other asset prices
-- /c, /cripto, /criptos, /crypto, /cryptos: crypto-only prices
-  example: /p apple
-  example: /p btc,timba
-  example: /price btc nvda
-  example: /price stock:META
-  example: /prices btc eth xmr
-  example: /prices 20
-  example: /prices 100 in eur
-  example: /prices btc 7d
-  example: /prices stables
-
-general:
-- /clima, /weather: current weather for any city or location
-  example: /weather London
-
-markets:
-- token cards: send a Solana or EVM address, or a $ticker; canonical assets resolve first, single assets get charts, and unknown symbols use exact token lookup
-  example: J8PS...pump
-  example: $GLORP
-- /dolar, /dollar, /usd: dollar exchange rates and changes by time window
-  example: /usd 1h
-- /s, /accion, /acciones, /stock, /stocks: stock prices by symbol or company from Yahoo Finance
-  example: /stocks aapl tsla
-  example: /stocks Mercado Libre
-- /petroleo, /oil: Brent and WTI oil prices
-- /bcra, /variables: economic variables from Argentina's central bank
-- /eleccion, /elecciones, /election, /elections: top global election markets on Polymarket by liquidity
-- /rulo, /devo, /powerlaw, /rainbow, /satoshi, /sat, /sats: official-rate, card/crypto, power-law, rainbow-chart, and satoshi tools
-  example: /devo 0.5, 100
-
-media:
-- /transcribe, /transcript, /describe: transcribe audio, video, or YouTube captions; describe images, stickers, or GIFs
-
-links:
-- links: fix supported social links and read linked content as context
-
-productivity:
-- /tarea, /tareas, /task, /tasks: create reminders and recurring tasks with natural language
-  example: /task tomorrow remind me to pay rent
-  example: /tasks
-
-memory:
-- /resumen, /summary, /tldr: summarize chats and retrieve relevant prior messages
-  example: /summary focus on crypto
-
-utilities:
-- /convertbase, /random, /time, /comando, /command, /instance: random selection, base conversion, Telegram commands, timestamps, and instance info
-  example: /random pizza, steak, sushi
-  example: /convertbase 101, 2, 10
-- /gm, /gn: random good-morning and good-night GIFs
-
-settings:
-- /config, /configs, /settings: all chat settings, including language, links, timezone, replies, and group limits
-- /language, /idioma: switch between Spanish and English
-
-credits:
-- /topup, /balance, /charges, /history, /gastos, /transfer: balance, expense history, Telegram Stars top-ups, and group transfers
-  example: /charges 10
-  example: /transfer 1.5
-
-utilities:
-- /help: show commands and features"#;
-
+/// Compact help pages. Full aliases remain available through the command parser.
 #[must_use]
-pub const fn render_help_text(locale: Locale) -> &'static str {
-    match locale {
-        Locale::Es => HELP_ES,
-        Locale::En => HELP_EN,
+pub fn render_help_page(
+    locale: Locale,
+    page: &str,
+) -> (String, crate::telegram_actions::InlineKeyboardMarkup) {
+    use crate::menu_ui::{back, button, close, localized};
+    let entries = [
+        (
+            "markets",
+            "Mercados",
+            "Markets",
+            "/p · $ticker — todos los activos\n/c — crypto\n/s — acciones y otros activos\n\n/p rkh 1m\n/p btc in eur\n/s Rockhopper\n\n/dolar · /petroleo · /bcra · /elecciones\n/rulo · /devo · /powerlaw · /rainbow · /satoshi",
+            "/p · $ticker — all assets\n/c — crypto\n/s — stocks and other assets\n\n/p rkh 1m\n/p btc in eur\n/s Rockhopper\n\n/dolar · /petroleo · /bcra · /elecciones\n/rulo · /devo · /powerlaw · /rainbow · /satoshi",
+        ),
+        (
+            "ai",
+            "IA y media",
+            "AI and media",
+            "/ask — preguntame lo que quieras\nTambién podés mencionarme o responderme.\n\n/transcribe — respondé a un audio, video o imagen\n/resumen — resumir el chat\n\nPuedo buscar en la web cuando hace falta.",
+            "/ask — ask me anything\nYou can also mention me or reply to me.\n\n/transcribe — reply to audio, video or an image\n/resumen — summarize the chat\n\nI can search the web when needed.",
+        ),
+        (
+            "tasks",
+            "Tareas",
+            "Tasks",
+            "/tarea — ver tus tareas\n/tarea mañana recordame pagar el alquiler\n\nCreá recordatorios o tareas recurrentes con tus palabras.",
+            "/tarea — view your tasks\n/tarea remind me tomorrow to pay rent\n\nCreate reminders or recurring tasks in your own words.",
+        ),
+        (
+            "credits",
+            "Créditos",
+            "Credits",
+            "/balance — saldo\n/topup — cargar con Telegram Stars\n/charges — historial de gastos\n/transfer 1.5 — pasar créditos al grupo",
+            "/balance — balance\n/topup — add credits with Telegram Stars\n/charges — spending history\n/transfer 1.5 — transfer credits to the group",
+        ),
+        (
+            "tools",
+            "Utilidades",
+            "Utilities",
+            "/clima Córdoba — clima actual\n/random pizza, sushi — elegir una opción\n/convertbase 101, 2, 10 — convertir bases\n/time — timestamp\n/comando — convertir a comando Telegram\n/instance — instancia del bot\n/gm · /gn — GIF de saludo",
+            "/clima London — current weather\n/random pizza, sushi — pick an option\n/convertbase 101, 2, 10 — convert bases\n/time — timestamp\n/comando — convert to a Telegram command\n/instance — bot instance\n/gm · /gn — greeting GIF",
+        ),
+        (
+            "settings",
+            "Configuración y links",
+            "Settings and links",
+            "/config — ajustes de este chat\n/language — idioma\n\nArreglo links de X, Bluesky, Instagram y Reddit según tu configuración.",
+            "/config — settings for this chat\n/language — language\n\nI fix X, Bluesky, Instagram and Reddit links according to your settings.",
+        ),
+    ];
+    if let Some((_, es, en, body_es, body_en)) = entries.iter().find(|entry| entry.0 == page) {
+        return (
+            format!(
+                "{}\n\n{}",
+                localized(locale, es, en),
+                localized(locale, body_es, body_en)
+            ),
+            crate::telegram_actions::InlineKeyboardMarkup {
+                inline_keyboard: vec![vec![back(locale, "help:home"), close(locale, "help:close")]],
+            },
+        );
     }
+    let mut rows = entries
+        .iter()
+        .map(|(id, es, en, _, _)| vec![button(localized(locale, es, en), format!("help:{id}"))])
+        .collect::<Vec<_>>();
+    rows.push(vec![close(locale, "help:close")]);
+    (
+        localized(
+            locale,
+            "Ayuda\n\n¿Qué querés hacer?",
+            "Help\n\nWhat would you like to do?",
+        )
+        .to_owned(),
+        crate::telegram_actions::InlineKeyboardMarkup {
+            inline_keyboard: rows,
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::render_help_text;
-    use crate::{locale::Locale, telegram_actions::MAX_TELEGRAM_TEXT_LENGTH};
+    use super::*;
 
     #[test]
-    fn catalogs_preserve_all_public_feature_groups_and_fit_one_message() {
-        for (locale, expected_header, expected_example) in [
-            (
-                Locale::Es,
-                "esto es lo que sé hacer, boludo:",
-                "/charges 10",
-            ),
-            (Locale::En, "what I can do:", "/summary focus on crypto"),
-        ] {
-            let help = render_help_text(locale);
-            assert!(help.starts_with(expected_header));
-            assert!(help.contains(expected_example));
-            assert!(help.contains("/help"));
-            assert!(help.chars().count() <= MAX_TELEGRAM_TEXT_LENGTH);
+    fn every_help_category_is_localized_and_has_navigation() {
+        for locale in [Locale::Es, Locale::En] {
+            let (home, keyboard) = render_help_page(locale, "home");
+            assert!(home.lines().count() <= 3);
+            assert_eq!(keyboard.inline_keyboard.len(), 7);
+            for row in &keyboard.inline_keyboard[..6] {
+                let page = row[0]
+                    .callback_data
+                    .as_deref()
+                    .unwrap_or_default()
+                    .strip_prefix("help:")
+                    .unwrap_or_default();
+                let (text, keyboard) = render_help_page(locale, page);
+                assert!(text.contains('/'));
+                assert!(text.chars().count() < 1000);
+                assert_eq!(
+                    keyboard.inline_keyboard[0][0].callback_data.as_deref(),
+                    Some("help:home")
+                );
+                assert_eq!(
+                    keyboard.inline_keyboard[0][1].callback_data.as_deref(),
+                    Some("help:close")
+                );
+            }
         }
     }
 }

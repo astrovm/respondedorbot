@@ -28,7 +28,7 @@ use bot_core::command_state::{
 use bot_core::config_callbacks::{
     ConfigCallbackDiagnostic, ConfigCallbackOutcome, plan_config_callback,
 };
-use bot_core::config_command::{plan_config_command, render_config};
+use bot_core::config_command::{plan_config_command, render_config_page};
 use bot_core::devo::{
     DevoCommandPlan, DevoQuotes, DevoReply, calculate_devo, plan_devo_command, render_devo_reply,
     render_devo_result,
@@ -66,8 +66,7 @@ use bot_core::task_commands::{
     task_delete_forbidden, task_deleted, task_load_failed, task_not_found,
 };
 use bot_core::telegram_actions::{
-    InlineKeyboardButton, InlineKeyboardMarkup, MAX_TELEGRAM_TEXT_LENGTH, ParseMode, SendMessage,
-    TelegramAction,
+    InlineKeyboardMarkup, MAX_TELEGRAM_TEXT_LENGTH, ParseMode, SendMessage, TelegramAction,
 };
 use bot_core::telegram_callbacks::{
     CallbackContext, CallbackContextOutcome, CallbackRoute, parse_callback_context,
@@ -472,68 +471,102 @@ fn token_signal_matches_query(signal: &TokenSignal, query: &SignalQuery) -> bool
     }
 }
 
-fn market_selection_keyboard(
+fn market_selection_prompt(
+    selection: &MarketSelection,
+    locale: bot_core::locale::Locale,
+) -> String {
+    format!(
+        "{} · {}",
+        bot_core::menu_ui::localized(locale, "Elegí un activo", "Choose an asset"),
+        selection.query
+    )
+}
+
+fn market_selection_page(
     selection_id: &str,
     selection: &MarketSelection,
+    locale: bot_core::locale::Locale,
+    page: usize,
 ) -> InlineKeyboardMarkup {
+    use bot_core::menu_ui::{button, close};
+    let identity = |candidate: &MarketCandidate| {
+        let name = if candidate.name.is_empty() {
+            &candidate.symbol
+        } else {
+            &candidate.name
+        };
+        let detail = if let Some(symbol) = candidate.id.strip_prefix("stock:") {
+            if candidate.exchange.trim().is_empty() {
+                symbol.to_owned()
+            } else {
+                format!("{symbol} · {}", candidate.exchange)
+            }
+        } else {
+            format!(
+                "{} · {}",
+                candidate.symbol,
+                candidate
+                    .contracts
+                    .first()
+                    .map_or("Crypto", |contract| contract.chain_id.as_str())
+            )
+        };
+        // Keep the ticker and exchange visible even with long company names.
+        let short_name = if name.chars().count() > 24 {
+            format!("{}…", name.chars().take(23).collect::<String>())
+        } else {
+            name.clone()
+        };
+        if name == &candidate.symbol {
+            detail
+        } else {
+            format!("{short_name} · {detail}")
+        }
+    };
+    let mut rows = selection
+        .candidates
+        .iter()
+        .enumerate()
+        .skip(page.saturating_mul(5))
+        .take(5)
+        .map(|(index, candidate)| {
+            let mut label = identity(candidate);
+            if selection
+                .candidates
+                .iter()
+                .filter(|other| identity(other) == label)
+                .count()
+                > 1
+            {
+                let suffix = candidate.contracts.first().map_or_else(
+                    || candidate.id.clone(),
+                    |contract| short_market_address(&contract.address),
+                );
+                label.push_str(&format!(" · {suffix}"));
+            }
+            vec![button(label, format!("mkt:select:{selection_id}:{index}"))]
+        })
+        .collect::<Vec<_>>();
+    let pages = selection.candidates.len().div_ceil(5);
+    let mut navigation = Vec::new();
+    if page > 0 {
+        navigation.push(button("‹", format!("mkt:page:{selection_id}:{}", page - 1)));
+    }
+    if pages > 1 {
+        navigation.push(button(
+            format!("{} / {pages}", page + 1),
+            format!("mkt:page:{selection_id}:{page}"),
+        ));
+    }
+    if page + 1 < pages {
+        navigation.push(button("›", format!("mkt:page:{selection_id}:{}", page + 1)));
+    }
+    if !navigation.is_empty() {
+        rows.push(navigation);
+    }
+    rows.push(vec![close(locale, format!("mkt:close:{selection_id}:0"))]);
     InlineKeyboardMarkup {
-        inline_keyboard: selection
-            .candidates
-            .iter()
-            .take(10)
-            .enumerate()
-            .map(|(index, candidate)| {
-                let name = if candidate.name.is_empty() {
-                    candidate.symbol.as_str()
-                } else {
-                    candidate.name.as_str()
-                };
-                let identity = if let Some(symbol) = candidate.id.strip_prefix("stock:") {
-                    let mut parts = vec![format!("Yahoo {symbol}")];
-                    if !candidate.exchange.trim().is_empty() {
-                        parts.push(candidate.exchange.clone());
-                    }
-                    if !candidate.asset_type.trim().is_empty() {
-                        parts.push(candidate.asset_type.clone());
-                    }
-                    parts.join(" · ")
-                } else if candidate.id.starts_with("token:") {
-                    candidate
-                        .contracts
-                        .first()
-                        .map(|contract| {
-                            format!(
-                                "{}:{} {}",
-                                contract.chain_id,
-                                contract.tag,
-                                short_market_address(&contract.address)
-                            )
-                        })
-                        .unwrap_or_else(|| "DEX token".to_owned())
-                } else {
-                    candidate
-                        .contracts
-                        .first()
-                        .map(|contract| {
-                            format!(
-                                "{}:{} {}",
-                                contract.chain_id,
-                                contract.tag,
-                                short_market_address(&contract.address)
-                            )
-                        })
-                        .unwrap_or_else(|| format!("CMC #{}", candidate.id))
-                };
-                let label =
-                    shorten_market_button(&format!("{} {} · {}", index + 1, name, identity));
-                vec![InlineKeyboardButton {
-                    text: label,
-                    url: None,
-                    callback_data: Some(format!("mkt:select:{selection_id}:{index}")),
-                    copy_text: None,
-                }]
-            })
-            .collect(),
+        inline_keyboard: rows,
     }
 }
 
@@ -551,15 +584,6 @@ fn short_market_address(value: &str) -> String {
         .rev()
         .collect::<String>();
     format!("{start}…{end}")
-}
-
-fn shorten_market_button(value: &str) -> String {
-    if value.chars().count() <= 64 {
-        return value.to_owned();
-    }
-    let mut value = value.chars().take(61).collect::<String>();
-    value.push_str("...");
-    value
 }
 
 fn market_selection_command(command: &str) -> MarketPriceCommand {
@@ -1338,7 +1362,7 @@ where
         selection: &MarketSelection,
         command: MarketPriceCommand,
         timestamp: i64,
-        text: &str,
+        locale: bot_core::locale::Locale,
         selection_index: usize,
     ) -> OptionalNativeDispatchResult<Config, Actions, Random> {
         let (Some(chat_id), Some(message_id), Some(requester_id)) =
@@ -1384,9 +1408,10 @@ where
                 .push(format!("market selection storage unavailable: {error}"));
             return Ok(None);
         }
-        let mut reply = SendMessage::new(chat_id, text);
+        let text = &market_selection_text(selection, locale);
+        let mut reply = SendMessage::new(chat_id, &market_selection_prompt(selection, locale));
         reply.reply_to_message_id = Some(message_id);
-        reply.reply_markup = Some(market_selection_keyboard(&selection_id, selection));
+        reply.reply_markup = Some(market_selection_page(&selection_id, selection, locale, 0));
         let receipt = self
             .actions
             .execute(TelegramAction::SendMessage(reply))
@@ -1467,14 +1492,9 @@ where
         self.state_diagnostics.extend(load.diagnostics.clone());
         if let Some(selection) = load.selection {
             let selection_text = format_market_selection(&selection, locale);
-            if let Some(outcome) = self.persist_market_selection(
-                message,
-                &selection,
-                command,
-                timestamp,
-                &selection_text,
-                0,
-            )? {
+            if let Some(outcome) =
+                self.persist_market_selection(message, &selection, command, timestamp, locale, 0)?
+            {
                 return Ok(Some(outcome));
             }
             let mut reply = SendMessage::new(chat_id, &selection_text);
@@ -1907,7 +1927,7 @@ where
                         &selection,
                         command,
                         timestamp,
-                        &selection_text,
+                        locale,
                         selection_index,
                     )?
                     .is_some();
@@ -2322,7 +2342,7 @@ where
         let selection_id = parts.next().unwrap_or_default();
         let candidate_index = parts.next().and_then(|value| value.parse::<usize>().ok());
         if !valid_prefix
-            || action != "select"
+            || !matches!(action, "select" | "page" | "close")
             || selection_id.is_empty()
             || candidate_index.is_none()
         {
@@ -2395,6 +2415,36 @@ where
             self.answer_callback_best_effort(context.callback_id.as_deref());
             return Ok(DispatchOutcome::Handled);
         };
+        if action == "close" {
+            self.answer_callback_best_effort(context.callback_id.as_deref());
+            return self.clear_market_selection_callback(
+                context,
+                chat_id_value,
+                &key,
+                selection_id,
+            );
+        }
+        if action == "page" {
+            if candidate_index >= stored.selection.candidates.len().div_ceil(5) {
+                self.answer_market_callback(context, locale, "invalid", true)?;
+                return Ok(DispatchOutcome::Handled);
+            }
+            self.answer_callback_best_effort(context.callback_id.as_deref());
+            self.actions
+                .try_edit(TelegramAction::EditMessage {
+                    chat_id: ChatId(chat_id_value),
+                    message_id: MessageId(context.message_id),
+                    text: market_selection_prompt(&stored.selection, locale),
+                    reply_markup: Some(market_selection_page(
+                        selection_id,
+                        &stored.selection,
+                        locale,
+                        candidate_index,
+                    )),
+                })
+                .map_err(DispatchError::Action)?;
+            return Ok(DispatchOutcome::Handled);
+        }
         let Some(candidate) = stored.selection.candidates.get(candidate_index).cloned() else {
             self.answer_market_callback(context, locale, "invalid", true)?;
             return Ok(DispatchOutcome::Handled);
@@ -2988,6 +3038,41 @@ where
             }
             return Ok(DispatchOutcome::Handled);
         };
+        if let Some(page) = context.data.strip_prefix("help:") {
+            let Ok(id) = context.chat_id.parse::<i64>() else {
+                self.answer_callback_best_effort(context.callback_id.as_deref());
+                return Ok(DispatchOutcome::Handled);
+            };
+            self.answer_callback_best_effort(context.callback_id.as_deref());
+            if page == "close" {
+                self.actions
+                    .execute(TelegramAction::DeleteMessage {
+                        chat_id: ChatId(id),
+                        message_id: MessageId(context.message_id),
+                    })
+                    .map_err(DispatchError::Action)?;
+            } else {
+                let config = self
+                    .config
+                    .get(&context.chat_id)
+                    .map_err(DispatchError::Config)?;
+                let locale = resolve_locale(
+                    Some(&config.language),
+                    context.user_language_code.as_deref(),
+                    &context.chat_type,
+                );
+                let (text, keyboard) = bot_core::help_catalog::render_help_page(locale, page);
+                self.actions
+                    .try_edit(TelegramAction::EditMessage {
+                        chat_id: ChatId(id),
+                        message_id: MessageId(context.message_id),
+                        text,
+                        reply_markup: Some(keyboard),
+                    })
+                    .map_err(DispatchError::Action)?;
+            }
+            return Ok(DispatchOutcome::Handled);
+        }
         if context.route == CallbackRoute::Task {
             return self.dispatch_task_callback(&context);
         }
@@ -3241,6 +3326,28 @@ where
                 return Ok(DispatchOutcome::Handled);
             }
         }
+        if let Some(page) = context.data.strip_prefix("cfg:page:") {
+            self.answer_callback_best_effort(context.callback_id.as_deref());
+            if page == "close" {
+                self.actions
+                    .execute(TelegramAction::DeleteMessage {
+                        chat_id,
+                        message_id,
+                    })
+                    .map_err(DispatchError::Action)?;
+            } else {
+                let (text, keyboard) = render_config_page(&current_config, locale, is_group, page);
+                self.actions
+                    .try_edit(TelegramAction::EditMessage {
+                        chat_id,
+                        message_id,
+                        text,
+                        reply_markup: Some(keyboard),
+                    })
+                    .map_err(DispatchError::Action)?;
+            }
+            return Ok(DispatchOutcome::Handled);
+        }
         let (outcome, config) = plan_config_callback(&context.data, &current_config);
         let (changed, diagnostic) = match outcome {
             ConfigCallbackOutcome::Render {
@@ -3281,7 +3388,12 @@ where
             context.user_language_code.as_deref(),
             &context.chat_type,
         );
-        let (rendered_text, rendered_markup) = render_config(&config, rendered_locale, is_group);
+        let (rendered_text, rendered_markup) = render_config_page(
+            &config,
+            rendered_locale,
+            is_group,
+            context.data.split(':').nth(1).unwrap_or("home"),
+        );
         let edit = TelegramAction::EditMessage {
             chat_id,
             message_id,
@@ -4880,9 +4992,8 @@ mod tests {
         StarPaymentReceipt, StarPaymentSink, StockPriceSource, StockQuotesLoad,
         StoredMarketSelection, TokenSignalLoad, TokenSignalSource, TransferResult,
         WeatherObservationLoad, WeatherSource, deduplicate_market_candidates,
-        market_selection_command, market_selection_id, market_selection_key,
-        market_selection_keyboard, market_selection_text, short_market_address,
-        shorten_market_button,
+        market_selection_command, market_selection_id, market_selection_key, market_selection_text,
+        short_market_address,
     };
     use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup};
     use bot_core::devo::DevoQuotes;
@@ -6985,8 +7096,8 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert!(message.text.starts_with("what I can do:"));
-        assert!(message.text.contains("/summary focus on crypto"));
+        assert_eq!(message.text, "Help\n\nWhat would you like to do?");
+        assert!(message.reply_markup.is_some());
         assert_eq!(dispatcher.state.incoming.len(), 1);
         assert_eq!(dispatcher.state.outgoing.len(), 1);
     }
@@ -8701,13 +8812,13 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert!(message.text.starts_with("Bot settings"));
+        assert!(message.text.starts_with("⚙️ Settings"));
         assert_eq!(
             message
                 .reply_markup
                 .as_ref()
                 .map(|markup| markup.inline_keyboard.len()),
-            Some(5)
+            Some(6)
         );
         assert_eq!(dispatcher.state.incoming.len(), 1);
         assert_eq!(dispatcher.state.outgoing.len(), 1);
@@ -8743,13 +8854,13 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert!(message.text.starts_with("config del gordo"));
+        assert!(message.text.starts_with("⚙️ Configuración"));
         assert_eq!(
             message
                 .reply_markup
                 .as_ref()
                 .map(|markup| markup.inline_keyboard.len()),
-            Some(7)
+            Some(8)
         );
         assert_eq!(dispatcher.state.incoming.len(), 1);
         assert_eq!(dispatcher.state.outgoing.len(), 1);
@@ -8826,7 +8937,7 @@ mod tests {
         assert!(matches!(
             dispatcher.actions.0.first(),
             Some(TelegramAction::EditMessage { reply_markup: Some(markup), .. })
-                if markup.inline_keyboard.len() == 5
+                if markup.inline_keyboard.len() == 6
         ));
         assert!(matches!(
             dispatcher.actions.0.get(1),
@@ -8858,7 +8969,7 @@ mod tests {
         );
         assert!(matches!(
             dispatcher.actions.0.first(),
-            Some(TelegramAction::EditMessage { text, .. }) if text.starts_with("Bot settings")
+            Some(TelegramAction::EditMessage { text, .. }) if text.starts_with("Language")
         ));
     }
 
@@ -9596,7 +9707,7 @@ mod tests {
                 &selection,
                 bot_core::market_prices::MarketPriceCommand::Unified,
                 1_672_531_200,
-                "selection",
+                bot_core::locale::Locale::En,
                 0,
             ),
             Ok(None)
@@ -9612,7 +9723,7 @@ mod tests {
                 &selection,
                 bot_core::market_prices::MarketPriceCommand::Unified,
                 1_672_531_200,
-                "selection",
+                bot_core::locale::Locale::En,
                 0,
             ),
             Ok(None)
@@ -9760,6 +9871,214 @@ mod tests {
             .0
             .iter()
             .any(|action| matches!(action, TelegramAction::EditMessage { reply_markup: Some(markup), .. } if markup.inline_keyboard.is_empty())));
+    }
+
+    #[test]
+    fn market_pages_preserve_identity_range_and_original_reply() -> Result<(), String> {
+        let mut selection = market_selection_fixture(Some("1m"));
+        let prototype = selection.candidates[0].clone();
+        selection.candidates = (0..7)
+            .map(|i| bot_core::market_prices::MarketCandidate {
+                id: (1000 + i).to_string(),
+                name: format!("Libra {i}"),
+                ..prototype.clone()
+            })
+            .collect();
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let selected = Rc::new(RefCell::new(Vec::new()));
+        let mut dispatcher =
+            dispatcher().with_market_price_source(Box::new(SelectableMarketPrices {
+                initial: MarketPriceLoad {
+                    selection: Some(selection),
+                    ..market_selection_load(Some("1m"))
+                },
+                candidate: market_candidate_quote(),
+                stored: Rc::clone(&stored),
+                selected: Rc::clone(&selected),
+            }));
+        assert_eq!(
+            dispatcher.dispatch(update("/p libra 1m", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let key = stored
+            .borrow()
+            .keys()
+            .next()
+            .cloned()
+            .ok_or("missing storage")?;
+        let id = key
+            .strip_prefix("market_selection:")
+            .ok_or("selection key")?;
+        let before = stored.borrow().clone();
+        for (page, message_id) in [(1, 701), (99, 700)] {
+            assert_eq!(
+                dispatcher.dispatch(callback_update_for_message(
+                    &format!("mkt:page:{id}:{page}"),
+                    "private",
+                    Some("en"),
+                    message_id
+                )),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert_eq!(*stored.borrow(), before);
+        }
+        assert_eq!(
+            dispatcher.dispatch(callback_update_for_message(
+                &format!("mkt:page:{id}:1"),
+                "private",
+                Some("en"),
+                700
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        let callback = dispatcher
+            .actions
+            .0
+            .iter()
+            .rev()
+            .find_map(|action| match action {
+                TelegramAction::EditMessage {
+                    message_id: MessageId(700),
+                    reply_markup: Some(markup),
+                    ..
+                } => markup
+                    .inline_keyboard
+                    .first()?
+                    .first()?
+                    .callback_data
+                    .clone(),
+                _ => None,
+            })
+            .ok_or("missing page edit")?;
+        assert_eq!(callback, format!("mkt:select:{id}:5"));
+        assert_eq!(*stored.borrow(), before);
+        assert_eq!(
+            dispatcher.dispatch(callback_update_for_message(
+                &callback,
+                "private",
+                Some("en"),
+                700
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(*selected.borrow(), vec!["1005:1m"]);
+        assert!(stored.borrow().is_empty());
+        assert!(dispatcher.actions.0.iter().any(|action| matches!(action, TelegramAction::SendMessage(message) if message.reply_to_message_id == Some(MessageId(7)) && message.reply_markup.is_none())));
+        Ok(())
+    }
+
+    #[test]
+    fn closing_market_menu_clears_state_without_fetching_a_quote() -> Result<(), String> {
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let selected = Rc::new(RefCell::new(Vec::new()));
+        let mut dispatcher =
+            dispatcher().with_market_price_source(Box::new(SelectableMarketPrices {
+                initial: market_selection_load(None),
+                candidate: market_candidate_quote(),
+                stored: Rc::clone(&stored),
+                selected: Rc::clone(&selected),
+            }));
+        assert_eq!(
+            dispatcher.dispatch(update("/p libra", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let key = stored
+            .borrow()
+            .keys()
+            .next()
+            .cloned()
+            .ok_or("missing storage")?;
+        let id = key
+            .strip_prefix("market_selection:")
+            .ok_or("selection key")?;
+        assert_eq!(
+            dispatcher.dispatch(callback_update_for_message(
+                &format!("mkt:close:{id}:0"),
+                "private",
+                Some("en"),
+                701
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(!stored.borrow().is_empty());
+        assert_eq!(
+            dispatcher.dispatch(callback_update_for_message(
+                &format!("mkt:close:{id}:0"),
+                "private",
+                Some("en"),
+                700
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(stored.borrow().is_empty());
+        assert!(selected.borrow().is_empty());
+        assert!(dispatcher.actions.0.iter().any(|action| matches!(
+            action,
+            TelegramAction::DeleteMessage {
+                message_id: MessageId(700),
+                ..
+            }
+        )));
+        Ok(())
+    }
+
+    #[test]
+    fn help_and_settings_navigation_edit_in_place_without_persistence() {
+        for data in [
+            "help:home",
+            "help:markets",
+            "help:ai",
+            "help:tasks",
+            "help:credits",
+            "help:tools",
+            "help:settings",
+            "help:close",
+            "cfg:page:home",
+            "cfg:page:link",
+            "cfg:page:help",
+            "cfg:page:close",
+        ] {
+            let mut dispatcher = dispatcher();
+            assert_eq!(
+                dispatcher.dispatch(callback_update(data, "private", Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert!(
+                !dispatcher
+                    .config
+                    .chat_ids
+                    .iter()
+                    .any(|id| id.starts_with("set:"))
+            );
+            assert!(
+                !dispatcher
+                    .actions
+                    .0
+                    .iter()
+                    .any(|a| matches!(a, TelegramAction::SendMessage(_)))
+            );
+            assert!(
+                dispatcher
+                    .actions
+                    .0
+                    .iter()
+                    .any(|a| matches!(a, TelegramAction::AnswerCallback { text: None, .. }))
+            );
+            assert!(dispatcher.actions.0.iter().any(|a| matches!(
+                a,
+                TelegramAction::EditMessage { .. } | TelegramAction::DeleteMessage { .. }
+            )));
+        }
+        let mut denied = dispatcher();
+        denied.authorization.is_admin = false;
+        assert_eq!(
+            denied.dispatch(callback_update("cfg:page:close", "group", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(!denied.actions.0.iter().any(|a| matches!(
+            a,
+            TelegramAction::EditMessage { .. } | TelegramAction::DeleteMessage { .. }
+        )));
     }
 
     #[test]
@@ -10561,8 +10880,6 @@ mod tests {
 
         assert_eq!(short_market_address("short"), "short");
         assert_eq!(short_market_address("123456789012345678"), "123456…5678");
-        assert_eq!(shorten_market_button("short"), "short");
-        assert_eq!(shorten_market_button(&"x".repeat(65)).chars().count(), 64);
         assert_eq!(
             market_selection_command("crypto"),
             bot_core::market_prices::MarketPriceCommand::CryptoOnly
@@ -10619,19 +10936,37 @@ mod tests {
             conversion: None,
             candidates,
         };
-        let keyboard = market_selection_keyboard("selection", &selection);
-        assert_eq!(keyboard.inline_keyboard.len(), 10);
-        assert!(keyboard.inline_keyboard.iter().all(|row| {
-            row.first()
-                .and_then(|button| button.callback_data.as_deref())
-                .is_some_and(|data| data.starts_with("mkt:select:selection:"))
+        let keyboard =
+            super::market_selection_page("selection", &selection, bot_core::locale::Locale::Es, 0);
+        assert_eq!(keyboard.inline_keyboard.len(), 7);
+        assert!(keyboard.inline_keyboard[..5].iter().all(|row| {
+            row[0]
+                .callback_data
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("mkt:select:selection:")
         }));
-        assert!(keyboard.inline_keyboard[1][0].text.ends_with("..."));
         assert!(
             keyboard
                 .inline_keyboard
                 .iter()
-                .any(|row| row[0].text.contains("Yahoo EXM-USD"))
+                .any(|row| row[0].text.contains("EXM-USD · Synthetic"))
+        );
+        let second =
+            super::market_selection_page("selection", &selection, bot_core::locale::Locale::En, 1);
+        assert_eq!(
+            second.inline_keyboard[0][0].callback_data.as_deref(),
+            Some("mkt:select:selection:5")
+        );
+        assert_eq!(
+            second.inline_keyboard[second.inline_keyboard.len() - 1][0].text,
+            "Close"
+        );
+        let third =
+            super::market_selection_page("selection", &selection, bot_core::locale::Locale::Es, 2);
+        assert_eq!(
+            third.inline_keyboard[0][0].callback_data.as_deref(),
+            Some("mkt:select:selection:10")
         );
         assert_eq!(
             market_selection_text(&selection, bot_core::locale::Locale::En),
@@ -11769,10 +12104,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(menus.len(), 2);
-        assert!(menus[0].0.contains("Libra"));
-        assert!(menus[1].0.contains("Trump"));
-        assert_eq!(menus[0].1.len(), 2);
-        assert_eq!(menus[1].1.len(), 2);
+        assert!(menus[0].0.contains("libra"));
+        assert!(menus[1].0.contains("trump"));
+        assert_eq!(menus[0].1.len(), 3);
+        assert_eq!(menus[1].1.len(), 3);
         let libra_second = menus[0].1[1].clone();
         let trump_first = menus[1].1[0].clone();
         let libra_selection_id = libra_second
@@ -12083,14 +12418,30 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert!(message.text.contains("Yahoo RKHNF"));
-        assert!(message.text.contains("Roaring Kity Hacked"));
+        assert!(
+            message
+                .reply_markup
+                .as_ref()
+                .into_iter()
+                .flat_map(|markup| markup.inline_keyboard.iter())
+                .flatten()
+                .any(|b| b.text.contains("RKHNF"))
+        );
+        assert!(
+            message
+                .reply_markup
+                .as_ref()
+                .into_iter()
+                .flat_map(|markup| markup.inline_keyboard.iter())
+                .flatten()
+                .any(|b| b.text.contains("Roaring Kity Hacked"))
+        );
         assert_eq!(
             message
                 .reply_markup
                 .as_ref()
                 .map(|markup| markup.inline_keyboard.len()),
-            Some(2)
+            Some(3)
         );
         assert_eq!(
             queries.borrow().as_slice(),
@@ -12201,15 +12552,31 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert!(message.text.contains("RKH.L"));
-        assert!(message.text.contains("London"));
-        assert!(message.text.contains("GBp"));
+        assert!(
+            message
+                .reply_markup
+                .as_ref()
+                .into_iter()
+                .flat_map(|markup| markup.inline_keyboard.iter())
+                .flatten()
+                .any(|b| b.text.contains("RKH.L"))
+        );
+        assert!(
+            message
+                .reply_markup
+                .as_ref()
+                .into_iter()
+                .flat_map(|markup| markup.inline_keyboard.iter())
+                .flatten()
+                .any(|b| b.text.contains("London"))
+        );
+        assert!(!message.text.contains("GBp"));
         assert_eq!(
             message
                 .reply_markup
                 .as_ref()
                 .map(|markup| markup.inline_keyboard.len()),
-            Some(2)
+            Some(3)
         );
 
         let Some(callback) = message
@@ -12299,14 +12666,30 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert!(message.text.contains("Native RKH"));
-        assert!(message.text.contains("Roaring Kity Hacked"));
+        assert!(
+            message
+                .reply_markup
+                .as_ref()
+                .into_iter()
+                .flat_map(|markup| markup.inline_keyboard.iter())
+                .flatten()
+                .any(|b| b.text.contains("Native RKH"))
+        );
+        assert!(
+            message
+                .reply_markup
+                .as_ref()
+                .into_iter()
+                .flat_map(|markup| markup.inline_keyboard.iter())
+                .flatten()
+                .any(|b| b.text.contains("Roaring Kity Hacked"))
+        );
         assert_eq!(
             message
                 .reply_markup
                 .as_ref()
                 .map(|markup| markup.inline_keyboard.len()),
-            Some(2)
+            Some(3)
         );
     }
 
