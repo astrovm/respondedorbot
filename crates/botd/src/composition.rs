@@ -1725,6 +1725,10 @@ where
     ) -> Result<(), String> {
         TokenSignalAdapter::save_state(self, signal_id, state)
     }
+
+    fn clear_state(&mut self, signal_id: &str) -> Result<(), String> {
+        TokenSignalAdapter::clear_state(self, signal_id)
+    }
 }
 
 pub fn publish_telegram_commands<Actions: ActionSink>(
@@ -3402,6 +3406,14 @@ mod tests {
         assert_eq!(
             TokenSignalSource::load_state(&mut adapter, "saved"),
             Ok(Some(state))
+        );
+        assert_eq!(
+            TokenSignalSource::clear_state(&mut adapter, "saved"),
+            Ok(())
+        );
+        assert_eq!(
+            TokenSignalSource::load_state(&mut adapter, "saved"),
+            Ok(None)
         );
     }
 

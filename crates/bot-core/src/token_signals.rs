@@ -13,7 +13,8 @@ use url::form_urlencoded;
 use crate::locale::Locale;
 use crate::telegram_actions::{CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup};
 
-pub const SIGNAL_STATE_TTL_SECONDS: i64 = 3_600;
+/// Zero means persistent button state; quote/history caches still expire.
+pub const SIGNAL_STATE_TTL_SECONDS: i64 = 0;
 pub const SIGNAL_REFRESH_COOLDOWN_SECONDS: i64 = 15;
 const PUMP_INITIAL_REAL_TOKENS: f64 = 793_100_000_000_000.0;
 
