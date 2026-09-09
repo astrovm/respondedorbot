@@ -205,13 +205,13 @@ timestamp/value shapes and TTL semantics.
 
 ## Files and environment
 
-The application reads `workspace/SOUL.md` and `workspace/RULES.md`, or uses
-`BOT_SYSTEM_PROMPT`. The deployed workspace mount is read-only and must remain so.
+The application requires nonempty `workspace/SOUL.md` and `workspace/RULES.md`
+as its only personality and response-rule configuration. The deployed workspace mount is read-only and must remain so.
 
 Configuration includes:
 
 - `TELEGRAM_TOKEN`, `TELEGRAM_USERNAME`
-- `BOT_SYSTEM_PROMPT`, `BOT_TRIGGER_WORDS`, `BOT_INSTANCE_NAME`
+- `BOT_TRIGGER_WORDS`, `BOT_INSTANCE_NAME`
 - `TELEGRAM_LONG_POLL_SECONDS`
 - `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`
 - `REDIS_MAXMEMORY`, `REDIS_MAXMEMORY_POLICY`
