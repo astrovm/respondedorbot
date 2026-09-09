@@ -605,11 +605,7 @@ fn social_rows(socials: &BTreeMap<String, String>) -> Vec<String> {
     if links.is_empty() {
         Vec::new()
     } else {
-        vec![
-            String::new(),
-            "🔗 <b>Socials</b>".to_owned(),
-            format!("└ {}", links.join(" • ")),
-        ]
+        vec![String::new(), links.join(" · ")]
     }
 }
 
@@ -635,7 +631,11 @@ fn link_rows(signal: &TokenSignal, symbol: &str) -> [String; 2] {
             encoded_query(&format!("(${symbol} OR {})", token.address))
         );
         return [
-            [html_link("DS", &dex), html_link("Xs", &search)].join("•"),
+            [
+                html_link("Dexscreener", &dex),
+                html_link("Search X", &search),
+            ]
+            .join(" · "),
             String::new(),
         ];
     }
@@ -664,32 +664,32 @@ fn link_rows(signal: &TokenSignal, symbol: &str) -> [String; 2] {
         encoded_query(&search)
     );
     let dexscreener = if pair.url.is_empty() {
-        "DS".to_owned()
+        "Dexscreener".to_owned()
     } else {
-        html_link("DS", &pair.url)
+        html_link("Dexscreener", &pair.url)
     };
     let primary = if pair.pair_address.is_empty() && pair.url.starts_with("https://pump.fun/coin/")
     {
         [
-            html_link("PF", &pair.url),
-            html_link("EXP", &explorer),
-            html_link("Xs", &x_search),
+            html_link("Pump.fun", &pair.url),
+            html_link("Explorer", &explorer),
+            html_link("Search X", &x_search),
         ]
-        .join("•")
+        .join(" · ")
     } else {
         [
-            html_link("DEF", &defined),
+            html_link("Defined", &defined),
             dexscreener,
-            html_link("GT", &gecko),
-            html_link("EXP", &explorer),
-            html_link("Xs", &x_search),
+            html_link("GeckoTerminal", &gecko),
+            html_link("Explorer", &explorer),
+            html_link("Search X", &x_search),
         ]
-        .join("•")
+        .join(" · ")
     };
     let trade = if token.chain_id == "ethereum" {
         [
             html_link(
-                "GM",
+                "GMGN",
                 &format!("https://gmgn.ai/eth/token/{}", token.address),
             ),
             html_link(
@@ -697,38 +697,38 @@ fn link_rows(signal: &TokenSignal, symbol: &str) -> [String; 2] {
                 &format!("https://web3.okx.com/token/ethereum/{}", token.address),
             ),
             html_link(
-                "PHO",
+                "Photon",
                 &format!(
                     "https://photon.tinyastro.io/en/r/@respondedor/{}",
                     token.address
                 ),
             ),
         ]
-        .join("•")
+        .join(" · ")
     } else {
         [
             html_link(
-                "GM",
+                "GMGN",
                 &format!("https://gmgn.ai/sol/token/{}", token.address),
             ),
-            html_link("AXI", &format!("https://axiom.trade/t/{}", token.address)),
+            html_link("Axiom", &format!("https://axiom.trade/t/{}", token.address)),
             html_link(
-                "TRO",
+                "Trojan",
                 &format!("https://t.me/menelaus_trojanbot?start={}", token.address),
             ),
             html_link(
-                "BLO",
+                "Bloom",
                 &format!("https://t.me/BloomSolana_bot?start=ca_{}", token.address),
             ),
             html_link(
-                "PHO",
+                "Photon",
                 &format!(
                     "https://photon-sol.tinyastro.io/en/r/@respondedor/{}",
                     token.address
                 ),
             ),
         ]
-        .join("•")
+        .join(" · ")
     };
     [primary, trade]
 }
@@ -837,50 +837,46 @@ pub fn format_signal_caption_for_period(
     );
     let (change, period) = signal_change_for_timeframe(signal, timeframe);
     let change = change.map_or_else(|| "N/A".to_owned(), optional_percentage);
-    let change = timeframe.map_or(change.clone(), |_| format!("{change} {period}"));
-    let mut stats = vec![
-        format!(
-            "├ USD   <b>{}</b> ({})",
-            optional_money(&pair.price_usd, true),
-            change
-        ),
-        format!(
-            "├ MC    <b>{}</b>",
-            if pair.market_cap.is_null() && pair.fdv.is_null() {
-                "N/A".to_owned()
-            } else {
-                format_money(market_cap, false)
-            }
-        ),
-        format!("├ Vol   <b>{}</b>", optional_money(&pair.volume.h24, false)),
-        format!(
-            "├ LP    <b>{}</b>",
-            if pair.liquidity.usd.is_null() {
-                "N/A".to_owned()
-            } else {
-                format_money(displayed_liquidity, false)
-            }
-        ),
-    ];
-    if let Some(supply) = signal.supply.filter(|supply| *supply > 0.0) {
-        let formatted = format_amount(supply);
-        stats.push(format!("├ Sup   <b>{formatted}/{formatted}</b>"));
+    let mut stats = vec![format!(
+        "<b>{}</b> USD · {change} {period}",
+        optional_money(&pair.price_usd, true)
+    )];
+    if !pair.market_cap.is_null() || !pair.fdv.is_null() {
+        stats.push(format!("MC <b>{}</b>", format_money(market_cap, false)));
     }
-    stats.push(format!(
-        "├ 1H    <b>{}</b> 🟩 {buys} 🟥 {sells}",
-        optional_percentage(&pair.price_change.h1)
-    ));
-    stats.push(format!("└ ATH   <b>{ath_line}</b>"));
-
+    if !pair.volume.h24.is_null() {
+        stats.push(format!(
+            "Vol 24h <b>{}</b>",
+            optional_money(&pair.volume.h24, false)
+        ));
+    }
+    if !pair.liquidity.usd.is_null() {
+        stats.push(format!(
+            "LP <b>{}</b>",
+            format_money(displayed_liquidity, false)
+        ));
+    }
+    if let Some(supply) = signal.supply.filter(|supply| *supply > 0.0) {
+        stats.push(format!("Supply <b>{}</b>", format_amount(supply)));
+    }
+    if period == "1h" && (!pair.txns.h1.buys.is_null() || !pair.txns.h1.sells.is_null()) {
+        stats.push(format!("1h · 🟩 {buys} · 🟥 {sells}"));
+    }
+    if ath_value > 0.0 {
+        stats.push(format!("ATH <b>{ath_line}</b>"));
+    }
     let mut rows = vec![
-        format!("💊 <b>{}</b> (${symbol})", html_escape(name)),
+        format!("<b>{}</b> (${symbol})", html_escape(name)),
+        if age == "?" {
+            chain
+        } else {
+            format!("{chain} · {age}")
+        },
         format!(
-            "├ <code>{}</code>",
+            "<code>{}</code>",
             html_escape(&compact_address(&signal.token))
         ),
-        format!("└ {chain} | <i>{age}</i>"),
         String::new(),
-        "📊 <b>Stats</b>".to_owned(),
     ];
     rows.extend(stats);
     rows.extend(social_rows(&signal.socials));
@@ -916,40 +912,48 @@ pub fn build_signal_keyboard(
     token: &TokenAddress,
     pair: &TokenPair,
 ) -> InlineKeyboardMarkup {
+    build_signal_keyboard_localized(signal_id, token, pair, Locale::Es)
+}
+
+#[must_use]
+pub fn build_signal_keyboard_localized(
+    signal_id: &str,
+    token: &TokenAddress,
+    pair: &TokenPair,
+    locale: Locale,
+) -> InlineKeyboardMarkup {
+    use crate::menu_ui::{button, close, localized};
     let dexscreener = if pair.url.is_empty() {
         format!("https://www.defined.fi/{}/{}", token.network, token.address)
     } else {
         pair.url.clone()
     };
     InlineKeyboardMarkup {
-        inline_keyboard: vec![vec![
-            InlineKeyboardButton {
-                text: "🗑".to_owned(),
-                url: None,
-                callback_data: Some(format!("sig:del:{signal_id}")),
-                copy_text: None,
-            },
-            InlineKeyboardButton {
-                text: "🔄".to_owned(),
-                url: None,
-                callback_data: Some(format!("sig:ref:{signal_id}")),
-                copy_text: None,
-            },
-            InlineKeyboardButton {
-                text: "📋".to_owned(),
-                url: None,
-                callback_data: None,
-                copy_text: Some(CopyTextButton {
-                    text: token.address.clone(),
-                }),
-            },
-            InlineKeyboardButton {
-                text: "DS".to_owned(),
-                url: Some(dexscreener),
-                callback_data: None,
-                copy_text: None,
-            },
-        ]],
+        inline_keyboard: vec![
+            vec![
+                button(
+                    localized(locale, "Actualizar", "Refresh"),
+                    format!("sig:ref:{signal_id}"),
+                ),
+                InlineKeyboardButton {
+                    text: localized(locale, "Copiar dirección", "Copy address").to_owned(),
+                    url: None,
+                    callback_data: None,
+                    copy_text: Some(CopyTextButton {
+                        text: token.address.clone(),
+                    }),
+                },
+            ],
+            vec![
+                InlineKeyboardButton {
+                    text: localized(locale, "Ver gráfico", "Open chart").to_owned(),
+                    url: Some(dexscreener),
+                    callback_data: None,
+                    copy_text: None,
+                },
+                close(locale, format!("sig:del:{signal_id}")),
+            ],
+        ],
     }
 }
 
@@ -1070,10 +1074,10 @@ mod tests {
         s.pair.liquidity = Default::default();
         s.pair.txns = Default::default();
         let caption = format_signal_caption(&s, 0);
-        assert!(caption.contains("USD   <b>N/A</b> (N/A)"));
-        assert!(caption.contains("Vol   <b>N/A</b>"));
-        assert!(caption.contains("LP    <b>N/A</b>"));
-        assert!(caption.contains("🟩 N/A 🟥 N/A"));
+        assert!(caption.contains("<b>N/A</b> USD · N/A 24h"));
+        assert!(!caption.contains("Vol 24h"));
+        assert!(!caption.contains("LP <b>"));
+        assert!(!caption.contains("🟩 N/A"));
         assert_ne!(format_money(0.00000000001, true), "$0");
         assert_eq!(format_money(0.0, true), "$0");
     }
@@ -1133,9 +1137,9 @@ mod tests {
     fn signal_captions_use_the_requested_period_when_supplied() {
         let signal = signal();
         let caption = format_signal_caption_for_period(&signal, 1_720_000_000, Some("1h"));
-        assert!(caption.contains("USD   <b>$0.0106</b> (+5.1% 1h)"));
+        assert!(caption.contains("<b>$0.0106</b> USD · +5.1% 1h"));
         let unavailable = format_signal_caption_for_period(&signal, 1_720_000_000, Some("7d"));
-        assert!(unavailable.contains("USD   <b>$0.0106</b> (N/A 7d)"));
+        assert!(unavailable.contains("<b>$0.0106</b> USD · N/A 7d"));
     }
 
     #[test]
@@ -1146,12 +1150,12 @@ mod tests {
         assert!(caption.contains("$TRIPLET"));
         assert!(caption.contains("J8P...pump"));
         assert!(!caption.contains(&format!("<code>{SOL_MINT}</code>")));
-        assert!(caption.contains("├ LP    <b>$123.3K</b>"));
-        assert!(caption.contains("├ Sup   <b>999.9M/999.9M</b>"));
-        assert!(caption.contains("ATH   <b>$2.50B"));
+        assert!(caption.contains("LP <b>$123.3K</b>"));
+        assert!(caption.contains("Supply <b>999.9M</b>"));
+        assert!(caption.contains("ATH <b>$2.50B"));
         let keyboard = build_signal_keyboard("abc", &signal.token, &signal.pair);
         assert_eq!(
-            keyboard.inline_keyboard[0][2]
+            keyboard.inline_keyboard[0][1]
                 .copy_text
                 .as_ref()
                 .map(|copy| copy.text.as_str()),
@@ -1175,8 +1179,8 @@ mod tests {
         });
         let caption = format_signal_caption(&signal, 1_720_000_000);
         assert!(caption.contains("#SOL (Pump @ 38%)"));
-        assert!(caption.contains("🔗 <b>Socials</b>"));
-        assert!(caption.contains("ATH   <b>$51.6K"));
+        assert!(caption.contains("https://x.com/token"));
+        assert!(caption.contains("ATH <b>$51.6K"));
     }
 
     #[test]
@@ -1394,18 +1398,43 @@ mod tests {
             }),
         };
         let caption = format_signal_caption(&signal, 1_720_000_000);
-        assert!(caption.contains("💊 <b>Token</b> ($TOKEN)"));
-        assert!(caption.contains("#ETH | <i>?</i>"));
-        assert!(caption.contains("MC    <b>$900</b>"));
-        assert!(caption.contains("ATH   <b>?</b>"));
+        assert!(caption.contains("<b>Token</b> ($TOKEN)"));
+        assert!(caption.contains("#ETH"));
+        assert!(caption.contains("MC <b>$900</b>"));
+        assert!(!caption.contains("ATH <b>"));
         assert!(caption.contains("etherscan.io"));
         assert!(caption.contains("gmgn.ai/eth"));
         assert!(caption.contains("Custom&lt;&amp;"));
         let keyboard = build_signal_keyboard("fallback", &signal.token, &signal.pair);
         assert_eq!(
-            keyboard.inline_keyboard[0][3].url.as_deref(),
+            keyboard.inline_keyboard[1][0].url.as_deref(),
             Some("https://www.defined.fi/eth/0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
         );
+    }
+
+    #[test]
+    fn card_actions_are_localized_and_copy_the_exact_address() {
+        let signal = signal();
+        for (locale, refresh, close) in [
+            (Locale::Es, "Actualizar", "Cerrar"),
+            (Locale::En, "Refresh", "Close"),
+        ] {
+            let keyboard =
+                super::build_signal_keyboard_localized("id", &signal.token, &signal.pair, locale);
+            assert_eq!(keyboard.inline_keyboard[0][0].text, refresh);
+            assert_eq!(keyboard.inline_keyboard[1][1].text, close);
+            assert_eq!(
+                keyboard.inline_keyboard[1][1].callback_data.as_deref(),
+                Some("sig:del:id")
+            );
+            assert_eq!(
+                keyboard.inline_keyboard[0][1]
+                    .copy_text
+                    .as_ref()
+                    .map(|copy| copy.text.as_str()),
+                Some(SOL_MINT)
+            );
+        }
     }
 
     #[test]

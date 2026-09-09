@@ -670,7 +670,15 @@ pub fn render_charge_history_page(
     locale: Locale,
 ) -> (String, Option<InlineKeyboardMarkup>) {
     if page.groups.is_empty() {
-        return (label(locale, "empty").to_owned(), None);
+        return (
+            label(locale, "empty").to_owned(),
+            Some(InlineKeyboardMarkup {
+                inline_keyboard: vec![vec![crate::menu_ui::close(
+                    locale,
+                    format!("chg:close:{user_id}"),
+                )]],
+            }),
+        );
     }
     let mut lines = vec![label(locale, "title").to_owned()];
     for group in &page.groups {
@@ -741,8 +749,16 @@ pub fn render_charge_history_page(
             copy_text: None,
         });
     }
-    let keyboard = (!buttons.is_empty()).then_some(InlineKeyboardMarkup {
-        inline_keyboard: vec![buttons],
+    let mut rows = Vec::new();
+    if !buttons.is_empty() {
+        rows.push(buttons);
+    }
+    rows.push(vec![crate::menu_ui::close(
+        locale,
+        format!("chg:close:{user_id}"),
+    )]);
+    let keyboard = Some(InlineKeyboardMarkup {
+        inline_keyboard: rows,
     });
     (lines.join("\n"), keyboard)
 }
@@ -946,8 +962,8 @@ mod tests {
             older_cursor: None,
         };
         assert_eq!(
-            render_charge_history_page(&empty, 55, 10, 0, Locale::En),
-            ("you have no recent AI expenses".to_owned(), None)
+            render_charge_history_page(&empty, 55, 10, 0, Locale::En).0,
+            "you have no recent AI expenses"
         );
     }
 
