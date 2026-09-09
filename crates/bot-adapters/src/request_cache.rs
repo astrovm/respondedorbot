@@ -18,6 +18,7 @@ pub trait RequestCache {
 
     fn get(&mut self, key: &str) -> Result<Option<String>, Self::Error>;
 
+    /// A zero TTL stores the value without expiration. Positive TTLs expire normally.
     fn set(&mut self, key: &str, value: &str, ttl_seconds: i64) -> Result<(), Self::Error>;
 }
 
@@ -29,7 +30,8 @@ impl RequestCache for RedisJsonCache {
     }
 
     fn set(&mut self, key: &str, value: &str, ttl_seconds: i64) -> Result<(), Self::Error> {
-        RedisJsonCache::set(self, key, value, Some(ttl_seconds)).map(|_stored| ())
+        RedisJsonCache::set(self, key, value, (ttl_seconds != 0).then_some(ttl_seconds))
+            .map(|_stored| ())
     }
 }
 

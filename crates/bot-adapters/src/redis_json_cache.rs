@@ -100,6 +100,18 @@ mod tests {
                     vec!["SETEX", "request_cache:key", "60", "expiring"],
                     b"+OK\r\n".as_slice(),
                 ),
+                (
+                    vec!["SET", "market_selection:test", "menu"],
+                    b"+OK\r\n".as_slice(),
+                ),
+                (
+                    vec!["SET", "token_signal:state:test", "card"],
+                    b"+OK\r\n".as_slice(),
+                ),
+                (
+                    vec!["SETEX", "token_signal:state:test", "1", "null"],
+                    b"+OK\r\n".as_slice(),
+                ),
             ];
             let (mut stream, _) = listener.accept()?;
             stream.set_read_timeout(Some(Duration::from_secs(2)))?;
@@ -118,6 +130,20 @@ mod tests {
         assert_eq!(cache.get("request_cache:key")?, Some("payload".to_owned()));
         assert!(cache.set("request_cache:key", "persistent", None)?);
         assert!(cache.set("request_cache:key", "expiring", Some(60))?);
+        let mut cache = cache;
+        crate::request_cache::RequestCache::set(&mut cache, "market_selection:test", "menu", 0)?;
+        crate::token_signal::TokenSignalCache::set(
+            &mut cache,
+            "token_signal:state:test",
+            "card",
+            0,
+        )?;
+        crate::token_signal::TokenSignalCache::set(
+            &mut cache,
+            "token_signal:state:test",
+            "null",
+            1,
+        )?;
         match server.join() {
             Ok(result) => result?,
             Err(_) => return Err("synthetic Redis server panicked".into()),
