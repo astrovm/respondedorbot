@@ -355,9 +355,14 @@ fn formatted_snapshot<C: DollarCache>(
     cache: &mut C,
     hours_ago: i64,
     now_unix: i64,
+    locale: Locale,
     diagnostics: &mut Vec<String>,
 ) -> Option<String> {
-    let key = format!("market:dolar:formatted:{hours_ago}");
+    let language = match locale {
+        Locale::Es => "es",
+        Locale::En => "en",
+    };
+    let key = format!("market:dolar:formatted:v2:{language}:{hours_ago}");
     let cached = cached_value(cache, &key, diagnostics)?;
     let timestamp = cached.get("timestamp").and_then(Value::as_i64)?;
     if matches!(
@@ -383,9 +388,14 @@ fn store_formatted<C: DollarCache>(
     hours_ago: i64,
     now_unix: i64,
     text: &str,
+    locale: Locale,
     diagnostics: &mut Vec<String>,
 ) {
-    let key = format!("market:dolar:formatted:{hours_ago}");
+    let language = match locale {
+        Locale::Es => "es",
+        Locale::En => "en",
+    };
+    let key = format!("market:dolar:formatted:v2:{language}:{hours_ago}");
     let value = json!({"timestamp": now_unix, "value": text}).to_string();
     if let Err(error) = cache.set(
         &key,
@@ -407,7 +417,7 @@ pub fn load_dollar_market<T: DollarTransport, C: DollarCache>(
     now_unix: i64,
 ) -> DollarMarketLoad {
     let mut diagnostics = Vec::new();
-    if let Some(text) = formatted_snapshot(cache, hours_ago, now_unix, &mut diagnostics) {
+    if let Some(text) = formatted_snapshot(cache, hours_ago, now_unix, locale, &mut diagnostics) {
         return DollarMarketLoad {
             text: Some(text),
             diagnostics,
@@ -463,7 +473,7 @@ pub fn load_dollar_market<T: DollarTransport, C: DollarCache>(
     let bands = currency_bands(cache, &mut diagnostics);
     let text = render_dollar_rates(&rates, bands.as_ref(), hours_ago, locale);
     if let Some(text) = &text {
-        store_formatted(cache, hours_ago, now_unix, text, &mut diagnostics);
+        store_formatted(cache, hours_ago, now_unix, text, locale, &mut diagnostics);
     }
     DollarMarketLoad { text, diagnostics }
 }
@@ -594,17 +604,17 @@ mod tests {
         let load = load_dollar_market(&transport, &mut cache, 24, Locale::Es, 1_725_000_000);
         let text = load.text.unwrap_or_default();
         for expected in [
-            "Mayorista: 1400 (+1% 24hs)",
-            "Oficial: 1420 (+2% 24hs)",
-            "Tarjeta: 1988 (+3% 24hs)",
-            "MEP: 1450 (+4% 24hs)",
-            "CCL: 1460 (+5% 24hs)",
-            "Blue: 1430 (+6% 24hs)",
-            "Bitcoin: 1470 (+7% 24hs)",
-            "USDC: 1480 (+8% 24hs)",
-            "USDT: 1490 (+9% 24hs)",
+            "Mayorista: 1400 (+1%)",
+            "Oficial: 1420 (+2%)",
+            "Tarjeta: 1988 (+3%)",
+            "MEP: 1450 (+4%)",
+            "CCL: 1460 (+5%)",
+            "Blue: 1430 (+6%)",
+            "Bitcoin: 1470 (+7%)",
+            "USDC: 1480 (+8%)",
+            "USDT: 1490 (+9%)",
             "TCRM 100: 1410",
-            "Banda piso: 950 (+0.1% 24hs)",
+            "Banda piso: 950 (+0.1%)",
         ] {
             assert!(text.contains(expected), "missing {expected} in {text}");
         }
@@ -618,7 +628,7 @@ mod tests {
             cache
                 .writes
                 .iter()
-                .any(|write| write.0 == "market:dolar:formatted:24")
+                .any(|write| write.0 == "market:dolar:formatted:v2:es:24")
         );
     }
 
@@ -646,15 +656,23 @@ mod tests {
             first
                 .text
                 .unwrap_or_default()
-                .contains("Mayorista: 1500 (+7.14% 6hs)")
+                .contains("Wholesale: 1500 (+7.14%)")
         );
-        let second = load_dollar_market(&transport, &mut cache, 6, Locale::Es, now + 301);
+        let spanish = load_dollar_market(&transport, &mut cache, 6, Locale::Es, now);
+        assert!(
+            spanish
+                .text
+                .as_deref()
+                .is_some_and(|text| text.starts_with("Dólar"))
+        );
+        assert!(cache.values.contains_key("market:dolar:formatted:v2:es:6"));
+        let second = load_dollar_market(&transport, &mut cache, 6, Locale::En, now + 301);
         assert_eq!(*transport.calls.borrow(), 1);
         assert_eq!(
             second.text,
             cache
                 .values
-                .get("market:dolar:formatted:6")
+                .get("market:dolar:formatted:v2:en:6")
                 .and_then(|raw| {
                     serde_json::from_str::<serde_json::Value>(raw)
                         .ok()?
@@ -739,7 +757,7 @@ mod tests {
         };
         let mut cache = Cache::default();
         cache.values.insert(
-            "market:dolar:formatted:6".to_owned(),
+            "market:dolar:formatted:v2:en:6".to_owned(),
             serde_json::json!({"timestamp": now - 100_000, "value": "stale"}).to_string(),
         );
         cache.values.insert(
@@ -785,6 +803,7 @@ mod tests {
             6,
             now,
             "synthetic formatted value",
+            Locale::Es,
             &mut write_diagnostics,
         );
         assert!(write_diagnostics[0].contains("could not write formatted dollar cache key"));

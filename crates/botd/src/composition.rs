@@ -4322,7 +4322,7 @@ mod tests {
             Locale::En,
             1_700_000_000,
         );
-        assert_eq!(stock_candidate_load.text, "EXM-USD: 42.00 USD (+5.00% 1m)");
+        assert_eq!(stock_candidate_load.text, "EXM-USD: 42 USD (+5% 1m)");
         assert_eq!(
             stock_candidate_load
                 .chart
@@ -4395,7 +4395,7 @@ mod tests {
             .push(response());
         let png = source.render_chart(&chart, 1_700_000_000)?;
         assert!(png.photo.starts_with(b"\x89PNG"));
-        assert_eq!(png.caption.as_deref(), Some("EXM: 42 USD (+5.00% 24h)"));
+        assert_eq!(png.caption.as_deref(), Some("EXM: 42 USD (+5% 24h)"));
         let mut ranged_chart = chart.clone();
         ranged_chart.timeframe = Some("1m".to_owned());
         source
@@ -4406,7 +4406,7 @@ mod tests {
             .push(response());
         let ranged = source.render_chart(&ranged_chart, 1_700_000_000)?;
         assert!(ranged.photo.starts_with(b"\x89PNG"));
-        assert_eq!(ranged.caption.as_deref(), Some("EXM: 42 USD (+5.00% 1m)"));
+        assert_eq!(ranged.caption.as_deref(), Some("EXM: 42 USD (+5% 1m)"));
         assert_eq!(
             source
                 .stocks

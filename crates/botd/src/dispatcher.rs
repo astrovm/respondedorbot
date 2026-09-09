@@ -1835,9 +1835,8 @@ where
                         caption,
                         match locale {
                             bot_core::locale::Locale::Es =>
-                                "gráfico no disponible; te dejo la cotización",
-                            bot_core::locale::Locale::En =>
-                                "Chart unavailable; showing the quote instead",
+                                "Gráfico no disponible. Probá de nuevo más tarde.",
+                            bot_core::locale::Locale::En => "Chart unavailable. Try again later.",
                         }
                     ));
                     continue;
@@ -7570,7 +7569,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert!(message.text.contains("Global elections by liquidity"));
+        assert!(message.text.contains("Elections by liquidity"));
         assert!(message.text.contains("Candidate A 72%"));
         assert_eq!(
             message.parse_mode,
@@ -7692,7 +7691,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "AAPL: 205.50 USD (+1.25% 24h)\nUnknown: not found"
+            "AAPL: 205.5 USD (+1.25% 24h)\nUnknown: not found"
         );
         assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
         assert_eq!(dispatcher.state.incoming.len(), 1);
@@ -7874,7 +7873,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "Brent: 98.15 USD (-8.78% 24hs)\nWTI: 95.45 USD (+1.25% 24hs)"
+            "Brent: 98.15 USD (-8.78% 24h)\nWTI: 95.45 USD (+1.25% 24h)"
         );
         assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
         assert_eq!(dispatcher.state.incoming.len(), 1);
@@ -8182,11 +8181,11 @@ mod tests {
                 .text
                 .starts_with("Rulos desde Oficial (precio oficial: 1.440 ARS/USD)")
         );
-        assert!(message.text.contains("  • Ganancia: +19.730 ARS"));
+        assert!(message.text.contains("Ganancia: +19.730 ARS"));
         assert!(
             message
                 .text
-                .contains("  • Tramos: USD→USDT BUENBIT, USDT→ARS BUENBIT")
+                .contains("Tramos: USD→USDT BUENBIT, USDT→ARS BUENBIT")
         );
         assert_eq!(
             dispatcher.state_diagnostics(),
@@ -8285,7 +8284,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "100 USD card = 15000 ARS = 76.92 USDT\nProfit: 9402.5 ARS / 48.22 USDT\nTotal: 24402.5 ARS / 125.14 USDT\n\nprofit: 62.68%\n\nfee: 0.5%\nofficial: 100\nusdt: 195\ncard: 150"
+            "100 USD card = 15000 ARS = 76.92 USDT\nProfit: 9402.5 ARS / 48.22 USDT\nTotal: 24402.5 ARS / 125.14 USDT\n\nProfit: 62.68%\nFee: 0.5%\n\nRates · ARS\nOfficial: 100\nUSDT: 195\nCard: 150"
         );
         assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
         assert_eq!(dispatcher.state.incoming.len(), 1);
@@ -11630,7 +11629,7 @@ mod tests {
         }
 
         for (input, language, expected) in [
-            ("/p apple", "es", "gráfico no disponible"),
+            ("/p apple", "es", "Gráfico no disponible"),
             (
                 "/p apple,banana",
                 "en",
@@ -14901,7 +14900,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "tenés 42.00 créditos ia\nsi querés cargar más mandale /topup"
+            "Saldo IA\n\nPersonal: 42.00 créditos\n\nCargar: /topup"
         );
         assert_eq!(
             private.state_diagnostics(),
@@ -14944,7 +14943,7 @@ mod tests {
         assert!(
             message
                 .text
-                .starts_with("AI balances:\n- yours: 30.00\n- group: 120.00")
+                .starts_with("AI balances\n\nPersonal: 30.00 credits\nGroup: 120.00 credits")
         );
     }
 
@@ -15203,7 +15202,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "listo, le pasé 0.10 créditos al grupo\n- lo tuyo: 2.85\n- lo del grupo: 12.15"
+            "Transferencia al grupo: 0.10 créditos\n\nSaldo personal: 2.85 créditos\nSaldo del grupo: 12.15 créditos"
         );
 
         let config = Config {
@@ -15243,7 +15242,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "you do not have enough personal credits\nyou have: 0.70"
+            "Insufficient personal balance.\nAvailable: 0.70 credits\nTry a smaller amount or add credits with /topup."
         );
     }
 
@@ -15367,7 +15366,7 @@ mod tests {
         assert_eq!(message.chat_id, ChatId(42));
         assert_eq!(
             message.text,
-            "added 50.00 credits\nyour balance is now 53.00\nuse /transfer <amount> to fund a group"
+            "Top-up: +50.00 credits\nPersonal balance: 53.00 credits"
         );
     }
 
@@ -15379,7 +15378,7 @@ mod tests {
                     inserted: false,
                     user_balance: 5_300,
                 }),
-                "this payment was already credited\nyour balance is 53.00",
+                "This payment was already credited.\nPersonal balance: 53.00 credits",
                 false,
             ),
             (

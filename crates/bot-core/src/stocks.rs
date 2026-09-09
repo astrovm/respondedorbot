@@ -76,13 +76,13 @@ pub fn render_stock_quotes(
     let lines = quotes
         .iter()
         .map(|(query, quote)| match quote {
-            Some(quote) => {
-                let sign = if quote.variation >= 0.0 { "+" } else { "" };
-                format!(
-                    "{}: {:.2} {} ({sign}{:.2}% 24h)",
-                    quote.symbol, quote.price, quote.currency, quote.variation
-                )
-            }
+            Some(quote) => crate::output_format::quote(
+                &quote.symbol,
+                quote.price,
+                &quote.currency,
+                Some(quote.variation),
+                "24h",
+            ),
             None => match locale {
                 Locale::Es => format!("{query}: no se pudo encontrar"),
                 Locale::En => format!("{query}: not found"),
@@ -99,14 +99,6 @@ pub fn render_stock_quotes(
     }
 }
 
-fn trimmed_decimal(value: f64) -> String {
-    let formatted = format!("{value:.2}");
-    formatted
-        .trim_end_matches('0')
-        .trim_end_matches('.')
-        .to_owned()
-}
-
 #[must_use]
 pub fn render_oil_quotes(
     brent: Option<&StockQuote>,
@@ -118,11 +110,12 @@ pub fn render_oil_quotes(
         let Some(quote) = quote else {
             continue;
         };
-        let sign = if quote.variation >= 0.0 { "+" } else { "" };
-        lines.push(format!(
-            "{name}: {} USD ({sign}{}% 24hs)",
-            trimmed_decimal(quote.price),
-            trimmed_decimal(quote.variation)
+        lines.push(crate::output_format::quote(
+            name,
+            quote.price,
+            &quote.currency,
+            Some(quote.variation),
+            "24h",
         ));
     }
     if lines.is_empty() {
@@ -679,11 +672,11 @@ mod tests {
         };
         assert_eq!(
             render_oil_quotes(Some(&brent), Some(&wti), Locale::Es),
-            "Brent: 98.15 USD (-8.78% 24hs)\nWTI: 95 USD (+0% 24hs)"
+            "Brent: 98.15 USD (-8.78% 24h)\nWTI: 95 USD (+0% 24h)"
         );
         assert_eq!(
             render_oil_quotes(Some(&brent), None, Locale::En),
-            "Brent: 98.15 USD (-8.78% 24hs)"
+            "Brent: 98.15 USD (-8.78% 24h)"
         );
         assert_eq!(
             render_oil_quotes(None, None, Locale::Es),
@@ -718,7 +711,7 @@ mod tests {
         ];
         assert_eq!(
             render_stock_quotes(Some(&entries), Locale::Es),
-            "EXM: 12.50 USD (-1.25% 24h)\nMissing Corp: no se pudo encontrar"
+            "EXM: 12.5 USD (-1.25% 24h)\nMissing Corp: no se pudo encontrar"
         );
         assert_eq!(
             render_stock_quotes(Some(&[("Unknown".to_owned(), None)]), Locale::En),

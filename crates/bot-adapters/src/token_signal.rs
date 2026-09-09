@@ -931,21 +931,11 @@ pub fn market_chart_caption(
         })
         .min_by(|(left, _), (right, _)| left.total_cmp(right))
         .map(|(_, opening_price)| opening_price);
-    let change = opening_price
-        .and_then(|opening_price| {
-            let change = (quote.price / opening_price - 1.0) * 100.0;
-            change.is_finite().then(|| format!("{change:+.2}%"))
-        })
-        .unwrap_or_else(|| "N/A".to_owned());
-    let period = if period.trim().is_empty() {
-        "24h"
-    } else {
-        period
-    };
-    format!(
-        "{}: {} {} ({change} {period})",
-        quote.symbol, quote.price, quote.currency
-    )
+    let change = opening_price.and_then(|opening_price| {
+        let change = (quote.price / opening_price - 1.0) * 100.0;
+        change.is_finite().then_some(change)
+    });
+    bot_core::output_format::quote(&quote.symbol, quote.price, &quote.currency, change, period)
 }
 
 pub fn render_market_chart_for_period(
@@ -1194,13 +1184,13 @@ mod tests {
         for period in ["1m", "7d", "2h", "1y"] {
             assert_eq!(
                 super::market_chart_caption(&quote, &candles, period),
-                format!("BTC: 120 USD (+20.00% {period})")
+                format!("BTC: 120 USD (+20% {period})")
             );
         }
         quote.price = 80.0;
         assert_eq!(
             super::market_chart_caption(&quote, &candles, "1m"),
-            "BTC: 80 USD (-20.00% 1m)"
+            "BTC: 80 USD (-20% 1m)"
         );
         for missing in [
             vec![],

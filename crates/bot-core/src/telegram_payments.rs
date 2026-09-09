@@ -204,21 +204,21 @@ pub fn balance_reply(user_balance: i64, chat_balance: Option<i64>, locale: Local
     let user = format_credit_units(CreditUnits::new(user_balance));
     match (chat_balance, locale) {
         (None, Locale::Es) => {
-            format!("tenés {user} créditos ia\nsi querés cargar más mandale /topup")
+            format!("Saldo IA\n\nPersonal: {user} créditos\n\nCargar: /topup")
         }
         (None, Locale::En) => {
-            format!("you have {user} AI credits\nuse /topup if you want to add more")
+            format!("AI balance\n\nPersonal: {user} credits\n\nAdd credits: /topup")
         }
         (Some(chat), Locale::Es) => {
             let chat = format_credit_units(CreditUnits::new(chat));
             format!(
-                "saldos ia, maestro:\n- lo tuyo: {user}\n- lo del grupo: {chat}\nsi no alcanza lo tuyo, manoteo del grupo\nsi querés cargar más: /topup por privado\nsi querés pasarle al grupo: /transfer <monto>"
+                "Saldos IA\n\nPersonal: {user} créditos\nGrupo: {chat} créditos\n\nSi no alcanza tu saldo, uso el del grupo.\nCargar: /topup por privado\nTransferir al grupo: /transfer <monto>"
             )
         }
         (Some(chat), Locale::En) => {
             let chat = format_credit_units(CreditUnits::new(chat));
             format!(
-                "AI balances:\n- yours: {user}\n- group: {chat}\nI use the group balance when yours runs out\nuse /topup in private to add more\nuse /transfer <amount> to move credits to the group"
+                "AI balances\n\nPersonal: {user} credits\nGroup: {chat} credits\n\nI use the group balance when yours runs out.\nAdd credits: /topup in private\nTransfer to group: /transfer <amount>"
             )
         }
     }
@@ -393,17 +393,17 @@ pub fn successful_payment_reply(
     let credits = format_credit_units(CreditUnits::new(credits_awarded));
     let balance = format_credit_units(CreditUnits::new(user_balance));
     match (inserted, locale) {
-        (true, Locale::Es) => format!(
-            "listo, te cargué {credits} créditos\nahora te quedaron {balance}\nsi querés mandarle al grupo: /transfer <monto>"
-        ),
-        (true, Locale::En) => format!(
-            "added {credits} credits\nyour balance is now {balance}\nuse /transfer <amount> to fund a group"
-        ),
+        (true, Locale::Es) => {
+            format!("Recarga: +{credits} créditos\nSaldo personal: {balance} créditos")
+        }
+        (true, Locale::En) => {
+            format!("Top-up: +{credits} credits\nPersonal balance: {balance} credits")
+        }
         (false, Locale::Es) => {
-            format!("ese pago ya estaba cargado, no rompas las bolas\nte quedaron {balance}")
+            format!("Ese pago ya fue acreditado.\nSaldo personal: {balance} créditos")
         }
         (false, Locale::En) => {
-            format!("this payment was already credited\nyour balance is {balance}")
+            format!("This payment was already credited.\nPersonal balance: {balance} credits")
         }
     }
 }
@@ -857,19 +857,19 @@ mod tests {
     fn balance_replies_match_private_and_group_credit_formatting() {
         assert_eq!(
             balance_reply(4_200, None, Locale::Es),
-            "tenés 42.00 créditos ia\nsi querés cargar más mandale /topup"
+            "Saldo IA\n\nPersonal: 42.00 créditos\n\nCargar: /topup"
         );
         assert_eq!(
             balance_reply(4_200, None, Locale::En),
-            "you have 42.00 AI credits\nuse /topup if you want to add more"
+            "AI balance\n\nPersonal: 42.00 credits\n\nAdd credits: /topup"
         );
         assert_eq!(
             balance_reply(3_000, Some(12_000), Locale::Es),
-            "saldos ia, maestro:\n- lo tuyo: 30.00\n- lo del grupo: 120.00\nsi no alcanza lo tuyo, manoteo del grupo\nsi querés cargar más: /topup por privado\nsi querés pasarle al grupo: /transfer <monto>"
+            "Saldos IA\n\nPersonal: 30.00 créditos\nGrupo: 120.00 créditos\n\nSi no alcanza tu saldo, uso el del grupo.\nCargar: /topup por privado\nTransferir al grupo: /transfer <monto>"
         );
         assert_eq!(
             balance_reply(3_000, Some(12_000), Locale::En),
-            "AI balances:\n- yours: 30.00\n- group: 120.00\nI use the group balance when yours runs out\nuse /topup in private to add more\nuse /transfer <amount> to move credits to the group"
+            "AI balances\n\nPersonal: 30.00 credits\nGroup: 120.00 credits\n\nI use the group balance when yours runs out.\nAdd credits: /topup in private\nTransfer to group: /transfer <amount>"
         );
     }
 
@@ -1071,19 +1071,19 @@ mod tests {
     fn successful_payment_replies_preserve_exact_credit_format_and_locale() {
         assert_eq!(
             successful_payment_reply(5_000, 5_300, true, Locale::Es),
-            "listo, te cargué 50.00 créditos\nahora te quedaron 53.00\nsi querés mandarle al grupo: /transfer <monto>"
+            "Recarga: +50.00 créditos\nSaldo personal: 53.00 créditos"
         );
         assert_eq!(
             successful_payment_reply(5_000, 5_300, true, Locale::En),
-            "added 50.00 credits\nyour balance is now 53.00\nuse /transfer <amount> to fund a group"
+            "Top-up: +50.00 credits\nPersonal balance: 53.00 credits"
         );
         assert_eq!(
             successful_payment_reply(5_000, 5_300, false, Locale::Es),
-            "ese pago ya estaba cargado, no rompas las bolas\nte quedaron 53.00"
+            "Ese pago ya fue acreditado.\nSaldo personal: 53.00 créditos"
         );
         assert_eq!(
             successful_payment_reply(5_000, 5_300, false, Locale::En),
-            "this payment was already credited\nyour balance is 53.00"
+            "This payment was already credited.\nPersonal balance: 53.00 credits"
         );
     }
 

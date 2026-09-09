@@ -117,18 +117,36 @@ pub fn render_dollar_rates(
     let mut lines = rates
         .iter()
         .map(|rate| {
-            let mut line = format!("{}: {}", rate.name, trimmed(rate.price, 2));
+            let name = match (locale, rate.name) {
+                (Locale::En, "Oficial") => "Official",
+                (Locale::En, "Mayorista") => "Wholesale",
+                (Locale::En, "Tarjeta") => "Card",
+                (Locale::En, "Banda piso") => "Lower band",
+                (Locale::En, "Banda techo") => "Upper band",
+                _ => rate.name,
+            };
+            let mut line = format!("{name}: {}", trimmed(rate.price, 2));
             if let Some(change) = rate.change {
-                line.push_str(&format!(" ({}% {hours_ago}hs)", signed(change)));
+                line.push_str(&format!(" ({}%)", signed(change)));
+            } else {
+                line.push_str(" (N/A)");
             }
             line
         })
         .collect::<Vec<_>>();
+    lines.insert(0, String::new());
+    lines.insert(
+        0,
+        format!(
+            "{} · ARS/USD · {hours_ago}h",
+            crate::menu_ui::localized(locale, "Dólar", "Dollar")
+        ),
+    );
     if hours_ago != 24 && no_history {
         lines.push(String::new());
         lines.push(match locale {
-            Locale::Es => format!("(sin datos historicos para {hours_ago}hs todavia)"),
-            Locale::En => format!("(no historical data for {hours_ago}h yet)"),
+            Locale::Es => format!("Sin datos históricos para {hours_ago}h. Probá más tarde."),
+            Locale::En => format!("No historical data for {hours_ago}h yet. Try again later."),
         });
     }
     Some(lines.join("\n"))
@@ -195,11 +213,12 @@ mod tests {
         assert_eq!(
             render_dollar_rates(&rates, Some(&bands), 24, Locale::Es).as_deref(),
             Some(concat!(
-                "Banda piso: 950.12 (+0.25% 24hs)\n",
-                "Mayorista: 1400 (+7.69% 24hs)\n",
-                "TCRM 100: 1410 (-0.5% 24hs)\n",
-                "Oficial: 1420 (+2% 24hs)\n",
-                "Banda techo: 1460.34 (-0.1% 24hs)"
+                "Dólar · ARS/USD · 24h\n\n",
+                "Banda piso: 950.12 (+0.25%)\n",
+                "Mayorista: 1400 (+7.69%)\n",
+                "TCRM 100: 1410 (-0.5%)\n",
+                "Oficial: 1420 (+2%)\n",
+                "Banda techo: 1460.34 (-0.1%)"
             ))
         );
     }
@@ -220,10 +239,11 @@ mod tests {
         assert_eq!(
             render_dollar_rates(&rates, Some(&bands), 6, Locale::En).as_deref(),
             Some(concat!(
-                "Banda piso: 900\n",
-                "Oficial: 1000\n",
-                "Banda techo: 1100\n\n",
-                "(no historical data for 6h yet)"
+                "Dollar · ARS/USD · 6h\n\n",
+                "Lower band: 900 (N/A)\n",
+                "Official: 1000 (N/A)\n",
+                "Upper band: 1100 (N/A)\n\n",
+                "No historical data for 6h yet. Try again later."
             ))
         );
         assert_eq!(render_dollar_rates(&[], None, 24, Locale::Es), None);
