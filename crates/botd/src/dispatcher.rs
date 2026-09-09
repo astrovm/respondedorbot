@@ -356,7 +356,8 @@ struct StoredMarketSelection {
     command: String,
 }
 
-const MARKET_SELECTION_TTL_SECONDS: i64 = 3_600;
+// Zero stores menu state until it is consumed, without a time limit.
+const MARKET_SELECTION_TTL_SECONDS: i64 = 0;
 
 fn market_selection_key(selection_id: &str) -> String {
     format!("market_selection:{selection_id}")
@@ -673,6 +674,10 @@ pub trait TokenSignalSource {
     fn load_state(&mut self, signal_id: &str) -> Result<Option<SignalState>, String>;
 
     fn save_state(&mut self, signal_id: &str, state: &SignalState) -> Result<(), String>;
+
+    fn clear_state(&mut self, _signal_id: &str) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2162,6 +2167,12 @@ where
                     message_id: MessageId(context.message_id),
                 })
                 .map_err(DispatchError::Action)?;
+            if let Some(source) = self.token_signal_source.as_mut()
+                && let Err(error) = source.clear_state(signal_id)
+            {
+                self.state_diagnostics
+                    .push(format!("token signal state cleanup failed: {error}"));
+            }
             if let Some(callback_id) = context.callback_id.as_deref() {
                 let _receipt = self
                     .actions
@@ -5855,6 +5866,11 @@ mod tests {
             *self.state.borrow_mut() = Some(state.clone());
             Ok(())
         }
+
+        fn clear_state(&mut self, _signal_id: &str) -> Result<(), String> {
+            *self.state.borrow_mut() = None;
+            Ok(())
+        }
     }
 
     struct MessageIdActions {
@@ -9472,7 +9488,13 @@ mod tests {
             self.candidate.clone()
         }
 
-        fn save_selection(&mut self, key: &str, value: &str, _: i64) -> Result<(), String> {
+        fn save_selection(
+            &mut self,
+            key: &str,
+            value: &str,
+            ttl_seconds: i64,
+        ) -> Result<(), String> {
+            assert_eq!(ttl_seconds, 0, "selection menus must not expire");
             let mut calls = self.save_calls.borrow_mut();
             *calls += 1;
             if self.fail_save_at == Some(*calls) {
@@ -11005,6 +11027,7 @@ mod tests {
                 message_id: MessageId(701),
             }
         )));
+        assert!(token_state.borrow().is_none());
         assert!(!dispatcher.actions.actions.iter().any(|action| matches!(
             action,
             TelegramAction::SendMessage(message)

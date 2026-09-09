@@ -111,6 +111,7 @@ pub trait TokenSignalCache {
 
     fn get(&mut self, key: &str) -> Result<Option<String>, Self::Error>;
 
+    /// A zero TTL stores the value without expiration. Positive TTLs expire normally.
     fn set(&mut self, key: &str, value: &str, ttl_seconds: i64) -> Result<(), Self::Error>;
 }
 
@@ -122,7 +123,8 @@ impl TokenSignalCache for RedisJsonCache {
     }
 
     fn set(&mut self, key: &str, value: &str, ttl_seconds: i64) -> Result<(), Self::Error> {
-        RedisJsonCache::set(self, key, value, Some(ttl_seconds)).map(|_stored| ())
+        RedisJsonCache::set(self, key, value, (ttl_seconds != 0).then_some(ttl_seconds))
+            .map(|_stored| ())
     }
 }
 
@@ -803,10 +805,17 @@ where
             .get(&key)
             .map_err(|error| error.to_string())?
             .map(|encoded| {
-                serde_json::from_str(&encoded)
+                serde_json::from_str::<Option<SignalState>>(&encoded)
                     .map_err(|error| format!("invalid token-signal state {key}: {error}"))
             })
             .transpose()
+            .map(Option::flatten)
+    }
+
+    pub fn clear_state(&mut self, signal_id: &str) -> Result<(), String> {
+        self.cache
+            .set(&signal_state_key(signal_id), "null", 1)
+            .map_err(|error| error.to_string())
     }
 
     pub fn save_state(&mut self, signal_id: &str, state: &SignalState) -> Result<(), String> {
