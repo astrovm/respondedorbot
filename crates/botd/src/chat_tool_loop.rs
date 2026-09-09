@@ -124,6 +124,7 @@ pub struct ChatToolLoopError {
 }
 
 pub fn run_chat_tool_loop<Provider, Tools>(
+    operation_id: &str,
     provider: &Provider,
     tools: &mut Tools,
     initial_messages: &[PromptMessage],
@@ -137,6 +138,14 @@ where
 {
     let schemas = tools.schemas(task_mode);
     let mut result = ChatToolLoopResult::new(initial_messages);
+    trace(
+        operation_id,
+        0,
+        "start",
+        json!({
+            "available_tools": schemas.iter().filter_map(|schema| schema.pointer("/function/name").and_then(Value::as_str)).collect::<Vec<_>>(),
+        }),
+    );
 
     for logical_round in 0..max_rounds {
         let mut retry = 0;
@@ -146,6 +155,15 @@ where
                 Ok(round) => break round,
                 Err(error) => {
                     result.provider_rounds += 1;
+                    trace(
+                        operation_id,
+                        result.provider_rounds,
+                        "provider_error",
+                        json!({
+                            "error_kind": provider_error_kind(&error.source),
+                            "provider": round_trace(&error.partial),
+                        }),
+                    );
                     record_round(&mut result, &error.partial);
                     let retry_delay = (retry < MAX_PROVIDER_RETRIES
                         && retryable_provider_error(&error.source)
@@ -176,6 +194,12 @@ where
             }
         };
         result.provider_rounds += 1;
+        trace(
+            operation_id,
+            result.provider_rounds,
+            "provider_round",
+            round_trace(&round),
+        );
         record_round(&mut result, &round);
 
         let known_calls = round
@@ -185,6 +209,15 @@ where
             .cloned()
             .collect::<Vec<_>>();
         if known_calls.is_empty() {
+            trace(
+                operation_id,
+                result.provider_rounds,
+                "finish",
+                json!({
+                    "tool_calls_executed": result.tool_calls_executed,
+                    "stopped_at_limit": false,
+                }),
+            );
             return Ok(result);
         }
 
@@ -194,7 +227,17 @@ where
         ));
         for call in known_calls {
             let arguments = parse_arguments(&call.arguments);
+            trace(
+                operation_id,
+                result.provider_rounds,
+                "tool_start",
+                tool_trace(&call, &arguments, None),
+            );
+            let started = std::time::Instant::now();
             let tool_result = tools.execute(&call.name, &arguments, &call.id);
+            let mut details = tool_trace(&call, &arguments, Some(&tool_result));
+            details["elapsed_ms"] = json!(started.elapsed().as_millis());
+            trace(operation_id, result.provider_rounds, "tool_result", details);
             result.tool_calls_executed += 1;
             if let Some(segment) = tool_result.billing_segment {
                 result.billing_segments.push(segment);
@@ -210,7 +253,125 @@ where
     }
 
     result.stopped_at_limit = true;
+    trace(
+        operation_id,
+        result.provider_rounds,
+        "finish",
+        json!({
+            "tool_calls_executed": result.tool_calls_executed,
+            "stopped_at_limit": true,
+        }),
+    );
     Ok(result)
+}
+
+// Keep traces separate from user-facing diagnostics. JSON escapes embedded newlines.
+fn trace(operation_id: &str, round: usize, event: &str, details: Value) {
+    eprintln!(
+        "AI trace: {}",
+        json!({
+            "operation_id": bounded(operation_id, 160),
+            "round": round,
+            "event": event,
+            "details": details,
+        })
+    );
+}
+
+fn bounded(text: &str, limit: usize) -> String {
+    let mut chars = text.chars();
+    let mut result: String = chars.by_ref().take(limit).collect();
+    if chars.next().is_some() {
+        result.push('…');
+    }
+    result
+}
+
+fn round_trace(round: &ChatRoundResult) -> Value {
+    let segment = round.billing_segment.as_ref();
+    json!({
+        "model": segment.and_then(|s| s.get("model")).and_then(Value::as_str).map(|s| bounded(s, 160)),
+        "generation_id": segment.and_then(|s| s.pointer("/metadata/provider_generation_id")).and_then(Value::as_str).map(|s| bounded(s, 160)),
+        "finish_reason": round.finish_reason.as_deref().map(|s| bounded(s, 80)),
+        "text_chars": round.text.chars().count(),
+        "tool_calls": round.tool_calls.iter().take(20).map(|call| json!({
+            "id": bounded(&call.id, 160), "name": bounded(&call.name, 80),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+// URLs can contain credentials or signed query parameters; retain only the location.
+fn source_location(raw: &str) -> String {
+    let Ok(mut url) = url::Url::parse(raw) else {
+        return "[invalid URL]".to_owned();
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return "[unsupported URL]".to_owned();
+    }
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    bounded(url.as_str(), 500)
+}
+
+fn tool_trace(
+    call: &StreamToolCall,
+    arguments: &Value,
+    result: Option<&ToolExecutionResult>,
+) -> Value {
+    let mut details =
+        json!({"tool": bounded(&call.name, 80), "tool_call_id": bounded(&call.id, 160)});
+    match call.name.as_str() {
+        "web_search" => {
+            details["query"] = json!(bounded(
+                arguments
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                500
+            ));
+        }
+        "web_fetch" => {
+            details["url"] = json!(source_location(
+                arguments
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+            ));
+        }
+        _ => {}
+    }
+    if let Some(result) = result {
+        details["output_chars"] = json!(result.output.chars().count());
+        details["diagnostic_count"] = json!(result.diagnostics.len());
+        if call.name == "web_search" {
+            let payload = serde_json::from_str::<Value>(&result.output).ok();
+            if let Some(results) = payload
+                .as_ref()
+                .and_then(|p| p.get("results"))
+                .and_then(Value::as_array)
+            {
+                details["result_count"] = json!(results.len());
+                details["sources"] = json!(results.iter().take(5).map(|source| json!({
+                    "url": source_location(source.get("url").and_then(Value::as_str).unwrap_or_default()),
+                    "title": bounded(source.get("title").and_then(Value::as_str).unwrap_or_default(), 300),
+                    "description": bounded(source.get("description").and_then(Value::as_str).unwrap_or_default(), 1200),
+                })).collect::<Vec<_>>());
+            } else {
+                details["search_error"] = json!(bounded(&result.output, 500));
+            }
+            details["provider_request_id"] = json!(
+                result
+                    .billing_segment
+                    .as_ref()
+                    .and_then(|s| s.pointer("/metadata/provider_request_id"))
+                    .and_then(Value::as_str)
+                    .map(|s| bounded(s, 160))
+            );
+        }
+    }
+    details
 }
 
 fn retryable_provider_error(error: &OpenRouterChatError) -> bool {
@@ -312,6 +473,75 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn search_trace_preserves_evidence_but_bounds_text_and_omits_extra_fields() {
+        let call = call("web_search", "{}");
+        let result = ToolExecutionResult::output(
+            json!({"results": [{
+                "title": "Fixture 2026", "description": "á".repeat(1400),
+                "url": "https://user:password@example.com/Fixture?token=secret#private",
+                "extra": "not logged"
+            }]})
+            .to_string(),
+        );
+        let trace = tool_trace(
+            &call,
+            &json!({"query": "boca river 2026\npróximo", "api_key": "secret-key"}),
+            Some(&result),
+        );
+        assert_eq!(trace["query"], "boca river 2026\npróximo");
+        assert_eq!(trace["sources"][0]["url"], "https://example.com/Fixture");
+        assert_eq!(trace["result_count"], 1);
+        assert_eq!(
+            trace["sources"][0]["description"]
+                .as_str()
+                .map(|s| s.chars().count()),
+            Some(1201)
+        );
+        let encoded = trace.to_string();
+        assert!(!encoded.contains('\n'));
+        for excluded in ["password", "secret", "not logged"] {
+            assert!(!encoded.contains(excluded));
+        }
+    }
+
+    #[test]
+    fn search_trace_distinguishes_empty_results_from_errors_and_links_provider_request() {
+        let call = call("web_search", "{}");
+        let mut result = ToolExecutionResult::output(r#"{"results":[]}"#);
+        result.billing_segment = Some(json!({"metadata": {"provider_request_id": "request-123"}}));
+        let empty = tool_trace(&call, &json!({}), Some(&result));
+        assert_eq!(empty["result_count"], 0);
+        assert_eq!(empty["provider_request_id"], "request-123");
+        assert!(empty.get("search_error").is_none());
+        result.output = "Search error: timed out".to_owned();
+        let error = tool_trace(&call, &json!({}), Some(&result));
+        assert_eq!(error["search_error"], "Search error: timed out");
+        assert!(error.get("result_count").is_none());
+    }
+
+    #[test]
+    fn traces_do_not_dump_private_tool_contents_or_assistant_text() {
+        let call = call("task_set", "{}");
+        let result = ToolExecutionResult::output("private reminder");
+        let trace = tool_trace(&call, &json!({"text": "private reminder"}), Some(&result));
+        assert!(!trace.to_string().contains("private reminder"));
+        assert_eq!(trace["output_chars"], 16);
+        let trace = round_trace(&round(
+            "private reply",
+            vec![],
+            json!({"model": "test-model", "metadata": {"provider_generation_id": "generation-1"}}),
+        ));
+        assert_eq!(trace["tool_calls"], json!([]));
+        assert_eq!(trace["generation_id"], "generation-1");
+        assert!(!trace.to_string().contains("private reply"));
+        assert_eq!(source_location("not a url"), "[invalid URL]");
+        assert_eq!(
+            source_location("data:text/plain,private"),
+            "[unsupported URL]"
+        );
+    }
+
     struct Provider {
         rounds: RefCell<Vec<Result<ChatRoundResult, ChatRoundError>>>,
         observed: RefCell<Vec<Vec<PromptMessage>>>,
@@ -403,6 +633,7 @@ mod tests {
         let mut tools = Tools::default();
         let mut streamed = String::new();
         let result = run_chat_tool_loop(
+            "test-operation",
             &provider,
             &mut tools,
             &[PromptMessage::text(PromptRole::User, "question")],
@@ -440,7 +671,15 @@ mod tests {
             observed: RefCell::new(Vec::new()),
         };
         let mut tools = Tools::default();
-        let result = run_chat_tool_loop(&provider, &mut tools, &[], false, 5, |_text| Ok(()));
+        let result = run_chat_tool_loop(
+            "test-operation",
+            &provider,
+            &mut tools,
+            &[],
+            false,
+            5,
+            |_text| Ok(()),
+        );
         assert!(result.is_ok());
         assert!(tools.calls.is_empty());
 
@@ -452,8 +691,16 @@ mod tests {
             ))]),
             observed: RefCell::new(Vec::new()),
         };
-        let result = run_chat_tool_loop(&provider, &mut tools, &[], false, 1, |_text| Ok(()))
-            .unwrap_or_else(|error| *error.partial);
+        let result = run_chat_tool_loop(
+            "test-operation",
+            &provider,
+            &mut tools,
+            &[],
+            false,
+            1,
+            |_text| Ok(()),
+        )
+        .unwrap_or_else(|error| *error.partial);
         assert_eq!(tools.calls[0].1, json!({}));
         assert!(result.stopped_at_limit);
     }
@@ -468,7 +715,16 @@ mod tests {
             observed: RefCell::new(Vec::new()),
         };
         let mut tools = Tools::default();
-        let error = run_chat_tool_loop(&provider, &mut tools, &[], false, 5, |_text| Ok(())).err();
+        let error = run_chat_tool_loop(
+            "test-operation",
+            &provider,
+            &mut tools,
+            &[],
+            false,
+            5,
+            |_text| Ok(()),
+        )
+        .err();
         assert!(error.is_some());
         let Some(error) = error else {
             return;
@@ -500,8 +756,16 @@ mod tests {
             ..Tools::default()
         };
 
-        let result = run_chat_tool_loop(&provider, &mut tools, &[], false, 5, |_text| Ok(()))
-            .unwrap_or_else(|error| *error.partial);
+        let result = run_chat_tool_loop(
+            "test-operation",
+            &provider,
+            &mut tools,
+            &[],
+            false,
+            5,
+            |_text| Ok(()),
+        )
+        .unwrap_or_else(|error| *error.partial);
 
         assert_eq!(result.text, "synthetic answer");
         assert_eq!(result.provider_rounds, 3);
@@ -544,9 +808,17 @@ mod tests {
             ..Tools::default()
         };
 
-        let error = run_chat_tool_loop(&provider, &mut tools, &[], false, 5, |_text| Ok(()))
-            .err()
-            .unwrap_or_else(|| unreachable!());
+        let error = run_chat_tool_loop(
+            "test-operation",
+            &provider,
+            &mut tools,
+            &[],
+            false,
+            5,
+            |_text| Ok(()),
+        )
+        .err()
+        .unwrap_or_else(|| unreachable!());
 
         assert_eq!(error.provider_rounds, 4);
         assert_eq!(error.partial.tool_calls_executed, 1);
@@ -583,9 +855,17 @@ mod tests {
             ..Tools::default()
         };
 
-        let error = run_chat_tool_loop(&provider, &mut tools, &[], false, 5, |_text| Ok(()))
-            .err()
-            .unwrap_or_else(|| unreachable!());
+        let error = run_chat_tool_loop(
+            "test-operation",
+            &provider,
+            &mut tools,
+            &[],
+            false,
+            5,
+            |_text| Ok(()),
+        )
+        .err()
+        .unwrap_or_else(|| unreachable!());
 
         assert_eq!(tools.calls.len(), 2);
         assert_eq!(
@@ -609,9 +889,17 @@ mod tests {
             };
             let mut tools = Tools::default();
 
-            let error = run_chat_tool_loop(&provider, &mut tools, &[], false, 5, |_text| Ok(()))
-                .err()
-                .unwrap_or_else(|| unreachable!());
+            let error = run_chat_tool_loop(
+                "test-operation",
+                &provider,
+                &mut tools,
+                &[],
+                false,
+                5,
+                |_text| Ok(()),
+            )
+            .err()
+            .unwrap_or_else(|| unreachable!());
 
             assert_eq!(error.provider_rounds, 1);
             assert_eq!(provider.observed.borrow().len(), 1);
