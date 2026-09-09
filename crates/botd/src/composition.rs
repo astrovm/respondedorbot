@@ -1336,6 +1336,7 @@ fn telegram_action_chat_id(action: &TelegramAction) -> Option<i64> {
         | TelegramAction::SendInvoice { chat_id, .. }
         | TelegramAction::SendTyping { chat_id }
         | TelegramAction::EditMessage { chat_id, .. }
+        | TelegramAction::EditMessageNoPreview { chat_id, .. }
         | TelegramAction::DeleteMessage { chat_id, .. } => Some(chat_id.0),
         TelegramAction::SetCommands { .. }
         | TelegramAction::AnswerCallback { .. }
