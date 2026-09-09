@@ -170,11 +170,11 @@ pub fn render_devo_reply(reply: DevoReply, locale: Locale) -> String {
 pub fn render_devo_result(result: &DevoResult, locale: Locale) -> String {
     let summary = match locale {
         Locale::Es => format!(
-            "ganancia: {}%\n\ncomisión: {}%\noficial: {}\nusdt: {}\ntarjeta: {}",
+            "Ganancia: {}%\nComisión: {}%\n\nCotizaciones · ARS\nOficial: {}\nUSDT: {}\nTarjeta: {}",
             result.profit, result.fee, result.official, result.usdt, result.card
         ),
         Locale::En => format!(
-            "profit: {}%\n\nfee: {}%\nofficial: {}\nusdt: {}\ncard: {}",
+            "Profit: {}%\nFee: {}%\n\nRates · ARS\nOfficial: {}\nUSDT: {}\nCard: {}",
             result.profit, result.fee, result.official, result.usdt, result.card
         ),
     };
@@ -183,7 +183,7 @@ pub fn render_devo_result(result: &DevoResult, locale: Locale) -> String {
     };
     match locale {
         Locale::Es => format!(
-            "{} USD Tarjeta = {} ARS = {} USDT\nGanarias {} ARS / {} USDT\nTotal: {} ARS / {} USDT\n\n{}",
+            "{} USD Tarjeta = {} ARS = {} USDT\nGanancia: {} ARS / {} USDT\nTotal: {} ARS / {} USDT\n\n{}",
             purchase.usd,
             purchase.ars,
             purchase.usdt,
@@ -315,7 +315,7 @@ mod tests {
         .unwrap_or_else(|_| unreachable!());
         assert_eq!(
             render_devo_result(&summary, Locale::Es),
-            "ganancia: 62.68%\n\ncomisión: 0.5%\noficial: 100\nusdt: 195\ntarjeta: 150"
+            "Ganancia: 62.68%\nComisión: 0.5%\n\nCotizaciones · ARS\nOficial: 100\nUSDT: 195\nTarjeta: 150"
         );
         let purchase = calculate_devo(
             0.005,
@@ -330,7 +330,7 @@ mod tests {
         .unwrap_or_else(|_| unreachable!());
         assert_eq!(
             render_devo_result(&purchase, Locale::En),
-            "100 USD card = 15000 ARS = 76.92 USDT\nProfit: 9402.5 ARS / 48.22 USDT\nTotal: 24402.5 ARS / 125.14 USDT\n\nprofit: 62.68%\n\nfee: 0.5%\nofficial: 100\nusdt: 195\ncard: 150"
+            "100 USD card = 15000 ARS = 76.92 USDT\nProfit: 9402.5 ARS / 48.22 USDT\nTotal: 24402.5 ARS / 125.14 USDT\n\nProfit: 62.68%\nFee: 0.5%\n\nRates · ARS\nOfficial: 100\nUSDT: 195\nCard: 150"
         );
     }
 }

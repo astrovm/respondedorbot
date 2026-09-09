@@ -248,13 +248,13 @@ pub fn render_elections(
 ) -> String {
     let (title, liquidity_label, closes_label, error) = match locale {
         Locale::Es => (
-            "Polymarket - Elecciones globales por liquidez",
+            "Polymarket · Elecciones por liquidez",
             "Liquidez",
             "Cierra",
             "No pude traer las elecciones desde Polymarket",
         ),
         Locale::En => (
-            "Polymarket - Global elections by liquidity",
+            "Polymarket · Elections by liquidity",
             "Liquidity",
             "Closes",
             "I could not load the elections from Polymarket",
@@ -311,9 +311,9 @@ pub fn render_elections(
             html_escape(&display_title)
         ));
         if !outcomes.is_empty() {
-            lines.push(outcomes.join(" | "));
+            lines.push(outcomes.join(" · "));
         }
-        lines.push(details.join(" | "));
+        lines.push(details.join(" · "));
     }
     if lines.len() > 1 {
         lines.join("\n")
@@ -461,10 +461,10 @@ mod tests {
         assert_eq!(
             render_elections(&events, &live, Locale::Es),
             concat!(
-                "Polymarket - Elecciones globales por liquidez\n\n",
+                "Polymarket · Elecciones por liquidez\n\n",
                 "<a href=\"https://polymarket.com/event/us-election\">🇺🇸 US election &amp; runoff</a>\n",
-                "Candidate A 72% | Candidate B 55%\n",
-                "Liquidez US$2.5M | Cierra 2027-04-30"
+                "Candidate A 72% · Candidate B 55%\n",
+                "Liquidez US$2.5M · Cierra 2027-04-30"
             )
         );
         assert_eq!(

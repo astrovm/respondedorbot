@@ -253,11 +253,17 @@ fn optional_count(value: &Value) -> String {
 #[must_use]
 pub fn format_signal_quote(signal: &TokenSignal, timeframe: Option<&str>) -> String {
     let (change, period) = signal_change_for_timeframe(signal, timeframe);
-    format!(
-        "{}: {} USD ({} {period})",
-        signal.pair.base_token.symbol,
-        optional_money(&signal.pair.price_usd, true),
-        change.map_or_else(|| "N/A".to_owned(), optional_percentage)
+    let numeric = |value: &Value| {
+        value
+            .as_f64()
+            .or_else(|| value.as_str().and_then(|v| v.parse().ok()))
+    };
+    crate::output_format::quote(
+        &signal.pair.base_token.symbol,
+        numeric(&signal.pair.price_usd).unwrap_or(f64::NAN),
+        "USD",
+        change.and_then(numeric),
+        period,
     )
 }
 

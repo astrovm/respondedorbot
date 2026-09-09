@@ -82,7 +82,7 @@ use bot_core::telegram_payments::{
 use bot_core::token_signals::{
     SIGNAL_REFRESH_COOLDOWN_SECONDS, SignalQuery, SignalState, TokenAddress, TokenSignal,
     build_signal_keyboard_localized, callback_text as signal_callback_text, detect_signal_query,
-    format_signal_caption_for_period, has_usable_chart, signal_market_values, stable_signal_id,
+    format_signal_caption_for_period, signal_market_values, stable_signal_id,
 };
 use bot_core::weather::{
     WeatherObservation, classify_weather_command, render_weather, requested_location,
@@ -683,8 +683,6 @@ pub trait TokenSignalSource {
     fn load(&mut self, query: &SignalQuery) -> TokenSignalLoad;
 
     fn load_token(&mut self, token: &TokenAddress) -> TokenSignalLoad;
-
-    fn render_photo(&mut self, signal: &TokenSignal) -> Result<Vec<u8>, String>;
 
     fn render_period_photo(
         &mut self,
@@ -1792,10 +1790,9 @@ where
                                     Some(period) => {
                                         source.render_period_photo(&signal, period, timestamp).ok()
                                     }
-                                    None if has_usable_chart(&signal) => {
-                                        source.render_photo(&signal).ok()
+                                    None => {
+                                        source.render_period_photo(&signal, "24h", timestamp).ok()
                                     }
-                                    None => None,
                                 },
                             );
                             if let Some(photo) = token_photo {
@@ -1835,9 +1832,8 @@ where
                         caption,
                         match locale {
                             bot_core::locale::Locale::Es =>
-                                "gráfico no disponible; te dejo la cotización",
-                            bot_core::locale::Locale::En =>
-                                "Chart unavailable; showing the quote instead",
+                                "Gráfico no disponible. Probá de nuevo más tarde.",
+                            bot_core::locale::Locale::En => "Chart unavailable. Try again later.",
                         }
                     ));
                     continue;
@@ -1989,7 +1985,7 @@ where
             .as_mut()
             .and_then(|source| match timeframe {
                 Some(period) => source.render_period_photo(&signal, period, timestamp).ok(),
-                None => source.render_photo(&signal).ok(),
+                None => source.render_period_photo(&signal, "24h", timestamp).ok(),
             }) {
             Some(photo) => photo,
             None => {
@@ -2001,20 +1997,18 @@ where
                         SignalQuery::Symbol(symbol) => symbol,
                     }
                 ));
-                let reply_text = timeframe.map_or_else(
-                    || caption.clone(),
-                    |period| {
-                        let unavailable = match locale {
-                            bot_core::locale::Locale::Es => {
-                                format!("historial {period} no disponible; te dejo la cotización")
-                            }
-                            bot_core::locale::Locale::En => {
-                                format!("{period} history unavailable; showing the quote")
-                            }
-                        };
-                        format!("{caption}\n{unavailable}")
-                    },
-                );
+                let reply_text = {
+                    let period = timeframe.unwrap_or("24h");
+                    let unavailable = match locale {
+                        bot_core::locale::Locale::Es => {
+                            format!("historial {period} no disponible; te dejo la cotización")
+                        }
+                        bot_core::locale::Locale::En => {
+                            format!("{period} history unavailable; showing the quote")
+                        }
+                    };
+                    format!("{caption}\n{unavailable}")
+                };
                 let mut reply = SendMessage::new(chat_id, &reply_text);
                 reply.reply_to_message_id = Some(message_id);
                 reply.parse_mode = Some(ParseMode::Html);
@@ -2251,7 +2245,7 @@ where
             || Err("native token-signal source disappeared".to_owned()),
             |source| match state.chart_period.as_deref() {
                 Some(period) => source.render_period_photo(&signal, period, timestamp),
-                None => source.render_photo(&signal),
+                None => source.render_period_photo(&signal, "24h", timestamp),
             },
         );
         let edited = match photo {
@@ -2578,8 +2572,7 @@ where
                             Some(period) => {
                                 source.render_period_photo(&signal, period, timestamp).ok()
                             }
-                            None if has_usable_chart(&signal) => source.render_photo(&signal).ok(),
-                            None => None,
+                            None => source.render_period_photo(&signal, "24h", timestamp).ok(),
                         }
                     });
                     if let Some(photo) = photo {
@@ -2710,8 +2703,7 @@ where
             .as_mut()
             .and_then(|source| match timeframe {
                 Some(period) => source.render_period_photo(&signal, period, timestamp).ok(),
-                None if has_usable_chart(&signal) => source.render_photo(&signal).ok(),
-                None => None,
+                None => source.render_period_photo(&signal, "24h", timestamp).ok(),
             });
         let signal_id = stable_signal_id(
             chat_id_value,
@@ -5974,10 +5966,6 @@ mod tests {
             self.token_load.clone()
         }
 
-        fn render_photo(&mut self, _signal: &TokenSignal) -> Result<Vec<u8>, String> {
-            self.photo.clone()
-        }
-
         fn render_period_photo(
             &mut self,
             _: &TokenSignal,
@@ -6023,10 +6011,6 @@ mod tests {
                     signal: Some(self.signal.clone()),
                     diagnostics: Vec::new(),
                 })
-        }
-
-        fn render_photo(&mut self, _signal: &TokenSignal) -> Result<Vec<u8>, String> {
-            Ok(b"stateful-token-card".to_vec())
         }
 
         fn render_period_photo(
@@ -6105,7 +6089,12 @@ mod tests {
             self.token_load.clone()
         }
 
-        fn render_photo(&mut self, _signal: &TokenSignal) -> Result<Vec<u8>, String> {
+        fn render_period_photo(
+            &mut self,
+            _signal: &TokenSignal,
+            _period: &str,
+            _now: i64,
+        ) -> Result<Vec<u8>, String> {
             self.photo.clone()
         }
 
@@ -7570,7 +7559,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert!(message.text.contains("Global elections by liquidity"));
+        assert!(message.text.contains("Elections by liquidity"));
         assert!(message.text.contains("Candidate A 72%"));
         assert_eq!(
             message.parse_mode,
@@ -7692,7 +7681,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "AAPL: 205.50 USD (+1.25% 24h)\nUnknown: not found"
+            "AAPL: 205.5 USD (+1.25% 24h)\nUnknown: not found"
         );
         assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
         assert_eq!(dispatcher.state.incoming.len(), 1);
@@ -7874,7 +7863,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "Brent: 98.15 USD (-8.78% 24hs)\nWTI: 95.45 USD (+1.25% 24hs)"
+            "Brent: 98.15 USD (-8.78% 24h)\nWTI: 95.45 USD (+1.25% 24h)"
         );
         assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
         assert_eq!(dispatcher.state.incoming.len(), 1);
@@ -8182,11 +8171,11 @@ mod tests {
                 .text
                 .starts_with("Rulos desde Oficial (precio oficial: 1.440 ARS/USD)")
         );
-        assert!(message.text.contains("  • Ganancia: +19.730 ARS"));
+        assert!(message.text.contains("Ganancia: +19.730 ARS"));
         assert!(
             message
                 .text
-                .contains("  • Tramos: USD→USDT BUENBIT, USDT→ARS BUENBIT")
+                .contains("Tramos: USD→USDT BUENBIT, USDT→ARS BUENBIT")
         );
         assert_eq!(
             dispatcher.state_diagnostics(),
@@ -8285,7 +8274,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "100 USD card = 15000 ARS = 76.92 USDT\nProfit: 9402.5 ARS / 48.22 USDT\nTotal: 24402.5 ARS / 125.14 USDT\n\nprofit: 62.68%\n\nfee: 0.5%\nofficial: 100\nusdt: 195\ncard: 150"
+            "100 USD card = 15000 ARS = 76.92 USDT\nProfit: 9402.5 ARS / 48.22 USDT\nTotal: 24402.5 ARS / 125.14 USDT\n\nProfit: 62.68%\nFee: 0.5%\n\nRates · ARS\nOfficial: 100\nUSDT: 195\nCard: 150"
         );
         assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
         assert_eq!(dispatcher.state.incoming.len(), 1);
@@ -11257,191 +11246,223 @@ mod tests {
     }
 
     #[test]
+    fn default_token_commands_fetch_24h_history_without_preloaded_candles() {
+        for input in ["$syn", "/p syn", "/c syn"] {
+            let mut signal = token_signal();
+            signal.candles.clear();
+            let periods = Rc::new(RefCell::new(Vec::new()));
+            let mut dispatcher = dispatcher().with_token_signal_source(Box::new(StatefulSignals {
+                signal,
+                token_results: Rc::new(RefCell::new(VecDeque::new())),
+                state: Rc::new(RefCell::new(None)),
+                saved: Rc::new(RefCell::new(Vec::new())),
+                periods: Rc::clone(&periods),
+            }));
+            assert_eq!(
+                dispatcher.dispatch(update(input, Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert_eq!(periods.borrow().as_slice(), ["24h"], "{input}");
+            assert!(dispatcher.actions.0.iter().any(|action| matches!(action,
+                TelegramAction::SendPhoto { reply_to_message_id: Some(MessageId(7)), caption, .. }
+                    if caption.contains("24h")
+            )), "{input}");
+        }
+    }
+
+    #[test]
     fn dex_market_selection_persists_card_state_for_refresh_and_delete() -> Result<(), String> {
-        let signal = token_signal();
-        let stored = Rc::new(RefCell::new(HashMap::new()));
-        let selected = Rc::new(RefCell::new(Vec::new()));
-        let token_state = Rc::new(RefCell::new(None));
-        let saved = Rc::new(RefCell::new(Vec::new()));
-        let periods = Rc::new(RefCell::new(Vec::new()));
-        let token_results = Rc::new(RefCell::new(VecDeque::new()));
-        let mut dispatcher = NativeDispatcher::new(
-            Config {
-                value: Ok(ChatConfig::default()),
-                chat_ids: Vec::new(),
-            },
-            MessageIdActions::new(700),
-            State::default(),
-            values(),
-            random(),
-            authorization(),
-            "@mybot",
-        )
-        .with_market_price_source(Box::new(SelectableMarketPrices {
-            initial: MarketPriceLoad {
-                chart: None,
-                selection: Some(bot_core::market_prices::MarketSelection {
-                    query: "syn".to_owned(),
-                    timeframe: Some("7d".to_owned()),
-                    target_symbol: "USD".to_owned(),
-                    target_parameter: "USD".to_owned(),
-                    conversion: None,
-                    candidates: vec![bot_core::market_prices::MarketCandidate {
-                        id: "1001".to_owned(),
-                        symbol: "SYN".to_owned(),
-                        name: "Native Synthetic".to_owned(),
-                        slug: "synthetic".to_owned(),
-                        price: "1".to_owned(),
-                        change: "N/A 7d".to_owned(),
-                        currency: String::new(),
-                        exchange: String::new(),
-                        asset_type: String::new(),
-                        contracts: Vec::new(),
-                    }],
-                }),
-                no_assets_found: false,
-                text: String::new(),
-                diagnostics: Vec::new(),
-            },
-            candidate: MarketPriceLoad {
-                chart: None,
-                selection: None,
-                no_assets_found: false,
-                text: "selected provider quote".to_owned(),
-                diagnostics: Vec::new(),
-            },
-            stored: Rc::clone(&stored),
-            selected: Rc::clone(&selected),
-        }))
-        .with_token_signal_source(Box::new(StatefulSignals {
-            signal,
-            token_results,
-            state: Rc::clone(&token_state),
-            saved: Rc::clone(&saved),
-            periods: Rc::clone(&periods),
-        }));
+        for requested in [None, Some("7d")] {
+            let expected = requested.unwrap_or("24h");
+            let mut signal = token_signal();
+            signal.candles.clear();
+            let stored = Rc::new(RefCell::new(HashMap::new()));
+            let selected = Rc::new(RefCell::new(Vec::new()));
+            let token_state = Rc::new(RefCell::new(None));
+            let saved = Rc::new(RefCell::new(Vec::new()));
+            let periods = Rc::new(RefCell::new(Vec::new()));
+            let token_results = Rc::new(RefCell::new(VecDeque::new()));
+            let mut dispatcher = NativeDispatcher::new(
+                Config {
+                    value: Ok(ChatConfig::default()),
+                    chat_ids: Vec::new(),
+                },
+                MessageIdActions::new(700),
+                State::default(),
+                values(),
+                random(),
+                authorization(),
+                "@mybot",
+            )
+            .with_market_price_source(Box::new(SelectableMarketPrices {
+                initial: MarketPriceLoad {
+                    chart: None,
+                    selection: Some(bot_core::market_prices::MarketSelection {
+                        query: "syn".to_owned(),
+                        timeframe: requested.map(str::to_owned),
+                        target_symbol: "USD".to_owned(),
+                        target_parameter: "USD".to_owned(),
+                        conversion: None,
+                        candidates: vec![bot_core::market_prices::MarketCandidate {
+                            id: "1001".to_owned(),
+                            symbol: "SYN".to_owned(),
+                            name: "Native Synthetic".to_owned(),
+                            slug: "synthetic".to_owned(),
+                            price: "1".to_owned(),
+                            change: "N/A 7d".to_owned(),
+                            currency: String::new(),
+                            exchange: String::new(),
+                            asset_type: String::new(),
+                            contracts: Vec::new(),
+                        }],
+                    }),
+                    no_assets_found: false,
+                    text: String::new(),
+                    diagnostics: Vec::new(),
+                },
+                candidate: MarketPriceLoad {
+                    chart: None,
+                    selection: None,
+                    no_assets_found: false,
+                    text: "selected provider quote".to_owned(),
+                    diagnostics: Vec::new(),
+                },
+                stored: Rc::clone(&stored),
+                selected: Rc::clone(&selected),
+            }))
+            .with_token_signal_source(Box::new(StatefulSignals {
+                signal,
+                token_results,
+                state: Rc::clone(&token_state),
+                saved: Rc::clone(&saved),
+                periods: Rc::clone(&periods),
+            }));
 
-        assert_eq!(
-            dispatcher.dispatch(update("/p syn 7d", Some("en"))),
-            Ok(DispatchOutcome::Handled)
-        );
-        let selection_callback = dispatcher
-            .actions
-            .actions
-            .iter()
-            .find_map(|action| match action {
-                TelegramAction::SendMessage(message) => message
-                    .reply_markup
-                    .as_ref()?
-                    .inline_keyboard
-                    .get(1)?
-                    .first()?
-                    .callback_data
-                    .clone(),
-                _ => None,
-            })
-            .ok_or_else(|| "DEX selection callback".to_owned())?;
-        assert!(selection_callback.ends_with(":1"));
-
-        assert_eq!(
-            dispatcher.dispatch(callback_update_for_message(
-                &selection_callback,
-                "private",
-                Some("en"),
-                700,
-            )),
-            Ok(DispatchOutcome::Handled)
-        );
-        let signal_callback = dispatcher
-            .actions
-            .actions
-            .iter()
-            .find_map(|action| match action {
-                TelegramAction::SendPhoto {
-                    reply_markup: Some(markup),
-                    ..
-                } => markup.inline_keyboard.first()?.iter().find_map(|button| {
-                    button
+            assert_eq!(
+                dispatcher.dispatch(update(
+                    &format!("/p syn {}", requested.unwrap_or("")),
+                    Some("en")
+                )),
+                Ok(DispatchOutcome::Handled)
+            );
+            let selection_callback = dispatcher
+                .actions
+                .actions
+                .iter()
+                .find_map(|action| match action {
+                    TelegramAction::SendMessage(message) => message
+                        .reply_markup
+                        .as_ref()?
+                        .inline_keyboard
+                        .get(1)?
+                        .first()?
                         .callback_data
-                        .as_deref()
-                        .filter(|data| data.starts_with("sig:ref:"))
-                        .map(ToOwned::to_owned)
-                }),
-                _ => None,
-            })
-            .ok_or_else(|| "refresh callback on delivered DEX card".to_owned())?;
-        assert!(dispatcher.actions.actions.iter().any(|action| matches!(
-            action,
-            TelegramAction::SendPhoto {
-                reply_to_message_id: Some(MessageId(7)),
-                caption,
-                ..
-            } if caption.contains("7d")
-        )));
-        assert_eq!(periods.borrow().as_slice(), ["7d"]);
-        assert!(stored.borrow().is_empty());
-        let saved = saved.borrow();
-        assert_eq!(saved.len(), 1);
-        assert_eq!(saved[0].1.message_id, 701);
-        assert_eq!(saved[0].1.source_message_id, 7);
-        assert_eq!(saved[0].1.requester_id, "88");
-        assert_eq!(saved[0].1.chart_period.as_deref(), Some("7d"));
-        assert_eq!(
-            saved[0].1.address,
-            "J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump"
-        );
-        drop(saved);
+                        .clone(),
+                    _ => None,
+                })
+                .ok_or_else(|| "DEX selection callback".to_owned())?;
+            assert!(selection_callback.ends_with(":1"));
 
-        assert_eq!(
-            dispatcher.dispatch(callback_update_for_message(
-                &signal_callback,
-                "private",
-                Some("en"),
-                701,
-            )),
-            Ok(DispatchOutcome::Handled)
-        );
-        assert_eq!(periods.borrow().as_slice(), ["7d", "7d"]);
-        assert!(dispatcher.actions.actions.iter().any(|action| matches!(
-            action,
-            TelegramAction::EditMessagePhoto {
-                message_id: MessageId(701),
-                caption,
-                ..
-            } if caption.contains("7d")
-        )));
-        assert_eq!(
-            token_state
-                .borrow()
-                .as_ref()
-                .and_then(|state| state.last_refresh_at),
-            Some(1_672_531_200)
-        );
+            assert_eq!(
+                dispatcher.dispatch(callback_update_for_message(
+                    &selection_callback,
+                    "private",
+                    Some("en"),
+                    700,
+                )),
+                Ok(DispatchOutcome::Handled)
+            );
+            let signal_callback = dispatcher
+                .actions
+                .actions
+                .iter()
+                .find_map(|action| match action {
+                    TelegramAction::SendPhoto {
+                        reply_markup: Some(markup),
+                        ..
+                    } => markup.inline_keyboard.first()?.iter().find_map(|button| {
+                        button
+                            .callback_data
+                            .as_deref()
+                            .filter(|data| data.starts_with("sig:ref:"))
+                            .map(ToOwned::to_owned)
+                    }),
+                    _ => None,
+                })
+                .ok_or_else(|| "refresh callback on delivered DEX card".to_owned())?;
+            assert!(dispatcher.actions.actions.iter().any(|action| matches!(
+                action,
+                TelegramAction::SendPhoto {
+                    reply_to_message_id: Some(MessageId(7)),
+                    caption,
+                    ..
+                } if caption.contains(expected)
+            )));
+            assert_eq!(periods.borrow().as_slice(), [expected]);
+            assert!(stored.borrow().is_empty());
+            let saved = saved.borrow();
+            assert_eq!(saved.len(), 1);
+            assert_eq!(saved[0].1.message_id, 701);
+            assert_eq!(saved[0].1.source_message_id, 7);
+            assert_eq!(saved[0].1.requester_id, "88");
+            assert_eq!(saved[0].1.chart_period.as_deref(), requested);
+            assert_eq!(
+                saved[0].1.address,
+                "J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump"
+            );
+            drop(saved);
 
-        let delete_callback = signal_callback.replacen("sig:ref:", "sig:del:", 1);
-        assert_eq!(
-            dispatcher.dispatch(callback_update_for_message(
-                &delete_callback,
-                "private",
-                Some("en"),
-                701,
-            )),
-            Ok(DispatchOutcome::Handled)
-        );
-        assert!(dispatcher.actions.actions.iter().any(|action| matches!(
-            action,
-            TelegramAction::DeleteMessage {
-                chat_id: ChatId(-42),
-                message_id: MessageId(701),
-            }
-        )));
-        assert!(token_state.borrow().is_none());
-        assert!(!dispatcher.actions.actions.iter().any(|action| matches!(
+            assert_eq!(
+                dispatcher.dispatch(callback_update_for_message(
+                    &signal_callback,
+                    "private",
+                    Some("en"),
+                    701,
+                )),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert_eq!(periods.borrow().as_slice(), [expected, expected]);
+            assert!(dispatcher.actions.actions.iter().any(|action| matches!(
+                action,
+                TelegramAction::EditMessagePhoto {
+                    message_id: MessageId(701),
+                    caption,
+                    ..
+                } if caption.contains(expected)
+            )));
+            assert_eq!(
+                token_state
+                    .borrow()
+                    .as_ref()
+                    .and_then(|state| state.last_refresh_at),
+                Some(1_672_531_200)
+            );
+
+            let delete_callback = signal_callback.replacen("sig:ref:", "sig:del:", 1);
+            assert_eq!(
+                dispatcher.dispatch(callback_update_for_message(
+                    &delete_callback,
+                    "private",
+                    Some("en"),
+                    701,
+                )),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert!(dispatcher.actions.actions.iter().any(|action| matches!(
+                action,
+                TelegramAction::DeleteMessage {
+                    chat_id: ChatId(-42),
+                    message_id: MessageId(701),
+                }
+            )));
+            assert!(token_state.borrow().is_none());
+            assert!(!dispatcher.actions.actions.iter().any(|action| matches!(
             action,
             TelegramAction::SendMessage(message)
                 if message.text == "Selection processed" || message.text == "selección procesada"
         )));
-        assert_eq!(selected.borrow().as_slice(), &[] as &[String]);
+            assert_eq!(selected.borrow().as_slice(), &[] as &[String]);
+        }
         Ok(())
     }
 
@@ -11630,7 +11651,7 @@ mod tests {
         }
 
         for (input, language, expected) in [
-            ("/p apple", "es", "gráfico no disponible"),
+            ("/p apple", "es", "Gráfico no disponible"),
             (
                 "/p apple,banana",
                 "en",
@@ -11717,7 +11738,7 @@ mod tests {
                     signal: Some(no_chart_signal),
                     diagnostics: Vec::new(),
                 },
-                photo: Ok(vec![1]),
+                photo: Err("history unavailable".to_owned()),
                 state: None,
                 queries: Rc::new(RefCell::new(Vec::new())),
                 saved: Rc::new(RefCell::new(Vec::new())),
@@ -12897,7 +12918,7 @@ mod tests {
                     signal: Some(no_chart_signal),
                     diagnostics: Vec::new(),
                 },
-                photo: Ok(vec![1]),
+                photo: Err("history unavailable".to_owned()),
                 state: None,
                 queries: Rc::new(RefCell::new(Vec::new())),
                 saved: Default::default(),
@@ -14901,7 +14922,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "tenés 42.00 créditos ia\nsi querés cargar más mandale /topup"
+            "Saldo IA\n\nPersonal: 42.00 créditos\n\nCargar: /topup"
         );
         assert_eq!(
             private.state_diagnostics(),
@@ -14944,7 +14965,7 @@ mod tests {
         assert!(
             message
                 .text
-                .starts_with("AI balances:\n- yours: 30.00\n- group: 120.00")
+                .starts_with("AI balances\n\nPersonal: 30.00 credits\nGroup: 120.00 credits")
         );
     }
 
@@ -15203,7 +15224,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "listo, le pasé 0.10 créditos al grupo\n- lo tuyo: 2.85\n- lo del grupo: 12.15"
+            "Transferencia al grupo: 0.10 créditos\n\nSaldo personal: 2.85 créditos\nSaldo del grupo: 12.15 créditos"
         );
 
         let config = Config {
@@ -15243,7 +15264,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "you do not have enough personal credits\nyou have: 0.70"
+            "Insufficient personal balance.\nAvailable: 0.70 credits\nTry a smaller amount or add credits with /topup."
         );
     }
 
@@ -15367,7 +15388,7 @@ mod tests {
         assert_eq!(message.chat_id, ChatId(42));
         assert_eq!(
             message.text,
-            "added 50.00 credits\nyour balance is now 53.00\nuse /transfer <amount> to fund a group"
+            "Top-up: +50.00 credits\nPersonal balance: 53.00 credits"
         );
     }
 
@@ -15379,7 +15400,7 @@ mod tests {
                     inserted: false,
                     user_balance: 5_300,
                 }),
-                "this payment was already credited\nyour balance is 53.00",
+                "This payment was already credited.\nPersonal balance: 53.00 credits",
                 false,
             ),
             (

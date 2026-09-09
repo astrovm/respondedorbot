@@ -6,10 +6,10 @@ use std::time::Duration;
 use ab_glyph::FontArc;
 use bot_core::token_signals::{
     PumpMetadata, SIGNAL_STATE_TTL_SECONDS, SignalQuery, SignalState, TokenAddress, TokenPair,
-    TokenSignal, choose_symbol_pair, format_money, has_usable_chart, pair_rank, signal_state_key,
-    token_from_pair, token_image_url, token_socials,
+    TokenSignal, choose_symbol_pair, format_money, pair_rank, signal_state_key, token_from_pair,
+    token_image_url, token_socials,
 };
-use image::{DynamicImage, ImageFormat, Rgb, RgbImage, imageops::FilterType};
+use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
 use imageproc::drawing::draw_text_mut;
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
@@ -773,32 +773,6 @@ where
         render_price_chart(&signal.pair, &candles, Some(&title), None, 1280, 900)
     }
 
-    pub fn render_photo(&self, signal: &TokenSignal) -> Result<Vec<u8>, String> {
-        if has_usable_chart(signal) {
-            return render_signal_chart(signal, 1_280, 900);
-        }
-        if let Some(url) = signal.token_image_url.as_deref()
-            && let Ok(image) = self.download_image(url)
-        {
-            return Ok(image);
-        }
-        render_signal_chart(signal, 1_280, 900)
-    }
-
-    fn download_image(&self, url: &str) -> Result<Vec<u8>, String> {
-        let response = self.transport.get_binary(url)?;
-        if !(200..300).contains(&response.status_code)
-            || !response.content_type.starts_with("image/")
-            || response.body.is_empty()
-        {
-            return Err("token image response was not a usable image".to_owned());
-        }
-        let image = image::load_from_memory(&response.body)
-            .map_err(|error| format!("token image decode failed: {error}"))?;
-        let image = image.resize(1_280, 900, FilterType::Lanczos3).to_rgb8();
-        encode_png(image)
-    }
-
     pub fn load_state(&mut self, signal_id: &str) -> Result<Option<SignalState>, String> {
         let key = signal_state_key(signal_id);
         self.cache
@@ -931,21 +905,11 @@ pub fn market_chart_caption(
         })
         .min_by(|(left, _), (right, _)| left.total_cmp(right))
         .map(|(_, opening_price)| opening_price);
-    let change = opening_price
-        .and_then(|opening_price| {
-            let change = (quote.price / opening_price - 1.0) * 100.0;
-            change.is_finite().then(|| format!("{change:+.2}%"))
-        })
-        .unwrap_or_else(|| "N/A".to_owned());
-    let period = if period.trim().is_empty() {
-        "24h"
-    } else {
-        period
-    };
-    format!(
-        "{}: {} {} ({change} {period})",
-        quote.symbol, quote.price, quote.currency
-    )
+    let change = opening_price.and_then(|opening_price| {
+        let change = (quote.price / opening_price - 1.0) * 100.0;
+        change.is_finite().then_some(change)
+    });
+    bot_core::output_format::quote(&quote.symbol, quote.price, &quote.currency, change, period)
 }
 
 pub fn render_market_chart_for_period(
@@ -1044,17 +1008,7 @@ fn render_price_chart(
         candles.reverse();
     }
     if candles.is_empty() {
-        if let Some(font) = chart_font(true) {
-            draw_text_mut(
-                &mut image,
-                Rgb([141, 161, 182]),
-                i32::try_from(width / 2).unwrap_or(0).saturating_sub(120),
-                i32::try_from(height / 2).unwrap_or(0),
-                32.0,
-                &font,
-                "no chart data",
-            );
-        }
+        return Err("token chart history unavailable".to_owned());
     } else {
         let low = candles
             .iter()
@@ -1194,13 +1148,13 @@ mod tests {
         for period in ["1m", "7d", "2h", "1y"] {
             assert_eq!(
                 super::market_chart_caption(&quote, &candles, period),
-                format!("BTC: 120 USD (+20.00% {period})")
+                format!("BTC: 120 USD (+20% {period})")
             );
         }
         quote.price = 80.0;
         assert_eq!(
             super::market_chart_caption(&quote, &candles, "1m"),
-            "BTC: 80 USD (-20.00% 1m)"
+            "BTC: 80 USD (-20% 1m)"
         );
         for missing in [
             vec![],
@@ -1441,6 +1395,7 @@ mod tests {
         for (period, interval) in [
             ("1h", "1m"),
             ("1d", "5m"),
+            ("24h", "5m"),
             ("7d", "1h"),
             ("60d", "4h"),
             ("61d", "24h"),
@@ -1595,7 +1550,11 @@ mod tests {
             let caption = bot_core::token_signals::format_signal_caption(&signal, 0);
             assert!(caption.contains(&format!("https://pump.fun/coin/{mint}")));
             assert!(!caption.contains("geckoterminal.com"));
-            assert!(adapter.render_photo(&signal).is_ok());
+            assert!(
+                adapter
+                    .render_period_photo(&signal, "24h", 1_800_000_000)
+                    .is_err()
+            );
         }
         Ok(())
     }
@@ -1661,7 +1620,11 @@ mod tests {
         assert_eq!(signal.token.address, address.to_ascii_lowercase());
         assert_eq!(signal.pair.base_token.symbol, "BIBI");
         assert!(signal.candles.is_empty());
-        assert!(adapter.render_photo(&signal).is_ok());
+        assert!(
+            adapter
+                .render_period_photo(&signal, "24h", 1_800_000_000)
+                .is_err()
+        );
         let caption = bot_core::token_signals::format_signal_caption(&signal, 0);
         assert!(caption.contains("#ROBINHOOD"));
         assert!(caption.contains("https://dexscreener.com/robinhood/pool"));
@@ -1800,7 +1763,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_chart_downloads_and_normalizes_a_real_token_image_to_png() {
+    fn missing_history_does_not_substitute_a_token_image() {
         let mut jpeg = std::io::Cursor::new(Vec::new());
         let source = image::RgbImage::from_pixel(4, 4, image::Rgb([255, 0, 0]));
         let encoded =
@@ -1815,7 +1778,7 @@ mod tests {
                 body: jpeg.into_inner(),
             }])),
         };
-        let adapter = TokenSignalAdapter::new(transport, Cache::default());
+        let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
         let signal = TokenSignal {
             token: TokenAddress {
                 chain_id: "solana".to_owned(),
@@ -1830,12 +1793,13 @@ mod tests {
             socials: BTreeMap::new(),
             pump: None,
         };
-        let photo = adapter.render_photo(&signal);
-        assert!(photo.as_ref().is_ok_and(|png| png.starts_with(b"\x89PNG")));
+        let photo = adapter.render_period_photo(&signal, "24h", 1_800_000_000);
+        assert!(photo.is_err());
+        assert_eq!(adapter.transport.binary.borrow().len(), 1);
     }
 
     #[test]
-    fn chart_renderer_returns_a_real_png_for_missing_and_usable_data() {
+    fn chart_renderer_rejects_missing_data_and_renders_usable_data() {
         let mut signal = TokenSignal {
             token: TokenAddress {
                 chain_id: "solana".to_owned(),
@@ -1857,7 +1821,7 @@ mod tests {
             pump: None,
         };
         let blank = render_signal_chart(&signal, 420, 300);
-        assert!(blank.as_ref().is_ok_and(|png| png.starts_with(b"\x89PNG")));
+        assert!(blank.is_err());
         signal.candles = vec![
             vec![1.0, 1.0, 2.0, 0.8, 1.5],
             vec![2.0, 1.5, 2.5, 1.2, 1.3],

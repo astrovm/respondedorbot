@@ -40,6 +40,7 @@ pub mod market_models;
 pub mod market_prices;
 pub mod menu_ui;
 pub mod message_state;
+pub mod output_format;
 pub mod polymarket;
 pub mod price_queries;
 pub mod provider_chain;

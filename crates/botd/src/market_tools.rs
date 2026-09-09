@@ -306,7 +306,7 @@ mod tests {
         };
         assert_eq!(
             tool.execute(request.clone(), "call").output,
-            "AAPL: 200.00 USD (+1.50% 24h)\nmissing: not found"
+            "AAPL: 200 USD (+1.5% 24h)\nmissing: not found"
         );
         tool.source.0.quotes = None;
         assert_eq!(
