@@ -292,7 +292,11 @@ impl<Store: TaskToolStore> ExternalToolExecutor for TaskListTool<Store> {
                     .join("\n"),
             ),
             Err(error) => ToolExecutionResult::with_diagnostics(
-                no_tasks(self.locale),
+                bot_core::menu_ui::localized(
+                    self.locale,
+                    "No pude cargar las tareas. Probá de nuevo.",
+                    "I could not load tasks. Try again.",
+                ),
                 vec![format!("task list failed: {error}")],
             ),
         }
@@ -339,7 +343,11 @@ impl<Store: TaskToolStore> ExternalToolExecutor for TaskCancelTool<Store> {
             Ok(tasks) => tasks,
             Err(error) => {
                 return ToolExecutionResult::with_diagnostics(
-                    task_not_found(self.locale),
+                    bot_core::menu_ui::localized(
+                        self.locale,
+                        "No pude cargar las tareas. Probá de nuevo.",
+                        "I could not load tasks. Try again.",
+                    ),
                     vec![format!("task cancel list failed: {error}")],
                 );
             }
@@ -351,7 +359,11 @@ impl<Store: TaskToolStore> ExternalToolExecutor for TaskCancelTool<Store> {
             Ok(true) => ToolExecutionResult::output(task_canceled(&task_id, self.locale)),
             Ok(false) => ToolExecutionResult::output(task_not_found(self.locale)),
             Err(error) => ToolExecutionResult::with_diagnostics(
-                task_not_found(self.locale),
+                bot_core::menu_ui::localized(
+                    self.locale,
+                    "No pude cancelar la tarea. Probá de nuevo.",
+                    "I could not cancel the task. Try again.",
+                ),
                 vec![format!("task cancellation failed: {error}")],
             ),
         }
@@ -618,8 +630,8 @@ pub fn task_credit_insufficient(balance: i64, required: i64, locale: Locale) -> 
 
 fn created(schedule: &str, text: &str, locale: Locale) -> String {
     match locale {
-        Locale::Es => format!("listo, tarea programada {schedule}: {text}"),
-        Locale::En => format!("task scheduled {schedule}: {text}"),
+        Locale::Es => format!("Tarea programada · {schedule}\n{text}"),
+        Locale::En => format!("Task scheduled · {schedule}\n{text}"),
     }
 }
 
@@ -814,11 +826,11 @@ mod tests {
         let result = tool.execute(set_request(Some(3_600), None, None), "call");
         assert_eq!(
             result.output,
-            "task scheduled in 1 hour: check the synthetic result"
+            "Task scheduled · in 1 hour\ncheck the synthetic result"
         );
         assert_eq!(
             result.failure_fallback.as_deref(),
-            Some("task scheduled in 1 hour: check the synthetic result")
+            Some("Task scheduled · in 1 hour\ncheck the synthetic result")
         );
         let state = state.borrow();
         assert_eq!(state.saved.len(), 1);
@@ -844,7 +856,7 @@ mod tests {
             interval
                 .execute(set_request(None, Some(86_400), None), "call")
                 .output,
-            "listo, tarea programada cada 1 dia: check the synthetic result"
+            "Tarea programada · cada 1 dia\ncheck the synthetic result"
         );
         assert_eq!(
             state.borrow().saved[0].0.task.schedule,
@@ -863,7 +875,7 @@ mod tests {
                 "call"
             )
             .output,
-            "listo, tarea programada los lun, mie a las 09:05: check the synthetic result"
+            "Tarea programada · los lun, mie a las 09:05\ncheck the synthetic result"
         );
         assert!(matches!(
             state.borrow().saved[1].0.task.schedule,
@@ -981,7 +993,7 @@ mod tests {
         }));
         let mut list = TaskListTool::new(Store(Rc::clone(&state)), "-100", Locale::Es);
         let result = list.execute(ExternalToolRequest::TaskList, "call");
-        assert_eq!(result.output, "no hay tareas");
+        assert_eq!(result.output, "No pude cargar las tareas. Probá de nuevo.");
         assert!(result.diagnostics[0].contains("synthetic list failure"));
 
         let mut cancel = TaskCancelTool::new(Store(state), "-100", Locale::En);
@@ -991,7 +1003,7 @@ mod tests {
             },
             "call",
         );
-        assert_eq!(result.output, "that task does not exist in this chat");
+        assert_eq!(result.output, "I could not load tasks. Try again.");
         assert!(result.diagnostics[0].contains("synthetic list failure"));
     }
 
@@ -1121,7 +1133,7 @@ mod tests {
             },
             "call",
         );
-        assert_eq!(result.output, task_not_found(Locale::En));
+        assert_eq!(result.output, "I could not cancel the task. Try again.");
         assert!(result.diagnostics[0].contains("synthetic cancel failure"));
     }
 

@@ -458,13 +458,13 @@ fn token_signal_fallbacks_cover_cached_pairs_symbols_and_image_failures() {
             content_type: "text/plain".to_owned(),
             body: b"not an image".to_vec(),
         }));
-    let adapter = TokenSignalAdapter::new(transport, Cache::default());
+    let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
     let mut without_chart = signal();
     without_chart.token_image_url = Some("https://example.test/image".to_owned());
     assert!(
         adapter
-            .render_photo(&without_chart)
-            .is_ok_and(|image| image.starts_with(b"\x89PNG"))
+            .render_period_photo(&without_chart, "24h", 1_800_000_000)
+            .is_err()
     );
 }
 
@@ -526,8 +526,8 @@ fn token_signal_chart_handles_boundaries_and_candle_variants() {
     assert!(render_signal_chart(&chart, 320, 240).is_ok_and(|image| image.starts_with(b"\x89PNG")));
     assert!(
         TokenSignalAdapter::new(Transport::default(), Cache::default())
-            .render_photo(&chart)
-            .is_ok_and(|image| image.starts_with(b"\x89PNG"))
+            .render_period_photo(&chart, "24h", 1_800_000_000)
+            .is_err()
     );
 }
 

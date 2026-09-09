@@ -263,29 +263,32 @@ pub fn render_rulo(evaluation: &RuloEvaluation, locale: Locale) -> String {
         ],
     };
     for route in &plan.routes {
-        lines.push(format!("- {}", route.label));
+        if !lines.last().is_some_and(String::is_empty) {
+            lines.push(String::new());
+        }
+        lines.push(route.label.to_owned());
         lines.push(match locale {
-            Locale::Es => format!("  • Precio venta: {} ARS/USD", route.sell_price),
-            Locale::En => format!("  • Sell price: {} ARS/USD", route.sell_price),
+            Locale::Es => format!("Precio venta: {} ARS/USD", route.sell_price),
+            Locale::En => format!("Sell price: {} ARS/USD", route.sell_price),
         });
         lines.push(match locale {
             Locale::Es => format!(
-                "  • Diferencia vs oficial: {} ARS ({}%)",
+                "Diferencia vs oficial: {} ARS ({}%)",
                 route.difference, route.percentage
             ),
             Locale::En => format!(
-                "  • Difference from official: {} ARS ({}%)",
+                "Difference from official: {} ARS ({}%)",
                 route.difference, route.percentage
             ),
         });
         for detail in &route.details {
             lines.push(match (detail, locale) {
-                (RuloDetail::Steps(text), Locale::Es) => format!("  • Tramos: {text}"),
-                (RuloDetail::Steps(text), Locale::En) => format!("  • Steps: {text}"),
-                (RuloDetail::Result(text), Locale::Es) => format!("  • Resultado: {text}"),
-                (RuloDetail::Result(text), Locale::En) => format!("  • Result: {text}"),
-                (RuloDetail::Profit(text), Locale::Es) => format!("  • Ganancia: {text} ARS"),
-                (RuloDetail::Profit(text), Locale::En) => format!("  • Profit: {text} ARS"),
+                (RuloDetail::Steps(text), Locale::Es) => format!("Tramos: {text}"),
+                (RuloDetail::Steps(text), Locale::En) => format!("Steps: {text}"),
+                (RuloDetail::Result(text), Locale::Es) => format!("Resultado: {text}"),
+                (RuloDetail::Result(text), Locale::En) => format!("Result: {text}"),
+                (RuloDetail::Profit(text), Locale::Es) => format!("Ganancia: {text} ARS"),
+                (RuloDetail::Profit(text), Locale::En) => format!("Profit: {text} ARS"),
             });
         }
     }
@@ -362,13 +365,13 @@ mod tests {
         let evaluation = evaluate_rulo(&complete_input());
         let spanish = render_rulo(&evaluation, Locale::Es);
         assert!(spanish.starts_with("Rulos desde Oficial (precio oficial: 1.440 ARS/USD)"));
-        assert!(spanish.contains("  • Ganancia: +19.730 ARS"));
-        assert!(spanish.contains("  • Tramos: USD→USDT BUENBIT, USDT→ARS BUENBIT"));
+        assert!(spanish.contains("Ganancia: +19.730 ARS"));
+        assert!(spanish.contains("Tramos: USD→USDT BUENBIT, USDT→ARS BUENBIT"));
         let english = render_rulo(&evaluation, Locale::En);
         assert!(
             english.starts_with("Arbitrage from the official rate (official rate: 1.440 ARS/USD)")
         );
-        assert!(english.contains("  • Profit: -10.000 ARS"));
+        assert!(english.contains("Profit: -10.000 ARS"));
 
         assert_eq!(
             render_rulo(&RuloEvaluation::OfficialError, Locale::Es),
