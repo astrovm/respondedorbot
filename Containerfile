@@ -1,4 +1,4 @@
-FROM rust:1.98.0-slim AS chef
+FROM rust:1.98.1-slim AS chef
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
