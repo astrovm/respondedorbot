@@ -43,10 +43,8 @@ Edit `.env` and set these values:
 | `COINMARKETCAP_KEY` | Crypto market data |
 | `OPENROUTER_API_KEY` | AI chat, vision, summaries, and fallback |
 
-The bot also needs a personality prompt. Choose one option:
-
-- Set `BOT_SYSTEM_PROMPT` in `.env`.
-- Create `workspace/SOUL.md` and, optionally, `workspace/RULES.md`.
+Create both `workspace/SOUL.md` and `workspace/RULES.md` with nonempty text.
+These files are the only source of the bot’s personality and response rules.
 
 Redis uses `localhost:6379` by default. See [.env.example](.env.example) for
 optional providers, monitoring, polling, and maintenance settings.
@@ -237,7 +235,7 @@ systemctl --user start respondedorbot.service
 ```
 
 Before starting, edit `~/respondedorbot/.env` and add the personality files to
-`~/respondedorbot/workspace`, or set `BOT_SYSTEM_PROMPT`.
+`~/respondedorbot/workspace/SOUL.md` and `~/respondedorbot/workspace/RULES.md`.
 
 </details>
 

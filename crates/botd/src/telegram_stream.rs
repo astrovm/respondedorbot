@@ -600,4 +600,41 @@ mod tests {
             TelegramAction::EditMessage { text, .. } if text == "River juega el sábado"
         ));
     }
+    #[test]
+    fn provisional_text_is_replaced_by_tools_and_only_the_final_round_remains() {
+        for thought in [None, Some("checking")] {
+            let mut actions = Actions {
+                next_message_id: Some(MessageId(80)),
+                ..Actions::default()
+            };
+            let mut stream =
+                TelegramAiStream::with_policy(&mut actions, ChatId(7), MessageId(4), 60.0, 100);
+            if let Some(thought) = thought {
+                assert_eq!(
+                    stream.feed(AiStreamEvent::Thought(thought.to_owned())),
+                    Ok(())
+                );
+            }
+            for event in [
+                AiStreamEvent::FinalText("provisional".to_owned()),
+                AiStreamEvent::ResetToTrace,
+                AiStreamEvent::ToolCall {
+                    id: "synthetic-call".to_owned(),
+                    name: "calculate".to_owned(),
+                    arguments: "{}".to_owned(),
+                },
+                AiStreamEvent::FinalText("answer".to_owned()),
+            ] {
+                assert_eq!(stream.feed(event), Ok(()));
+            }
+            assert!(stream.finalize("answer").is_ok());
+            drop(stream);
+            assert!(actions.actions.iter().any(|action| matches!(action,
+                TelegramAction::EditMessage { text, .. } if !text.contains("provisional") && (text.contains("checking") || text.contains("calculate"))
+            )));
+            assert!(
+                matches!(actions.actions.last(), Some(TelegramAction::EditMessage { text, .. }) if text == "answer")
+            );
+        }
+    }
 }

@@ -127,13 +127,16 @@ jobs:
 
       - name: Verify image
         run: |
+          mkdir -p "$RUNNER_TEMP/bot-workspace"
+          printf '%s\n' 'synthetic personality' > "$RUNNER_TEMP/bot-workspace/SOUL.md"
+          printf '%s\n' 'synthetic response rules' > "$RUNNER_TEMP/bot-workspace/RULES.md"
           docker run --rm \
             --env TELEGRAM_TOKEN=synthetic-telegram-token \
             --env TELEGRAM_USERNAME=synthetic_test_bot \
             --env SUPABASE_POSTGRES_URL=postgresql://synthetic-user:synthetic-password@db.synthetic.invalid:5432/postgres?sslmode=require \
             --env COINMARKETCAP_KEY=synthetic-coinmarketcap-key \
             --env OPENROUTER_API_KEY=synthetic-openrouter-key \
-            --env BOT_SYSTEM_PROMPT=synthetic-system-prompt \
+            --volume "$RUNNER_TEMP/bot-workspace:/app/workspace:ro" \
             "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}" \
             /usr/local/bin/botd --check-config
 
@@ -176,13 +179,16 @@ jobs:
 
       - name: Verify image
         run: |
+          mkdir -p "$RUNNER_TEMP/bot-workspace"
+          printf '%s\n' 'synthetic personality' > "$RUNNER_TEMP/bot-workspace/SOUL.md"
+          printf '%s\n' 'synthetic response rules' > "$RUNNER_TEMP/bot-workspace/RULES.md"
           docker run --rm \
             --env TELEGRAM_TOKEN=synthetic-telegram-token \
             --env TELEGRAM_USERNAME=synthetic_test_bot \
             --env SUPABASE_POSTGRES_URL=postgresql://synthetic-user:synthetic-password@db.synthetic.invalid:5432/postgres?sslmode=require \
             --env COINMARKETCAP_KEY=synthetic-coinmarketcap-key \
             --env OPENROUTER_API_KEY=synthetic-openrouter-key \
-            --env BOT_SYSTEM_PROMPT=synthetic-system-prompt \
+            --volume "$RUNNER_TEMP/bot-workspace:/app/workspace:ro" \
             "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}" \
             /usr/local/bin/botd --check-config
 

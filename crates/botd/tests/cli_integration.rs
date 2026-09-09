@@ -19,6 +19,44 @@ fn isolated_botd() -> Command {
     command
 }
 
+struct Workspace(std::path::PathBuf);
+
+impl Workspace {
+    fn new() -> Result<Self, std::io::Error> {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "botd-cli-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(path.join("workspace"))?;
+        std::fs::write(path.join("workspace/SOUL.md"), "synthetic personality")?;
+        std::fs::write(path.join("workspace/RULES.md"), "synthetic rules")?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for Workspace {
+    fn drop(&mut self) {
+        let _result = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn configured_botd(workspace: &Workspace) -> Command {
+    let mut command = isolated_botd();
+    command
+        .current_dir(&workspace.0)
+        .env("TELEGRAM_TOKEN", "synthetic-telegram-token")
+        .env("TELEGRAM_USERNAME", "synthetic_test_bot")
+        .env(
+            "SUPABASE_POSTGRES_URL",
+            "postgresql://synthetic:synthetic@db.example.test/database?sslmode=require",
+        )
+        .env("COINMARKETCAP_KEY", "synthetic-market-key")
+        .env("OPENROUTER_API_KEY", "synthetic-ai-key");
+    command
+}
+
 #[test]
 fn every_cli_mode_reports_missing_configuration_without_starting_services()
 -> Result<(), Box<dyn Error>> {
@@ -37,18 +75,8 @@ fn every_cli_mode_reports_missing_configuration_without_starting_services()
 
 #[test]
 fn valid_configuration_check_exits_successfully() -> Result<(), Box<dyn Error>> {
-    let output = isolated_botd()
-        .arg("--check-config")
-        .env("TELEGRAM_TOKEN", "synthetic-telegram-token")
-        .env("TELEGRAM_USERNAME", "synthetic_test_bot")
-        .env(
-            "SUPABASE_POSTGRES_URL",
-            "postgresql://synthetic:synthetic@db.example.test/database?sslmode=require",
-        )
-        .env("COINMARKETCAP_KEY", "synthetic-market-key")
-        .env("OPENROUTER_API_KEY", "synthetic-ai-key")
-        .env("BOT_SYSTEM_PROMPT", "synthetic system prompt")
-        .output()?;
+    let workspace = Workspace::new()?;
+    let output = configured_botd(&workspace).arg("--check-config").output()?;
     assert!(output.status.success());
     assert!(String::from_utf8(output.stdout)?.contains("configuration valid"));
     Ok(())
@@ -128,7 +156,8 @@ fn production_startup_composes_real_services_before_reporting_an_unavailable_cac
     let Some(database_url) = std::env::var("TEST_DATABASE_URL").ok() else {
         return Ok(());
     };
-    let output = isolated_botd()
+    let workspace = Workspace::new()?;
+    let output = configured_botd(&workspace)
         .env("TELEGRAM_TOKEN", "synthetic-telegram-token")
         .env("TELEGRAM_USERNAME", "synthetic_test_bot")
         .env("SUPABASE_POSTGRES_URL", database_url)
@@ -136,7 +165,6 @@ fn production_startup_composes_real_services_before_reporting_an_unavailable_cac
         .env("REDIS_PORT", "1")
         .env("COINMARKETCAP_KEY", "synthetic-market-key")
         .env("OPENROUTER_API_KEY", "synthetic-ai-key")
-        .env("BOT_SYSTEM_PROMPT", "synthetic system prompt")
         .env("BOT_INSTANCE_NAME", "synthetic-startup")
         .output()?;
 
@@ -147,5 +175,27 @@ fn production_startup_composes_real_services_before_reporting_an_unavailable_cac
         error.contains("Redis") || error.contains("redis") || error.contains("Connection"),
         "{error}"
     );
+    Ok(())
+}
+
+#[test]
+fn configuration_requires_both_nonempty_personality_files() -> Result<(), Box<dyn Error>> {
+    for name in ["SOUL.md", "RULES.md"] {
+        let workspace = Workspace::new()?;
+        let path = workspace.0.join("workspace").join(name);
+        for contents in [Some(" \n"), None] {
+            if let Some(contents) = contents {
+                std::fs::write(&path, contents)?;
+            } else {
+                std::fs::remove_file(&path)?;
+            }
+            let output = configured_botd(&workspace)
+                .arg("--check-config")
+                .env("BOT_SYSTEM_PROMPT", "obsolete synthetic override")
+                .output()?;
+            assert!(!output.status.success());
+            assert!(String::from_utf8(output.stderr)?.contains("must both exist and contain text"));
+        }
+    }
     Ok(())
 }

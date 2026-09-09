@@ -132,7 +132,10 @@ impl<Transport: OpenRouterStreamTransport> OpenRouterChatStreamer<Transport> {
                     on_event(ProviderStreamEvent::TextDelta(chunk.text.clone()))?;
                     result.text.push_str(&chunk.text);
                 }
-                result.reasoning_details.extend(chunk.reasoning_details);
+                accumulate_reasoning_details(
+                    &mut result.reasoning_details,
+                    chunk.reasoning_details,
+                );
                 result.tool_calls = accumulate_stream_tool_calls(
                     std::mem::take(&mut result.tool_calls),
                     chunk.tool_call_fragments,
@@ -266,6 +269,47 @@ fn openrouter_message(message: &PromptMessage) -> ChatMessage {
             .iter()
             .map(openrouter_tool_call)
             .collect(),
+    }
+}
+
+// Text and summary deltas extend the preceding logical block. Opaque encrypted
+// blocks must remain separate and in order, even when their indices are equal.
+fn accumulate_reasoning_details(details: &mut Vec<Value>, fragments: Vec<Value>) {
+    for fragment in fragments {
+        let kind = fragment.get("type").and_then(Value::as_str);
+        let previous = details.last_mut().filter(|previous| {
+            matches!(kind, Some("reasoning.text" | "reasoning.summary"))
+                && previous.get("type") == fragment.get("type")
+                && ["id", "format", "index"].iter().all(|key| {
+                    match (previous.get(key), fragment.get(key)) {
+                        (Some(left), Some(right)) if !left.is_null() && !right.is_null() => {
+                            left == right
+                        }
+                        _ => true,
+                    }
+                })
+        });
+        if let Some(Value::Object(previous)) = previous
+            && let Some(fragment) = fragment.as_object()
+        {
+            for (key, value) in fragment {
+                if matches!(key.as_str(), "text" | "summary" | "signature")
+                    && let Some(delta) = value.as_str()
+                {
+                    let mut text = previous
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
+                    text.push_str(delta);
+                    previous.insert(key.clone(), Value::String(text));
+                } else if !value.is_null() {
+                    previous.insert(key.clone(), value.clone());
+                }
+            }
+        } else {
+            details.push(fragment);
+        }
     }
 }
 
@@ -615,5 +659,67 @@ mod tests {
             ]
         );
         assert_eq!(result.reasoning, "checking details");
+    }
+    #[test]
+    fn streamed_reasoning_is_reassembled_for_the_tool_continuation() {
+        let fragments = vec![
+            json!({"type":"reasoning.text","text":"check ","id":"text-1","index":0}),
+            json!({"type":"reasoning.text","text":"the fixture","signature":"sig-","index":0}),
+            json!({"type":"reasoning.text","signature":"end","index":0}),
+            json!({"type":"reasoning.summary","summary":"checking ","index":0}),
+            json!({"type":"reasoning.summary","summary":"schedule","index":0}),
+            json!({"type":"reasoning.encrypted","data":"opaque-one","index":0}),
+            json!({"type":"reasoning.encrypted","data":"opaque-two","index":0}),
+            json!({"type":"reasoning.text","text":"new block","id":"text-2","index":0}),
+            json!({"type":"reasoning.text","text":"separate block","id":"text-3","index":0}),
+        ];
+        let mut body = fragments
+            .iter()
+            .map(|detail| {
+                format!(
+                    "data: {}\n\n",
+                    json!({
+                        "choices":[{"delta":{"reasoning_details":[detail]}}]
+                    })
+                )
+            })
+            .collect::<String>();
+        body.push_str("data: [DONE]\n\n");
+        let provider = OpenRouterChatStreamer::new(
+            Transport {
+                chunks: vec![body.into_bytes()],
+                failure: None,
+                requests: RefCell::new(Vec::new()),
+            },
+            "synthetic-key",
+            "https://synthetic.invalid/api/v1",
+            "synthetic/model",
+        );
+        let round = provider
+            .stream_round_events(&messages(), &[], |_| Ok(()))
+            .unwrap_or_else(|error| *error.partial);
+        let continuation = PromptMessage::assistant_tool_calls_with_reasoning(
+            None,
+            vec![],
+            Some(round.reasoning),
+            round.reasoning_details,
+        );
+        provider
+            .stream_round(&[continuation], &[], |_| Ok(()))
+            .unwrap_or_else(|error| *error.partial);
+        let requests = provider.transport.requests.borrow();
+        let body: Value = serde_json::from_str(&requests[1].body).unwrap_or(Value::Null);
+        assert_eq!(
+            body["messages"][0]["reasoning_details"],
+            json!([
+                {"type":"reasoning.text","text":"check the fixture","signature":"sig-end","id":"text-1","index":0},
+                {"type":"reasoning.summary","summary":"checking schedule","index":0},
+                {"type":"reasoning.encrypted","data":"opaque-one","index":0},
+                {"type":"reasoning.encrypted","data":"opaque-two","index":0},
+                {"type":"reasoning.text","text":"new block","id":"text-2","index":0},
+                {"type":"reasoning.text","text":"separate block","id":"text-3","index":0}
+            ])
+        );
+        assert!(body["messages"][0].get("reasoning").is_none());
     }
 }
