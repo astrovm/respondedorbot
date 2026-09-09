@@ -15,15 +15,18 @@ use bot_core::ai_reserve::{
 use bot_core::ai_response_cleanup::cleanup_response;
 use bot_core::ai_usage::stable_provider_segment_id;
 use bot_core::locale::{Locale, format_date};
+use bot_core::provider_stream_policy::ProviderStreamEvent;
 use bot_core::text_cleanup::sanitize_summary_text;
 use chrono::{DateTime, FixedOffset, Offset, Utc};
 use serde_json::{Map, Value, json};
 
 use crate::ai_dispatch::{
     AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, AiReplyMetadata,
+    AiStreamEvent,
 };
 use crate::chat_tool_loop::{
-    ChatRoundStream, ChatToolLoopError, NativeToolRuntime, provider_error_kind, run_chat_tool_loop,
+    ChatRoundStream, ChatToolLoopError, ChatToolLoopEvent, NativeToolRuntime, provider_error_kind,
+    run_chat_tool_loop_events,
 };
 use crate::compaction_scheduler::{
     CompactionScheduleContext, MemoryCompactionPlan, MemoryCompactionScheduler, PayerSource,
@@ -787,7 +790,7 @@ where
     fn prepare_summary_command_transaction(
         &mut self,
         input: AiConversationInput,
-        on_token: &mut dyn FnMut(&str) -> Result<(), String>,
+        on_event: &mut dyn FnMut(AiStreamEvent) -> Result<(), String>,
     ) -> Result<AiPreparation, String> {
         let operation_id = summary_operation_id(&input);
         let admission = vec![PromptMessage::text(PromptRole::User, "summary")];
@@ -840,7 +843,7 @@ where
                     compaction_payer: None,
                 },
             );
-            on_token(&text)?;
+            on_event(AiStreamEvent::FinalText(text.clone()))?;
             return Ok(AiPreparation::reply(text, Some(operation_id)));
         }
 
@@ -877,26 +880,31 @@ where
             }
         }
 
-        let (raw_text, mut segments, diagnostics, provider_failed) =
-            match self.provider.stream_round(&messages, &[], &mut |token| {
-                on_token(token).map_err(bot_adapters::openrouter_chat::OpenRouterChatError::Stream)
+        let (raw_text, mut segments, diagnostics, provider_failed) = match self
+            .provider
+            .stream_round_events(&messages, &[], &mut |event| {
+                let event = match event {
+                    ProviderStreamEvent::ReasoningDelta(text) => AiStreamEvent::Thought(text),
+                    ProviderStreamEvent::TextDelta(text) => AiStreamEvent::FinalText(text),
+                };
+                on_event(event).map_err(bot_adapters::openrouter_chat::OpenRouterChatError::Stream)
             }) {
-                Ok(result) => (
-                    result.text,
-                    result.billing_segment.into_iter().collect::<Vec<_>>(),
-                    Vec::new(),
-                    false,
-                ),
-                Err(error) => {
-                    let partial = *error.partial;
-                    (
-                        partial.text,
-                        partial.billing_segment.into_iter().collect::<Vec<_>>(),
-                        vec![format!("summary provider stream: {}", error.source)],
-                        true,
-                    )
-                }
-            };
+            Ok(result) => (
+                result.text,
+                result.billing_segment.into_iter().collect::<Vec<_>>(),
+                Vec::new(),
+                false,
+            ),
+            Err(error) => {
+                let partial = *error.partial;
+                (
+                    partial.text,
+                    partial.billing_segment.into_iter().collect::<Vec<_>>(),
+                    vec![format!("summary provider stream: {}", error.source)],
+                    true,
+                )
+            }
+        };
         for segment in &mut segments {
             if let Some(segment) = segment.as_object_mut() {
                 segment.insert("kind".to_owned(), json!("summary"));
@@ -929,7 +937,7 @@ where
     fn prepare_transaction(
         &mut self,
         input: AiConversationInput,
-        on_token: &mut dyn FnMut(&str) -> Result<(), String>,
+        on_event: &mut dyn FnMut(AiStreamEvent) -> Result<(), String>,
     ) -> Result<AiPreparation, String> {
         self.state.record_incoming(&input)?;
         let task_command = matches!(
@@ -1126,15 +1134,31 @@ where
             }
         }
 
-        let loop_result = run_chat_tool_loop(
+        let loop_result = run_chat_tool_loop_events(
             &operation_id,
             &self.provider,
             &mut tools,
             &messages,
             false,
             self.max_tool_rounds,
-            |token| {
-                on_token(token).map_err(bot_adapters::openrouter_chat::OpenRouterChatError::Stream)
+            |event| {
+                let event = match event {
+                    ChatToolLoopEvent::ReasoningDelta(text) => AiStreamEvent::Thought(text),
+                    ChatToolLoopEvent::ToolCall {
+                        id,
+                        name,
+                        arguments,
+                    } => AiStreamEvent::ToolCall {
+                        id,
+                        name,
+                        arguments,
+                    },
+                    ChatToolLoopEvent::ToolResult { id, name, output } => {
+                        AiStreamEvent::ToolResult { id, name, output }
+                    }
+                    ChatToolLoopEvent::FinalText(text) => AiStreamEvent::FinalText(text),
+                };
+                on_event(event).map_err(bot_adapters::openrouter_chat::OpenRouterChatError::Stream)
             },
         );
         let (raw_text, chat_segments, chat_diagnostics, provider_failed, failure_fallbacks) =
@@ -1234,7 +1258,7 @@ where
 
     fn prepare(&mut self, input: AiConversationInput) -> Result<AiPreparation, String> {
         let operation_id = operation_id(&input);
-        let result = self.prepare_transaction(input, &mut |_token| Ok(()));
+        let result = self.prepare_transaction(input, &mut |_event| Ok(()));
         self.finish_preparation(&operation_id, result)
     }
 
@@ -1243,8 +1267,24 @@ where
         input: AiConversationInput,
         on_token: &mut dyn FnMut(&str) -> Result<(), String>,
     ) -> Result<AiPreparation, String> {
+        let mut on_event = |event: AiStreamEvent| match event {
+            AiStreamEvent::FinalText(text) => on_token(&text),
+            AiStreamEvent::Thought(_)
+            | AiStreamEvent::ToolCall { .. }
+            | AiStreamEvent::ToolResult { .. } => Ok(()),
+        };
         let operation_id = operation_id(&input);
-        let result = self.prepare_transaction(input, on_token);
+        let result = self.prepare_transaction(input, &mut on_event);
+        self.finish_preparation(&operation_id, result)
+    }
+
+    fn prepare_streaming_events(
+        &mut self,
+        input: AiConversationInput,
+        on_event: &mut dyn FnMut(AiStreamEvent) -> Result<(), String>,
+    ) -> Result<AiPreparation, String> {
+        let operation_id = operation_id(&input);
+        let result = self.prepare_transaction(input, on_event);
         self.finish_preparation(&operation_id, result)
     }
 
@@ -1266,9 +1306,27 @@ where
         input: AiConversationInput,
         on_token: &mut dyn FnMut(&str) -> Result<(), String>,
     ) -> Result<Option<AiPreparation>, String> {
+        let mut on_event = |event: AiStreamEvent| match event {
+            AiStreamEvent::FinalText(text) => on_token(&text),
+            AiStreamEvent::Thought(_)
+            | AiStreamEvent::ToolCall { .. }
+            | AiStreamEvent::ToolResult { .. } => Ok(()),
+        };
         let operation_id = summary_operation_id(&input);
         let result = self
-            .prepare_summary_command_transaction(input, on_token)
+            .prepare_summary_command_transaction(input, &mut on_event)
+            .map(Some);
+        self.finish_preparation(&operation_id, result)
+    }
+
+    fn prepare_summary_command_streaming_events(
+        &mut self,
+        input: AiConversationInput,
+        on_event: &mut dyn FnMut(AiStreamEvent) -> Result<(), String>,
+    ) -> Result<Option<AiPreparation>, String> {
+        let operation_id = summary_operation_id(&input);
+        let result = self
+            .prepare_summary_command_transaction(input, on_event)
             .map(Some);
         self.finish_preparation(&operation_id, result)
     }
@@ -1879,6 +1937,8 @@ mod tests {
     fn round(text: &str, cost: Option<&str>) -> ChatRoundResult {
         ChatRoundResult {
             text: text.to_owned(),
+            reasoning: String::new(),
+            reasoning_details: Vec::new(),
             tool_calls: Vec::<StreamToolCall>::new(),
             finish_reason: Some("stop".to_owned()),
             billing_segment: Some(json!({
@@ -2461,6 +2521,8 @@ mod tests {
                 source: OpenRouterChatError::IncompleteStream,
                 partial: Box::new(ChatRoundResult {
                     text: String::new(),
+                    reasoning: String::new(),
+                    reasoning_details: Vec::new(),
                     tool_calls: Vec::new(),
                     finish_reason: None,
                     billing_segment: Some(json!({
@@ -2478,6 +2540,8 @@ mod tests {
         };
         let first_round = ChatRoundResult {
             text: String::new(),
+            reasoning: String::new(),
+            reasoning_details: Vec::new(),
             tool_calls: vec![StreamToolCall {
                 index: 0,
                 id: "synthetic-call".to_owned(),
@@ -2647,6 +2711,8 @@ mod tests {
             provider_rounds: 3,
             failed_round: Box::new(ChatRoundResult {
                 text: String::new(),
+                reasoning: String::new(),
+                reasoning_details: Vec::new(),
                 tool_calls: Vec::new(),
                 finish_reason: None,
                 billing_segment: Some(json!({
@@ -3795,6 +3861,8 @@ mod tests {
                 source: OpenRouterChatError::IncompleteStream,
                 partial: Box::new(ChatRoundResult {
                     text: String::new(),
+                    reasoning: String::new(),
+                    reasoning_details: Vec::new(),
                     tool_calls: Vec::new(),
                     finish_reason: None,
                     billing_segment: None,
@@ -3903,6 +3971,8 @@ mod tests {
     fn interrupted_usage_is_billed_on_failed_delivery_but_empty_calls_refund() {
         let partial = ChatRoundResult {
             text: "partial".to_owned(),
+            reasoning: String::new(),
+            reasoning_details: Vec::new(),
             tool_calls: Vec::new(),
             finish_reason: None,
             billing_segment: Some(json!({
@@ -4046,6 +4116,8 @@ mod tests {
             content: PromptContent::TextParts(vec!["synthetic".to_owned()]),
             tool_call_id: None,
             tool_calls: Vec::new(),
+            reasoning: None,
+            reasoning_details: Vec::new(),
         }];
         append_media_context(&mut parts, &image, Locale::Es);
         append_media_context(&mut parts, &image, Locale::En);
@@ -4055,6 +4127,8 @@ mod tests {
             content: PromptContent::Empty,
             tool_call_id: None,
             tool_calls: Vec::new(),
+            reasoning: None,
+            reasoning_details: Vec::new(),
         }];
         append_media_context(&mut empty, &audio, Locale::Es);
         assert!(
@@ -4076,6 +4150,8 @@ mod tests {
             content: PromptContent::TextParts(vec!["one".to_owned(), "two".to_owned()]),
             tool_call_id: None,
             tool_calls: Vec::new(),
+            reasoning: None,
+            reasoning_details: Vec::new(),
         };
         assert!(matches!(
             estimated_message(&tool_message).content,
@@ -4086,6 +4162,8 @@ mod tests {
             content: PromptContent::Empty,
             tool_call_id: None,
             tool_calls: Vec::new(),
+            reasoning: None,
+            reasoning_details: Vec::new(),
         };
         assert_eq!(
             estimated_message(&empty_message).content,

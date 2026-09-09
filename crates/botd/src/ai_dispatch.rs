@@ -4,6 +4,22 @@ use bot_core::locale::Locale;
 use bot_core::telegram_input::{ChatId, MessageId, UserId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AiStreamEvent {
+    Thought(String),
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: String,
+    },
+    ToolResult {
+        id: String,
+        name: String,
+        output: String,
+    },
+    FinalText(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AiReplyMetadata {
     pub kind: String,
     pub uses_ai: bool,
@@ -98,6 +114,16 @@ pub trait AiConversationSource {
         self.prepare(input)
     }
 
+    fn prepare_streaming_events(
+        &mut self,
+        input: AiConversationInput,
+        on_event: &mut dyn FnMut(AiStreamEvent) -> Result<(), String>,
+    ) -> Result<AiPreparation, String> {
+        self.prepare_streaming(input, &mut |token| {
+            on_event(AiStreamEvent::FinalText(token.to_owned()))
+        })
+    }
+
     fn prepare_media_command(
         &mut self,
         _input: AiConversationInput,
@@ -111,6 +137,16 @@ pub trait AiConversationSource {
         _on_token: &mut dyn FnMut(&str) -> Result<(), String>,
     ) -> Result<Option<AiPreparation>, String> {
         Ok(None)
+    }
+
+    fn prepare_summary_command_streaming_events(
+        &mut self,
+        input: AiConversationInput,
+        on_event: &mut dyn FnMut(AiStreamEvent) -> Result<(), String>,
+    ) -> Result<Option<AiPreparation>, String> {
+        self.prepare_summary_command_streaming(input, &mut |token| {
+            on_event(AiStreamEvent::FinalText(token.to_owned()))
+        })
     }
 
     fn record_ignored(&mut self, _input: AiConversationInput) -> Result<(), String> {

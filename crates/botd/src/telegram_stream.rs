@@ -5,11 +5,15 @@ use std::time::Instant;
 use bot_core::telegram_actions::{SendMessage, TelegramAction};
 use bot_core::telegram_input::{ChatId, MessageId};
 use bot_core::telegram_streaming::{StreamAction, plan_feed, plan_finalize};
+use serde_json::Value;
 
+use crate::ai_dispatch::AiStreamEvent;
 use crate::dispatcher::{ActionReceipt, ActionSink};
 
 const DEFAULT_MIN_EDIT_INTERVAL_SECONDS: f64 = 0.3;
 const DEFAULT_MIN_CHARS_BETWEEN_EDITS: usize = 15;
+const MAX_TRACE_HEAD_CHARS: usize = 800;
+const MAX_TOOL_OUTPUT_CHARS: usize = 1_200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamDelivery {
@@ -147,6 +151,43 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
         }
     }
 
+    fn replace_snapshot(
+        &mut self,
+        text: &str,
+        now_seconds: f64,
+        force: bool,
+    ) -> Result<(), Actions::Error> {
+        self.buffer = bot_core::telegram_actions::truncate_text(text);
+        if self.buffer.trim().is_empty() {
+            return Ok(());
+        }
+        if self.message_id.is_none() && !self.send_attempted {
+            self.send_attempted = true;
+            let receipt = self.actions.execute(self.send_action(&self.buffer))?;
+            self.accept_send(receipt, now_seconds);
+        } else if self.message_id.is_some()
+            && self.buffer != self.sent_text
+            && (force
+                || bot_core::telegram_streaming::should_edit(
+                    false,
+                    true,
+                    now_seconds,
+                    self.last_edit_seconds,
+                    self.buffer.chars().count(),
+                    self.sent_text.chars().count(),
+                    self.min_edit_interval_seconds,
+                    self.min_chars_between_edits,
+                ))
+        {
+            self.try_edit(now_seconds);
+        }
+        Ok(())
+    }
+
+    fn replace(&mut self, text: &str, force: bool) -> Result<(), Actions::Error> {
+        self.replace_snapshot(text, self.elapsed_seconds(), force)
+    }
+
     pub fn finalize(
         &mut self,
         final_text: &str,
@@ -200,6 +241,188 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
     pub const fn ignored_edit_failures(&self) -> usize {
         self.ignored_edit_failures
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraceLineKind {
+    Thought,
+    ToolCall,
+    ToolResult,
+}
+
+/// Renders provider reasoning and tool activity into one replaceable Telegram
+/// draft before handing the message over to the final answer stream.
+pub struct TelegramAiStream<'a, Actions> {
+    stream: TelegramStream<'a, Actions>,
+    trace: String,
+    final_text: String,
+    last_trace_line: Option<TraceLineKind>,
+    final_started: bool,
+    final_message_started: bool,
+}
+
+impl<'a, Actions: ActionSink> TelegramAiStream<'a, Actions> {
+    #[must_use]
+    pub fn new(actions: &'a mut Actions, chat_id: ChatId, reply_to_message_id: MessageId) -> Self {
+        Self::with_policy(
+            actions,
+            chat_id,
+            reply_to_message_id,
+            DEFAULT_MIN_EDIT_INTERVAL_SECONDS,
+            DEFAULT_MIN_CHARS_BETWEEN_EDITS,
+        )
+    }
+
+    #[must_use]
+    fn with_policy(
+        actions: &'a mut Actions,
+        chat_id: ChatId,
+        reply_to_message_id: MessageId,
+        min_edit_interval_seconds: f64,
+        min_chars_between_edits: usize,
+    ) -> Self {
+        Self {
+            stream: TelegramStream::with_policy(
+                actions,
+                chat_id,
+                reply_to_message_id,
+                min_edit_interval_seconds,
+                min_chars_between_edits,
+            ),
+            trace: String::new(),
+            final_text: String::new(),
+            last_trace_line: None,
+            final_started: false,
+            final_message_started: false,
+        }
+    }
+
+    pub fn feed(&mut self, event: AiStreamEvent) -> Result<(), Actions::Error> {
+        match event {
+            AiStreamEvent::Thought(text) if !self.final_started => {
+                self.append_thought(&text);
+                self.stream.replace(&self.trace, false)
+            }
+            AiStreamEvent::ToolCall {
+                name, arguments, ..
+            } if !self.final_started => {
+                self.append_trace_line(
+                    TraceLineKind::ToolCall,
+                    &format!("🔧 {}({})", name, format_tool_arguments(&arguments)),
+                );
+                self.stream.replace(&self.trace, false)
+            }
+            AiStreamEvent::ToolResult { name, output, .. } if !self.final_started => {
+                let output = bounded_text(output.trim(), MAX_TOOL_OUTPUT_CHARS);
+                let line = if output.is_empty() {
+                    format!("✅ {name}")
+                } else {
+                    format!("✅ {name} → {output}")
+                };
+                self.append_trace_line(TraceLineKind::ToolResult, &line);
+                self.stream.replace(&self.trace, false)
+            }
+            AiStreamEvent::FinalText(text) => {
+                self.final_started = true;
+                self.final_text.push_str(&text);
+                let force = !self.final_message_started && !self.final_text.trim().is_empty();
+                self.final_message_started |= force;
+                self.stream.replace(&self.final_text, force)
+            }
+            AiStreamEvent::Thought(_)
+            | AiStreamEvent::ToolCall { .. }
+            | AiStreamEvent::ToolResult { .. } => Ok(()),
+        }
+    }
+
+    fn append_thought(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if self.last_trace_line != Some(TraceLineKind::Thought) {
+            self.append_separator();
+            self.trace.push_str("💭 ");
+            self.last_trace_line = Some(TraceLineKind::Thought);
+        }
+        self.trace.push_str(text);
+        self.bound_trace();
+    }
+
+    fn append_trace_line(&mut self, kind: TraceLineKind, line: &str) {
+        self.append_separator();
+        self.trace.push_str(line);
+        self.last_trace_line = Some(kind);
+        self.bound_trace();
+    }
+
+    fn append_separator(&mut self) {
+        if !self.trace.is_empty() && !self.trace.ends_with("\n\n") {
+            self.trace.push_str("\n\n");
+        }
+    }
+
+    fn bound_trace(&mut self) {
+        let max_chars = bot_core::telegram_actions::MAX_TELEGRAM_TEXT_LENGTH;
+        let chars = self.trace.chars().collect::<Vec<_>>();
+        if chars.len() <= max_chars {
+            return;
+        }
+        let marker = ['\n', '…', '\n'];
+        let tail_chars = max_chars.saturating_sub(MAX_TRACE_HEAD_CHARS + marker.len());
+        let mut bounded = chars[..MAX_TRACE_HEAD_CHARS].to_vec();
+        bounded.extend(marker);
+        bounded.extend(
+            chars[chars.len().saturating_sub(tail_chars)..]
+                .iter()
+                .copied(),
+        );
+        self.trace = bounded.into_iter().collect();
+    }
+
+    pub fn finalize(
+        &mut self,
+        final_text: &str,
+    ) -> Result<StreamDelivery, StreamFinalizeError<Actions::Error>> {
+        self.stream
+            .finalize(&bot_core::telegram_actions::truncate_text(final_text))
+    }
+
+    pub fn cancel(&mut self) {
+        self.stream.cancel();
+    }
+
+    #[must_use]
+    pub const fn ignored_edit_failures(&self) -> usize {
+        self.stream.ignored_edit_failures()
+    }
+}
+
+fn format_tool_arguments(raw: &str) -> String {
+    let Ok(Value::Object(arguments)) = serde_json::from_str::<Value>(raw) else {
+        return raw.trim().to_owned();
+    };
+    arguments
+        .into_iter()
+        .map(|(name, value)| format!("{name}={}", format_tool_value(&value)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_tool_value(value: &Value) -> String {
+    match value {
+        Value::String(value) => serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_owned()),
+        _ => serde_json::to_string(value).unwrap_or_else(|_| "null".to_owned()),
+    }
+}
+
+fn bounded_text(text: &str, max_chars: usize) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        return text.to_owned();
+    }
+    let mut bounded = chars[..max_chars.saturating_sub(1)].to_vec();
+    bounded.push('…');
+    bounded.into_iter().collect()
 }
 
 #[cfg(test)]
@@ -306,6 +529,60 @@ mod tests {
                 chat_id: ChatId(7),
                 message_id: MessageId(80),
             })
+        ));
+    }
+
+    #[test]
+    fn ai_stream_replaces_compact_trace_with_the_final_answer() {
+        let mut actions = Actions {
+            next_message_id: Some(MessageId(80)),
+            ..Actions::default()
+        };
+        let mut stream =
+            TelegramAiStream::with_policy(&mut actions, ChatId(7), MessageId(4), 0.0, 1);
+        stream
+            .feed(AiStreamEvent::Thought("checking the match".to_owned()))
+            .unwrap_or_else(|_| unreachable!());
+        stream
+            .feed(AiStreamEvent::ToolCall {
+                id: "call-1".to_owned(),
+                name: "web_search".to_owned(),
+                arguments: r#"{"query":"cuando juegan river y huracán"}"#.to_owned(),
+            })
+            .unwrap_or_else(|_| unreachable!());
+        stream
+            .feed(AiStreamEvent::ToolResult {
+                id: "call-1".to_owned(),
+                name: "web_search".to_owned(),
+                output: "fixture result".to_owned(),
+            })
+            .unwrap_or_else(|_| unreachable!());
+        stream
+            .feed(AiStreamEvent::FinalText("River juega el sábado".to_owned()))
+            .unwrap_or_else(|_| unreachable!());
+        let delivery = stream
+            .finalize("River juega el sábado")
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(delivery.message_id, MessageId(80));
+        drop(stream);
+
+        assert!(matches!(
+            &actions.actions[0],
+            TelegramAction::SendMessage(message) if message.text == "💭 checking the match"
+        ));
+        assert!(matches!(
+            &actions.actions[1],
+            TelegramAction::EditMessage { text, .. }
+                if text == "💭 checking the match\n\n🔧 web_search(query=\"cuando juegan river y huracán\")"
+        ));
+        assert!(matches!(
+            &actions.actions[2],
+            TelegramAction::EditMessage { text, .. }
+                if text == "💭 checking the match\n\n🔧 web_search(query=\"cuando juegan river y huracán\")\n\n✅ web_search → fixture result"
+        ));
+        assert!(matches!(
+            &actions.actions[3],
+            TelegramAction::EditMessage { text, .. } if text == "River juega el sábado"
         ));
     }
 }

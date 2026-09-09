@@ -2,6 +2,7 @@
 
 use crate::locale::Locale;
 use crate::message_state::truncate_text;
+use serde_json::Value;
 
 const PROMPT_TEXT_LIMIT: usize = 4_096;
 
@@ -34,6 +35,8 @@ pub struct PromptMessage {
     pub content: PromptContent,
     pub tool_call_id: Option<String>,
     pub tool_calls: Vec<PromptToolCall>,
+    pub reasoning: Option<String>,
+    pub reasoning_details: Vec<Value>,
 }
 
 impl PromptMessage {
@@ -44,11 +47,23 @@ impl PromptMessage {
             content: PromptContent::Text(content.into()),
             tool_call_id: None,
             tool_calls: Vec::new(),
+            reasoning: None,
+            reasoning_details: Vec::new(),
         }
     }
 
     #[must_use]
     pub fn assistant_tool_calls(content: Option<&str>, tool_calls: Vec<PromptToolCall>) -> Self {
+        Self::assistant_tool_calls_with_reasoning(content, tool_calls, None, Vec::new())
+    }
+
+    #[must_use]
+    pub fn assistant_tool_calls_with_reasoning(
+        content: Option<&str>,
+        tool_calls: Vec<PromptToolCall>,
+        reasoning: Option<String>,
+        reasoning_details: Vec<Value>,
+    ) -> Self {
         Self {
             role: PromptRole::Assistant,
             content: content.map_or(PromptContent::Empty, |text| {
@@ -56,6 +71,8 @@ impl PromptMessage {
             }),
             tool_call_id: None,
             tool_calls,
+            reasoning,
+            reasoning_details,
         }
     }
 
@@ -66,6 +83,8 @@ impl PromptMessage {
             content: PromptContent::Text(content.into()),
             tool_call_id: Some(tool_call_id.to_owned()),
             tool_calls: Vec::new(),
+            reasoning: None,
+            reasoning_details: Vec::new(),
         }
     }
 }
@@ -186,6 +205,8 @@ pub fn build_conversation_prompt(input: &ConversationPromptInput) -> Vec<PromptM
         content: PromptContent::TextParts(vec![message.text.clone()]),
         tool_call_id: None,
         tool_calls: Vec::new(),
+        reasoning: None,
+        reasoning_details: Vec::new(),
     }));
 
     let (
@@ -375,6 +396,8 @@ mod tests {
                     content: PromptContent::TextParts(vec!["recent history".to_owned()]),
                     tool_call_id: None,
                     tool_calls: Vec::new(),
+                    reasoning: None,
+                    reasoning_details: Vec::new(),
                 }
             ]
         );

@@ -2,17 +2,21 @@
 
 use bot_adapters::openrouter_chat::{
     ChatCompletionRequest, ChatMessage, ChatRole, ChatStreamEvent, OpenRouterChatError,
-    OpenRouterStreamTransport, ToolCall, ToolFunctionCall, stream_with,
+    OpenRouterStreamTransport, ReasoningConfig, ToolCall, ToolFunctionCall, stream_with,
 };
 use bot_core::ai_prompt::{PromptContent, PromptMessage, PromptRole};
 use bot_core::ai_reserve::chat_output_token_limit;
-use bot_core::provider_stream_policy::{StreamToolCall, accumulate_stream_tool_calls};
+use bot_core::provider_stream_policy::{
+    ProviderStreamEvent, StreamToolCall, accumulate_stream_tool_calls,
+};
 use serde_json::{Map, Value, json};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatRoundResult {
     pub text: String,
+    pub reasoning: String,
+    pub reasoning_details: Vec<Value>,
     pub tool_calls: Vec<StreamToolCall>,
     pub finish_reason: Option<String>,
     pub billing_segment: Option<Value>,
@@ -22,6 +26,8 @@ impl ChatRoundResult {
     fn empty() -> Self {
         Self {
             text: String::new(),
+            reasoning: String::new(),
+            reasoning_details: Vec::new(),
             tool_calls: Vec::new(),
             finish_reason: None,
             billing_segment: None,
@@ -70,6 +76,7 @@ impl<Transport> OpenRouterChatStreamer<Transport> {
         );
         request.tools = tools.to_vec();
         request.max_tokens = u64::try_from(chat_output_token_limit(&self.model)).ok();
+        request.reasoning = Some(ReasoningConfig { enabled: true });
         request.stream = true;
         request
     }
@@ -85,6 +92,21 @@ impl<Transport: OpenRouterStreamTransport> OpenRouterChatStreamer<Transport> {
     where
         F: FnMut(&str) -> Result<(), OpenRouterChatError>,
     {
+        self.stream_round_events(messages, tools, |event| match event {
+            ProviderStreamEvent::ReasoningDelta(_) => Ok(()),
+            ProviderStreamEvent::TextDelta(text) => on_text(&text),
+        })
+    }
+
+    pub fn stream_round_events<F>(
+        &self,
+        messages: &[PromptMessage],
+        tools: &[Value],
+        mut on_event: F,
+    ) -> Result<ChatRoundResult, ChatRoundError>
+    where
+        F: FnMut(ProviderStreamEvent) -> Result<(), OpenRouterChatError>,
+    {
         let mut result = ChatRoundResult::empty();
         let mut metadata = ProviderRoundMetadata::default();
         let mut usage = Map::new();
@@ -97,10 +119,15 @@ impl<Transport: OpenRouterStreamTransport> OpenRouterChatStreamer<Transport> {
                 let ChatStreamEvent::Chunk(chunk) = event else {
                     return Ok(());
                 };
+                if !chunk.reasoning.is_empty() {
+                    on_event(ProviderStreamEvent::ReasoningDelta(chunk.reasoning.clone()))?;
+                    result.reasoning.push_str(&chunk.reasoning);
+                }
                 if !chunk.text.is_empty() {
-                    on_text(&chunk.text)?;
+                    on_event(ProviderStreamEvent::TextDelta(chunk.text.clone()))?;
                     result.text.push_str(&chunk.text);
                 }
+                result.reasoning_details.extend(chunk.reasoning_details);
                 result.tool_calls = accumulate_stream_tool_calls(
                     std::mem::take(&mut result.tool_calls),
                     chunk.tool_call_fragments,
@@ -219,6 +246,8 @@ fn openrouter_message(message: &PromptMessage) -> ChatMessage {
             PromptRole::Tool => ChatRole::Tool,
         },
         content,
+        reasoning: message.reasoning.clone(),
+        reasoning_details: message.reasoning_details.clone(),
         name: None,
         tool_call_id: message.tool_call_id.clone(),
         tool_calls: message
@@ -248,6 +277,7 @@ mod tests {
         HttpRequest, OpenRouterChatError, OpenRouterStreamTransport,
     };
     use bot_core::ai_prompt::{PromptContent, PromptMessage, PromptRole, PromptToolCall};
+    use bot_core::provider_stream_policy::ProviderStreamEvent;
     use serde_json::{Value, json};
 
     use super::OpenRouterChatStreamer;
@@ -281,6 +311,8 @@ mod tests {
                     "model": "resolved/model",
                     "provider": "SyntheticProvider",
                     "choices": [{"delta": {
+                        "reasoning": "checking ",
+                        "reasoning_details": [{"type": "reasoning.text", "text": "checking "}],
                         "content": "hello ",
                         "annotations": [{"type": "url_citation"}],
                         "tool_calls": [{
@@ -324,6 +356,8 @@ mod tests {
                 content: PromptContent::TextParts(vec!["question".to_owned()]),
                 tool_call_id: None,
                 tool_calls: Vec::new(),
+                reasoning: None,
+                reasoning_details: Vec::new(),
             },
         ]
     }
@@ -351,6 +385,14 @@ mod tests {
             return;
         };
         assert_eq!(result.text, "hello world");
+        assert_eq!(result.reasoning, "checking ");
+        assert_eq!(
+            result.reasoning_details,
+            [json!({
+                "type": "reasoning.text",
+                "text": "checking "
+            })]
+        );
         assert_eq!(emitted, ["hello ", "world"]);
         assert_eq!(result.tool_calls[0].name, "weather");
         assert_eq!(result.tool_calls[0].arguments, "{\"city\":\"x\"}");
@@ -367,8 +409,42 @@ mod tests {
         let body: Value = serde_json::from_str(&provider.transport.requests.borrow()[0].body)
             .unwrap_or(Value::Null);
         assert_eq!(body["stream"], true);
+        assert_eq!(body["reasoning"]["enabled"], true);
         assert_eq!(body["messages"][1]["content"][0]["type"], "text");
         assert_eq!(body["tools"][0]["type"], "function");
+    }
+
+    #[test]
+    fn stream_round_events_exposes_reasoning_before_text_and_keeps_tool_context() {
+        let transport = Transport {
+            chunks: stream_body(true),
+            failure: None,
+            requests: RefCell::new(Vec::new()),
+        };
+        let provider = OpenRouterChatStreamer::new(
+            transport,
+            "synthetic-key",
+            "https://synthetic.invalid/api/v1",
+            "requested/model",
+        );
+        let mut events = Vec::new();
+        let result = provider
+            .stream_round_events(&messages(), &[], |event| {
+                events.push(event);
+                Ok(())
+            })
+            .unwrap_or_else(|error| error.partial.as_ref().clone());
+
+        assert_eq!(
+            events[..3],
+            [
+                ProviderStreamEvent::ReasoningDelta("checking ".to_owned()),
+                ProviderStreamEvent::TextDelta("hello ".to_owned()),
+                ProviderStreamEvent::TextDelta("world".to_owned()),
+            ]
+        );
+        assert_eq!(result.reasoning, "checking ");
+        assert_eq!(result.text, "hello world");
     }
 
     #[test]
@@ -443,12 +519,16 @@ mod tests {
                     name: "calculate".to_owned(),
                     arguments: r#"{"expression":"2+2"}"#.to_owned(),
                 }],
+                reasoning: Some("checking".to_owned()),
+                reasoning_details: vec![json!({"type": "reasoning.text", "text": "checking"})],
             },
             PromptMessage {
                 role: PromptRole::Tool,
                 content: PromptContent::Text("4".to_owned()),
                 tool_call_id: Some("synthetic-call".to_owned()),
                 tool_calls: Vec::new(),
+                reasoning: None,
+                reasoning_details: Vec::new(),
             },
         ];
         let result = provider.stream_round(&messages, &[], |_text| Ok(()));
@@ -457,6 +537,11 @@ mod tests {
             .unwrap_or(Value::Null);
         assert_eq!(body["messages"][0]["role"], "assistant");
         assert!(body["messages"][0]["content"].is_null());
+        assert_eq!(body["messages"][0]["reasoning"], "checking");
+        assert_eq!(
+            body["messages"][0]["reasoning_details"][0]["type"],
+            "reasoning.text"
+        );
         assert_eq!(body["messages"][0]["tool_calls"][0]["id"], "synthetic-call");
         assert_eq!(body["messages"][1]["role"], "tool");
         assert_eq!(body["messages"][1]["tool_call_id"], "synthetic-call");

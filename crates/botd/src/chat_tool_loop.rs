@@ -6,7 +6,7 @@ use bot_core::provider_runtime_policy::{
     ProviderExceptionFacts, is_retryable_provider_exception, response_has_billable_usage,
     retry_wait_seconds,
 };
-use bot_core::provider_stream_policy::StreamToolCall;
+use bot_core::provider_stream_policy::{ProviderStreamEvent, StreamToolCall};
 use serde_json::{Value, json};
 use std::time::Duration;
 use thiserror::Error;
@@ -67,6 +67,22 @@ pub trait NativeToolRuntime {
     -> ToolExecutionResult;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatToolLoopEvent {
+    ReasoningDelta(String),
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: String,
+    },
+    ToolResult {
+        id: String,
+        name: String,
+        output: String,
+    },
+    FinalText(String),
+}
+
 pub trait ChatRoundStream {
     fn stream_round(
         &self,
@@ -74,6 +90,17 @@ pub trait ChatRoundStream {
         tools: &[Value],
         on_text: &mut dyn FnMut(&str) -> Result<(), OpenRouterChatError>,
     ) -> Result<ChatRoundResult, ChatRoundError>;
+
+    fn stream_round_events(
+        &self,
+        messages: &[PromptMessage],
+        tools: &[Value],
+        on_event: &mut dyn FnMut(ProviderStreamEvent) -> Result<(), OpenRouterChatError>,
+    ) -> Result<ChatRoundResult, ChatRoundError> {
+        self.stream_round(messages, tools, &mut |text| {
+            on_event(ProviderStreamEvent::TextDelta(text.to_owned()))
+        })
+    }
 }
 
 impl<Transport: OpenRouterStreamTransport> ChatRoundStream for OpenRouterChatStreamer<Transport> {
@@ -84,6 +111,15 @@ impl<Transport: OpenRouterStreamTransport> ChatRoundStream for OpenRouterChatStr
         on_text: &mut dyn FnMut(&str) -> Result<(), OpenRouterChatError>,
     ) -> Result<ChatRoundResult, ChatRoundError> {
         self.stream_round(messages, tools, on_text)
+    }
+
+    fn stream_round_events(
+        &self,
+        messages: &[PromptMessage],
+        tools: &[Value],
+        on_event: &mut dyn FnMut(ProviderStreamEvent) -> Result<(), OpenRouterChatError>,
+    ) -> Result<ChatRoundResult, ChatRoundError> {
+        OpenRouterChatStreamer::stream_round_events(self, messages, tools, on_event)
     }
 }
 
@@ -136,6 +172,63 @@ where
     Provider: ChatRoundStream,
     Tools: NativeToolRuntime,
 {
+    run_chat_tool_loop_events_with_policy(
+        operation_id,
+        provider,
+        tools,
+        initial_messages,
+        task_mode,
+        max_rounds,
+        true,
+        |event| match event {
+            ChatToolLoopEvent::FinalText(text) => on_text(&text),
+            ChatToolLoopEvent::ReasoningDelta(_)
+            | ChatToolLoopEvent::ToolCall { .. }
+            | ChatToolLoopEvent::ToolResult { .. } => Ok(()),
+        },
+    )
+}
+
+pub fn run_chat_tool_loop_events<Provider, Tools>(
+    operation_id: &str,
+    provider: &Provider,
+    tools: &mut Tools,
+    initial_messages: &[PromptMessage],
+    task_mode: bool,
+    max_rounds: usize,
+    on_event: impl FnMut(ChatToolLoopEvent) -> Result<(), OpenRouterChatError>,
+) -> Result<ChatToolLoopResult, ChatToolLoopError>
+where
+    Provider: ChatRoundStream,
+    Tools: NativeToolRuntime,
+{
+    run_chat_tool_loop_events_with_policy(
+        operation_id,
+        provider,
+        tools,
+        initial_messages,
+        task_mode,
+        max_rounds,
+        false,
+        on_event,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_chat_tool_loop_events_with_policy<Provider, Tools>(
+    operation_id: &str,
+    provider: &Provider,
+    tools: &mut Tools,
+    initial_messages: &[PromptMessage],
+    task_mode: bool,
+    max_rounds: usize,
+    include_intermediate_text: bool,
+    mut on_event: impl FnMut(ChatToolLoopEvent) -> Result<(), OpenRouterChatError>,
+) -> Result<ChatToolLoopResult, ChatToolLoopError>
+where
+    Provider: ChatRoundStream,
+    Tools: NativeToolRuntime,
+{
     let schemas = tools.schemas(task_mode);
     let mut result = ChatToolLoopResult::new(initial_messages);
     trace(
@@ -149,50 +242,64 @@ where
 
     for logical_round in 0..max_rounds {
         let mut retry = 0;
-        let round = loop {
-            let round = provider.stream_round(&result.messages, &schemas, &mut on_text);
-            match round {
-                Ok(round) => break round,
-                Err(error) => {
-                    result.provider_rounds += 1;
-                    trace(
-                        operation_id,
-                        result.provider_rounds,
-                        "provider_error",
-                        json!({
-                            "error_kind": provider_error_kind(&error.source),
-                            "provider": round_trace(&error.partial),
-                        }),
-                    );
-                    record_round(&mut result, &error.partial);
-                    let retry_delay = (retry < MAX_PROVIDER_RETRIES
-                        && retryable_provider_error(&error.source)
-                        && error.partial.text.is_empty()
-                        && error.partial.tool_calls.is_empty()
-                        && !round_has_billable_usage(&error.partial))
-                    .then(|| provider_retry_delay(&error.source, retry))
-                    .flatten();
-                    if let Some(delay) = retry_delay {
-                        result.diagnostics.push(format!(
-                            "AI provider retry: round={} attempt={} error_kind={} delay_ms={}",
-                            logical_round + 1,
-                            retry + 1,
-                            provider_error_kind(&error.source),
-                            delay.as_millis(),
-                        ));
-                        wait_before_retry(delay);
-                        retry += 1;
-                        continue;
-                    }
-                    return Err(ChatToolLoopError {
-                        source: error.source,
-                        failed_round: error.partial,
-                        provider_rounds: result.provider_rounds,
-                        partial: Box::new(result),
+        let mut buffered_text = Vec::new();
+        let round =
+            loop {
+                buffered_text.clear();
+                let round =
+                    provider.stream_round_events(&result.messages, &schemas, &mut |event| {
+                        match event {
+                            ProviderStreamEvent::ReasoningDelta(text) => {
+                                on_event(ChatToolLoopEvent::ReasoningDelta(text))
+                            }
+                            ProviderStreamEvent::TextDelta(text) => {
+                                buffered_text.push(text);
+                                Ok(())
+                            }
+                        }
                     });
+                match round {
+                    Ok(round) => break round,
+                    Err(error) => {
+                        result.provider_rounds += 1;
+                        trace(
+                            operation_id,
+                            result.provider_rounds,
+                            "provider_error",
+                            json!({
+                                "error_kind": provider_error_kind(&error.source),
+                                "provider": round_trace(&error.partial),
+                            }),
+                        );
+                        record_failed_round(&mut result, &error.partial);
+                        let retry_delay = (retry < MAX_PROVIDER_RETRIES
+                            && retryable_provider_error(&error.source)
+                            && error.partial.text.is_empty()
+                            && error.partial.tool_calls.is_empty()
+                            && !round_has_billable_usage(&error.partial))
+                        .then(|| provider_retry_delay(&error.source, retry))
+                        .flatten();
+                        if let Some(delay) = retry_delay {
+                            result.diagnostics.push(format!(
+                                "AI provider retry: round={} attempt={} error_kind={} delay_ms={}",
+                                logical_round + 1,
+                                retry + 1,
+                                provider_error_kind(&error.source),
+                                delay.as_millis(),
+                            ));
+                            wait_before_retry(delay);
+                            retry += 1;
+                            continue;
+                        }
+                        return Err(ChatToolLoopError {
+                            source: error.source,
+                            failed_round: error.partial,
+                            provider_rounds: result.provider_rounds,
+                            partial: Box::new(result),
+                        });
+                    }
                 }
-            }
-        };
+            };
         result.provider_rounds += 1;
         trace(
             operation_id,
@@ -209,6 +316,15 @@ where
             .cloned()
             .collect::<Vec<_>>();
         if known_calls.is_empty() {
+            for text in buffered_text {
+                emit_event(
+                    &mut on_event,
+                    &result,
+                    &round,
+                    ChatToolLoopEvent::FinalText(text),
+                )?;
+            }
+            result.text.push_str(&round.text);
             trace(
                 operation_id,
                 result.provider_rounds,
@@ -221,11 +337,36 @@ where
             return Ok(result);
         }
 
-        result.messages.push(PromptMessage::assistant_tool_calls(
-            (!round.text.is_empty()).then_some(round.text.as_str()),
-            known_calls.iter().map(prompt_tool_call).collect(),
-        ));
+        if include_intermediate_text {
+            for text in &buffered_text {
+                emit_event(
+                    &mut on_event,
+                    &result,
+                    &round,
+                    ChatToolLoopEvent::FinalText(text.clone()),
+                )?;
+            }
+            result.text.push_str(&round.text);
+        }
+        result
+            .messages
+            .push(PromptMessage::assistant_tool_calls_with_reasoning(
+                (!round.text.is_empty()).then_some(round.text.as_str()),
+                known_calls.iter().map(prompt_tool_call).collect(),
+                (!round.reasoning.is_empty()).then_some(round.reasoning.clone()),
+                round.reasoning_details.clone(),
+            ));
         for call in known_calls {
+            emit_event(
+                &mut on_event,
+                &result,
+                &round,
+                ChatToolLoopEvent::ToolCall {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    arguments: call.arguments.clone(),
+                },
+            )?;
             let arguments = parse_arguments(&call.arguments);
             trace(
                 operation_id,
@@ -246,6 +387,16 @@ where
             if let Some(fallback) = tool_result.failure_fallback {
                 result.failure_fallbacks.push(fallback);
             }
+            emit_event(
+                &mut on_event,
+                &result,
+                &round,
+                ChatToolLoopEvent::ToolResult {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    output: tool_result.output.clone(),
+                },
+            )?;
             result
                 .messages
                 .push(PromptMessage::tool_result(&call.id, tool_result.output));
@@ -263,6 +414,20 @@ where
         }),
     );
     Ok(result)
+}
+
+fn emit_event(
+    on_event: &mut impl FnMut(ChatToolLoopEvent) -> Result<(), OpenRouterChatError>,
+    result: &ChatToolLoopResult,
+    round: &ChatRoundResult,
+    event: ChatToolLoopEvent,
+) -> Result<(), ChatToolLoopError> {
+    on_event(event).map_err(|source| ChatToolLoopError {
+        source,
+        failed_round: Box::new(round.clone()),
+        partial: Box::new(result.clone()),
+        provider_rounds: result.provider_rounds,
+    })
 }
 
 // Keep traces separate from user-facing diagnostics. JSON escapes embedded newlines.
@@ -443,10 +608,14 @@ fn wait_before_retry(delay: Duration) {
 }
 
 fn record_round(result: &mut ChatToolLoopResult, round: &ChatRoundResult) {
-    result.text.push_str(&round.text);
     if let Some(segment) = round.billing_segment.clone() {
         result.billing_segments.push(segment);
     }
+}
+
+fn record_failed_round(result: &mut ChatToolLoopResult, round: &ChatRoundResult) {
+    result.text.push_str(&round.text);
+    record_round(result, round);
 }
 
 fn parse_arguments(raw: &str) -> Value {
@@ -601,6 +770,8 @@ mod tests {
     fn round(text: &str, calls: Vec<StreamToolCall>, segment: Value) -> ChatRoundResult {
         ChatRoundResult {
             text: text.to_owned(),
+            reasoning: String::new(),
+            reasoning_details: Vec::new(),
             tool_calls: calls,
             finish_reason: Some("tool_calls".to_owned()),
             billing_segment: Some(segment),
@@ -658,6 +829,54 @@ mod tests {
         assert_eq!(observed[1][2].role, PromptRole::Tool);
         assert_eq!(observed[1][2].tool_call_id.as_deref(), Some("call-1"));
         assert_eq!(observed[1][2].content, PromptContent::Text("4".to_owned()));
+    }
+
+    #[test]
+    fn event_loop_emits_tool_activity_before_only_the_final_text() {
+        let provider = Provider {
+            rounds: RefCell::new(vec![
+                Ok(round(
+                    "checking",
+                    vec![call("calculate", r#"{"expression":"2+2"}"#)],
+                    json!({"round": 1}),
+                )),
+                Ok(round("answer", Vec::new(), json!({"round": 2}))),
+            ]),
+            observed: RefCell::new(Vec::new()),
+        };
+        let mut tools = Tools::default();
+        let mut events = Vec::new();
+        let result = run_chat_tool_loop_events(
+            "test-operation",
+            &provider,
+            &mut tools,
+            &[],
+            false,
+            DEFAULT_MAX_TOOL_ROUNDS,
+            |event| {
+                events.push(event);
+                Ok(())
+            },
+        )
+        .unwrap_or_else(|error| *error.partial);
+
+        assert_eq!(
+            events,
+            [
+                ChatToolLoopEvent::ToolCall {
+                    id: "call-1".to_owned(),
+                    name: "calculate".to_owned(),
+                    arguments: r#"{"expression":"2+2"}"#.to_owned(),
+                },
+                ChatToolLoopEvent::ToolResult {
+                    id: "call-1".to_owned(),
+                    name: "calculate".to_owned(),
+                    output: "4".to_owned(),
+                },
+                ChatToolLoopEvent::FinalText("answer".to_owned()),
+            ]
+        );
+        assert_eq!(result.text, "answer");
     }
 
     #[test]
