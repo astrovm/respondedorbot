@@ -42,6 +42,10 @@ pub struct ChatMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_details: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
@@ -55,6 +59,8 @@ impl ChatMessage {
         Self {
             role,
             content: Some(Value::String(content.into())),
+            reasoning: None,
+            reasoning_details: Vec::new(),
             name: None,
             tool_call_id: None,
             tool_calls: Vec::new(),
@@ -66,6 +72,8 @@ impl ChatMessage {
         Self {
             role: ChatRole::Tool,
             content: Some(Value::String(content.into())),
+            reasoning: None,
+            reasoning_details: Vec::new(),
             name: None,
             tool_call_id: Some(tool_call_id.into()),
             tool_calls: Vec::new(),
@@ -77,6 +85,8 @@ impl ChatMessage {
         Self {
             role: ChatRole::Assistant,
             content: None,
+            reasoning: None,
+            reasoning_details: Vec::new(),
             name: None,
             tool_call_id: None,
             tool_calls: calls,
@@ -95,6 +105,11 @@ pub struct ProviderPreferences {
     pub max_price: ProviderMaxPrice,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReasoningConfig {
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ChatCompletionRequest {
     pub model: String,
@@ -107,6 +122,8 @@ pub struct ChatCompletionRequest {
     pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderPreferences>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningConfig>,
     pub stream: bool,
 }
 
@@ -125,6 +142,7 @@ impl ChatCompletionRequest {
             max_tokens: None,
             temperature: None,
             provider,
+            reasoning: None,
             stream: false,
         }
     }
@@ -161,6 +179,8 @@ pub struct HttpResponse {
 pub struct ChatStreamChunk {
     pub generation_id: Option<String>,
     pub text: String,
+    pub reasoning: String,
+    pub reasoning_details: Vec<Value>,
     pub tool_call_fragments: Vec<StreamToolCallFragment>,
     pub finish_reason: Option<String>,
     pub model: Option<String>,
@@ -374,6 +394,12 @@ struct RawStreamChoice {
 struct RawStreamDelta {
     #[serde(default)]
     content: Value,
+    #[serde(default)]
+    reasoning: Value,
+    #[serde(default)]
+    reasoning_content: Value,
+    #[serde(default)]
+    reasoning_details: Option<Vec<Value>>,
     #[serde(default)]
     tool_calls: Vec<RawStreamToolCall>,
     #[serde(default)]
@@ -632,38 +658,54 @@ fn parse_sse_frame(frame: &[u8]) -> Result<Option<ChatStreamEvent>, OpenRouterCh
     if let Some(error) = choice.as_ref().and_then(|choice| choice.error.as_ref()) {
         return Err(OpenRouterChatError::Stream(stream_error_message(error)));
     }
-    let (text, fragments, finish_reason, annotations) = choice.map_or_else(
-        || Ok::<_, OpenRouterChatError>((String::new(), Vec::new(), None, Vec::new())),
-        |choice| {
-            let text = content_text(&choice.delta.content)?;
-            let fragments = choice
-                .delta
-                .tool_calls
-                .into_iter()
-                .enumerate()
-                .map(|(position, fragment)| {
-                    let function = fragment.function;
-                    StreamToolCallFragment {
-                        position: i64::try_from(position).unwrap_or(i64::MAX),
-                        index: fragment.index,
-                        id: fragment.id,
-                        call_type: fragment.call_type,
-                        name: function.as_ref().and_then(|value| value.name.clone()),
-                        arguments: function.and_then(|value| value.arguments),
-                    }
-                })
-                .collect();
-            Ok::<_, OpenRouterChatError>((
-                text,
-                fragments,
-                choice.finish_reason.filter(|value| !value.is_empty()),
-                choice.delta.annotations,
-            ))
-        },
-    )?;
+    let (text, reasoning, reasoning_details, fragments, finish_reason, annotations) = choice
+        .map_or_else(
+            || {
+                Ok::<_, OpenRouterChatError>((
+                    String::new(),
+                    String::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    Vec::new(),
+                ))
+            },
+            |choice| {
+                let text = content_text(&choice.delta.content)?;
+                let reasoning =
+                    reasoning_text(&choice.delta.reasoning, &choice.delta.reasoning_content)?;
+                let fragments = choice
+                    .delta
+                    .tool_calls
+                    .into_iter()
+                    .enumerate()
+                    .map(|(position, fragment)| {
+                        let function = fragment.function;
+                        StreamToolCallFragment {
+                            position: i64::try_from(position).unwrap_or(i64::MAX),
+                            index: fragment.index,
+                            id: fragment.id,
+                            call_type: fragment.call_type,
+                            name: function.as_ref().and_then(|value| value.name.clone()),
+                            arguments: function.and_then(|value| value.arguments),
+                        }
+                    })
+                    .collect();
+                Ok::<_, OpenRouterChatError>((
+                    text,
+                    reasoning,
+                    choice.delta.reasoning_details.unwrap_or_default(),
+                    fragments,
+                    choice.finish_reason.filter(|value| !value.is_empty()),
+                    choice.delta.annotations,
+                ))
+            },
+        )?;
     Ok(Some(ChatStreamEvent::Chunk(Box::new(ChatStreamChunk {
         generation_id: envelope.id.filter(|value| !value.is_empty()),
         text,
+        reasoning,
+        reasoning_details,
         tool_call_fragments: fragments,
         finish_reason,
         model: envelope.model.filter(|value| !value.is_empty()),
@@ -672,6 +714,16 @@ fn parse_sse_frame(frame: &[u8]) -> Result<Option<ChatStreamEvent>, OpenRouterCh
         annotations,
         usage: envelope.usage,
     }))))
+}
+
+fn reasoning_text(
+    reasoning: &Value,
+    reasoning_content: &Value,
+) -> Result<String, OpenRouterChatError> {
+    if !reasoning.is_null() {
+        return content_text(reasoning);
+    }
+    content_text(reasoning_content)
 }
 
 fn stream_error_message(error: &Value) -> String {
@@ -1136,7 +1188,10 @@ mod tests {
                     "model": "resolved/model",
                     "provider": "Synthetic",
                     "service_tier": "paid",
-                    "choices": [{"delta": {"content": "holá "}}]
+                    "choices": [{"delta": {
+                        "content": "holá ",
+                        "reasoning": "thinking"
+                    }}]
                 })
             ),
             format!(
@@ -1144,6 +1199,7 @@ mod tests {
                 json!({
                     "choices": [{"delta": {
                         "content": "mundo",
+                        "reasoning_content": "legacy",
                         "tool_calls": [{
                             "index": 0,
                             "id": "call-1",
@@ -1170,6 +1226,7 @@ mod tests {
                     }
                 })
             ),
+            format!("data: {}\n\n", json!({"id": "heartbeat"})),
             "data: [DONE]\n\n".to_owned(),
         ]
         .concat();
@@ -1197,17 +1254,19 @@ mod tests {
             },
         );
         assert_eq!(result, Ok(()));
-        assert_eq!(events.len(), 4);
+        assert_eq!(events.len(), 5);
         let ChatStreamEvent::Chunk(first) = &events[0] else {
             return;
         };
         assert_eq!(first.text, "holá ");
+        assert_eq!(first.reasoning, "thinking");
         assert_eq!(first.generation_id.as_deref(), Some("gen-1"));
         assert_eq!(first.model.as_deref(), Some("resolved/model"));
         let ChatStreamEvent::Chunk(second) = &events[1] else {
             return;
         };
         assert_eq!(second.text, "mundo");
+        assert_eq!(second.reasoning, "legacy");
         assert_eq!(second.tool_call_fragments[0].name.as_deref(), Some("wea"));
         let ChatStreamEvent::Chunk(final_chunk) = &events[2] else {
             return;
@@ -1218,7 +1277,14 @@ mod tests {
         );
         assert_eq!(final_chunk.finish_reason.as_deref(), Some("tool_calls"));
         assert_eq!(final_chunk.usage["cost"], "0.001");
-        assert_eq!(events[3], ChatStreamEvent::Done);
+        assert!(matches!(
+            &events[3],
+            ChatStreamEvent::Chunk(chunk)
+                if chunk.text.is_empty()
+                    && chunk.reasoning.is_empty()
+                    && chunk.reasoning_details.is_empty()
+        ));
+        assert_eq!(events[4], ChatStreamEvent::Done);
         let requests = transport.requests.borrow();
         assert_eq!(
             requests[0].url,

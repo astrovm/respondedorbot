@@ -198,6 +198,8 @@ pub fn describe_image_with<T: OpenRouterTransport>(
                 {"type": "text", "text": vision.user_prompt},
                 {"type": "image_url", "image_url": {"url": image_url}}
             ])),
+            reasoning: None,
+            reasoning_details: Vec::new(),
             name: None,
             tool_call_id: None,
             tool_calls: Vec::new(),
@@ -230,6 +232,8 @@ pub fn transcribe_audio_openrouter_with<T: OpenRouterTransport>(
             },
             {"type": "text", "text": "Transcribe this audio exactly as spoken."}
         ])),
+        reasoning: None,
+        reasoning_details: Vec::new(),
         name: None,
         tool_call_id: None,
         tool_calls: Vec::new(),
