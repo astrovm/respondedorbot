@@ -3,9 +3,8 @@
 use crate::chat_config::ChatConfig;
 use crate::command_parsing::parse_command;
 use crate::locale::Locale;
-use crate::telegram_actions::{
-    InlineKeyboardButton, InlineKeyboardMarkup, SendMessage, TelegramAction,
-};
+use crate::menu_ui::{back, button, close, localized};
+use crate::telegram_actions::{InlineKeyboardMarkup, SendMessage, TelegramAction};
 use crate::telegram_input::{ChatId, MessageId};
 
 pub const TIMEZONE_OFFSET_MIN: i64 = -12;
@@ -19,74 +18,23 @@ fn offset_text(offset: i64) -> String {
     }
 }
 
-fn enabled_text(enabled: bool, locale: Locale) -> String {
-    let state = match (enabled, locale) {
-        (true, Locale::Es) => "activado",
-        (false, Locale::Es) => "desactivado",
-        (true, Locale::En) => "on",
-        (false, Locale::En) => "off",
-    };
-    format!("{} {state}", if enabled { "✅" } else { "▫️" })
-}
-
-fn render_config_text(config: &ChatConfig, locale: Locale, is_group: bool) -> String {
-    let language = match locale {
-        Locale::Es => "Español",
-        Locale::En => "English",
-    };
-    let link_mode = match (locale, config.link_mode.as_str()) {
-        (Locale::Es, "delete") => "borro el original y reposteo el link arreglado",
-        (Locale::Es, "off") => "no toco los links",
-        (Locale::Es, _) => "respondo con el link arreglado",
-        (Locale::En, "delete") => "Delete the original and repost the fixed link",
-        (Locale::En, "off") => "Do not modify links",
-        (Locale::En, _) => "Reply with the fixed link",
-    };
-    let unavailable = match locale {
-        Locale::Es => "solo disponible en grupos",
-        Locale::En => "only available in groups",
-    };
-    let random = if is_group {
-        enabled_text(config.ai_random_replies, locale)
-    } else {
-        unavailable.to_owned()
-    };
-    let creditless = if is_group {
-        if config.creditless_user_hourly_limit < 0 {
-            "∞".to_owned()
-        } else {
-            config.creditless_user_hourly_limit.to_string()
-        }
-    } else {
-        unavailable.to_owned()
-    };
-    match locale {
-        Locale::Es => format!(
-            "config del gordo\n\n1. idioma\nidioma de los mensajes y respuestas del bot\n{language}\n\n2. links arreglados\nqué hago con links compatibles\n{link_mode}\n\n3. seguir charla en comandos\nsigo la conversación cuando respondés a un comando\n{}\n\n4. ignorar replies a links arreglados\nignoro respuestas normales a links que arreglé\n{}\n\n5. zona horaria\nhora usada en comandos y tareas\n{}\n\n6. respuestas random\na veces respondo en el grupo aunque nadie me llame\n{random}\n\n7. mensajes gratis por usuario por hora\nmensajes de IA que paga el grupo para cada usuario\n{creditless}\n\ntocá los botones de abajo para cambiar la config",
-            enabled_text(config.ai_command_followups, locale),
-            enabled_text(config.ignore_link_fix_followups, locale),
-            offset_text(config.timezone_offset),
-        ),
-        Locale::En => format!(
-            "Bot settings\n\n1. Language\nLanguage used for bot messages and responses\n{language}\n\n2. Fixed links\nWhat I do with supported links\n{link_mode}\n\n3. Command follow-ups\nContinue the conversation when you reply to a command\n{}\n\n4. Ignore replies to fixed links\nIgnore normal replies to links I fixed\n{}\n\n5. Timezone\nTime used in commands and tasks\n{}\n\n6. Random replies\nSometimes join group conversations without being called\n{random}\n\n7. Free messages per user per hour\nAI messages paid by the group for each user\n{creditless}\n\nUse the buttons below to change the settings",
-            enabled_text(config.ai_command_followups, locale),
-            enabled_text(config.ignore_link_fix_followups, locale),
-            offset_text(config.timezone_offset),
-        ),
-    }
-}
-
-fn button(text: String, callback_data: String) -> InlineKeyboardButton {
-    InlineKeyboardButton {
-        text,
-        url: None,
-        callback_data: Some(callback_data),
-        copy_text: None,
-    }
-}
-
 fn selected_label(selected: bool, label: &str) -> String {
-    format!("{} {label}", if selected { "✅" } else { "▫️" })
+    if selected {
+        format!("✓ {label}")
+    } else {
+        label.to_owned()
+    }
+}
+
+fn toggle_label(enabled: bool, locale: Locale) -> String {
+    selected_label(
+        enabled,
+        localized(
+            locale,
+            if enabled { "Activado" } else { "Desactivado" },
+            if enabled { "On" } else { "Off" },
+        ),
+    )
 }
 
 fn render_config_keyboard(
@@ -100,22 +48,8 @@ fn render_config_keyboard(
         _ => locale,
     };
     let labels = match locale {
-        Locale::Es => (
-            "responder link",
-            "borrar link",
-            "apagado",
-            "seguir charla",
-            "ignorar replies",
-            "me meto en la charla",
-        ),
-        Locale::En => (
-            "reply with link",
-            "replace link",
-            "off",
-            "command follow-ups",
-            "ignore replies",
-            "join conversations",
-        ),
+        Locale::Es => ("Responder con link", "Reemplazar original", "Desactivado"),
+        Locale::En => ("Reply with link", "Replace original", "off"),
     };
     let mut rows = vec![
         vec![
@@ -143,11 +77,11 @@ fn render_config_keyboard(
             ),
         ],
         vec![button(
-            selected_label(config.ai_command_followups, labels.3),
+            toggle_label(config.ai_command_followups, locale),
             "cfg:followups:toggle".to_owned(),
         )],
         vec![button(
-            selected_label(config.ignore_link_fix_followups, labels.4),
+            toggle_label(config.ignore_link_fix_followups, locale),
             "cfg:linkfixfollowups:toggle".to_owned(),
         )],
         vec![
@@ -179,7 +113,7 @@ fn render_config_keyboard(
     ];
     if is_group {
         rows.push(vec![button(
-            selected_label(config.ai_random_replies, labels.5),
+            toggle_label(config.ai_random_replies, locale),
             "cfg:random:toggle".to_owned(),
         )]);
         rows.push(vec![
@@ -202,15 +136,155 @@ fn render_config_keyboard(
     }
 }
 
+const PAGES: [&str; 7] = [
+    "language",
+    "link",
+    "followups",
+    "linkfixfollowups",
+    "timezone",
+    "random",
+    "creditless",
+];
+
+fn titles(locale: Locale) -> [&'static str; 7] {
+    match locale {
+        Locale::Es => [
+            "Idioma",
+            "Links",
+            "Seguir conversaciones",
+            "Ignorar replies a links",
+            "Zona horaria",
+            "Respuestas random",
+            "Mensajes gratis por hora",
+        ],
+        Locale::En => [
+            "Language",
+            "Links",
+            "Follow conversations",
+            "Ignore replies to links",
+            "Timezone",
+            "Random replies",
+            "Free messages per hour",
+        ],
+    }
+}
+
 #[must_use]
 pub fn render_config(
     config: &ChatConfig,
     locale: Locale,
     is_group: bool,
 ) -> (String, InlineKeyboardMarkup) {
+    render_config_page(config, locale, is_group, "home")
+}
+
+#[must_use]
+pub fn render_config_page(
+    config: &ChatConfig,
+    locale: Locale,
+    is_group: bool,
+    page: &str,
+) -> (String, InlineKeyboardMarkup) {
+    if page == "help" {
+        return (localized(locale, "Configuración\n\nLos cambios se guardan al tocar una opción. En grupos, solo los admins pueden cambiarlos.", "Settings\n\nChanges are saved when you choose an option. In groups, only admins can change settings.").to_owned(), InlineKeyboardMarkup { inline_keyboard: vec![vec![back(locale, "cfg:page:home"), close(locale, "cfg:page:close")]] });
+    }
+    let names = titles(locale);
+    let index = PAGES
+        .iter()
+        .position(|name| *name == page)
+        .filter(|index| is_group || *index < 5);
+    if let Some(index) = index {
+        let descriptions = match locale {
+            Locale::Es => [
+                "Idioma de mis mensajes y respuestas.",
+                "Qué hago con los links compatibles.",
+                "Sigo la conversación cuando respondés a un comando.",
+                "Ignoro respuestas normales a links que arreglé.",
+                "Hora usada en comandos y tareas.",
+                "A veces respondo en el grupo aunque nadie me llame.",
+                "Mensajes de IA que paga el grupo por usuario, por hora.",
+            ],
+            Locale::En => [
+                "Language used for my messages and responses.",
+                "What I do with supported links.",
+                "Continue the conversation when you reply to a command.",
+                "Ignore normal replies to links I fixed.",
+                "Time used in commands and tasks.",
+                "Sometimes join group conversations without being called.",
+                "AI messages paid by the group per user, per hour.",
+            ],
+        };
+        let options = render_config_keyboard(config, locale, is_group)
+            .inline_keyboard
+            .remove(index);
+        let mut rows = if index == 1 {
+            options.into_iter().map(|b| vec![b]).collect::<Vec<_>>()
+        } else {
+            vec![options]
+        };
+        rows.push(vec![
+            back(locale, "cfg:page:home"),
+            close(locale, "cfg:page:close"),
+        ]);
+        return (
+            format!("{}\n\n{}", names[index], descriptions[index]),
+            InlineKeyboardMarkup {
+                inline_keyboard: rows,
+            },
+        );
+    }
+    let language = match config.language.as_str() {
+        "en" => "English",
+        "es" => "Español",
+        _ => localized(locale, "Español", "English"),
+    };
+    let yes_no = |value| {
+        localized(
+            locale,
+            if value { "Sí" } else { "No" },
+            if value { "On" } else { "Off" },
+        )
+    };
+    let links = match config.link_mode.as_str() {
+        "delete" => localized(locale, "Reemplazar original", "Replace original"),
+        "off" => localized(locale, "Desactivados", "Off"),
+        _ => localized(locale, "Responder con link", "Reply with link"),
+    };
+    let values = [
+        language.to_owned(),
+        links.to_owned(),
+        yes_no(config.ai_command_followups).to_owned(),
+        yes_no(config.ignore_link_fix_followups).to_owned(),
+        offset_text(config.timezone_offset),
+        yes_no(config.ai_random_replies).to_owned(),
+        if config.creditless_user_hourly_limit < 0 {
+            "∞".to_owned()
+        } else {
+            config.creditless_user_hourly_limit.to_string()
+        },
+    ];
+    let mut rows = (0..if is_group { 7 } else { 5 })
+        .map(|i| {
+            vec![button(
+                format!("{} · {}", names[i], values[i]),
+                format!("cfg:page:{}", PAGES[i]),
+            )]
+        })
+        .collect::<Vec<_>>();
+    rows.push(vec![
+        button(localized(locale, "Ayuda", "Help"), "cfg:page:help"),
+        close(locale, "cfg:page:close"),
+    ]);
     (
-        render_config_text(config, locale, is_group),
-        render_config_keyboard(config, locale, is_group),
+        localized(
+            locale,
+            "⚙️ Configuración\n\nElegí qué querés cambiar.",
+            "⚙️ Settings\n\nChoose a setting to change.",
+        )
+        .to_owned(),
+        InlineKeyboardMarkup {
+            inline_keyboard: rows,
+        },
     )
 }
 
@@ -240,159 +314,99 @@ pub fn plan_config_command(
 
 #[cfg(test)]
 mod tests {
-    use std::fmt::Write;
+    use super::*;
 
-    use serde_json::Value;
-    use sha2::{Digest, Sha256};
-
-    use super::{TIMEZONE_OFFSET_MAX, plan_config_command, render_config};
-    use crate::{
-        chat_config::ChatConfig,
-        locale::Locale,
-        telegram_actions::TelegramAction,
-        telegram_input::{ChatId, MessageId},
-    };
-
-    fn message(plan: Option<TelegramAction>) -> Option<crate::telegram_actions::SendMessage> {
-        match plan {
-            Some(TelegramAction::SendMessage(message)) => Some(message),
-            None | Some(_) => None,
-        }
-    }
-
-    fn sort_json_keys(value: &mut Value) {
-        match value {
-            Value::Array(values) => values.iter_mut().for_each(sort_json_keys),
-            Value::Object(map) => {
-                let mut entries = std::mem::take(map).into_iter().collect::<Vec<_>>();
-                entries.sort_by(|left, right| left.0.cmp(&right.0));
-                for (_, value) in &mut entries {
-                    sort_json_keys(value);
+    #[test]
+    fn home_is_compact_and_shows_current_values_only_in_buttons() {
+        for locale in [Locale::Es, Locale::En] {
+            for group in [false, true] {
+                let (text, keyboard) = render_config(&ChatConfig::default(), locale, group);
+                assert!(text.lines().count() <= 3);
+                assert!(!text.contains("UTC"));
+                assert_eq!(keyboard.inline_keyboard.len(), if group { 8 } else { 6 });
+                assert!(keyboard.inline_keyboard[4][0].text.contains("UTC-3"));
+                assert_eq!(
+                    keyboard.inline_keyboard[0][0].callback_data.as_deref(),
+                    Some("cfg:page:language")
+                );
+                assert_eq!(
+                    keyboard.inline_keyboard[keyboard.inline_keyboard.len() - 1][1]
+                        .callback_data
+                        .as_deref(),
+                    Some("cfg:page:close")
+                );
+                for page in PAGES.iter().take(if group { 7 } else { 5 }) {
+                    let (detail, keyboard) =
+                        render_config_page(&ChatConfig::default(), locale, group, page);
+                    assert!(!detail.contains("Elegí"));
+                    assert!(
+                        keyboard
+                            .inline_keyboard
+                            .iter()
+                            .flatten()
+                            .any(|b| b.callback_data.as_deref() == Some("cfg:page:home"))
+                    );
                 }
-                map.extend(entries);
-            }
-            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
-        }
-    }
-
-    fn parity_hash(message: &crate::telegram_actions::SendMessage) -> Option<String> {
-        let mut value = serde_json::json!({
-            "text": message.text,
-            "reply_markup": message.reply_markup,
-        });
-        sort_json_keys(&mut value);
-        let encoded = serde_json::to_string(&value).ok()?;
-        let mut hash = String::with_capacity(64);
-        for byte in Sha256::digest(encoded.as_bytes()) {
-            if write!(&mut hash, "{byte:02x}").is_err() {
-                return None;
             }
         }
-        Some(hash)
     }
 
     #[test]
-    fn spanish_group_defaults_match_text_and_seven_keyboard_rows() {
-        let message = message(plan_config_command(
-            ChatId(1),
-            MessageId(2),
-            "/configs",
-            "@mybot",
-            Locale::Es,
-            &ChatConfig::default(),
-            true,
-        ));
-        assert!(message.is_some());
-        let Some(message) = message else { return };
-        assert_eq!(
-            message.text,
-            "config del gordo\n\n1. idioma\nidioma de los mensajes y respuestas del bot\nEspañol\n\n2. links arreglados\nqué hago con links compatibles\nrespondo con el link arreglado\n\n3. seguir charla en comandos\nsigo la conversación cuando respondés a un comando\n✅ activado\n\n4. ignorar replies a links arreglados\nignoro respuestas normales a links que arreglé\n✅ activado\n\n5. zona horaria\nhora usada en comandos y tareas\nUTC-3\n\n6. respuestas random\na veces respondo en el grupo aunque nadie me llame\n✅ activado\n\n7. mensajes gratis por usuario por hora\nmensajes de IA que paga el grupo para cada usuario\n5\n\ntocá los botones de abajo para cambiar la config"
-        );
-        assert_eq!(
-            parity_hash(&message).as_deref(),
-            Some("c7f3bbd9a744addf3cfdf79e21a8c533069417caf6b21d4dd3e143ce8e5bb4eb")
-        );
-        assert_eq!(
-            message
-                .reply_markup
-                .map(|markup| markup.inline_keyboard.len()),
-            Some(7)
-        );
-    }
-
-    #[test]
-    fn english_private_hides_group_buttons_and_marks_values_unavailable() {
-        let config = ChatConfig {
-            language: "en".to_owned(),
-            ..ChatConfig::default()
-        };
-        let message = message(plan_config_command(
-            ChatId(1),
-            MessageId(2),
-            "/settings@mybot",
-            "@mybot",
-            Locale::En,
-            &config,
-            false,
-        ));
-        assert!(message.is_some());
-        let Some(message) = message else { return };
-        assert_eq!(
-            message.text,
-            "Bot settings\n\n1. Language\nLanguage used for bot messages and responses\nEnglish\n\n2. Fixed links\nWhat I do with supported links\nReply with the fixed link\n\n3. Command follow-ups\nContinue the conversation when you reply to a command\n✅ on\n\n4. Ignore replies to fixed links\nIgnore normal replies to links I fixed\n✅ on\n\n5. Timezone\nTime used in commands and tasks\nUTC-3\n\n6. Random replies\nSometimes join group conversations without being called\nonly available in groups\n\n7. Free messages per user per hour\nAI messages paid by the group for each user\nonly available in groups\n\nUse the buttons below to change the settings"
-        );
-        assert_eq!(
-            parity_hash(&message).as_deref(),
-            Some("b9039bb642d144fe2f2a28fceed429d515ee4e88805c47f0156f54154185ad51")
-        );
-        assert_eq!(
-            message
-                .reply_markup
-                .map(|markup| markup.inline_keyboard.len()),
-            Some(5)
-        );
-    }
-
-    #[test]
-    fn custom_values_render_bounds_disabled_states_and_unlimited_limit() {
+    fn details_preserve_selected_options_and_timezone_bounds() {
         let config = ChatConfig {
             link_mode: "delete".to_owned(),
-            ai_command_followups: false,
-            ignore_link_fix_followups: false,
             timezone_offset: TIMEZONE_OFFSET_MAX,
-            ai_random_replies: false,
             creditless_user_hourly_limit: -1,
             ..ChatConfig::default()
         };
-        let message = message(plan_config_command(
-            ChatId(1),
-            MessageId(2),
-            "/config",
-            "@mybot",
-            Locale::En,
-            &config,
-            true,
-        ));
-        assert!(message.is_some());
-        let Some(message) = message else { return };
-        assert!(
-            message
-                .text
-                .contains("Delete the original and repost the fixed link")
+        let (_, links) = render_config_page(&config, Locale::En, true, "link");
+        assert!(links.inline_keyboard[1][0].text.starts_with("✓"));
+        let (_, timezone) = render_config_page(&config, Locale::En, true, "timezone");
+        assert_eq!(
+            timezone.inline_keyboard[0][2].callback_data.as_deref(),
+            Some("cfg:timezone:14")
         );
-        assert!(message.text.contains("▫️ off"));
-        assert!(message.text.contains("UTC+14"));
-        assert!(message.text.contains('∞'));
-        let next_timezone = message
-            .reply_markup
-            .and_then(|markup| markup.inline_keyboard.get(4).cloned())
-            .and_then(|row| row.get(2).cloned())
-            .and_then(|button| button.callback_data);
-        assert_eq!(next_timezone.as_deref(), Some("cfg:timezone:14"));
+        let (_, home) = render_config(&config, Locale::En, true);
+        assert!(home.inline_keyboard[6][0].text.ends_with('∞'));
+        let config = ChatConfig {
+            timezone_offset: TIMEZONE_OFFSET_MIN,
+            ..config
+        };
+        let (_, timezone) = render_config_page(&config, Locale::Es, false, "timezone");
+        assert_eq!(
+            timezone.inline_keyboard[0][0].callback_data.as_deref(),
+            Some("cfg:timezone:-12")
+        );
     }
 
     #[test]
-    fn ignores_unrelated_commands() {
+    fn unavailable_group_pages_return_home() {
+        let config = ChatConfig::default();
+        for page in ["random", "creditless", "unknown"] {
+            assert_eq!(
+                render_config_page(&config, Locale::En, false, page),
+                render_config(&config, Locale::En, false)
+            );
+        }
+    }
+
+    #[test]
+    fn command_aliases_reply_to_original_message() {
+        for command in ["/config", "/configs", "/settings@mybot"] {
+            let Some(TelegramAction::SendMessage(message)) = plan_config_command(
+                ChatId(1),
+                MessageId(2),
+                command,
+                "@mybot",
+                Locale::Es,
+                &ChatConfig::default(),
+                true,
+            ) else {
+                unreachable!("missing config")
+            };
+            assert_eq!(message.reply_to_message_id, Some(MessageId(2)));
+            assert!(message.reply_markup.is_some());
+        }
         assert!(
             plan_config_command(
                 ChatId(1),
@@ -401,80 +415,9 @@ mod tests {
                 "@mybot",
                 Locale::Es,
                 &ChatConfig::default(),
-                true,
+                true
             )
             .is_none()
         );
-    }
-
-    #[test]
-    fn renderer_covers_alternate_locales_states_and_integer_extremes() {
-        let cases = [
-            (
-                ChatConfig {
-                    language: "es".to_owned(),
-                    link_mode: "delete".to_owned(),
-                    ai_command_followups: false,
-                    ignore_link_fix_followups: false,
-                    timezone_offset: 0,
-                    ai_random_replies: false,
-                    creditless_user_hourly_limit: 0,
-                },
-                Locale::Es,
-                false,
-                "borro el original y reposteo el link arreglado",
-            ),
-            (
-                ChatConfig {
-                    language: "auto".to_owned(),
-                    link_mode: "off".to_owned(),
-                    timezone_offset: i64::MIN,
-                    ai_random_replies: false,
-                    creditless_user_hourly_limit: -1,
-                    ..ChatConfig::default()
-                },
-                Locale::Es,
-                true,
-                "no toco los links",
-            ),
-            (
-                ChatConfig {
-                    language: "en".to_owned(),
-                    link_mode: "off".to_owned(),
-                    timezone_offset: i64::MAX,
-                    ai_random_replies: false,
-                    ..ChatConfig::default()
-                },
-                Locale::En,
-                true,
-                "Do not modify links",
-            ),
-        ];
-        for (config, locale, is_group, expected) in cases {
-            let (text, reply_markup) = render_config(&config, locale, is_group);
-            assert!(text.contains(expected));
-            assert!(text.contains(if config.timezone_offset == 0 {
-                "UTC\n"
-            } else if config.timezone_offset > 0 {
-                "UTC+"
-            } else {
-                "UTC-"
-            }));
-            assert_eq!(
-                reply_markup.inline_keyboard.len(),
-                if is_group { 7 } else { 5 }
-            );
-        }
-
-        let plan = plan_config_command(
-            ChatId(1),
-            MessageId(2),
-            "/config",
-            "@mybot",
-            Locale::Es,
-            &ChatConfig::default(),
-            true,
-        );
-        assert!(plan.is_some());
     }
 }

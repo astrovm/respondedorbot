@@ -8,13 +8,7 @@ use bot_core::telegram_input::{ChatId, MessageId};
 #[test]
 fn public_config_renderer_covers_bilingual_private_and_group_states() {
     let cases = [
-        (
-            ChatConfig::default(),
-            Locale::Es,
-            true,
-            "config del gordo",
-            7,
-        ),
+        (ChatConfig::default(), Locale::Es, true, "Configuración", 8),
         (
             ChatConfig {
                 language: "es".to_owned(),
@@ -27,8 +21,8 @@ fn public_config_renderer_covers_bilingual_private_and_group_states() {
             },
             Locale::Es,
             false,
-            "solo disponible en grupos",
-            5,
+            "Configuración",
+            6,
         ),
         (
             ChatConfig {
@@ -41,8 +35,8 @@ fn public_config_renderer_covers_bilingual_private_and_group_states() {
             },
             Locale::En,
             true,
-            "Do not modify links",
-            7,
+            "Settings",
+            8,
         ),
         (
             ChatConfig {
@@ -52,8 +46,8 @@ fn public_config_renderer_covers_bilingual_private_and_group_states() {
             },
             Locale::En,
             false,
-            "Delete the original and repost the fixed link",
-            5,
+            "Settings",
+            6,
         ),
     ];
     for (config, locale, is_group, expected, row_count) in cases {
