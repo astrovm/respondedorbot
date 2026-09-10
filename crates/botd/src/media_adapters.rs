@@ -398,7 +398,6 @@ impl<Transport> OpenRouterVisionProvider<Transport> {
             pricing: None,
         }
     }
-}
 
     #[must_use]
     pub fn with_openrouter_pricing(
