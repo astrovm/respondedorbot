@@ -6,8 +6,8 @@ use std::time::Duration;
 use ab_glyph::FontArc;
 use bot_core::token_signals::{
     PumpMetadata, SIGNAL_STATE_TTL_SECONDS, SignalQuery, SignalState, TokenAddress, TokenPair,
-    TokenSignal, TokenSignalCandidates, format_money, normalize_token_name, pair_rank,
-    signal_state_key, token_from_pair, token_image_url, token_socials,
+    TokenSignal, TokenSignalCandidates, format_money, is_usable_chart_candle, normalize_token_name,
+    pair_rank, signal_state_key, token_from_pair, token_image_url, token_socials,
 };
 use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
 use imageproc::drawing::draw_text_mut;
@@ -581,7 +581,11 @@ where
                 continue;
             }
             let resolved = token_from_pair(&pair).unwrap_or_else(|| token.clone());
-            let candles = self.candles(&resolved, &pair.pair_address, &mut diagnostics);
+            let reference_price = flexible_number(&pair.price_usd).filter(|price| *price > 0.0);
+            let candles = filter_chart_candles(
+                self.candles(&resolved, &pair.pair_address, &mut diagnostics),
+                reference_price,
+            );
             if !candles.is_empty() {
                 return TokenSignalLoad {
                     signal: Some(self.enrich(resolved, pair, candles, &mut diagnostics)),
@@ -606,8 +610,12 @@ where
         mut diagnostics: Vec<String>,
     ) -> TokenSignalLoad {
         if !initial_pair.pair_address.is_empty() {
-            let candles =
-                self.candles(&initial_token, &initial_pair.pair_address, &mut diagnostics);
+            let reference_price =
+                flexible_number(&initial_pair.price_usd).filter(|price| *price > 0.0);
+            let candles = filter_chart_candles(
+                self.candles(&initial_token, &initial_pair.pair_address, &mut diagnostics),
+                reference_price,
+            );
             if !candles.is_empty() {
                 return TokenSignalLoad {
                     signal: Some(self.enrich(
@@ -631,7 +639,11 @@ where
             if pair.pair_address.is_empty() {
                 continue;
             }
-            let candles = self.candles(&token, &pair.pair_address, &mut diagnostics);
+            let reference_price = flexible_number(&pair.price_usd).filter(|price| *price > 0.0);
+            let candles = filter_chart_candles(
+                self.candles(&token, &pair.pair_address, &mut diagnostics),
+                reference_price,
+            );
             if !candles.is_empty() {
                 return TokenSignalLoad {
                     signal: Some(self.enrich(token, pair, candles, &mut diagnostics)),
@@ -963,6 +975,8 @@ where
             raw.and_then(|value| serde_json::from_value::<Vec<Vec<f64>>>(value).ok())
                 .unwrap_or_default()
         };
+        let reference_price = flexible_number(&signal.pair.price_usd).filter(|price| *price > 0.0);
+        let candles = filter_chart_candles(candles, reference_price);
         let last_known = candles
             .iter()
             .filter(|row| row.len() >= 5 && row[0] < (now - range.seconds) as f64)
@@ -1037,6 +1051,13 @@ fn flexible_number(value: &Value) -> Option<f64> {
     value
         .as_f64()
         .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
+fn filter_chart_candles(candles: Vec<Vec<f64>>, reference_price: Option<f64>) -> Vec<Vec<f64>> {
+    candles
+        .into_iter()
+        .filter(|candle| is_usable_chart_candle(candle, reference_price))
+        .collect()
 }
 
 fn chart_font(bold: bool) -> Option<FontArc> {
@@ -1235,11 +1256,8 @@ fn render_price_chart(
         let x = left + (right - left) * index / 6;
         draw_line(&mut image, x, top, x, bottom, Rgb([17, 24, 39]));
     }
-    let mut candles = candles
-        .iter()
-        .filter(|candle| candle.len() >= 5)
-        .cloned()
-        .collect::<Vec<_>>();
+    let reference_price = flexible_number(&pair.price_usd).filter(|price| *price > 0.0);
+    let mut candles = filter_chart_candles(candles.to_vec(), reference_price);
     if candles
         .first()
         .zip(candles.last())
@@ -1451,6 +1469,16 @@ mod tests {
                 .map_err(|error| error.to_string())?;
         assert!(png.starts_with(b"\x89PNG"));
         Ok(())
+    }
+
+    #[test]
+    fn chart_history_drops_extreme_provider_candles() {
+        let candles = vec![
+            vec![1.0, 0.9, 1.1, 0.8, 1.0],
+            vec![2.0, 1.0, 2_000_000.0, 0.9, 1.1],
+        ];
+        let filtered = super::filter_chart_candles(candles, Some(1.0));
+        assert_eq!(filtered, vec![vec![1.0, 0.9, 1.1, 0.8, 1.0]]);
     }
 
     use std::collections::{BTreeMap, VecDeque};

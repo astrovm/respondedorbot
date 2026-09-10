@@ -17,6 +17,10 @@ use crate::telegram_actions::{CopyTextButton, InlineKeyboardButton, InlineKeyboa
 /// Zero means persistent button state; quote/history caches still expire.
 pub const SIGNAL_STATE_TTL_SECONDS: i64 = 0;
 pub const SIGNAL_REFRESH_COOLDOWN_SECONDS: i64 = 15;
+/// Reject chart candles whose prices are many orders of magnitude away from
+/// the current token price. Providers occasionally return malformed launch
+/// candles that would otherwise flatten the whole chart and inflate ATH.
+pub const MAX_CANDLE_PRICE_RATIO: f64 = 1_000_000.0;
 const PUMP_INITIAL_REAL_TOKENS: f64 = 793_100_000_000_000.0;
 
 static SOLANA_ADDRESS: LazyLock<Option<Regex>> =
@@ -845,12 +849,49 @@ fn link_rows(signal: &TokenSignal, symbol: &str) -> [String; 2] {
     [primary, trade]
 }
 
-fn ath(candles: &[Vec<f64>]) -> Option<(f64, i64)> {
+fn ath(candles: &[Vec<f64>], reference_price: Option<f64>) -> Option<(f64, i64)> {
     candles
         .iter()
-        .filter(|candle| candle.len() >= 4)
+        .filter(|candle| is_usable_chart_candle(candle, reference_price))
         .map(|candle| (candle[2], candle[0] as i64))
         .max_by(|left, right| left.0.total_cmp(&right.0))
+}
+
+/// Return whether an OHLC row is safe to use for a linear price chart.
+///
+/// This keeps malformed provider data from dominating the axis. A reference
+/// price is optional because historical rows may be inspected before a live
+/// quote is available.
+#[must_use]
+pub fn is_usable_chart_candle(candle: &[f64], reference_price: Option<f64>) -> bool {
+    if candle.len() < 5 || !candle[0].is_finite() {
+        return false;
+    }
+    let [open, high, low, close] = [candle[1], candle[2], candle[3], candle[4]];
+    if ![open, high, low, close]
+        .iter()
+        .all(|value| value.is_finite() && *value > 0.0)
+        || high < low
+        || open < low
+        || open > high
+        || close < low
+        || close > high
+        || high / low > MAX_CANDLE_PRICE_RATIO
+    {
+        return false;
+    }
+    if let Some(reference) = reference_price.filter(|value| value.is_finite() && *value > 0.0) {
+        let high_ratio = high / reference;
+        let low_ratio = reference / low;
+        if !high_ratio.is_finite()
+            || !low_ratio.is_finite()
+            || high_ratio > MAX_CANDLE_PRICE_RATIO
+            || low_ratio > MAX_CANDLE_PRICE_RATIO
+        {
+            return false;
+        }
+    }
+    true
 }
 
 #[must_use]
@@ -903,7 +944,9 @@ pub fn format_signal_caption_for_period(
             .map(|pump| number(&pump.ath_market_cap_timestamp) as i64 / 1_000)
             .filter(|timestamp| *timestamp > 0);
         (pump_ath, timestamp)
-    } else if let Some((ath_price, timestamp)) = ath(&signal.candles) {
+    } else if let Some((ath_price, timestamp)) =
+        ath(&signal.candles, (price > 0.0).then_some(price))
+    {
         let value = if price > 0.0 && market_cap > 0.0 {
             market_cap * ath_price / price
         } else {
@@ -1002,7 +1045,7 @@ pub fn has_usable_chart(signal: &TokenSignal) -> bool {
     let candles = signal
         .candles
         .iter()
-        .filter(|candle| candle.len() >= 5)
+        .filter(|candle| is_usable_chart_candle(candle, None))
         .collect::<Vec<_>>();
     if candles.len() < 5 {
         return false;
@@ -1102,8 +1145,8 @@ mod tests {
         TokenAddress, TokenPair, TokenSignal, age_text, build_signal_keyboard, callback_text,
         choose_best_pair, choose_symbol_pair, detect_signal_query, format_money,
         format_signal_caption, format_signal_caption_for_period, format_signal_quote,
-        has_usable_chart, normalize_token_name, pair_rank, signal_state_key, stable_signal_id,
-        token_from_pair, token_image_url, token_socials,
+        has_usable_chart, is_usable_chart_candle, normalize_token_name, pair_rank,
+        signal_state_key, stable_signal_id, token_from_pair, token_image_url, token_socials,
     };
     use crate::locale::Locale;
 
@@ -1340,6 +1383,33 @@ mod tests {
         assert!(!has_usable_chart(&signal));
         signal.candles = [candles(), candles()].concat();
         assert!(has_usable_chart(&signal));
+    }
+
+    #[test]
+    fn chart_candle_validation_rejects_provider_outliers() {
+        let valid = [1.0, 0.9, 1.1, 0.8, 1.0];
+        assert!(is_usable_chart_candle(&valid, Some(1.0)));
+
+        let outlier = [2.0, 1.0, 2_000_000.0, 0.9, 1.1];
+        assert!(!is_usable_chart_candle(&outlier, Some(1.0)));
+
+        let malformed = [3.0, 1.0, 0.8, 0.9, 1.1];
+        assert!(!is_usable_chart_candle(&malformed, Some(1.0)));
+    }
+
+    #[test]
+    fn captions_ignore_extreme_history_when_calculating_ath() {
+        let mut signal = signal();
+        signal.pair.price_usd = json!(1.0);
+        signal.pair.market_cap = json!(1_000_000.0);
+        signal.pair.fdv = json!(null);
+        signal.candles = vec![
+            vec![1.0, 0.9, 1.1, 0.8, 1.0],
+            vec![2.0, 1.0, 2_000_000.0, 0.9, 1.1],
+        ];
+        let caption = format_signal_caption(&signal, 1_700_000_000);
+        assert!(caption.contains("ATH <b>$1.10M"), "{caption}");
+        assert!(!caption.contains("$2T"), "{caption}");
     }
 
     #[test]
