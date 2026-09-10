@@ -8,6 +8,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use url::Url;
 use url::form_urlencoded;
 
 use crate::locale::Locale;
@@ -142,6 +143,12 @@ pub struct TokenSignal {
     pub pump: Option<PumpMetadata>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct TokenSignalCandidates {
+    pub signals: Vec<TokenSignal>,
+    pub diagnostics: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SignalState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -174,6 +181,8 @@ impl SignalState {
 pub enum SignalQuery {
     Address(TokenAddress),
     Symbol(String),
+    /// A provider slug extracted from a CoinMarketCap or CoinGecko URL.
+    Slug(String),
 }
 
 #[must_use]
@@ -204,11 +213,70 @@ pub fn detect_signal_query(text: &str) -> Option<SignalQuery> {
             address: candidate.to_owned(),
         }));
     }
+    if let Some(slug) = provider_slug_from_url(candidate) {
+        return Some(SignalQuery::Slug(slug));
+    }
     TOKEN_SYMBOL
         .as_ref()
         .and_then(|pattern| pattern.captures(candidate))
         .and_then(|captures| captures.get(1))
         .map(|symbol| SignalQuery::Symbol(symbol.as_str().to_ascii_lowercase()))
+}
+
+fn provider_slug_from_url(candidate: &str) -> Option<String> {
+    let parsed = Url::parse(candidate).ok()?;
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    let marker = match host {
+        "coinmarketcap.com" => "currencies",
+        "coingecko.com" => "coins",
+        _ => return None,
+    };
+    let mut segments = parsed.path_segments()?;
+    let found_marker = segments.any(|segment| segment.eq_ignore_ascii_case(marker));
+    if !found_marker {
+        return None;
+    }
+    let slug = segments.next()?.trim().to_ascii_lowercase();
+    if slug.is_empty()
+        || slug.len() > 128
+        || !slug
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return None;
+    }
+    Some(slug)
+}
+
+/// Normalize a provider name or slug for exact token-name matching.
+#[must_use]
+pub fn normalize_token_name(value: &str) -> String {
+    let value = value.replace(['\'', '’'], "");
+    let words = value
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut normalized: Vec<String> = Vec::with_capacity(words.len());
+    for word in words {
+        if word == "s"
+            && let Some(previous) = normalized.last_mut()
+        {
+            previous.push('s');
+            continue;
+        }
+        normalized.push(word);
+    }
+    normalized.join(" ")
 }
 
 #[must_use]
@@ -234,13 +302,6 @@ fn optional_money(value: &Value, price: bool) -> String {
         format_money(number(value), price)
     }
 }
-fn optional_percentage(value: &Value) -> String {
-    if value.is_null() {
-        "N/A".to_owned()
-    } else {
-        format_percentage(number(value))
-    }
-}
 fn optional_count(value: &Value) -> String {
     if value.is_null() {
         "N/A".to_owned()
@@ -253,16 +314,11 @@ fn optional_count(value: &Value) -> String {
 #[must_use]
 pub fn format_signal_quote(signal: &TokenSignal, timeframe: Option<&str>) -> String {
     let (change, period) = signal_change_for_timeframe(signal, timeframe);
-    let numeric = |value: &Value| {
-        value
-            .as_f64()
-            .or_else(|| value.as_str().and_then(|v| v.parse().ok()))
-    };
     crate::output_format::quote(
         &signal.pair.base_token.symbol,
-        numeric(&signal.pair.price_usd).unwrap_or(f64::NAN),
+        numeric_value(&signal.pair.price_usd).unwrap_or(f64::NAN),
         "USD",
-        change.and_then(numeric),
+        change,
         period,
     )
 }
@@ -278,28 +334,71 @@ pub fn signal_market_values(signal: &TokenSignal, timeframe: Option<&str>) -> (S
         "N/A".to_owned()
     };
     let (change, period) = signal_change_for_timeframe(signal, timeframe);
-    let change = change.map_or_else(|| "N/A".to_owned(), optional_percentage);
+    let change = change.map_or_else(|| "N/A".to_owned(), format_percentage);
     (price, format!("{change} {period}"))
 }
 
-fn signal_change_for_timeframe<'signal, 'period>(
-    signal: &'signal TokenSignal,
+fn signal_change_for_timeframe<'period>(
+    signal: &TokenSignal,
     timeframe: Option<&'period str>,
-) -> (Option<&'signal Value>, &'period str) {
+) -> (Option<f64>, &'period str) {
     match timeframe {
-        Some("1h") => (Some(&signal.pair.price_change.h1), "1h"),
-        Some("24h") => (Some(&signal.pair.price_change.h24), "24h"),
-        Some("1d") => (Some(&signal.pair.price_change.h24), "1d"),
+        Some("1h") => (
+            numeric_value(&signal.pair.price_change.h1)
+                .or_else(|| candle_change(&signal.candles, 3_600)),
+            "1h",
+        ),
+        Some("24h") => (
+            numeric_value(&signal.pair.price_change.h24)
+                .or_else(|| candle_change(&signal.candles, 86_400)),
+            "24h",
+        ),
+        Some("1d") => (
+            numeric_value(&signal.pair.price_change.h24)
+                .or_else(|| candle_change(&signal.candles, 86_400)),
+            "1d",
+        ),
         Some(period) => (None, period),
-        None => (Some(&signal.pair.price_change.h24), "24h"),
+        None => (
+            numeric_value(&signal.pair.price_change.h24)
+                .or_else(|| candle_change(&signal.candles, 86_400)),
+            "24h",
+        ),
     }
 }
 
-fn number(value: &Value) -> f64 {
+fn numeric_value(value: &Value) -> Option<f64> {
     value
         .as_f64()
         .or_else(|| value.as_str().and_then(|value| value.parse::<f64>().ok()))
-        .unwrap_or(0.0)
+        .filter(|value| value.is_finite())
+}
+
+fn candle_change(candles: &[Vec<f64>], seconds: i64) -> Option<f64> {
+    let mut closes = candles
+        .iter()
+        .filter_map(|candle| {
+            let timestamp = candle
+                .first()
+                .copied()?
+                .is_finite()
+                .then(|| candle[0] as i64)?;
+            let close = candle.get(4).copied()?.is_finite().then_some(candle[4])?;
+            (close > 0.0).then_some((timestamp, close))
+        })
+        .collect::<Vec<_>>();
+    closes.sort_by_key(|(timestamp, _)| *timestamp);
+    let (latest_timestamp, latest_close) = closes.last().copied()?;
+    let reference = closes
+        .iter()
+        .rev()
+        .find(|(timestamp, _)| latest_timestamp.saturating_sub(*timestamp) >= seconds)
+        .map(|(_, close)| *close)?;
+    Some((latest_close / reference - 1.0) * 100.0)
+}
+
+fn number(value: &Value) -> f64 {
+    numeric_value(value).unwrap_or(0.0)
 }
 
 #[must_use]
@@ -502,7 +601,14 @@ pub fn format_money(value: f64, price: bool) -> String {
             trim_exact_suffix(format!("{:.1}", value / 1e3), ".0")
         );
     }
-    format!("${}", grouped_integer(value))
+    let decimals = if absolute >= 1.0 {
+        2
+    } else if absolute >= 0.01 {
+        4
+    } else {
+        8
+    };
+    format!("${}", trim_decimal(format!("{value:.decimals$}")))
 }
 
 fn format_amount(value: f64) -> String {
@@ -842,7 +948,7 @@ pub fn format_signal_caption_for_period(
         |progress| format!("#{} (Pump @ {progress:.0}%)", signal.token.tag),
     );
     let (change, period) = signal_change_for_timeframe(signal, timeframe);
-    let change = change.map_or_else(|| "N/A".to_owned(), optional_percentage);
+    let change = change.map_or_else(|| "N/A".to_owned(), format_percentage);
     let mut stats = vec![format!(
         "<b>{}</b> USD · {change} {period}",
         optional_money(&pair.price_usd, true)
@@ -996,8 +1102,8 @@ mod tests {
         TokenAddress, TokenPair, TokenSignal, age_text, build_signal_keyboard, callback_text,
         choose_best_pair, choose_symbol_pair, detect_signal_query, format_money,
         format_signal_caption, format_signal_caption_for_period, format_signal_quote,
-        has_usable_chart, pair_rank, signal_state_key, stable_signal_id, token_from_pair,
-        token_image_url, token_socials,
+        has_usable_chart, normalize_token_name, pair_rank, signal_state_key, stable_signal_id,
+        token_from_pair, token_image_url, token_socials,
     };
     use crate::locale::Locale;
 
@@ -1108,6 +1214,28 @@ mod tests {
     }
 
     #[test]
+    fn detects_supported_provider_urls_as_slug_queries() {
+        assert_eq!(
+            detect_signal_query("https://coinmarketcap.com/currencies/hunter-biden-s-laptop/"),
+            Some(SignalQuery::Slug("hunter-biden-s-laptop".to_owned()))
+        );
+        assert_eq!(
+            detect_signal_query(
+                "https://www.coingecko.com/en/coins/hunter-bidens-laptop?utm_source=test"
+            ),
+            Some(SignalQuery::Slug("hunter-bidens-laptop".to_owned()))
+        );
+        assert_eq!(
+            detect_signal_query("https://example.test/coins/timba"),
+            None
+        );
+        assert_eq!(
+            normalize_token_name("Hunter Biden's Laptop"),
+            "hunter bidens laptop"
+        );
+    }
+
+    #[test]
     fn pair_selection_prefers_liquidity_and_exact_supported_symbol() {
         let mut low = pair();
         low.liquidity.usd = json!(10);
@@ -1146,6 +1274,20 @@ mod tests {
         assert!(caption.contains("<b>$0.0106</b> USD · +5.1% 1h"));
         let unavailable = format_signal_caption_for_period(&signal, 1_720_000_000, Some("7d"));
         assert!(unavailable.contains("<b>$0.0106</b> USD · N/A 7d"));
+    }
+
+    #[test]
+    fn missing_change_uses_candle_history_when_it_covers_the_period() {
+        let mut signal = signal();
+        signal.pair.price_change.h24 = serde_json::Value::Null;
+        signal.candles = vec![
+            vec![1_700_000_000.0, 1.0, 1.0, 1.0, 100.0],
+            vec![1_700_086_400.0, 2.0, 2.0, 2.0, 125.0],
+        ];
+        let quote = format_signal_quote(&signal, Some("24h"));
+        assert!(quote.contains("+25% 24h"), "{quote}");
+        let caption = format_signal_caption(&signal, 1_700_086_400);
+        assert!(caption.contains("+25% 24h"), "{caption}");
     }
 
     #[test]
@@ -1360,6 +1502,8 @@ mod tests {
         assert_eq!(format_money(2_500_000.0, false), "$2.50M");
         assert_eq!(format_money(-1_500.0, false), "$-1.5K");
         assert_eq!(format_money(-999.0, false), "$-999");
+        assert_eq!(format_money(0.24, false), "$0.24");
+        assert_eq!(format_money(0.005, false), "$0.005");
         assert_eq!(age_text(400 * 86_400), "1y");
         assert_eq!(age_text(2 * 86_400), "2d");
         assert_eq!(age_text(7_200), "2h");

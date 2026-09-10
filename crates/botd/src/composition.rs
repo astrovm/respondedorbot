@@ -1696,6 +1696,13 @@ where
         }
     }
 
+    fn load_candidates(
+        &mut self,
+        query: &bot_core::token_signals::SignalQuery,
+    ) -> bot_core::token_signals::TokenSignalCandidates {
+        TokenSignalAdapter::load_candidates(self, query)
+    }
+
     fn render_period_photo(
         &mut self,
         signal: &bot_core::token_signals::TokenSignal,
