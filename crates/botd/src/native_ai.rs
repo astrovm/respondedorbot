@@ -11,12 +11,12 @@ use bot_core::ai_pricing::calculate_billing_for_segments;
 use bot_core::ai_prompt::build_system_prompt;
 use bot_core::ai_reserve::{
     EstimatedMessage, ReserveEstimateError, TokenEstimateValue, chat_output_token_limit,
-    estimate_chat_reserve_credit_units, estimate_firecrawl_reserve_credit_units,
+    estimate_chat_reserve_credit_units_with_pricing, estimate_firecrawl_reserve_credit_units,
 };
 use bot_core::ai_usage::stable_provider_segment_id;
 use bot_core::credit_units::{CreditUnits, format_credit_units};
 use bot_core::locale::{Locale, format_date};
-use bot_core::provider_pricing::{DEEPSEEK_MODEL, GEMINI_FLASH_LITE_MODEL};
+use bot_core::provider_pricing::{DEEPSEEK_MODEL, GEMINI_FLASH_LITE_MODEL, TokenPricing};
 use bot_core::scheduled_tasks::ScheduledTask;
 use bot_core::telegram_actions::{SendMessage, TelegramAction};
 use bot_core::telegram_input::ChatId;
@@ -40,10 +40,34 @@ pub const OPENROUTER_TRANSCRIPTION_MODEL: &str = GEMINI_FLASH_LITE_MODEL;
 const SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE: i64 = 4_000;
 const TASK_WEB_SEARCH_MAX_USES: usize = 3;
 
+pub fn reservation_pricing_for_model(
+    model: &str,
+    pricing: Option<&OpenRouterPricingCache>,
+) -> Result<TokenPricing, String> {
+    if let Some(pricing) = pricing {
+        return pricing
+            .pricing(model)
+            .map_err(|error| format!("OpenRouter pricing lookup failed: {error}"))?
+            .ok_or_else(|| format!("OpenRouter catalog has no pricing for {model}"));
+    }
+    #[cfg(test)]
+    if model.split(':').next() == Some(DEEPSEEK_MODEL) {
+        return Ok(TokenPricing {
+            input_per_million: 300_000,
+            cached_input_per_million: Some(6_000),
+            cache_write_per_million: None,
+            audio_input_per_million: None,
+            output_per_million: 1_200_000,
+        });
+    }
+    Err(format!("OpenRouter pricing is unavailable for {model}"))
+}
+
 pub fn estimate_task_reserve_credit_units(
     text: &str,
     locale: &str,
-) -> Result<i64, bot_core::ai_reserve::ReserveEstimateError> {
+    pricing: Option<&OpenRouterPricingCache>,
+) -> Result<i64, String> {
     let estimated_messages = build_task_messages(text, locale)
         .into_iter()
         .map(|message| EstimatedMessage {
@@ -52,13 +76,16 @@ pub fn estimate_task_reserve_credit_units(
             name: TokenEstimateValue::Empty,
         })
         .collect::<Vec<_>>();
-    estimate_chat_reserve_credit_units(
+    let pricing = reservation_pricing_for_model(PRIMARY_CHAT_MODEL, pricing)?;
+    estimate_chat_reserve_credit_units_with_pricing(
         None,
         &estimated_messages,
         Some(chat_output_token_limit(PRIMARY_CHAT_MODEL)),
         SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE,
         PRIMARY_CHAT_MODEL,
+        &pricing,
     )
+    .map_err(|error| error.to_string())
 }
 
 fn add_task_web_search_reserve(chat: i64) -> Result<i64, ReserveEstimateError> {
@@ -76,6 +103,7 @@ pub struct OpenRouterTaskProvider<Transport> {
     base_url: String,
     model: String,
     persona: String,
+    pricing: Option<Arc<OpenRouterPricingCache>>,
     web_search: Option<Box<dyn ScheduledWebSearch>>,
 }
 
@@ -94,8 +122,15 @@ impl<Transport> OpenRouterTaskProvider<Transport> {
             base_url: base_url.to_owned(),
             model: model.to_owned(),
             persona: persona.to_owned(),
+            pricing: None,
             web_search: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_openrouter_pricing(mut self, pricing: Arc<OpenRouterPricingCache>) -> Self {
+        self.pricing = Some(pricing);
+        self
     }
 
     #[must_use]
@@ -108,7 +143,7 @@ impl<Transport> OpenRouterTaskProvider<Transport> {
         &self,
         messages: &[TaskPromptMessage],
         task: &ScheduledTask,
-    ) -> ChatCompletionRequest {
+    ) -> Result<ChatCompletionRequest, OpenRouterChatError> {
         let mut request_messages = Vec::with_capacity(messages.len() + 1);
         request_messages.push(ChatMessage::text(
             ChatRole::System,
@@ -118,11 +153,14 @@ impl<Transport> OpenRouterTaskProvider<Transport> {
             ChatMessage::text(task_message_role(message.role), message.content.clone())
         }));
         let mut request = ChatCompletionRequest::new(&self.model, request_messages);
+        if let Some(pricing) = self.pricing.as_ref() {
+            pricing.apply_to_request(&mut request)?;
+        }
         request.max_tokens = u64::try_from(chat_output_token_limit(&self.model)).ok();
         if self.web_search.is_some() {
             request.tools = vec![tool_schema(NativeTool::WebSearch)];
         }
-        request
+        Ok(request)
     }
 }
 
@@ -135,7 +173,9 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
         task: &ScheduledTask,
         _execution_id: &str,
     ) -> Result<TaskProviderReply, TaskProviderFailure<Self::Error>> {
-        let mut request = self.request(messages, task);
+        let mut request = self
+            .request(messages, task)
+            .map_err(|source| TaskProviderFailure::new(source, Vec::new()))?;
         let mut billing_segments = Vec::new();
         let mut text = String::new();
         let mut search_uses = 0_usize;
@@ -373,6 +413,7 @@ pub enum NativeTaskBillingError {
 pub struct PostgresTaskBilling<Store> {
     store: Store,
     model: String,
+    pricing: Option<Arc<OpenRouterPricingCache>>,
     web_search_enabled: bool,
 }
 
@@ -382,8 +423,15 @@ impl<Store> PostgresTaskBilling<Store> {
         Self {
             store,
             model: model.to_owned(),
+            pricing: None,
             web_search_enabled: false,
         }
+    }
+
+    #[must_use]
+    pub fn with_openrouter_pricing(mut self, pricing: Arc<OpenRouterPricingCache>) -> Self {
+        self.pricing = Some(pricing);
+        self
     }
 
     #[must_use]
@@ -508,12 +556,16 @@ impl<Store: TaskCreditStore> TaskBilling for PostgresTaskBilling<Store> {
                 name: TokenEstimateValue::Empty,
             })
             .collect::<Vec<_>>();
-        let chat_amount = estimate_chat_reserve_credit_units(
+        let pricing =
+            reservation_pricing_for_model(&self.model, self.pricing.as_deref())
+                .map_err(NativeTaskBillingError::Estimate)?;
+        let chat_amount = estimate_chat_reserve_credit_units_with_pricing(
             None,
             &estimated_messages,
             Some(chat_output_token_limit(&self.model)),
             SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE,
             &self.model,
+            &pricing,
         )
         .map_err(|error| NativeTaskBillingError::Estimate(error.to_string()))?;
         let amount = if self.web_search_enabled {
