@@ -120,9 +120,11 @@ such as `/p btc,timba` combine market and token quotes. Bare `/c`, `/p`, top-N
 lists, stablecoin lists, and conversion options retain their provider list
 behavior.
 
-Full Solana/EVM addresses and `$ticker` messages share the command resolver.
-Addresses preserve case and pin the token identity; symbol searches require an
-exact match. DexScreener and pump.fun supply token cards. Missing chart history
+Full Solana/EVM addresses, `$ticker` messages, and CoinMarketCap/CoinGecko
+token URLs share the command resolver. Addresses preserve case and pin the
+token identity; symbol searches require an exact match. Ambiguous tickers keep
+their distinct chain and contract identities so the bot can ask which token
+you mean. DexScreener and pump.fun supply token cards. Missing chart history
 or photo delivery falls back to the available quote/card text, and missing
 metrics are shown as N/A. Pump.fun bonding-curve tokens use pump.fun’s candle feed
 for explicit chart ranges. When only an older trade is available, the chart
