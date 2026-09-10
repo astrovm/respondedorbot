@@ -634,27 +634,31 @@ mod tests {
             )
             .unwrap_or_else(|_| unreachable!("pricing cache construction")),
         );
-        let result = build_production_background_specs(ProductionBackgroundOptions {
-            redis_endpoint: &RedisEndpoint {
-                host: "synthetic.invalid".to_owned(),
-                port: 6379,
-                password: Some("synthetic-password".to_owned()),
-            },
-            database_url: "postgresql://synthetic.invalid/database",
-            telegram_token: "synthetic-telegram-token",
-            openrouter_api_key: "synthetic-openrouter-key",
-            openrouter_base_url: "https://openrouter.example.test/api/v1",
-            openrouter_pricing: pricing,
-            firecrawl_api_key: None,
-            system_prompt: "synthetic persona",
-            owner_token: "synthetic-owner",
-            scheduler_mode: SchedulerMode::Authoritative,
-            reconciliation_interval: Duration::from_secs(60),
-            reconciliation_settings: ReconciliationSettings::default(),
-            active_operations: ActiveOperationRegistry::default(),
-            coinmarketcap_key: Some("synthetic-coinmarketcap-key"),
-            telegram_delivery: TelegramDeliveryCoordinator::default(),
-        });
+        let build = |openrouter_base_url| {
+            build_production_background_specs(ProductionBackgroundOptions {
+                redis_endpoint: &RedisEndpoint {
+                    host: "synthetic.invalid".to_owned(),
+                    port: 6379,
+                    password: Some("synthetic-password".to_owned()),
+                },
+                database_url: "postgresql://synthetic.invalid/database",
+                telegram_token: "synthetic-telegram-token",
+                openrouter_api_key: "synthetic-openrouter-key",
+                openrouter_base_url,
+                openrouter_pricing: Arc::clone(&pricing),
+                firecrawl_api_key: None,
+                system_prompt: "synthetic persona",
+                owner_token: "synthetic-owner",
+                scheduler_mode: SchedulerMode::Authoritative,
+                reconciliation_interval: Duration::from_secs(60),
+                reconciliation_settings: ReconciliationSettings::default(),
+                active_operations: ActiveOperationRegistry::default(),
+                coinmarketcap_key: Some("synthetic-coinmarketcap-key"),
+                telegram_delivery: TelegramDeliveryCoordinator::default(),
+            })
+        };
+        assert!(build("not-a-url").is_err());
+        let result = build("https://openrouter.example.test/api/v1");
         assert!(result.is_ok());
         assert_eq!(result.map(|specs| specs.len()), Ok(7));
     }
