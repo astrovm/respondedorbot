@@ -294,6 +294,26 @@ mod tests {
     }
 
     #[test]
+    fn rejects_invalid_or_overflowing_reserve_inputs() {
+        assert_eq!(
+            estimate_transcription_reserve_credit_units(f64::NAN),
+            Err(ReserveEstimateError::NonFiniteAudioDuration)
+        );
+        assert_eq!(
+            estimate_vision_reserve_credit_units("", usize::MAX, 0, 1, GEMINI_FLASH_LITE_MODEL),
+            Err(ReserveEstimateError::Overflow)
+        );
+        assert_eq!(
+            estimate_vision_reserve_credit_units("", 0, 0, 1, "unknown/model"),
+            Err(ReserveEstimateError::MissingTokenPricing)
+        );
+        assert_eq!(
+            credit_units_from_usd_micros(i128::MAX),
+            Err(ReserveEstimateError::Overflow)
+        );
+    }
+
+    #[test]
     fn preserves_model_limits_credit_rounding_and_provider_reserves() {
         assert_eq!(
             chat_output_token_limit("deepseek/deepseek-v4.1-flash:free"),
