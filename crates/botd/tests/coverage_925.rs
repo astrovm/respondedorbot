@@ -2,11 +2,14 @@
 
 use std::collections::HashSet;
 use std::convert::Infallible;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use bot_adapters::compaction_job::{COMPACTION_JOB_SCHEMA_VERSION, CompactionJobRecord};
+use bot_adapters::openrouter_chat::OpenRouterPricingCache;
 use bot_adapters::redis_compaction_queue::QueueJob;
 use bot_adapters::redis_update_queue::QueuedUpdate;
 use bot_adapters::telegram_polling::{IncomingEvent, IncomingUpdate};
@@ -627,8 +630,43 @@ fn schedule_context() -> CompactionScheduleContext {
     }
 }
 
+fn test_pricing_cache() -> (Arc<OpenRouterPricingCache>, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+    let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+        let mut request = [0_u8; 8_192];
+        let _ = stream.read(&mut request);
+        let body = json!({
+            "data": [{
+                "id": TEST_MODEL,
+                "pricing": {
+                    "prompt": "0.0000003",
+                    "completion": "0.0000012",
+                    "input_cache_read": "0.000000006"
+                }
+            }]
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .unwrap_or_else(|_| unreachable!());
+    });
+    let cache = OpenRouterPricingCache::new(
+        "synthetic-key",
+        &format!("http://{address}"),
+    )
+    .unwrap_or_else(|_| unreachable!());
+    (Arc::new(cache), server)
+}
+
 #[test]
 fn compaction_scheduler_refunds_every_failed_enqueue_shape() {
+    let (pricing, pricing_server) = test_pricing_cache();
     let cases = [
         (false, Ok(true), false, true),
         (false, Ok(false), false, false),
@@ -652,7 +690,8 @@ fn compaction_scheduler_refunds_every_failed_enqueue_shape() {
             || "synthetic-token".to_owned(),
             TEST_MODEL,
             "synthetic system prompt",
-        );
+        )
+        .with_openrouter_pricing(Arc::clone(&pricing));
         let result = scheduler.schedule(plan(), schedule_context());
         if expected_success {
             assert_eq!(result, Ok(true));
@@ -681,7 +720,8 @@ fn compaction_scheduler_refunds_every_failed_enqueue_shape() {
         || "unused".to_owned(),
         TEST_MODEL,
         "synthetic system prompt",
-    );
+    )
+    .with_openrouter_pricing(Arc::clone(&pricing));
     assert_eq!(existing.schedule(plan(), schedule_context()), Ok(false));
 
     let mut denied = NativeCompactionScheduler::new(
@@ -690,8 +730,12 @@ fn compaction_scheduler_refunds_every_failed_enqueue_shape() {
         || "unused".to_owned(),
         TEST_MODEL,
         "synthetic system prompt",
-    );
+    )
+    .with_openrouter_pricing(pricing);
     assert_eq!(denied.schedule(plan(), schedule_context()), Ok(false));
+    pricing_server
+        .join()
+        .unwrap_or_else(|_| unreachable!());
 }
 
 #[derive(Clone, Default)]
