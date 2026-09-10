@@ -589,8 +589,8 @@ mod tests {
 
     use super::{
         ActiveOperationRegistry, AiBillingReconciler, GenerationSource, OpenRouterGenerationSource,
-        ReconciliationSettings, ReconciliationStore, age_seconds, reconciled_segment,
-        segment_needs_reconciliation, settlement_reason,
+        ReconciliationSettings, ReconciliationStore, age_seconds, production_reconciler,
+        reconciled_segment, segment_needs_reconciliation, settlement_reason,
     };
 
     #[derive(Default)]
@@ -744,6 +744,20 @@ mod tests {
                 &operation("synthetic-operation", "2026-09-02T00:00:00Z", None),
                 1,
                 &Map::new(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn production_reconciler_rejects_invalid_base_url_before_database_io() {
+        assert!(
+            production_reconciler(
+                "postgresql://synthetic.invalid/database",
+                "synthetic-key",
+                "not-a-url",
+                ActiveOperationRegistry::default(),
+                ReconciliationSettings::default(),
             )
             .is_err()
         );
