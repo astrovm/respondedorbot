@@ -1,11 +1,12 @@
 //! Composition for native scheduled-task verification and execution.
 
 use std::convert::Infallible;
+use std::sync::Arc;
 use std::thread;
 
 use bot_adapters::billing_read::BillingRepository;
 use bot_adapters::firecrawl::ReqwestFirecrawlTransport;
-use bot_adapters::openrouter_chat::ReqwestOpenRouterTransport;
+use bot_adapters::openrouter_chat::{OpenRouterPricingCache, ReqwestOpenRouterTransport};
 use bot_adapters::redis_connection::RedisEndpoint;
 use bot_adapters::redis_task_store::{RedisTaskStore, task_execution_key};
 use bot_adapters::telegram_http::ReqwestTelegramTransport;
@@ -125,13 +126,18 @@ pub fn verify_tasks_once(
 pub fn build_task_scheduler(
     options: TaskServiceOptions<'_>,
 ) -> Result<ConcreteTaskScheduler, TaskServiceError> {
+    let pricing = Arc::new(OpenRouterPricingCache::new(
+        options.openrouter_api_key,
+        options.openrouter_base_url,
+    )?);
     let mut provider = OpenRouterTaskProvider::new(
         ReqwestOpenRouterTransport::new()?,
         options.openrouter_api_key,
         options.openrouter_base_url,
         PRIMARY_CHAT_MODEL,
         options.system_prompt,
-    );
+    )
+    .with_openrouter_pricing(Arc::clone(&pricing));
     let firecrawl_api_key = options.firecrawl_api_key.filter(|key| !key.is_empty());
     if let Some(api_key) = firecrawl_api_key {
         provider = provider.with_web_search(Box::new(FirecrawlScheduledWebSearch::new(
@@ -144,6 +150,7 @@ pub fn build_task_scheduler(
         BillingRepository::new(options.database_url),
         PRIMARY_CHAT_MODEL,
     )
+    .with_openrouter_pricing(pricing)
     .with_web_search(firecrawl_api_key.is_some());
     let action_transport = ReqwestTelegramTransport::new().map_err(TaskServiceError::Telegram)?;
     let messenger = ActionTaskMessenger::new(
