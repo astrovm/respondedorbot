@@ -1382,6 +1382,12 @@ mod tests {
         assert_eq!(pricing.input_per_million, 300_000);
         assert_eq!(pricing.cached_input_per_million, Some(6_000));
         assert_eq!(pricing.output_per_million, 1_200_000);
+        assert_eq!(
+            cache.price_ceiling("synthetic/missing"),
+            Err(OpenRouterChatError::MissingModelPricing {
+                model: "synthetic/missing".to_owned(),
+            })
+        );
 
         let mut request = ChatCompletionRequest::new(format!("{DEEPSEEK_MODEL}:free"), Vec::new());
         cache
@@ -1421,6 +1427,11 @@ mod tests {
                 "application/json".to_owned(),
                 "{\"error\":{\"message\":\"synthetic outage\"}}".to_owned(),
             ),
+            (
+                "503 Service Unavailable".to_owned(),
+                "application/json".to_owned(),
+                "{\"error\":{\"message\":\"synthetic outage\"}}".to_owned(),
+            ),
         ]);
         let cache = OpenRouterPricingCache::new("synthetic-key", &base_url)
             .unwrap_or_else(|_| unreachable!("cache construction"));
@@ -1450,6 +1461,29 @@ mod tests {
             .unwrap_or_else(|_| unreachable!("outage fallback"))
             .unwrap_or_else(|| unreachable!("cached transcription model"));
         assert_eq!(outage_fallback, first);
+        cache
+            .state
+            .lock()
+            .unwrap_or_else(|_| unreachable!("pricing state"))
+            .fetched_at = Some(Instant::now() - Duration::from_secs(301));
+        cache
+            .state
+            .lock()
+            .unwrap_or_else(|_| unreachable!("pricing state"))
+            .refresh_retry_at = Some(Instant::now() - Duration::from_secs(1));
+        let second_outage_fallback = cache
+            .transcription_pricing(OPENROUTER_TRANSCRIPTION_MODEL)
+            .unwrap_or_else(|_| unreachable!("second outage fallback"))
+            .unwrap_or_else(|| unreachable!("cached transcription model"));
+        assert_eq!(second_outage_fallback, first);
+        assert_eq!(
+            cache
+                .state
+                .lock()
+                .unwrap_or_else(|_| unreachable!("pricing state"))
+                .refresh_retry_delay,
+            Duration::from_secs(60)
+        );
         let retry_at = cache
             .state
             .lock()
@@ -1506,6 +1540,76 @@ mod tests {
             invalid_url.pricing(DEEPSEEK_MODEL),
             Err(OpenRouterChatError::InvalidBaseUrl)
         );
+        assert_eq!(invalid_url.pricing(" "), Ok(None));
+
+        let invalid_scheme =
+            OpenRouterPricingCache::new("synthetic-key", "ftp://openrouter.example.test/api/v1")
+                .unwrap_or_else(|_| unreachable!("cache construction"));
+        assert_eq!(
+            invalid_scheme.pricing(DEEPSEEK_MODEL),
+            Err(OpenRouterChatError::InvalidBaseUrl)
+        );
+    }
+
+    #[test]
+    fn refresh_failures_without_a_cached_catalog_are_backed_off_and_remain_fail_closed() {
+        let (base_url, server) = serve_once(
+            "503 Service Unavailable",
+            "application/json",
+            "{\"error\":{\"message\":\"synthetic outage\"}}",
+        );
+        let cache = OpenRouterPricingCache::new("synthetic-key", &base_url)
+            .unwrap_or_else(|_| unreachable!("cache construction"));
+        assert_eq!(
+            cache.pricing(DEEPSEEK_MODEL),
+            Err(OpenRouterChatError::Http {
+                status_code: 503,
+                message: "synthetic outage".to_owned(),
+            })
+        );
+        assert_eq!(
+            cache.pricing(DEEPSEEK_MODEL),
+            Err(OpenRouterChatError::Http {
+                status_code: 503,
+                message: "synthetic outage".to_owned(),
+            })
+        );
+        server
+            .join()
+            .unwrap_or_else(|_| unreachable!("catalog server"));
+    }
+
+    #[test]
+    fn refresh_rejects_malformed_and_unusable_catalog_entries() {
+        let (base_url, server) = serve_sequence(vec![
+            (
+                "200 OK".to_owned(),
+                "application/json".to_owned(),
+                "{}".to_owned(),
+            ),
+            (
+                "200 OK".to_owned(),
+                "application/json".to_owned(),
+                r#"{"data":[{"id":"synthetic/model"}]}"#.to_owned(),
+            ),
+        ]);
+        let cache = OpenRouterPricingCache::new("synthetic-key", &base_url)
+            .unwrap_or_else(|_| unreachable!("cache construction"));
+        assert_eq!(
+            cache.refresh(),
+            Err(OpenRouterChatError::InvalidJson(
+                "models response has no data array".to_owned()
+            ))
+        );
+        assert_eq!(
+            cache.refresh(),
+            Err(OpenRouterChatError::InvalidJson(
+                "models response has no usable pricing entries".to_owned()
+            ))
+        );
+        server
+            .join()
+            .unwrap_or_else(|_| unreachable!("catalog server"));
     }
 
     #[test]
