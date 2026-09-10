@@ -6,7 +6,7 @@ use crate::provider_pricing::{
     CREDIT_UNIT_USD_MICROS, DEEPSEEK_MODEL, FIRECRAWL_SEARCH_MAX_CREDITS,
     FIRECRAWL_STANDARD_USD_MICROS_PER_CREDIT, GROQ_TRANSCRIPTION_MIN_SECONDS,
     GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR, TokenPricing,
-    YOUTUBE_TRANSCRIPT_USD_MICROS_PER_SUCCESS, reservation_token_pricing,
+    YOUTUBE_TRANSCRIPT_USD_MICROS_PER_SUCCESS,
 };
 
 pub const CHAT_OUTPUT_TOKEN_LIMIT: i64 = 1_024;
@@ -35,8 +35,6 @@ pub enum ReserveEstimateError {
     Overflow,
     #[error("AI reserve estimate requires finite audio duration")]
     NonFiniteAudioDuration,
-    #[error("AI model does not define token pricing")]
-    MissingTokenPricing,
 }
 
 #[must_use]
@@ -82,24 +80,6 @@ pub fn estimate_message_tokens(messages: &[EstimatedMessage]) -> i64 {
     })
 }
 
-pub fn estimate_chat_reserve_credit_units(
-    system_message: Option<&EstimatedMessage>,
-    messages: &[EstimatedMessage],
-    max_output_tokens: Option<i64>,
-    extra_input_tokens: i64,
-    model: &str,
-) -> Result<i64, ReserveEstimateError> {
-    let pricing = chat_pricing(model)?;
-    estimate_chat_reserve_credit_units_with_pricing(
-        system_message,
-        messages,
-        max_output_tokens,
-        extra_input_tokens,
-        model,
-        &pricing,
-    )
-}
-
 pub fn estimate_chat_reserve_credit_units_with_pricing(
     system_message: Option<&EstimatedMessage>,
     messages: &[EstimatedMessage],
@@ -132,14 +112,13 @@ pub fn estimate_chat_reserve_credit_units_with_pricing(
     credit_units_from_usd_micros(usd_micros)
 }
 
-pub fn estimate_vision_reserve_credit_units(
+pub fn estimate_vision_reserve_credit_units_with_pricing(
     prompt_text: &str,
     image_byte_length: usize,
     extra_input_tokens: i64,
     max_output_tokens: i64,
-    model: &str,
+    pricing: &TokenPricing,
 ) -> Result<i64, ReserveEstimateError> {
-    let pricing = vision_pricing(model)?;
     let encoded_length = image_byte_length
         .checked_add(2)
         .and_then(|value| value.checked_div(3))
@@ -214,28 +193,31 @@ pub fn credit_units_from_usd_micros(usd_micros: i128) -> Result<i64, ReserveEsti
     i64::try_from(units).map_err(|_| ReserveEstimateError::Overflow)
 }
 
-fn chat_pricing(model: &str) -> Result<TokenPricing, ReserveEstimateError> {
-    reservation_token_pricing(model).ok_or(ReserveEstimateError::MissingTokenPricing)
-}
-
-fn vision_pricing(model: &str) -> Result<TokenPricing, ReserveEstimateError> {
-    reservation_token_pricing(model).ok_or(ReserveEstimateError::MissingTokenPricing)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         EstimatedMessage, ReserveEstimateError, TokenEstimateValue, TokenPricing,
-        chat_output_token_limit, credit_units_from_usd_micros, estimate_chat_reserve_credit_units,
+        chat_output_token_limit, credit_units_from_usd_micros,
         estimate_chat_reserve_credit_units_with_pricing, estimate_firecrawl_reserve_credit_units,
         estimate_message_tokens, estimate_nested_tokens, estimate_text_tokens,
-        estimate_transcription_reserve_credit_units, estimate_vision_reserve_credit_units,
+        estimate_transcription_reserve_credit_units,
+        estimate_vision_reserve_credit_units_with_pricing,
         estimate_youtube_transcript_reserve_credit_units,
     };
-    use crate::provider_pricing::GEMINI_FLASH_LITE_MODEL;
+
 
     fn text(value: &str) -> TokenEstimateValue {
         TokenEstimateValue::Text(value.to_owned())
+    }
+
+    fn synthetic_pricing() -> TokenPricing {
+        TokenPricing {
+            input_per_million: 250_000,
+            cached_input_per_million: Some(25_000),
+            cache_write_per_million: Some(83_333),
+            audio_input_per_million: Some(500_000),
+            output_per_million: 1_500_000,
+        }
     }
 
     #[test]
@@ -300,12 +282,10 @@ mod tests {
             Err(ReserveEstimateError::NonFiniteAudioDuration)
         );
         assert_eq!(
-            estimate_vision_reserve_credit_units("", usize::MAX, 0, 1, GEMINI_FLASH_LITE_MODEL),
+            estimate_vision_reserve_credit_units_with_pricing(
+                "", usize::MAX, 0, 1, &synthetic_pricing()
+            ),
             Err(ReserveEstimateError::Overflow)
-        );
-        assert_eq!(
-            estimate_vision_reserve_credit_units("", 0, 0, 1, "unknown/model"),
-            Err(ReserveEstimateError::MissingTokenPricing)
         );
         assert_eq!(
             credit_units_from_usd_micros(i128::MAX),
@@ -332,26 +312,20 @@ mod tests {
             Ok(2_220)
         );
         assert_eq!(
-            estimate_vision_reserve_credit_units(
+            estimate_vision_reserve_credit_units_with_pricing(
                 "describe",
                 100,
                 0,
                 512,
-                "google/gemini-3.1-flash-lite",
+                &synthetic_pricing(),
             ),
             Ok(16)
         );
         assert_eq!(
-            estimate_vision_reserve_credit_units("", 0, 0, 1, GEMINI_FLASH_LITE_MODEL),
+            estimate_vision_reserve_credit_units_with_pricing(
+                "", 0, 0, 1, &synthetic_pricing()
+            ),
             Ok(1)
-        );
-        assert_eq!(
-            estimate_chat_reserve_credit_units(None, &[], Some(1), 0, GEMINI_FLASH_LITE_MODEL),
-            Ok(1)
-        );
-        assert_eq!(
-            estimate_chat_reserve_credit_units(None, &[], None, 0, "unknown/model"),
-            Err(ReserveEstimateError::MissingTokenPricing)
         );
     }
 }
