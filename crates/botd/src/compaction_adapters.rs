@@ -865,6 +865,32 @@ mod tests {
     }
 
     #[test]
+    fn pricing_lookup_failure_stops_compaction_before_transport_io() {
+        let transport = Transport {
+            request: RefCell::new(None),
+        };
+        let pricing = Arc::new(
+            OpenRouterPricingCache::new("synthetic-key", "not-a-url")
+                .unwrap_or_else(|_| unreachable!("pricing cache construction")),
+        );
+        let mut provider = OpenRouterCompactionProvider::new(
+            transport,
+            "synthetic-key",
+            "https://synthetic.invalid/api/v1",
+            "requested/model",
+            "synthetic persona",
+        )
+        .with_openrouter_pricing(pricing);
+
+        assert!(
+            provider
+                .compact(&[json!({"role":"user","text":"hello"})], None, "en")
+                .is_err()
+        );
+        assert!(provider.transport.request.borrow().is_none());
+    }
+
+    #[test]
     fn spanish_compaction_maps_roles_skips_empty_messages_and_rejects_empty_output() {
         struct EmptyTransport;
         impl OpenRouterTransport for EmptyTransport {

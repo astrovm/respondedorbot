@@ -366,9 +366,10 @@ fn openrouter_tool_call(call: &bot_core::ai_prompt::PromptToolCall) -> ToolCall 
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::sync::Arc;
 
     use bot_adapters::openrouter_chat::{
-        HttpRequest, OpenRouterChatError, OpenRouterStreamTransport,
+        HttpRequest, OpenRouterChatError, OpenRouterPricingCache, OpenRouterStreamTransport,
     };
     use bot_core::ai_prompt::{PromptContent, PromptMessage, PromptRole, PromptToolCall};
     use bot_core::provider_stream_policy::ProviderStreamEvent;
@@ -522,6 +523,32 @@ mod tests {
         assert_eq!(body["reasoning"]["enabled"], true);
         assert_eq!(body["messages"][1]["content"][0]["type"], "text");
         assert_eq!(body["tools"][0]["type"], "function");
+    }
+
+    #[test]
+    fn pricing_lookup_failure_stops_streaming_before_transport_io() {
+        let transport = Transport {
+            chunks: Vec::new(),
+            failure: None,
+            requests: RefCell::new(Vec::new()),
+        };
+        let pricing = Arc::new(
+            OpenRouterPricingCache::new("synthetic-key", "not-a-url")
+                .unwrap_or_else(|_| unreachable!("pricing cache construction")),
+        );
+        let provider = OpenRouterChatStreamer::new(
+            transport,
+            "synthetic-key",
+            "https://synthetic.invalid/api/v1",
+            "requested/model",
+        )
+        .with_openrouter_pricing(pricing);
+
+        let result = provider.stream_round(&messages(), &[], |_| Ok(()));
+        let error = result.unwrap_err();
+        assert_eq!(error.source, OpenRouterChatError::InvalidBaseUrl);
+        assert!(error.partial.text.is_empty());
+        assert!(provider.transport.requests.borrow().is_empty());
     }
 
     #[test]

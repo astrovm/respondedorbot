@@ -694,10 +694,11 @@ where
 mod tests {
     use std::cell::RefCell;
     use std::collections::{BTreeMap, VecDeque};
+    use std::sync::Arc;
 
     use bot_adapters::billing_read::AiChargeResult;
     use bot_adapters::openrouter_chat::{
-        HttpRequest, HttpResponse, OpenRouterChatError, OpenRouterTransport,
+        HttpRequest, HttpResponse, OpenRouterChatError, OpenRouterPricingCache, OpenRouterTransport,
     };
     use bot_core::locale::Locale;
     use bot_core::scheduled_tasks::{ScheduledTask, TaskId, TaskSchedule};
@@ -842,6 +843,40 @@ mod tests {
                 .is_some_and(|content| content.contains("synthetic persona"))
         );
         assert_eq!(body["messages"][1]["content"], "do it");
+    }
+
+    #[test]
+    fn task_pricing_lookup_failure_stops_provider_before_transport_io() {
+        let transport = Transport {
+            requests: RefCell::new(Vec::new()),
+            responses: RefCell::new(VecDeque::new()),
+        };
+        let pricing = Arc::new(
+            OpenRouterPricingCache::new("synthetic-key", "not-a-url")
+                .unwrap_or_else(|_| unreachable!("pricing cache construction")),
+        );
+        let mut provider = OpenRouterTaskProvider::new(
+            transport,
+            "synthetic-key",
+            "https://synthetic.invalid/api/v1",
+            "deepseek/deepseek-v4.1-flash",
+            "synthetic persona",
+        )
+        .with_openrouter_pricing(pricing);
+
+        let failure = provider
+            .complete(
+                &[TaskPromptMessage {
+                    role: "user",
+                    content: "do it".to_owned(),
+                }],
+                &task("en"),
+                "task123:1000",
+            )
+            .unwrap_err();
+        assert_eq!(failure.source, OpenRouterChatError::InvalidBaseUrl);
+        assert!(failure.billing_segments.is_empty());
+        assert!(provider.transport.requests.borrow().is_empty());
     }
 
     #[test]
