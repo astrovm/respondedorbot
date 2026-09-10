@@ -80,14 +80,20 @@ pub fn openrouter_price_ceiling(model: &str) -> Option<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEEPSEEK_MODEL, GEMINI_FLASH_LITE_MODEL, openrouter_price_ceiling,
-        reservation_token_pricing,
+        DEEPSEEK_MODEL, GEMINI_FLASH_LITE_MODEL, GROQ_CHAT_MODEL, openrouter_price_ceiling,
+        published_token_pricing, reservation_token_pricing,
     };
 
     #[test]
     fn locally_defined_models_have_reservation_prices_and_openrouter_ceilings() {
         assert!(reservation_token_pricing(GEMINI_FLASH_LITE_MODEL).is_some());
         assert!(openrouter_price_ceiling(GEMINI_FLASH_LITE_MODEL).is_some());
+        assert!(published_token_pricing("", GEMINI_FLASH_LITE_MODEL).is_some());
+        assert!(
+            published_token_pricing("groq", &format!("{GROQ_CHAT_MODEL}:free")).is_some()
+        );
+        assert!(published_token_pricing("other", GROQ_CHAT_MODEL).is_none());
+        assert!(published_token_pricing("", DEEPSEEK_MODEL).is_none());
         assert!(reservation_token_pricing(DEEPSEEK_MODEL).is_none());
         assert!(openrouter_price_ceiling(DEEPSEEK_MODEL).is_none());
         assert!(reservation_token_pricing("unknown/model").is_none());
