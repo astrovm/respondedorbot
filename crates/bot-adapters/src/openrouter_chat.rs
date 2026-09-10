@@ -2,9 +2,10 @@
 
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
-use bot_core::provider_pricing::openrouter_price_ceiling;
+use bot_core::provider_pricing::{TokenPricing, openrouter_price_ceiling};
 use bot_core::provider_stream_policy::StreamToolCallFragment;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
@@ -12,6 +13,253 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 
 pub const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+
+const OPENROUTER_PRICING_TTL: Duration = Duration::from_secs(300);
+const USD_MICROS_PER_MILLION_TOKENS: i128 = 1_000_000_000_000;
+
+#[derive(Default)]
+struct OpenRouterPricingState {
+    fetched_at: Option<Instant>,
+    models: BTreeMap<String, TokenPricing>,
+}
+
+#[derive(Clone)]
+pub struct OpenRouterPricingCache {
+    client: Client,
+    api_key: String,
+    base_url: String,
+    state: Arc<Mutex<OpenRouterPricingState>>,
+}
+
+impl OpenRouterPricingCache {
+    pub fn new(api_key: &str, base_url: &str) -> Result<Self, OpenRouterChatError> {
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|error| OpenRouterChatError::Transport(error.to_string()))?;
+        Ok(Self {
+            client,
+            api_key: api_key.to_owned(),
+            base_url: base_url.to_owned(),
+            state: Arc::new(Mutex::new(OpenRouterPricingState::default())),
+        })
+    }
+
+    pub fn pricing(&self, model: &str) -> Result<Option<TokenPricing>, OpenRouterChatError> {
+        let model = model.trim();
+        if model.is_empty() {
+            return Ok(None);
+        }
+        if self.is_stale()? {
+            self.refresh()?;
+        }
+        let base_model = catalog_base_model(model);
+        let state = self.lock_state()?;
+        Ok(state
+            .models
+            .get(model)
+            .copied()
+            .or_else(|| state.models.get(base_model).copied()))
+    }
+
+    pub fn refresh(&self) -> Result<(), OpenRouterChatError> {
+        let api_key = self.api_key.trim();
+        if api_key.is_empty() {
+            return Err(OpenRouterChatError::MissingApiKey);
+        }
+        let response = self
+            .client
+            .get(models_url(&self.base_url)?)
+            .bearer_auth(api_key)
+            .send()
+            .map_err(|error| OpenRouterChatError::Transport(error.to_string()))?;
+        let status_code = response.status().as_u16();
+        let headers = response
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|value| (name.as_str().to_ascii_lowercase(), value.to_owned()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let body = response
+            .text()
+            .map_err(|error| OpenRouterChatError::Transport(error.to_string()))?;
+        if status_code >= 400 {
+            return Err(http_error(status_code, &body, &headers));
+        }
+        let payload = serde_json::from_str::<Value>(&body)
+            .map_err(|error| OpenRouterChatError::InvalidJson(error.to_string()))?;
+        let models = payload
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| OpenRouterChatError::InvalidJson("models response has no data array".to_owned()))?;
+        let mut prices = BTreeMap::new();
+        for model in models {
+            let Some((id, pricing)) = parse_catalog_model(model) else {
+                continue;
+            };
+            prices.insert(id.clone(), pricing);
+            prices.entry(catalog_base_model(&id).to_owned()).or_insert(pricing);
+        }
+        let mut state = self.lock_state()?;
+        state.models = prices;
+        state.fetched_at = Some(Instant::now());
+        Ok(())
+    }
+
+    pub fn apply_to_request(
+        &self,
+        request: &mut ChatCompletionRequest,
+    ) -> Result<(), OpenRouterChatError> {
+        if let Some(pricing) = self.pricing(&request.model)? {
+            request.set_price_ceiling(
+                pricing.input_per_million as f64 / 1_000_000.0,
+                pricing.output_per_million as f64 / 1_000_000.0,
+            );
+        }
+        Ok(())
+    }
+
+    fn is_stale(&self) -> Result<bool, OpenRouterChatError> {
+        let state = self.lock_state()?;
+        Ok(state
+            .fetched_at
+            .is_none_or(|fetched_at| fetched_at.elapsed() >= OPENROUTER_PRICING_TTL))
+    }
+
+    fn lock_state(
+        &self,
+    ) -> Result<MutexGuard<'_, OpenRouterPricingState>, OpenRouterChatError> {
+        self.state
+            .lock()
+            .map_err(|_| OpenRouterChatError::Transport("OpenRouter pricing cache was poisoned".to_owned()))
+    }
+}
+
+fn models_url(base_url: &str) -> Result<String, OpenRouterChatError> {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    let parsed = reqwest::Url::parse(trimmed).map_err(|_| OpenRouterChatError::InvalidBaseUrl)?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(OpenRouterChatError::InvalidBaseUrl);
+    }
+    Ok(format!("{trimmed}/models"))
+}
+
+fn catalog_base_model(model: &str) -> &str {
+    model.split(':').next().unwrap_or(model)
+}
+
+fn parse_catalog_model(value: &Value) -> Option<(String, TokenPricing)> {
+    let id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())?;
+    let pricing = value.get("pricing").and_then(Value::as_object)?;
+    let mut input = pricing.get("prompt").and_then(parse_catalog_rate);
+    let mut cached_input = pricing
+        .get("input_cache_read")
+        .and_then(parse_catalog_rate);
+    let mut cache_write = pricing
+        .get("input_cache_write")
+        .and_then(parse_catalog_rate);
+    let mut audio_input = pricing.get("audio").and_then(parse_catalog_rate);
+    let mut output = pricing.get("completion").and_then(parse_catalog_rate);
+    if let Some(overrides) = pricing.get("overrides").and_then(Value::as_array) {
+        for override_value in overrides {
+            let Some(override_pricing) = override_value.as_object() else {
+                continue;
+            };
+            update_max(&mut input, override_pricing.get("prompt"));
+            update_max(
+                &mut cached_input,
+                override_pricing.get("input_cache_read"),
+            );
+            update_max(
+                &mut cache_write,
+                override_pricing.get("input_cache_write"),
+            );
+            update_max(&mut audio_input, override_pricing.get("audio"));
+            update_max(&mut output, override_pricing.get("completion"));
+        }
+    }
+    Some((
+        id.to_owned(),
+        TokenPricing {
+            input_per_million: input?,
+            cached_input_per_million: cached_input,
+            cache_write_per_million: cache_write,
+            audio_input_per_million: audio_input,
+            output_per_million: output?,
+        },
+    ))
+}
+
+fn update_max(target: &mut Option<i128>, value: Option<&Value>) {
+    let Some(rate) = value.and_then(parse_catalog_rate) else {
+        return;
+    };
+    if target.is_none_or(|current| rate > current) {
+        *target = Some(rate);
+    }
+}
+
+fn parse_catalog_rate(value: &Value) -> Option<i128> {
+    let text = value
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| value.as_number().map(ToString::to_string))?;
+    decimal_rate_to_usd_micros_per_million(&text)
+}
+
+fn decimal_rate_to_usd_micros_per_million(value: &str) -> Option<i128> {
+    let value = value.trim().strip_prefix('+').unwrap_or(value);
+    if value.is_empty() || value.starts_with('-') {
+        return None;
+    }
+    let (mantissa, exponent) = value
+        .find('e')
+        .or_else(|| value.find('E'))
+        .map_or((value, 0_i32), |position| {
+            let (mantissa, exponent) = value.split_at(position);
+            (
+                mantissa,
+                exponent[1..].parse::<i32>().unwrap_or(i32::MAX),
+            )
+        });
+    if !mantissa.contains('.') && mantissa.chars().all(|character| character.is_ascii_digit()) {
+        let digits = mantissa.parse::<i128>().ok()?;
+        return scale_decimal_rate(digits, 0, exponent);
+    }
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    if (!whole.is_empty() && !whole.chars().all(|character| character.is_ascii_digit()))
+        || !fraction.chars().all(|character| character.is_ascii_digit())
+        || whole.is_empty() && fraction.is_empty()
+    {
+        return None;
+    }
+    let digits = format!("{}{}", if whole.is_empty() { "0" } else { whole }, fraction)
+        .parse::<i128>()
+        .ok()?;
+    let fraction_digits = i32::try_from(fraction.len()).ok()?;
+    scale_decimal_rate(digits, fraction_digits, exponent)
+}
+
+fn scale_decimal_rate(digits: i128, fraction_digits: i32, exponent: i32) -> Option<i128> {
+    let scale = fraction_digits.checked_sub(exponent)?;
+    if scale <= 0 {
+        return digits.checked_mul(10_i128.checked_pow(scale.unsigned_abs())?);
+    }
+    let denominator = 10_i128.checked_pow(u32::try_from(scale).ok()?)?;
+    let numerator = digits.checked_mul(USD_MICROS_PER_MILLION_TOKENS)?;
+    numerator
+        .checked_add(denominator.checked_sub(1)?)
+        .and_then(|value| value.checked_div(denominator))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -128,6 +376,12 @@ pub struct ChatCompletionRequest {
 }
 
 impl ChatCompletionRequest {
+    pub fn set_price_ceiling(&mut self, prompt: f64, completion: f64) {
+        self.provider = Some(ProviderPreferences {
+            max_price: ProviderMaxPrice { prompt, completion },
+        });
+    }
+
     #[must_use]
     pub fn new(model: impl Into<String>, messages: Vec<ChatMessage>) -> Self {
         let model = model.into();
