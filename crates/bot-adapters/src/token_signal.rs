@@ -6,8 +6,8 @@ use std::time::Duration;
 use ab_glyph::FontArc;
 use bot_core::token_signals::{
     PumpMetadata, SIGNAL_STATE_TTL_SECONDS, SignalQuery, SignalState, TokenAddress, TokenPair,
-    TokenSignal, choose_symbol_pair, format_money, pair_rank, signal_state_key, token_from_pair,
-    token_image_url, token_socials,
+    TokenSignal, TokenSignalCandidates, format_money, normalize_token_name, pair_rank,
+    signal_state_key, token_from_pair, token_image_url, token_socials,
 };
 use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
 use imageproc::drawing::draw_text_mut;
@@ -137,6 +137,41 @@ pub struct TokenSignalLoad {
 pub struct TokenSignalAdapter<Transport, Cache> {
     transport: Transport,
     cache: Cache,
+}
+
+/// Activity is a better discriminator for a bare ticker than pool depth:
+/// namesake pools often advertise a large LP while receiving little real
+/// trading. Liquidity remains the tie-breaker for pools with equal volume.
+fn compare_symbol_pairs(left: &TokenPair, right: &TokenPair) -> std::cmp::Ordering {
+    let (left_liquidity, left_volume) = pair_rank(left);
+    let (right_liquidity, right_volume) = pair_rank(right);
+    right_volume
+        .total_cmp(&left_volume)
+        .then_with(|| right_liquidity.total_cmp(&left_liquidity))
+}
+
+fn same_token_identity(left: &TokenAddress, right: &TokenAddress) -> bool {
+    left.chain_id.eq_ignore_ascii_case(&right.chain_id)
+        && left.network.eq_ignore_ascii_case(&right.network)
+        && if left.address.starts_with("0x") && right.address.starts_with("0x") {
+            left.address.eq_ignore_ascii_case(&right.address)
+        } else {
+            left.address == right.address
+        }
+}
+
+fn preview_signal(token: TokenAddress, pair: TokenPair) -> TokenSignal {
+    let token_image_url = token_image_url(&pair, None);
+    let socials = token_socials(&pair, None);
+    TokenSignal {
+        token,
+        pair,
+        candles: Vec::new(),
+        supply: None,
+        token_image_url,
+        socials,
+        pump: None,
+    }
 }
 
 impl<Transport, Cache> TokenSignalAdapter<Transport, Cache> {
@@ -489,6 +524,7 @@ where
             }
             SignalQuery::Address(token) => self.load_token(token),
             SignalQuery::Symbol(symbol) => self.load_symbol(symbol),
+            SignalQuery::Slug(slug) => self.load_slug(slug),
         }
     }
 
@@ -497,7 +533,18 @@ where
         let pairs = self
             .pairs(token, &mut diagnostics)
             .into_iter()
-            .filter(|pair| token_from_pair(pair).as_ref() == Some(token))
+            .filter(|pair| {
+                token_from_pair(pair).is_some_and(|resolved| {
+                    resolved.chain_id.eq_ignore_ascii_case(&token.chain_id)
+                        && resolved.network.eq_ignore_ascii_case(&token.network)
+                        && if resolved.address.starts_with("0x") && token.address.starts_with("0x")
+                        {
+                            resolved.address.eq_ignore_ascii_case(&token.address)
+                        } else {
+                            resolved.address == token.address
+                        }
+                })
+            })
             .collect::<Vec<_>>();
         if pairs.is_empty() {
             let signal = self
@@ -551,34 +598,13 @@ where
         }
     }
 
-    pub fn load_symbol(&mut self, symbol: &str) -> TokenSignalLoad {
-        let mut diagnostics = Vec::new();
-        let mut pairs = self.search_pairs(symbol, &mut diagnostics);
-        let normalized = symbol.trim_start_matches('$').to_ascii_lowercase();
-        pairs.sort_by(|left, right| {
-            let left_exact = left.base_token.symbol.to_ascii_lowercase() == normalized;
-            let right_exact = right.base_token.symbol.to_ascii_lowercase() == normalized;
-            right_exact.cmp(&left_exact).then_with(|| {
-                let left = pair_rank(left);
-                let right = pair_rank(right);
-                right
-                    .0
-                    .total_cmp(&left.0)
-                    .then_with(|| right.1.total_cmp(&left.1))
-            })
-        });
-        let Some(initial_pair) = choose_symbol_pair(&pairs, symbol) else {
-            return TokenSignalLoad {
-                signal: self.search_pump_signal(symbol, &mut diagnostics),
-                diagnostics,
-            };
-        };
-        let Some(initial_token) = token_from_pair(&initial_pair) else {
-            return TokenSignalLoad {
-                signal: None,
-                diagnostics,
-            };
-        };
+    fn load_ranked_pairs(
+        &mut self,
+        mut pairs: Vec<TokenPair>,
+        initial_pair: TokenPair,
+        initial_token: TokenAddress,
+        mut diagnostics: Vec<String>,
+    ) -> TokenSignalLoad {
         if !initial_pair.pair_address.is_empty() {
             let candles =
                 self.candles(&initial_token, &initial_pair.pair_address, &mut diagnostics);
@@ -594,6 +620,7 @@ where
                 };
             }
         }
+        pairs.sort_by(compare_symbol_pairs);
         for pair in pairs {
             let Some(token) = token_from_pair(&pair) else {
                 continue;
@@ -615,6 +642,210 @@ where
         TokenSignalLoad {
             signal: Some(self.enrich(initial_token, initial_pair, Vec::new(), &mut diagnostics)),
             diagnostics,
+        }
+    }
+
+    fn load_symbol_pairs(
+        &mut self,
+        mut pairs: Vec<TokenPair>,
+        symbol: &str,
+        mut diagnostics: Vec<String>,
+    ) -> TokenSignalLoad {
+        let normalized = symbol.trim_start_matches('$').to_ascii_lowercase();
+        pairs.sort_by(|left, right| {
+            let left_exact = left.base_token.symbol.to_ascii_lowercase() == normalized;
+            let right_exact = right.base_token.symbol.to_ascii_lowercase() == normalized;
+            right_exact
+                .cmp(&left_exact)
+                .then_with(|| compare_symbol_pairs(left, right))
+        });
+        let Some(initial_pair) = pairs
+            .iter()
+            .find(|pair| {
+                token_from_pair(pair).is_some()
+                    && pair.base_token.symbol.eq_ignore_ascii_case(&normalized)
+            })
+            .cloned()
+        else {
+            return TokenSignalLoad {
+                signal: self.search_pump_signal(symbol, &mut diagnostics),
+                diagnostics,
+            };
+        };
+        let Some(initial_token) = token_from_pair(&initial_pair) else {
+            return TokenSignalLoad {
+                signal: None,
+                diagnostics,
+            };
+        };
+        self.load_ranked_pairs(pairs, initial_pair, initial_token, diagnostics)
+    }
+
+    pub fn load_symbol(&mut self, symbol: &str) -> TokenSignalLoad {
+        let mut diagnostics = Vec::new();
+        let pairs = self.search_pairs(symbol, &mut diagnostics);
+        self.load_symbol_pairs(pairs, symbol, diagnostics)
+    }
+
+    pub fn load_slug(&mut self, slug: &str) -> TokenSignalLoad {
+        let mut diagnostics = Vec::new();
+        let search = slug.replace(['-', '_'], " ");
+        let normalized = normalize_token_name(slug);
+        let mut pairs = self
+            .search_pairs(&search, &mut diagnostics)
+            .into_iter()
+            .filter(|pair| {
+                token_from_pair(pair).is_some()
+                    && (normalize_token_name(&pair.base_token.name) == normalized
+                        || normalize_token_name(&pair.base_token.symbol) == normalized)
+            })
+            .collect::<Vec<_>>();
+        pairs.sort_by(compare_symbol_pairs);
+        let Some(initial_pair) = pairs.first().cloned() else {
+            diagnostics.push(format!("no DexScreener token matched slug {slug}"));
+            return TokenSignalLoad {
+                signal: None,
+                diagnostics,
+            };
+        };
+        let Some(initial_token) = token_from_pair(&initial_pair) else {
+            return TokenSignalLoad {
+                signal: None,
+                diagnostics,
+            };
+        };
+        self.load_ranked_pairs(pairs, initial_pair, initial_token, diagnostics)
+    }
+
+    fn symbol_candidates(
+        &mut self,
+        mut pairs: Vec<TokenPair>,
+        symbol: &str,
+        mut diagnostics: Vec<String>,
+    ) -> TokenSignalCandidates {
+        let normalized = symbol.trim_start_matches('$').to_ascii_lowercase();
+        pairs.retain(|pair| {
+            token_from_pair(pair).is_some()
+                && pair.base_token.symbol.eq_ignore_ascii_case(&normalized)
+        });
+        pairs.sort_by(compare_symbol_pairs);
+        let exact_pairs = pairs.clone();
+        let mut unique = Vec::<(TokenAddress, TokenPair)>::new();
+        for pair in pairs {
+            let Some(token) = token_from_pair(&pair) else {
+                continue;
+            };
+            if let Some((_, known_pair)) = unique
+                .iter_mut()
+                .find(|(known, _)| same_token_identity(known, &token))
+            {
+                if compare_symbol_pairs(&pair, known_pair).is_lt() {
+                    *known_pair = pair;
+                }
+            } else {
+                unique.push((token, pair));
+            }
+        }
+        if unique.len() <= 1 {
+            let load = self.load_symbol_pairs(exact_pairs, symbol, diagnostics);
+            return TokenSignalCandidates {
+                signals: load.signal.into_iter().collect(),
+                diagnostics: load.diagnostics,
+            };
+        }
+        diagnostics.push(format!(
+            "ambiguous token symbol {symbol}: {} identities",
+            unique.len()
+        ));
+        let signals = unique
+            .into_iter()
+            .take(10)
+            .map(|(token, pair)| preview_signal(token, pair))
+            .collect();
+        TokenSignalCandidates {
+            signals,
+            diagnostics,
+        }
+    }
+
+    fn slug_candidates(
+        &mut self,
+        pairs: Vec<TokenPair>,
+        slug: &str,
+        diagnostics: Vec<String>,
+    ) -> TokenSignalCandidates {
+        let normalized = normalize_token_name(slug);
+        let pairs = pairs
+            .into_iter()
+            .filter(|pair| {
+                token_from_pair(pair).is_some()
+                    && (normalize_token_name(&pair.base_token.name) == normalized
+                        || normalize_token_name(&pair.base_token.symbol) == normalized)
+            })
+            .collect::<Vec<_>>();
+        let mut pairs = pairs;
+        pairs.sort_by(compare_symbol_pairs);
+        let exact_pairs = pairs.clone();
+        let mut unique = Vec::<(TokenAddress, TokenPair)>::new();
+        for pair in pairs {
+            let Some(token) = token_from_pair(&pair) else {
+                continue;
+            };
+            if let Some((_, known_pair)) = unique
+                .iter_mut()
+                .find(|(known, _)| same_token_identity(known, &token))
+            {
+                if compare_symbol_pairs(&pair, known_pair).is_lt() {
+                    *known_pair = pair;
+                }
+            } else {
+                unique.push((token, pair));
+            }
+        }
+        if unique.len() <= 1 {
+            let Some((token, pair)) = unique.first().cloned() else {
+                return TokenSignalCandidates {
+                    signals: Vec::new(),
+                    diagnostics,
+                };
+            };
+            let load = self.load_ranked_pairs(exact_pairs, pair, token, diagnostics);
+            return TokenSignalCandidates {
+                signals: load.signal.into_iter().collect(),
+                diagnostics: load.diagnostics,
+            };
+        }
+        let signals = unique
+            .into_iter()
+            .take(10)
+            .map(|(token, pair)| preview_signal(token, pair))
+            .collect();
+        TokenSignalCandidates {
+            signals,
+            diagnostics,
+        }
+    }
+
+    pub fn load_candidates(&mut self, query: &SignalQuery) -> TokenSignalCandidates {
+        match query {
+            SignalQuery::Address(_) => {
+                let load = self.load_query(query);
+                TokenSignalCandidates {
+                    signals: load.signal.into_iter().collect(),
+                    diagnostics: load.diagnostics,
+                }
+            }
+            SignalQuery::Symbol(symbol) => {
+                let mut diagnostics = Vec::new();
+                let pairs = self.search_pairs(symbol, &mut diagnostics);
+                self.symbol_candidates(pairs, symbol, diagnostics)
+            }
+            SignalQuery::Slug(slug) => {
+                let mut diagnostics = Vec::new();
+                let search = slug.replace(['-', '_'], " ");
+                let pairs = self.search_pairs(&search, &mut diagnostics);
+                self.slug_candidates(pairs, slug, diagnostics)
+            }
         }
     }
 
@@ -1671,6 +1902,319 @@ mod tests {
     }
 
     #[test]
+    fn symbol_resolution_prefers_real_activity_over_a_high_lp_namesake() -> Result<(), String> {
+        let official = "0xb095274743941e953c746f9c228da9c18bb6ec29";
+        let namesake = "0x0000000000000000000000000000000000000001";
+        let pair = |address: &str, chain: &str, liquidity: u64, volume: u64| {
+            json!({
+                "chainId": chain,
+                "pairAddress": format!("pool-{address}"),
+                "baseToken": {"address": address, "name": "Laptop", "symbol": "LAPTOP"},
+                "liquidity": {"usd": liquidity},
+                "volume": {"h24": volume},
+                "priceUsd": "1"
+            })
+        };
+        let transport = Transport {
+            json: std::cell::RefCell::new(VecDeque::from([
+                JsonResponse {
+                    status_code: 200,
+                    body: json!({
+                        "pairs": [
+                            pair(namesake, "robinhood", 2_000_000, 1),
+                            pair(official, "base", 100_000, 100_000)
+                        ]
+                    })
+                    .to_string(),
+                },
+                JsonResponse {
+                    status_code: 404,
+                    body: "{}".to_owned(),
+                },
+            ])),
+            post: Default::default(),
+            binary: Default::default(),
+        };
+        let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
+        let signal = adapter
+            .load_symbol("$LAPTOP")
+            .signal
+            .ok_or("missing signal")?;
+        assert_eq!(signal.token.chain_id, "base");
+        assert_eq!(signal.token.address, official);
+        Ok(())
+    }
+
+    #[test]
+    fn ambiguous_symbol_candidates_keep_each_contract_for_selection() {
+        let first = "0x0000000000000000000000000000000000000001";
+        let second = "0x0000000000000000000000000000000000000002";
+        let pair = |address: &str, chain: &str, volume: u64| {
+            json!({
+                "chainId": chain,
+                "pairAddress": format!("pool-{address}"),
+                "baseToken": {"address": address, "name": "Synthetic Laptop", "symbol": "LAPTOP"},
+                "liquidity": {"usd": 1000},
+                "volume": {"h24": volume},
+                "priceUsd": "1"
+            })
+        };
+        let transport = Transport {
+            json: std::cell::RefCell::new(VecDeque::from([JsonResponse {
+                status_code: 200,
+                body: json!({"pairs":[pair(first, "base", 20), pair(second, "robinhood", 10)]})
+                    .to_string(),
+            }])),
+            post: Default::default(),
+            binary: Default::default(),
+        };
+        let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
+        let candidates = adapter.load_candidates(&SignalQuery::Symbol("laptop".to_owned()));
+        assert_eq!(candidates.signals.len(), 2);
+        assert_eq!(candidates.signals[0].token.address, first);
+        assert_eq!(candidates.signals[1].token.address, second);
+        assert!(
+            candidates
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("ambiguous token symbol"))
+        );
+    }
+
+    #[test]
+    fn provider_slug_resolution_matches_token_name_and_keeps_chain() -> Result<(), String> {
+        let address = "0xb095274743941e953c746f9c228da9c18bb6ec29";
+        let transport = Transport {
+            json: std::cell::RefCell::new(VecDeque::from([
+                JsonResponse {
+                    status_code: 200,
+                    body: json!({"pairs":[{
+                        "chainId":"base",
+                        "pairAddress":"pool",
+                        "baseToken":{"address":address,"name":"Hunter Biden's Laptop","symbol":"LAPTOP"},
+                        "liquidity":{"usd":1000},
+                        "volume":{"h24":10},
+                        "priceUsd":"1"
+                    }]}).to_string(),
+                },
+                JsonResponse {
+                    status_code: 404,
+                    body: "{}".to_owned(),
+                },
+            ])),
+            post: Default::default(),
+            binary: Default::default(),
+        };
+        let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
+        let load = adapter.load_query(&SignalQuery::Slug("hunter-biden-s-laptop".to_owned()));
+        let signal = load.signal.ok_or("missing signal")?;
+        assert_eq!(signal.token.chain_id, "base");
+        assert_eq!(signal.pair.base_token.name, "Hunter Biden's Laptop");
+        Ok(())
+    }
+
+    #[test]
+    fn slug_candidates_preserve_distinct_contract_identities() {
+        let first = "0x0000000000000000000000000000000000000001";
+        let second = "0x0000000000000000000000000000000000000002";
+        let pair = |address: &str, chain: &str, volume: u64| {
+            json!({
+                "chainId": chain,
+                "pairAddress": format!("pool-{chain}"),
+                "baseToken": {
+                    "address": address,
+                    "name": "Hunter Biden's Laptop",
+                    "symbol": "LAPTOP"
+                },
+                "liquidity": {"usd": 1000},
+                "volume": {"h24": volume},
+                "priceUsd": "1"
+            })
+        };
+        let transport = Transport {
+            json: std::cell::RefCell::new(VecDeque::from([JsonResponse {
+                status_code: 200,
+                body: json!({
+                    "pairs": [
+                        pair(first, "base", 20),
+                        pair(second, "robinhood", 10)
+                    ]
+                })
+                .to_string(),
+            }])),
+            post: Default::default(),
+            binary: Default::default(),
+        };
+        let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
+        let candidates =
+            adapter.load_candidates(&SignalQuery::Slug("hunter-bidens-laptop".to_owned()));
+        assert_eq!(candidates.signals.len(), 2);
+        assert_eq!(candidates.signals[0].token.address, first);
+        assert_eq!(candidates.signals[1].token.address, second);
+        assert_eq!(candidates.signals[0].token.chain_id, "base");
+        assert_eq!(candidates.signals[1].token.chain_id, "robinhood");
+    }
+
+    #[test]
+    fn address_candidates_keep_the_resolved_contract() {
+        let address = "0x0000000000000000000000000000000000000001";
+        let transport = Transport {
+            json: std::cell::RefCell::new(VecDeque::from([
+                JsonResponse {
+                    status_code: 200,
+                    body: json!([{
+                        "chainId": "base",
+                        "pairAddress": "pool",
+                        "baseToken": {"address": address, "symbol": "LAPTOP"},
+                        "liquidity": {"usd": 1000},
+                        "priceUsd": "1"
+                    }])
+                    .to_string(),
+                },
+                JsonResponse {
+                    status_code: 404,
+                    body: "{}".to_owned(),
+                },
+            ])),
+            post: Default::default(),
+            binary: Default::default(),
+        };
+        let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
+        let token = TokenAddress {
+            chain_id: "base".to_owned(),
+            network: "base".to_owned(),
+            tag: "BASE".to_owned(),
+            address: address.to_owned(),
+        };
+        let candidates = adapter.load_candidates(&SignalQuery::Address(token));
+        assert_eq!(candidates.signals.len(), 1);
+        assert_eq!(candidates.signals[0].token.address, address);
+    }
+
+    #[test]
+    fn single_symbol_candidate_loads_history_and_duplicate_pairs_fall_back() {
+        let address = "0x0000000000000000000000000000000000000001";
+        let pair = |pool: &str, volume: u64| {
+            json!({
+                "chainId": "base",
+                "pairAddress": pool,
+                "baseToken": {"address": address, "symbol": "SYN"},
+                "liquidity": {"usd": 1000},
+                "volume": {"h24": volume},
+                "priceUsd": "1"
+            })
+        };
+        let transport = Transport {
+            json: std::cell::RefCell::new(VecDeque::from([
+                JsonResponse {
+                    status_code: 200,
+                    body: json!({"pairs": [pair("history", 20)]}).to_string(),
+                },
+                JsonResponse {
+                    status_code: 200,
+                    body: json!({
+                        "data": {"attributes": {"ohlcv_list": [[1, 1, 2, 0.8, 1.5]]}}
+                    })
+                    .to_string(),
+                },
+            ])),
+            post: Default::default(),
+            binary: Default::default(),
+        };
+        let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
+        let candidates = adapter.load_candidates(&SignalQuery::Symbol("syn".to_owned()));
+        assert_eq!(candidates.signals.len(), 1);
+        assert_eq!(candidates.signals[0].pair.pair_address, "history");
+        assert!(!candidates.signals[0].candles.is_empty());
+
+        let pair = |pool: &str, volume: u64| {
+            json!({
+                "chainId": "solana",
+                "pairAddress": pool,
+                "baseToken": {"address": "synthetic-mint", "symbol": "SYN"},
+                "liquidity": {"usd": 1000},
+                "volume": {"h24": volume},
+                "priceUsd": "1"
+            })
+        };
+        let transport = Transport {
+            json: std::cell::RefCell::new(VecDeque::from([
+                JsonResponse {
+                    status_code: 200,
+                    body: json!({"pairs": [pair("primary", 20), pair("alternate", 10)]})
+                        .to_string(),
+                },
+                JsonResponse {
+                    status_code: 404,
+                    body: "{}".to_owned(),
+                },
+                JsonResponse {
+                    status_code: 404,
+                    body: "{}".to_owned(),
+                },
+            ])),
+            post: Default::default(),
+            binary: Default::default(),
+        };
+        let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
+        let candidates = adapter.load_candidates(&SignalQuery::Symbol("syn".to_owned()));
+        assert_eq!(candidates.signals.len(), 1);
+        assert_eq!(candidates.signals[0].pair.pair_address, "primary");
+        assert_eq!(candidates.signals[0].token.address, "synthetic-mint");
+    }
+
+    #[test]
+    fn slug_load_reports_when_dex_has_no_exact_name_match() {
+        let transport = Transport {
+            json: std::cell::RefCell::new(VecDeque::from([JsonResponse {
+                status_code: 200,
+                body: json!({"pairs": [{
+                    "chainId": "base",
+                    "pairAddress": "pool",
+                    "baseToken": {"address": "0x0000000000000000000000000000000000000001", "name": "Other", "symbol": "OTHER"}
+                }]}).to_string(),
+            }])),
+            post: Default::default(),
+            binary: Default::default(),
+        };
+        let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
+        let load = adapter.load_slug("missing-token");
+        assert!(load.signal.is_none());
+        assert!(
+            load.diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("no DexScreener token matched slug"))
+        );
+    }
+
+    #[test]
+    fn chart_truncates_long_titles_without_losing_the_quote() {
+        let signal = TokenSignal {
+            token: TokenAddress {
+                chain_id: "base".to_owned(),
+                network: "base".to_owned(),
+                tag: "BASE".to_owned(),
+                address: "0x0000000000000000000000000000000000000001".to_owned(),
+            },
+            pair: bot_core::token_signals::TokenPair {
+                base_token: bot_core::token_signals::PairToken {
+                    symbol: "SYNTHETIC-LONG-TOKEN-SYMBOL".to_owned(),
+                    ..Default::default()
+                },
+                price_usd: json!(1.2345),
+                ..Default::default()
+            },
+            candles: vec![vec![1.0, 1.0, 2.0, 0.8, 1.5]],
+            supply: None,
+            token_image_url: None,
+            socials: BTreeMap::new(),
+            pump: None,
+        };
+        let chart = render_signal_chart(&signal, 420, 300);
+        assert!(chart.is_ok_and(|png| png.starts_with(b"\x89PNG")));
+    }
+
+    #[test]
     fn address_load_uses_first_ranked_pair_with_candles_and_compatible_cache_keys() {
         let pair = |address: &str, liquidity: i64| {
             serde_json::json!({
@@ -1727,6 +2271,40 @@ mod tests {
                 .iter()
                 .any(|(key, ttl)| key == "token_signal:ohlcv:eth:good:hour" && *ttl == 60)
         );
+    }
+
+    #[test]
+    fn address_load_ignores_provider_tag_aliases_when_contract_matches() {
+        let address = "0xb095274743941e953c746f9c228da9c18bb6ec29";
+        let transport = Transport {
+            json: std::cell::RefCell::new(VecDeque::from([
+                JsonResponse {
+                    status_code: 200,
+                    body: json!([{
+                        "chainId":"base",
+                        "pairAddress":"pool",
+                        "baseToken":{"address":address,"symbol":"LAPTOP"},
+                        "liquidity":{"usd":1000},
+                        "priceUsd":"1"
+                    }])
+                    .to_string(),
+                },
+                JsonResponse {
+                    status_code: 404,
+                    body: "{}".to_owned(),
+                },
+            ])),
+            post: Default::default(),
+            binary: Default::default(),
+        };
+        let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
+        let token = TokenAddress {
+            chain_id: "base".to_owned(),
+            network: "base".to_owned(),
+            tag: "ETH".to_owned(),
+            address: address.to_owned(),
+        };
+        assert!(adapter.load_token(&token).signal.is_some());
     }
 
     #[test]

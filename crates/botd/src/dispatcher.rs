@@ -81,8 +81,9 @@ use bot_core::telegram_payments::{
 };
 use bot_core::token_signals::{
     SIGNAL_REFRESH_COOLDOWN_SECONDS, SignalQuery, SignalState, TokenAddress, TokenSignal,
-    build_signal_keyboard_localized, callback_text as signal_callback_text, detect_signal_query,
-    format_signal_caption_for_period, signal_market_values, stable_signal_id,
+    TokenSignalCandidates, build_signal_keyboard_localized, callback_text as signal_callback_text,
+    detect_signal_query, format_signal_caption_for_period, normalize_token_name,
+    signal_market_values, stable_signal_id,
 };
 use bot_core::weather::{
     WeatherObservation, classify_weather_command, render_weather, requested_location,
@@ -407,11 +408,6 @@ fn market_token_candidate(signal: &TokenSignal, timeframe: Option<&str>) -> Mark
 }
 
 fn market_contracts_match(left: &TokenAddress, right: &TokenAddress) -> bool {
-    if !left.chain_id.eq_ignore_ascii_case(&right.chain_id)
-        || !left.network.eq_ignore_ascii_case(&right.network)
-    {
-        return false;
-    }
     let left_is_evm = left.address.len() == 42
         && left.address.starts_with("0x")
         && left.address[2..]
@@ -423,8 +419,26 @@ fn market_contracts_match(left: &TokenAddress, right: &TokenAddress) -> bool {
             .chars()
             .all(|character| character.is_ascii_hexdigit());
     if left_is_evm && right_is_evm {
-        left.address.eq_ignore_ascii_case(&right.address)
+        let same_chain = left.chain_id.eq_ignore_ascii_case(&right.chain_id)
+            && left.network.eq_ignore_ascii_case(&right.network);
+        // A bare EVM address has no chain information. The detector keeps the
+        // historical Ethereum-shaped placeholder until DexScreener resolves
+        // the actual chain, so compare the contract across EVM networks while
+        // that placeholder is present.
+        let unqualified_left = left.chain_id.eq_ignore_ascii_case("ethereum")
+            && left.network.eq_ignore_ascii_case("eth")
+            && left.tag.eq_ignore_ascii_case("ETH");
+        let unqualified_right = right.chain_id.eq_ignore_ascii_case("ethereum")
+            && right.network.eq_ignore_ascii_case("eth")
+            && right.tag.eq_ignore_ascii_case("ETH");
+        (same_chain || unqualified_left || unqualified_right)
+            && left.address.eq_ignore_ascii_case(&right.address)
     } else {
+        if !left.chain_id.eq_ignore_ascii_case(&right.chain_id)
+            || !left.network.eq_ignore_ascii_case(&right.network)
+        {
+            return false;
+        }
         // Base58 addresses, including Solana mints, are case-sensitive.
         left.address == right.address
     }
@@ -468,6 +482,28 @@ fn token_signal_matches_query(signal: &TokenSignal, query: &SignalQuery) -> bool
             signal.pair.base_token.symbol.eq_ignore_ascii_case(symbol)
                 || signal.pair.base_token.name.eq_ignore_ascii_case(symbol)
         }
+        SignalQuery::Slug(slug) => {
+            let slug = normalize_token_name(slug);
+            normalize_token_name(&signal.pair.base_token.name) == slug
+                || normalize_token_name(&signal.pair.base_token.symbol) == slug
+        }
+    }
+}
+
+fn provider_query_text(text: &str) -> String {
+    match detect_signal_query(text) {
+        Some(SignalQuery::Slug(slug)) => slug,
+        _ => text.to_owned(),
+    }
+}
+
+fn provider_request_text(request: &str, query: &SignalQuery) -> String {
+    match query {
+        SignalQuery::Slug(slug) => slug.clone(),
+        SignalQuery::Address(token) if !request.eq_ignore_ascii_case(&token.address) => {
+            token.address.clone()
+        }
+        _ => request.to_owned(),
     }
 }
 
@@ -683,6 +719,14 @@ pub trait TokenSignalSource {
     fn load(&mut self, query: &SignalQuery) -> TokenSignalLoad;
 
     fn load_token(&mut self, token: &TokenAddress) -> TokenSignalLoad;
+
+    fn load_candidates(&mut self, query: &SignalQuery) -> TokenSignalCandidates {
+        let load = self.load(query);
+        TokenSignalCandidates {
+            signals: load.signal.into_iter().collect(),
+            diagnostics: load.diagnostics,
+        }
+    }
 
     fn render_period_photo(
         &mut self,
@@ -1531,13 +1575,14 @@ where
         timestamp: i64,
     ) -> OptionalNativeDispatchResult<Config, Actions, Random> {
         use bot_core::price_queries::{PriceQuery, ProviderScope, parse_price_query};
+        let query_text = provider_query_text(text);
         let mut valid_periods = vec!["1h".into(), "24h".into(), "7d".into(), "30d".into()];
-        if let Some(candidate) = text.split_whitespace().last()
+        if let Some(candidate) = query_text.split_whitespace().last()
             && bot_core::price_queries::ChartPeriod::parse(candidate).is_some()
         {
             valid_periods.push(candidate.to_ascii_lowercase());
         }
-        let parsed_query = parse_price_query(text, &valid_periods);
+        let parsed_query = parse_price_query(&query_text, &valid_periods);
         if matches!(
             &parsed_query,
             PriceQuery::AmountConversion(_)
@@ -1546,7 +1591,13 @@ where
                     ..
                 }
         ) {
-            return self.dispatch_market_price_query(message, text, command, locale, timestamp);
+            return self.dispatch_market_price_query(
+                message,
+                &query_text,
+                command,
+                locale,
+                timestamp,
+            );
         }
         let PriceQuery::Assets {
             query,
@@ -1590,12 +1641,19 @@ where
             ));
         }
         let single = requests.len() == 1;
+        let direct_query = single.then(|| detect_signal_query(text)).flatten();
         let mut lines = Vec::new();
         let mut pending_selections = Vec::new();
         for request in requests {
-            let detected = detect_signal_query(request);
+            let detected = direct_query
+                .clone()
+                .or_else(|| detect_signal_query(request));
             let is_address = matches!(detected, Some(SignalQuery::Address(_)));
-            let market_alias = request.trim().to_ascii_lowercase();
+            let provider_request = detected.as_ref().map_or_else(
+                || request.to_owned(),
+                |query| provider_request_text(request, query),
+            );
+            let market_alias = provider_request.trim().to_ascii_lowercase();
             let token_query = if provider_scope == Some(ProviderScope::Stock)
                 || market_alias.is_empty()
                 || matches!(market_alias.as_str(), "stables" | "stablecoins")
@@ -1607,9 +1665,9 @@ where
                     .or_else(|| detect_signal_query(&format!("${request}")))
             };
             let mut market_query = match provider_scope {
-                Some(ProviderScope::Stock) => format!("stock:{request}"),
-                Some(ProviderScope::Crypto) => format!("crypto:{request}"),
-                None => request.to_owned(),
+                Some(ProviderScope::Stock) => format!("stock:{provider_request}"),
+                Some(ProviderScope::Crypto) => format!("crypto:{provider_request}"),
+                None => provider_request.clone(),
             };
             if let Some(timeframe) = &timeframe {
                 market_query.push_str(&format!(" {timeframe}"));
@@ -1637,20 +1695,97 @@ where
                             .as_ref()
                             .is_some_and(|chart| chart.candidate.is_some())
                 }));
-            let token_signal = if probe_token_signal {
-                token_query.as_ref().and_then(|token_query| {
-                    self.token_signal_source.as_mut().and_then(|source| {
-                        let load = source.load(token_query);
-                        self.state_diagnostics.extend(load.diagnostics);
-                        load.signal.filter(|signal| {
-                            self.market_price_source.is_none()
-                                || token_signal_matches_query(signal, token_query)
-                        })
-                    })
-                })
-            } else {
-                None
-            };
+            let mut token_candidates = Vec::new();
+            if probe_token_signal
+                && let Some(token_query) = token_query.as_ref()
+                && let Some(source) = self.token_signal_source.as_mut()
+            {
+                let canonical_token = load
+                    .as_ref()
+                    .and_then(|load| load.chart.as_ref())
+                    .and_then(|chart| chart.token.as_ref())
+                    .cloned();
+                token_candidates = if matches!(token_query, SignalQuery::Address(_)) {
+                    if let Some(token) = canonical_token.as_ref() {
+                        let loaded = source.load_token(token);
+                        self.state_diagnostics.extend(loaded.diagnostics);
+                        if let Some(signal) = loaded.signal {
+                            vec![signal]
+                        } else {
+                            let loaded = source.load_candidates(token_query);
+                            self.state_diagnostics.extend(loaded.diagnostics);
+                            loaded.signals
+                        }
+                    } else {
+                        let loaded = source.load_candidates(token_query);
+                        self.state_diagnostics.extend(loaded.diagnostics);
+                        loaded.signals
+                    }
+                } else {
+                    // A provider's symbol match can be a namesake. Discover
+                    // DEX identities first, then add the provider's canonical
+                    // contract as another candidate when it is distinct.
+                    let loaded = source.load_candidates(token_query);
+                    self.state_diagnostics.extend(loaded.diagnostics);
+                    let mut candidates = loaded.signals;
+                    if let Some(token) = canonical_token.as_ref() {
+                        let loaded = source.load_token(token);
+                        self.state_diagnostics.extend(loaded.diagnostics);
+                        if let Some(signal) = loaded.signal
+                            && !candidates.iter().any(|candidate| {
+                                market_contracts_match(&candidate.token, &signal.token)
+                            })
+                        {
+                            candidates.push(signal);
+                        }
+                    }
+                    candidates
+                };
+                token_candidates.retain(|signal| {
+                    self.market_price_source.is_none()
+                        || token_signal_matches_query(signal, token_query)
+                });
+            }
+            let token_signal = (token_candidates.len() == 1)
+                .then(|| token_candidates.first().cloned())
+                .flatten();
+            if token_candidates.len() > 1 {
+                let token_candidates = token_candidates
+                    .iter()
+                    .map(|signal| market_token_candidate(signal, timeframe.as_deref()))
+                    .collect::<Vec<_>>();
+                let mut selection = if let Some(load) = load.as_ref()
+                    && let Some(existing) = load.selection.as_ref()
+                {
+                    existing.clone()
+                } else if let Some(chart) = load.as_ref().and_then(|load| load.chart.as_ref())
+                    && let Some(market_candidate) = chart.candidate.clone()
+                {
+                    MarketSelection {
+                        query: provider_request.clone(),
+                        timeframe: timeframe.clone(),
+                        target_symbol: "USD".to_owned(),
+                        target_parameter: "USD".to_owned(),
+                        conversion: None,
+                        candidates: vec![market_candidate],
+                    }
+                } else {
+                    MarketSelection {
+                        query: provider_request.clone(),
+                        timeframe: timeframe.clone(),
+                        target_symbol: "USD".to_owned(),
+                        target_parameter: "USD".to_owned(),
+                        conversion: None,
+                        candidates: Vec::new(),
+                    }
+                };
+                selection.candidates.extend(token_candidates);
+                deduplicate_market_candidates(&mut selection.candidates);
+                if selection.candidates.len() > 1 {
+                    pending_selections.push(selection);
+                    continue;
+                }
+            }
             if let Some(signal) = token_signal.as_ref() {
                 let token_candidate = market_token_candidate(signal, timeframe.as_deref());
                 if let Some(load) = load.as_mut()
@@ -1664,7 +1799,7 @@ where
                     && let Some(market_candidate) = chart.candidate.clone()
                 {
                     let mut selection = MarketSelection {
-                        query: request.to_owned(),
+                        query: provider_request.clone(),
                         timeframe: timeframe.clone(),
                         target_symbol: "USD".to_owned(),
                         target_parameter: "USD".to_owned(),
@@ -1995,6 +2130,7 @@ where
                     match query {
                         SignalQuery::Address(token) => token.address.as_str(),
                         SignalQuery::Symbol(symbol) => symbol,
+                        SignalQuery::Slug(slug) => slug,
                     }
                 ));
                 let reply_text = {
@@ -5058,8 +5194,8 @@ mod tests {
         StarPaymentReceipt, StarPaymentSink, StockPriceSource, StockQuotesLoad,
         StoredMarketSelection, TokenSignalLoad, TokenSignalSource, TransferResult,
         WeatherObservationLoad, WeatherSource, deduplicate_market_candidates,
-        market_selection_command, market_selection_id, market_selection_key, market_selection_text,
-        short_market_address,
+        market_contracts_match, market_selection_command, market_selection_id,
+        market_selection_key, market_selection_text, provider_query_text, short_market_address,
     };
     use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup};
     use bot_core::devo::DevoQuotes;
@@ -5074,6 +5210,42 @@ mod tests {
     struct Config {
         value: Result<ChatConfig, &'static str>,
         chat_ids: Vec<String>,
+    }
+
+    #[test]
+    fn bare_evm_address_matches_the_chain_resolved_by_dexscreener() {
+        let address = "0xb095274743941e953c746f9c228da9c18bb6ec29";
+        let query = TokenAddress {
+            chain_id: "ethereum".to_owned(),
+            network: "eth".to_owned(),
+            tag: "ETH".to_owned(),
+            address: address.to_owned(),
+        };
+        let resolved = TokenAddress {
+            chain_id: "base".to_owned(),
+            network: "base".to_owned(),
+            tag: "BASE".to_owned(),
+            address: address.to_owned(),
+        };
+        assert!(market_contracts_match(&query, &resolved));
+        assert!(!market_contracts_match(
+            &query,
+            &TokenAddress {
+                address: "0x0000000000000000000000000000000000000001".to_owned(),
+                ..resolved
+            }
+        ));
+    }
+
+    #[test]
+    fn provider_url_is_normalized_before_market_lookup() {
+        assert_eq!(
+            provider_query_text(
+                "https://www.coingecko.com/en/coins/hunter-bidens-laptop?utm_source=test"
+            ),
+            "hunter-bidens-laptop"
+        );
+        assert_eq!(provider_query_text("$LAPTOP"), "$LAPTOP");
     }
 
     impl ChatConfigSource for Config {
@@ -12786,6 +12958,83 @@ mod tests {
                 .map(|markup| markup.inline_keyboard.len()),
             Some(3)
         );
+    }
+
+    #[test]
+    fn provider_symbol_does_not_hide_a_distinct_dex_identity() {
+        let mut official = token_signal();
+        official.token = TokenAddress {
+            chain_id: "base".to_owned(),
+            network: "base".to_owned(),
+            tag: "BASE".to_owned(),
+            address: "0x0000000000000000000000000000000000000001".to_owned(),
+        };
+        official.pair.chain_id = "base".to_owned();
+        official.pair.base_token.address = official.token.address.clone();
+        official.pair.base_token.name = "Official Laptop".to_owned();
+        official.pair.base_token.symbol = "LAPTOP".to_owned();
+
+        let mut provider = official.clone();
+        provider.token.address = "0x0000000000000000000000000000000000000002".to_owned();
+        provider.pair.base_token.address = provider.token.address.clone();
+        provider.pair.base_token.name = "Provider Laptop".to_owned();
+
+        let provider_candidate = bot_core::market_prices::MarketCandidate {
+            id: "provider:laptop".to_owned(),
+            symbol: "LAPTOP".to_owned(),
+            name: "Provider Laptop".to_owned(),
+            slug: "laptop".to_owned(),
+            price: "1".to_owned(),
+            change: "N/A 24h".to_owned(),
+            currency: String::new(),
+            exchange: String::new(),
+            asset_type: String::new(),
+            contracts: vec![provider.token.clone()],
+        };
+        let mut dispatcher = dispatcher()
+            .with_market_price_source(Box::new(CandidateChartPrices {
+                initial: MarketPriceLoad {
+                    chart: Some(bot_core::market_prices::MarketChart {
+                        timeframe: None,
+                        symbol: "LAPTOP".to_owned(),
+                        name: "Provider Laptop".to_owned(),
+                        yahoo_symbol: String::new(),
+                        token: Some(provider.token.clone()),
+                        candidate: Some(provider_candidate),
+                    }),
+                    selection: None,
+                    no_assets_found: false,
+                    text: "LAPTOP: 1 USD".to_owned(),
+                    diagnostics: Vec::new(),
+                },
+                rendered: Rc::new(RefCell::new(Vec::new())),
+            }))
+            .with_token_signal_source(Box::new(Signals {
+                query_load: TokenSignalLoad {
+                    signal: Some(official),
+                    diagnostics: Vec::new(),
+                },
+                token_load: TokenSignalLoad {
+                    signal: Some(provider),
+                    diagnostics: Vec::new(),
+                },
+                photo: Ok(vec![1]),
+                state: None,
+                queries: Rc::new(RefCell::new(Vec::new())),
+                saved: Rc::new(RefCell::new(Vec::new())),
+            }));
+
+        assert_eq!(
+            dispatcher.dispatch(update("/p laptop", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
+            return;
+        };
+        assert!(message.text.contains("Official Laptop"));
+        assert!(message.text.contains("Provider Laptop"));
+        assert!(message.text.contains("base:BASE 0x000000…000001"));
+        assert!(message.text.contains("base:BASE 0x000000…000002"));
     }
 
     #[test]
