@@ -227,6 +227,7 @@ mod tests {
     use super::{
         EstimatedMessage, ReserveEstimateError, TokenEstimateValue, TokenPricing,
         chat_output_token_limit, credit_units_from_usd_micros, estimate_chat_reserve_credit_units,
+        GEMINI_FLASH_LITE_MODEL,
         estimate_chat_reserve_credit_units_with_pricing, estimate_firecrawl_reserve_credit_units,
         estimate_message_tokens, estimate_nested_tokens, estimate_text_tokens,
         estimate_transcription_reserve_credit_units, estimate_vision_reserve_credit_units,
@@ -319,6 +320,10 @@ mod tests {
                 "google/gemini-3.1-flash-lite",
             ),
             Ok(16)
+        );
+        assert_eq!(
+            estimate_chat_reserve_credit_units(None, &[], Some(1), 0, GEMINI_FLASH_LITE_MODEL),
+            Ok(1)
         );
         assert_eq!(
             estimate_chat_reserve_credit_units(None, &[], None, 0, "unknown/model"),
