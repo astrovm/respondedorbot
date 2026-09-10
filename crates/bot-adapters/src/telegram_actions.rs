@@ -95,6 +95,13 @@ fn insert_optional<T: serde::Serialize>(
     Ok(())
 }
 
+fn disable_link_preview(payload: &mut Map<String, Value>) {
+    payload.insert(
+        "link_preview_options".to_owned(),
+        json!({"is_disabled": true}),
+    );
+}
+
 fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
     let (endpoint, method, params, json_payload) = match action {
         TelegramAction::SetCommands {
@@ -128,7 +135,7 @@ fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
                 message.parse_mode.map(parse_mode),
             )?;
             if message.disable_web_page_preview {
-                payload.insert("disable_web_page_preview".to_owned(), json!(true));
+                disable_link_preview(&mut payload);
             }
             insert_optional(&mut payload, "reply_markup", message.reply_markup)?;
             (
@@ -221,8 +228,8 @@ fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
                 ("chat_id".to_owned(), json!(chat_id.0)),
                 ("message_id".to_owned(), json!(message_id.0)),
                 ("text".to_owned(), json!(truncate_text(&text))),
-                ("disable_web_page_preview".to_owned(), json!(true)),
             ]);
+            disable_link_preview(&mut payload);
             insert_optional(&mut payload, "reply_markup", reply_markup)?;
             (
                 "editMessageText",
@@ -967,7 +974,7 @@ mod tests {
                 "text":"hello",
                 "reply_to_message_id":7,
                 "parse_mode":"HTML",
-                "disable_web_page_preview":true,
+                "link_preview_options":{"is_disabled":true},
                 "reply_markup":{"inline_keyboard":[[{"text":"Open","url":"https://example.test"}]]}
             }))
         );
@@ -999,7 +1006,7 @@ mod tests {
                 "chat_id":42,
                 "message_id":77,
                 "text":"draft https://example.test",
-                "disable_web_page_preview":true,
+                "link_preview_options":{"is_disabled":true},
             }))
         );
     }
