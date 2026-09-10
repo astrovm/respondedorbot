@@ -804,7 +804,8 @@ where
     ) -> Result<AiPreparation, String> {
         let operation_id = summary_operation_id(&input);
         let admission = vec![PromptMessage::text(PromptRole::User, "summary")];
-        let base_amount = estimate_reserve(&admission, &self.model, self.openrouter_pricing.as_deref())?;
+        let base_amount =
+            estimate_reserve(&admission, &self.model, self.openrouter_pricing.as_deref())?;
         let base = self.reserve(
             &input,
             &operation_id,
@@ -868,7 +869,8 @@ where
                 .map(|message| PromptMessage::text(message.role, message.text)),
         );
         messages.push(PromptMessage::text(PromptRole::User, prompt));
-        let full_amount = estimate_reserve(&messages, &self.model, self.openrouter_pricing.as_deref())?;
+        let full_amount =
+            estimate_reserve(&messages, &self.model, self.openrouter_pricing.as_deref())?;
         if full_amount > base_amount {
             let extension = self.reserve(
                 &input,
@@ -1016,7 +1018,8 @@ where
             PromptRole::User,
             &provider_input.message_text,
         )];
-        let base_amount = estimate_reserve(&admission, &self.model, self.openrouter_pricing.as_deref())?;
+        let base_amount =
+            estimate_reserve(&admission, &self.model, self.openrouter_pricing.as_deref())?;
         let base = self.reserve(
             &input,
             &operation_id,
@@ -1119,7 +1122,8 @@ where
                 return Err(error);
             }
         };
-        let full_amount = estimate_reserve(&messages, &self.model, self.openrouter_pricing.as_deref())?;
+        let full_amount =
+            estimate_reserve(&messages, &self.model, self.openrouter_pricing.as_deref())?;
         if full_amount > base_amount {
             let extension = self.reserve(
                 &input,
