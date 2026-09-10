@@ -1,19 +1,22 @@
 //! Foreground planning handoff for durable background memory compaction.
 
 use std::fmt::Display;
+use std::sync::Arc;
 
 use bot_adapters::billing_read::BillingRepository;
+use bot_adapters::openrouter_chat::OpenRouterPricingCache;
 use bot_adapters::compaction_job::{COMPACTION_JOB_SCHEMA_VERSION, CompactionJobRecord};
 use bot_adapters::redis_compaction_queue::RedisCompactionQueue;
 use bot_core::ai_reserve::{
     EstimatedMessage, TokenEstimateValue, chat_output_token_limit,
-    estimate_chat_reserve_credit_units,
+    estimate_chat_reserve_credit_units_with_pricing,
 };
 use bot_core::credit_units::CREDIT_SCALE;
 use bot_core::locale::Locale;
 use serde_json::{Map, Value, json};
 
 use crate::compaction_adapters::COMPACTION_MODEL;
+use crate::native_ai::reservation_pricing_for_model;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryCompactionPlan {
@@ -101,6 +104,7 @@ pub struct NativeCompactionScheduler<Queue, Billing, Token> {
     token: Token,
     model: String,
     system_prompt: String,
+    pricing: Option<Arc<OpenRouterPricingCache>>,
 }
 
 impl<Queue, Billing, Token> NativeCompactionScheduler<Queue, Billing, Token> {
@@ -118,7 +122,14 @@ impl<Queue, Billing, Token> NativeCompactionScheduler<Queue, Billing, Token> {
             token,
             model: model.to_owned(),
             system_prompt: system_prompt.to_owned(),
+            pricing: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_openrouter_pricing(mut self, pricing: Arc<OpenRouterPricingCache>) -> Self {
+        self.pricing = Some(pricing);
+        self
     }
 
     pub fn into_parts(self) -> (Queue, Billing, Token) {
@@ -140,12 +151,14 @@ impl<Queue, Billing, Token> NativeCompactionScheduler<Queue, Billing, Token> {
             "user",
             "update the previous summary with the new messages",
         ));
-        estimate_chat_reserve_credit_units(
+        let pricing = reservation_pricing_for_model(&self.model, self.pricing.as_deref())?;
+        estimate_chat_reserve_credit_units_with_pricing(
             Some(&system),
             &messages,
             Some(chat_output_token_limit(&self.model)),
             0,
             &self.model,
+            &pricing,
         )
         .map(|units| units.max(1))
         .map_err(|error| error.to_string())
@@ -362,18 +375,20 @@ pub fn production_compaction_scheduler(
     queue: RedisCompactionQueue,
     database_url: &str,
     system_prompt: &str,
+    pricing: Option<Arc<OpenRouterPricingCache>>,
 ) -> NativeCompactionScheduler<
     RedisCompactionQueue,
     PostgresCompactionReservations,
     impl FnMut() -> String + use<>,
 > {
-    NativeCompactionScheduler::new(
+    let scheduler = NativeCompactionScheduler::new(
         queue,
         PostgresCompactionReservations::new(database_url),
         random_token,
         COMPACTION_MODEL,
         system_prompt,
-    )
+    );
+    pricing.map_or(scheduler, |pricing| scheduler.with_openrouter_pricing(pricing))
 }
 
 fn estimated_message(role: &str, content: &str) -> EstimatedMessage {
