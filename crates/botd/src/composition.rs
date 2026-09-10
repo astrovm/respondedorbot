@@ -41,7 +41,8 @@ use bot_adapters::link_preview::{
 };
 use bot_adapters::media_provider::ReqwestGroqTranscriptionTransport;
 use bot_adapters::openrouter_chat::{
-    DEFAULT_OPENROUTER_BASE_URL, OpenRouterChatError, ReqwestOpenRouterTransport,
+    DEFAULT_OPENROUTER_BASE_URL, OpenRouterChatError, OpenRouterPricingCache,
+    ReqwestOpenRouterTransport,
 };
 use bot_adapters::polymarket::{
     PolymarketTransport, ReqwestPolymarketTransport,
@@ -1934,6 +1935,7 @@ pub struct ProductionToolFactory {
     database_url: String,
     coinmarketcap_key: Option<String>,
     firecrawl_key: Option<String>,
+    openrouter_pricing: Option<Arc<OpenRouterPricingCache>>,
 }
 
 impl ProductionToolFactory {
@@ -1949,7 +1951,14 @@ impl ProductionToolFactory {
             database_url: database_url.to_owned(),
             coinmarketcap_key,
             firecrawl_key,
+            openrouter_pricing: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_openrouter_pricing(mut self, pricing: Arc<OpenRouterPricingCache>) -> Self {
+        self.openrouter_pricing = Some(pricing);
+        self
     }
 }
 
@@ -2048,24 +2057,30 @@ impl ConversationToolFactory for ProductionToolFactory {
             )
             .with_executor(
                 NativeTool::TaskSet,
-                Box::new(TaskSetTool::new(
-                    RedisTaskStore::new(&self.redis_endpoint).map_err(|error| error.to_string())?,
-                    BillingRepository::new(&self.database_url),
-                    RandomTaskIdSource,
-                    current_unix_timestamp,
-                    TaskToolContext {
-                        chat_id: chat_id.clone(),
-                        user_name: if input.sender_username.is_empty() {
-                            input.sender_first_name.clone()
-                        } else {
-                            input.sender_username.clone()
+                Box::new({
+                    let tool = TaskSetTool::new(
+                        RedisTaskStore::new(&self.redis_endpoint)
+                            .map_err(|error| error.to_string())?,
+                        BillingRepository::new(&self.database_url),
+                        RandomTaskIdSource,
+                        current_unix_timestamp,
+                        TaskToolContext {
+                            chat_id: chat_id.clone(),
+                            user_name: if input.sender_username.is_empty() {
+                                input.sender_first_name.clone()
+                            } else {
+                                input.sender_username.clone()
+                            },
+                            user_id: Some(input.sender_id.0),
+                            timezone_offset: i32::try_from(input.timezone_offset_hours)
+                                .unwrap_or_default(),
+                            locale,
                         },
-                        user_id: Some(input.sender_id.0),
-                        timezone_offset: i32::try_from(input.timezone_offset_hours)
-                            .unwrap_or_default(),
-                        locale,
-                    },
-                )),
+                    );
+                    self.openrouter_pricing.clone().map_or(tool, |pricing| {
+                        tool.with_openrouter_pricing(pricing)
+                    })
+                }),
             )
             .with_executor(
                 NativeTool::TaskList,
@@ -2264,13 +2279,18 @@ fn build_native_dispatcher(
                 .filter(|url| !url.is_empty())
                 .unwrap_or(DEFAULT_OPENROUTER_BASE_URL)
                 .to_owned();
+            let openrouter_pricing = Arc::new(
+                OpenRouterPricingCache::new(&api_key, &openrouter_base_url)
+                    .map_err(CompositionError::OpenRouterChatTransport)?,
+            );
             let provider = OpenRouterChatStreamer::new(
                 ReqwestOpenRouterTransport::new()
                     .map_err(CompositionError::OpenRouterChatTransport)?,
                 &api_key,
                 &openrouter_base_url,
                 crate::native_ai::PRIMARY_CHAT_MODEL,
-            );
+            )
+            .with_openrouter_pricing(Arc::clone(&openrouter_pricing));
             let groq_accounts: Vec<(String, String)> =
                 [("free", groq_free_api_key), ("paid", groq_api_key)]
                     .into_iter()
@@ -2325,6 +2345,7 @@ fn build_native_dispatcher(
                     .map_err(|error| CompositionError::ConversationState(error.to_string()))?,
                 options.database_url,
                 &system_prompt,
+                Some(Arc::clone(&openrouter_pricing)),
             );
             let mut conversation = NativeConversation::new(
                 provider,
@@ -2333,7 +2354,8 @@ fn build_native_dispatcher(
                     options.database_url,
                     conversation_coinmarketcap_key,
                     conversation_firecrawl_key,
-                ),
+                )
+                .with_openrouter_pricing(Arc::clone(&openrouter_pricing)),
                 RedisConversationState::new(options.redis_endpoint)
                     .map_err(CompositionError::ConversationState)?,
                 PostgresConversationBilling::new(options.database_url)
@@ -2345,6 +2367,7 @@ fn build_native_dispatcher(
                 crate::native_ai::PRIMARY_CHAT_MODEL,
                 DEFAULT_MAX_TOOL_ROUNDS,
             )
+            .with_openrouter_pricing(Arc::clone(&openrouter_pricing))
             .with_media(Box::new(media))
             .with_compaction_scheduler(Box::new(compaction_scheduler));
             conversation = conversation.with_youtube(youtube);
