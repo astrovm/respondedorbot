@@ -95,6 +95,13 @@ fn insert_optional<T: serde::Serialize>(
     Ok(())
 }
 
+fn disable_link_preview(payload: &mut Map<String, Value>) {
+    payload.insert(
+        "link_preview_options".to_owned(),
+        json!({"is_disabled": true}),
+    );
+}
+
 fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
     let (endpoint, method, params, json_payload) = match action {
         TelegramAction::SetCommands {
@@ -128,7 +135,7 @@ fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
                 message.parse_mode.map(parse_mode),
             )?;
             if message.disable_web_page_preview {
-                payload.insert("disable_web_page_preview".to_owned(), json!(true));
+                disable_link_preview(&mut payload);
             }
             insert_optional(&mut payload, "reply_markup", message.reply_markup)?;
             (
@@ -203,6 +210,26 @@ fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
                 ("message_id".to_owned(), json!(message_id.0)),
                 ("text".to_owned(), json!(truncate_text(&text))),
             ]);
+            insert_optional(&mut payload, "reply_markup", reply_markup)?;
+            (
+                "editMessageText",
+                Method::POST,
+                None,
+                Some(Value::Object(payload)),
+            )
+        }
+        TelegramAction::EditMessageNoPreview {
+            chat_id,
+            message_id,
+            text,
+            reply_markup,
+        } => {
+            let mut payload = Map::from_iter([
+                ("chat_id".to_owned(), json!(chat_id.0)),
+                ("message_id".to_owned(), json!(message_id.0)),
+                ("text".to_owned(), json!(truncate_text(&text))),
+            ]);
+            disable_link_preview(&mut payload);
             insert_optional(&mut payload, "reply_markup", reply_markup)?;
             (
                 "editMessageText",
@@ -947,8 +974,39 @@ mod tests {
                 "text":"hello",
                 "reply_to_message_id":7,
                 "parse_mode":"HTML",
-                "disable_web_page_preview":true,
+                "link_preview_options":{"is_disabled":true},
                 "reply_markup":{"inline_keyboard":[[{"text":"Open","url":"https://example.test"}]]}
+            }))
+        );
+    }
+
+    #[test]
+    fn draft_edit_disables_web_page_previews() {
+        let transport = transport(r#"{"ok":true,"result":{"message_id":77}}"#);
+        assert_eq!(
+            execute_with(
+                &transport,
+                "synthetic-token",
+                TelegramAction::EditMessageNoPreview {
+                    chat_id: ChatId(42),
+                    message_id: MessageId(77),
+                    text: "draft https://example.test".to_owned(),
+                    reply_markup: None,
+                },
+            ),
+            Ok(ActionOutcome::Completed {
+                message_id: Some(77)
+            })
+        );
+        let request = &transport.requests.borrow()[0];
+        assert_eq!(request.endpoint, "editMessageText");
+        assert_eq!(
+            request.json_payload,
+            Some(serde_json::json!({
+                "chat_id":42,
+                "message_id":77,
+                "text":"draft https://example.test",
+                "link_preview_options":{"is_disabled":true},
             }))
         );
     }

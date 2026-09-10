@@ -114,6 +114,13 @@ pub enum TelegramAction {
         text: String,
         reply_markup: Option<InlineKeyboardMarkup>,
     },
+    /// Edits a temporary AI draft without asking Telegram to generate link previews.
+    EditMessageNoPreview {
+        chat_id: ChatId,
+        message_id: MessageId,
+        text: String,
+        reply_markup: Option<InlineKeyboardMarkup>,
+    },
     DeleteMessage {
         chat_id: ChatId,
         message_id: MessageId,
