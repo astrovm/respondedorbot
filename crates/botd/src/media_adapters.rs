@@ -1,6 +1,7 @@
 //! Production adapters for the native media pipeline.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -11,7 +12,9 @@ use bot_adapters::media_provider::{
     ReqwestGroqTranscriptionTransport, VisionRequest, describe_image_with,
     transcribe_audio_groq_with, transcribe_audio_openrouter_with,
 };
-use bot_adapters::openrouter_chat::{OpenRouterTransport, ReqwestOpenRouterTransport};
+use bot_adapters::openrouter_chat::{
+    OpenRouterPricingCache, OpenRouterTransport, ReqwestOpenRouterTransport,
+};
 use bot_adapters::redis_connection::RedisEndpoint;
 use bot_adapters::redis_media_cache::{cache_media, get_cached_media};
 use bot_adapters::telegram_http::{
@@ -374,6 +377,7 @@ pub struct OpenRouterVisionProvider<Transport> {
     base_url: String,
     model: String,
     max_tokens: u64,
+    pricing: Option<Arc<OpenRouterPricingCache>>,
 }
 
 impl<Transport> OpenRouterVisionProvider<Transport> {
@@ -391,10 +395,20 @@ impl<Transport> OpenRouterVisionProvider<Transport> {
             base_url: base_url.to_owned(),
             model: model.to_owned(),
             max_tokens,
+            pricing: None,
         }
     }
 }
 
+    #[must_use]
+    pub fn with_openrouter_pricing(
+        mut self,
+        pricing: Arc<OpenRouterPricingCache>,
+    ) -> Self {
+        self.pricing = Some(pricing);
+        self
+    }
+}
 impl<Transport: OpenRouterTransport> VisionProvider for OpenRouterVisionProvider<Transport> {
     fn describe(
         &mut self,
@@ -407,6 +421,12 @@ impl<Transport: OpenRouterTransport> VisionProvider for OpenRouterVisionProvider
         } else {
             "respondé siempre en minúsculas, sin emojis, sin markdown y en lenguaje coloquial argentino."
         };
+        let price_ceiling = self
+            .pricing
+            .as_ref()
+            .map(|pricing| pricing.price_ceiling(&self.model))
+            .transpose()
+            .map_err(|error| error.to_string())?;
         describe_image_with(
             &self.transport,
             VisionRequest {
@@ -418,6 +438,7 @@ impl<Transport: OpenRouterTransport> VisionProvider for OpenRouterVisionProvider
                 image_bytes: &image.bytes,
                 image_mime: &image.mime,
                 max_tokens: self.max_tokens,
+                price_ceiling,
                 file_id: Some(file_id),
             },
         )
@@ -434,6 +455,7 @@ pub struct FallbackTranscriptionProvider<Groq, OpenRouter> {
     openrouter_base_url: String,
     groq_model: String,
     openrouter_model: String,
+    pricing: Option<Arc<OpenRouterPricingCache>>,
     default_backoff_seconds: u64,
     cooldowns: HashMap<String, Instant>,
 }
@@ -459,9 +481,19 @@ impl<Groq, OpenRouter> FallbackTranscriptionProvider<Groq, OpenRouter> {
             openrouter_base_url: config.openrouter_base_url,
             groq_model: config.groq_model,
             openrouter_model: config.openrouter_model,
+            pricing: None,
             default_backoff_seconds: config.default_backoff_seconds,
             cooldowns: HashMap::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_openrouter_pricing(
+        mut self,
+        pricing: Arc<OpenRouterPricingCache>,
+    ) -> Self {
+        self.pricing = Some(pricing);
+        self
     }
 
     fn cooling_down(&self, account: &str) -> bool {
@@ -522,11 +554,18 @@ where
         let Some(api_key) = self.openrouter_api_key.as_deref() else {
             return Ok(None);
         };
+        let price_ceiling = self
+            .pricing
+            .as_ref()
+            .map(|pricing| pricing.price_ceiling(&self.openrouter_model))
+            .transpose()
+            .map_err(|error| error.to_string())?;
         transcribe_audio_openrouter_with(
             &self.openrouter,
             api_key,
             &self.openrouter_base_url,
             &self.openrouter_model,
+            price_ceiling,
             &audio.bytes,
             Some(file_id),
         )
