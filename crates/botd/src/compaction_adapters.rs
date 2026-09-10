@@ -1,9 +1,11 @@
 //! Production Redis, PostgreSQL, and OpenRouter ports for memory compaction.
 
+use std::sync::Arc;
+
 use bot_adapters::billing_read::BillingRepository;
 use bot_adapters::openrouter_chat::{
-    ChatCompletionRequest, ChatMessage, ChatRole, OpenRouterTransport, ReqwestOpenRouterTransport,
-    complete_with,
+    ChatCompletionRequest, ChatMessage, ChatRole, OpenRouterPricingCache, OpenRouterTransport,
+    ReqwestOpenRouterTransport, complete_with,
 };
 use bot_adapters::redis_compaction_queue::RedisCompactionQueue;
 use bot_adapters::redis_connection::RedisEndpoint;
@@ -48,6 +50,10 @@ pub fn production_compaction_worker(
         let sequence = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         format!("{owner_prefix}:compaction:{sequence}")
     });
+    let pricing = Arc::new(
+        OpenRouterPricingCache::new(openrouter_api_key, openrouter_base_url)
+            .map_err(|error| error.to_string())?,
+    );
     Ok(CompactionWorker::new(
         RedisCompactionQueue::new(endpoint).map_err(|error| error.to_string())?,
         RedisCompactionState::new(endpoint)?,
@@ -57,7 +63,8 @@ pub fn production_compaction_worker(
             openrouter_base_url,
             COMPACTION_MODEL,
             system_prompt,
-        ),
+        )
+        .with_openrouter_pricing(pricing),
         PostgresCompactionBilling::new(database_url),
         token,
     )
@@ -124,6 +131,7 @@ pub struct OpenRouterCompactionProvider<Transport> {
     base_url: String,
     model: String,
     system_prompt: String,
+    pricing: Option<Arc<OpenRouterPricingCache>>,
 }
 
 impl<Transport> OpenRouterCompactionProvider<Transport> {
@@ -141,7 +149,14 @@ impl<Transport> OpenRouterCompactionProvider<Transport> {
             base_url: base_url.to_owned(),
             model: model.to_owned(),
             system_prompt: system_prompt.to_owned(),
+            pricing: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_openrouter_pricing(mut self, pricing: Arc<OpenRouterPricingCache>) -> Self {
+        self.pricing = Some(pricing);
+        self
     }
 
     fn request(
@@ -149,7 +164,7 @@ impl<Transport> OpenRouterCompactionProvider<Transport> {
         messages: &[Value],
         prior_summary: Option<&str>,
         locale: &str,
-    ) -> ChatCompletionRequest {
+    ) -> Result<ChatCompletionRequest, String> {
         let mut prompt = vec![ChatMessage::text(ChatRole::System, &self.system_prompt)];
         if let Some(prior_summary) = prior_summary.filter(|value| !value.is_empty()) {
             prompt.push(ChatMessage::text(ChatRole::Assistant, prior_summary));
@@ -173,8 +188,13 @@ impl<Transport> OpenRouterCompactionProvider<Transport> {
             },
         ));
         let mut request = ChatCompletionRequest::new(&self.model, prompt);
+        if let Some(pricing) = self.pricing.as_ref() {
+            pricing
+                .apply_to_request(&mut request)
+                .map_err(|error| error.to_string())?;
+        }
         request.max_tokens = u64::try_from(chat_output_token_limit(&self.model)).ok();
-        request
+        Ok(request)
     }
 }
 
@@ -193,7 +213,9 @@ impl<Transport: OpenRouterTransport> CompactionProvider
             &self.transport,
             &self.api_key,
             &self.base_url,
-            &self.request(messages, prior_summary, locale),
+            &self
+                .request(messages, prior_summary, locale)
+                .map_err(|error| error.to_string())?,
         )
         .map_err(|error| error.to_string())?;
         let cleaned = sanitize_summary_text(&completion.text);
