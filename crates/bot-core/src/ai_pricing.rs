@@ -771,8 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_model_costs_require_provider_reported_settlement() -> Result<(), AiPricingError>
-    {
+    fn openrouter_model_costs_require_provider_reported_settlement() -> Result<(), AiPricingError> {
         let missing = calculate_billing_for_segments(&json!([{
             "kind": "chat",
             "model": "deepseek/deepseek-v4.1-flash",
