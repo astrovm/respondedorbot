@@ -199,9 +199,6 @@ impl TokenUsage {
         ])
     }
 
-    fn has_tokens(self) -> bool {
-        self.input_tokens != 0 || self.output_tokens != 0
-    }
 }
 
 struct ModelCost {
