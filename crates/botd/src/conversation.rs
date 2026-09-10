@@ -1,7 +1,9 @@
 //! Native foreground AI conversation transaction.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use bot_adapters::openrouter_chat::OpenRouterPricingCache;
 use bot_core::ai_pricing::calculate_billing_for_segments;
 use bot_core::ai_prompt::{
     ConversationPromptInput, HistoryMessage, PromptContent, PromptMessage, PromptRole,
@@ -9,7 +11,7 @@ use bot_core::ai_prompt::{
 };
 use bot_core::ai_reserve::{
     EstimatedMessage, TokenEstimateValue, VISION_OUTPUT_TOKEN_LIMIT, chat_output_token_limit,
-    estimate_chat_reserve_credit_units, estimate_transcription_reserve_credit_units,
+    estimate_chat_reserve_credit_units_with_pricing, estimate_transcription_reserve_credit_units,
     estimate_vision_reserve_credit_units,
 };
 use bot_core::ai_response_cleanup::cleanup_response;
@@ -199,6 +201,7 @@ pub struct NativeConversation<Provider, Tools, State, Billing> {
     media: Option<Box<dyn MediaRuntime>>,
     youtube: Option<Box<dyn YoutubeContextRuntime>>,
     compaction_scheduler: Option<Box<dyn MemoryCompactionScheduler>>,
+    openrouter_pricing: Option<Arc<OpenRouterPricingCache>>,
     pending: HashMap<String, PendingConversation>,
 }
 
@@ -224,8 +227,15 @@ impl<Provider, Tools, State, Billing> NativeConversation<Provider, Tools, State,
             media: None,
             youtube: None,
             compaction_scheduler: None,
+            openrouter_pricing: None,
             pending: HashMap::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_openrouter_pricing(mut self, pricing: Arc<OpenRouterPricingCache>) -> Self {
+        self.openrouter_pricing = Some(pricing);
+        self
     }
 
     #[must_use]
@@ -794,7 +804,7 @@ where
     ) -> Result<AiPreparation, String> {
         let operation_id = summary_operation_id(&input);
         let admission = vec![PromptMessage::text(PromptRole::User, "summary")];
-        let base_amount = estimate_reserve(&admission, &self.model)?;
+        let base_amount = estimate_reserve(&admission, &self.model), self.openrouter_pricing.as_deref())?;
         let base = self.reserve(
             &input,
             &operation_id,
@@ -858,7 +868,7 @@ where
                 .map(|message| PromptMessage::text(message.role, message.text)),
         );
         messages.push(PromptMessage::text(PromptRole::User, prompt));
-        let full_amount = estimate_reserve(&messages, &self.model)?;
+        let full_amount = estimate_reserve(&messages, &self.model), self.openrouter_pricing.as_deref())?;
         if full_amount > base_amount {
             let extension = self.reserve(
                 &input,
@@ -952,6 +962,7 @@ where
                     Locale::Es => "es",
                     Locale::En => "en",
                 },
+                self.openrouter_pricing.as_deref(),
             ) {
                 Ok(required) => required.max(1),
                 Err(_) => {
@@ -1005,7 +1016,7 @@ where
             PromptRole::User,
             &provider_input.message_text,
         )];
-        let base_amount = estimate_reserve(&admission, &self.model)?;
+        let base_amount = estimate_reserve(&admission, &self.model), self.openrouter_pricing.as_deref())?;
         let base = self.reserve(
             &input,
             &operation_id,
@@ -1108,7 +1119,7 @@ where
                 return Err(error);
             }
         };
-        let full_amount = estimate_reserve(&messages, &self.model)?;
+        let full_amount = estimate_reserve(&messages, &self.model), self.openrouter_pricing.as_deref())?;
         if full_amount > base_amount {
             let extension = self.reserve(
                 &input,
@@ -1739,9 +1750,25 @@ fn user_identity(input: &AiConversationInput) -> String {
     }
 }
 
-fn estimate_reserve(messages: &[PromptMessage], model: &str) -> Result<i64, String> {
+fn estimate_reserve(
+    messages: &[PromptMessage],
+    model: &str,
+    pricing: Option<&OpenRouterPricingCache>,
+) -> Result<i64, String> {
     let estimated = messages.iter().map(estimated_message).collect::<Vec<_>>();
-    estimate_chat_reserve_credit_units(
+    if pricing.is_some() || model.split(':').next() == Some(crate::native_ai::DEEPSEEK_MODEL) {
+        let pricing = crate::native_ai::reservation_pricing_for_model(model, pricing)?;
+        return estimate_chat_reserve_credit_units_with_pricing(
+            None,
+            &estimated,
+            Some(chat_output_token_limit(model)),
+            SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE,
+            model,
+            &pricing,
+        )
+        .map_err(|error| error.to_string());
+    }
+    bot_core::ai_reserve::estimate_chat_reserve_credit_units(
         None,
         &estimated,
         Some(chat_output_token_limit(model)),
