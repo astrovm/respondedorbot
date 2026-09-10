@@ -119,11 +119,11 @@ impl OpenRouterPricingCache {
         &self,
         request: &mut ChatCompletionRequest,
     ) -> Result<(), OpenRouterChatError> {
-        let pricing = self
-            .pricing(&request.model)?
-            .ok_or_else(|| OpenRouterChatError::MissingModelPricing {
-                model: request.model.clone(),
-            })?;
+        let pricing = self.pricing(&request.model)?.ok_or_else(|| {
+            OpenRouterChatError::MissingModelPricing {
+                model: request.model.clone()
+            }
+        })?;
         request.set_price_ceiling(
             pricing.input_per_million as f64 / 1_000_000.0,
             pricing.output_per_million as f64 / 1_000_000.0,
@@ -1188,8 +1188,7 @@ mod tests {
         assert_eq!(pricing.cached_input_per_million, Some(6_000));
         assert_eq!(pricing.output_per_million, 1_200_000);
 
-        let mut request =
-            ChatCompletionRequest::new(format!("{DEEPSEEK_MODEL}:free"), Vec::new());
+        let mut request = ChatCompletionRequest::new(format!("{DEEPSEEK_MODEL}:free"), Vec::new());
         cache
             .apply_to_request(&mut request)
             .unwrap_or_else(|_| unreachable!("apply catalog pricing"));
@@ -1254,10 +1253,7 @@ mod tests {
             super::decimal_rate_to_usd_micros_per_million("+0.00000015"),
             Some(150_000)
         );
-        assert_eq!(
-            super::decimal_rate_to_usd_micros_per_million("-1"),
-            None
-        );
+        assert_eq!(super::decimal_rate_to_usd_micros_per_million("-1"), None);
         assert_eq!(
             super::decimal_rate_to_usd_micros_per_million("not-a-rate"),
             None
