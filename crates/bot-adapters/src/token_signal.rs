@@ -561,6 +561,19 @@ where
         self.load_pairs(token, pairs, diagnostics)
     }
 
+    fn pair_candles(
+        &mut self,
+        token: &TokenAddress,
+        pair: &TokenPair,
+        diagnostics: &mut Vec<String>,
+    ) -> Vec<Vec<f64>> {
+        let reference_price = pair_reference_price(pair);
+        filter_chart_candles(
+            self.candles(token, &pair.pair_address, diagnostics),
+            reference_price,
+        )
+    }
+
     fn load_pairs(
         &mut self,
         token: &TokenAddress,
@@ -581,11 +594,7 @@ where
                 continue;
             }
             let resolved = token_from_pair(&pair).unwrap_or_else(|| token.clone());
-            let reference_price = flexible_number(&pair.price_usd).filter(|price| *price > 0.0);
-            let candles = filter_chart_candles(
-                self.candles(&resolved, &pair.pair_address, &mut diagnostics),
-                reference_price,
-            );
+            let candles = self.pair_candles(&resolved, &pair, &mut diagnostics);
             if !candles.is_empty() {
                 return TokenSignalLoad {
                     signal: Some(self.enrich(resolved, pair, candles, &mut diagnostics)),
@@ -610,12 +619,7 @@ where
         mut diagnostics: Vec<String>,
     ) -> TokenSignalLoad {
         if !initial_pair.pair_address.is_empty() {
-            let reference_price =
-                flexible_number(&initial_pair.price_usd).filter(|price| *price > 0.0);
-            let candles = filter_chart_candles(
-                self.candles(&initial_token, &initial_pair.pair_address, &mut diagnostics),
-                reference_price,
-            );
+            let candles = self.pair_candles(&initial_token, &initial_pair, &mut diagnostics);
             if !candles.is_empty() {
                 return TokenSignalLoad {
                     signal: Some(self.enrich(
@@ -639,11 +643,7 @@ where
             if pair.pair_address.is_empty() {
                 continue;
             }
-            let reference_price = flexible_number(&pair.price_usd).filter(|price| *price > 0.0);
-            let candles = filter_chart_candles(
-                self.candles(&token, &pair.pair_address, &mut diagnostics),
-                reference_price,
-            );
+            let candles = self.pair_candles(&token, &pair, &mut diagnostics);
             if !candles.is_empty() {
                 return TokenSignalLoad {
                     signal: Some(self.enrich(token, pair, candles, &mut diagnostics)),
@@ -975,18 +975,16 @@ where
             raw.and_then(|value| serde_json::from_value::<Vec<Vec<f64>>>(value).ok())
                 .unwrap_or_default()
         };
-        let reference_price = flexible_number(&signal.pair.price_usd).filter(|price| *price > 0.0);
+        let reference_price = pair_reference_price(&signal.pair);
         let candles = filter_chart_candles(candles, reference_price);
         let last_known = candles
             .iter()
-            .filter(|row| row.len() >= 5 && row[0] < (now - range.seconds) as f64)
+            .filter(|row| row[0] < (now - range.seconds) as f64)
             .max_by(|a, b| a[0].total_cmp(&b[0]))
             .map(|row| row[4]);
         let candles: Vec<_> = candles
             .into_iter()
-            .filter(|row| {
-                row.len() >= 5 && row[0] >= (now - range.seconds) as f64 && row[0] <= now as f64
-            })
+            .filter(|row| row[0] >= (now - range.seconds) as f64 && row[0] <= now as f64)
             .collect();
         if candles.is_empty() {
             if pump_history && let Some(price) = last_known {
@@ -1051,6 +1049,10 @@ fn flexible_number(value: &Value) -> Option<f64> {
     value
         .as_f64()
         .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
+fn pair_reference_price(pair: &TokenPair) -> Option<f64> {
+    flexible_number(&pair.price_usd).filter(|price| *price > 0.0)
 }
 
 fn filter_chart_candles(candles: Vec<Vec<f64>>, reference_price: Option<f64>) -> Vec<Vec<f64>> {
@@ -1256,7 +1258,7 @@ fn render_price_chart(
         let x = left + (right - left) * index / 6;
         draw_line(&mut image, x, top, x, bottom, Rgb([17, 24, 39]));
     }
-    let reference_price = flexible_number(&pair.price_usd).filter(|price| *price > 0.0);
+    let reference_price = pair_reference_price(pair);
     let mut candles = filter_chart_candles(candles.to_vec(), reference_price);
     if candles
         .first()
