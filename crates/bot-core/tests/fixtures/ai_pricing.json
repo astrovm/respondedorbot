@@ -1,19 +1,19 @@
 {
   "cases": [
     {
-      "name": "published_cached_deepseek_tokens",
+      "name": "unpriced_deepseek_tokens_are_incomplete",
       "segments": [{
         "kind": "chat",
         "model": "deepseek/deepseek-v4.1-flash",
         "usage": {"input_tokens": 1000, "input_cached_tokens": 900, "output_tokens": 500}
       }],
       "expected": {
-        "raw_usd_micros": 317,
-        "raw_usd_micros_exact": "317.7",
-        "charged_credit_units": 7,
-        "pricing_complete": true,
-        "pricing_basis": "published_rate",
-        "model_usd_micros": 317
+        "raw_usd_micros": 0,
+        "raw_usd_micros_exact": "0",
+        "charged_credit_units": 0,
+        "pricing_complete": false,
+        "pricing_basis": "missing",
+        "model_usd_micros": 0
       }
     },
     {
