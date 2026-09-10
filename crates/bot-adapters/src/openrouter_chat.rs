@@ -96,14 +96,18 @@ impl OpenRouterPricingCache {
         let models = payload
             .get("data")
             .and_then(Value::as_array)
-            .ok_or_else(|| OpenRouterChatError::InvalidJson("models response has no data array".to_owned()))?;
+            .ok_or_else(|| {
+                OpenRouterChatError::InvalidJson("models response has no data array".to_owned())
+            })?;
         let mut prices = BTreeMap::new();
         for model in models {
             let Some((id, pricing)) = parse_catalog_model(model) else {
                 continue;
             };
             prices.insert(id.clone(), pricing);
-            prices.entry(catalog_base_model(&id).to_owned()).or_insert(pricing);
+            prices
+                .entry(catalog_base_model(&id).to_owned())
+                .or_insert(pricing);
         }
         let mut state = self.lock_state()?;
         state.models = prices;
@@ -115,12 +119,15 @@ impl OpenRouterPricingCache {
         &self,
         request: &mut ChatCompletionRequest,
     ) -> Result<(), OpenRouterChatError> {
-        if let Some(pricing) = self.pricing(&request.model)? {
-            request.set_price_ceiling(
-                pricing.input_per_million as f64 / 1_000_000.0,
-                pricing.output_per_million as f64 / 1_000_000.0,
-            );
-        }
+        let pricing = self
+            .pricing(&request.model)?
+            .ok_or_else(|| OpenRouterChatError::MissingModelPricing {
+                model: request.model.clone(),
+            })?;
+        request.set_price_ceiling(
+            pricing.input_per_million as f64 / 1_000_000.0,
+            pricing.output_per_million as f64 / 1_000_000.0,
+        );
         Ok(())
     }
 
@@ -131,12 +138,10 @@ impl OpenRouterPricingCache {
             .is_none_or(|fetched_at| fetched_at.elapsed() >= OPENROUTER_PRICING_TTL))
     }
 
-    fn lock_state(
-        &self,
-    ) -> Result<MutexGuard<'_, OpenRouterPricingState>, OpenRouterChatError> {
-        self.state
-            .lock()
-            .map_err(|_| OpenRouterChatError::Transport("OpenRouter pricing cache was poisoned".to_owned()))
+    fn lock_state(&self) -> Result<MutexGuard<'_, OpenRouterPricingState>, OpenRouterChatError> {
+        self.state.lock().map_err(|_| {
+            OpenRouterChatError::Transport("OpenRouter pricing cache was poisoned".to_owned())
+        })
     }
 }
 
@@ -161,9 +166,7 @@ fn parse_catalog_model(value: &Value) -> Option<(String, TokenPricing)> {
         .filter(|id| !id.is_empty())?;
     let pricing = value.get("pricing").and_then(Value::as_object)?;
     let mut input = pricing.get("prompt").and_then(parse_catalog_rate);
-    let mut cached_input = pricing
-        .get("input_cache_read")
-        .and_then(parse_catalog_rate);
+    let mut cached_input = pricing.get("input_cache_read").and_then(parse_catalog_rate);
     let mut cache_write = pricing
         .get("input_cache_write")
         .and_then(parse_catalog_rate);
@@ -175,14 +178,8 @@ fn parse_catalog_model(value: &Value) -> Option<(String, TokenPricing)> {
                 continue;
             };
             update_max(&mut input, override_pricing.get("prompt"));
-            update_max(
-                &mut cached_input,
-                override_pricing.get("input_cache_read"),
-            );
-            update_max(
-                &mut cache_write,
-                override_pricing.get("input_cache_write"),
-            );
+            update_max(&mut cached_input, override_pricing.get("input_cache_read"));
+            update_max(&mut cache_write, override_pricing.get("input_cache_write"));
             update_max(&mut audio_input, override_pricing.get("audio"));
             update_max(&mut output, override_pricing.get("completion"));
         }
@@ -221,16 +218,14 @@ fn decimal_rate_to_usd_micros_per_million(value: &str) -> Option<i128> {
     if value.is_empty() || value.starts_with('-') {
         return None;
     }
-    let (mantissa, exponent) = value
-        .find('e')
-        .or_else(|| value.find('E'))
-        .map_or((value, 0_i32), |position| {
-            let (mantissa, exponent) = value.split_at(position);
-            (
-                mantissa,
-                exponent[1..].parse::<i32>().unwrap_or(i32::MAX),
-            )
-        });
+    let (mantissa, exponent) =
+        value
+            .find('e')
+            .or_else(|| value.find('E'))
+            .map_or((value, 0_i32), |position| {
+                let (mantissa, exponent) = value.split_at(position);
+                (mantissa, exponent[1..].parse::<i32>().unwrap_or(i32::MAX))
+            });
     if !mantissa.contains('.') && mantissa.chars().all(|character| character.is_ascii_digit()) {
         let digits = mantissa.parse::<i128>().ok()?;
         return scale_decimal_rate(digits, 0, exponent);
@@ -559,6 +554,8 @@ pub enum OpenRouterChatError {
     MissingApiKey,
     #[error("OpenRouter model is missing")]
     MissingModel,
+    #[error("OpenRouter model pricing is unavailable: {model}")]
+    MissingModelPricing { model: String },
     #[error("OpenRouter base URL is invalid")]
     InvalidBaseUrl,
     #[error("OpenRouter request could not be serialized: {0}")]
@@ -1141,10 +1138,12 @@ mod tests {
     #[test]
     fn dynamic_price_ceilings_are_applied_without_a_local_deepseek_table() {
         let mut request = ChatCompletionRequest::new(DEEPSEEK_MODEL, Vec::new());
-        assert!(serde_json::to_value(&request)
-            .unwrap_or(Value::Null)
-            .get("provider")
-            .is_none());
+        assert!(
+            serde_json::to_value(&request)
+                .unwrap_or(Value::Null)
+                .get("provider")
+                .is_none()
+        );
         request.set_price_ceiling(0.3, 1.2);
         let body = serde_json::to_value(request).unwrap_or(Value::Null);
         assert_eq!(body["provider"]["max_price"]["prompt"], 0.3);
@@ -1187,7 +1186,9 @@ mod tests {
         assert_eq!(pricing.input_per_million, 300_000);
         assert_eq!(pricing.cached_input_per_million, Some(6_000));
         assert_eq!(pricing.output_per_million, 1_200_000);
-        server.join().unwrap_or_else(|_| unreachable!("catalog server"));
+        server
+            .join()
+            .unwrap_or_else(|_| unreachable!("catalog server"));
     }
 
     #[test]
