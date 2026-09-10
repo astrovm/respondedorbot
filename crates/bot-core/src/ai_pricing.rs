@@ -198,7 +198,6 @@ impl TokenUsage {
             ("output_tokens".to_owned(), json!(self.output_tokens)),
         ])
     }
-
 }
 
 struct ModelCost {
