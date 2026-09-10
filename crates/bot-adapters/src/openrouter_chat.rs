@@ -5,7 +5,7 @@ use std::io::Read;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use bot_core::provider_pricing::{TokenPricing, openrouter_price_ceiling};
+use bot_core::provider_pricing::TokenPricing;
 use bot_core::provider_stream_policy::StreamToolCallFragment;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
@@ -115,19 +115,27 @@ impl OpenRouterPricingCache {
         Ok(())
     }
 
+    pub fn price_ceiling(
+        &self,
+        model: &str,
+    ) -> Result<(f64, f64), OpenRouterChatError> {
+        let pricing = self.pricing(model)?.ok_or_else(|| {
+            OpenRouterChatError::MissingModelPricing {
+                model: model.to_owned(),
+            }
+        })?;
+        Ok((
+            pricing.input_per_million as f64 / 1_000_000.0,
+            pricing.output_per_million as f64 / 1_000_000.0,
+        ))
+    }
+
     pub fn apply_to_request(
         &self,
         request: &mut ChatCompletionRequest,
     ) -> Result<(), OpenRouterChatError> {
-        let pricing = self.pricing(&request.model)?.ok_or_else(|| {
-            OpenRouterChatError::MissingModelPricing {
-                model: request.model.clone(),
-            }
-        })?;
-        request.set_price_ceiling(
-            pricing.input_per_million as f64 / 1_000_000.0,
-            pricing.output_per_million as f64 / 1_000_000.0,
-        );
+        let (prompt, completion) = self.price_ceiling(&request.model)?;
+        request.set_price_ceiling(prompt, completion);
         Ok(())
     }
 
@@ -381,17 +389,13 @@ impl ChatCompletionRequest {
     #[must_use]
     pub fn new(model: impl Into<String>, messages: Vec<ChatMessage>) -> Self {
         let model = model.into();
-        let provider =
-            openrouter_price_ceiling(&model).map(|(prompt, completion)| ProviderPreferences {
-                max_price: ProviderMaxPrice { prompt, completion },
-            });
         Self {
             model,
             messages,
             tools: Vec::new(),
             max_tokens: None,
             temperature: None,
-            provider,
+            provider: None,
             reasoning: None,
             stream: false,
         }
