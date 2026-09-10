@@ -1,4 +1,4 @@
-//! Provider model names and published prices used by billing and reservations.
+//! Provider model names and locally defined prices used by billing and reservations.
 
 pub const PRICING_VERSION: &str = "2026-09-10";
 pub const CREDIT_UNIT_USD_MICROS: i128 = 50;
@@ -23,24 +23,8 @@ pub struct TokenPricing {
     pub output_per_million: i128,
 }
 
-const DEEPSEEK_PRICING: TokenPricing = TokenPricing {
-    input_per_million: 150_000,
-    cached_input_per_million: Some(3_000),
-    cache_write_per_million: None,
-    audio_input_per_million: None,
-    output_per_million: 600_000,
-};
-
-// Reserve against OpenRouter's highest advertised weekday peak rate so
-// scheduled price windows and provider failover cannot exceed the hold.
-const DEEPSEEK_RESERVATION_PRICING: TokenPricing = TokenPricing {
-    input_per_million: 300_000,
-    cached_input_per_million: Some(6_000),
-    cache_write_per_million: None,
-    audio_input_per_million: None,
-    output_per_million: 1_200_000,
-};
-
+// OpenRouter model prices are loaded from its catalog at runtime. Keep only
+// prices for providers that do not expose a catalog through this adapter here.
 const GEMINI_FLASH_LITE_PRICING: TokenPricing = TokenPricing {
     input_per_million: 250_000,
     cached_input_per_million: Some(25_000),
@@ -68,7 +52,6 @@ pub fn published_token_pricing(provider: &str, model: &str) -> Option<TokenPrici
         return Some(GROQ_CHAT_PRICING);
     }
     match model {
-        DEEPSEEK_MODEL => Some(DEEPSEEK_PRICING),
         GEMINI_FLASH_LITE_MODEL => Some(GEMINI_FLASH_LITE_PRICING),
         _ => None,
     }
@@ -77,14 +60,14 @@ pub fn published_token_pricing(provider: &str, model: &str) -> Option<TokenPrici
 #[must_use]
 pub fn reservation_token_pricing(model: &str) -> Option<TokenPricing> {
     match base_model(model) {
-        DEEPSEEK_MODEL => Some(DEEPSEEK_RESERVATION_PRICING),
         GEMINI_FLASH_LITE_MODEL => Some(GEMINI_FLASH_LITE_PRICING),
         _ => None,
     }
 }
 
 /// Return the maximum OpenRouter prompt and completion prices in USD per
-/// million tokens accepted by this deployment.
+/// million tokens for locally defined model prices. Catalog-backed models use
+/// `OpenRouterPricingCache` from the adapter crate instead.
 #[must_use]
 pub fn openrouter_price_ceiling(model: &str) -> Option<(f64, f64)> {
     let pricing = reservation_token_pricing(model)?;
@@ -102,13 +85,12 @@ mod tests {
     };
 
     #[test]
-    fn known_models_have_one_reservation_price_and_openrouter_ceiling() {
-        for model in [DEEPSEEK_MODEL, GEMINI_FLASH_LITE_MODEL] {
-            assert!(reservation_token_pricing(model).is_some());
-            assert!(openrouter_price_ceiling(model).is_some());
-        }
+    fn locally_defined_models_have_reservation_prices_and_openrouter_ceilings() {
+        assert!(reservation_token_pricing(GEMINI_FLASH_LITE_MODEL).is_some());
+        assert!(openrouter_price_ceiling(GEMINI_FLASH_LITE_MODEL).is_some());
+        assert!(reservation_token_pricing(DEEPSEEK_MODEL).is_none());
+        assert!(openrouter_price_ceiling(DEEPSEEK_MODEL).is_none());
         assert!(reservation_token_pricing("unknown/model").is_none());
         assert!(openrouter_price_ceiling("unknown/model").is_none());
-        assert_eq!(openrouter_price_ceiling(DEEPSEEK_MODEL), Some((0.3, 1.2)));
     }
 }
