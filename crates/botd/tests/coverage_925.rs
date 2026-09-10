@@ -29,7 +29,7 @@ use botd::runtime::{
 };
 use serde_json::{Value, json};
 
-const TEST_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
+const TEST_MODEL: &str = "deepseek/deepseek-v4.1-flash";
 
 #[derive(Default)]
 struct Reporter {

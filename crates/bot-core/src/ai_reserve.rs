@@ -260,16 +260,16 @@ mod tests {
                 &messages,
                 None,
                 0,
-                "deepseek/deepseek-v4-flash-0731",
+                "deepseek/deepseek-v4.1-flash",
             ),
-            Ok(46)
+            Ok(197)
         );
     }
 
     #[test]
     fn preserves_model_limits_credit_rounding_and_provider_reserves() {
         assert_eq!(
-            chat_output_token_limit("deepseek/deepseek-v4-flash-0731:free"),
+            chat_output_token_limit("deepseek/deepseek-v4.1-flash:free"),
             8_192
         );
         assert_eq!(chat_output_token_limit("other"), 1_024);

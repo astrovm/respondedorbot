@@ -4,16 +4,16 @@
       "name": "published_cached_deepseek_tokens",
       "segments": [{
         "kind": "chat",
-        "model": "deepseek/deepseek-v4-flash-0731",
+        "model": "deepseek/deepseek-v4.1-flash",
         "usage": {"input_tokens": 1000, "input_cached_tokens": 900, "output_tokens": 500}
       }],
       "expected": {
-        "raw_usd_micros": 96,
-        "raw_usd_micros_exact": "96.7",
-        "charged_credit_units": 2,
+        "raw_usd_micros": 317,
+        "raw_usd_micros_exact": "317.7",
+        "charged_credit_units": 7,
         "pricing_complete": true,
         "pricing_basis": "published_rate",
-        "model_usd_micros": 96
+        "model_usd_micros": 317
       }
     },
     {
@@ -35,7 +35,7 @@
       "name": "openrouter_total_cost_is_not_added_to_its_upstream_component",
       "segments": [{
         "kind": "chat",
-        "model": "deepseek/deepseek-v4-flash-0731",
+        "model": "deepseek/deepseek-v4.1-flash",
         "usage": {"cost": "0.000001", "cost_details": {"upstream_inference_cost": "0.00010442124"}},
         "metadata": {"provider": "openrouter"}
       }],
@@ -52,7 +52,7 @@
       "name": "openrouter_upstream_cost_is_used_when_total_cost_is_missing",
       "segments": [{
         "kind": "chat",
-        "model": "deepseek/deepseek-v4-flash-0731",
+        "model": "deepseek/deepseek-v4.1-flash",
         "usage": {"cost_details": {"upstream_inference_cost": "0.00010442124"}},
         "metadata": {"provider": "openrouter"}
       }],
@@ -148,7 +148,7 @@
     },
     {
       "name": "internal_cache_is_free_and_complete",
-      "segments": [{"kind": "summary", "model": "deepseek/deepseek-v4-flash-0731", "source": "cache", "cached": true}],
+      "segments": [{"kind": "summary", "model": "deepseek/deepseek-v4.1-flash", "source": "cache", "cached": true}],
       "expected": {
         "raw_usd_micros": 0,
         "raw_usd_micros_exact": "0",

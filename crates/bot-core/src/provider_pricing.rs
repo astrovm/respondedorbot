@@ -1,9 +1,9 @@
 //! Provider model names and published prices used by billing and reservations.
 
-pub const PRICING_VERSION: &str = "2026-09-04";
+pub const PRICING_VERSION: &str = "2026-09-10";
 pub const CREDIT_UNIT_USD_MICROS: i128 = 50;
 
-pub const DEEPSEEK_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
+pub const DEEPSEEK_MODEL: &str = "deepseek/deepseek-v4.1-flash";
 pub const GEMINI_FLASH_LITE_MODEL: &str = "google/gemini-3.1-flash-lite";
 pub const GROQ_CHAT_MODEL: &str = "openai/gpt-oss-120b";
 pub const GROQ_TRANSCRIPTION_MODEL: &str = "whisper-large-v3";
@@ -24,21 +24,21 @@ pub struct TokenPricing {
 }
 
 const DEEPSEEK_PRICING: TokenPricing = TokenPricing {
-    input_per_million: 50_000,
-    cached_input_per_million: Some(13_000),
+    input_per_million: 150_000,
+    cached_input_per_million: Some(3_000),
     cache_write_per_million: None,
     audio_input_per_million: None,
-    output_per_million: 160_000,
+    output_per_million: 600_000,
 };
 
-// Keep reservations above the cheapest advertised route so OpenRouter can
-// fail over across several providers without spending more than the hold.
+// Reserve against OpenRouter's highest advertised weekday peak rate so
+// scheduled price windows and provider failover cannot exceed the hold.
 const DEEPSEEK_RESERVATION_PRICING: TokenPricing = TokenPricing {
-    input_per_million: 130_000,
-    cached_input_per_million: Some(13_000),
+    input_per_million: 300_000,
+    cached_input_per_million: Some(6_000),
     cache_write_per_million: None,
     audio_input_per_million: None,
-    output_per_million: 280_000,
+    output_per_million: 1_200_000,
 };
 
 const GEMINI_FLASH_LITE_PRICING: TokenPricing = TokenPricing {
@@ -109,6 +109,6 @@ mod tests {
         }
         assert!(reservation_token_pricing("unknown/model").is_none());
         assert!(openrouter_price_ceiling("unknown/model").is_none());
-        assert_eq!(openrouter_price_ceiling(DEEPSEEK_MODEL), Some((0.13, 0.28)));
+        assert_eq!(openrouter_price_ceiling(DEEPSEEK_MODEL), Some((0.3, 1.2)));
     }
 }

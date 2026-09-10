@@ -22,7 +22,7 @@ use crate::compaction_worker::{
     CompactionWorker, SettlementRequest,
 };
 
-pub const COMPACTION_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
+pub const COMPACTION_MODEL: &str = "deepseek/deepseek-v4.1-flash";
 const MAX_SUMMARY_MESSAGES: usize = 200;
 const PRODUCTION_LOCK_TTL_SECONDS: i64 = 3_600;
 
@@ -661,7 +661,7 @@ mod tests {
         let segment = json!({
             "kind":"summary",
             "text":"synthetic summary",
-            "model":"deepseek/deepseek-v4-flash-0731",
+            "model":"deepseek/deepseek-v4.1-flash",
             "usage":{"prompt_tokens":4,"completion_tokens":2},
             "source":"openrouter",
             "metadata":{"provider_generation_id":format!("synthetic-generation-{nonce}")},

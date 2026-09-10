@@ -589,7 +589,7 @@ mod tests {
             },
             Billing::default(),
             || "nonce".to_owned(),
-            "deepseek/deepseek-v4-flash-0731",
+            "deepseek/deepseek-v4.1-flash",
             "persona",
         );
         assert_eq!(scheduler.schedule(plan(), context()), Ok(true));
