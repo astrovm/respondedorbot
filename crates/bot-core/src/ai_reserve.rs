@@ -227,10 +227,10 @@ mod tests {
     use super::{
         EstimatedMessage, ReserveEstimateError, TokenEstimateValue, TokenPricing,
         chat_output_token_limit, credit_units_from_usd_micros, estimate_chat_reserve_credit_units,
-        estimate_chat_reserve_credit_units_with_pricing,
-        estimate_firecrawl_reserve_credit_units, estimate_message_tokens, estimate_nested_tokens,
-        estimate_text_tokens, estimate_transcription_reserve_credit_units,
-        estimate_vision_reserve_credit_units, estimate_youtube_transcript_reserve_credit_units,
+        estimate_chat_reserve_credit_units_with_pricing, estimate_firecrawl_reserve_credit_units,
+        estimate_message_tokens, estimate_nested_tokens, estimate_text_tokens,
+        estimate_transcription_reserve_credit_units, estimate_vision_reserve_credit_units,
+        estimate_youtube_transcript_reserve_credit_units,
     };
 
     fn text(value: &str) -> TokenEstimateValue {
