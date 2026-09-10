@@ -8,6 +8,7 @@ use bot_core::ai_reserve::{
     VISION_OUTPUT_TOKEN_LIMIT, estimate_transcription_reserve_credit_units,
     estimate_vision_reserve_credit_units_with_pricing,
 };
+use bot_core::provider_pricing::TokenPricing;
 use serde_json::Value;
 use thiserror::Error;
 
@@ -163,6 +164,19 @@ pub enum MediaPipelineError {
     ReserveEstimate(String),
 }
 
+pub(crate) fn estimate_standard_vision_reserve_credit_units(
+    pricing: &TokenPricing,
+) -> Result<i64, String> {
+    estimate_vision_reserve_credit_units_with_pricing(
+        "Describe what you see in this image in detail.",
+        0,
+        1_200,
+        VISION_OUTPUT_TOKEN_LIMIT,
+        pricing,
+    )
+    .map_err(|error| error.to_string())
+}
+
 pub struct NativeMedia<Files, Cache, Processor, Vision, Transcription> {
     files: Files,
     cache: Cache,
@@ -207,14 +221,7 @@ impl<Files, Cache, Processor, Vision, Transcription>
             &self.vision_model,
             self.openrouter_pricing.as_deref(),
         )?;
-        estimate_vision_reserve_credit_units_with_pricing(
-            "Describe what you see in this image in detail.",
-            0,
-            1_200,
-            VISION_OUTPUT_TOKEN_LIMIT,
-            &pricing,
-        )
-        .map_err(|error| error.to_string())
+        estimate_standard_vision_reserve_credit_units(&pricing)
     }
 
     fn estimate_audio_reserve_credit_units(&self, audio_seconds: f64) -> Result<i64, String> {

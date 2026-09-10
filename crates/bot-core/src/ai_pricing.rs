@@ -502,18 +502,17 @@ pub fn calculate_billing_for_segments(segments: &Value) -> Result<Value, AiPrici
             continue;
         }
 
-        let transcription_pricing = match model.as_str() {
+        let legacy_transcription_pricing = match model.as_str() {
             "whisper-large-v3" | "groq/whisper-large-v3" => Some((
                 LEGACY_GROQ_TRANSCRIPTION_MIN_SECONDS,
                 LEGACY_GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR,
-                "whisper-large-v3",
                 "groq",
             )),
             _ => None,
         };
         if kind == "transcribe"
-            && let Some((minimum_seconds, usd_micros_per_hour, default_model, default_provider)) =
-                transcription_pricing
+            && let Some((minimum_seconds, usd_micros_per_hour, default_provider)) =
+                legacy_transcription_pricing
             && !(provider == "openrouter" && reported.is_some())
         {
             let usd_micros =
@@ -521,14 +520,14 @@ pub fn calculate_billing_for_segments(segments: &Value) -> Result<Value, AiPrici
             total = total.add(ExactDecimal::from_ratio(i128::from(usd_micros), 0))?;
             model_breakdown.push(json!({
                 "kind": kind,
-                "model": if model.is_empty() { default_model } else { &model },
+                "model": model,
                 "usd_micros": usd_micros,
                 "audio_seconds": audio_seconds,
             }));
             segment_breakdown.push(json!({
                 "segment_index": segment_index,
                 "kind": kind,
-                "model": if model.is_empty() { default_model } else { &model },
+                "model": model,
                 "provider": if provider.is_empty() { default_provider } else { &provider },
                 "pricing_basis": "published_rate",
                 "cost_complete": audio_seconds > 0.0,
@@ -829,6 +828,42 @@ mod tests {
             "provider_reported"
         );
         assert_eq!(settled["model_breakdown"][0]["usd_micros"], 123);
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_legacy_groq_transcription_pricing_for_historical_segments()
+    -> Result<(), AiPricingError> {
+        let output = calculate_billing_for_segments(&json!([
+            {
+                "kind": "transcribe",
+                "model": "groq/whisper-large-v3",
+                "source": "groq",
+                "audio_seconds": 3
+            },
+            {
+                "kind": "transcribe",
+                "model": "whisper-large-v3",
+                "audio_seconds": 0
+            },
+            {"kind": "chat", "model": "unknown/model"}
+        ]))?;
+        assert_eq!(output["raw_usd_micros_exact"], "309");
+        assert_eq!(output["charged_credit_units"], 7);
+        assert_eq!(output["pricing_complete"], false);
+        assert_eq!(output["model_breakdown"][0]["usd_micros"], 309);
+        assert_eq!(output["model_breakdown"][1]["usd_micros"], 0);
+        assert_eq!(
+            output["segment_breakdown"][0]["pricing_basis"],
+            "published_rate"
+        );
+        assert_eq!(output["segment_breakdown"][0]["provider"], "groq");
+        assert_eq!(output["segment_breakdown"][1]["cost_complete"], false);
+        assert_eq!(output["segment_breakdown"][2]["pricing_basis"], "missing");
+        assert_eq!(
+            output["unsupported_notes"].as_array().map(Vec::len),
+            Some(2)
+        );
         Ok(())
     }
 

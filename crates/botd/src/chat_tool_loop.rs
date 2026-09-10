@@ -586,6 +586,7 @@ pub(crate) fn provider_error_kind(error: &OpenRouterChatError) -> String {
         OpenRouterChatError::RateLimited { .. } => "rate_limited".to_owned(),
         OpenRouterChatError::Http { status_code, .. } => format!("http_{status_code}"),
         OpenRouterChatError::InvalidJson(_) => "invalid_json".to_owned(),
+        OpenRouterChatError::ResponseTooLarge => "response_too_large".to_owned(),
         OpenRouterChatError::MalformedResponse => "malformed_response".to_owned(),
         OpenRouterChatError::IncompleteStream => "incomplete_stream".to_owned(),
         OpenRouterChatError::Stream(_) => "stream_consumer_or_provider".to_owned(),

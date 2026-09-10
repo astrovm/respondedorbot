@@ -206,6 +206,20 @@ fn transcription_result(
         .filter(|value| value.is_finite() && *value > 0.0)
         .unwrap_or(audio_seconds)
         .max(0.0);
+    let mut metadata = Map::from_iter([
+        ("file_id".to_owned(), json!(file_id)),
+        ("cache_hit".to_owned(), json!(false)),
+        ("provider".to_owned(), json!("openrouter")),
+    ]);
+    if let Some(generation_id) = response
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("x-generation-id"))
+        .map(|(_, value)| value)
+        .filter(|value| !value.is_empty())
+    {
+        metadata.insert("provider_generation_id".to_owned(), json!(generation_id));
+    }
     Ok(MediaProviderResult {
         text,
         billing_segment: json!({
@@ -214,11 +228,7 @@ fn transcription_result(
             "usage": usage,
             "audio_seconds": audio_seconds,
             "source": "openrouter",
-            "metadata": {
-                "file_id": file_id,
-                "cache_hit": false,
-                "provider": "openrouter",
-            }
+            "metadata": metadata
         }),
     })
 }
@@ -394,7 +404,10 @@ mod tests {
             request: RefCell::new(None),
             response: HttpResponse {
                 status_code: 200,
-                headers: BTreeMap::new(),
+                headers: BTreeMap::from([(
+                    "x-generation-id".to_owned(),
+                    "synthetic-generation".to_owned(),
+                )]),
                 body: json!({
                     "text": "spoken words",
                     "model": "resolved/model",
@@ -423,6 +436,10 @@ mod tests {
         assert_eq!(result.billing_segment["usage"]["cost"], "0.0000903");
         assert_eq!(result.billing_segment["source"], "openrouter");
         assert_eq!(result.billing_segment["metadata"]["provider"], "openrouter");
+        assert_eq!(
+            result.billing_segment["metadata"]["provider_generation_id"],
+            "synthetic-generation"
+        );
         let body: Value = serde_json::from_str(
             &transport
                 .request

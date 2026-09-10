@@ -41,7 +41,7 @@ Edit `.env` and set these values:
 | `TELEGRAM_USERNAME` | Bot username, with or without `@` |
 | `SUPABASE_POSTGRES_URL` | PostgreSQL database URL |
 | `COINMARKETCAP_KEY` | Crypto market data |
-| `OPENROUTER_API_KEY` | AI chat, vision, summaries, and fallback |
+| `OPENROUTER_API_KEY` | AI chat, vision, summaries, and audio transcription |
 
 Create both `workspace/SOUL.md` and `workspace/RULES.md` with nonempty text.
 These files are the only source of the bot’s personality and response rules.

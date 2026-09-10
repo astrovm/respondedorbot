@@ -10,9 +10,8 @@ use bot_core::ai_prompt::{
     RetrievedMessage, build_conversation_prompt, build_system_prompt,
 };
 use bot_core::ai_reserve::{
-    EstimatedMessage, TokenEstimateValue, VISION_OUTPUT_TOKEN_LIMIT, chat_output_token_limit,
+    EstimatedMessage, TokenEstimateValue, chat_output_token_limit,
     estimate_chat_reserve_credit_units_with_pricing,
-    estimate_vision_reserve_credit_units_with_pricing,
 };
 use bot_core::ai_response_cleanup::cleanup_response;
 use bot_core::ai_usage::stable_provider_segment_id;
@@ -602,14 +601,7 @@ where
                 crate::native_ai::VISION_MODEL,
                 self.openrouter_pricing.as_deref(),
             )?;
-            estimate_vision_reserve_credit_units_with_pricing(
-                "Describe what you see in this image in detail.",
-                0,
-                1_200,
-                VISION_OUTPUT_TOKEN_LIMIT,
-                &pricing,
-            )
-            .map_err(|error| error.to_string())?
+            crate::media::estimate_standard_vision_reserve_credit_units(&pricing)?
         };
         let admission = self.reserve(
             &input,
