@@ -12,7 +12,7 @@ use bot_core::ai_prompt::{
 use bot_core::ai_reserve::{
     EstimatedMessage, TokenEstimateValue, VISION_OUTPUT_TOKEN_LIMIT, chat_output_token_limit,
     estimate_chat_reserve_credit_units_with_pricing, estimate_transcription_reserve_credit_units,
-    estimate_vision_reserve_credit_units,
+    estimate_vision_reserve_credit_units_with_pricing,
 };
 use bot_core::ai_response_cleanup::cleanup_response;
 use bot_core::ai_usage::stable_provider_segment_id;
@@ -594,13 +594,19 @@ where
             });
         let admission_kind = selected.map_or(MediaKind::Image, |(kind, _, _)| kind);
         let admission_amount = match admission_kind {
-            MediaKind::Image => estimate_vision_reserve_credit_units(
-                "Describe what you see in this image in detail.",
-                0,
-                1_200,
-                VISION_OUTPUT_TOKEN_LIMIT,
-                crate::native_ai::VISION_MODEL,
-            ),
+            MediaKind::Image => {
+                let pricing = crate::native_ai::reservation_pricing_for_model(
+                    crate::native_ai::VISION_MODEL,
+                    self.openrouter_pricing.as_deref(),
+                )?;
+                estimate_vision_reserve_credit_units_with_pricing(
+                    "Describe what you see in this image in detail.",
+                    0,
+                    1_200,
+                    VISION_OUTPUT_TOKEN_LIMIT,
+                    &pricing,
+                )
+            }
             MediaKind::Audio => estimate_transcription_reserve_credit_units(
                 input.audio_duration_seconds.unwrap_or(1.0),
             ),
@@ -1760,24 +1766,14 @@ fn estimate_reserve(
     pricing: Option<&OpenRouterPricingCache>,
 ) -> Result<i64, String> {
     let estimated = messages.iter().map(estimated_message).collect::<Vec<_>>();
-    if pricing.is_some() || model.split(':').next() == Some(crate::native_ai::PRIMARY_CHAT_MODEL) {
-        let pricing = crate::native_ai::reservation_pricing_for_model(model, pricing)?;
-        return estimate_chat_reserve_credit_units_with_pricing(
-            None,
-            &estimated,
-            Some(chat_output_token_limit(model)),
-            SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE,
-            model,
-            &pricing,
-        )
-        .map_err(|error| error.to_string());
-    }
-    bot_core::ai_reserve::estimate_chat_reserve_credit_units(
+    let pricing = crate::native_ai::reservation_pricing_for_model(model, pricing)?;
+    estimate_chat_reserve_credit_units_with_pricing(
         None,
         &estimated,
         Some(chat_output_token_limit(model)),
         SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE,
         model,
+        &pricing,
     )
     .map_err(|error| error.to_string())
 }
