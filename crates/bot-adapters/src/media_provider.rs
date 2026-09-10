@@ -35,6 +35,7 @@ pub struct VisionRequest<'a> {
     pub image_bytes: &'a [u8],
     pub image_mime: &'a str,
     pub max_tokens: u64,
+    pub price_ceiling: Option<(f64, f64)>,
     pub file_id: Option<&'a str>,
 }
 
@@ -207,6 +208,9 @@ pub fn describe_image_with<T: OpenRouterTransport>(
     ];
     let mut request = ChatCompletionRequest::new(vision.model, messages);
     request.max_tokens = Some(vision.max_tokens);
+    if let Some((prompt, completion)) = vision.price_ceiling {
+        request.set_price_ceiling(prompt, completion);
+    }
     let completion = complete_with(transport, vision.api_key, vision.base_url, &request)?;
     result_from_completion("vision", completion, "openrouter", vision.file_id, None)
 }
@@ -216,6 +220,7 @@ pub fn transcribe_audio_openrouter_with<T: OpenRouterTransport>(
     api_key: &str,
     base_url: &str,
     model: &str,
+    price_ceiling: Option<(f64, f64)>,
     audio_bytes: &[u8],
     file_id: Option<&str>,
 ) -> Result<MediaProviderResult, MediaProviderError> {
@@ -240,6 +245,9 @@ pub fn transcribe_audio_openrouter_with<T: OpenRouterTransport>(
     };
     let mut request = ChatCompletionRequest::new(model, vec![message]);
     request.max_tokens = Some(4_096);
+    if let Some((prompt, completion)) = price_ceiling {
+        request.set_price_ceiling(prompt, completion);
+    }
     let completion = complete_with(transport, api_key, base_url, &request)?;
     result_from_completion("transcribe", completion, "openrouter", file_id, Some(0.0))
 }
@@ -492,6 +500,7 @@ mod tests {
                 image_bytes: b"image",
                 image_mime: "image/webp",
                 max_tokens: 500,
+                price_ceiling: None,
                 file_id: Some("file-1"),
             },
         );
@@ -529,6 +538,7 @@ mod tests {
             "key",
             "https://synthetic.invalid/api/v1",
             "requested/model",
+            None,
             b"OggS synthetic",
             Some("audio-1"),
         );
