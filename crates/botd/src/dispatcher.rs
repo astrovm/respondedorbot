@@ -715,6 +715,35 @@ pub struct TokenSignalLoad {
     pub diagnostics: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenSignalPhotoFailure {
+    HistoryUnavailable,
+    DeliveryFailed,
+    DeliveryUnconfirmed,
+}
+
+struct TokenSignalPhotoRequest<'a> {
+    signal: &'a TokenSignal,
+    signal_id: &'a str,
+    chat_id: ChatId,
+    reply_to_message_id: Option<MessageId>,
+    timeframe: Option<&'a str>,
+    locale: bot_core::locale::Locale,
+    timestamp: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TokenSignalPhotoDelivery {
+    Sent {
+        caption: String,
+        message_id: MessageId,
+    },
+    Failed {
+        caption: String,
+        failure: TokenSignalPhotoFailure,
+    },
+}
+
 pub trait TokenSignalSource {
     fn load(&mut self, query: &SignalQuery) -> TokenSignalLoad;
 
@@ -2071,6 +2100,97 @@ where
         }
     }
 
+    fn render_token_signal_photo(
+        &mut self,
+        signal: &TokenSignal,
+        timeframe: Option<&str>,
+        timestamp: i64,
+    ) -> Result<Vec<u8>, String> {
+        self.token_signal_source.as_mut().map_or_else(
+            || Err("native token-signal source disappeared".to_owned()),
+            |source| source.render_period_photo(signal, timeframe.unwrap_or("24h"), timestamp),
+        )
+    }
+
+    fn try_send_token_signal_photo(
+        &mut self,
+        request: TokenSignalPhotoRequest<'_>,
+    ) -> TokenSignalPhotoDelivery {
+        let TokenSignalPhotoRequest {
+            signal,
+            signal_id,
+            chat_id,
+            reply_to_message_id,
+            timeframe,
+            locale,
+            timestamp,
+        } = request;
+        let caption = format_signal_caption_for_period(signal, timestamp, timeframe);
+        let photo = match self.render_token_signal_photo(signal, timeframe, timestamp) {
+            Ok(photo) => photo,
+            Err(_) => {
+                return TokenSignalPhotoDelivery::Failed {
+                    caption,
+                    failure: TokenSignalPhotoFailure::HistoryUnavailable,
+                };
+            }
+        };
+        match self.actions.try_photo(TelegramAction::SendPhoto {
+            chat_id,
+            photo: photo.into(),
+            reply_to_message_id,
+            caption: caption.clone(),
+            parse_mode: Some(ParseMode::Html),
+            reply_markup: Some(build_signal_keyboard_localized(
+                signal_id,
+                &signal.token,
+                &signal.pair,
+                locale,
+            )),
+        }) {
+            Ok(Some(receipt)) => match receipt.message_id {
+                Some(message_id) => TokenSignalPhotoDelivery::Sent {
+                    caption,
+                    message_id,
+                },
+                None => TokenSignalPhotoDelivery::Failed {
+                    caption,
+                    failure: TokenSignalPhotoFailure::DeliveryUnconfirmed,
+                },
+            },
+            Ok(None) => TokenSignalPhotoDelivery::Failed {
+                caption,
+                failure: TokenSignalPhotoFailure::DeliveryUnconfirmed,
+            },
+            Err(_) => TokenSignalPhotoDelivery::Failed {
+                caption,
+                failure: TokenSignalPhotoFailure::DeliveryFailed,
+            },
+        }
+    }
+
+    fn token_signal_state(
+        signal: &TokenSignal,
+        chart_period: Option<String>,
+        chat_id: i64,
+        message_id: MessageId,
+        source_message_id: i64,
+        requester_id: i64,
+    ) -> SignalState {
+        SignalState {
+            chart_period,
+            chat_id: chat_id.to_string(),
+            message_id: message_id.0,
+            source_message_id,
+            requester_id: requester_id.to_string(),
+            chain_id: signal.token.chain_id.clone(),
+            network: signal.token.network.clone(),
+            tag: signal.token.tag.clone(),
+            address: signal.token.address.clone(),
+            last_refresh_at: None,
+        }
+    }
+
     fn dispatch_token_signal_loaded_message(
         &mut self,
         message: &IncomingMessage,
@@ -2088,26 +2208,58 @@ where
         let Some(signal) = signal else {
             return Ok(None);
         };
-        let caption = format_signal_caption_for_period(&signal, timestamp, timeframe);
-        let photo = match self
-            .token_signal_source
-            .as_mut()
-            .and_then(|source| match timeframe {
-                Some(period) => source.render_period_photo(&signal, period, timestamp).ok(),
-                None => source.render_period_photo(&signal, "24h", timestamp).ok(),
-            }) {
-            Some(photo) => photo,
-            None => {
-                self.state_diagnostics.push(format!(
-                    "token signal photo failed chat_id={} query={}",
+        let signal_id = stable_signal_id(chat_id.0, message_id.0, sender_id.0, timestamp);
+        match self.try_send_token_signal_photo(TokenSignalPhotoRequest {
+            signal: &signal,
+            signal_id: &signal_id,
+            chat_id,
+            reply_to_message_id: Some(message_id),
+            timeframe,
+            locale,
+            timestamp,
+        }) {
+            TokenSignalPhotoDelivery::Sent {
+                caption,
+                message_id: sent_message_id,
+            } => {
+                self.record_price_delivery(message, &caption, Some(sent_message_id), timestamp);
+                let state = Self::token_signal_state(
+                    &signal,
+                    timeframe.map(str::to_owned),
                     chat_id.0,
-                    match query {
-                        SignalQuery::Address(token) => token.address.as_str(),
-                        SignalQuery::Symbol(symbol) => symbol,
-                        SignalQuery::Slug(slug) => slug,
+                    sent_message_id,
+                    message_id.0,
+                    sender_id.0,
+                );
+                self.save_token_signal_state(&signal_id, &state);
+            }
+            TokenSignalPhotoDelivery::Failed { caption, failure } => {
+                match failure {
+                    TokenSignalPhotoFailure::HistoryUnavailable => {
+                        self.state_diagnostics.push(format!(
+                            "token signal photo failed chat_id={} query={}",
+                            chat_id.0,
+                            match query {
+                                SignalQuery::Address(token) => token.address.as_str(),
+                                SignalQuery::Symbol(symbol) => symbol,
+                                SignalQuery::Slug(slug) => slug,
+                            }
+                        ));
                     }
-                ));
-                let reply_text = {
+                    TokenSignalPhotoFailure::DeliveryFailed => self
+                        .state_diagnostics
+                        .push(format!(
+                            "token signal photo delivery failed chat_id={} signal_id={signal_id}",
+                            chat_id.0
+                        )),
+                    TokenSignalPhotoFailure::DeliveryUnconfirmed => self
+                        .state_diagnostics
+                        .push(format!(
+                            "token signal photo delivery was unconfirmed chat_id={} signal_id={signal_id}",
+                            chat_id.0
+                        )),
+                }
+                let reply_text = if failure == TokenSignalPhotoFailure::HistoryUnavailable {
                     let period = timeframe.unwrap_or("24h");
                     let unavailable = match locale {
                         bot_core::locale::Locale::Es => {
@@ -2118,6 +2270,8 @@ where
                         }
                     };
                     format!("{caption}\n{unavailable}")
+                } else {
+                    caption
                 };
                 let mut reply = SendMessage::new(chat_id, &reply_text);
                 reply.reply_to_message_id = Some(message_id);
@@ -2127,69 +2281,8 @@ where
                     .execute(TelegramAction::SendMessage(reply))
                     .map_err(DispatchError::Action)?;
                 self.record_price_delivery(message, &reply_text, receipt.message_id, timestamp);
-                return Ok(Some(DispatchOutcome::Handled));
             }
-        };
-        let signal_id = stable_signal_id(chat_id.0, message_id.0, sender_id.0, timestamp);
-        let receipt = match self.actions.try_photo(TelegramAction::SendPhoto {
-            chat_id,
-            photo: photo.into(),
-            reply_to_message_id: Some(message_id),
-            caption: caption.clone(),
-            parse_mode: Some(ParseMode::Html),
-            reply_markup: Some(build_signal_keyboard_localized(
-                &signal_id,
-                &signal.token,
-                &signal.pair,
-                locale,
-            )),
-        }) {
-            Ok(Some(receipt)) => receipt,
-            Ok(None) | Err(_) => {
-                self.state_diagnostics.push(format!(
-                    "token signal photo delivery failed chat_id={} signal_id={signal_id}",
-                    chat_id.0
-                ));
-                let mut reply = SendMessage::new(chat_id, &caption);
-                reply.reply_to_message_id = Some(message_id);
-                reply.parse_mode = Some(ParseMode::Html);
-                let receipt = self
-                    .actions
-                    .execute(TelegramAction::SendMessage(reply))
-                    .map_err(DispatchError::Action)?;
-                self.record_price_delivery(message, &caption, receipt.message_id, timestamp);
-                return Ok(Some(DispatchOutcome::Handled));
-            }
-        };
-        let Some(sent_message_id) = receipt.message_id else {
-            self.state_diagnostics.push(format!(
-                "token signal photo delivery was unconfirmed chat_id={} signal_id={signal_id}",
-                chat_id.0
-            ));
-            let mut reply = SendMessage::new(chat_id, &caption);
-            reply.reply_to_message_id = Some(message_id);
-            reply.parse_mode = Some(ParseMode::Html);
-            let receipt = self
-                .actions
-                .execute(TelegramAction::SendMessage(reply))
-                .map_err(DispatchError::Action)?;
-            self.record_price_delivery(message, &caption, receipt.message_id, timestamp);
-            return Ok(Some(DispatchOutcome::Handled));
-        };
-        self.record_price_delivery(message, &caption, Some(sent_message_id), timestamp);
-        let state = SignalState {
-            chart_period: timeframe.map(str::to_owned),
-            chat_id: chat_id.0.to_string(),
-            message_id: sent_message_id.0,
-            source_message_id: message_id.0,
-            requester_id: sender_id.0.to_string(),
-            chain_id: signal.token.chain_id.clone(),
-            network: signal.token.network.clone(),
-            tag: signal.token.tag.clone(),
-            address: signal.token.address.clone(),
-            last_refresh_at: None,
-        };
-        self.save_token_signal_state(&signal_id, &state);
+        }
         Ok(Some(DispatchOutcome::Handled))
     }
 
@@ -2351,13 +2444,8 @@ where
             }
             return Ok(DispatchOutcome::Handled);
         };
-        let photo = self.token_signal_source.as_mut().map_or_else(
-            || Err("native token-signal source disappeared".to_owned()),
-            |source| match state.chart_period.as_deref() {
-                Some(period) => source.render_period_photo(&signal, period, timestamp),
-                None => source.render_period_photo(&signal, "24h", timestamp),
-            },
-        );
+        let photo =
+            self.render_token_signal_photo(&signal, state.chart_period.as_deref(), timestamp);
         let edited = match photo {
             Ok(photo) => match self.actions.try_edit(TelegramAction::EditMessagePhoto {
                 chat_id: ChatId(chat_id),
@@ -2632,9 +2720,7 @@ where
         }
         let mut delivered = false;
         let mut delivered_text = None;
-        if !load.no_assets_found
-            && let Some(chart) = load.chart.as_ref()
-        {
+        if let Some(chart) = load.chart.as_ref() {
             let rendered = match self
                 .market_price_source
                 .as_mut()
@@ -2670,74 +2756,54 @@ where
                         .push("market chart photo delivery failed".to_owned()),
                 }
             }
-            if !delivered
-                && let Some(token) = chart.token.as_ref()
-                && let Some(source) = self.token_signal_source.as_mut()
-            {
-                let token_load = source.load_token(token);
-                self.state_diagnostics.extend(token_load.diagnostics);
-                if let Some(signal) = token_load.signal {
-                    let signal_id = stable_signal_id(
-                        chat_id_value,
-                        context.message_id,
-                        stored.requester_id,
-                        timestamp,
-                    );
-                    let photo = self.token_signal_source.as_mut().and_then(|source| {
-                        match stored.selection.timeframe.as_deref() {
-                            Some(period) => {
-                                source.render_period_photo(&signal, period, timestamp).ok()
-                            }
-                            None => source.render_period_photo(&signal, "24h", timestamp).ok(),
-                        }
-                    });
-                    if let Some(photo) = photo {
-                        let caption = format_signal_caption_for_period(
-                            &signal,
+            if !delivered && let Some(token) = chart.token.as_ref() {
+                let token_load = self
+                    .token_signal_source
+                    .as_mut()
+                    .map(|source| source.load_token(token));
+                if let Some(token_load) = token_load {
+                    self.state_diagnostics.extend(token_load.diagnostics);
+                    if let Some(signal) = token_load.signal {
+                        let signal_id = stable_signal_id(
+                            chat_id_value,
+                            context.message_id,
+                            stored.requester_id,
                             timestamp,
-                            stored.selection.timeframe.as_deref(),
                         );
-                        match self.actions.try_photo(TelegramAction::SendPhoto {
+                        match self.try_send_token_signal_photo(TokenSignalPhotoRequest {
+                            signal: &signal,
+                            signal_id: &signal_id,
                             chat_id: ChatId(chat_id_value),
-                            photo: photo.into(),
                             reply_to_message_id,
-                            caption: caption.clone(),
-                            parse_mode: Some(ParseMode::Html),
-                            reply_markup: Some(build_signal_keyboard_localized(
-                                &signal_id,
-                                &signal.token,
-                                &signal.pair,
-                                locale,
-                            )),
+                            timeframe: stored.selection.timeframe.as_deref(),
+                            locale,
+                            timestamp,
                         }) {
-                            Ok(Some(receipt)) if receipt.message_id.is_some() => {
-                                let sent_message_id = receipt.message_id;
+                            TokenSignalPhotoDelivery::Sent {
+                                caption,
+                                message_id,
+                            } => {
                                 delivered = true;
-                                delivered_text = Some((caption, sent_message_id));
-                                if let Some(sent_message_id) = sent_message_id {
-                                    let state = SignalState {
-                                        chart_period: stored.selection.timeframe.clone(),
-                                        chat_id: chat_id_value.to_string(),
-                                        message_id: sent_message_id.0,
-                                        source_message_id: stored
-                                            .source_message_id
-                                            .unwrap_or(context.message_id),
-                                        requester_id: stored.requester_id.to_string(),
-                                        chain_id: signal.token.chain_id.clone(),
-                                        network: signal.token.network.clone(),
-                                        tag: signal.token.tag.clone(),
-                                        address: signal.token.address.clone(),
-                                        last_refresh_at: None,
-                                    };
-                                    self.save_token_signal_state(&signal_id, &state);
-                                }
+                                delivered_text = Some((caption, Some(message_id)));
+                                let state = Self::token_signal_state(
+                                    &signal,
+                                    stored.selection.timeframe.clone(),
+                                    chat_id_value,
+                                    message_id,
+                                    stored.source_message_id.unwrap_or(context.message_id),
+                                    stored.requester_id,
+                                );
+                                self.save_token_signal_state(&signal_id, &state);
                             }
-                            Ok(_) => self
-                                .state_diagnostics
-                                .push("token chart photo delivery was unconfirmed".to_owned()),
-                            Err(_) => self
-                                .state_diagnostics
-                                .push("token chart photo delivery failed".to_owned()),
+                            TokenSignalPhotoDelivery::Failed { failure, .. } => match failure {
+                                TokenSignalPhotoFailure::HistoryUnavailable => {}
+                                TokenSignalPhotoFailure::DeliveryUnconfirmed => self
+                                    .state_diagnostics
+                                    .push("token chart photo delivery was unconfirmed".to_owned()),
+                                TokenSignalPhotoFailure::DeliveryFailed => self
+                                    .state_diagnostics
+                                    .push("token chart photo delivery failed".to_owned()),
+                            },
                         }
                     }
                 }
@@ -2836,42 +2902,28 @@ where
             return Ok(DispatchOutcome::Handled);
         };
         let timeframe = stored.selection.timeframe.as_deref();
-        let caption = format_signal_caption_for_period(&signal, timestamp, timeframe);
-        let photo = self
-            .token_signal_source
-            .as_mut()
-            .and_then(|source| match timeframe {
-                Some(period) => source.render_period_photo(&signal, period, timestamp).ok(),
-                None => source.render_period_photo(&signal, "24h", timestamp).ok(),
-            });
         let signal_id = stable_signal_id(
             chat_id_value,
             context.message_id,
             stored.requester_id,
             timestamp,
         );
-        let (delivered, delivered_text, sent_message_id) = if let Some(photo) = photo {
-            match self.actions.try_photo(TelegramAction::SendPhoto {
+        let (delivered, delivered_text, sent_message_id) =
+            match self.try_send_token_signal_photo(TokenSignalPhotoRequest {
+                signal: &signal,
+                signal_id: &signal_id,
                 chat_id: ChatId(chat_id_value),
-                photo: photo.into(),
                 reply_to_message_id,
-                caption: caption.clone(),
-                parse_mode: Some(ParseMode::Html),
-                reply_markup: Some(build_signal_keyboard_localized(
-                    &signal_id,
-                    &signal.token,
-                    &signal.pair,
-                    locale,
-                )),
+                timeframe,
+                locale,
+                timestamp,
             }) {
-                Ok(Some(receipt)) if receipt.message_id.is_some() => {
-                    (true, caption.clone(), receipt.message_id)
-                }
-                Ok(_) | Err(_) => (false, caption.clone(), None),
-            }
-        } else {
-            (false, caption.clone(), None)
-        };
+                TokenSignalPhotoDelivery::Sent {
+                    caption,
+                    message_id,
+                } => (true, caption, Some(message_id)),
+                TokenSignalPhotoDelivery::Failed { caption, .. } => (false, caption, None),
+            };
         if delivered {
             self.record_market_callback_delivery(
                 context,
@@ -2881,22 +2933,18 @@ where
                 timestamp,
             );
             if let Some(sent_message_id) = sent_message_id {
-                let state = SignalState {
-                    chart_period: stored.selection.timeframe.clone(),
-                    chat_id: chat_id_value.to_string(),
-                    message_id: sent_message_id.0,
-                    source_message_id: stored.source_message_id.unwrap_or(context.message_id),
-                    requester_id: stored.requester_id.to_string(),
-                    chain_id: signal.token.chain_id.clone(),
-                    network: signal.token.network.clone(),
-                    tag: signal.token.tag.clone(),
-                    address: signal.token.address.clone(),
-                    last_refresh_at: None,
-                };
+                let state = Self::token_signal_state(
+                    &signal,
+                    stored.selection.timeframe.clone(),
+                    chat_id_value,
+                    sent_message_id,
+                    stored.source_message_id.unwrap_or(context.message_id),
+                    stored.requester_id,
+                );
                 self.save_token_signal_state(&signal_id, &state);
             }
         } else {
-            let mut reply = SendMessage::new(ChatId(chat_id_value), &caption);
+            let mut reply = SendMessage::new(ChatId(chat_id_value), &delivered_text);
             reply.reply_to_message_id = reply_to_message_id;
             reply.parse_mode = Some(ParseMode::Html);
             let receipt = self
@@ -2905,7 +2953,7 @@ where
                 .map_err(DispatchError::Action)?;
             self.record_market_callback_delivery(
                 context,
-                &caption,
+                &delivered_text,
                 receipt.message_id,
                 command_name,
                 timestamp,
