@@ -873,7 +873,8 @@ mod tests {
                 &task("en"),
                 "task123:1000",
             )
-            .unwrap_err();
+            .err()
+            .unwrap_or_else(|| unreachable!());
         assert_eq!(failure.source, OpenRouterChatError::InvalidBaseUrl);
         assert!(failure.billing_segments.is_empty());
         assert!(provider.transport.requests.borrow().is_empty());

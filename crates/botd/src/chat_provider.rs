@@ -545,7 +545,9 @@ mod tests {
         .with_openrouter_pricing(pricing);
 
         let result = provider.stream_round(&messages(), &[], |_| Ok(()));
-        let error = result.unwrap_err();
+        let Some(error) = result.err() else {
+            unreachable!();
+        };
         assert_eq!(error.source, OpenRouterChatError::InvalidBaseUrl);
         assert!(error.partial.text.is_empty());
         assert!(provider.transport.requests.borrow().is_empty());
