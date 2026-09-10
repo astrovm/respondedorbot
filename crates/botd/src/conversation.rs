@@ -2633,7 +2633,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(prompt.contains("YOUTUBE VIDEO TRANSCRIPT:\nsynthetic transcript"));
-        assert_eq!(service.billing.reserves.len(), 2);
+        assert_eq!(service.billing.reserves.len(), 3);
         assert_eq!(
             service.billing.reserves[0].metadata["usage_tag"],
             "ai_response_base"
