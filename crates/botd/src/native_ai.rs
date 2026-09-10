@@ -557,9 +557,8 @@ impl<Store: TaskCreditStore> TaskBilling for PostgresTaskBilling<Store> {
                 name: TokenEstimateValue::Empty,
             })
             .collect::<Vec<_>>();
-        let pricing =
-            reservation_pricing_for_model(&self.model, self.pricing.as_deref())
-                .map_err(NativeTaskBillingError::Estimate)?;
+        let pricing = reservation_pricing_for_model(&self.model, self.pricing.as_deref())
+            .map_err(NativeTaskBillingError::Estimate)?;
         let chat_amount = estimate_chat_reserve_credit_units_with_pricing(
             None,
             &estimated_messages,
