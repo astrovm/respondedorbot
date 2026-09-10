@@ -656,11 +656,8 @@ fn test_pricing_cache() -> (Arc<OpenRouterPricingCache>, thread::JoinHandle<()>)
             .write_all(response.as_bytes())
             .unwrap_or_else(|_| unreachable!());
     });
-    let cache = OpenRouterPricingCache::new(
-        "synthetic-key",
-        &format!("http://{address}"),
-    )
-    .unwrap_or_else(|_| unreachable!());
+    let cache = OpenRouterPricingCache::new("synthetic-key", &format!("http://{address}"))
+        .unwrap_or_else(|_| unreachable!());
     (Arc::new(cache), server)
 }
 
@@ -733,9 +730,7 @@ fn compaction_scheduler_refunds_every_failed_enqueue_shape() {
     )
     .with_openrouter_pricing(pricing);
     assert_eq!(denied.schedule(plan(), schedule_context()), Ok(false));
-    pricing_server
-        .join()
-        .unwrap_or_else(|_| unreachable!());
+    pricing_server.join().unwrap_or_else(|_| unreachable!());
 }
 
 #[derive(Clone, Default)]
