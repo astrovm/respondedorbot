@@ -1,9 +1,9 @@
 //! Production adapters for the native media pipeline.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -400,10 +400,7 @@ impl<Transport> OpenRouterVisionProvider<Transport> {
     }
 
     #[must_use]
-    pub fn with_openrouter_pricing(
-        mut self,
-        pricing: Arc<OpenRouterPricingCache>,
-    ) -> Self {
+    pub fn with_openrouter_pricing(mut self, pricing: Arc<OpenRouterPricingCache>) -> Self {
         self.pricing = Some(pricing);
         self
     }
@@ -487,10 +484,7 @@ impl<Groq, OpenRouter> FallbackTranscriptionProvider<Groq, OpenRouter> {
     }
 
     #[must_use]
-    pub fn with_openrouter_pricing(
-        mut self,
-        pricing: Arc<OpenRouterPricingCache>,
-    ) -> Self {
+    pub fn with_openrouter_pricing(mut self, pricing: Arc<OpenRouterPricingCache>) -> Self {
         self.pricing = Some(pricing);
         self
     }
