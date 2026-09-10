@@ -725,7 +725,7 @@ mod tests {
             },
             {"kind": "summary", "source": "cache"}
         ]))?;
-        assert_eq!(output["raw_usd_micros_exact"], "2382.36330000");
+        assert_eq!(output["raw_usd_micros_exact"], "2382.3633000000");
         assert_eq!(output["charged_credit_units"], 48);
         assert_eq!(output["pricing_complete"], true);
         assert_eq!(output["model_breakdown"][0]["usd_micros"], 0);
