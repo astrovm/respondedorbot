@@ -2123,7 +2123,9 @@ mod tests {
         }
     }
 
-    struct StickerMedia;
+    struct StickerMedia {
+        fail_execute: bool,
+    }
 
     impl MediaRuntime for StickerMedia {
         fn estimate_reserve_credit_units(
@@ -2155,6 +2157,9 @@ mod tests {
             prompt: &str,
         ) -> Result<MediaExecution, String> {
             assert!(prompt.starts_with("Describe this sticker"));
+            if self.fail_execute {
+                return Err("synthetic cached media failure".to_owned());
+            }
             Ok(MediaExecution {
                 kind: prepared.kind(),
                 file_id: "sticker-1".to_owned(),
@@ -2352,6 +2357,7 @@ mod tests {
     struct Billing {
         decisions: VecDeque<ReserveDecision>,
         reserves: Vec<ReserveRequest>,
+        reserve_error: Option<String>,
         segments: Vec<ProviderSegmentRequest>,
         settlements: Vec<SettlementRequest>,
         released_operations: Vec<String>,
@@ -2365,6 +2371,9 @@ mod tests {
     impl ConversationBilling for Billing {
         fn reserve(&mut self, request: ReserveRequest) -> Result<ReserveDecision, String> {
             self.reserves.push(request);
+            if let Some(error) = &self.reserve_error {
+                return Err(error.clone());
+            }
             Ok(self.decisions.pop_front().unwrap_or(ReserveDecision {
                 authorized: true,
                 user_balance: 1_000,
@@ -3215,47 +3224,56 @@ mod tests {
     }
 
     #[test]
-    fn explicit_media_command_preserves_reply_help_and_refunds_after_delivery() {
+    fn explicit_media_command_without_media_returns_reply_help_without_reserving() {
         let mut service = conversation(Vec::new(), Billing::default()).with_media(Box::new(Media));
         let preparation = service.prepare_media_command(input());
         let Ok(Some(AiPreparation::Reply {
             text,
-            completion_id: Some(completion_id),
+            completion_id: None,
             ..
         })) = preparation
         else {
-            return;
+            unreachable!();
         };
-        assert_eq!(
-            text,
-            "reply to audio, video, an image, sticker, GIF, or YouTube link and I will process it"
-        );
-        assert_eq!(
-            service.complete_delivery(AiDelivery {
-                completion_id,
-                delivered: true,
-                sent_message_id: Some(MessageId(99)),
-            }),
-            Ok(())
-        );
-        assert_eq!(service.billing.settlements[0].actual_credit_units, 0);
+        assert_eq!(text, media_command_reply_required(Locale::En));
+        assert!(service.billing.reserves.is_empty());
+        assert!(service.billing.settlements.is_empty());
     }
 
     #[test]
     fn explicit_sticker_command_uses_sticker_copy_and_sanitizes_cached_text() {
         let mut service =
-            conversation(Vec::new(), Billing::default()).with_media(Box::new(StickerMedia));
+            conversation(Vec::new(), Billing::default()).with_media(Box::new(StickerMedia {
+                fail_execute: false,
+            }));
         let mut request = input();
         request.command = "/describe".to_owned();
         request.has_reply = true;
         request.visual_media_kind = Some("sticker".to_owned());
         request.photo_file_id = Some("sticker-1".to_owned());
-        let preparation = service.prepare_media_command(request);
+        let preparation = service.prepare_media_command(request.clone());
         assert!(matches!(
             preparation,
             Ok(Some(AiPreparation::Reply { ref text, .. }))
                 if text == "synthetic sticker"
         ));
+
+        let mut failed = conversation(Vec::new(), Billing::default())
+            .with_media(Box::new(StickerMedia { fail_execute: true }));
+        let preparation = failed
+            .prepare_media_command(request)
+            .unwrap_or_else(|_| unreachable!())
+            .unwrap_or_else(|| unreachable!());
+        assert!(matches!(
+            preparation,
+            AiPreparation::Reply {
+                completion_id: None,
+                ref diagnostics,
+                ..
+            } if diagnostics.iter().any(|value| value.contains("synthetic cached media failure"))
+        ));
+        assert!(failed.billing.reserves.is_empty());
+        assert!(failed.billing.settlements.is_empty());
     }
 
     #[test]
@@ -3395,6 +3413,31 @@ mod tests {
                 ..
             }))
         ));
+
+        let mut reserve_failure = conversation(
+            Vec::new(),
+            Billing {
+                reserve_error: Some("synthetic reserve failure".to_owned()),
+                ..Billing::default()
+            },
+        )
+        .with_media(Box::new(ConfigurableMedia {
+            prepare_error: None,
+            execute_error: None,
+            reserve_credit_units: 5,
+        }));
+        let mut reserve_input = input();
+        reserve_input.audio_file_id = Some("synthetic-audio".to_owned());
+        reserve_input.audio_duration_seconds = Some(1.0);
+        assert!(
+            reserve_failure
+                .prepare_media_command(reserve_input)
+                .is_err_and(|error| error == "synthetic reserve failure")
+        );
+        assert_eq!(
+            reserve_failure.billing.released_operations,
+            vec!["ai:42:7:88"]
+        );
 
         let mut provider_failure =
             conversation(Vec::new(), Billing::default()).with_media(Box::new(ConfigurableMedia {

@@ -2450,6 +2450,7 @@ mod tests {
     use bot_adapters::link_preview::{
         LinkPreviewTransport, PreviewFailure, PreviewRequest, PreviewResponse,
     };
+    use bot_adapters::openrouter_chat::OpenRouterPricingCache;
     use bot_adapters::polymarket::{
         HttpResponse as PolymarketHttpResponse, MidpointsRequest, PolymarketTransport,
         TransportFailureKind as PolymarketFailure,
@@ -3802,7 +3803,13 @@ mod tests {
             giphy_api_key: None,
             openrouter_api_key: Some("synthetic-openrouter-key".to_owned()),
             openrouter_base_url: Some("https://openrouter.example.test/v1".to_owned()),
-            openrouter_pricing: None,
+            openrouter_pricing: Some(Arc::new(
+                OpenRouterPricingCache::new(
+                    "synthetic-openrouter-key",
+                    "https://openrouter.example.test/v1",
+                )
+                .unwrap_or_else(|_| unreachable!("pricing cache construction")),
+            )),
             firecrawl_api_key: Some("synthetic-firecrawl-key".to_owned()),
             supadata_api_key: Some("synthetic-supadata-key".to_owned()),
             apify_api_key: Some("synthetic-apify-key".to_owned()),
