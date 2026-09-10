@@ -89,9 +89,7 @@ mod tests {
         assert!(reservation_token_pricing(GEMINI_FLASH_LITE_MODEL).is_some());
         assert!(openrouter_price_ceiling(GEMINI_FLASH_LITE_MODEL).is_some());
         assert!(published_token_pricing("", GEMINI_FLASH_LITE_MODEL).is_some());
-        assert!(
-            published_token_pricing("groq", &format!("{GROQ_CHAT_MODEL}:free")).is_some()
-        );
+        assert!(published_token_pricing("groq", &format!("{GROQ_CHAT_MODEL}:free")).is_some());
         assert!(published_token_pricing("other", GROQ_CHAT_MODEL).is_none());
         assert!(published_token_pricing("", DEEPSEEK_MODEL).is_none());
         assert!(reservation_token_pricing(DEEPSEEK_MODEL).is_none());
