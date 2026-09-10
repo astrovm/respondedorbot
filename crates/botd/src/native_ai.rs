@@ -1,11 +1,12 @@
 //! Concrete native AI and billing adapters for scheduled task execution.
 
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bot_adapters::billing_read::{AiChargeResult, BillingRepository};
 use bot_adapters::openrouter_chat::{
     ChatCompletion, ChatCompletionRequest, ChatMessage, ChatRole, OpenRouterChatError,
-    OpenRouterTransport, complete_with,
+    OpenRouterPricingCache, OpenRouterTransport, complete_with,
 };
 use bot_core::ai_pricing::calculate_billing_for_segments;
 use bot_core::ai_prompt::build_system_prompt;
