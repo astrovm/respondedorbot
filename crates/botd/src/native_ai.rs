@@ -61,6 +61,16 @@ pub fn reservation_pricing_for_model(
             output_per_million: 1_200_000,
         });
     }
+    #[cfg(test)]
+    if model.split(':').next() == Some(GEMINI_FLASH_LITE_MODEL) {
+        return Ok(TokenPricing {
+            input_per_million: 1_000_000,
+            cached_input_per_million: None,
+            cache_write_per_million: None,
+            audio_input_per_million: None,
+            output_per_million: 1_000_000,
+        });
+    }
     Err(format!("OpenRouter pricing is unavailable for {model}"))
 }
 
