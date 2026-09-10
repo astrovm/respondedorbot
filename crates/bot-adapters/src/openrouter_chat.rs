@@ -218,14 +218,13 @@ fn decimal_rate_to_usd_micros_per_million(value: &str) -> Option<i128> {
     if value.is_empty() || value.starts_with('-') {
         return None;
     }
-    let (mantissa, exponent) =
-        value
-            .find('e')
-            .or_else(|| value.find('E'))
-            .map_or((value, 0_i32), |position| {
-                let (mantissa, exponent) = value.split_at(position);
-                (mantissa, exponent[1..].parse::<i32>().unwrap_or(i32::MAX))
-            });
+    let (mantissa, exponent) = match value.find('e').or_else(|| value.find('E')) {
+        Some(position) => {
+            let (mantissa, exponent) = value.split_at(position);
+            (mantissa, exponent[1..].parse::<i32>().ok()?)
+        }
+        None => (value, 0),
+    };
     if !mantissa.contains('.') && mantissa.chars().all(|character| character.is_ascii_digit()) {
         let digits = mantissa.parse::<i128>().ok()?;
         return scale_decimal_rate(digits, 0, exponent);
@@ -247,7 +246,9 @@ fn decimal_rate_to_usd_micros_per_million(value: &str) -> Option<i128> {
 fn scale_decimal_rate(digits: i128, fraction_digits: i32, exponent: i32) -> Option<i128> {
     let scale = fraction_digits.checked_sub(exponent)?;
     if scale <= 0 {
-        return digits.checked_mul(10_i128.checked_pow(scale.unsigned_abs())?);
+        return digits
+            .checked_mul(10_i128.checked_pow(scale.unsigned_abs())?)?
+            .checked_mul(USD_MICROS_PER_MILLION_TOKENS);
     }
     let denominator = 10_i128.checked_pow(u32::try_from(scale).ok()?)?;
     let numerator = digits.checked_mul(USD_MICROS_PER_MILLION_TOKENS)?;
@@ -1186,9 +1187,81 @@ mod tests {
         assert_eq!(pricing.input_per_million, 300_000);
         assert_eq!(pricing.cached_input_per_million, Some(6_000));
         assert_eq!(pricing.output_per_million, 1_200_000);
+
+        let mut request =
+            ChatCompletionRequest::new(format!("{DEEPSEEK_MODEL}:free"), Vec::new());
+        cache
+            .apply_to_request(&mut request)
+            .unwrap_or_else(|_| unreachable!("apply catalog pricing"));
+        let request_body = serde_json::to_value(request).unwrap_or(Value::Null);
+        assert_eq!(request_body["provider"]["max_price"]["prompt"], 0.3);
+        assert_eq!(request_body["provider"]["max_price"]["completion"], 1.2);
+
         server
             .join()
             .unwrap_or_else(|_| unreachable!("catalog server"));
+    }
+
+    #[test]
+    fn fails_closed_when_catalog_has_no_model_pricing() {
+        let (base_url, server) = serve_once("200", "application/json", r#"{"data":[]}"#);
+        let cache = OpenRouterPricingCache::new("synthetic-key", &base_url)
+            .unwrap_or_else(|_| unreachable!("cache construction"));
+        let mut request = ChatCompletionRequest::new(DEEPSEEK_MODEL, Vec::new());
+        assert_eq!(
+            cache.apply_to_request(&mut request),
+            Err(OpenRouterChatError::MissingModelPricing {
+                model: DEEPSEEK_MODEL.to_owned()
+            })
+        );
+        server
+            .join()
+            .unwrap_or_else(|_| unreachable!("catalog server"));
+    }
+
+    #[test]
+    fn rejects_missing_keys_and_invalid_catalog_urls() {
+        let missing_key = OpenRouterPricingCache::new("", "https://openrouter.ai/api/v1")
+            .unwrap_or_else(|_| unreachable!("cache construction"));
+        assert_eq!(
+            missing_key.pricing(DEEPSEEK_MODEL),
+            Err(OpenRouterChatError::MissingApiKey)
+        );
+
+        let invalid_url = OpenRouterPricingCache::new("synthetic-key", "not-a-url")
+            .unwrap_or_else(|_| unreachable!("cache construction"));
+        assert_eq!(
+            invalid_url.pricing(DEEPSEEK_MODEL),
+            Err(OpenRouterChatError::InvalidBaseUrl)
+        );
+    }
+
+    #[test]
+    fn scales_decimal_catalog_rates_without_float_rounding() {
+        assert_eq!(
+            super::decimal_rate_to_usd_micros_per_million("1"),
+            Some(1_000_000_000_000)
+        );
+        assert_eq!(
+            super::decimal_rate_to_usd_micros_per_million("1e-6"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            super::decimal_rate_to_usd_micros_per_million("1e1"),
+            Some(10_000_000_000_000)
+        );
+        assert_eq!(
+            super::decimal_rate_to_usd_micros_per_million("+0.00000015"),
+            Some(150_000)
+        );
+        assert_eq!(
+            super::decimal_rate_to_usd_micros_per_million("-1"),
+            None
+        );
+        assert_eq!(
+            super::decimal_rate_to_usd_micros_per_million("not-a-rate"),
+            None
+        );
     }
 
     #[test]
