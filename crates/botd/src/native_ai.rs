@@ -1221,8 +1221,7 @@ mod tests {
             })),
             ..Store::default()
         };
-        let mut settled =
-            PostgresTaskBilling::new(settled_store, "deepseek/deepseek-v4.1-flash");
+        let mut settled = PostgresTaskBilling::new(settled_store, "deepseek/deepseek-v4.1-flash");
         assert_eq!(
             settled.reserve(&task("es"), "task123:1000", &[]),
             Ok(TaskReserveOutcome::AlreadySettled)
