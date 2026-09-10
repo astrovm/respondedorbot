@@ -191,10 +191,7 @@ impl<Files, Cache, Processor, Vision, Transcription>
     }
 
     #[must_use]
-    pub fn with_openrouter_pricing(
-        mut self,
-        pricing: Arc<OpenRouterPricingCache>,
-    ) -> Self {
+    pub fn with_openrouter_pricing(mut self, pricing: Arc<OpenRouterPricingCache>) -> Self {
         self.openrouter_pricing = Some(pricing);
         self
     }
