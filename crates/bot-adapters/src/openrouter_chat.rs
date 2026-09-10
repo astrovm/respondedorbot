@@ -889,8 +889,8 @@ mod tests {
         let request = ChatCompletionRequest::new(DEEPSEEK_MODEL, Vec::new());
         let body = serde_json::to_value(request).unwrap_or(Value::Null);
         assert!(body["provider"].get("sort").is_none());
-        assert_eq!(body["provider"]["max_price"]["prompt"], 0.13);
-        assert_eq!(body["provider"]["max_price"]["completion"], 0.28);
+        assert_eq!(body["provider"]["max_price"]["prompt"], 0.3);
+        assert_eq!(body["provider"]["max_price"]["completion"], 1.2);
 
         let unknown =
             serde_json::to_value(ChatCompletionRequest::new("synthetic/model", Vec::new()))
