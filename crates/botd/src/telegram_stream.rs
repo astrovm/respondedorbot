@@ -13,7 +13,6 @@ use crate::dispatcher::{ActionReceipt, ActionSink};
 const DEFAULT_MIN_EDIT_INTERVAL_SECONDS: f64 = 0.3;
 const DEFAULT_MIN_CHARS_BETWEEN_EDITS: usize = 15;
 const MAX_TRACE_HEAD_CHARS: usize = 800;
-const MAX_TOOL_OUTPUT_CHARS: usize = 1_200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamDelivery {
@@ -106,17 +105,18 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
             StreamAction::None => {}
             StreamAction::Send => {
                 self.send_attempted = true;
-                let receipt = self.actions.execute(self.send_action(&self.buffer))?;
+                let receipt = self.actions.execute(self.send_action(&self.buffer, true))?;
                 self.accept_send(receipt, now_seconds);
             }
-            StreamAction::Edit => self.try_edit(now_seconds),
+            StreamAction::Edit => self.try_edit(now_seconds, true),
         }
         Ok(())
     }
 
-    fn send_action(&self, text: &str) -> TelegramAction {
+    fn send_action(&self, text: &str, disable_web_page_preview: bool) -> TelegramAction {
         let mut message = SendMessage::new(self.chat_id, text);
         message.reply_to_message_id = Some(self.reply_to_message_id);
+        message.disable_web_page_preview = disable_web_page_preview;
         TelegramAction::SendMessage(message)
     }
 
@@ -126,23 +126,38 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
         self.last_edit_seconds = now_seconds;
     }
 
-    fn edit_action(&self, message_id: MessageId, text: &str) -> TelegramAction {
-        TelegramAction::EditMessage {
-            chat_id: self.chat_id,
-            message_id,
-            text: text.to_owned(),
-            reply_markup: None,
+    fn edit_action(
+        &self,
+        message_id: MessageId,
+        text: &str,
+        disable_web_page_preview: bool,
+    ) -> TelegramAction {
+        if disable_web_page_preview {
+            TelegramAction::EditMessageNoPreview {
+                chat_id: self.chat_id,
+                message_id,
+                text: text.to_owned(),
+                reply_markup: None,
+            }
+        } else {
+            TelegramAction::EditMessage {
+                chat_id: self.chat_id,
+                message_id,
+                text: text.to_owned(),
+                reply_markup: None,
+            }
         }
     }
 
-    fn try_edit(&mut self, now_seconds: f64) {
+    fn try_edit(&mut self, now_seconds: f64, disable_web_page_preview: bool) {
         let Some(message_id) = self.message_id else {
             return;
         };
-        match self
-            .actions
-            .try_edit(self.edit_action(message_id, &self.buffer))
-        {
+        match self.actions.try_edit(self.edit_action(
+            message_id,
+            &self.buffer,
+            disable_web_page_preview,
+        )) {
             Ok(true) => {
                 self.sent_text.clone_from(&self.buffer);
                 self.last_edit_seconds = now_seconds;
@@ -156,6 +171,7 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
         text: &str,
         now_seconds: f64,
         force: bool,
+        disable_web_page_preview: bool,
     ) -> Result<(), Actions::Error> {
         self.buffer = bot_core::telegram_actions::truncate_text(text);
         if self.buffer.trim().is_empty() {
@@ -163,7 +179,9 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
         }
         if self.message_id.is_none() && !self.send_attempted {
             self.send_attempted = true;
-            let receipt = self.actions.execute(self.send_action(&self.buffer))?;
+            let receipt = self
+                .actions
+                .execute(self.send_action(&self.buffer, disable_web_page_preview))?;
             self.accept_send(receipt, now_seconds);
         } else if self.message_id.is_some()
             && self.buffer != self.sent_text
@@ -179,13 +197,13 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
                     self.min_chars_between_edits,
                 ))
         {
-            self.try_edit(now_seconds);
+            self.try_edit(now_seconds, disable_web_page_preview);
         }
         Ok(())
     }
 
-    fn replace(&mut self, text: &str, force: bool) -> Result<(), Actions::Error> {
-        self.replace_snapshot(text, self.elapsed_seconds(), force)
+    fn replace_draft(&mut self, text: &str, force: bool) -> Result<(), Actions::Error> {
+        self.replace_snapshot(text, self.elapsed_seconds(), force, true)
     }
 
     pub fn finalize(
@@ -204,7 +222,7 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
                 self.send_attempted = true;
                 let receipt = self
                     .actions
-                    .execute(self.send_action(&plan.text))
+                    .execute(self.send_action(&plan.text, false))
                     .map_err(StreamFinalizeError::Action)?;
                 self.message_id = receipt.message_id;
                 self.sent_text = plan.text;
@@ -215,7 +233,7 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
                 };
                 match self
                     .actions
-                    .try_edit(self.edit_action(message_id, &plan.text))
+                    .try_edit(self.edit_action(message_id, &plan.text, false))
                 {
                     Ok(true) => self.sent_text = plan.text,
                     Ok(false) | Err(_) => self.ignored_edit_failures += 1,
@@ -247,7 +265,6 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
 enum TraceLineKind {
     Thought,
     ToolCall,
-    ToolResult,
 }
 
 /// Shows only the latest reasoning block or tool activity in one replaceable
@@ -305,13 +322,13 @@ impl<'a, Actions: ActionSink> TelegramAiStream<'a, Actions> {
                 }
                 let force = self.last_trace_line != Some(TraceLineKind::Thought);
                 self.append_thought(&text);
-                self.stream.replace(&self.trace, force)
+                self.stream.replace_draft(&self.trace, force)
             }
             AiStreamEvent::ResetToTrace => {
                 self.final_started = false;
                 self.final_message_started = false;
                 self.final_text.clear();
-                self.stream.replace(&self.trace, true)
+                self.stream.replace_draft(&self.trace, true)
             }
             AiStreamEvent::ToolCall {
                 name, arguments, ..
@@ -320,24 +337,20 @@ impl<'a, Actions: ActionSink> TelegramAiStream<'a, Actions> {
                     TraceLineKind::ToolCall,
                     &format!("🔧 {}({})", name, format_tool_arguments(&arguments)),
                 );
-                self.stream.replace(&self.trace, true)
+                self.stream.replace_draft(&self.trace, true)
             }
-            AiStreamEvent::ToolResult { name, output, .. } if !self.final_started => {
-                let output = bounded_text(output.trim(), MAX_TOOL_OUTPUT_CHARS);
-                let line = if output.is_empty() {
-                    format!("✅ {name}")
-                } else {
-                    format!("✅ {name} → {output}")
-                };
-                self.replace_trace_line(TraceLineKind::ToolResult, &line);
-                self.stream.replace(&self.trace, true)
+            // Tool results stay internal; keep the visible trace anchored to the call
+            // so the next reasoning block replaces it instead of extending old text.
+            AiStreamEvent::ToolResult { .. } if !self.final_started => {
+                self.last_trace_line = Some(TraceLineKind::ToolCall);
+                Ok(())
             }
             AiStreamEvent::FinalText(text) => {
                 self.final_started = true;
                 self.final_text.push_str(&text);
                 let force = !self.final_message_started && !self.final_text.trim().is_empty();
                 self.final_message_started |= force;
-                self.stream.replace(&self.final_text, force)
+                self.stream.replace_draft(&self.final_text, force)
             }
             AiStreamEvent::Thought(_)
             | AiStreamEvent::ToolCall { .. }
@@ -416,16 +429,6 @@ fn format_tool_value(value: &Value) -> String {
     }
 }
 
-fn bounded_text(text: &str, max_chars: usize) -> String {
-    let chars = text.chars().collect::<Vec<_>>();
-    if chars.len() <= max_chars {
-        return text.to_owned();
-    }
-    let mut bounded = chars[..max_chars.saturating_sub(1)].to_vec();
-    bounded.push('…');
-    bounded.into_iter().collect()
-}
-
 #[cfg(test)]
 mod tests {
     use bot_core::telegram_actions::TelegramAction;
@@ -483,11 +486,13 @@ mod tests {
         assert!(matches!(
             &actions.actions[0],
             TelegramAction::SendMessage(message)
-                if message.text == "hello" && message.reply_to_message_id == Some(MessageId(4))
+                if message.text == "hello"
+                    && message.reply_to_message_id == Some(MessageId(4))
+                    && message.disable_web_page_preview
         ));
         assert!(matches!(
             &actions.actions[1],
-            TelegramAction::EditMessage { text, .. } if text == "hello there friend"
+            TelegramAction::EditMessageNoPreview { text, .. } if text == "hello there friend"
         ));
         assert!(matches!(
             &actions.actions[2],
@@ -562,7 +567,7 @@ mod tests {
             })
             .unwrap_or_else(|_| unreachable!());
         stream
-            .feed(AiStreamEvent::FinalText("River juega el sábado".to_owned()))
+            .feed(AiStreamEvent::FinalText("River juega ".to_owned()))
             .unwrap_or_else(|_| unreachable!());
         let delivery = stream
             .finalize("River juega el sábado")
@@ -573,16 +578,16 @@ mod tests {
         assert!(matches!(
             &actions.actions[0],
             TelegramAction::SendMessage(message) if message.text == "💭 checking the match"
+                && message.disable_web_page_preview
         ));
         assert!(matches!(
             &actions.actions[1],
-            TelegramAction::EditMessage { text, .. }
+            TelegramAction::EditMessageNoPreview { text, .. }
                 if text == "🔧 web_search(query=\"cuando juegan river y huracán\")"
         ));
         assert!(matches!(
             &actions.actions[2],
-            TelegramAction::EditMessage { text, .. }
-                if text == "✅ web_search → fixture result"
+            TelegramAction::EditMessageNoPreview { text, .. } if text == "River juega "
         ));
         assert!(matches!(
             &actions.actions[3],
@@ -619,10 +624,10 @@ mod tests {
             assert!(stream.finalize("answer").is_ok());
             drop(stream);
             assert!(actions.actions.iter().any(|action| matches!(action,
-                TelegramAction::EditMessage { text, .. } if !text.contains("provisional") && (text.contains("checking") || text.contains("calculate"))
+                TelegramAction::EditMessageNoPreview { text, .. } if !text.contains("provisional") && (text.contains("checking") || text.contains("calculate"))
             )));
             assert!(
-                matches!(actions.actions.last(), Some(TelegramAction::EditMessage { text, .. }) if text == "answer")
+                matches!(actions.actions.last(), Some(TelegramAction::EditMessageNoPreview { text, .. }) if text == "answer")
             );
         }
     }
@@ -665,6 +670,7 @@ mod tests {
             .filter_map(|action| match action {
                 TelegramAction::SendMessage(message) => Some(message.text.as_str()),
                 TelegramAction::EditMessage { text, .. } => Some(text.as_str()),
+                TelegramAction::EditMessageNoPreview { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -674,7 +680,6 @@ mod tests {
                 "💭 a long initial reasoning block",
                 "🔧 web_search(query=\"synthetic fixture\")",
                 "🔧 calculate()",
-                "✅ calculate → 2",
                 "💭 done",
                 "answer",
             ]
@@ -709,6 +714,7 @@ mod tests {
             .filter_map(|action| match action {
                 TelegramAction::SendMessage(message) => Some(message.text.as_str()),
                 TelegramAction::EditMessage { text, .. } => Some(text.as_str()),
+                TelegramAction::EditMessageNoPreview { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -717,7 +723,6 @@ mod tests {
             [
                 "💭 first ",
                 "💭 first thought",
-                "✅ calculate → 2",
                 "💭 next ",
                 "💭 next thought"
             ]
