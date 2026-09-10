@@ -708,6 +708,7 @@ mod tests {
     use super::{
         ActionTaskMessenger, OpenRouterTaskProvider, PostgresTaskBilling, TaskAiProvider,
         TaskBilling, TaskCreditStore, TaskMessenger, TaskPromptMessage, TaskReserveOutcome,
+        reservation_pricing_for_model,
     };
     use crate::chat_tool_loop::ToolExecutionResult;
     use crate::dispatcher::{ActionReceipt, ActionSink};
@@ -843,6 +844,14 @@ mod tests {
                 .is_some_and(|content| content.contains("synthetic persona"))
         );
         assert_eq!(body["messages"][1]["content"], "do it");
+    }
+
+    #[test]
+    fn reservation_pricing_reports_catalog_lookup_failures() {
+        let pricing = OpenRouterPricingCache::new("synthetic-key", "not-a-url")
+            .unwrap_or_else(|_| unreachable!("pricing cache construction"));
+        let result = reservation_pricing_for_model("synthetic/model", Some(&pricing));
+        assert!(result.is_err());
     }
 
     #[test]
