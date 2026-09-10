@@ -1,8 +1,11 @@
 //! OpenRouter streaming rounds with partial-usage preservation.
 
+use std::sync::Arc;
+
 use bot_adapters::openrouter_chat::{
     ChatCompletionRequest, ChatMessage, ChatRole, ChatStreamEvent, OpenRouterChatError,
-    OpenRouterStreamTransport, ReasoningConfig, ToolCall, ToolFunctionCall, stream_with,
+    OpenRouterPricingCache, OpenRouterStreamTransport, ReasoningConfig, ToolCall,
+    ToolFunctionCall, stream_with,
 };
 use bot_core::ai_prompt::{PromptContent, PromptMessage, PromptRole};
 use bot_core::ai_reserve::chat_output_token_limit;
@@ -56,6 +59,7 @@ pub struct OpenRouterChatStreamer<Transport> {
     api_key: String,
     base_url: String,
     model: String,
+    pricing: Option<Arc<OpenRouterPricingCache>>,
 }
 
 impl<Transport> OpenRouterChatStreamer<Transport> {
@@ -66,19 +70,33 @@ impl<Transport> OpenRouterChatStreamer<Transport> {
             api_key: api_key.to_owned(),
             base_url: base_url.to_owned(),
             model: model.to_owned(),
+            pricing: None,
         }
     }
 
-    fn request(&self, messages: &[PromptMessage], tools: &[Value]) -> ChatCompletionRequest {
+    #[must_use]
+    pub fn with_openrouter_pricing(mut self, pricing: Arc<OpenRouterPricingCache>) -> Self {
+        self.pricing = Some(pricing);
+        self
+    }
+
+    fn request(
+        &self,
+        messages: &[PromptMessage],
+        tools: &[Value],
+    ) -> Result<ChatCompletionRequest, OpenRouterChatError> {
         let mut request = ChatCompletionRequest::new(
             &self.model,
             messages.iter().map(openrouter_message).collect(),
         );
+        if let Some(pricing) = self.pricing.as_ref() {
+            pricing.apply_to_request(&mut request)?;
+        }
         request.tools = tools.to_vec();
         request.max_tokens = u64::try_from(chat_output_token_limit(&self.model)).ok();
         request.reasoning = Some(ReasoningConfig { enabled: true });
         request.stream = true;
-        request
+        Ok(request)
     }
 }
 
@@ -108,13 +126,22 @@ impl<Transport: OpenRouterStreamTransport> OpenRouterChatStreamer<Transport> {
         F: FnMut(ProviderStreamEvent) -> Result<(), OpenRouterChatError>,
     {
         let mut result = ChatRoundResult::empty();
+        let request = match self.request(messages, tools) {
+            Ok(request) => request,
+            Err(source) => {
+                return Err(ChatRoundError {
+                    source,
+                    partial: Box::new(result),
+                });
+            }
+        };
         let mut metadata = ProviderRoundMetadata::default();
         let mut usage = Map::new();
         let stream_result = stream_with(
             &self.transport,
             &self.api_key,
             &self.base_url,
-            &self.request(messages, tools),
+            &request,
             |event| {
                 let ChatStreamEvent::Chunk(chunk) = event else {
                     return Ok(());
