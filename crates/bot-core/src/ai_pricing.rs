@@ -6,7 +6,7 @@ use thiserror::Error;
 use crate::provider_pricing::{
     CREDIT_UNIT_USD_MICROS, FIRECRAWL_STANDARD_USD_MICROS_PER_CREDIT,
     GROQ_TRANSCRIPTION_MIN_SECONDS, GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR, PRICING_VERSION,
-    YOUTUBE_TRANSCRIPT_USD_MICROS_PER_SUCCESS, published_token_pricing,
+    YOUTUBE_TRANSCRIPT_USD_MICROS_PER_SUCCESS,
 };
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -329,24 +329,14 @@ fn reported_cost(
     Ok(upstream_cost)
 }
 
-/// Return the local input and cached-input rates used by admin cache reports.
+/// OpenRouter cache savings require current catalog data and are not reconstructed
+/// from settled usage records.
 #[must_use]
-pub fn model_cache_input_rates(model: &str) -> Option<(i64, i64)> {
-    let pricing = published_token_pricing("", model)?;
-    let input = i64::try_from(pricing.input_per_million).ok()?;
-    let cached = i64::try_from(
-        pricing
-            .cached_input_per_million
-            .unwrap_or(pricing.input_per_million),
-    )
-    .ok()?;
-    Some((input, cached))
+pub fn model_cache_input_rates(_model: &str) -> Option<(i64, i64)> {
+    None
 }
-
 fn model_cost(
-    model: &str,
     usage: &Map<String, Value>,
-    provider: &str,
     accept_reported_zero: bool,
 ) -> Result<ModelCost, AiPricingError> {
     let tokens = token_usage(usage)?;
@@ -366,68 +356,13 @@ fn model_cost(
             tokens,
         });
     }
-    let local_pricing = (provider != "openrouter")
-        .then(|| published_token_pricing(provider, model))
-        .flatten();
-    let Some(pricing) = local_pricing else {
-        return Ok(ModelCost {
-            usd_micros: 0,
-            exact: ExactDecimal::ZERO,
-            pricing_basis: "missing",
-            tokens,
-        });
-    };
-    let details = object(usage.get("prompt_tokens_details"));
-    let audio = python_int(details.and_then(|value| value.get("audio_tokens")))?.max(0);
-    let cache_write = python_int(details.and_then(|value| value.get("cache_write_tokens")))?.max(0);
-    let audio = audio.min(tokens.input_non_cached_tokens);
-    let cache_write = cache_write.min(tokens.input_non_cached_tokens.saturating_sub(audio));
-    let regular = tokens
-        .input_non_cached_tokens
-        .saturating_sub(audio)
-        .saturating_sub(cache_write)
-        .max(0);
-    let cached_rate = pricing
-        .cached_input_per_million
-        .unwrap_or(pricing.input_per_million);
-    let audio_rate = pricing
-        .audio_input_per_million
-        .unwrap_or(pricing.input_per_million);
-    let cache_write_rate = pricing
-        .cache_write_per_million
-        .unwrap_or(pricing.input_per_million);
-    let numerator = i128::from(regular)
-        .checked_mul(pricing.input_per_million)
-        .and_then(|value| {
-            i128::from(tokens.input_cached_tokens)
-                .checked_mul(cached_rate)
-                .and_then(|cost| value.checked_add(cost))
-        })
-        .and_then(|value| {
-            i128::from(audio)
-                .checked_mul(audio_rate)
-                .and_then(|cost| value.checked_add(cost))
-        })
-        .and_then(|value| {
-            i128::from(cache_write)
-                .checked_mul(cache_write_rate)
-                .and_then(|cost| value.checked_add(cost))
-        })
-        .and_then(|value| {
-            i128::from(tokens.output_tokens)
-                .checked_mul(pricing.output_per_million)
-                .and_then(|cost| value.checked_add(cost))
-        })
-        .ok_or(AiPricingError::Overflow)?;
-    let exact = ExactDecimal::from_ratio(numerator, 6);
     Ok(ModelCost {
-        usd_micros: exact.floor_i64()?,
-        exact,
-        pricing_basis: "published_rate",
+        usd_micros: 0,
+        exact: ExactDecimal::ZERO,
+        pricing_basis: "missing",
         tokens,
     })
 }
-
 fn firecrawl_cost(
     metadata: &Map<String, Value>,
     kind: &str,
@@ -603,7 +538,7 @@ pub fn calculate_billing_for_segments(segments: &Value) -> Result<Value, AiPrici
             continue;
         }
 
-        let model_cost = model_cost(&model, usage, &provider, usage_reconciled)?;
+        let model_cost = model_cost(usage, usage_reconciled)?;
         total = total.add(model_cost.exact)?;
         let mut model_item = model_cost.tokens.json_fields();
         model_item.insert("model".to_owned(), json!(model));
@@ -615,8 +550,7 @@ pub fn calculate_billing_for_segments(segments: &Value) -> Result<Value, AiPrici
         if let Some(tool_cost) = tool_cost {
             tool_breakdown.push(tool_cost);
         }
-        let complete = reported.is_some()
-            || (model_cost.tokens.has_tokens() && model_cost.pricing_basis == "published_rate");
+        let complete = reported.is_some();
         if !complete {
             unsupported_notes.push(format!(
                 "missing_usage_or_cost:segment={segment_index}:provider={}:model={}",
@@ -759,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn prices_provider_published_cache_tool_and_transcription_segments()
+    fn prices_provider_reported_cache_tool_and_transcription_segments()
     -> Result<(), AiPricingError> {
         let output = calculate_billing_for_segments(&json!([
             {
@@ -772,6 +706,7 @@ mod tests {
                 "kind": "vision",
                 "model": "google/gemini-3.1-flash-lite",
                 "usage": {
+                    "cost": "0.0004133333",
                     "prompt_tokens": 1000,
                     "completion_tokens": 100,
                     "prompt_tokens_details": {
@@ -779,7 +714,8 @@ mod tests {
                         "audio_tokens": 300,
                         "cache_write_tokens": 100
                     }
-                }
+                },
+                "metadata": {"provider": "openrouter"}
             },
             {
                 "kind": "web_search",
