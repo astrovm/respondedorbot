@@ -579,6 +579,7 @@ pub(crate) fn provider_error_kind(error: &OpenRouterChatError) -> String {
     match error {
         OpenRouterChatError::MissingApiKey => "missing_api_key".to_owned(),
         OpenRouterChatError::MissingModel => "missing_model".to_owned(),
+        OpenRouterChatError::MissingModelPricing { .. } => "missing_model_pricing".to_owned(),
         OpenRouterChatError::InvalidBaseUrl => "invalid_base_url".to_owned(),
         OpenRouterChatError::RequestJson(_) => "request_json".to_owned(),
         OpenRouterChatError::Transport(_) => "transport".to_owned(),
