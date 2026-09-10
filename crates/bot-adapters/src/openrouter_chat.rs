@@ -1055,8 +1055,8 @@ mod tests {
 
     use super::{
         ChatCompletionRequest, ChatMessage, ChatRole, ChatStreamEvent, HttpRequest, HttpResponse,
-        OpenRouterChatError, OpenRouterStreamTransport, OpenRouterTransport,
-        ReqwestOpenRouterTransport, ToolCall, ToolFunctionCall, complete_with,
+        OpenRouterChatError, OpenRouterPricingCache, OpenRouterStreamTransport,
+        OpenRouterTransport, ReqwestOpenRouterTransport, ToolCall, ToolFunctionCall, complete_with,
         parse_chat_completion, stream_with,
     };
 
@@ -1139,10 +1139,14 @@ mod tests {
     }
 
     #[test]
-    fn known_models_are_routed_with_the_reserved_price_ceiling() {
-        let request = ChatCompletionRequest::new(DEEPSEEK_MODEL, Vec::new());
+    fn dynamic_price_ceilings_are_applied_without_a_local_deepseek_table() {
+        let mut request = ChatCompletionRequest::new(DEEPSEEK_MODEL, Vec::new());
+        assert!(serde_json::to_value(&request)
+            .unwrap_or(Value::Null)
+            .get("provider")
+            .is_none());
+        request.set_price_ceiling(0.3, 1.2);
         let body = serde_json::to_value(request).unwrap_or(Value::Null);
-        assert!(body["provider"].get("sort").is_none());
         assert_eq!(body["provider"]["max_price"]["prompt"], 0.3);
         assert_eq!(body["provider"]["max_price"]["completion"], 1.2);
 
@@ -1150,6 +1154,40 @@ mod tests {
             serde_json::to_value(ChatCompletionRequest::new("synthetic/model", Vec::new()))
                 .unwrap_or(Value::Null);
         assert!(unknown.get("provider").is_none());
+    }
+
+    #[test]
+    fn loads_catalog_pricing_and_uses_the_highest_override_rate() {
+        let body = json!({
+            "data": [{
+                "id": DEEPSEEK_MODEL,
+                "pricing": {
+                    "prompt": "0.00000015",
+                    "completion": "0.0000006",
+                    "input_cache_read": "0.000000003",
+                    "overrides": [{
+                        "utc_days": ["monday"],
+                        "utc_start": 100,
+                        "utc_end": 400,
+                        "prompt": "0.0000003",
+                        "completion": "0.0000012",
+                        "input_cache_read": "0.000000006"
+                    }]
+                }
+            }]
+        })
+        .to_string();
+        let (base_url, server) = serve_once("200", "application/json", &body);
+        let cache = OpenRouterPricingCache::new("synthetic-key", &base_url)
+            .unwrap_or_else(|_| unreachable!("cache construction"));
+        let pricing = cache
+            .pricing(&format!("{DEEPSEEK_MODEL}:free"))
+            .unwrap_or_else(|_| unreachable!("catalog lookup"))
+            .unwrap_or_else(|| unreachable!("catalog model"));
+        assert_eq!(pricing.input_per_million, 300_000);
+        assert_eq!(pricing.cached_input_per_million, Some(6_000));
+        assert_eq!(pricing.output_per_million, 1_200_000);
+        server.join().unwrap_or_else(|_| unreachable!("catalog server"));
     }
 
     #[test]
