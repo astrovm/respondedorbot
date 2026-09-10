@@ -105,12 +105,10 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
             StreamAction::None => {}
             StreamAction::Send => {
                 self.send_attempted = true;
-                let receipt = self
-                    .actions
-                    .execute(self.send_action(&self.buffer, false))?;
+                let receipt = self.actions.execute(self.send_action(&self.buffer, true))?;
                 self.accept_send(receipt, now_seconds);
             }
-            StreamAction::Edit => self.try_edit(now_seconds, false),
+            StreamAction::Edit => self.try_edit(now_seconds, true),
         }
         Ok(())
     }
@@ -202,10 +200,6 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
             self.try_edit(now_seconds, disable_web_page_preview);
         }
         Ok(())
-    }
-
-    fn replace(&mut self, text: &str, force: bool) -> Result<(), Actions::Error> {
-        self.replace_snapshot(text, self.elapsed_seconds(), force, false)
     }
 
     fn replace_draft(&mut self, text: &str, force: bool) -> Result<(), Actions::Error> {
@@ -356,7 +350,7 @@ impl<'a, Actions: ActionSink> TelegramAiStream<'a, Actions> {
                 self.final_text.push_str(&text);
                 let force = !self.final_message_started && !self.final_text.trim().is_empty();
                 self.final_message_started |= force;
-                self.stream.replace(&self.final_text, force)
+                self.stream.replace_draft(&self.final_text, force)
             }
             AiStreamEvent::Thought(_)
             | AiStreamEvent::ToolCall { .. }
@@ -492,11 +486,13 @@ mod tests {
         assert!(matches!(
             &actions.actions[0],
             TelegramAction::SendMessage(message)
-                if message.text == "hello" && message.reply_to_message_id == Some(MessageId(4))
+                if message.text == "hello"
+                    && message.reply_to_message_id == Some(MessageId(4))
+                    && message.disable_web_page_preview
         ));
         assert!(matches!(
             &actions.actions[1],
-            TelegramAction::EditMessage { text, .. } if text == "hello there friend"
+            TelegramAction::EditMessageNoPreview { text, .. } if text == "hello there friend"
         ));
         assert!(matches!(
             &actions.actions[2],
@@ -571,7 +567,7 @@ mod tests {
             })
             .unwrap_or_else(|_| unreachable!());
         stream
-            .feed(AiStreamEvent::FinalText("River juega el sábado".to_owned()))
+            .feed(AiStreamEvent::FinalText("River juega ".to_owned()))
             .unwrap_or_else(|_| unreachable!());
         let delivery = stream
             .finalize("River juega el sábado")
@@ -591,6 +587,10 @@ mod tests {
         ));
         assert!(matches!(
             &actions.actions[2],
+            TelegramAction::EditMessageNoPreview { text, .. } if text == "River juega "
+        ));
+        assert!(matches!(
+            &actions.actions[3],
             TelegramAction::EditMessage { text, .. } if text == "River juega el sábado"
         ));
     }
@@ -627,7 +627,7 @@ mod tests {
                 TelegramAction::EditMessageNoPreview { text, .. } if !text.contains("provisional") && (text.contains("checking") || text.contains("calculate"))
             )));
             assert!(
-                matches!(actions.actions.last(), Some(TelegramAction::EditMessage { text, .. }) if text == "answer")
+                matches!(actions.actions.last(), Some(TelegramAction::EditMessageNoPreview { text, .. }) if text == "answer")
             );
         }
     }
