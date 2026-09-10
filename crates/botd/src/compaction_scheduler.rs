@@ -388,7 +388,11 @@ pub fn production_compaction_scheduler(
         COMPACTION_MODEL,
         system_prompt,
     );
-    pricing.map_or(scheduler, |pricing| scheduler.with_openrouter_pricing(pricing))
+    if let Some(pricing) = pricing {
+        scheduler.with_openrouter_pricing(pricing)
+    } else {
+        scheduler
+    }
 }
 
 fn estimated_message(role: &str, content: &str) -> EstimatedMessage {
