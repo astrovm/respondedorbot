@@ -1756,7 +1756,7 @@ fn estimate_reserve(
     pricing: Option<&OpenRouterPricingCache>,
 ) -> Result<i64, String> {
     let estimated = messages.iter().map(estimated_message).collect::<Vec<_>>();
-    if pricing.is_some() || model.split(':').next() == Some(crate::native_ai::DEEPSEEK_MODEL) {
+    if pricing.is_some() || model.split(':').next() == Some(crate::native_ai::PRIMARY_CHAT_MODEL) {
         let pricing = crate::native_ai::reservation_pricing_for_model(model, pricing)?;
         return estimate_chat_reserve_credit_units_with_pricing(
             None,
