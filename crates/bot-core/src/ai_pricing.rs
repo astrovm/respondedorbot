@@ -4,9 +4,7 @@ use serde_json::{Map, Value, json};
 use thiserror::Error;
 
 use crate::provider_pricing::{
-    CREDIT_UNIT_USD_MICROS, FIRECRAWL_STANDARD_USD_MICROS_PER_CREDIT,
-    OPENROUTER_TRANSCRIPTION_MIN_SECONDS, OPENROUTER_TRANSCRIPTION_MODEL,
-    OPENROUTER_TRANSCRIPTION_USD_MICROS_PER_HOUR, PRICING_VERSION,
+    CREDIT_UNIT_USD_MICROS, FIRECRAWL_STANDARD_USD_MICROS_PER_CREDIT, PRICING_VERSION,
     YOUTUBE_TRANSCRIPT_USD_MICROS_PER_SUCCESS,
 };
 
@@ -505,12 +503,6 @@ pub fn calculate_billing_for_segments(segments: &Value) -> Result<Value, AiPrici
         }
 
         let transcription_pricing = match model.as_str() {
-            OPENROUTER_TRANSCRIPTION_MODEL => Some((
-                OPENROUTER_TRANSCRIPTION_MIN_SECONDS,
-                OPENROUTER_TRANSCRIPTION_USD_MICROS_PER_HOUR,
-                OPENROUTER_TRANSCRIPTION_MODEL,
-                "openrouter",
-            )),
             "whisper-large-v3" | "groq/whisper-large-v3" => Some((
                 LEGACY_GROQ_TRANSCRIPTION_MIN_SECONDS,
                 LEGACY_GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR,
@@ -742,7 +734,10 @@ mod tests {
             {
                 "kind": "transcribe",
                 "model": "microsoft/mai-transcribe-2",
-                "audio_seconds": 1
+                "audio_seconds": 1,
+                "usage": {"seconds": 1, "cost": "0.000028"},
+                "source": "openrouter",
+                "metadata": {"provider": "openrouter"}
             },
             {"kind": "summary", "source": "cache"}
         ]))?;

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use bot_adapters::media_provider::MediaProviderResult;
-use bot_adapters::openrouter_chat::OpenRouterPricingCache;
+use bot_adapters::openrouter_chat::{OpenRouterChatError, OpenRouterPricingCache};
 use bot_core::ai_reserve::{
     VISION_OUTPUT_TOKEN_LIMIT, estimate_transcription_reserve_credit_units,
     estimate_vision_reserve_credit_units_with_pricing,
@@ -84,6 +84,12 @@ pub struct MediaExecution {
 }
 
 pub trait MediaRuntime {
+    fn estimate_reserve_credit_units(
+        &mut self,
+        kind: MediaKind,
+        duration_hint_seconds: Option<f64>,
+    ) -> Result<i64, String>;
+
     fn prepare(
         &mut self,
         kind: MediaKind,
@@ -195,6 +201,38 @@ impl<Files, Cache, Processor, Vision, Transcription>
         self.openrouter_pricing = Some(pricing);
         self
     }
+
+    fn estimate_image_reserve_credit_units(&self) -> Result<i64, String> {
+        let pricing = crate::native_ai::reservation_pricing_for_model(
+            &self.vision_model,
+            self.openrouter_pricing.as_deref(),
+        )?;
+        estimate_vision_reserve_credit_units_with_pricing(
+            "Describe what you see in this image in detail.",
+            0,
+            1_200,
+            VISION_OUTPUT_TOKEN_LIMIT,
+            &pricing,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    fn estimate_audio_reserve_credit_units(&self, audio_seconds: f64) -> Result<i64, String> {
+        let pricing = self
+            .openrouter_pricing
+            .as_deref()
+            .ok_or_else(|| "OpenRouter pricing cache is unavailable".to_owned())?
+            .transcription_pricing(crate::native_ai::OPENROUTER_TRANSCRIPTION_MODEL)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                OpenRouterChatError::MissingModelPricing {
+                    model: crate::native_ai::OPENROUTER_TRANSCRIPTION_MODEL.to_owned(),
+                }
+                .to_string()
+            })?;
+        estimate_transcription_reserve_credit_units(audio_seconds, pricing.usd_micros_per_hour)
+            .map_err(|error| error.to_string())
+    }
 }
 
 impl<Files, Cache, Processor, Vision, Transcription> MediaRuntime
@@ -206,6 +244,19 @@ where
     Vision: VisionProvider,
     Transcription: TranscriptionProvider,
 {
+    fn estimate_reserve_credit_units(
+        &mut self,
+        kind: MediaKind,
+        duration_hint_seconds: Option<f64>,
+    ) -> Result<i64, String> {
+        match kind {
+            MediaKind::Image => self.estimate_image_reserve_credit_units(),
+            MediaKind::Audio => {
+                self.estimate_audio_reserve_credit_units(duration_hint_seconds.unwrap_or(1.0))
+            }
+        }
+    }
+
     fn prepare(
         &mut self,
         kind: MediaKind,
@@ -230,21 +281,9 @@ where
                     .processor
                     .prepare_image(&bytes)?
                     .ok_or_else(|| MediaPipelineError::InvalidImage.to_string())?;
-                let pricing = crate::native_ai::reservation_pricing_for_model(
-                    &self.vision_model,
-                    self.openrouter_pricing.as_deref(),
-                )
-                .map_err(|error| MediaPipelineError::ReserveEstimate(error).to_string())?;
-                let reserve_credit_units = estimate_vision_reserve_credit_units_with_pricing(
-                    "Describe what you see in this image in detail.",
-                    0,
-                    1_200,
-                    VISION_OUTPUT_TOKEN_LIMIT,
-                    &pricing,
-                )
-                .map_err(|error| {
-                    MediaPipelineError::ReserveEstimate(error.to_string()).to_string()
-                })?;
+                let reserve_credit_units = self
+                    .estimate_image_reserve_credit_units()
+                    .map_err(|error| MediaPipelineError::ReserveEstimate(error).to_string())?;
                 Ok(PreparedMedia::Image {
                     file_id: file_id.to_owned(),
                     bytes: image.bytes,
@@ -260,10 +299,9 @@ where
                         audio.duration_seconds.is_finite() && audio.duration_seconds > 0.0
                     })
                     .ok_or_else(|| MediaPipelineError::InvalidAudio.to_string())?;
-                let reserve_credit_units =
-                    estimate_transcription_reserve_credit_units(audio.duration_seconds).map_err(
-                        |error| MediaPipelineError::ReserveEstimate(error.to_string()).to_string(),
-                    )?;
+                let reserve_credit_units = self
+                    .estimate_audio_reserve_credit_units(audio.duration_seconds)
+                    .map_err(|error| MediaPipelineError::ReserveEstimate(error).to_string())?;
                 Ok(PreparedMedia::Audio {
                     file_id: file_id.to_owned(),
                     bytes: audio.bytes,
@@ -330,7 +368,12 @@ where
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::thread;
 
+    use bot_adapters::openrouter_chat::OpenRouterPricingCache;
     use serde_json::json;
 
     use super::*;
@@ -380,6 +423,43 @@ mod tests {
                 duration_seconds: duration_hint_seconds.unwrap_or(4.5),
             }))
         }
+    }
+
+    fn pricing_cache() -> (Arc<OpenRouterPricingCache>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+            let mut request = [0_u8; 8_192];
+            let _ = stream.read(&mut request);
+            let body = json!({
+                "data": [
+                    {
+                        "id": "google/gemini-3.1-flash-lite",
+                        "pricing": {"prompt": "0.000001", "completion": "0.000001"}
+                    },
+                    {
+                        "id": "microsoft/mai-transcribe-2",
+                        "architecture": {
+                            "modality": "audio->transcription",
+                            "output_modalities": ["transcription"]
+                        },
+                        "pricing": {"prompt": "0.1", "completion": "0"}
+                    }
+                ]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .unwrap_or_else(|_| unreachable!());
+        });
+        let cache = OpenRouterPricingCache::new("synthetic-key", &format!("http://{address}"))
+            .unwrap_or_else(|_| unreachable!());
+        (Arc::new(cache), server)
     }
 
     struct Vision;
@@ -450,7 +530,8 @@ mod tests {
 
     #[test]
     fn image_and_audio_are_prepared_reserved_executed_and_cached() {
-        let mut media = media(Cache::default());
+        let (pricing, server) = pricing_cache();
+        let mut media = media(Cache::default()).with_openrouter_pricing(pricing);
         let image = media.prepare(MediaKind::Image, "image-1", None);
         assert!(matches!(
             image,
@@ -495,6 +576,17 @@ mod tests {
                 .map(String::as_str),
             Some("synthetic transcript")
         );
+        server.join().unwrap_or_else(|_| unreachable!());
+    }
+
+    #[test]
+    fn audio_reservation_requires_a_cached_openrouter_price() {
+        let mut media = media(Cache::default());
+        let result = media.prepare(MediaKind::Audio, "audio-1", Some(4.5));
+        assert!(matches!(
+            result,
+            Err(error) if error.contains("OpenRouter pricing cache is unavailable")
+        ));
     }
 
     #[test]

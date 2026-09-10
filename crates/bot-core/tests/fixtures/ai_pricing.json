@@ -120,15 +120,15 @@
       }
     },
     {
-      "name": "openrouter_transcription_rate",
+      "name": "openrouter_transcription_without_usage_is_incomplete",
       "segments": [{"kind": "transcribe", "model": "microsoft/mai-transcribe-2", "audio_seconds": 1}],
       "expected": {
-        "raw_usd_micros": 28,
-        "raw_usd_micros_exact": "28",
-        "charged_credit_units": 1,
-        "pricing_complete": true,
-        "pricing_basis": "published_rate",
-        "model_usd_micros": 28
+        "raw_usd_micros": 0,
+        "raw_usd_micros_exact": "0",
+        "charged_credit_units": 0,
+        "pricing_complete": false,
+        "pricing_basis": "missing",
+        "model_usd_micros": 0
       }
     },
     {

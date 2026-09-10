@@ -11,7 +11,7 @@ use bot_core::ai_prompt::{
 };
 use bot_core::ai_reserve::{
     EstimatedMessage, TokenEstimateValue, VISION_OUTPUT_TOKEN_LIMIT, chat_output_token_limit,
-    estimate_chat_reserve_credit_units_with_pricing, estimate_transcription_reserve_credit_units,
+    estimate_chat_reserve_credit_units_with_pricing,
     estimate_vision_reserve_credit_units_with_pricing,
 };
 use bot_core::ai_response_cleanup::cleanup_response;
@@ -592,26 +592,25 @@ where
                     .as_deref()
                     .map(|file_id| (MediaKind::Image, file_id, None))
             });
-        let admission_kind = selected.map_or(MediaKind::Image, |(kind, _, _)| kind);
-        let admission_amount = match admission_kind {
-            MediaKind::Image => {
-                let pricing = crate::native_ai::reservation_pricing_for_model(
-                    crate::native_ai::VISION_MODEL,
-                    self.openrouter_pricing.as_deref(),
-                )?;
-                estimate_vision_reserve_credit_units_with_pricing(
-                    "Describe what you see in this image in detail.",
-                    0,
-                    1_200,
-                    VISION_OUTPUT_TOKEN_LIMIT,
-                    &pricing,
-                )
-            }
-            MediaKind::Audio => estimate_transcription_reserve_credit_units(
-                input.audio_duration_seconds.unwrap_or(1.0),
-            ),
-        }
-        .map_err(|error| error.to_string())?;
+        let admission_amount = if let Some((kind, _, duration)) = selected {
+            self.media
+                .as_mut()
+                .ok_or_else(|| "native media runtime disappeared".to_owned())?
+                .estimate_reserve_credit_units(kind, duration)?
+        } else {
+            let pricing = crate::native_ai::reservation_pricing_for_model(
+                crate::native_ai::VISION_MODEL,
+                self.openrouter_pricing.as_deref(),
+            )?;
+            estimate_vision_reserve_credit_units_with_pricing(
+                "Describe what you see in this image in detail.",
+                0,
+                1_200,
+                VISION_OUTPUT_TOKEN_LIMIT,
+                &pricing,
+            )
+            .map_err(|error| error.to_string())?
+        };
         let admission = self.reserve(
             &input,
             &operation_id,
@@ -2091,6 +2090,16 @@ mod tests {
     }
 
     impl MediaRuntime for Media {
+        fn estimate_reserve_credit_units(
+            &mut self,
+            kind: MediaKind,
+            duration_hint_seconds: Option<f64>,
+        ) -> Result<i64, String> {
+            assert_eq!(kind, MediaKind::Audio);
+            assert_eq!(duration_hint_seconds, Some(4.5));
+            Ok(7)
+        }
+
         fn prepare(
             &mut self,
             kind: MediaKind,
@@ -2135,6 +2144,16 @@ mod tests {
     struct StickerMedia;
 
     impl MediaRuntime for StickerMedia {
+        fn estimate_reserve_credit_units(
+            &mut self,
+            kind: MediaKind,
+            duration_hint_seconds: Option<f64>,
+        ) -> Result<i64, String> {
+            assert_eq!(kind, MediaKind::Image);
+            assert_eq!(duration_hint_seconds, None);
+            Ok(0)
+        }
+
         fn prepare(
             &mut self,
             kind: MediaKind,
@@ -2169,6 +2188,16 @@ mod tests {
     struct GifMedia;
 
     impl MediaRuntime for GifMedia {
+        fn estimate_reserve_credit_units(
+            &mut self,
+            kind: MediaKind,
+            duration_hint_seconds: Option<f64>,
+        ) -> Result<i64, String> {
+            assert_eq!(kind, MediaKind::Image);
+            assert_eq!(duration_hint_seconds, None);
+            Ok(0)
+        }
+
         fn prepare(
             &mut self,
             kind: MediaKind,
@@ -2203,6 +2232,16 @@ mod tests {
     struct DownloadFailureMedia;
 
     impl MediaRuntime for DownloadFailureMedia {
+        fn estimate_reserve_credit_units(
+            &mut self,
+            kind: MediaKind,
+            duration_hint_seconds: Option<f64>,
+        ) -> Result<i64, String> {
+            assert_eq!(kind, MediaKind::Audio);
+            assert_eq!(duration_hint_seconds, Some(2.0));
+            Ok(1)
+        }
+
         fn prepare(
             &mut self,
             _kind: MediaKind,
@@ -2228,6 +2267,17 @@ mod tests {
     }
 
     impl MediaRuntime for ConfigurableMedia {
+        fn estimate_reserve_credit_units(
+            &mut self,
+            kind: MediaKind,
+            _duration_hint_seconds: Option<f64>,
+        ) -> Result<i64, String> {
+            Ok(match kind {
+                MediaKind::Image => self.reserve_credit_units,
+                MediaKind::Audio => 1,
+            })
+        }
+
         fn prepare(
             &mut self,
             kind: MediaKind,

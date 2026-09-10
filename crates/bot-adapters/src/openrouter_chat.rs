@@ -21,6 +21,12 @@ const USD_MICROS_PER_MILLION_TOKENS: i128 = 1_000_000_000_000;
 struct OpenRouterPricingState {
     fetched_at: Option<Instant>,
     models: BTreeMap<String, TokenPricing>,
+    transcription_models: BTreeMap<String, TranscriptionPricing>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TranscriptionPricing {
+    pub usd_micros_per_hour: i128,
 }
 
 #[derive(Clone)]
@@ -51,16 +57,32 @@ impl OpenRouterPricingCache {
         if model.is_empty() {
             return Ok(None);
         }
-        if self.is_stale()? {
-            self.refresh()?;
+        let cached = self.cached_pricing(model)?;
+        if self.is_stale()?
+            && let Err(error) = self.refresh()
+            && cached.is_none()
+        {
+            return Err(error);
         }
-        let base_model = catalog_base_model(model);
-        let state = self.lock_state()?;
-        Ok(state
-            .models
-            .get(model)
-            .copied()
-            .or_else(|| state.models.get(base_model).copied()))
+        self.cached_pricing(model)
+    }
+
+    pub fn transcription_pricing(
+        &self,
+        model: &str,
+    ) -> Result<Option<TranscriptionPricing>, OpenRouterChatError> {
+        let model = model.trim();
+        if model.is_empty() {
+            return Ok(None);
+        }
+        let cached = self.cached_transcription_pricing(model)?;
+        if self.is_stale()?
+            && let Err(error) = self.refresh()
+            && cached.is_none()
+        {
+            return Err(error);
+        }
+        self.cached_transcription_pricing(model)
     }
 
     pub fn refresh(&self) -> Result<(), OpenRouterChatError> {
@@ -100,17 +122,25 @@ impl OpenRouterPricingCache {
                 OpenRouterChatError::InvalidJson("models response has no data array".to_owned())
             })?;
         let mut prices = BTreeMap::new();
+        let mut transcription_prices = BTreeMap::new();
         for model in models {
-            let Some((id, pricing)) = parse_catalog_model(model) else {
+            let Some((id, pricing, transcription_pricing)) = parse_catalog_model(model) else {
                 continue;
             };
             prices.insert(id.clone(), pricing);
             prices
                 .entry(catalog_base_model(&id).to_owned())
                 .or_insert(pricing);
+            if let Some(transcription_pricing) = transcription_pricing {
+                transcription_prices.insert(id.clone(), transcription_pricing);
+                transcription_prices
+                    .entry(catalog_base_model(&id).to_owned())
+                    .or_insert(transcription_pricing);
+            }
         }
         let mut state = self.lock_state()?;
         state.models = prices;
+        state.transcription_models = transcription_prices;
         state.fetched_at = Some(Instant::now());
         Ok(())
     }
@@ -143,6 +173,29 @@ impl OpenRouterPricingCache {
             .is_none_or(|fetched_at| fetched_at.elapsed() >= OPENROUTER_PRICING_TTL))
     }
 
+    fn cached_pricing(&self, model: &str) -> Result<Option<TokenPricing>, OpenRouterChatError> {
+        let base_model = catalog_base_model(model);
+        let state = self.lock_state()?;
+        Ok(state
+            .models
+            .get(model)
+            .copied()
+            .or_else(|| state.models.get(base_model).copied()))
+    }
+
+    fn cached_transcription_pricing(
+        &self,
+        model: &str,
+    ) -> Result<Option<TranscriptionPricing>, OpenRouterChatError> {
+        let base_model = catalog_base_model(model);
+        let state = self.lock_state()?;
+        Ok(state
+            .transcription_models
+            .get(model)
+            .copied()
+            .or_else(|| state.transcription_models.get(base_model).copied()))
+    }
+
     fn lock_state(&self) -> Result<MutexGuard<'_, OpenRouterPricingState>, OpenRouterChatError> {
         self.state.lock().map_err(|_| {
             OpenRouterChatError::Transport("OpenRouter pricing cache was poisoned".to_owned())
@@ -156,14 +209,16 @@ fn models_url(base_url: &str) -> Result<String, OpenRouterChatError> {
     if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
         return Err(OpenRouterChatError::InvalidBaseUrl);
     }
-    Ok(format!("{trimmed}/models"))
+    Ok(format!("{trimmed}/models?output_modalities=all"))
 }
 
 fn catalog_base_model(model: &str) -> &str {
     model.split(':').next().unwrap_or(model)
 }
 
-fn parse_catalog_model(value: &Value) -> Option<(String, TokenPricing)> {
+fn parse_catalog_model(
+    value: &Value,
+) -> Option<(String, TokenPricing, Option<TranscriptionPricing>)> {
     let id = value
         .get("id")
         .and_then(Value::as_str)
@@ -189,6 +244,26 @@ fn parse_catalog_model(value: &Value) -> Option<(String, TokenPricing)> {
             update_max(&mut output, override_pricing.get("completion"));
         }
     }
+    let is_transcription = value
+        .get("architecture")
+        .and_then(Value::as_object)
+        .is_some_and(|architecture| {
+            architecture
+                .get("modality")
+                .and_then(Value::as_str)
+                .is_some_and(|modality| modality == "audio->transcription")
+                || architecture
+                    .get("output_modalities")
+                    .and_then(Value::as_array)
+                    .is_some_and(|modalities| {
+                        modalities
+                            .iter()
+                            .any(|modality| modality.as_str() == Some("transcription"))
+                    })
+        });
+    let transcription_pricing = is_transcription
+        .then(|| input.and_then(transcription_rate_from_input))
+        .flatten();
     Some((
         id.to_owned(),
         TokenPricing {
@@ -198,7 +273,16 @@ fn parse_catalog_model(value: &Value) -> Option<(String, TokenPricing)> {
             audio_input_per_million: audio_input,
             output_per_million: output?,
         },
+        transcription_pricing,
     ))
+}
+
+fn transcription_rate_from_input(input_per_million: i128) -> Option<TranscriptionPricing> {
+    Some(TranscriptionPricing {
+        usd_micros_per_hour: input_per_million
+            .checked_add(999_999)?
+            .checked_div(1_000_000)?,
+    })
 }
 
 fn update_max(target: &mut Option<i128>, value: Option<&Value>) {
@@ -1048,6 +1132,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
+    use std::time::{Duration, Instant};
 
     use bot_core::provider_pricing::DEEPSEEK_MODEL;
     use serde_json::{Value, json};
@@ -1080,6 +1165,28 @@ mod tests {
             stream
                 .write_all(response.as_bytes())
                 .unwrap_or_else(|_| unreachable!());
+        });
+        (format!("http://{address}"), server)
+    }
+
+    fn serve_sequence(
+        responses: Vec<(String, String, String)>,
+    ) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+        let server = thread::spawn(move || {
+            for (status, content_type, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+                let mut request = [0_u8; 8_192];
+                let _ = stream.read(&mut request);
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .unwrap_or_else(|_| unreachable!());
+            }
         });
         (format!("http://{address}"), server)
     }
@@ -1197,6 +1304,50 @@ mod tests {
         assert_eq!(request_body["provider"]["max_price"]["prompt"], 0.3);
         assert_eq!(request_body["provider"]["max_price"]["completion"], 1.2);
 
+        server
+            .join()
+            .unwrap_or_else(|_| unreachable!("catalog server"));
+    }
+
+    #[test]
+    fn transcription_pricing_uses_the_catalog_and_keeps_the_last_cache_on_refresh_failure() {
+        let catalog = json!({
+            "data": [{
+                "id": "microsoft/mai-transcribe-2",
+                "architecture": {
+                    "modality": "audio->transcription",
+                    "output_modalities": ["transcription"]
+                },
+                "pricing": {"prompt": "0.1", "completion": "0"}
+            }]
+        })
+        .to_string();
+        let (base_url, server) = serve_sequence(vec![
+            ("200 OK".to_owned(), "application/json".to_owned(), catalog),
+            (
+                "503 Service Unavailable".to_owned(),
+                "application/json".to_owned(),
+                "{\"error\":{\"message\":\"synthetic outage\"}}".to_owned(),
+            ),
+        ]);
+        let cache = OpenRouterPricingCache::new("synthetic-key", &base_url)
+            .unwrap_or_else(|_| unreachable!("cache construction"));
+        let first = cache
+            .transcription_pricing("microsoft/mai-transcribe-2")
+            .unwrap_or_else(|_| unreachable!("catalog lookup"))
+            .unwrap_or_else(|| unreachable!("transcription model"));
+        assert_eq!(first.usd_micros_per_hour, 100_000);
+
+        cache
+            .state
+            .lock()
+            .unwrap_or_else(|_| unreachable!("pricing state"))
+            .fetched_at = Some(Instant::now() - Duration::from_secs(301));
+        let cached = cache
+            .transcription_pricing("microsoft/mai-transcribe-2")
+            .unwrap_or_else(|_| unreachable!("cached lookup"))
+            .unwrap_or_else(|| unreachable!("cached transcription model"));
+        assert_eq!(cached, first);
         server
             .join()
             .unwrap_or_else(|_| unreachable!("catalog server"));

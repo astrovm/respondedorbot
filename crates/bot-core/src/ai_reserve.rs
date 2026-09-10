@@ -4,8 +4,7 @@ use thiserror::Error;
 
 use crate::provider_pricing::{
     CREDIT_UNIT_USD_MICROS, DEEPSEEK_MODEL, FIRECRAWL_SEARCH_MAX_CREDITS,
-    FIRECRAWL_STANDARD_USD_MICROS_PER_CREDIT, OPENROUTER_TRANSCRIPTION_MIN_SECONDS,
-    OPENROUTER_TRANSCRIPTION_USD_MICROS_PER_HOUR, TokenPricing,
+    FIRECRAWL_STANDARD_USD_MICROS_PER_CREDIT, TokenPricing,
     YOUTUBE_TRANSCRIPT_USD_MICROS_PER_SUCCESS,
 };
 
@@ -153,6 +152,7 @@ pub fn estimate_vision_reserve_credit_units_with_pricing(
 
 pub fn estimate_transcription_reserve_credit_units(
     audio_seconds: f64,
+    usd_micros_per_hour: i128,
 ) -> Result<i64, ReserveEstimateError> {
     if !audio_seconds.is_finite() {
         return Err(ReserveEstimateError::NonFiniteAudioDuration);
@@ -161,10 +161,7 @@ pub fn estimate_transcription_reserve_credit_units(
     if seconds <= 0.0 {
         return Ok(1);
     }
-    let usd_micros = (seconds.max(OPENROUTER_TRANSCRIPTION_MIN_SECONDS)
-        * OPENROUTER_TRANSCRIPTION_USD_MICROS_PER_HOUR
-        / 3_600.0)
-        .ceil();
+    let usd_micros = (seconds * usd_micros_per_hour as f64 / 3_600.0).ceil();
     if usd_micros > i128::MAX as f64 {
         return Err(ReserveEstimateError::Overflow);
     }
@@ -277,7 +274,7 @@ mod tests {
     #[test]
     fn rejects_invalid_or_overflowing_reserve_inputs() {
         assert_eq!(
-            estimate_transcription_reserve_credit_units(f64::NAN),
+            estimate_transcription_reserve_credit_units(f64::NAN, 100_000),
             Err(ReserveEstimateError::NonFiniteAudioDuration)
         );
         assert_eq!(
@@ -308,10 +305,16 @@ mod tests {
         }
         assert_eq!(estimate_firecrawl_reserve_credit_units(), Ok(34));
         assert_eq!(estimate_youtube_transcript_reserve_credit_units(), Ok(60));
-        assert_eq!(estimate_transcription_reserve_credit_units(0.0), Ok(1));
-        assert_eq!(estimate_transcription_reserve_credit_units(1.0), Ok(1));
         assert_eq!(
-            estimate_transcription_reserve_credit_units(3_600.0),
+            estimate_transcription_reserve_credit_units(0.0, 100_000),
+            Ok(1)
+        );
+        assert_eq!(
+            estimate_transcription_reserve_credit_units(1.0, 100_000),
+            Ok(1)
+        );
+        assert_eq!(
+            estimate_transcription_reserve_credit_units(3_600.0, 100_000),
             Ok(2_000)
         );
         assert_eq!(
