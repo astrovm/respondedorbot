@@ -115,15 +115,12 @@ impl OpenRouterPricingCache {
         Ok(())
     }
 
-    pub fn price_ceiling(
-        &self,
-        model: &str,
-    ) -> Result<(f64, f64), OpenRouterChatError> {
-        let pricing = self.pricing(model)?.ok_or_else(|| {
-            OpenRouterChatError::MissingModelPricing {
-                model: model.to_owned(),
-            }
-        })?;
+    pub fn price_ceiling(&self, model: &str) -> Result<(f64, f64), OpenRouterChatError> {
+        let pricing =
+            self.pricing(model)?
+                .ok_or_else(|| OpenRouterChatError::MissingModelPricing {
+                    model: model.to_owned(),
+                })?;
         Ok((
             pricing.input_per_million as f64 / 1_000_000.0,
             pricing.output_per_million as f64 / 1_000_000.0,
