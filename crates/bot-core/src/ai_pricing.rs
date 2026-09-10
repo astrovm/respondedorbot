@@ -693,8 +693,8 @@ mod tests {
     }
 
     #[test]
-    fn prices_provider_reported_cache_tool_and_transcription_segments()
-    -> Result<(), AiPricingError> {
+    fn prices_provider_reported_cache_tool_and_transcription_segments() -> Result<(), AiPricingError>
+    {
         let output = calculate_billing_for_segments(&json!([
             {
                 "kind": "chat",
