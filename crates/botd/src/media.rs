@@ -1,9 +1,12 @@
 //! Native cache/download/prepare/provider pipeline for Telegram media.
 
+use std::sync::Arc;
+
 use bot_adapters::media_provider::MediaProviderResult;
+use bot_adapters::openrouter_chat::OpenRouterPricingCache;
 use bot_core::ai_reserve::{
     VISION_OUTPUT_TOKEN_LIMIT, estimate_transcription_reserve_credit_units,
-    estimate_vision_reserve_credit_units,
+    estimate_vision_reserve_credit_units_with_pricing,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -161,6 +164,7 @@ pub struct NativeMedia<Files, Cache, Processor, Vision, Transcription> {
     vision: Vision,
     transcription: Transcription,
     vision_model: String,
+    openrouter_pricing: Option<Arc<OpenRouterPricingCache>>,
 }
 
 impl<Files, Cache, Processor, Vision, Transcription>
@@ -182,7 +186,17 @@ impl<Files, Cache, Processor, Vision, Transcription>
             vision,
             transcription,
             vision_model: vision_model.to_owned(),
+            openrouter_pricing: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_openrouter_pricing(
+        mut self,
+        pricing: Arc<OpenRouterPricingCache>,
+    ) -> Self {
+        self.openrouter_pricing = Some(pricing);
+        self
     }
 }
 
@@ -219,12 +233,17 @@ where
                     .processor
                     .prepare_image(&bytes)?
                     .ok_or_else(|| MediaPipelineError::InvalidImage.to_string())?;
-                let reserve_credit_units = estimate_vision_reserve_credit_units(
+                let pricing = crate::native_ai::reservation_pricing_for_model(
+                    &self.vision_model,
+                    self.openrouter_pricing.as_deref(),
+                )
+                .map_err(|error| MediaPipelineError::ReserveEstimate(error).to_string())?;
+                let reserve_credit_units = estimate_vision_reserve_credit_units_with_pricing(
                     "Describe what you see in this image in detail.",
                     0,
                     1_200,
                     VISION_OUTPUT_TOKEN_LIMIT,
-                    &self.vision_model,
+                    &pricing,
                 )
                 .map_err(|error| {
                     MediaPipelineError::ReserveEstimate(error.to_string()).to_string()
