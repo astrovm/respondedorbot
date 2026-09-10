@@ -719,6 +719,7 @@ pub struct TokenSignalLoad {
 enum TokenSignalPhotoFailure {
     HistoryUnavailable,
     DeliveryFailed,
+    DeliverySkipped,
     DeliveryUnconfirmed,
 }
 
@@ -2160,7 +2161,7 @@ where
             },
             Ok(None) => TokenSignalPhotoDelivery::Failed {
                 caption,
-                failure: TokenSignalPhotoFailure::DeliveryUnconfirmed,
+                failure: TokenSignalPhotoFailure::DeliverySkipped,
             },
             Err(_) => TokenSignalPhotoDelivery::Failed {
                 caption,
@@ -2247,6 +2248,12 @@ where
                         ));
                     }
                     TokenSignalPhotoFailure::DeliveryFailed => self
+                        .state_diagnostics
+                        .push(format!(
+                            "token signal photo delivery failed chat_id={} signal_id={signal_id}",
+                            chat_id.0
+                        )),
+                    TokenSignalPhotoFailure::DeliverySkipped => self
                         .state_diagnostics
                         .push(format!(
                             "token signal photo delivery failed chat_id={} signal_id={signal_id}",
@@ -2797,7 +2804,8 @@ where
                             }
                             TokenSignalPhotoDelivery::Failed { failure, .. } => match failure {
                                 TokenSignalPhotoFailure::HistoryUnavailable => {}
-                                TokenSignalPhotoFailure::DeliveryUnconfirmed => self
+                                TokenSignalPhotoFailure::DeliverySkipped
+                                | TokenSignalPhotoFailure::DeliveryUnconfirmed => self
                                     .state_diagnostics
                                     .push("token chart photo delivery was unconfirmed".to_owned()),
                                 TokenSignalPhotoFailure::DeliveryFailed => self
