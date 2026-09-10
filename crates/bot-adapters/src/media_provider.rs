@@ -25,7 +25,7 @@ pub struct MediaProviderResult {
     pub billing_segment: Value,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VisionRequest<'a> {
     pub api_key: &'a str,
     pub base_url: &'a str,
