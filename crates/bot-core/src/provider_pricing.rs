@@ -5,12 +5,12 @@ pub const CREDIT_UNIT_USD_MICROS: i128 = 50;
 
 pub const DEEPSEEK_MODEL: &str = "deepseek/deepseek-v4.1-flash";
 pub const GEMINI_FLASH_LITE_MODEL: &str = "google/gemini-3.1-flash-lite";
-pub const GROQ_TRANSCRIPTION_MODEL: &str = "whisper-large-v3";
+pub const OPENROUTER_TRANSCRIPTION_MODEL: &str = "microsoft/mai-transcribe-2";
 
 pub const FIRECRAWL_SEARCH_MAX_CREDITS: i128 = 2;
 pub const FIRECRAWL_STANDARD_USD_MICROS_PER_CREDIT: i128 = 830;
-pub const GROQ_TRANSCRIPTION_MIN_SECONDS: f64 = 10.0;
-pub const GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR: f64 = 111_000.0;
+pub const OPENROUTER_TRANSCRIPTION_MIN_SECONDS: f64 = 1.0;
+pub const OPENROUTER_TRANSCRIPTION_USD_MICROS_PER_HOUR: f64 = 100_000.0;
 pub const YOUTUBE_TRANSCRIPT_USD_MICROS_PER_SUCCESS: i128 = 3_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

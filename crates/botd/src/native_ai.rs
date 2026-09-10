@@ -36,8 +36,8 @@ use crate::tool_requests::validate_request;
 
 pub const PRIMARY_CHAT_MODEL: &str = DEEPSEEK_MODEL;
 pub const VISION_MODEL: &str = GEMINI_FLASH_LITE_MODEL;
-pub const GROQ_TRANSCRIPTION_MODEL: &str = "whisper-large-v3";
-pub const OPENROUTER_TRANSCRIPTION_MODEL: &str = GEMINI_FLASH_LITE_MODEL;
+pub const OPENROUTER_TRANSCRIPTION_MODEL: &str =
+    bot_core::provider_pricing::OPENROUTER_TRANSCRIPTION_MODEL;
 const SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE: i64 = 4_000;
 const TASK_WEB_SEARCH_MAX_USES: usize = 3;
 

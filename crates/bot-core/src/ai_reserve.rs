@@ -4,8 +4,8 @@ use thiserror::Error;
 
 use crate::provider_pricing::{
     CREDIT_UNIT_USD_MICROS, DEEPSEEK_MODEL, FIRECRAWL_SEARCH_MAX_CREDITS,
-    FIRECRAWL_STANDARD_USD_MICROS_PER_CREDIT, GROQ_TRANSCRIPTION_MIN_SECONDS,
-    GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR, TokenPricing,
+    FIRECRAWL_STANDARD_USD_MICROS_PER_CREDIT, OPENROUTER_TRANSCRIPTION_MIN_SECONDS,
+    OPENROUTER_TRANSCRIPTION_USD_MICROS_PER_HOUR, TokenPricing,
     YOUTUBE_TRANSCRIPT_USD_MICROS_PER_SUCCESS,
 };
 
@@ -161,8 +161,8 @@ pub fn estimate_transcription_reserve_credit_units(
     if seconds <= 0.0 {
         return Ok(1);
     }
-    let usd_micros = (seconds.max(GROQ_TRANSCRIPTION_MIN_SECONDS)
-        * GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR
+    let usd_micros = (seconds.max(OPENROUTER_TRANSCRIPTION_MIN_SECONDS)
+        * OPENROUTER_TRANSCRIPTION_USD_MICROS_PER_HOUR
         / 3_600.0)
         .ceil();
     if usd_micros > i128::MAX as f64 {
@@ -309,10 +309,10 @@ mod tests {
         assert_eq!(estimate_firecrawl_reserve_credit_units(), Ok(34));
         assert_eq!(estimate_youtube_transcript_reserve_credit_units(), Ok(60));
         assert_eq!(estimate_transcription_reserve_credit_units(0.0), Ok(1));
-        assert_eq!(estimate_transcription_reserve_credit_units(1.0), Ok(7));
+        assert_eq!(estimate_transcription_reserve_credit_units(1.0), Ok(1));
         assert_eq!(
             estimate_transcription_reserve_credit_units(3_600.0),
-            Ok(2_220)
+            Ok(2_000)
         );
         assert_eq!(
             estimate_vision_reserve_credit_units_with_pricing(

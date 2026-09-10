@@ -46,8 +46,6 @@ pub struct ProductionConfig {
     giphy_api_key: Option<String>,
     openrouter_api_key: String,
     pub openrouter_base_url: Option<String>,
-    groq_free_api_key: Option<String>,
-    groq_api_key: Option<String>,
     firecrawl_api_key: Option<String>,
     supadata_api_key: Option<String>,
     apify_api_key: Option<String>,
@@ -115,8 +113,6 @@ impl fmt::Debug for ProductionConfig {
             .field("coinmarketcap_configured", &true)
             .field("giphy_configured", &self.giphy_api_key.is_some())
             .field("openrouter_configured", &true)
-            .field("groq_free_configured", &self.groq_free_api_key.is_some())
-            .field("groq_configured", &self.groq_api_key.is_some())
             .field("firecrawl_configured", &self.firecrawl_api_key.is_some())
             .field("supadata_configured", &self.supadata_api_key.is_some())
             .field("apify_configured", &self.apify_api_key.is_some())
@@ -427,8 +423,6 @@ impl ProductionConfig {
             giphy_api_key: optional_trimmed(&lookup, "GIPHY_API_KEY"),
             openrouter_api_key,
             openrouter_base_url: optional_trimmed(&lookup, "OPENROUTER_BASE_URL"),
-            groq_free_api_key: optional_trimmed(&lookup, "GROQ_FREE_API_KEY"),
-            groq_api_key: optional_trimmed(&lookup, "GROQ_API_KEY"),
             firecrawl_api_key: optional_trimmed(&lookup, "FIRECRAWL_API_KEY"),
             supadata_api_key: optional_trimmed(&lookup, "SUPADATA_API_KEY"),
             apify_api_key: optional_trimmed(&lookup, "APIFY_API_KEY"),
@@ -457,16 +451,6 @@ impl ProductionConfig {
     #[must_use]
     pub fn openrouter_api_key(&self) -> &str {
         &self.openrouter_api_key
-    }
-
-    #[must_use]
-    pub fn groq_free_api_key(&self) -> Option<&str> {
-        self.groq_free_api_key.as_deref()
-    }
-
-    #[must_use]
-    pub fn groq_api_key(&self) -> Option<&str> {
-        self.groq_api_key.as_deref()
     }
 
     #[must_use]
@@ -779,8 +763,6 @@ mod tests {
                 ("COINMARKETCAP_KEY", "cmc-secret"),
                 ("GIPHY_API_KEY", "giphy-secret"),
                 ("OPENROUTER_API_KEY", "openrouter-secret"),
-                ("GROQ_FREE_API_KEY", "groq-free-secret"),
-                ("GROQ_API_KEY", "groq-secret"),
                 ("FIRECRAWL_API_KEY", "firecrawl-secret"),
                 ("SUPADATA_API_KEY", "supadata-secret"),
                 ("APIFY_API_KEY", "apify-secret"),
@@ -812,8 +794,6 @@ mod tests {
             "cmc-secret",
             "giphy-secret",
             "openrouter-secret",
-            "groq-free-secret",
-            "groq-secret",
             "firecrawl-secret",
             "supadata-secret",
             "apify-secret",

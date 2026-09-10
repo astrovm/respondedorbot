@@ -5,9 +5,14 @@ use thiserror::Error;
 
 use crate::provider_pricing::{
     CREDIT_UNIT_USD_MICROS, FIRECRAWL_STANDARD_USD_MICROS_PER_CREDIT,
-    GROQ_TRANSCRIPTION_MIN_SECONDS, GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR, PRICING_VERSION,
+    OPENROUTER_TRANSCRIPTION_MIN_SECONDS, OPENROUTER_TRANSCRIPTION_MODEL,
+    OPENROUTER_TRANSCRIPTION_USD_MICROS_PER_HOUR, PRICING_VERSION,
     YOUTUBE_TRANSCRIPT_USD_MICROS_PER_SUCCESS,
 };
+
+// Keep immutable historical Groq segments billable after the active provider is removed.
+const LEGACY_GROQ_TRANSCRIPTION_MIN_SECONDS: f64 = 10.0;
+const LEGACY_GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR: f64 = 111_000.0;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum AiPricingError {
@@ -391,15 +396,16 @@ fn firecrawl_cost(
     ))
 }
 
-fn transcription_cost(audio_seconds: f64) -> Result<i64, AiPricingError> {
+fn transcription_cost(
+    audio_seconds: f64,
+    minimum_seconds: f64,
+    usd_micros_per_hour: f64,
+) -> Result<i64, AiPricingError> {
     let seconds = audio_seconds.max(0.0);
     if seconds <= 0.0 {
         return Ok(0);
     }
-    let value = (seconds.max(GROQ_TRANSCRIPTION_MIN_SECONDS)
-        * GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR
-        / 3_600.0)
-        .ceil();
+    let value = (seconds.max(minimum_seconds) * usd_micros_per_hour / 3_600.0).ceil();
     if value > i64::MAX as f64 {
         return Err(AiPricingError::Overflow);
     }
@@ -498,25 +504,40 @@ pub fn calculate_billing_for_segments(segments: &Value) -> Result<Value, AiPrici
             continue;
         }
 
-        let has_audio_pricing =
-            matches!(model.as_str(), "whisper-large-v3" | "groq/whisper-large-v3");
+        let transcription_pricing = match model.as_str() {
+            OPENROUTER_TRANSCRIPTION_MODEL => Some((
+                OPENROUTER_TRANSCRIPTION_MIN_SECONDS,
+                OPENROUTER_TRANSCRIPTION_USD_MICROS_PER_HOUR,
+                OPENROUTER_TRANSCRIPTION_MODEL,
+                "openrouter",
+            )),
+            "whisper-large-v3" | "groq/whisper-large-v3" => Some((
+                LEGACY_GROQ_TRANSCRIPTION_MIN_SECONDS,
+                LEGACY_GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR,
+                "whisper-large-v3",
+                "groq",
+            )),
+            _ => None,
+        };
         if kind == "transcribe"
-            && has_audio_pricing
+            && let Some((minimum_seconds, usd_micros_per_hour, default_model, default_provider)) =
+                transcription_pricing
             && !(provider == "openrouter" && reported.is_some())
         {
-            let usd_micros = transcription_cost(audio_seconds)?;
+            let usd_micros =
+                transcription_cost(audio_seconds, minimum_seconds, usd_micros_per_hour)?;
             total = total.add(ExactDecimal::from_ratio(i128::from(usd_micros), 0))?;
             model_breakdown.push(json!({
                 "kind": kind,
-                "model": if model.is_empty() { "whisper-large-v3" } else { &model },
+                "model": if model.is_empty() { default_model } else { &model },
                 "usd_micros": usd_micros,
                 "audio_seconds": audio_seconds,
             }));
             segment_breakdown.push(json!({
                 "segment_index": segment_index,
                 "kind": kind,
-                "model": if model.is_empty() { "whisper-large-v3" } else { &model },
-                "provider": if provider.is_empty() { "groq" } else { &provider },
+                "model": if model.is_empty() { default_model } else { &model },
+                "provider": if provider.is_empty() { default_provider } else { &provider },
                 "pricing_basis": "published_rate",
                 "cost_complete": audio_seconds > 0.0,
                 "usd_micros_exact": usd_micros.to_string(),
@@ -525,7 +546,7 @@ pub fn calculate_billing_for_segments(segments: &Value) -> Result<Value, AiPrici
                 unsupported_notes.push(format!(
                     "missing_usage_or_cost:segment={segment_index}:provider={}:model={model}",
                     if provider.is_empty() {
-                        "groq"
+                        default_provider
                     } else {
                         &provider
                     }
@@ -720,13 +741,13 @@ mod tests {
             },
             {
                 "kind": "transcribe",
-                "model": "groq/whisper-large-v3",
+                "model": "microsoft/mai-transcribe-2",
                 "audio_seconds": 1
             },
             {"kind": "summary", "source": "cache"}
         ]))?;
-        assert_eq!(output["raw_usd_micros_exact"], "2382.3633000000");
-        assert_eq!(output["charged_credit_units"], 48);
+        assert_eq!(output["raw_usd_micros_exact"], "2101.3633000000");
+        assert_eq!(output["charged_credit_units"], 43);
         assert_eq!(output["pricing_complete"], true);
         assert_eq!(output["model_breakdown"][0]["usd_micros"], 0);
         assert_eq!(output["model_breakdown"][1]["usd_micros"], 413);

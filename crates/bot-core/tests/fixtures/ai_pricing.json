@@ -120,15 +120,15 @@
       }
     },
     {
-      "name": "transcription_ten_second_minimum",
-      "segments": [{"kind": "transcribe", "model": "groq/whisper-large-v3", "audio_seconds": 1}],
+      "name": "openrouter_transcription_rate",
+      "segments": [{"kind": "transcribe", "model": "microsoft/mai-transcribe-2", "audio_seconds": 1}],
       "expected": {
-        "raw_usd_micros": 309,
-        "raw_usd_micros_exact": "309",
-        "charged_credit_units": 7,
+        "raw_usd_micros": 28,
+        "raw_usd_micros_exact": "28",
+        "charged_credit_units": 1,
         "pricing_complete": true,
         "pricing_basis": "published_rate",
-        "model_usd_micros": 309
+        "model_usd_micros": 28
       }
     },
     {

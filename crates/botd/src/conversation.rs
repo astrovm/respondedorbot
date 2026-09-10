@@ -2121,11 +2121,11 @@ mod tests {
                 text: "synthetic transcript".to_owned(),
                 billing_segment: Some(json!({
                     "kind": "transcribe",
-                    "model": "whisper-large-v3",
-                    "usage": {},
+                    "model": "microsoft/mai-transcribe-2",
+                    "usage": {"seconds": 4.5, "cost": "0.000125"},
                     "audio_seconds": 4.5,
-                    "source": "groq",
-                    "metadata": {"provider": "groq"}
+                    "source": "openrouter",
+                    "metadata": {"provider": "openrouter"}
                 })),
                 cached: false,
             })

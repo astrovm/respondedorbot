@@ -1,23 +1,16 @@
 //! Typed image-description and audio-transcription provider boundaries.
 
 use std::collections::BTreeMap;
-use std::io::Read;
-use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use reqwest::blocking::Client;
-use reqwest::blocking::multipart::{Form, Part};
 use serde_json::{Map, Value, json};
 use thiserror::Error;
 
 use crate::openrouter_chat::{
-    ChatCompletion, ChatCompletionRequest, ChatMessage, ChatRole, OpenRouterChatError,
-    OpenRouterTransport, complete_with,
+    ChatCompletion, ChatCompletionRequest, ChatMessage, ChatRole, HttpRequest, HttpResponse,
+    OpenRouterChatError, OpenRouterTransport, complete_with,
 };
-
-const GROQ_TRANSCRIPTION_URL: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
-const MAX_RESPONSE_BYTES: u64 = 1_048_576;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MediaProviderResult {
@@ -39,91 +32,6 @@ pub struct VisionRequest<'a> {
     pub file_id: Option<&'a str>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GroqTranscriptionRequest {
-    pub url: String,
-    pub bearer_token: String,
-    pub model: String,
-    pub file_name: String,
-    pub audio: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GroqTranscriptionResponse {
-    pub status_code: u16,
-    pub headers: BTreeMap<String, String>,
-    pub body: String,
-}
-
-pub trait GroqTranscriptionTransport {
-    fn transcribe(
-        &self,
-        request: &GroqTranscriptionRequest,
-    ) -> Result<GroqTranscriptionResponse, MediaProviderError>;
-}
-
-pub struct ReqwestGroqTranscriptionTransport {
-    client: Client,
-}
-
-impl ReqwestGroqTranscriptionTransport {
-    pub fn new() -> Result<Self, MediaProviderError> {
-        Client::builder()
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(90))
-            .build()
-            .map(|client| Self { client })
-            .map_err(|error| MediaProviderError::Transport(error.to_string()))
-    }
-}
-
-impl GroqTranscriptionTransport for ReqwestGroqTranscriptionTransport {
-    fn transcribe(
-        &self,
-        request: &GroqTranscriptionRequest,
-    ) -> Result<GroqTranscriptionResponse, MediaProviderError> {
-        let audio = Part::bytes(request.audio.clone())
-            .file_name(request.file_name.clone())
-            .mime_str("application/octet-stream")
-            .map_err(|error| MediaProviderError::Transport(error.to_string()))?;
-        let form = Form::new()
-            .text("model", request.model.clone())
-            .part("file", audio);
-        let mut response = self
-            .client
-            .post(&request.url)
-            .bearer_auth(&request.bearer_token)
-            .multipart(form)
-            .send()
-            .map_err(|error| MediaProviderError::Transport(error.to_string()))?;
-        let status_code = response.status().as_u16();
-        let headers = response
-            .headers()
-            .iter()
-            .filter_map(|(name, value)| {
-                value
-                    .to_str()
-                    .ok()
-                    .map(|value| (name.as_str().to_ascii_lowercase(), value.to_owned()))
-            })
-            .collect();
-        let mut body = Vec::new();
-        response
-            .by_ref()
-            .take(MAX_RESPONSE_BYTES + 1)
-            .read_to_end(&mut body)
-            .map_err(|error| MediaProviderError::Transport(error.to_string()))?;
-        if body.len() as u64 > MAX_RESPONSE_BYTES {
-            return Err(MediaProviderError::ResponseTooLarge);
-        }
-        Ok(GroqTranscriptionResponse {
-            status_code,
-            headers,
-            body: String::from_utf8_lossy(&body).into_owned(),
-        })
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MediaProviderError {
     #[error(transparent)]
@@ -132,8 +40,6 @@ pub enum MediaProviderError {
     MissingCredential,
     #[error("provider transport failed: {0}")]
     Transport(String),
-    #[error("provider response exceeded the safe size limit")]
-    ResponseTooLarge,
     #[error("provider returned HTTP {status_code}: {message}")]
     Http {
         status_code: u16,
@@ -220,60 +126,46 @@ pub fn transcribe_audio_openrouter_with<T: OpenRouterTransport>(
     api_key: &str,
     base_url: &str,
     model: &str,
-    price_ceiling: Option<(f64, f64)>,
     audio_bytes: &[u8],
-    file_id: Option<&str>,
-) -> Result<MediaProviderResult, MediaProviderError> {
-    let audio_format = detect_audio_format(audio_bytes);
-    let message = ChatMessage {
-        role: ChatRole::User,
-        content: Some(json!([
-            {
-                "type": "input_audio",
-                "input_audio": {
-                    "format": audio_format,
-                    "data": BASE64.encode(audio_bytes),
-                }
-            },
-            {"type": "text", "text": "Transcribe this audio exactly as spoken."}
-        ])),
-        reasoning: None,
-        reasoning_details: Vec::new(),
-        name: None,
-        tool_call_id: None,
-        tool_calls: Vec::new(),
-    };
-    let mut request = ChatCompletionRequest::new(model, vec![message]);
-    request.max_tokens = Some(4_096);
-    if let Some((prompt, completion)) = price_ceiling {
-        request.set_price_ceiling(prompt, completion);
-    }
-    let completion = complete_with(transport, api_key, base_url, &request)?;
-    result_from_completion("transcribe", completion, "openrouter", file_id, Some(0.0))
-}
-
-pub fn transcribe_audio_groq_with<T: GroqTranscriptionTransport>(
-    transport: &T,
-    api_key: &str,
-    model: &str,
-    audio_bytes: &[u8],
-    file_id: Option<&str>,
     audio_seconds: f64,
-    account: &str,
+    file_id: Option<&str>,
 ) -> Result<MediaProviderResult, MediaProviderError> {
-    if api_key.trim().is_empty() {
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
         return Err(MediaProviderError::MissingCredential);
     }
-    let response = transport.transcribe(&GroqTranscriptionRequest {
-        url: GROQ_TRANSCRIPTION_URL.to_owned(),
-        bearer_token: api_key.trim().to_owned(),
-        model: model.to_owned(),
-        file_name: "audio.webm".to_owned(),
-        audio: audio_bytes.to_vec(),
+    let model = model.trim();
+    if model.is_empty() {
+        return Err(MediaProviderError::OpenRouter(
+            OpenRouterChatError::MissingModel,
+        ));
+    }
+    let audio_format = detect_audio_format(audio_bytes);
+    let response = transport.post(&HttpRequest {
+        url: transcription_url(base_url)?,
+        bearer_token: api_key.to_owned(),
+        body: serde_json::to_string(&json!({
+            "model": model,
+            "input_audio": {
+                "format": audio_format,
+                "data": BASE64.encode(audio_bytes),
+            }
+        }))
+        .map_err(|error| {
+            MediaProviderError::OpenRouter(OpenRouterChatError::RequestJson(error.to_string()))
+        })?,
     })?;
-    let payload = serde_json::from_str::<Value>(&response.body)
-        .map_err(|error| MediaProviderError::InvalidJson(error.to_string()))?;
+    transcription_result(response, model, audio_seconds, file_id)
+}
+
+fn transcription_result(
+    response: HttpResponse,
+    requested_model: &str,
+    audio_seconds: f64,
+    file_id: Option<&str>,
+) -> Result<MediaProviderResult, MediaProviderError> {
     if response.status_code >= 400 {
+        let payload = serde_json::from_str::<Value>(&response.body).unwrap_or(Value::Null);
         let error = payload.get("error").unwrap_or(&payload);
         return Err(MediaProviderError::Http {
             status_code: response.status_code,
@@ -290,6 +182,8 @@ pub fn transcribe_audio_groq_with<T: GroqTranscriptionTransport>(
             retry_after_seconds: retry_after(&response.headers),
         });
     }
+    let payload = serde_json::from_str::<Value>(&response.body)
+        .map_err(|error| MediaProviderError::InvalidJson(error.to_string()))?;
     let text = payload
         .get("text")
         .and_then(Value::as_str)
@@ -300,28 +194,45 @@ pub fn transcribe_audio_groq_with<T: GroqTranscriptionTransport>(
         .get("model")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
-        .unwrap_or(model);
+        .unwrap_or(requested_model);
     let usage = payload
         .get("usage")
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    let audio_seconds = usage
+        .get("seconds")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(audio_seconds)
+        .max(0.0);
     Ok(MediaProviderResult {
         text,
         billing_segment: json!({
             "kind": "transcribe",
             "model": response_model,
             "usage": usage,
-            "audio_seconds": audio_seconds.max(0.0),
-            "source": "groq",
+            "audio_seconds": audio_seconds,
+            "source": "openrouter",
             "metadata": {
                 "file_id": file_id,
                 "cache_hit": false,
-                "provider": "groq",
-                "groq_account": account,
+                "provider": "openrouter",
             }
         }),
     })
+}
+
+fn transcription_url(base_url: &str) -> Result<String, MediaProviderError> {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    let parsed = reqwest::Url::parse(trimmed)
+        .map_err(|_| MediaProviderError::OpenRouter(OpenRouterChatError::InvalidBaseUrl))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(MediaProviderError::OpenRouter(
+            OpenRouterChatError::InvalidBaseUrl,
+        ));
+    }
+    Ok(format!("{trimmed}/audio/transcriptions"))
 }
 
 fn result_from_completion(
@@ -365,10 +276,18 @@ fn result_from_completion(
 }
 
 fn detect_audio_format(audio: &[u8]) -> &'static str {
-    if audio.starts_with(b"\x1aE\xdf\xa3") || audio.starts_with(b"ID3") {
+    if audio.starts_with(b"ID3") {
         "mp3"
+    } else if audio.starts_with(b"\x1aE\xdf\xa3") {
+        "webm"
     } else if audio.starts_with(b"OggS") {
         "ogg"
+    } else if audio.starts_with(b"fLaC") {
+        "flac"
+    } else if audio.starts_with(b"RIFF") && audio.get(8..12) == Some(b"WAVE") {
+        "wav"
+    } else if audio.get(4..8) == Some(b"ftyp") {
+        "m4a"
     } else {
         "webm"
     }
@@ -393,53 +312,10 @@ fn retry_after(headers: &BTreeMap<String, String>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::thread;
 
     use crate::openrouter_chat::{HttpRequest, HttpResponse};
 
     use super::*;
-
-    #[test]
-    fn reqwest_groq_transport_posts_multipart_audio_and_preserves_response_metadata() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
-            let mut request = [0_u8; 16_384];
-            let count = stream.read(&mut request).unwrap_or_default();
-            let request = String::from_utf8_lossy(&request[..count]);
-            let request = request.to_ascii_lowercase();
-            assert!(request.contains("authorization: bearer synthetic-key"));
-            assert!(request.contains("multipart/form-data"));
-            let body = r#"{"text":"synthetic transcript"}"#;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Synthetic: yes\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream
-                .write_all(response.as_bytes())
-                .unwrap_or_else(|_| unreachable!());
-        });
-        let transport = ReqwestGroqTranscriptionTransport::new().unwrap_or_else(|_| unreachable!());
-        let response = transport
-            .transcribe(&GroqTranscriptionRequest {
-                url: format!("http://{address}/transcribe"),
-                bearer_token: "synthetic-key".to_owned(),
-                model: "synthetic-model".to_owned(),
-                file_name: "synthetic.ogg".to_owned(),
-                audio: b"synthetic audio".to_vec(),
-            })
-            .unwrap_or_else(|_| unreachable!());
-        assert_eq!(response.status_code, 200);
-        assert_eq!(
-            response.headers.get("x-synthetic").map(String::as_str),
-            Some("yes")
-        );
-        assert!(response.body.contains("synthetic transcript"));
-        assert!(server.join().is_ok());
-    }
 
     struct OpenRouter {
         request: RefCell<Option<HttpRequest>>,
@@ -448,21 +324,6 @@ mod tests {
 
     impl OpenRouterTransport for OpenRouter {
         fn post(&self, request: &HttpRequest) -> Result<HttpResponse, OpenRouterChatError> {
-            self.request.replace(Some(request.clone()));
-            Ok(self.response.clone())
-        }
-    }
-
-    struct Groq {
-        request: RefCell<Option<GroqTranscriptionRequest>>,
-        response: GroqTranscriptionResponse,
-    }
-
-    impl GroqTranscriptionTransport for Groq {
-        fn transcribe(
-            &self,
-            request: &GroqTranscriptionRequest,
-        ) -> Result<GroqTranscriptionResponse, MediaProviderError> {
             self.request.replace(Some(request.clone()));
             Ok(self.response.clone())
         }
@@ -531,18 +392,37 @@ mod tests {
     fn openrouter_audio_detects_container_and_preserves_provider_usage() {
         let transport = OpenRouter {
             request: RefCell::new(None),
-            response: chat_response("spoken words"),
+            response: HttpResponse {
+                status_code: 200,
+                headers: BTreeMap::new(),
+                body: json!({
+                    "text": "spoken words",
+                    "model": "resolved/model",
+                    "usage": {"seconds": 3.25, "cost": "0.0000903"}
+                })
+                .to_string(),
+            },
         };
         let result = transcribe_audio_openrouter_with(
             &transport,
             "key",
             "https://synthetic.invalid/api/v1",
             "requested/model",
-            None,
             b"OggS synthetic",
+            4.5,
             Some("audio-1"),
         );
         assert!(result.is_ok());
+        let Some(result) = result.ok() else {
+            return;
+        };
+        assert_eq!(result.text, "spoken words");
+        assert_eq!(result.billing_segment["kind"], "transcribe");
+        assert_eq!(result.billing_segment["model"], "resolved/model");
+        assert_eq!(result.billing_segment["audio_seconds"], 3.25);
+        assert_eq!(result.billing_segment["usage"]["cost"], "0.0000903");
+        assert_eq!(result.billing_segment["source"], "openrouter");
+        assert_eq!(result.billing_segment["metadata"]["provider"], "openrouter");
         let body: Value = serde_json::from_str(
             &transport
                 .request
@@ -551,69 +431,28 @@ mod tests {
                 .map_or_else(String::new, |request| request.body.clone()),
         )
         .unwrap_or(Value::Null);
+        assert_eq!(body["model"], "requested/model");
+        assert_eq!(body["input_audio"]["format"], "ogg");
         assert_eq!(
-            body["messages"][0]["content"][0]["input_audio"]["format"],
-            "ogg"
+            body["input_audio"]["data"],
+            BASE64.encode(b"OggS synthetic")
         );
-    }
-
-    #[test]
-    fn groq_transcription_normalizes_success_and_rate_limits() {
-        let transport = Groq {
-            request: RefCell::new(None),
-            response: GroqTranscriptionResponse {
-                status_code: 200,
-                headers: BTreeMap::new(),
-                body: json!({
-                    "text": "spoken words",
-                    "usage": {"total_time": 1.5}
-                })
-                .to_string(),
-            },
-        };
-        let result = transcribe_audio_groq_with(
-            &transport,
-            "key",
-            "whisper-large-v3",
-            b"audio",
-            Some("audio-1"),
-            4.5,
-            "free",
+        assert_eq!(
+            transport
+                .request
+                .borrow()
+                .as_ref()
+                .map(|request| request.url.as_str()),
+            Some("https://synthetic.invalid/api/v1/audio/transcriptions")
         );
-        assert!(result.is_ok());
-        let Some(result) = result.ok() else {
-            return;
-        };
-        assert_eq!(result.text, "spoken words");
-        assert_eq!(result.billing_segment["audio_seconds"], 4.5);
-        assert_eq!(result.billing_segment["metadata"]["groq_account"], "free");
-
-        let limited = Groq {
-            request: RefCell::new(None),
-            response: GroqTranscriptionResponse {
-                status_code: 429,
-                headers: BTreeMap::from([("retry-after".to_owned(), "12".to_owned())]),
-                body: json!({"error": {"code": "rate_limit", "message": "slow down"}}).to_string(),
-            },
-        };
-        let error = transcribe_audio_groq_with(
-            &limited,
-            "key",
-            "whisper-large-v3",
-            b"audio",
-            None,
-            0.0,
-            "free",
-        )
-        .err();
-        assert!(matches!(
-            error,
-            Some(MediaProviderError::Http {
-                status_code: 429,
-                retry_after_seconds: Some(12),
-                ..
-            })
-        ));
+        assert_eq!(
+            transport
+                .request
+                .borrow()
+                .as_ref()
+                .map(|request| request.bearer_token.as_str()),
+            Some("key")
+        );
     }
 
     #[test]
@@ -647,51 +486,125 @@ mod tests {
 
     #[test]
     fn media_validation_handles_missing_and_malformed_provider_results() {
-        let response = GroqTranscriptionResponse {
+        let response = HttpResponse {
             status_code: 200,
             headers: BTreeMap::new(),
             body: "not-json".to_owned(),
         };
-        for (api_key, response, expected) in [
-            ("", response.clone(), MediaProviderError::MissingCredential),
-            (
+        let invalid_json = OpenRouter {
+            request: RefCell::new(None),
+            response: response.clone(),
+        };
+        assert_eq!(
+            transcribe_audio_openrouter_with(
+                &invalid_json,
                 "synthetic-key",
-                response,
-                MediaProviderError::InvalidJson("expected value at line 1 column 1".to_owned()),
-            ),
-            (
-                "synthetic-key",
-                GroqTranscriptionResponse {
-                    status_code: 200,
-                    headers: BTreeMap::new(),
-                    body: json!({"text":""}).to_string(),
-                },
-                MediaProviderError::MissingText,
-            ),
-        ] {
-            let transport = Groq {
-                request: RefCell::new(None),
-                response,
-            };
-            let result = transcribe_audio_groq_with(
-                &transport,
-                api_key,
+                "https://synthetic.invalid/api/v1",
                 "synthetic-model",
                 b"synthetic audio",
+                3.0,
                 None,
-                -3.0,
-                "synthetic-account",
-            );
-            let error = result.err().unwrap_or_else(|| unreachable!());
-            if matches!(expected, MediaProviderError::InvalidJson(_)) {
-                assert!(matches!(error, MediaProviderError::InvalidJson(_)));
-            } else {
-                assert_eq!(error, expected);
-            }
-        }
+            )
+            .err()
+            .map(|error| matches!(error, MediaProviderError::InvalidJson(_))),
+            Some(true)
+        );
+
+        let missing_text = OpenRouter {
+            request: RefCell::new(None),
+            response: HttpResponse {
+                status_code: 200,
+                headers: BTreeMap::new(),
+                body: json!({"text":""}).to_string(),
+            },
+        };
+        assert_eq!(
+            transcribe_audio_openrouter_with(
+                &missing_text,
+                "synthetic-key",
+                "https://synthetic.invalid/api/v1",
+                "synthetic-model",
+                b"synthetic audio",
+                3.0,
+                None,
+            )
+            .err(),
+            Some(MediaProviderError::MissingText)
+        );
+
+        let missing_key = OpenRouter {
+            request: RefCell::new(None),
+            response,
+        };
+        assert_eq!(
+            transcribe_audio_openrouter_with(
+                &missing_key,
+                "",
+                "https://synthetic.invalid/api/v1",
+                "synthetic-model",
+                b"synthetic audio",
+                3.0,
+                None,
+            )
+            .err(),
+            Some(MediaProviderError::MissingCredential)
+        );
+
+        let limited = OpenRouter {
+            request: RefCell::new(None),
+            response: HttpResponse {
+                status_code: 429,
+                headers: BTreeMap::from([("retry-after".to_owned(), "12".to_owned())]),
+                body: json!({"error": {"code": "rate_limit", "message": "slow down"}}).to_string(),
+            },
+        };
+        assert!(matches!(
+            transcribe_audio_openrouter_with(
+                &limited,
+                "synthetic-key",
+                "https://synthetic.invalid/api/v1",
+                "synthetic-model",
+                b"synthetic audio",
+                3.0,
+                None,
+            ),
+            Err(MediaProviderError::Http {
+                status_code: 429,
+                code,
+                retry_after_seconds: Some(12),
+                ..
+            }) if code == "rate_limit"
+        ));
+
+        let malformed_url = OpenRouter {
+            request: RefCell::new(None),
+            response: HttpResponse {
+                status_code: 200,
+                headers: BTreeMap::new(),
+                body: json!({"text":"synthetic"}).to_string(),
+            },
+        };
+        assert!(matches!(
+            transcribe_audio_openrouter_with(
+                &malformed_url,
+                "synthetic-key",
+                "not a url",
+                "synthetic-model",
+                b"synthetic audio",
+                3.0,
+                None,
+            ),
+            Err(MediaProviderError::OpenRouter(
+                OpenRouterChatError::InvalidBaseUrl
+            ))
+        ));
 
         assert_eq!(detect_audio_format(b"ID3 synthetic"), "mp3");
-        assert_eq!(detect_audio_format(b"\x1aE\xdf\xa3 synthetic"), "mp3");
+        assert_eq!(detect_audio_format(b"\x1aE\xdf\xa3 synthetic"), "webm");
+        assert_eq!(detect_audio_format(b"OggS synthetic"), "ogg");
+        assert_eq!(detect_audio_format(b"fLaC synthetic"), "flac");
+        assert_eq!(detect_audio_format(b"RIFFxxxxWAVE"), "wav");
+        assert_eq!(detect_audio_format(b"xxxxftyp"), "m4a");
         assert_eq!(detect_audio_format(b"synthetic"), "webm");
         assert_eq!(
             retry_after(&BTreeMap::from([(
@@ -735,58 +648,5 @@ mod tests {
             "synthetic-tier"
         );
         assert_eq!(result.billing_segment["audio_seconds"], 0.0);
-    }
-
-    #[test]
-    fn reqwest_groq_transport_rejects_oversized_responses() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
-            let mut request = Vec::new();
-            loop {
-                let mut chunk = [0_u8; 8_192];
-                let read = stream.read(&mut chunk).unwrap_or_default();
-                if read == 0 {
-                    break;
-                }
-                request.extend_from_slice(&chunk[..read]);
-                let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
-                else {
-                    continue;
-                };
-                let headers = String::from_utf8_lossy(&request[..header_end]);
-                let content_length = headers.lines().find_map(|line| {
-                    let lower = line.to_ascii_lowercase();
-                    lower
-                        .strip_prefix("content-length:")?
-                        .trim()
-                        .parse::<usize>()
-                        .ok()
-                });
-                if content_length.is_some_and(|length| request.len() >= header_end + 4 + length) {
-                    break;
-                }
-            }
-            let body = vec![b'x'; (MAX_RESPONSE_BYTES + 1) as usize];
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            stream
-                .write_all(response.as_bytes())
-                .unwrap_or_else(|_| unreachable!());
-            stream.write_all(&body).unwrap_or_else(|_| unreachable!());
-        });
-        let transport = ReqwestGroqTranscriptionTransport::new().unwrap_or_else(|_| unreachable!());
-        let result = transport.transcribe(&GroqTranscriptionRequest {
-            url: format!("http://{address}/transcribe"),
-            bearer_token: "synthetic-key".to_owned(),
-            model: "synthetic-model".to_owned(),
-            file_name: "synthetic.webm".to_owned(),
-            audio: b"synthetic audio".to_vec(),
-        });
-        assert_eq!(result, Err(MediaProviderError::ResponseTooLarge));
-        assert!(server.join().is_ok());
     }
 }

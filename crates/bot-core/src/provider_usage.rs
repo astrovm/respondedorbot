@@ -83,9 +83,9 @@ mod tests {
             response_model: Some("same/model"),
             upstream_provider: None,
             service_tier: None,
-            source: Some("groq"),
+            source: Some("synthetic-provider"),
         });
         assert_eq!(actual.requested_model_metadata, None);
-        assert_eq!(actual.source, "groq");
+        assert_eq!(actual.source, "synthetic-provider");
     }
 }

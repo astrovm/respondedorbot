@@ -1,6 +1,5 @@
 //! Production adapters for the native media pipeline.
 
-use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -8,9 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bot_adapters::media_provider::{
-    GroqTranscriptionTransport, MediaProviderError, MediaProviderResult,
-    ReqwestGroqTranscriptionTransport, VisionRequest, describe_image_with,
-    transcribe_audio_groq_with, transcribe_audio_openrouter_with,
+    MediaProviderResult, VisionRequest, describe_image_with, transcribe_audio_openrouter_with,
 };
 use bot_adapters::openrouter_chat::{
     OpenRouterPricingCache, OpenRouterTransport, ReqwestOpenRouterTransport,
@@ -21,7 +18,6 @@ use bot_adapters::telegram_http::{
     TELEGRAM_FILE_MAX_BYTES, TelegramFileOutcome, TelegramFileTransport, TelegramHttpOutcome,
     TelegramTransport, download_file_with, request_with,
 };
-use bot_core::provider_errors::{ProviderErrorFacts, classify_provider_error};
 use serde_json::{Value, json};
 
 use crate::media::{
@@ -443,123 +439,41 @@ impl<Transport: OpenRouterTransport> VisionProvider for OpenRouterVisionProvider
     }
 }
 
-pub struct FallbackTranscriptionProvider<Groq, OpenRouter> {
-    groq: Groq,
-    openrouter: OpenRouter,
-    groq_accounts: Vec<(String, String)>,
-    openrouter_api_key: Option<String>,
+pub struct OpenRouterTranscriptionProvider<Transport> {
+    transport: Transport,
+    api_key: String,
     openrouter_base_url: String,
-    groq_model: String,
-    openrouter_model: String,
-    pricing: Option<Arc<OpenRouterPricingCache>>,
-    default_backoff_seconds: u64,
-    cooldowns: HashMap<String, Instant>,
+    model: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TranscriptionProviderConfig {
-    pub groq_accounts: Vec<(String, String)>,
-    pub openrouter_api_key: Option<String>,
-    pub openrouter_base_url: String,
-    pub groq_model: String,
-    pub openrouter_model: String,
-    pub default_backoff_seconds: u64,
-}
-
-impl<Groq, OpenRouter> FallbackTranscriptionProvider<Groq, OpenRouter> {
+impl<Transport> OpenRouterTranscriptionProvider<Transport> {
     #[must_use]
-    pub fn new(groq: Groq, openrouter: OpenRouter, config: TranscriptionProviderConfig) -> Self {
+    pub fn new(transport: Transport, api_key: &str, base_url: &str, model: &str) -> Self {
         Self {
-            groq,
-            openrouter,
-            groq_accounts: config.groq_accounts,
-            openrouter_api_key: config.openrouter_api_key,
-            openrouter_base_url: config.openrouter_base_url,
-            groq_model: config.groq_model,
-            openrouter_model: config.openrouter_model,
-            pricing: None,
-            default_backoff_seconds: config.default_backoff_seconds,
-            cooldowns: HashMap::new(),
-        }
-    }
-
-    #[must_use]
-    pub fn with_openrouter_pricing(mut self, pricing: Arc<OpenRouterPricingCache>) -> Self {
-        self.pricing = Some(pricing);
-        self
-    }
-
-    fn cooling_down(&self, account: &str) -> bool {
-        self.cooldowns
-            .get(account)
-            .is_some_and(|deadline| *deadline > Instant::now())
-    }
-
-    fn mark_cooldown(&mut self, account: &str, seconds: u64) {
-        if let Some(deadline) = Instant::now().checked_add(Duration::from_secs(seconds)) {
-            self.cooldowns.insert(account.to_owned(), deadline);
+            transport,
+            api_key: api_key.to_owned(),
+            openrouter_base_url: base_url.to_owned(),
+            model: model.to_owned(),
         }
     }
 }
 
-impl<Groq, OpenRouter> TranscriptionProvider for FallbackTranscriptionProvider<Groq, OpenRouter>
+impl<Transport> TranscriptionProvider for OpenRouterTranscriptionProvider<Transport>
 where
-    Groq: GroqTranscriptionTransport,
-    OpenRouter: OpenRouterTransport,
+    Transport: OpenRouterTransport,
 {
     fn transcribe(
         &mut self,
         audio: &PreparedAudio,
         file_id: &str,
     ) -> Result<Option<MediaProviderResult>, String> {
-        for (account, api_key) in self.groq_accounts.clone() {
-            if self.cooling_down(&account) {
-                continue;
-            }
-            match transcribe_audio_groq_with(
-                &self.groq,
-                &api_key,
-                &self.groq_model,
-                &audio.bytes,
-                Some(file_id),
-                audio.duration_seconds,
-                &account,
-            ) {
-                Ok(result) => return Ok(Some(result)),
-                Err(error) => {
-                    let policy = classify_media_error(&error);
-                    if policy.rate_limited {
-                        self.mark_cooldown(
-                            &account,
-                            error
-                                .retry_after_seconds()
-                                .unwrap_or(self.default_backoff_seconds),
-                        );
-                        continue;
-                    }
-                    if policy.try_next_groq_account {
-                        continue;
-                    }
-                    break;
-                }
-            }
-        }
-        let Some(api_key) = self.openrouter_api_key.as_deref() else {
-            return Ok(None);
-        };
-        let price_ceiling = self
-            .pricing
-            .as_ref()
-            .map(|pricing| pricing.price_ceiling(&self.openrouter_model))
-            .transpose()
-            .map_err(|error| error.to_string())?;
         transcribe_audio_openrouter_with(
-            &self.openrouter,
-            api_key,
+            &self.transport,
+            &self.api_key,
             &self.openrouter_base_url,
-            &self.openrouter_model,
-            price_ceiling,
+            &self.model,
             &audio.bytes,
+            audio.duration_seconds,
             Some(file_id),
         )
         .map(Some)
@@ -567,20 +481,9 @@ where
     }
 }
 
-fn classify_media_error(
-    error: &MediaProviderError,
-) -> bot_core::provider_errors::ProviderErrorPolicy {
-    classify_provider_error(ProviderErrorFacts {
-        status_code: error.status_code().map(i64::from),
-        status: None,
-        code: error.code(),
-        message: &error.to_string(),
-    })
-}
-
 pub type ProductionVisionProvider = OpenRouterVisionProvider<ReqwestOpenRouterTransport>;
 pub type ProductionTranscriptionProvider =
-    FallbackTranscriptionProvider<ReqwestGroqTranscriptionTransport, ReqwestOpenRouterTransport>;
+    OpenRouterTranscriptionProvider<ReqwestOpenRouterTransport>;
 
 #[cfg(test)]
 mod tests {
@@ -588,7 +491,6 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use bot_adapters::media_provider::{GroqTranscriptionRequest, GroqTranscriptionResponse};
     use bot_adapters::openrouter_chat::{HttpRequest, HttpResponse, OpenRouterChatError};
     use bot_adapters::telegram_http::{
         BinaryHttpResponse, HttpResponse as TelegramResponse, TelegramFileRequest, TelegramRequest,
@@ -727,47 +629,15 @@ mod tests {
         bytes
     }
 
-    struct Groq {
-        responses: RefCell<Vec<Result<GroqTranscriptionResponse, MediaProviderError>>>,
-        accounts: RefCell<Vec<String>>,
-    }
-
-    impl GroqTranscriptionTransport for Groq {
-        fn transcribe(
-            &self,
-            request: &GroqTranscriptionRequest,
-        ) -> Result<GroqTranscriptionResponse, MediaProviderError> {
-            self.accounts
-                .borrow_mut()
-                .push(request.bearer_token.clone());
-            self.responses.borrow_mut().remove(0)
-        }
-    }
-
     struct OpenRouter {
-        calls: RefCell<usize>,
+        requests: RefCell<Vec<HttpRequest>>,
+        response: HttpResponse,
     }
 
     impl OpenRouterTransport for OpenRouter {
-        fn post(&self, _request: &HttpRequest) -> Result<HttpResponse, OpenRouterChatError> {
-            *self.calls.borrow_mut() += 1;
-            Ok(HttpResponse {
-                status_code: 200,
-                headers: BTreeMap::new(),
-                body: json!({
-                    "choices": [{"message": {"content": "fallback transcript"}}],
-                    "usage": {"prompt_tokens": 1, "completion_tokens": 2}
-                })
-                .to_string(),
-            })
-        }
-    }
-
-    fn groq_response(status_code: u16, body: Value) -> GroqTranscriptionResponse {
-        GroqTranscriptionResponse {
-            status_code,
-            headers: BTreeMap::new(),
-            body: body.to_string(),
+        fn post(&self, request: &HttpRequest) -> Result<HttpResponse, OpenRouterChatError> {
+            self.requests.borrow_mut().push(request.clone());
+            Ok(self.response.clone())
         }
     }
 
@@ -873,92 +743,54 @@ mod tests {
     }
 
     #[test]
-    fn groq_rate_limit_tries_next_account_before_openrouter() {
-        let groq = Groq {
-            responses: RefCell::new(vec![
-                Ok(groq_response(
-                    429,
-                    json!({"error": {"message": "rate limit"}}),
-                )),
-                Ok(groq_response(
-                    200,
-                    json!({"text": "second account transcript"}),
-                )),
-            ]),
-            accounts: RefCell::new(Vec::new()),
-        };
-        let openrouter = OpenRouter {
-            calls: RefCell::new(0),
-        };
-        let mut provider = FallbackTranscriptionProvider::new(
-            groq,
-            openrouter,
-            TranscriptionProviderConfig {
-                groq_accounts: vec![
-                    ("free".to_owned(), "free-key".to_owned()),
-                    ("paid".to_owned(), "paid-key".to_owned()),
-                ],
-                openrouter_api_key: Some("openrouter-key".to_owned()),
-                openrouter_base_url: "https://synthetic.invalid".to_owned(),
-                groq_model: "whisper-large-v3".to_owned(),
-                openrouter_model: "google/gemini".to_owned(),
-                default_backoff_seconds: 60,
+    fn transcription_provider_uses_openrouter_audio_endpoint() {
+        let mut provider = OpenRouterTranscriptionProvider::new(
+            OpenRouter {
+                requests: RefCell::new(Vec::new()),
+                response: HttpResponse {
+                    status_code: 200,
+                    headers: BTreeMap::new(),
+                    body: json!({
+                        "text": "synthetic transcript",
+                        "usage": {"seconds": 3.0, "cost": "0.0000833"}
+                    })
+                    .to_string(),
+                },
             },
+            "synthetic-key",
+            "https://synthetic.invalid/api/v1",
+            "microsoft/mai-transcribe-2",
         );
         let result = provider.transcribe(
             &PreparedAudio {
-                bytes: b"audio".to_vec(),
+                bytes: b"\x1aE\xdf\xa3 synthetic audio".to_vec(),
                 duration_seconds: 3.0,
             },
             "file-1",
         );
         assert!(matches!(
-            result,
-            Ok(Some(MediaProviderResult { ref text, .. })) if text == "second account transcript"
+            result.as_ref(),
+            Ok(Some(MediaProviderResult { text, .. })) if text == "synthetic transcript"
         ));
+        assert_eq!(provider.transport.requests.borrow().len(), 1);
+        let requests = provider.transport.requests.borrow();
+        let request = &requests[0];
+        let payload = serde_json::from_str::<Value>(&request.body).unwrap_or(Value::Null);
         assert_eq!(
-            provider.groq.accounts.borrow().as_slice(),
-            ["free-key", "paid-key"]
+            request.url,
+            "https://synthetic.invalid/api/v1/audio/transcriptions"
         );
-        assert_eq!(*provider.openrouter.calls.borrow(), 0);
-    }
-
-    #[test]
-    fn unrecoverable_groq_failure_uses_openrouter_fallback() {
-        let groq = Groq {
-            responses: RefCell::new(vec![Ok(groq_response(
-                500,
-                json!({"error": {"message": "server failed"}}),
-            ))]),
-            accounts: RefCell::new(Vec::new()),
-        };
-        let openrouter = OpenRouter {
-            calls: RefCell::new(0),
-        };
-        let mut provider = FallbackTranscriptionProvider::new(
-            groq,
-            openrouter,
-            TranscriptionProviderConfig {
-                groq_accounts: vec![("free".to_owned(), "free-key".to_owned())],
-                openrouter_api_key: Some("openrouter-key".to_owned()),
-                openrouter_base_url: "https://synthetic.invalid".to_owned(),
-                groq_model: "whisper-large-v3".to_owned(),
-                openrouter_model: "google/gemini".to_owned(),
-                default_backoff_seconds: 60,
-            },
+        assert_eq!(request.bearer_token, "synthetic-key");
+        assert_eq!(payload["model"], "microsoft/mai-transcribe-2");
+        assert_eq!(payload["input_audio"]["format"], "webm");
+        assert_eq!(
+            result
+                .as_ref()
+                .ok()
+                .and_then(|value| value.as_ref())
+                .map(|value| value.billing_segment["metadata"]["provider"].clone()),
+            Some(json!("openrouter"))
         );
-        let result = provider.transcribe(
-            &PreparedAudio {
-                bytes: b"audio".to_vec(),
-                duration_seconds: 3.0,
-            },
-            "file-1",
-        );
-        assert!(matches!(
-            result,
-            Ok(Some(MediaProviderResult { ref text, .. })) if text == "fallback transcript"
-        ));
-        assert_eq!(*provider.openrouter.calls.borrow(), 1);
     }
 
     #[test]
