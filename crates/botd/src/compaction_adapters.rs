@@ -41,6 +41,7 @@ pub fn production_compaction_worker(
     database_url: &str,
     openrouter_api_key: &str,
     openrouter_base_url: &str,
+    pricing: Arc<OpenRouterPricingCache>,
     system_prompt: &str,
     owner_prefix: &str,
 ) -> Result<ProductionCompactionWorker, String> {
@@ -50,10 +51,6 @@ pub fn production_compaction_worker(
         let sequence = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         format!("{owner_prefix}:compaction:{sequence}")
     });
-    let pricing = Arc::new(
-        OpenRouterPricingCache::new(openrouter_api_key, openrouter_base_url)
-            .map_err(|error| error.to_string())?,
-    );
     Ok(CompactionWorker::new(
         RedisCompactionQueue::new(endpoint).map_err(|error| error.to_string())?,
         RedisCompactionState::new(endpoint)?,
@@ -560,13 +557,14 @@ fn compaction_actual_units(
 mod tests {
     use std::cell::RefCell;
     use std::error::Error;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use bot_adapters::billing_read::BillingRepository;
     use bot_adapters::billing_schema::BillingSchemaRepository;
     use bot_adapters::compaction_job::{COMPACTION_JOB_SCHEMA_VERSION, CompactionJobRecord};
     use bot_adapters::openrouter_chat::{
-        HttpRequest, HttpResponse, OpenRouterChatError, OpenRouterTransport,
+        HttpRequest, HttpResponse, OpenRouterChatError, OpenRouterPricingCache, OpenRouterTransport,
     };
     use bot_adapters::redis_connection::RedisEndpoint;
     use serde_json::{Value, json};
@@ -778,6 +776,13 @@ mod tests {
             "postgresql://synthetic.invalid/database",
             "synthetic-openrouter-key",
             "https://openrouter.example.test/api/v1",
+            Arc::new(
+                OpenRouterPricingCache::new(
+                    "synthetic-openrouter-key",
+                    "https://openrouter.example.test/api/v1",
+                )
+                .unwrap_or_else(|_| unreachable!("pricing cache construction")),
+            ),
             "synthetic persona",
             "synthetic-owner",
         );

@@ -22,6 +22,7 @@ use crate::reconciliation::{
 use crate::scheduler::SchedulerMode;
 use crate::scheduler::{ScheduledTaskExecutor, SchedulerStep, SchedulerStore, TaskScheduler};
 use crate::task_service::{TaskServiceOptions, build_task_scheduler};
+use bot_adapters::openrouter_chat::OpenRouterPricingCache;
 use bot_adapters::redis_connection::RedisEndpoint;
 
 const TASK_INTERVAL: Duration = Duration::from_secs(1);
@@ -36,6 +37,7 @@ pub struct ProductionBackgroundOptions<'a> {
     pub telegram_token: &'a str,
     pub openrouter_api_key: &'a str,
     pub openrouter_base_url: &'a str,
+    pub openrouter_pricing: Arc<OpenRouterPricingCache>,
     pub firecrawl_api_key: Option<&'a str>,
     pub system_prompt: &'a str,
     pub owner_token: &'a str,
@@ -58,6 +60,7 @@ pub fn build_production_background_specs(
             telegram_token: options.telegram_token,
             openrouter_api_key: options.openrouter_api_key,
             openrouter_base_url: options.openrouter_base_url,
+            openrouter_pricing: Arc::clone(&options.openrouter_pricing),
             firecrawl_api_key: options.firecrawl_api_key,
             system_prompt: options.system_prompt,
             owner_token: options.owner_token,
@@ -77,12 +80,14 @@ pub fn build_production_background_specs(
         options.database_url,
         options.openrouter_api_key,
         options.openrouter_base_url,
+        Arc::clone(&options.openrouter_pricing),
         options.system_prompt,
         options.owner_token,
     )?;
     let reconciliation = production_reconciler(
         options.database_url,
         options.openrouter_api_key,
+        options.openrouter_base_url,
         options.active_operations,
         options.reconciliation_settings,
     )?;
@@ -461,6 +466,7 @@ mod tests {
     use std::sync::mpsc::{self, RecvTimeoutError};
     use std::sync::{Arc, Mutex};
 
+    use bot_adapters::openrouter_chat::OpenRouterPricingCache;
     use bot_adapters::redis_connection::RedisEndpoint;
     use bot_core::locale::Locale;
 
@@ -621,6 +627,13 @@ mod tests {
 
     #[test]
     fn production_background_composition_does_not_start_or_contact_services() {
+        let pricing = Arc::new(
+            OpenRouterPricingCache::new(
+                "synthetic-openrouter-key",
+                "https://openrouter.example.test/api/v1",
+            )
+            .unwrap_or_else(|_| unreachable!("pricing cache construction")),
+        );
         let result = build_production_background_specs(ProductionBackgroundOptions {
             redis_endpoint: &RedisEndpoint {
                 host: "synthetic.invalid".to_owned(),
@@ -631,6 +644,7 @@ mod tests {
             telegram_token: "synthetic-telegram-token",
             openrouter_api_key: "synthetic-openrouter-key",
             openrouter_base_url: "https://openrouter.example.test/api/v1",
+            openrouter_pricing: pricing,
             firecrawl_api_key: None,
             system_prompt: "synthetic persona",
             owner_token: "synthetic-owner",

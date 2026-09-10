@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bot_adapters::billing_schema::BillingSchemaRepository;
-use bot_adapters::openrouter_chat::DEFAULT_OPENROUTER_BASE_URL;
+use bot_adapters::openrouter_chat::{DEFAULT_OPENROUTER_BASE_URL, OpenRouterPricingCache};
 use bot_adapters::telegram_http::ReqwestTelegramTransport;
 use bot_adapters::telegram_polling::PollFailure;
 use bot_core::locale::Locale;
@@ -169,6 +169,10 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
         .openrouter_base_url
         .as_deref()
         .unwrap_or(DEFAULT_OPENROUTER_BASE_URL);
+    let openrouter_pricing = Arc::new(
+        OpenRouterPricingCache::new(config.openrouter_api_key(), openrouter_base_url)
+            .map_err(|error| error.to_string())?,
+    );
     let mut runtime = build_native_runtime(NativeRuntimeOptions {
         token: config.runtime.telegram_token(),
         database_url: config.database_url(),
@@ -181,6 +185,7 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
         giphy_api_key: config.giphy_api_key().map(str::to_owned),
         openrouter_api_key: Some(config.openrouter_api_key().to_owned()),
         openrouter_base_url: config.openrouter_base_url.clone(),
+        openrouter_pricing: Some(Arc::clone(&openrouter_pricing)),
         firecrawl_api_key: config.firecrawl_api_key().map(str::to_owned),
         supadata_api_key: config.supadata_api_key().map(str::to_owned),
         apify_api_key: config.apify_api_key().map(str::to_owned),
@@ -196,6 +201,7 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
         telegram_token: config.runtime.telegram_token(),
         openrouter_api_key: config.openrouter_api_key(),
         openrouter_base_url,
+        openrouter_pricing,
         firecrawl_api_key: config.firecrawl_api_key(),
         system_prompt: &config.system_prompt,
         owner_token: &config.owner_token(),

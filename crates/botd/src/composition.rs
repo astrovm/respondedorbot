@@ -1839,6 +1839,7 @@ pub struct NativeRuntimeOptions<'a> {
     pub giphy_api_key: Option<String>,
     pub openrouter_api_key: Option<String>,
     pub openrouter_base_url: Option<String>,
+    pub openrouter_pricing: Option<Arc<OpenRouterPricingCache>>,
     pub firecrawl_api_key: Option<String>,
     pub supadata_api_key: Option<String>,
     pub apify_api_key: Option<String>,
@@ -1861,6 +1862,7 @@ struct OwnedNativeRuntimeOptions {
     giphy_api_key: Option<String>,
     openrouter_api_key: Option<String>,
     openrouter_base_url: Option<String>,
+    openrouter_pricing: Option<Arc<OpenRouterPricingCache>>,
     firecrawl_api_key: Option<String>,
     supadata_api_key: Option<String>,
     apify_api_key: Option<String>,
@@ -1884,6 +1886,7 @@ impl OwnedNativeRuntimeOptions {
             giphy_api_key: options.giphy_api_key,
             openrouter_api_key: options.openrouter_api_key,
             openrouter_base_url: options.openrouter_base_url,
+            openrouter_pricing: options.openrouter_pricing,
             firecrawl_api_key: options.firecrawl_api_key,
             supadata_api_key: options.supadata_api_key,
             apify_api_key: options.apify_api_key,
@@ -1907,6 +1910,7 @@ impl OwnedNativeRuntimeOptions {
             giphy_api_key: self.giphy_api_key.clone(),
             openrouter_api_key: self.openrouter_api_key.clone(),
             openrouter_base_url: self.openrouter_base_url.clone(),
+            openrouter_pricing: self.openrouter_pricing.clone(),
             firecrawl_api_key: self.firecrawl_api_key.clone(),
             supadata_api_key: self.supadata_api_key.clone(),
             apify_api_key: self.apify_api_key.clone(),
@@ -2270,10 +2274,13 @@ fn build_native_dispatcher(
                 .filter(|url| !url.is_empty())
                 .unwrap_or(DEFAULT_OPENROUTER_BASE_URL)
                 .to_owned();
-            let openrouter_pricing = Arc::new(
-                OpenRouterPricingCache::new(&api_key, &openrouter_base_url)
-                    .map_err(CompositionError::OpenRouterChatTransport)?,
-            );
+            let openrouter_pricing = match options.openrouter_pricing {
+                Some(pricing) => pricing,
+                None => Arc::new(
+                    OpenRouterPricingCache::new(&api_key, &openrouter_base_url)
+                        .map_err(CompositionError::OpenRouterChatTransport)?,
+                ),
+            };
             let provider = OpenRouterChatStreamer::new(
                 ReqwestOpenRouterTransport::new()
                     .map_err(CompositionError::OpenRouterChatTransport)?,
@@ -3751,6 +3758,7 @@ mod tests {
             giphy_api_key: None,
             openrouter_api_key: None,
             openrouter_base_url: None,
+            openrouter_pricing: None,
             firecrawl_api_key: None,
             supadata_api_key: None,
             apify_api_key: None,
@@ -3772,6 +3780,7 @@ mod tests {
             giphy_api_key: None,
             openrouter_api_key: None,
             openrouter_base_url: None,
+            openrouter_pricing: None,
             firecrawl_api_key: None,
             supadata_api_key: None,
             apify_api_key: None,
@@ -3793,6 +3802,7 @@ mod tests {
             giphy_api_key: None,
             openrouter_api_key: Some("synthetic-openrouter-key".to_owned()),
             openrouter_base_url: Some("https://openrouter.example.test/v1".to_owned()),
+            openrouter_pricing: None,
             firecrawl_api_key: Some("synthetic-firecrawl-key".to_owned()),
             supadata_api_key: Some("synthetic-supadata-key".to_owned()),
             apify_api_key: Some("synthetic-apify-key".to_owned()),
@@ -3824,6 +3834,7 @@ mod tests {
             giphy_api_key: Some("synthetic-image-key".to_owned()),
             openrouter_api_key: Some("synthetic-ai-key".to_owned()),
             openrouter_base_url: Some("https://provider.example.test/v1".to_owned()),
+            openrouter_pricing: None,
             firecrawl_api_key: Some("synthetic-search-key".to_owned()),
             supadata_api_key: Some("synthetic-supadata-key".to_owned()),
             apify_api_key: Some("synthetic-apify-key".to_owned()),

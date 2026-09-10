@@ -430,10 +430,12 @@ pub type ProductionAiBillingReconciler =
 pub fn production_reconciler(
     database_url: &str,
     openrouter_api_key: &str,
+    openrouter_base_url: &str,
     active: ActiveOperationRegistry,
     settings: ReconciliationSettings,
 ) -> Result<ProductionAiBillingReconciler, String> {
-    let transport = ReqwestGenerationTransport::new().map_err(|error| error.to_string())?;
+    let transport = ReqwestGenerationTransport::new_with_base_url(openrouter_base_url)
+        .map_err(|error| error.to_string())?;
     Ok(AiBillingReconciler::new(
         BillingRepository::new(database_url),
         OpenRouterGenerationSource::new(transport, openrouter_api_key),

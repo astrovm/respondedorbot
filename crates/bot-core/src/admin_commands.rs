@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 use serde_json::{Map, Value};
 
 use crate::admin_reports::{CreditLogLimit, parse_creditlog_limit, truncate_report};
-use crate::ai_pricing::model_cache_input_rates;
 use crate::command_parsing::parse_command;
 use crate::credit_units::{CreditUnits, format_credit_units, parse_credit_units};
 use crate::locale::Locale;
@@ -298,26 +297,16 @@ fn summarize_segments(value: Option<&Value>, cache_only: bool) -> Option<String>
 
 fn summarize_model_cache(value: Option<&Value>, locale: Locale) -> Option<String> {
     let mut cached_tokens_total = 0_i64;
-    let mut savings_total = 0_i128;
     for item in objects(value) {
         let cached_tokens = value_i64(item.get("input_cached_tokens"));
         if cached_tokens <= 0 {
             continue;
         }
-        let model = item
-            .get("model")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let (input_price, cached_price) = model_cache_input_rates(model).unwrap_or((0, 0));
         cached_tokens_total = cached_tokens_total.saturating_add(cached_tokens);
-        if input_price > cached_price {
-            savings_total +=
-                i128::from(cached_tokens) * i128::from(input_price - cached_price) / 1_000_000;
-        }
     }
     (cached_tokens_total > 0).then(|| match locale {
-        Locale::Es => format!("cacheados={cached_tokens_total} ahorro_cache={savings_total}"),
-        Locale::En => format!("cached_tokens={cached_tokens_total} cache_savings={savings_total}"),
+        Locale::Es => format!("cacheados={cached_tokens_total}"),
+        Locale::En => format!("cached_tokens={cached_tokens_total}"),
     })
 }
 
@@ -631,7 +620,7 @@ mod tests {
         };
         assert_eq!(
             render_creditlog(&[entry], Locale::Es),
-            "últimas liquidaciones IA:\n\n2026-03-11 17:35:10 | cmd=/ask | estado=ok\nchat=202 user=99 reservado=2.00 cobrado=1.00 refund=1.00 extra=0.00 deuda=0.00\nusd_micros=390\nrequests: chat=3\ncache_hits: chat=1\ncacheados=900 ahorro_cache=0\nmodelos: deepseek/deepseek-v4.1-flash=390\ntools: web_search=8000 (2x), python=500 (1x)"
+            "últimas liquidaciones IA:\n\n2026-03-11 17:35:10 | cmd=/ask | estado=ok\nchat=202 user=99 reservado=2.00 cobrado=1.00 refund=1.00 extra=0.00 deuda=0.00\nusd_micros=390\nrequests: chat=3\ncache_hits: chat=1\ncacheados=900\nmodelos: deepseek/deepseek-v4.1-flash=390\ntools: web_search=8000 (2x), python=500 (1x)"
         );
     }
 
@@ -701,7 +690,7 @@ mod tests {
                 Some(&json!([{"model":"unknown","input_cached_tokens":5}])),
                 Locale::En
             ),
-            Some("cached_tokens=5 cache_savings=0".to_owned())
+            Some("cached_tokens=5".to_owned())
         );
     }
 }

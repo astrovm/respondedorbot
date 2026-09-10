@@ -15,6 +15,8 @@ use thiserror::Error;
 pub const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 const OPENROUTER_PRICING_TTL: Duration = Duration::from_secs(300);
+const OPENROUTER_PRICING_RETRY_INITIAL: Duration = Duration::from_secs(30);
+const OPENROUTER_PRICING_RETRY_MAX: Duration = Duration::from_secs(15 * 60);
 const USD_MICROS_PER_MILLION_TOKENS: i128 = 1_000_000_000_000;
 const OPENROUTER_MAX_RESPONSE_BYTES: u64 = 1_048_576;
 
@@ -23,6 +25,9 @@ struct OpenRouterPricingState {
     fetched_at: Option<Instant>,
     models: BTreeMap<String, TokenPricing>,
     transcription_models: BTreeMap<String, TranscriptionPricing>,
+    refresh_retry_at: Option<Instant>,
+    refresh_retry_delay: Duration,
+    last_refresh_error: Option<OpenRouterChatError>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +74,20 @@ impl OpenRouterPricingCache {
     }
 
     pub fn refresh(&self) -> Result<(), OpenRouterChatError> {
+        let result = self.refresh_catalog();
+        match result {
+            Ok(()) => {
+                self.record_refresh_success()?;
+                Ok(())
+            }
+            Err(error) => {
+                self.record_refresh_failure(&error)?;
+                Err(error)
+            }
+        }
+    }
+
+    fn refresh_catalog(&self) -> Result<(), OpenRouterChatError> {
         let api_key = self.api_key.trim();
         if api_key.is_empty() {
             return Err(OpenRouterChatError::MissingApiKey);
@@ -135,7 +154,6 @@ impl OpenRouterPricingCache {
             state.models.extend(prices);
             state.transcription_models.extend(transcription_prices);
         }
-        state.fetched_at = Some(Instant::now());
         Ok(())
     }
 
@@ -160,11 +178,15 @@ impl OpenRouterPricingCache {
         Ok(())
     }
 
-    fn is_stale(&self) -> Result<bool, OpenRouterChatError> {
+    fn refresh_is_due(&self) -> Result<bool, OpenRouterChatError> {
         let state = self.lock_state()?;
-        Ok(state
+        let stale = state
             .fetched_at
-            .is_none_or(|fetched_at| fetched_at.elapsed() >= OPENROUTER_PRICING_TTL))
+            .is_none_or(|fetched_at| fetched_at.elapsed() >= OPENROUTER_PRICING_TTL);
+        Ok(stale
+            && state
+                .refresh_retry_at
+                .is_none_or(|retry_at| retry_at <= Instant::now()))
     }
 
     fn lookup<T, F>(&self, model: &str, lookup: F) -> Result<Option<T>, OpenRouterChatError>
@@ -180,7 +202,7 @@ impl OpenRouterPricingCache {
             let state = self.lock_state()?;
             lookup(&state, model)
         };
-        if self.is_stale()?
+        if self.refresh_is_due()?
             && let Err(error) = self.refresh()
             && cached.is_none()
         {
@@ -188,9 +210,46 @@ impl OpenRouterPricingCache {
         }
         let current = {
             let state = self.lock_state()?;
+            if let Some(current) = lookup(&state, model) {
+                return Ok(Some(current));
+            }
+            if cached.is_none()
+                && let Some(error) = state.last_refresh_error.clone()
+            {
+                return Err(error);
+            }
             lookup(&state, model)
         };
         Ok(current.or(cached))
+    }
+
+    fn record_refresh_success(&self) -> Result<(), OpenRouterChatError> {
+        let mut state = self.lock_state()?;
+        state.fetched_at = Some(Instant::now());
+        state.refresh_retry_at = None;
+        state.refresh_retry_delay = Duration::ZERO;
+        state.last_refresh_error = None;
+        Ok(())
+    }
+
+    fn record_refresh_failure(
+        &self,
+        error: &OpenRouterChatError,
+    ) -> Result<(), OpenRouterChatError> {
+        let mut state = self.lock_state()?;
+        let delay = if state.refresh_retry_delay.is_zero() {
+            OPENROUTER_PRICING_RETRY_INITIAL
+        } else {
+            state
+                .refresh_retry_delay
+                .checked_mul(2)
+                .unwrap_or(OPENROUTER_PRICING_RETRY_MAX)
+                .min(OPENROUTER_PRICING_RETRY_MAX)
+        };
+        state.refresh_retry_delay = delay;
+        state.refresh_retry_at = Some(Instant::now() + delay);
+        state.last_refresh_error = Some(error.clone());
+        Ok(())
     }
 
     fn lock_state(&self) -> Result<MutexGuard<'_, OpenRouterPricingState>, OpenRouterChatError> {
@@ -1391,6 +1450,26 @@ mod tests {
             .unwrap_or_else(|_| unreachable!("outage fallback"))
             .unwrap_or_else(|| unreachable!("cached transcription model"));
         assert_eq!(outage_fallback, first);
+        let retry_at = cache
+            .state
+            .lock()
+            .unwrap_or_else(|_| unreachable!("pricing state"))
+            .refresh_retry_at
+            .unwrap_or_else(|| unreachable!("refresh retry deadline"));
+        assert!(retry_at > Instant::now());
+        let repeated_fallback = cache
+            .transcription_pricing(OPENROUTER_TRANSCRIPTION_MODEL)
+            .unwrap_or_else(|_| unreachable!("backoff fallback"))
+            .unwrap_or_else(|| unreachable!("cached transcription model"));
+        assert_eq!(repeated_fallback, first);
+        assert_eq!(
+            cache
+                .state
+                .lock()
+                .unwrap_or_else(|_| unreachable!("pricing state"))
+                .refresh_retry_at,
+            Some(retry_at)
+        );
         server
             .join()
             .unwrap_or_else(|_| unreachable!("catalog server"));

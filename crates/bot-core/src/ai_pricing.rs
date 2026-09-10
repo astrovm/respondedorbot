@@ -328,12 +328,6 @@ fn reported_cost(
     Ok(upstream_cost)
 }
 
-/// OpenRouter cache savings require current catalog data and are not reconstructed
-/// from settled usage records.
-#[must_use]
-pub fn model_cache_input_rates(_model: &str) -> Option<(i64, i64)> {
-    None
-}
 fn model_cost(
     usage: &Map<String, Value>,
     accept_reported_zero: bool,
@@ -804,11 +798,6 @@ mod tests {
         assert_eq!(missing["model_breakdown"][0]["input_tokens"], 1_000);
         assert_eq!(missing["model_breakdown"][0]["input_cached_tokens"], 100);
         assert_eq!(missing["model_breakdown"][0]["output_tokens"], 50);
-        assert_eq!(
-            super::model_cache_input_rates("deepseek/deepseek-v4.1-flash"),
-            None
-        );
-
         let settled = calculate_billing_for_segments(&json!([{
             "kind": "chat",
             "model": "deepseek/deepseek-v4.1-flash",

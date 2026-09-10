@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-const GENERATION_URL: &str = "https://openrouter.ai/api/v1/generation";
+use crate::openrouter_chat::DEFAULT_OPENROUTER_BASE_URL;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenerationRequest {
@@ -25,6 +25,8 @@ pub struct HttpResponse {
 pub enum GenerationError {
     #[error("OpenRouter generation transport failed: {0}")]
     Transport(String),
+    #[error("OpenRouter generation base URL is invalid")]
+    InvalidBaseUrl,
     #[error("OpenRouter generation HTTP {status_code}")]
     Http { status_code: u16 },
     #[error("OpenRouter generation returned invalid JSON: {0}")]
@@ -49,13 +51,18 @@ pub struct ReqwestGenerationTransport {
 
 impl ReqwestGenerationTransport {
     pub fn new() -> Result<Self, GenerationError> {
+        Self::new_with_base_url(DEFAULT_OPENROUTER_BASE_URL)
+    }
+
+    pub fn new_with_base_url(base_url: &str) -> Result<Self, GenerationError> {
+        let generation_url = generation_url(base_url)?;
         Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(20))
             .build()
             .map(|client| Self {
                 client,
-                generation_url: GENERATION_URL.to_owned(),
+                generation_url,
             })
             .map_err(|error| GenerationError::Transport(error.to_string()))
     }
@@ -67,6 +74,15 @@ impl ReqwestGenerationTransport {
             transport
         })
     }
+}
+
+fn generation_url(base_url: &str) -> Result<String, GenerationError> {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    let parsed = reqwest::Url::parse(trimmed).map_err(|_| GenerationError::InvalidBaseUrl)?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(GenerationError::InvalidBaseUrl);
+    }
+    Ok(format!("{trimmed}/generation"))
 }
 
 impl GenerationTransport for ReqwestGenerationTransport {
@@ -135,7 +151,7 @@ mod tests {
 
     use super::{
         GenerationError, GenerationOutcome, GenerationRequest, GenerationTransport, HttpResponse,
-        ReqwestGenerationTransport, fetch_with, parse_response,
+        ReqwestGenerationTransport, fetch_with, generation_url, parse_response,
     };
 
     struct FakeTransport {
@@ -245,6 +261,22 @@ mod tests {
         assert_eq!(
             fetch_with(&transport, "key", "generation"),
             Err(GenerationError::Transport("synthetic failure".to_owned()))
+        );
+    }
+
+    #[test]
+    fn generation_url_uses_the_configured_openrouter_base_and_validates_it() {
+        assert_eq!(
+            generation_url(" https://provider.example.test/api/v1/ "),
+            Ok("https://provider.example.test/api/v1/generation".to_owned())
+        );
+        assert_eq!(
+            generation_url("ftp://provider.example.test/api/v1"),
+            Err(GenerationError::InvalidBaseUrl)
+        );
+        assert_eq!(
+            generation_url("provider.example.test/api/v1"),
+            Err(GenerationError::InvalidBaseUrl)
         );
     }
 
