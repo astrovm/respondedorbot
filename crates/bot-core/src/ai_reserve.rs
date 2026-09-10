@@ -90,6 +90,24 @@ pub fn estimate_chat_reserve_credit_units(
     model: &str,
 ) -> Result<i64, ReserveEstimateError> {
     let pricing = chat_pricing(model)?;
+    estimate_chat_reserve_credit_units_with_pricing(
+        system_message,
+        messages,
+        max_output_tokens,
+        extra_input_tokens,
+        model,
+        &pricing,
+    )
+}
+
+pub fn estimate_chat_reserve_credit_units_with_pricing(
+    system_message: Option<&EstimatedMessage>,
+    messages: &[EstimatedMessage],
+    max_output_tokens: Option<i64>,
+    extra_input_tokens: i64,
+    model: &str,
+    pricing: &TokenPricing,
+) -> Result<i64, ReserveEstimateError> {
     let mut input_tokens = i128::from(estimate_message_tokens(messages))
         .checked_add(i128::from(extra_input_tokens))
         .ok_or(ReserveEstimateError::Overflow)?;
@@ -207,8 +225,9 @@ fn vision_pricing(model: &str) -> Result<TokenPricing, ReserveEstimateError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        EstimatedMessage, ReserveEstimateError, TokenEstimateValue, chat_output_token_limit,
-        credit_units_from_usd_micros, estimate_chat_reserve_credit_units,
+        EstimatedMessage, ReserveEstimateError, TokenEstimateValue, TokenPricing,
+        chat_output_token_limit, credit_units_from_usd_micros, estimate_chat_reserve_credit_units,
+        estimate_chat_reserve_credit_units_with_pricing,
         estimate_firecrawl_reserve_credit_units, estimate_message_tokens, estimate_nested_tokens,
         estimate_text_tokens, estimate_transcription_reserve_credit_units,
         estimate_vision_reserve_credit_units, estimate_youtube_transcript_reserve_credit_units,
@@ -251,7 +270,7 @@ mod tests {
         ];
         assert_eq!(estimate_message_tokens(&messages), 10);
         assert_eq!(
-            estimate_chat_reserve_credit_units(
+            estimate_chat_reserve_credit_units_with_pricing(
                 Some(&EstimatedMessage {
                     role: text("system"),
                     content: text("rules"),
@@ -261,6 +280,13 @@ mod tests {
                 None,
                 0,
                 "deepseek/deepseek-v4.1-flash",
+                &TokenPricing {
+                    input_per_million: 300_000,
+                    cached_input_per_million: Some(6_000),
+                    cache_write_per_million: None,
+                    audio_input_per_million: None,
+                    output_per_million: 1_200_000,
+                },
             ),
             Ok(197)
         );
