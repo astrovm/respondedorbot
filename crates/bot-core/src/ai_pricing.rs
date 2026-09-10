@@ -771,6 +771,53 @@ mod tests {
     }
 
     #[test]
+    fn openrouter_model_costs_require_provider_reported_settlement() -> Result<(), AiPricingError>
+    {
+        let missing = calculate_billing_for_segments(&json!([{
+            "kind": "chat",
+            "model": "deepseek/deepseek-v4.1-flash",
+            "usage": {
+                "input_tokens": 1_000,
+                "input_cached_tokens": 100,
+                "output_tokens": 50
+            },
+            "metadata": {"provider": "openrouter"}
+        }]))?;
+        assert_eq!(missing["raw_usd_micros"], 0);
+        assert_eq!(missing["charged_credit_units"], 0);
+        assert_eq!(missing["pricing_complete"], false);
+        assert_eq!(missing["segment_breakdown"][0]["pricing_basis"], "missing");
+        assert_eq!(missing["model_breakdown"][0]["input_tokens"], 1_000);
+        assert_eq!(missing["model_breakdown"][0]["input_cached_tokens"], 100);
+        assert_eq!(missing["model_breakdown"][0]["output_tokens"], 50);
+        assert_eq!(
+            super::model_cache_input_rates("deepseek/deepseek-v4.1-flash"),
+            None
+        );
+
+        let settled = calculate_billing_for_segments(&json!([{
+            "kind": "chat",
+            "model": "deepseek/deepseek-v4.1-flash",
+            "usage": {
+                "input_tokens": 1_000,
+                "input_cached_tokens": 100,
+                "output_tokens": 50,
+                "cost": "0.000123"
+            },
+            "metadata": {"provider": "openrouter"}
+        }]))?;
+        assert_eq!(settled["raw_usd_micros"], 123);
+        assert_eq!(settled["charged_credit_units"], 3);
+        assert_eq!(settled["pricing_complete"], true);
+        assert_eq!(
+            settled["segment_breakdown"][0]["pricing_basis"],
+            "provider_reported"
+        );
+        assert_eq!(settled["model_breakdown"][0]["usd_micros"], 123);
+        Ok(())
+    }
+
+    #[test]
     fn accepts_zero_provider_cost_only_after_authoritative_reconciliation()
     -> Result<(), AiPricingError> {
         let pending = calculate_billing_for_segments(&json!([{
