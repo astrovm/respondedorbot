@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use bot_adapters::openrouter_chat::{
     ChatCompletionRequest, ChatMessage, ChatRole, ChatStreamEvent, OpenRouterChatError,
-    OpenRouterPricingCache, OpenRouterStreamTransport, ReasoningConfig, ToolCall,
-    ToolFunctionCall, stream_with,
+    OpenRouterPricingCache, OpenRouterStreamTransport, ReasoningConfig, ToolCall, ToolFunctionCall,
+    stream_with,
 };
 use bot_core::ai_prompt::{PromptContent, PromptMessage, PromptRole};
 use bot_core::ai_reserve::chat_output_token_limit;
