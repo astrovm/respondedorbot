@@ -2077,9 +2077,11 @@ impl ConversationToolFactory for ProductionToolFactory {
                             locale,
                         },
                     );
-                    self.openrouter_pricing.clone().map_or(tool, |pricing| {
+                    if let Some(pricing) = self.openrouter_pricing.clone() {
                         tool.with_openrouter_pricing(pricing)
-                    })
+                    } else {
+                        tool
+                    }
                 }),
             )
             .with_executor(
