@@ -1,8 +1,10 @@
 //! Native task creation, listing, and cancellation AI tools.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use bot_adapters::billing_read::BillingRepository;
+use bot_adapters::openrouter_chat::OpenRouterPricingCache;
 use bot_adapters::redis_task_store::RedisTaskStore;
 use bot_adapters::task_record::TaskRecordDocument;
 use bot_core::credit_units::{CreditUnits, format_credit_units};
