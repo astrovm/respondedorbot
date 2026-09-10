@@ -4,8 +4,8 @@ use std::fmt::Display;
 use std::sync::Arc;
 
 use bot_adapters::billing_read::BillingRepository;
-use bot_adapters::openrouter_chat::OpenRouterPricingCache;
 use bot_adapters::compaction_job::{COMPACTION_JOB_SCHEMA_VERSION, CompactionJobRecord};
+use bot_adapters::openrouter_chat::OpenRouterPricingCache;
 use bot_adapters::redis_compaction_queue::RedisCompactionQueue;
 use bot_core::ai_reserve::{
     EstimatedMessage, TokenEstimateValue, chat_output_token_limit,
