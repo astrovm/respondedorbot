@@ -121,7 +121,7 @@ impl OpenRouterPricingCache {
     ) -> Result<(), OpenRouterChatError> {
         let pricing = self.pricing(&request.model)?.ok_or_else(|| {
             OpenRouterChatError::MissingModelPricing {
-                model: request.model.clone()
+                model: request.model.clone(),
             }
         })?;
         request.set_price_ceiling(
