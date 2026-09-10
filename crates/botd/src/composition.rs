@@ -2316,7 +2316,8 @@ fn build_native_dispatcher(
                     &openrouter_base_url,
                     crate::native_ai::VISION_MODEL,
                     u64::try_from(VISION_OUTPUT_TOKEN_LIMIT).unwrap_or(512),
-                ),
+                )
+                .with_openrouter_pricing(Arc::clone(&openrouter_pricing)),
                 FallbackTranscriptionProvider::new(
                     ReqwestGroqTranscriptionTransport::new().map_err(|error| {
                         CompositionError::MediaProviderTransport(error.to_string())
@@ -2332,9 +2333,11 @@ fn build_native_dispatcher(
                             .to_owned(),
                         default_backoff_seconds: 60,
                     },
-                ),
+                )
+                .with_openrouter_pricing(Arc::clone(&openrouter_pricing)),
                 crate::native_ai::VISION_MODEL,
-            );
+            )
+            .with_openrouter_pricing(Arc::clone(&openrouter_pricing));
             let youtube: Box<dyn YoutubeContextRuntime> = Box::new(NativeYoutubeContext::new(
                 ReqwestYoutubeTranscriptTransport::new()
                     .map_err(|error| CompositionError::MediaProviderTransport(error.to_string()))?,
