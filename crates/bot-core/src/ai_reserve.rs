@@ -205,7 +205,6 @@ mod tests {
         estimate_youtube_transcript_reserve_credit_units,
     };
 
-
     fn text(value: &str) -> TokenEstimateValue {
         TokenEstimateValue::Text(value.to_owned())
     }
@@ -283,7 +282,11 @@ mod tests {
         );
         assert_eq!(
             estimate_vision_reserve_credit_units_with_pricing(
-                "", usize::MAX, 0, 1, &synthetic_pricing()
+                "",
+                usize::MAX,
+                0,
+                1,
+                &synthetic_pricing()
             ),
             Err(ReserveEstimateError::Overflow)
         );
@@ -322,9 +325,7 @@ mod tests {
             Ok(16)
         );
         assert_eq!(
-            estimate_vision_reserve_credit_units_with_pricing(
-                "", 0, 0, 1, &synthetic_pricing()
-            ),
+            estimate_vision_reserve_credit_units_with_pricing("", 0, 0, 1, &synthetic_pricing()),
             Ok(1)
         );
     }
