@@ -18,6 +18,8 @@ concurrency:
 
 jobs:
   quality:
+    # Main is protected by the PR checks; avoid running this validation again after merge.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-26.04
     permissions:
       contents: read
@@ -36,6 +38,8 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
   coverage:
+    # Main is protected by the PR checks; avoid running this validation again after merge.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-26.04
     permissions:
       contents: read
@@ -142,9 +146,6 @@ jobs:
 
   publish-latest:
     if: github.event_name == 'push'
-    needs:
-      - quality
-      - coverage
     runs-on: ubuntu-26.04
     permissions:
       contents: read
