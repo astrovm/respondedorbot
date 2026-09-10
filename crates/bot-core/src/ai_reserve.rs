@@ -322,6 +322,10 @@ mod tests {
             Ok(16)
         );
         assert_eq!(
+            estimate_vision_reserve_credit_units("", 0, 0, 1, GEMINI_FLASH_LITE_MODEL),
+            Ok(1)
+        );
+        assert_eq!(
             estimate_chat_reserve_credit_units(None, &[], Some(1), 0, GEMINI_FLASH_LITE_MODEL),
             Ok(1)
         );
