@@ -69,9 +69,9 @@
       "name": "openrouter_missing_reported_cost_is_incomplete",
       "segments": [{
         "kind": "chat",
-        "model": "openai/gpt-oss-120b",
+        "model": "deepseek/deepseek-v4.1-flash",
         "usage": {"prompt_tokens": 1000, "completion_tokens": 500, "cost": 0},
-        "metadata": {"provider": "openrouter", "upstream_provider": "Groq"}
+        "metadata": {"provider": "openrouter", "upstream_provider": "DeepSeek"}
       }],
       "expected": {
         "raw_usd_micros": 0,
@@ -83,7 +83,7 @@
       }
     },
     {
-      "name": "gemini_cache_audio_and_write_rates",
+      "name": "openrouter_gemini_missing_reported_cost_is_incomplete",
       "segments": [{
         "kind": "vision",
         "model": "google/gemini-3.1-flash-lite",
@@ -91,15 +91,16 @@
           "prompt_tokens": 1000,
           "completion_tokens": 100,
           "prompt_tokens_details": {"cached_tokens": 200, "audio_tokens": 300, "cache_write_tokens": 100}
-        }
+        },
+        "metadata": {"provider": "openrouter"}
       }],
       "expected": {
-        "raw_usd_micros": 413,
-        "raw_usd_micros_exact": "413.3333",
-        "charged_credit_units": 9,
-        "pricing_complete": true,
-        "pricing_basis": "published_rate",
-        "model_usd_micros": 413
+        "raw_usd_micros": 0,
+        "raw_usd_micros_exact": "0",
+        "charged_credit_units": 0,
+        "pricing_complete": false,
+        "pricing_basis": "missing",
+        "model_usd_micros": 0
       }
     },
     {
