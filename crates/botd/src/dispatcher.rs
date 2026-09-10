@@ -1919,43 +1919,17 @@ where
                     {
                         let token_load = source.load_token(token);
                         self.state_diagnostics.extend(token_load.diagnostics);
-                        if let Some(signal) = token_load.signal {
-                            let token_photo = self.token_signal_source.as_mut().and_then(
-                                |source| match timeframe.as_deref() {
-                                    Some(period) => {
-                                        source.render_period_photo(&signal, period, timestamp).ok()
-                                    }
-                                    None => {
-                                        source.render_period_photo(&signal, "24h", timestamp).ok()
-                                    }
-                                },
-                            );
-                            if let Some(photo) = token_photo {
-                                let token_caption = format_signal_caption_for_period(
-                                    &signal,
-                                    timestamp,
-                                    timeframe.as_deref(),
-                                );
-                                let delivered = self.actions.try_photo(TelegramAction::SendPhoto {
-                                    chat_id,
-                                    photo: photo.into(),
-                                    reply_to_message_id: Some(message_id),
-                                    caption: token_caption.clone(),
-                                    parse_mode: Some(ParseMode::Html),
-                                    reply_markup: None,
-                                });
-                                if let Ok(Some(receipt)) = delivered
-                                    && receipt.message_id.is_some()
-                                {
-                                    self.record_price_delivery(
-                                        message,
-                                        &token_caption,
-                                        receipt.message_id,
-                                        timestamp,
-                                    );
-                                    return Ok(Some(DispatchOutcome::Handled));
-                                }
-                            }
+                        if message.sender_id.is_some()
+                            && let Some(outcome) = self.dispatch_token_signal_loaded_message(
+                                message,
+                                &SignalQuery::Address(token.clone()),
+                                token_load.signal,
+                                timeframe.as_deref(),
+                                locale,
+                                timestamp,
+                            )?
+                        {
+                            return Ok(Some(outcome));
                         }
                     }
                     self.state_diagnostics.push(format!(
@@ -2703,6 +2677,12 @@ where
                 let token_load = source.load_token(token);
                 self.state_diagnostics.extend(token_load.diagnostics);
                 if let Some(signal) = token_load.signal {
+                    let signal_id = stable_signal_id(
+                        chat_id_value,
+                        context.message_id,
+                        stored.requester_id,
+                        timestamp,
+                    );
                     let photo = self.token_signal_source.as_mut().and_then(|source| {
                         match stored.selection.timeframe.as_deref() {
                             Some(period) => {
@@ -2723,11 +2703,34 @@ where
                             reply_to_message_id,
                             caption: caption.clone(),
                             parse_mode: Some(ParseMode::Html),
-                            reply_markup: None,
+                            reply_markup: Some(build_signal_keyboard_localized(
+                                &signal_id,
+                                &signal.token,
+                                &signal.pair,
+                                locale,
+                            )),
                         }) {
                             Ok(Some(receipt)) if receipt.message_id.is_some() => {
+                                let sent_message_id = receipt.message_id;
                                 delivered = true;
-                                delivered_text = Some((caption, receipt.message_id));
+                                delivered_text = Some((caption, sent_message_id));
+                                if let Some(sent_message_id) = sent_message_id {
+                                    let state = SignalState {
+                                        chart_period: stored.selection.timeframe.clone(),
+                                        chat_id: chat_id_value.to_string(),
+                                        message_id: sent_message_id.0,
+                                        source_message_id: stored
+                                            .source_message_id
+                                            .unwrap_or(context.message_id),
+                                        requester_id: stored.requester_id.to_string(),
+                                        chain_id: signal.token.chain_id.clone(),
+                                        network: signal.token.network.clone(),
+                                        tag: signal.token.tag.clone(),
+                                        address: signal.token.address.clone(),
+                                        last_refresh_at: None,
+                                    };
+                                    self.save_token_signal_state(&signal_id, &state);
+                                }
                             }
                             Ok(_) => self
                                 .state_diagnostics
@@ -10785,6 +10788,7 @@ mod tests {
                 address: "J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump".to_owned(),
             };
             let stored = Rc::new(RefCell::new(HashMap::new()));
+            let saved = Rc::new(RefCell::new(Vec::new()));
             let mut dispatcher = dispatcher()
                 .with_market_price_source(Box::new(SelectionStorageMarketPrices {
                     initial: market_selection_load(timeframe),
@@ -10809,7 +10813,7 @@ mod tests {
                     photo: Ok(b"token-callback".to_vec()),
                     state: None,
                     queries: Rc::new(RefCell::new(Vec::new())),
-                    saved: Rc::new(RefCell::new(Vec::new())),
+                    saved: Rc::clone(&saved),
                 }));
             let input = timeframe.map_or("/p libra", |period| {
                 if period == "7d" {
@@ -10831,17 +10835,17 @@ mod tests {
                 )),
                 Ok(DispatchOutcome::Handled)
             );
-            assert!(matches!(
-                dispatcher.actions.0.iter().find(|action| matches!(
-                    action,
-                    TelegramAction::SendPhoto {
-                        parse_mode: Some(bot_core::telegram_actions::ParseMode::Html),
-                        reply_to_message_id: Some(MessageId(7)),
-                        ..
-                    }
-                )),
-                Some(TelegramAction::SendPhoto { photo, .. }) if photo.as_ref() == b"token-callback"
-            ));
+            assert!(dispatcher.actions.0.iter().any(|action| matches!(
+                action,
+                TelegramAction::SendPhoto {
+                    photo,
+                    parse_mode: Some(bot_core::telegram_actions::ParseMode::Html),
+                    reply_to_message_id: Some(MessageId(7)),
+                    reply_markup: Some(markup),
+                    ..
+                } if photo.as_ref() == b"token-callback" && !markup.inline_keyboard.is_empty()
+            )));
+            assert_eq!(saved.borrow().len(), 1);
             assert!(stored.borrow().is_empty());
         }
     }
@@ -11852,6 +11856,7 @@ mod tests {
                 tag: "SOL".to_owned(),
                 address: "J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump".to_owned(),
             };
+            let saved = Rc::new(RefCell::new(Vec::new()));
             let mut dispatcher = dispatcher()
                 .with_market_price_source(Box::new(EmptyMarket {
                     with_chart: true,
@@ -11869,7 +11874,7 @@ mod tests {
                     photo: Ok(vec![1, 2, 3]),
                     state: None,
                     queries: Rc::new(RefCell::new(Vec::new())),
-                    saved: Rc::new(RefCell::new(Vec::new())),
+                    saved: Rc::clone(&saved),
                 }));
             assert_eq!(
                 dispatcher.dispatch(update(input, Some("en"))),
@@ -11879,9 +11884,11 @@ mod tests {
                 dispatcher.actions.0.as_slice(),
                 [TelegramAction::SendPhoto {
                     parse_mode: Some(bot_core::telegram_actions::ParseMode::Html),
+                    reply_markup: Some(markup),
                     ..
-                }]
+                }] if !markup.inline_keyboard.is_empty()
             ));
+            assert_eq!(saved.borrow().len(), 1);
             assert!(
                 dispatcher
                     .state_diagnostics()
@@ -11922,7 +11929,7 @@ mod tests {
         );
         assert!(matches!(
             dispatcher.actions.0.as_slice(),
-            [TelegramAction::SendMessage(message)] if message.text.contains("Chart unavailable")
+            [TelegramAction::SendMessage(message)] if message.text.contains("history unavailable")
         ));
 
         let mut undelivered_token = NativeDispatcher::new(
@@ -11970,7 +11977,7 @@ mod tests {
             undelivered_token
                 .state_diagnostics()
                 .iter()
-                .any(|diagnostic| diagnostic.contains("market chart unavailable or undelivered"))
+                .any(|diagnostic| diagnostic.contains("token signal photo delivery failed"))
         );
     }
 
