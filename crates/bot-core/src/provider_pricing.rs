@@ -4,7 +4,7 @@ pub const PRICING_VERSION: &str = "2026-09-10";
 pub const CREDIT_UNIT_USD_MICROS: i128 = 50;
 
 pub const DEEPSEEK_MODEL: &str = "deepseek/deepseek-v4.1-flash";
-pub const GEMINI_FLASH_LITE_MODEL: &str = "google/gemini-3.1-flash-lite";
+pub const DEEPSEEK_FLASH_MODEL: &str = "deepseek/deepseek-v4-flash";
 pub const OPENROUTER_TRANSCRIPTION_MODEL: &str = "microsoft/mai-transcribe-2";
 
 pub const FIRECRAWL_SEARCH_MAX_CREDITS: i128 = 2;
