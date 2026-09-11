@@ -6,7 +6,7 @@ use std::sync::Arc;
 use bot_adapters::openrouter_chat::OpenRouterPricingCache;
 use bot_core::ai_pricing::calculate_billing_for_segments;
 use bot_core::ai_prompt::{
-    ConversationPromptInput, HistoryMessage, PromptContent, PromptMessage, PromptRole,
+    ConversationPromptInput, HistoryMessage, PromptContent, PromptImage, PromptMessage, PromptRole,
     RetrievedMessage, build_conversation_prompt, build_system_prompt,
 };
 use bot_core::ai_reserve::{
@@ -167,6 +167,7 @@ enum PendingKind {
 #[derive(Debug, Default)]
 struct PreparedConversationMedia {
     execution: Option<MediaExecution>,
+    image: Option<PromptImage>,
     segments: Vec<Value>,
     reserve_decision: Option<ReserveDecision>,
     diagnostics: Vec<String>,
@@ -388,6 +389,7 @@ where
         &mut self,
         input: &AiConversationInput,
         media_context: Option<&MediaExecution>,
+        image_context: Option<&PromptImage>,
         link_context: Option<&str>,
     ) -> Result<PreparedPrompt<ToolFactory::Tools>, String> {
         let tools = self.tools.create(input)?;
@@ -422,6 +424,9 @@ where
         });
         if let Some(media) = media_context {
             append_media_context(&mut conversation, media, input.locale);
+        }
+        if let Some(image) = image_context {
+            append_image_context(&mut conversation, image, input.locale);
         }
         messages.extend(conversation);
         Ok(PreparedPrompt {
@@ -512,6 +517,26 @@ where
         let Some((kind, file_id, duration)) = selected else {
             return Ok(PreparedConversationMedia::default());
         };
+        if kind == MediaKind::Image {
+            let direct_image = match self
+                .media
+                .as_mut()
+                .ok_or_else(|| "native media runtime disappeared".to_owned())?
+                .prepare_image_for_prompt(file_id)
+            {
+                Ok(image) => image,
+                Err(_) => None,
+            };
+            if let Some(image) = direct_image {
+                return Ok(PreparedConversationMedia {
+                    image: Some(PromptImage {
+                        bytes: image.bytes,
+                        mime: image.mime,
+                    }),
+                    ..PreparedConversationMedia::default()
+                });
+            }
+        }
         let prepared = match self
             .media
             .as_mut()
@@ -560,6 +585,7 @@ where
                     .collect::<Vec<_>>();
                 Ok(PreparedConversationMedia {
                     execution: Some(execution),
+                    image: None,
                     segments,
                     reserve_decision: decision,
                     diagnostics: Vec::new(),
@@ -1094,6 +1120,7 @@ where
         } = match self.prompt(
             &provider_input,
             prepared_media.execution.as_ref(),
+            prepared_media.image.as_ref(),
             prepared_youtube.context.as_deref(),
         ) {
             Ok(value) => value,
@@ -1637,8 +1664,30 @@ fn append_media_context(messages: &mut [PromptMessage], media: &MediaExecution, 
     match &mut last.content {
         PromptContent::Text(text) => text.push_str(&format!("\n\n{context}")),
         PromptContent::TextParts(parts) => parts.push(context),
+        PromptContent::Image { text_parts, .. } => text_parts.push(context),
         PromptContent::Empty => last.content = PromptContent::Text(context),
     }
+}
+
+fn append_image_context(messages: &mut [PromptMessage], image: &PromptImage, locale: Locale) {
+    let Some(last) = messages.last_mut() else {
+        return;
+    };
+    let content = std::mem::replace(&mut last.content, PromptContent::Empty);
+    let mut text_parts = match content {
+        PromptContent::Text(text) => vec![text],
+        PromptContent::TextParts(parts) => parts,
+        PromptContent::Image { text_parts, .. } => text_parts,
+        PromptContent::Empty => Vec::new(),
+    };
+    text_parts.push(match locale {
+        Locale::Es => "[Imagen adjunta]".to_owned(),
+        Locale::En => "[Attached image]".to_owned(),
+    });
+    last.content = PromptContent::Image {
+        text_parts,
+        image: image.clone(),
+    };
 }
 
 fn partial_failure(
@@ -1779,6 +1828,16 @@ fn estimated_message(message: &PromptMessage) -> EstimatedMessage {
                     .map(TokenEstimateValue::Text)
                     .collect(),
             ),
+            PromptContent::Image { text_parts, image } => TokenEstimateValue::Sequence(vec![
+                TokenEstimateValue::Sequence(
+                    text_parts
+                        .iter()
+                        .cloned()
+                        .map(TokenEstimateValue::Text)
+                        .collect(),
+                ),
+                TokenEstimateValue::Image(image.bytes.len()),
+            ]),
             PromptContent::Empty => TokenEstimateValue::Empty,
         },
         name: TokenEstimateValue::Empty,
@@ -1892,6 +1951,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::convert::Infallible;
     use std::rc::Rc;
+    use std::sync::Arc;
 
     use bot_adapters::openrouter_chat::{OpenRouterChatError, OpenRouterPricingCache};
     use bot_core::provider_pricing::DEEPSEEK_MODEL;
@@ -2307,6 +2367,46 @@ mod tests {
                 })),
                 cached: false,
             })
+        }
+    }
+
+    struct DirectImageMedia;
+
+    impl MediaRuntime for DirectImageMedia {
+        fn estimate_reserve_credit_units(
+            &mut self,
+            _kind: MediaKind,
+            _duration_hint_seconds: Option<f64>,
+        ) -> Result<i64, String> {
+            Err("legacy media path should not estimate direct images".to_owned())
+        }
+
+        fn prepare(
+            &mut self,
+            _kind: MediaKind,
+            _file_id: &str,
+            _duration_hint_seconds: Option<f64>,
+        ) -> Result<crate::media::PreparedMedia, String> {
+            Err("legacy media path should not prepare direct images".to_owned())
+        }
+
+        fn prepare_image_for_prompt(
+            &mut self,
+            file_id: &str,
+        ) -> Result<Option<crate::media::PreparedImagePrompt>, String> {
+            assert_eq!(file_id, "synthetic-image");
+            Ok(Some(crate::media::PreparedImagePrompt {
+                bytes: Arc::from(b"synthetic direct image".to_vec()),
+                mime: "image/png".to_owned(),
+            }))
+        }
+
+        fn execute(
+            &mut self,
+            _prepared: crate::media::PreparedMedia,
+            _prompt: &str,
+        ) -> Result<MediaExecution, String> {
+            Err("legacy media path should not execute direct images".to_owned())
         }
     }
 
@@ -3071,7 +3171,9 @@ mod tests {
             .iter()
             .filter_map(|message| match &message.content {
                 PromptContent::Text(text) => Some(text.as_str()),
-                PromptContent::TextParts(_) | PromptContent::Empty => None,
+                PromptContent::TextParts(_)
+                | PromptContent::Image { .. }
+                | PromptContent::Empty => None,
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -3552,6 +3654,56 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(service.billing.segments.len(), 2);
+    }
+
+    #[test]
+    fn normal_images_are_sent_to_the_chat_model_as_one_multimodal_request() {
+        let mut service = conversation(
+            vec![Ok(round("synthetic answer", None))],
+            Billing::default(),
+        )
+        .with_media(Box::new(DirectImageMedia));
+        let mut request = input();
+        request.photo_file_id = Some("synthetic-image".to_owned());
+
+        let result = service.prepare(request).unwrap_or_else(|_| unreachable!());
+        let AiPreparation::Reply {
+            completion_id: Some(completion_id),
+            ..
+        } = result
+        else {
+            unreachable!();
+        };
+
+        let prompts = service.provider.prompts.borrow();
+        let Some(PromptMessage {
+            content: PromptContent::Image { text_parts, image },
+            ..
+        }) = prompts[0].last()
+        else {
+            unreachable!();
+        };
+        assert!(text_parts.iter().any(|part| part.contains("MESSAGE:")));
+        assert!(
+            text_parts
+                .iter()
+                .any(|part| part.contains("Attached image"))
+        );
+        assert_eq!(image.mime, "image/png");
+        assert_eq!(image.bytes.as_ref(), b"synthetic direct image");
+        drop(prompts);
+
+        assert!(
+            service
+                .complete_delivery(AiDelivery {
+                    completion_id,
+                    delivered: true,
+                    sent_message_id: Some(MessageId(99)),
+                })
+                .is_ok()
+        );
+        assert_eq!(service.billing.segments.len(), 1);
+        assert_eq!(service.billing.segments[0].segment["kind"], "chat");
     }
 
     #[test]

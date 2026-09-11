@@ -84,6 +84,12 @@ pub struct MediaExecution {
     pub cached: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedImagePrompt {
+    pub bytes: Arc<[u8]>,
+    pub mime: String,
+}
+
 pub trait MediaRuntime {
     fn estimate_reserve_credit_units(
         &mut self,
@@ -97,6 +103,13 @@ pub trait MediaRuntime {
         file_id: &str,
         duration_hint_seconds: Option<f64>,
     ) -> Result<PreparedMedia, String>;
+
+    fn prepare_image_for_prompt(
+        &mut self,
+        _file_id: &str,
+    ) -> Result<Option<PreparedImagePrompt>, String> {
+        Ok(None)
+    }
 
     fn execute(&mut self, prepared: PreparedMedia, prompt: &str) -> Result<MediaExecution, String>;
 }
@@ -262,6 +275,25 @@ where
                 self.estimate_audio_reserve_credit_units(duration_hint_seconds.unwrap_or(1.0))
             }
         }
+    }
+
+    fn prepare_image_for_prompt(
+        &mut self,
+        file_id: &str,
+    ) -> Result<Option<PreparedImagePrompt>, String> {
+        let bytes = self
+            .files
+            .download(file_id)?
+            .filter(|bytes| !bytes.is_empty())
+            .ok_or_else(|| MediaPipelineError::Download.to_string())?;
+        let image = self
+            .processor
+            .prepare_image(&bytes)?
+            .ok_or_else(|| MediaPipelineError::InvalidImage.to_string())?;
+        Ok(Some(PreparedImagePrompt {
+            bytes: Arc::from(image.bytes),
+            mime: image.mime,
+        }))
     }
 
     fn prepare(
@@ -584,6 +616,17 @@ mod tests {
             Some("synthetic transcript")
         );
         server.join().unwrap_or_else(|_| unreachable!());
+    }
+
+    #[test]
+    fn direct_image_prompt_preparation_returns_processed_image_bytes() {
+        let mut media = media(Cache::default());
+        let prepared = media
+            .prepare_image_for_prompt("image-1")
+            .unwrap_or_else(|_| unreachable!())
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(prepared.bytes.as_ref(), &[1, 2, 3]);
+        assert_eq!(prepared.mime, "image/webp");
     }
 
     #[test]

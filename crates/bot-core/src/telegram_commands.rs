@@ -226,7 +226,7 @@ pub fn command_publication_actions() -> Vec<TelegramAction> {
     ]
     .into_iter()
     .map(|(language_code, locale)| TelegramAction::SetCommands {
-        commands: primary_telegram_commands(locale),
+        commands: telegram_commands(locale),
         language_code: language_code.map(ToOwned::to_owned),
     })
     .collect()
@@ -317,6 +317,6 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(languages, [(31, None), (31, Some("es")), (31, Some("en"))]);
+        assert_eq!(languages, [(75, None), (75, Some("es")), (75, Some("en"))]);
     }
 }

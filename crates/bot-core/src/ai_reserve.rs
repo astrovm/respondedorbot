@@ -16,6 +16,7 @@ pub const VISION_OUTPUT_TOKEN_LIMIT: i64 = 512;
 pub enum TokenEstimateValue {
     Empty,
     Text(String),
+    Image(usize),
     Mapping(Vec<TokenEstimateValue>),
     Sequence(Vec<TokenEstimateValue>),
     Scalar(String),
@@ -61,6 +62,8 @@ pub fn estimate_nested_tokens(value: &TokenEstimateValue) -> i64 {
         TokenEstimateValue::Text(value) | TokenEstimateValue::Scalar(value) => {
             estimate_text_tokens(Some(value))
         }
+        TokenEstimateValue::Image(byte_length) => estimate_text_tokens(Some("input_image"))
+            .saturating_add(estimate_image_url_tokens(*byte_length).unwrap_or(i64::MAX)),
         TokenEstimateValue::Mapping(values) | TokenEstimateValue::Sequence(values) => {
             values.iter().fold(0_i64, |total, value| {
                 total.saturating_add(estimate_nested_tokens(value))
@@ -118,24 +121,13 @@ pub fn estimate_vision_reserve_credit_units_with_pricing(
     max_output_tokens: i64,
     pricing: &TokenPricing,
 ) -> Result<i64, ReserveEstimateError> {
-    let encoded_length = image_byte_length
-        .checked_add(2)
-        .and_then(|value| value.checked_div(3))
-        .and_then(|value| value.checked_mul(4))
-        .ok_or(ReserveEstimateError::Overflow)?;
-    let image_url_characters = if image_byte_length == 0 {
-        0
-    } else {
-        23_usize
-            .checked_add(encoded_length)
-            .ok_or(ReserveEstimateError::Overflow)?
-    };
+    let image_url_tokens = estimate_image_url_tokens(image_byte_length)?;
     let structural_tokens = estimate_text_tokens(Some("user"))
         + estimate_text_tokens(Some("input_text"))
         + estimate_text_tokens(Some("input_image"));
     let input_tokens = i128::from(structural_tokens)
         .checked_add(i128::from(estimate_text_tokens(Some(prompt_text))))
-        .and_then(|value| value.checked_add(i128::try_from(image_url_characters.div_ceil(4)).ok()?))
+        .and_then(|value| value.checked_add(i128::from(image_url_tokens)))
         .and_then(|value| value.checked_add(i128::from(extra_input_tokens)))
         .ok_or(ReserveEstimateError::Overflow)?;
     let usd_micros = input_tokens
@@ -148,6 +140,22 @@ pub fn estimate_vision_reserve_credit_units_with_pricing(
         .ok_or(ReserveEstimateError::Overflow)?
         / 1_000_000;
     Ok(credit_units_from_usd_micros(usd_micros)?.max(1))
+}
+
+fn estimate_image_url_tokens(image_byte_length: usize) -> Result<i64, ReserveEstimateError> {
+    let encoded_length = image_byte_length
+        .checked_add(2)
+        .and_then(|value| value.checked_div(3))
+        .and_then(|value| value.checked_mul(4))
+        .ok_or(ReserveEstimateError::Overflow)?;
+    let image_url_characters = if image_byte_length == 0 {
+        0
+    } else {
+        23_usize
+            .checked_add(encoded_length)
+            .ok_or(ReserveEstimateError::Overflow)?
+    };
+    i64::try_from(image_url_characters.div_ceil(4)).map_err(|_| ReserveEstimateError::Overflow)
 }
 
 pub fn estimate_transcription_reserve_credit_units(
