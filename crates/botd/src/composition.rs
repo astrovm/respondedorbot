@@ -1496,6 +1496,14 @@ impl TelegramStreamDeliveryState {
         self.last_intermediate_edit
             .insert(chat_id, std::time::Instant::now());
     }
+
+    fn prune_inactive_intermediate_edit(&mut self, chat_id: i64) {
+        let chat_is_active = self.pending.keys().any(|key| key.chat_id == chat_id)
+            || self.thinking.keys().any(|key| key.chat_id == chat_id);
+        if !chat_is_active {
+            self.last_intermediate_edit.remove(&chat_id);
+        }
+    }
 }
 
 /// Asynchronous, latest-snapshot Telegram delivery for AI streams.
@@ -1598,6 +1606,7 @@ impl TelegramStreamDelivery {
         {
             state.pending.remove(&key);
         }
+        state.prune_inactive_intermediate_edit(key.chat_id);
         let _ = self.wake.try_send(());
     }
 
@@ -1640,11 +1649,16 @@ impl TelegramStreamDelivery {
             chat_id: chat_id.0,
             message_id: message_id.0,
         };
-        let response = lock_unpoisoned(&self.state)
-            .pending
-            .remove(&key)
-            .and_then(|pending| pending.final_response);
-        lock_unpoisoned(&self.state).thinking.remove(&key);
+        let response = {
+            let mut state = lock_unpoisoned(&self.state);
+            let response = state
+                .pending
+                .remove(&key)
+                .and_then(|pending| pending.final_response);
+            state.thinking.remove(&key);
+            state.prune_inactive_intermediate_edit(key.chat_id);
+            response
+        };
         if let Some(response) = response {
             let _ = response.send(Ok(false));
         }
@@ -1664,6 +1678,7 @@ impl TelegramStreamDelivery {
     fn remove_pending(&self, key: TelegramStreamKey) {
         let mut state = lock_unpoisoned(&self.state);
         let _ = state.pending.remove(&key);
+        state.prune_inactive_intermediate_edit(key.chat_id);
     }
 }
 
@@ -1695,6 +1710,7 @@ fn fail_pending_telegram_stream_edits(state: &Arc<Mutex<TelegramStreamDeliverySt
         let mut state = lock_unpoisoned(state);
         state.order.clear();
         state.thinking.clear();
+        state.last_intermediate_edit.clear();
         state
             .pending
             .drain()
@@ -1733,9 +1749,10 @@ fn run_telegram_stream_delivery_worker<Transport>(
                     }
                 },
                 TelegramStreamDeliveryDecision::Ready(pending) => {
+                    let key = pending.key;
                     let is_final = pending.final_response.is_some();
                     if !is_final {
-                        lock_unpoisoned(&state).mark_intermediate_edit_started(pending.key.chat_id);
+                        lock_unpoisoned(&state).mark_intermediate_edit_started(key.chat_id);
                     }
                     let started = std::time::Instant::now();
                     let result = if is_final {
@@ -1761,6 +1778,7 @@ fn run_telegram_stream_delivery_worker<Transport>(
                     if let Some(response) = pending.final_response {
                         let _ = response.send(result);
                     }
+                    lock_unpoisoned(&state).prune_inactive_intermediate_edit(key.chat_id);
                 }
             }
         }
@@ -3866,6 +3884,34 @@ mod tests {
             assert_eq!(pending.key, ready_key);
         }
         assert!(state.pending.contains_key(&limited_key));
+    }
+
+    #[test]
+    fn telegram_stream_delivery_prunes_throttle_state_when_chat_is_idle() {
+        let key = super::TelegramStreamKey {
+            chat_id: 7,
+            message_id: 80,
+        };
+        let mut state = super::TelegramStreamDeliveryState {
+            pending: std::collections::HashMap::from([(
+                key,
+                super::PendingTelegramStreamEdit {
+                    key,
+                    action: stream_edit(7, 80, "active"),
+                    final_response: None,
+                },
+            )]),
+            order: std::collections::VecDeque::from([key]),
+            last_intermediate_edit: std::collections::HashMap::from([(7, Instant::now())]),
+            thinking: std::collections::HashMap::new(),
+        };
+
+        state.prune_inactive_intermediate_edit(7);
+        assert!(state.last_intermediate_edit.contains_key(&7));
+
+        state.pending.clear();
+        state.prune_inactive_intermediate_edit(7);
+        assert!(!state.last_intermediate_edit.contains_key(&7));
     }
 
     #[test]
