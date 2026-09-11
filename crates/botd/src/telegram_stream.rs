@@ -485,6 +485,96 @@ mod tests {
     }
 
     #[test]
+    fn public_feed_and_status_events_handle_empty_and_post_final_inputs() {
+        let mut actions = Actions {
+            next_message_id: Some(MessageId(80)),
+            ..Actions::default()
+        };
+        {
+            let mut stream = TelegramStream::with_policy(
+                &mut actions,
+                ChatId(7),
+                MessageId(4),
+                0.3,
+                DEFAULT_MIN_CHARS_BETWEEN_EDITS,
+            );
+            assert_eq!(stream.feed("hello"), Ok(()));
+        }
+
+        let mut no_message_actions = Actions::default();
+        let mut no_message_stream = TelegramStream::with_policy(
+            &mut no_message_actions,
+            ChatId(7),
+            MessageId(4),
+            0.3,
+            DEFAULT_MIN_CHARS_BETWEEN_EDITS,
+        );
+        no_message_stream.try_edit(0.0, true);
+
+        let mut empty_actions = Actions::default();
+        let mut empty_status = TelegramAiStream::with_policy(
+            &mut empty_actions,
+            ChatId(7),
+            MessageId(4),
+            0.3,
+            DEFAULT_MIN_CHARS_BETWEEN_EDITS,
+        )
+        .with_thinking_text("");
+        assert_eq!(empty_status.show_thinking(), Ok(()));
+
+        let mut final_actions = Actions {
+            next_message_id: Some(MessageId(81)),
+            ..Actions::default()
+        };
+        let mut final_stream =
+            TelegramAiStream::with_policy(&mut final_actions, ChatId(7), MessageId(4), 0.0, 1);
+        assert_eq!(
+            final_stream.feed(AiStreamEvent::FinalText("answer".to_owned())),
+            Ok(())
+        );
+        assert_eq!(
+            final_stream.feed(AiStreamEvent::ToolResult {
+                id: "synthetic".to_owned(),
+                name: "calculate".to_owned(),
+                output: "2".to_owned(),
+            }),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn bounds_long_tool_traces_and_formats_non_string_arguments() {
+        let mut actions = Actions {
+            next_message_id: Some(MessageId(80)),
+            ..Actions::default()
+        };
+        let mut stream =
+            TelegramAiStream::with_policy(&mut actions, ChatId(7), MessageId(4), 0.0, 1);
+        assert_eq!(
+            stream.feed(AiStreamEvent::ToolCall {
+                id: "long-call".to_owned(),
+                name: "synthetic".to_owned(),
+                arguments: "x".repeat(bot_core::telegram_actions::MAX_TELEGRAM_TEXT_LENGTH),
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            stream.feed(AiStreamEvent::ToolCall {
+                id: "numeric-call".to_owned(),
+                name: "calculate".to_owned(),
+                arguments: r#"{"count":2}"#.to_owned(),
+            }),
+            Ok(())
+        );
+        drop(stream);
+        assert!(matches!(
+            actions.actions.first(),
+            Some(TelegramAction::SendMessage(message))
+                if message.text.chars().count() <= bot_core::telegram_actions::MAX_TELEGRAM_TEXT_LENGTH
+        ));
+    }
+
+    #[test]
     fn ignores_draft_edit_failures_and_keeps_confirmed_delivery() {
         let mut actions = Actions {
             next_message_id: Some(MessageId(80)),
