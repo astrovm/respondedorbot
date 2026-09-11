@@ -100,6 +100,13 @@ use crate::ai_dispatch::{
 use crate::runtime::UpdateHandler;
 use crate::telegram_stream::{StreamFinalizeError, TelegramAiStream};
 
+fn thinking_text(locale: bot_core::locale::Locale) -> &'static str {
+    match locale {
+        bot_core::locale::Locale::Es => "Pensando...",
+        bot_core::locale::Locale::En => "Thinking...",
+    }
+}
+
 pub trait ChatConfigSource {
     type Error;
 
@@ -141,6 +148,22 @@ pub trait ActionSink {
     fn try_photo(&mut self, action: TelegramAction) -> Result<Option<ActionReceipt>, Self::Error> {
         self.execute(action).map(Some)
     }
+
+    /// Queue an intermediate AI stream edit without making the provider wait
+    /// for Telegram. Implementations without a background delivery queue keep
+    /// the synchronous behavior as a safe fallback.
+    fn enqueue_stream_edit(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
+        self.try_edit(action)
+    }
+
+    /// Deliver the final AI stream edit and wait for its result.
+    fn finalize_stream_edit(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
+        self.try_edit(action)
+    }
+
+    /// Drop queued intermediate edits for one AI stream before deleting its
+    /// temporary Telegram message.
+    fn cancel_stream_edits(&mut self, _chat_id: ChatId, _message_id: MessageId) {}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3816,7 +3839,9 @@ where
             let Some(source) = self.ai_conversation_source.as_mut() else {
                 return Err(DispatchError::MissingService("AI conversation"));
             };
-            let mut stream = TelegramAiStream::new(&mut self.actions, chat_id, message_id);
+            let mut stream = TelegramAiStream::new(&mut self.actions, chat_id, message_id)
+                .with_thinking_text(thinking_text(locale));
+            let _thinking_result = stream.show_thinking();
             let preparation = source.prepare_streaming_events(input, &mut |event| {
                 stream
                     .feed(event)
@@ -4144,7 +4169,9 @@ where
             let Some(source) = self.ai_conversation_source.as_mut() else {
                 return Err(DispatchError::MissingService("AI conversation"));
             };
-            let mut stream = TelegramAiStream::new(&mut self.actions, chat_id, message_id);
+            let mut stream = TelegramAiStream::new(&mut self.actions, chat_id, message_id)
+                .with_thinking_text(thinking_text(locale));
+            let _thinking_result = stream.show_thinking();
             let preparation =
                 source.prepare_summary_command_streaming_events(input, &mut |event| {
                     stream
@@ -6864,13 +6891,17 @@ mod tests {
         assert!(ignored.borrow().is_empty());
         assert_eq!(dispatcher.state.incoming.len(), 1);
         assert_eq!(dispatcher.state.outgoing.len(), 1);
-        assert_eq!(dispatcher.actions.0.len(), 2);
+        assert_eq!(dispatcher.actions.0.len(), 3);
         assert!(matches!(
             &dispatcher.actions.0[0],
-            TelegramAction::SendMessage(message) if message.text == "raw summary"
+            TelegramAction::SendMessage(message) if message.text == "Thinking..."
         ));
         assert!(matches!(
             &dispatcher.actions.0[1],
+            TelegramAction::EditMessageNoPreview { text, .. } if text == "raw summary"
+        ));
+        assert!(matches!(
+            &dispatcher.actions.0[2],
             TelegramAction::EditMessage { text, .. } if text == "clean summary"
         ));
         assert_eq!(
@@ -6973,11 +7004,38 @@ mod tests {
                 Ok(DispatchOutcome::Handled)
             );
             match case {
-                CommandCase::MediaNone | CommandCase::SummaryNone => {
+                CommandCase::MediaNone => {
                     assert_eq!(dispatcher.actions.0.len(), 1);
                 }
-                CommandCase::MediaSilent | CommandCase::SummarySilent => {
+                CommandCase::MediaSilent => {
                     assert!(dispatcher.actions.0.is_empty());
+                }
+                CommandCase::SummaryNone => {
+                    assert_eq!(dispatcher.actions.0.len(), 3);
+                    assert!(matches!(
+                        &dispatcher.actions.0[0],
+                        TelegramAction::SendMessage(message) if message.text == "Thinking..."
+                    ));
+                    assert!(matches!(
+                        &dispatcher.actions.0[1],
+                        TelegramAction::DeleteMessage { .. }
+                    ));
+                    assert!(matches!(
+                        &dispatcher.actions.0[2],
+                        TelegramAction::SendMessage(message)
+                            if message.text == "I could not generate the summary"
+                    ));
+                }
+                CommandCase::SummarySilent => {
+                    assert_eq!(dispatcher.actions.0.len(), 2);
+                    assert!(matches!(
+                        &dispatcher.actions.0[0],
+                        TelegramAction::SendMessage(message) if message.text == "Thinking..."
+                    ));
+                    assert!(matches!(
+                        &dispatcher.actions.0[1],
+                        TelegramAction::DeleteMessage { .. }
+                    ));
                 }
             }
         }
@@ -7129,13 +7187,17 @@ mod tests {
             dispatcher.dispatch(update("tell me something", Some("en"))),
             Ok(DispatchOutcome::Handled)
         );
-        assert_eq!(dispatcher.actions.0.len(), 2);
+        assert_eq!(dispatcher.actions.0.len(), 3);
         assert!(matches!(
             &dispatcher.actions.0[0],
-            TelegramAction::SendMessage(message) if message.text == "raw "
+            TelegramAction::SendMessage(message) if message.text == "Thinking..."
         ));
         assert!(matches!(
             &dispatcher.actions.0[1],
+            TelegramAction::EditMessageNoPreview { text, .. } if text == "raw "
+        ));
+        assert!(matches!(
+            &dispatcher.actions.0[2],
             TelegramAction::EditMessage { text, .. } if text == "cleaned answer"
         ));
         assert_eq!(
@@ -7249,7 +7311,13 @@ mod tests {
         assert_eq!(prepared.borrow()[0].command, "/che");
         assert_eq!(prepared.borrow()[0].message_text, "seguís ahí?");
         assert!(deliveries.borrow().is_empty());
-        assert!(dispatcher.actions.0.is_empty());
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [
+                TelegramAction::SendMessage(message),
+                TelegramAction::DeleteMessage { .. },
+            ] if message.text == "Pensando..."
+        ));
     }
 
     #[test]
@@ -9533,7 +9601,7 @@ mod tests {
         );
         assert!(matches!(
             dispatcher.actions.0.last(),
-            Some(TelegramAction::SendMessage(message)) if message.text == "task scheduled"
+            Some(TelegramAction::EditMessage { text, .. }) if text == "task scheduled"
         ));
         Ok(())
     }
@@ -16405,9 +16473,13 @@ mod tests {
             Ok(DispatchOutcome::Handled)
         );
         assert!(matches!(
-            failed.actions.0.first(),
-            Some(TelegramAction::SendMessage(message))
-                if message.text == "me quedé reculando y no te pude responder, probá de nuevo"
+            failed.actions.0.as_slice(),
+            [
+                TelegramAction::SendMessage(thinking),
+                TelegramAction::DeleteMessage { .. },
+                TelegramAction::SendMessage(failure),
+            ] if thinking.text == "Pensando..."
+                && failure.text == "me quedé reculando y no te pude responder, probá de nuevo"
         ));
 
         let (source, _observations) = ai_source(Ok(AiPreparation::silent()));
