@@ -13,6 +13,7 @@ use crate::dispatcher::{ActionReceipt, ActionSink};
 const DEFAULT_MIN_EDIT_INTERVAL_SECONDS: f64 = 0.3;
 const DEFAULT_MIN_CHARS_BETWEEN_EDITS: usize = 15;
 const MAX_TRACE_HEAD_CHARS: usize = 800;
+const THINKING_DOT_FRAMES: [&str; 3] = [".", "..", "..."];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamDelivery {
@@ -177,6 +178,7 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
         now_seconds: f64,
         force: bool,
         disable_web_page_preview: bool,
+        min_chars_between_edits: usize,
     ) -> Result<(), Actions::Error> {
         self.buffer = bot_core::telegram_actions::truncate_text(text);
         if self.buffer.trim().is_empty() {
@@ -199,7 +201,7 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
                     self.buffer.chars().count(),
                     self.sent_text.chars().count(),
                     self.min_edit_interval_seconds,
-                    self.min_chars_between_edits,
+                    min_chars_between_edits,
                 ))
         {
             self.try_edit(now_seconds, disable_web_page_preview);
@@ -208,7 +210,13 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
     }
 
     fn replace_draft(&mut self, text: &str, force: bool) -> Result<(), Actions::Error> {
-        self.replace_snapshot(text, self.elapsed_seconds(), force, true)
+        let now_seconds = self.elapsed_seconds();
+        self.replace_snapshot(text, now_seconds, force, true, self.min_chars_between_edits)
+    }
+
+    fn replace_status(&mut self, text: &str) -> Result<(), Actions::Error> {
+        let now_seconds = self.elapsed_seconds();
+        self.replace_snapshot(text, now_seconds, false, true, 0)
     }
 
     pub fn finalize(
@@ -284,6 +292,8 @@ pub struct TelegramAiStream<'a, Actions> {
     final_text: String,
     final_started: bool,
     final_message_started: bool,
+    thinking_frame: usize,
+    thinking_visible: bool,
 }
 
 impl<'a, Actions: ActionSink> TelegramAiStream<'a, Actions> {
@@ -315,36 +325,70 @@ impl<'a, Actions: ActionSink> TelegramAiStream<'a, Actions> {
                 min_chars_between_edits,
             ),
             trace: String::new(),
-            thinking_text: "Thinking...".to_owned(),
+            thinking_text: "☁️ Thinking".to_owned(),
             final_text: String::new(),
             final_started: false,
             final_message_started: false,
+            thinking_frame: 0,
+            thinking_visible: false,
         }
     }
 
     #[must_use]
     pub fn with_thinking_text(mut self, text: impl Into<String>) -> Self {
-        self.thinking_text = text.into();
+        self.thinking_text = text.into().trim_end_matches('.').to_owned();
         self
+    }
+
+    fn thinking_status(&self) -> String {
+        if self.thinking_text.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "{}{}",
+                self.thinking_text, THINKING_DOT_FRAMES[self.thinking_frame]
+            )
+        }
+    }
+
+    fn next_thinking_frame(&mut self) {
+        self.thinking_frame = (self.thinking_frame + 1) % THINKING_DOT_FRAMES.len();
+    }
+
+    fn render_thinking(&mut self, force: bool) -> Result<(), Actions::Error> {
+        self.thinking_visible = true;
+        self.trace = self.thinking_status();
+        let result = if force {
+            self.stream.replace_draft(&self.trace, true)
+        } else {
+            self.stream.replace_status(&self.trace)
+        };
+        if result.is_ok() {
+            self.next_thinking_frame();
+        }
+        result
     }
 
     pub fn show_thinking(&mut self) -> Result<(), Actions::Error> {
         self.final_started = false;
         self.final_message_started = false;
         self.final_text.clear();
-        self.trace.clone_from(&self.thinking_text);
-        self.stream.replace_draft(&self.trace, true)
+        self.render_thinking(true)
     }
 
     pub fn feed(&mut self, event: AiStreamEvent) -> Result<(), Actions::Error> {
         match event {
             // Keep reasoning internal to the model; Telegram only receives a
             // localized status message while the provider is thinking.
+            AiStreamEvent::Thought(_) if !self.final_started && self.thinking_visible => {
+                self.render_thinking(false)
+            }
             AiStreamEvent::Thought(_) if !self.final_started => Ok(()),
             AiStreamEvent::ResetToTrace => self.show_thinking(),
             AiStreamEvent::ToolCall {
                 name, arguments, ..
             } if !self.final_started => {
+                self.thinking_visible = false;
                 self.replace_trace_line(&format!(
                     "🔧 {}({})",
                     name,
@@ -682,7 +726,7 @@ mod tests {
         };
         let mut stream =
             TelegramAiStream::with_policy(&mut actions, ChatId(7), MessageId(4), 0.0, 1)
-                .with_thinking_text("Pensando...");
+                .with_thinking_text("☁️ Pensando");
         stream.show_thinking().unwrap_or_else(|_| unreachable!());
         stream
             .feed(AiStreamEvent::Thought("checking the match".to_owned()))
@@ -715,24 +759,32 @@ mod tests {
 
         assert!(matches!(
             &actions.actions[0],
-            TelegramAction::SendMessage(message) if message.text == "Pensando..."
+            TelegramAction::SendMessage(message) if message.text == "☁️ Pensando."
                 && message.disable_web_page_preview
         ));
         assert!(matches!(
             &actions.actions[1],
+            TelegramAction::EditMessageNoPreview { text, .. } if text == "☁️ Pensando.."
+        ));
+        assert!(matches!(
+            &actions.actions[2],
+            TelegramAction::EditMessageNoPreview { text, .. } if text == "☁️ Pensando..."
+        ));
+        assert!(matches!(
+            &actions.actions[3],
             TelegramAction::EditMessageNoPreview { text, .. }
                 if text == "🔧 web_search(query=\"cuando juegan river y huracán\")"
         ));
         assert!(matches!(
-            &actions.actions[2],
-            TelegramAction::EditMessageNoPreview { text, .. } if text == "Pensando..."
+            &actions.actions[4],
+            TelegramAction::EditMessageNoPreview { text, .. } if text == "☁️ Pensando."
         ));
         assert!(matches!(
-            &actions.actions[3],
+            &actions.actions[5],
             TelegramAction::EditMessageNoPreview { text, .. } if text == "River juega "
         ));
         assert!(matches!(
-            &actions.actions[4],
+            &actions.actions[6],
             TelegramAction::EditMessage { text, .. } if text == "River juega el sábado"
         ));
     }
@@ -766,7 +818,7 @@ mod tests {
             assert!(stream.finalize("answer").is_ok());
             drop(stream);
             assert!(actions.actions.iter().any(|action| matches!(action,
-                TelegramAction::EditMessageNoPreview { text, .. } if text == "Thinking..."
+                TelegramAction::EditMessageNoPreview { text, .. } if text.starts_with("☁️ Thinking")
             )));
             assert!(actions.actions.iter().any(|action| matches!(action,
                 TelegramAction::EditMessageNoPreview { text, .. } if text.contains("calculate")
@@ -824,10 +876,10 @@ mod tests {
         assert_eq!(
             texts,
             [
-                "Thinking...",
+                "☁️ Thinking.",
                 "🔧 web_search(query=\"synthetic fixture\")",
                 "🔧 calculate()",
-                "Thinking...",
+                "☁️ Thinking...",
                 "answer",
                 "answer",
             ]
@@ -872,6 +924,17 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(texts, ["Thinking...", "🔧 calculate()", "Thinking..."]);
+        assert_eq!(
+            texts,
+            [
+                "☁️ Thinking.",
+                "☁️ Thinking..",
+                "☁️ Thinking...",
+                "🔧 calculate()",
+                "☁️ Thinking.",
+                "☁️ Thinking..",
+                "☁️ Thinking...",
+            ]
+        );
     }
 }
