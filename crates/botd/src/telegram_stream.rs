@@ -108,8 +108,8 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
         match plan.action {
             StreamAction::None => {}
             StreamAction::Send => {
-                self.send_attempted = true;
                 let receipt = self.actions.execute(self.send_action(&self.buffer, true))?;
+                self.send_attempted = true;
                 self.accept_send(receipt, now_seconds);
             }
             StreamAction::Edit => self.try_edit(now_seconds, true),
@@ -183,10 +183,10 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
             return Ok(());
         }
         if self.message_id.is_none() && !self.send_attempted {
-            self.send_attempted = true;
             let receipt = self
                 .actions
                 .execute(self.send_action(&self.buffer, disable_web_page_preview))?;
+            self.send_attempted = true;
             self.accept_send(receipt, now_seconds);
         } else if self.message_id.is_some()
             && self.buffer != self.sent_text
@@ -243,11 +243,11 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
         match action {
             StreamAction::None => {}
             StreamAction::Send => {
-                self.send_attempted = true;
                 let receipt = self
                     .actions
                     .execute(self.send_action(&plan.text, false))
                     .map_err(StreamFinalizeError::Action)?;
+                self.send_attempted = true;
                 self.message_id = receipt.message_id;
                 self.sent_text = plan.text;
             }
@@ -474,6 +474,7 @@ mod tests {
     struct Actions {
         actions: Vec<TelegramAction>,
         next_message_id: Option<MessageId>,
+        execute_failures: usize,
         edit_fails: bool,
         queue_stream_edits: bool,
         queued_stream_edits: Vec<TelegramAction>,
@@ -485,6 +486,10 @@ mod tests {
 
         fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
             self.actions.push(action);
+            if self.execute_failures > 0 {
+                self.execute_failures -= 1;
+                return Err(SyntheticError);
+            }
             Ok(ActionReceipt {
                 message_id: self.next_message_id,
             })
@@ -637,6 +642,39 @@ mod tests {
             }),
             Ok(())
         );
+    }
+
+    #[test]
+    fn retries_the_final_send_after_a_failed_initial_status_send() {
+        let mut actions = Actions {
+            next_message_id: Some(MessageId(80)),
+            execute_failures: 1,
+            ..Actions::default()
+        };
+        let mut stream =
+            TelegramAiStream::with_policy(&mut actions, ChatId(7), MessageId(4), 0.0, 1);
+
+        assert_eq!(stream.show_thinking(), Err(SyntheticError));
+        assert_eq!(
+            stream.feed(AiStreamEvent::FinalText("answer".to_owned())),
+            Ok(())
+        );
+        assert_eq!(
+            stream.finalize("answer"),
+            Ok(StreamDelivery {
+                message_id: MessageId(80)
+            })
+        );
+        drop(stream);
+
+        assert!(matches!(
+            &actions.actions[0],
+            TelegramAction::SendMessage(message) if message.text == "💭 Thinking."
+        ));
+        assert!(matches!(
+            &actions.actions[1],
+            TelegramAction::SendMessage(message) if message.text == "answer"
+        ));
     }
 
     #[test]

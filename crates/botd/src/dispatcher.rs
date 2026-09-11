@@ -102,8 +102,8 @@ use crate::telegram_stream::{StreamFinalizeError, TelegramAiStream};
 
 fn thinking_text(locale: bot_core::locale::Locale) -> &'static str {
     match locale {
-        bot_core::locale::Locale::Es => "☁️ Pensando",
-        bot_core::locale::Locale::En => "☁️ Thinking",
+        bot_core::locale::Locale::Es => "💭 Pensando",
+        bot_core::locale::Locale::En => "💭 Thinking",
     }
 }
 
@@ -3841,13 +3841,13 @@ where
             return Ok(DispatchOutcome::Handled);
         }
 
-        let (preparation, stream_finalize, ignored_edit_failures) = {
+        let (preparation, stream_finalize, ignored_edit_failures, thinking_status_failed) = {
             let Some(source) = self.ai_conversation_source.as_mut() else {
                 return Err(DispatchError::MissingService("AI conversation"));
             };
             let mut stream = TelegramAiStream::new(&mut self.actions, chat_id, message_id)
                 .with_thinking_text(thinking_text(locale));
-            let _thinking_result = stream.show_thinking();
+            let thinking_status_failed = stream.show_thinking().is_err();
             let preparation = source.prepare_streaming_events(input, &mut |event| {
                 stream
                     .feed(event)
@@ -3857,12 +3857,17 @@ where
                 Err(error) => {
                     stream.cancel();
                     let ignored = stream.ignored_edit_failures();
-                    (Err(error), None, ignored)
+                    (Err(error), None, ignored, thinking_status_failed)
                 }
                 Ok(AiPreparation::Silent { diagnostics }) => {
                     stream.cancel();
                     let ignored = stream.ignored_edit_failures();
-                    (Ok(AiPreparation::Silent { diagnostics }), None, ignored)
+                    (
+                        Ok(AiPreparation::Silent { diagnostics }),
+                        None,
+                        ignored,
+                        thinking_status_failed,
+                    )
                 }
                 Ok(AiPreparation::Reply {
                     text,
@@ -3879,10 +3884,17 @@ where
                         }),
                         Some(finalized),
                         ignored,
+                        thinking_status_failed,
                     )
                 }
             }
         };
+        if thinking_status_failed {
+            self.state_diagnostics.push(
+                "AI Telegram thinking status send failed; continuing so response delivery can retry"
+                    .to_owned(),
+            );
+        }
         if ignored_edit_failures > 0 {
             self.state_diagnostics.push(format!(
                 "AI Telegram stream ignored {ignored_edit_failures} intermediate edit failures"
@@ -4171,13 +4183,13 @@ where
             timestamp,
             spontaneous: false,
         };
-        let (preparation, stream_finalize, ignored_edit_failures) = {
+        let (preparation, stream_finalize, ignored_edit_failures, thinking_status_failed) = {
             let Some(source) = self.ai_conversation_source.as_mut() else {
                 return Err(DispatchError::MissingService("AI conversation"));
             };
             let mut stream = TelegramAiStream::new(&mut self.actions, chat_id, message_id)
                 .with_thinking_text(thinking_text(locale));
-            let _thinking_result = stream.show_thinking();
+            let thinking_status_failed = stream.show_thinking().is_err();
             let preparation =
                 source.prepare_summary_command_streaming_events(input, &mut |event| {
                     stream
@@ -4188,12 +4200,12 @@ where
                 Err(error) => {
                     stream.cancel();
                     let ignored = stream.ignored_edit_failures();
-                    (Err(error), None, ignored)
+                    (Err(error), None, ignored, thinking_status_failed)
                 }
                 Ok(None) => {
                     stream.cancel();
                     let ignored = stream.ignored_edit_failures();
-                    (Ok(None), None, ignored)
+                    (Ok(None), None, ignored, thinking_status_failed)
                 }
                 Ok(Some(AiPreparation::Silent { diagnostics })) => {
                     stream.cancel();
@@ -4202,6 +4214,7 @@ where
                         Ok(Some(AiPreparation::Silent { diagnostics })),
                         None,
                         ignored,
+                        thinking_status_failed,
                     )
                 }
                 Ok(Some(AiPreparation::Reply {
@@ -4219,10 +4232,17 @@ where
                         })),
                         Some(finalized),
                         ignored,
+                        thinking_status_failed,
                     )
                 }
             }
         };
+        if thinking_status_failed {
+            self.state_diagnostics.push(
+                "summary Telegram thinking status send failed; continuing so response delivery can retry"
+                    .to_owned(),
+            );
+        }
         if ignored_edit_failures > 0 {
             self.state_diagnostics.push(format!(
                 "summary Telegram stream ignored {ignored_edit_failures} intermediate edit failures"
@@ -6900,7 +6920,7 @@ mod tests {
         assert_eq!(dispatcher.actions.0.len(), 3);
         assert!(matches!(
             &dispatcher.actions.0[0],
-            TelegramAction::SendMessage(message) if message.text == "☁️ Thinking."
+            TelegramAction::SendMessage(message) if message.text == "💭 Thinking."
         ));
         assert!(matches!(
             &dispatcher.actions.0[1],
@@ -7020,7 +7040,7 @@ mod tests {
                     assert_eq!(dispatcher.actions.0.len(), 3);
                     assert!(matches!(
                         &dispatcher.actions.0[0],
-                        TelegramAction::SendMessage(message) if message.text == "☁️ Thinking."
+                        TelegramAction::SendMessage(message) if message.text == "💭 Thinking."
                     ));
                     assert!(matches!(
                         &dispatcher.actions.0[1],
@@ -7036,7 +7056,7 @@ mod tests {
                     assert_eq!(dispatcher.actions.0.len(), 2);
                     assert!(matches!(
                         &dispatcher.actions.0[0],
-                        TelegramAction::SendMessage(message) if message.text == "☁️ Thinking."
+                        TelegramAction::SendMessage(message) if message.text == "💭 Thinking."
                     ));
                     assert!(matches!(
                         &dispatcher.actions.0[1],
@@ -7196,7 +7216,7 @@ mod tests {
         assert_eq!(dispatcher.actions.0.len(), 3);
         assert!(matches!(
             &dispatcher.actions.0[0],
-            TelegramAction::SendMessage(message) if message.text == "☁️ Thinking."
+            TelegramAction::SendMessage(message) if message.text == "💭 Thinking."
         ));
         assert!(matches!(
             &dispatcher.actions.0[1],
@@ -7322,7 +7342,7 @@ mod tests {
             [
                 TelegramAction::SendMessage(message),
                 TelegramAction::DeleteMessage { .. },
-            ] if message.text == "☁️ Pensando."
+            ] if message.text == "💭 Pensando."
         ));
     }
 
@@ -16484,7 +16504,7 @@ mod tests {
                 TelegramAction::SendMessage(thinking),
                 TelegramAction::DeleteMessage { .. },
                 TelegramAction::SendMessage(failure),
-            ] if thinking.text == "☁️ Pensando."
+            ] if thinking.text == "💭 Pensando."
                 && failure.text == "me quedé reculando y no te pude responder, probá de nuevo"
         ));
 
