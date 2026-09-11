@@ -102,8 +102,8 @@ use crate::telegram_stream::{StreamFinalizeError, TelegramAiStream};
 
 fn thinking_text(locale: bot_core::locale::Locale) -> &'static str {
     match locale {
-        bot_core::locale::Locale::Es => "☁️ Pensando",
-        bot_core::locale::Locale::En => "☁️ Thinking",
+        bot_core::locale::Locale::Es => "💭 Pensando",
+        bot_core::locale::Locale::En => "💭 Thinking",
     }
 }
 
@@ -6900,7 +6900,7 @@ mod tests {
         assert_eq!(dispatcher.actions.0.len(), 3);
         assert!(matches!(
             &dispatcher.actions.0[0],
-            TelegramAction::SendMessage(message) if message.text == "☁️ Thinking."
+            TelegramAction::SendMessage(message) if message.text == "💭 Thinking."
         ));
         assert!(matches!(
             &dispatcher.actions.0[1],
@@ -7020,7 +7020,7 @@ mod tests {
                     assert_eq!(dispatcher.actions.0.len(), 3);
                     assert!(matches!(
                         &dispatcher.actions.0[0],
-                        TelegramAction::SendMessage(message) if message.text == "☁️ Thinking."
+                        TelegramAction::SendMessage(message) if message.text == "💭 Thinking."
                     ));
                     assert!(matches!(
                         &dispatcher.actions.0[1],
@@ -7036,7 +7036,7 @@ mod tests {
                     assert_eq!(dispatcher.actions.0.len(), 2);
                     assert!(matches!(
                         &dispatcher.actions.0[0],
-                        TelegramAction::SendMessage(message) if message.text == "☁️ Thinking."
+                        TelegramAction::SendMessage(message) if message.text == "💭 Thinking."
                     ));
                     assert!(matches!(
                         &dispatcher.actions.0[1],
@@ -7196,7 +7196,7 @@ mod tests {
         assert_eq!(dispatcher.actions.0.len(), 3);
         assert!(matches!(
             &dispatcher.actions.0[0],
-            TelegramAction::SendMessage(message) if message.text == "☁️ Thinking."
+            TelegramAction::SendMessage(message) if message.text == "💭 Thinking."
         ));
         assert!(matches!(
             &dispatcher.actions.0[1],
@@ -7322,7 +7322,7 @@ mod tests {
             [
                 TelegramAction::SendMessage(message),
                 TelegramAction::DeleteMessage { .. },
-            ] if message.text == "☁️ Pensando."
+            ] if message.text == "💭 Pensando."
         ));
     }
 
@@ -16484,7 +16484,7 @@ mod tests {
                 TelegramAction::SendMessage(thinking),
                 TelegramAction::DeleteMessage { .. },
                 TelegramAction::SendMessage(failure),
-            ] if thinking.text == "☁️ Pensando."
+            ] if thinking.text == "💭 Pensando."
                 && failure.text == "me quedé reculando y no te pude responder, probá de nuevo"
         ));
 
