@@ -1,8 +1,10 @@
 //! Native task creation, listing, and cancellation AI tools.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use bot_adapters::billing_read::BillingRepository;
+use bot_adapters::openrouter_chat::OpenRouterPricingCache;
 use bot_adapters::redis_task_store::RedisTaskStore;
 use bot_adapters::task_record::TaskRecordDocument;
 use bot_core::credit_units::{CreditUnits, format_credit_units};
@@ -94,6 +96,7 @@ pub struct TaskSetTool<Store, Balance, Ids, Now> {
     ids: Ids,
     now: Now,
     context: TaskToolContext,
+    openrouter_pricing: Option<Arc<OpenRouterPricingCache>>,
 }
 
 impl<Store, Balance, Ids, Now> TaskSetTool<Store, Balance, Ids, Now> {
@@ -111,7 +114,14 @@ impl<Store, Balance, Ids, Now> TaskSetTool<Store, Balance, Ids, Now> {
             ids,
             now,
             context,
+            openrouter_pricing: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_openrouter_pricing(mut self, pricing: Arc<OpenRouterPricingCache>) -> Self {
+        self.openrouter_pricing = Some(pricing);
+        self
     }
 }
 
@@ -156,7 +166,11 @@ where
             return ToolExecutionResult::output(credit_user(self.context.locale));
         };
         let locale_code = locale_code(self.context.locale);
-        let required = match estimate_task_reserve_credit_units(&text, locale_code) {
+        let required = match estimate_task_reserve_credit_units(
+            &text,
+            locale_code,
+            self.openrouter_pricing.as_deref(),
+        ) {
             Ok(required) => required.max(1),
             Err(error) => {
                 return ToolExecutionResult::with_diagnostics(

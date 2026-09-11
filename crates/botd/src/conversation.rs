@@ -1,16 +1,17 @@
 //! Native foreground AI conversation transaction.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use bot_adapters::openrouter_chat::OpenRouterPricingCache;
 use bot_core::ai_pricing::calculate_billing_for_segments;
 use bot_core::ai_prompt::{
     ConversationPromptInput, HistoryMessage, PromptContent, PromptMessage, PromptRole,
     RetrievedMessage, build_conversation_prompt, build_system_prompt,
 };
 use bot_core::ai_reserve::{
-    EstimatedMessage, TokenEstimateValue, VISION_OUTPUT_TOKEN_LIMIT, chat_output_token_limit,
-    estimate_chat_reserve_credit_units, estimate_transcription_reserve_credit_units,
-    estimate_vision_reserve_credit_units,
+    EstimatedMessage, TokenEstimateValue, chat_output_token_limit,
+    estimate_chat_reserve_credit_units_with_pricing,
 };
 use bot_core::ai_response_cleanup::cleanup_response;
 use bot_core::ai_usage::stable_provider_segment_id;
@@ -31,7 +32,7 @@ use crate::chat_tool_loop::{
 use crate::compaction_scheduler::{
     CompactionScheduleContext, MemoryCompactionPlan, MemoryCompactionScheduler, PayerSource,
 };
-use crate::media::{MediaExecution, MediaKind, MediaPipelineError, MediaRuntime};
+use crate::media::{MediaExecution, MediaKind, MediaPipelineError, MediaRuntime, PreparedMedia};
 use crate::youtube::YoutubeContextRuntime;
 
 const MAX_HISTORY_MESSAGES: usize = 40;
@@ -199,6 +200,7 @@ pub struct NativeConversation<Provider, Tools, State, Billing> {
     media: Option<Box<dyn MediaRuntime>>,
     youtube: Option<Box<dyn YoutubeContextRuntime>>,
     compaction_scheduler: Option<Box<dyn MemoryCompactionScheduler>>,
+    openrouter_pricing: Option<Arc<OpenRouterPricingCache>>,
     pending: HashMap<String, PendingConversation>,
 }
 
@@ -224,8 +226,15 @@ impl<Provider, Tools, State, Billing> NativeConversation<Provider, Tools, State,
             media: None,
             youtube: None,
             compaction_scheduler: None,
+            openrouter_pricing: None,
             pending: HashMap::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_openrouter_pricing(mut self, pricing: Arc<OpenRouterPricingCache>) -> Self {
+        self.openrouter_pricing = Some(pricing);
+        self
     }
 
     #[must_use]
@@ -582,25 +591,76 @@ where
                     .as_deref()
                     .map(|file_id| (MediaKind::Image, file_id, None))
             });
-        let admission_kind = selected.map_or(MediaKind::Image, |(kind, _, _)| kind);
-        let admission_amount = match admission_kind {
-            MediaKind::Image => estimate_vision_reserve_credit_units(
-                "Describe what you see in this image in detail.",
-                0,
-                1_200,
-                VISION_OUTPUT_TOKEN_LIMIT,
-                crate::native_ai::VISION_MODEL,
-            ),
-            MediaKind::Audio => estimate_transcription_reserve_credit_units(
-                input.audio_duration_seconds.unwrap_or(1.0),
-            ),
+        let Some((kind, file_id, duration)) = selected else {
+            let text = if input.has_reply {
+                media_command_none(input.locale)
+            } else {
+                media_command_reply_required(input.locale)
+            };
+            return Ok(AiPreparation::reply(text, None));
+        };
+
+        // prepare checks the media cache before downloading, decoding, or
+        // looking up provider pricing. Cached results are therefore free even
+        // when the pricing catalog is unavailable.
+        let prepared = match self
+            .media
+            .as_mut()
+            .ok_or_else(|| "native media runtime disappeared".to_owned())?
+            .prepare(kind, file_id, duration)
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let text = media_command_prepare_error(
+                    kind,
+                    input.visual_media_kind.as_deref(),
+                    input.locale,
+                    &error,
+                );
+                return Ok(AiPreparation::Reply {
+                    text,
+                    completion_id: None,
+                    diagnostics: vec![format!("media command preparation: {error}")],
+                });
+            }
+        };
+        let prompt = match input.visual_media_kind.as_deref() {
+            Some("sticker") => sticker_prompt(input.locale),
+            Some("animation") => gif_prompt(input.locale),
+            _ => media_prompt(kind, input.locale),
+        };
+        if matches!(prepared, PreparedMedia::Cached { .. }) {
+            return Ok(
+                match self
+                    .media
+                    .as_mut()
+                    .ok_or_else(|| "native media runtime disappeared".to_owned())?
+                    .execute(prepared, prompt)
+                {
+                    Ok(execution) => {
+                        AiPreparation::reply(sanitize_summary_text(&execution.text), None)
+                    }
+                    Err(error) => AiPreparation::Reply {
+                        text: media_command_provider_error(
+                            kind,
+                            input.visual_media_kind.as_deref(),
+                            input.locale,
+                        )
+                        .to_owned(),
+                        completion_id: None,
+                        diagnostics: vec![format!("media command cached result: {error}")],
+                    },
+                },
+            );
         }
-        .map_err(|error| error.to_string())?;
+
+        // Preparation determines the exact audio/image reserve. Reserve it
+        // immediately before the paid provider call.
         let admission = self.reserve(
             &input,
             &operation_id,
             "transcribe_command_media",
-            admission_amount,
+            prepared.reserve_credit_units(),
             1,
         )?;
         if !admission.authorized {
@@ -609,93 +669,30 @@ where
                 None,
             ));
         }
-
-        let (text, segments, diagnostics) = if let Some((kind, file_id, duration)) = selected {
-            let prepared = match self
-                .media
-                .as_mut()
-                .ok_or_else(|| "native media runtime disappeared".to_owned())?
-                .prepare(kind, file_id, duration)
-            {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    let text = media_command_prepare_error(
-                        kind,
-                        input.visual_media_kind.as_deref(),
-                        input.locale,
-                        &error,
-                    );
-                    return Ok(self.prepare_media_command_reply(
-                        input,
-                        operation_id,
-                        text,
-                        Vec::new(),
-                        vec![format!("media command preparation: {error}")],
-                    ));
-                }
-            };
-            let required_amount = prepared.reserve_credit_units();
-            if required_amount > admission_amount {
-                let extension = self.reserve(
-                    &input,
-                    &operation_id,
-                    "transcribe_command_media_extension",
-                    required_amount - admission_amount,
-                    1,
-                )?;
-                if !extension.authorized {
-                    self.settle_immediately(
-                        &input,
-                        &operation_id,
-                        "transcribe_command_reserve_adjustment_failed",
-                    )?;
-                    return Ok(AiPreparation::reply(
-                        Self::insufficient(input.locale, &input, &extension),
-                        None,
-                    ));
-                }
-            }
-            let prompt = match input.visual_media_kind.as_deref() {
-                Some("sticker") => sticker_prompt(input.locale),
-                Some("animation") => gif_prompt(input.locale),
-                _ => media_prompt(kind, input.locale),
-            };
-            match self
-                .media
-                .as_mut()
-                .ok_or_else(|| "native media runtime disappeared".to_owned())?
-                .execute(prepared, prompt)
-            {
-                Ok(execution) => {
-                    let text = sanitize_summary_text(&execution.text);
-                    (
-                        text,
-                        execution.billing_segment.into_iter().collect(),
-                        Vec::new(),
-                    )
-                }
-                Err(error) => (
-                    media_command_provider_error(
-                        kind,
-                        input.visual_media_kind.as_deref(),
-                        input.locale,
-                    )
-                    .to_owned(),
+        let (text, segments, diagnostics) = match self
+            .media
+            .as_mut()
+            .ok_or_else(|| "native media runtime disappeared".to_owned())?
+            .execute(prepared, prompt)
+        {
+            Ok(execution) => {
+                let text = sanitize_summary_text(&execution.text);
+                (
+                    text,
+                    execution.billing_segment.into_iter().collect(),
                     Vec::new(),
-                    vec![format!("media command provider: {error}")],
-                ),
+                )
             }
-        } else {
-            (
-                if input.has_reply {
-                    media_command_none(input.locale)
-                } else {
-                    media_command_reply_required(input.locale)
-                }
+            Err(error) => (
+                media_command_provider_error(
+                    kind,
+                    input.visual_media_kind.as_deref(),
+                    input.locale,
+                )
                 .to_owned(),
                 Vec::new(),
-                Vec::new(),
-            )
+                vec![format!("media command provider: {error}")],
+            ),
         };
         Ok(self.prepare_media_command_reply(input, operation_id, text, segments, diagnostics))
     }
@@ -794,7 +791,8 @@ where
     ) -> Result<AiPreparation, String> {
         let operation_id = summary_operation_id(&input);
         let admission = vec![PromptMessage::text(PromptRole::User, "summary")];
-        let base_amount = estimate_reserve(&admission, &self.model)?;
+        let base_amount =
+            estimate_reserve(&admission, &self.model, self.openrouter_pricing.as_deref())?;
         let base = self.reserve(
             &input,
             &operation_id,
@@ -858,7 +856,8 @@ where
                 .map(|message| PromptMessage::text(message.role, message.text)),
         );
         messages.push(PromptMessage::text(PromptRole::User, prompt));
-        let full_amount = estimate_reserve(&messages, &self.model)?;
+        let full_amount =
+            estimate_reserve(&messages, &self.model, self.openrouter_pricing.as_deref())?;
         if full_amount > base_amount {
             let extension = self.reserve(
                 &input,
@@ -952,6 +951,7 @@ where
                     Locale::Es => "es",
                     Locale::En => "en",
                 },
+                self.openrouter_pricing.as_deref(),
             ) {
                 Ok(required) => required.max(1),
                 Err(_) => {
@@ -1005,7 +1005,8 @@ where
             PromptRole::User,
             &provider_input.message_text,
         )];
-        let base_amount = estimate_reserve(&admission, &self.model)?;
+        let base_amount =
+            estimate_reserve(&admission, &self.model, self.openrouter_pricing.as_deref())?;
         let base = self.reserve(
             &input,
             &operation_id,
@@ -1108,7 +1109,8 @@ where
                 return Err(error);
             }
         };
-        let full_amount = estimate_reserve(&messages, &self.model)?;
+        let full_amount =
+            estimate_reserve(&messages, &self.model, self.openrouter_pricing.as_deref())?;
         if full_amount > base_amount {
             let extension = self.reserve(
                 &input,
@@ -1739,14 +1741,20 @@ fn user_identity(input: &AiConversationInput) -> String {
     }
 }
 
-fn estimate_reserve(messages: &[PromptMessage], model: &str) -> Result<i64, String> {
+fn estimate_reserve(
+    messages: &[PromptMessage],
+    model: &str,
+    pricing: Option<&OpenRouterPricingCache>,
+) -> Result<i64, String> {
     let estimated = messages.iter().map(estimated_message).collect::<Vec<_>>();
-    estimate_chat_reserve_credit_units(
+    let pricing = crate::native_ai::reservation_pricing_for_model(model, pricing)?;
+    estimate_chat_reserve_credit_units_with_pricing(
         None,
         &estimated,
         Some(chat_output_token_limit(model)),
         SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE,
         model,
+        &pricing,
     )
     .map_err(|error| error.to_string())
 }
@@ -1885,7 +1893,7 @@ mod tests {
     use std::convert::Infallible;
     use std::rc::Rc;
 
-    use bot_adapters::openrouter_chat::OpenRouterChatError;
+    use bot_adapters::openrouter_chat::{OpenRouterChatError, OpenRouterPricingCache};
     use bot_core::provider_pricing::DEEPSEEK_MODEL;
     use bot_core::provider_stream_policy::StreamToolCall;
     use bot_core::telegram_input::{ChatId, MessageId, UserId};
@@ -2064,6 +2072,16 @@ mod tests {
     }
 
     impl MediaRuntime for Media {
+        fn estimate_reserve_credit_units(
+            &mut self,
+            kind: MediaKind,
+            duration_hint_seconds: Option<f64>,
+        ) -> Result<i64, String> {
+            assert_eq!(kind, MediaKind::Audio);
+            assert_eq!(duration_hint_seconds, Some(4.5));
+            Ok(7)
+        }
+
         fn prepare(
             &mut self,
             kind: MediaKind,
@@ -2094,20 +2112,30 @@ mod tests {
                 text: "synthetic transcript".to_owned(),
                 billing_segment: Some(json!({
                     "kind": "transcribe",
-                    "model": "whisper-large-v3",
-                    "usage": {},
+                    "model": "microsoft/mai-transcribe-2",
+                    "usage": {"seconds": 4.5, "cost": "0.000125"},
                     "audio_seconds": 4.5,
-                    "source": "groq",
-                    "metadata": {"provider": "groq"}
+                    "source": "openrouter",
+                    "metadata": {"provider": "openrouter"}
                 })),
                 cached: false,
             })
         }
     }
 
-    struct StickerMedia;
+    struct StickerMedia {
+        fail_execute: bool,
+    }
 
     impl MediaRuntime for StickerMedia {
+        fn estimate_reserve_credit_units(
+            &mut self,
+            _kind: MediaKind,
+            _duration_hint_seconds: Option<f64>,
+        ) -> Result<i64, String> {
+            Err("cached media must skip reserve estimation".to_owned())
+        }
+
         fn prepare(
             &mut self,
             kind: MediaKind,
@@ -2129,6 +2157,9 @@ mod tests {
             prompt: &str,
         ) -> Result<MediaExecution, String> {
             assert!(prompt.starts_with("Describe this sticker"));
+            if self.fail_execute {
+                return Err("synthetic cached media failure".to_owned());
+            }
             Ok(MediaExecution {
                 kind: prepared.kind(),
                 file_id: "sticker-1".to_owned(),
@@ -2142,6 +2173,14 @@ mod tests {
     struct GifMedia;
 
     impl MediaRuntime for GifMedia {
+        fn estimate_reserve_credit_units(
+            &mut self,
+            _kind: MediaKind,
+            _duration_hint_seconds: Option<f64>,
+        ) -> Result<i64, String> {
+            Err("cached media must skip reserve estimation".to_owned())
+        }
+
         fn prepare(
             &mut self,
             kind: MediaKind,
@@ -2176,6 +2215,16 @@ mod tests {
     struct DownloadFailureMedia;
 
     impl MediaRuntime for DownloadFailureMedia {
+        fn estimate_reserve_credit_units(
+            &mut self,
+            kind: MediaKind,
+            duration_hint_seconds: Option<f64>,
+        ) -> Result<i64, String> {
+            assert_eq!(kind, MediaKind::Audio);
+            assert_eq!(duration_hint_seconds, Some(2.0));
+            Ok(1)
+        }
+
         fn prepare(
             &mut self,
             _kind: MediaKind,
@@ -2201,6 +2250,17 @@ mod tests {
     }
 
     impl MediaRuntime for ConfigurableMedia {
+        fn estimate_reserve_credit_units(
+            &mut self,
+            kind: MediaKind,
+            _duration_hint_seconds: Option<f64>,
+        ) -> Result<i64, String> {
+            Ok(match kind {
+                MediaKind::Image => self.reserve_credit_units,
+                MediaKind::Audio => 1,
+            })
+        }
+
         fn prepare(
             &mut self,
             kind: MediaKind,
@@ -2297,6 +2357,7 @@ mod tests {
     struct Billing {
         decisions: VecDeque<ReserveDecision>,
         reserves: Vec<ReserveRequest>,
+        reserve_error: Option<String>,
         segments: Vec<ProviderSegmentRequest>,
         settlements: Vec<SettlementRequest>,
         released_operations: Vec<String>,
@@ -2310,6 +2371,9 @@ mod tests {
     impl ConversationBilling for Billing {
         fn reserve(&mut self, request: ReserveRequest) -> Result<ReserveDecision, String> {
             self.reserves.push(request);
+            if let Some(error) = &self.reserve_error {
+                return Err(error.clone());
+            }
             Ok(self.decisions.pop_front().unwrap_or(ReserveDecision {
                 authorized: true,
                 user_balance: 1_000,
@@ -2604,6 +2668,40 @@ mod tests {
     }
 
     #[test]
+    fn denied_youtube_reservation_stops_before_provider_io() {
+        let mut service = conversation(
+            Vec::new(),
+            Billing {
+                decisions: VecDeque::from([ReserveDecision {
+                    authorized: false,
+                    user_balance: 0,
+                    chat_balance: 0,
+                    source: None,
+                    denial: None,
+                }]),
+                ..Billing::default()
+            },
+        )
+        .with_youtube(Box::new(Youtube {
+            fail: false,
+            cached: false,
+        }));
+        let mut request = input();
+        request.message_text = "https://youtu.be/synthetic-video".to_owned();
+        let preparation = service
+            .prepare_youtube(&request, "synthetic-operation")
+            .unwrap_or_else(|_| unreachable!());
+
+        assert!(preparation.matched);
+        assert!(
+            preparation
+                .reserve_decision
+                .is_some_and(|decision| !decision.authorized)
+        );
+        assert!(service.provider.prompts.borrow().is_empty());
+    }
+
+    #[test]
     fn youtube_reply_context_reserves_and_charges_caption_context() {
         let mut service = conversation(
             vec![Ok(round("synthetic answer", None))],
@@ -2633,7 +2731,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(prompt.contains("YOUTUBE VIDEO TRANSCRIPT:\nsynthetic transcript"));
-        assert_eq!(service.billing.reserves.len(), 2);
+        assert_eq!(service.billing.reserves.len(), 3);
         assert_eq!(
             service.billing.reserves[0].metadata["usage_tag"],
             "ai_response_base"
@@ -3160,51 +3258,60 @@ mod tests {
     }
 
     #[test]
-    fn explicit_media_command_preserves_reply_help_and_refunds_after_delivery() {
+    fn explicit_media_command_without_media_returns_reply_help_without_reserving() {
         let mut service = conversation(Vec::new(), Billing::default()).with_media(Box::new(Media));
         let preparation = service.prepare_media_command(input());
         let Ok(Some(AiPreparation::Reply {
             text,
-            completion_id: Some(completion_id),
+            completion_id: None,
             ..
         })) = preparation
         else {
-            return;
+            unreachable!();
         };
-        assert_eq!(
-            text,
-            "reply to audio, video, an image, sticker, GIF, or YouTube link and I will process it"
-        );
-        assert_eq!(
-            service.complete_delivery(AiDelivery {
-                completion_id,
-                delivered: true,
-                sent_message_id: Some(MessageId(99)),
-            }),
-            Ok(())
-        );
-        assert_eq!(service.billing.settlements[0].actual_credit_units, 0);
+        assert_eq!(text, media_command_reply_required(Locale::En));
+        assert!(service.billing.reserves.is_empty());
+        assert!(service.billing.settlements.is_empty());
     }
 
     #[test]
     fn explicit_sticker_command_uses_sticker_copy_and_sanitizes_cached_text() {
         let mut service =
-            conversation(Vec::new(), Billing::default()).with_media(Box::new(StickerMedia));
+            conversation(Vec::new(), Billing::default()).with_media(Box::new(StickerMedia {
+                fail_execute: false,
+            }));
         let mut request = input();
         request.command = "/describe".to_owned();
         request.has_reply = true;
         request.visual_media_kind = Some("sticker".to_owned());
         request.photo_file_id = Some("sticker-1".to_owned());
-        let preparation = service.prepare_media_command(request);
+        let preparation = service.prepare_media_command(request.clone());
         assert!(matches!(
             preparation,
             Ok(Some(AiPreparation::Reply { ref text, .. }))
                 if text == "synthetic sticker"
         ));
+
+        let mut failed = conversation(Vec::new(), Billing::default())
+            .with_media(Box::new(StickerMedia { fail_execute: true }));
+        let preparation = failed
+            .prepare_media_command(request)
+            .unwrap_or_else(|_| unreachable!())
+            .unwrap_or_else(|| unreachable!());
+        assert!(matches!(
+            preparation,
+            AiPreparation::Reply {
+                completion_id: None,
+                ref diagnostics,
+                ..
+            } if diagnostics.iter().any(|value| value.contains("synthetic cached media failure"))
+        ));
+        assert!(failed.billing.reserves.is_empty());
+        assert!(failed.billing.settlements.is_empty());
     }
 
     #[test]
-    fn explicit_media_download_failure_is_localized_and_refundable() {
+    fn explicit_media_download_failure_is_localized_without_reserving() {
         let mut service =
             conversation(Vec::new(), Billing::default()).with_media(Box::new(DownloadFailureMedia));
         let mut request = input();
@@ -3215,7 +3322,7 @@ mod tests {
         let preparation = service.prepare_media_command(request);
         let Ok(Some(AiPreparation::Reply {
             text,
-            completion_id: Some(completion_id),
+            completion_id: None,
             diagnostics,
         })) = preparation
         else {
@@ -3223,15 +3330,8 @@ mod tests {
         };
         assert_eq!(text, "I could not download the audio, send it again");
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(
-            service.complete_delivery(AiDelivery {
-                completion_id,
-                delivered: true,
-                sent_message_id: Some(MessageId(99)),
-            }),
-            Ok(())
-        );
-        assert_eq!(service.billing.settlements[0].actual_credit_units, 0);
+        assert!(service.billing.reserves.is_empty());
+        assert!(service.billing.settlements.is_empty());
     }
 
     #[test]
@@ -3337,48 +3437,40 @@ mod tests {
             execute_error: None,
             reserve_credit_units: 5,
         }));
+        let mut denied_input = input();
+        denied_input.audio_file_id = Some("synthetic-audio".to_owned());
+        denied_input.audio_duration_seconds = Some(1.0);
         assert!(matches!(
-            admission_denied.prepare_media_command(input()),
+            admission_denied.prepare_media_command(denied_input),
             Ok(Some(AiPreparation::Reply {
                 completion_id: None,
                 ..
             }))
         ));
 
-        let mut audio = input();
-        audio.audio_file_id = Some("synthetic-audio".to_owned());
-        audio.audio_duration_seconds = Some(1.0);
-        let mut extension_denied = conversation(
+        let mut reserve_failure = conversation(
             Vec::new(),
             Billing {
-                decisions: VecDeque::from([
-                    ReserveDecision {
-                        authorized: true,
-                        user_balance: 1_000,
-                        chat_balance: 0,
-                        source: Some(PayerSource::User),
-                        denial: None,
-                    },
-                    denied,
-                ]),
+                reserve_error: Some("synthetic reserve failure".to_owned()),
                 ..Billing::default()
             },
         )
         .with_media(Box::new(ConfigurableMedia {
             prepare_error: None,
             execute_error: None,
-            reserve_credit_units: 10_000,
+            reserve_credit_units: 5,
         }));
-        assert!(matches!(
-            extension_denied.prepare_media_command(audio.clone()),
-            Ok(Some(AiPreparation::Reply {
-                completion_id: None,
-                ..
-            }))
-        ));
+        let mut reserve_input = input();
+        reserve_input.audio_file_id = Some("synthetic-audio".to_owned());
+        reserve_input.audio_duration_seconds = Some(1.0);
+        assert!(
+            reserve_failure
+                .prepare_media_command(reserve_input)
+                .is_err_and(|error| error == "synthetic reserve failure")
+        );
         assert_eq!(
-            extension_denied.billing.settlements[0].reason,
-            "transcribe_command_reserve_adjustment_failed"
+            reserve_failure.billing.released_operations,
+            vec!["ai:42:7:88"]
         );
 
         let mut provider_failure =
@@ -3387,6 +3479,9 @@ mod tests {
                 execute_error: Some("synthetic provider failure".to_owned()),
                 reserve_credit_units: 1,
             }));
+        let mut audio = input();
+        audio.audio_file_id = Some("synthetic-audio".to_owned());
+        audio.audio_duration_seconds = Some(1.0);
         let result = provider_failure
             .prepare_media_command(audio)
             .unwrap_or_else(|_| unreachable!())
@@ -3694,12 +3789,16 @@ mod tests {
 
         let mut no_media = conversation(Vec::new(), Billing::default());
         assert_eq!(no_media.prepare_media_command(input()), Ok(None));
-        let mut configured =
-            conversation(Vec::new(), Billing::default()).with_media(Box::new(ConfigurableMedia {
+        let mut configured = conversation(Vec::new(), Billing::default())
+            .with_media(Box::new(ConfigurableMedia {
                 prepare_error: None,
                 execute_error: None,
                 reserve_credit_units: 0,
-            }));
+            }))
+            .with_openrouter_pricing(Arc::new(
+                OpenRouterPricingCache::new("synthetic-key", "not-a-url")
+                    .unwrap_or_else(|_| unreachable!("pricing cache construction")),
+            ));
         let mut replied_without_media = input();
         replied_without_media.has_reply = true;
         assert!(matches!(
@@ -3707,6 +3806,8 @@ mod tests {
             Ok(Some(AiPreparation::Reply { ref text, .. }))
                 if text == media_command_none(Locale::En)
         ));
+        assert!(configured.billing.reserves.is_empty());
+        assert!(configured.billing.settlements.is_empty());
     }
 
     #[test]

@@ -39,9 +39,9 @@ use bot_adapters::link_preview::{
     LinkPreviewTransport, ReqwestLinkPreviewTransport, download_oversized_video,
     inspect_with as inspect_link_preview,
 };
-use bot_adapters::media_provider::ReqwestGroqTranscriptionTransport;
 use bot_adapters::openrouter_chat::{
-    DEFAULT_OPENROUTER_BASE_URL, OpenRouterChatError, ReqwestOpenRouterTransport,
+    DEFAULT_OPENROUTER_BASE_URL, OpenRouterChatError, OpenRouterPricingCache,
+    ReqwestOpenRouterTransport,
 };
 use bot_adapters::polymarket::{
     PolymarketTransport, ReqwestPolymarketTransport,
@@ -123,8 +123,8 @@ use crate::hacker_news_tool::HackerNewsTool;
 use crate::market_tools::{CryptoPricesTool, DollarRatesTool, StockPricesTool, WeatherTool};
 use crate::media::NativeMedia;
 use crate::media_adapters::{
-    FallbackTranscriptionProvider, FfmpegMediaProcessor, OpenRouterVisionProvider, RedisMediaCache,
-    TelegramMediaFiles, TranscriptionProviderConfig,
+    FfmpegMediaProcessor, OpenRouterTranscriptionProvider, OpenRouterVisionProvider,
+    RedisMediaCache, TelegramMediaFiles,
 };
 use crate::native_tools::{NativeTool, NativeToolRegistry, StandardNativeToolBackend};
 use crate::random_tool::RandomChoiceTool;
@@ -1839,8 +1839,7 @@ pub struct NativeRuntimeOptions<'a> {
     pub giphy_api_key: Option<String>,
     pub openrouter_api_key: Option<String>,
     pub openrouter_base_url: Option<String>,
-    pub groq_free_api_key: Option<String>,
-    pub groq_api_key: Option<String>,
+    pub openrouter_pricing: Option<Arc<OpenRouterPricingCache>>,
     pub firecrawl_api_key: Option<String>,
     pub supadata_api_key: Option<String>,
     pub apify_api_key: Option<String>,
@@ -1863,8 +1862,7 @@ struct OwnedNativeRuntimeOptions {
     giphy_api_key: Option<String>,
     openrouter_api_key: Option<String>,
     openrouter_base_url: Option<String>,
-    groq_free_api_key: Option<String>,
-    groq_api_key: Option<String>,
+    openrouter_pricing: Option<Arc<OpenRouterPricingCache>>,
     firecrawl_api_key: Option<String>,
     supadata_api_key: Option<String>,
     apify_api_key: Option<String>,
@@ -1888,8 +1886,7 @@ impl OwnedNativeRuntimeOptions {
             giphy_api_key: options.giphy_api_key,
             openrouter_api_key: options.openrouter_api_key,
             openrouter_base_url: options.openrouter_base_url,
-            groq_free_api_key: options.groq_free_api_key,
-            groq_api_key: options.groq_api_key,
+            openrouter_pricing: options.openrouter_pricing,
             firecrawl_api_key: options.firecrawl_api_key,
             supadata_api_key: options.supadata_api_key,
             apify_api_key: options.apify_api_key,
@@ -1913,8 +1910,7 @@ impl OwnedNativeRuntimeOptions {
             giphy_api_key: self.giphy_api_key.clone(),
             openrouter_api_key: self.openrouter_api_key.clone(),
             openrouter_base_url: self.openrouter_base_url.clone(),
-            groq_free_api_key: self.groq_free_api_key.clone(),
-            groq_api_key: self.groq_api_key.clone(),
+            openrouter_pricing: self.openrouter_pricing.clone(),
             firecrawl_api_key: self.firecrawl_api_key.clone(),
             supadata_api_key: self.supadata_api_key.clone(),
             apify_api_key: self.apify_api_key.clone(),
@@ -1934,6 +1930,7 @@ pub struct ProductionToolFactory {
     database_url: String,
     coinmarketcap_key: Option<String>,
     firecrawl_key: Option<String>,
+    openrouter_pricing: Option<Arc<OpenRouterPricingCache>>,
 }
 
 impl ProductionToolFactory {
@@ -1949,7 +1946,14 @@ impl ProductionToolFactory {
             database_url: database_url.to_owned(),
             coinmarketcap_key,
             firecrawl_key,
+            openrouter_pricing: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_openrouter_pricing(mut self, pricing: Arc<OpenRouterPricingCache>) -> Self {
+        self.openrouter_pricing = Some(pricing);
+        self
     }
 }
 
@@ -2048,24 +2052,32 @@ impl ConversationToolFactory for ProductionToolFactory {
             )
             .with_executor(
                 NativeTool::TaskSet,
-                Box::new(TaskSetTool::new(
-                    RedisTaskStore::new(&self.redis_endpoint).map_err(|error| error.to_string())?,
-                    BillingRepository::new(&self.database_url),
-                    RandomTaskIdSource,
-                    current_unix_timestamp,
-                    TaskToolContext {
-                        chat_id: chat_id.clone(),
-                        user_name: if input.sender_username.is_empty() {
-                            input.sender_first_name.clone()
-                        } else {
-                            input.sender_username.clone()
+                Box::new({
+                    let tool = TaskSetTool::new(
+                        RedisTaskStore::new(&self.redis_endpoint)
+                            .map_err(|error| error.to_string())?,
+                        BillingRepository::new(&self.database_url),
+                        RandomTaskIdSource,
+                        current_unix_timestamp,
+                        TaskToolContext {
+                            chat_id: chat_id.clone(),
+                            user_name: if input.sender_username.is_empty() {
+                                input.sender_first_name.clone()
+                            } else {
+                                input.sender_username.clone()
+                            },
+                            user_id: Some(input.sender_id.0),
+                            timezone_offset: i32::try_from(input.timezone_offset_hours)
+                                .unwrap_or_default(),
+                            locale,
                         },
-                        user_id: Some(input.sender_id.0),
-                        timezone_offset: i32::try_from(input.timezone_offset_hours)
-                            .unwrap_or_default(),
-                        locale,
-                    },
-                )),
+                    );
+                    if let Some(pricing) = self.openrouter_pricing.clone() {
+                        tool.with_openrouter_pricing(pricing)
+                    } else {
+                        tool
+                    }
+                }),
             )
             .with_executor(
                 NativeTool::TaskList,
@@ -2132,8 +2144,6 @@ fn build_native_dispatcher(
 ) -> Result<ConcreteNativeDispatcher, CompositionError> {
     let conversation_coinmarketcap_key = options.coinmarketcap_key.clone();
     let conversation_firecrawl_key = options.firecrawl_api_key.clone();
-    let groq_free_api_key = options.groq_free_api_key.clone();
-    let groq_api_key = options.groq_api_key.clone();
     let action_transport =
         ReqwestTelegramTransport::new().map_err(CompositionError::ActionTransport)?;
     let admin_transport =
@@ -2264,22 +2274,21 @@ fn build_native_dispatcher(
                 .filter(|url| !url.is_empty())
                 .unwrap_or(DEFAULT_OPENROUTER_BASE_URL)
                 .to_owned();
+            let openrouter_pricing = match options.openrouter_pricing {
+                Some(pricing) => pricing,
+                None => Arc::new(
+                    OpenRouterPricingCache::new(&api_key, &openrouter_base_url)
+                        .map_err(CompositionError::OpenRouterChatTransport)?,
+                ),
+            };
             let provider = OpenRouterChatStreamer::new(
                 ReqwestOpenRouterTransport::new()
                     .map_err(CompositionError::OpenRouterChatTransport)?,
                 &api_key,
                 &openrouter_base_url,
                 crate::native_ai::PRIMARY_CHAT_MODEL,
-            );
-            let groq_accounts: Vec<(String, String)> =
-                [("free", groq_free_api_key), ("paid", groq_api_key)]
-                    .into_iter()
-                    .filter_map(|(account, api_key)| {
-                        api_key
-                            .filter(|key| !key.is_empty())
-                            .map(|key| (account.to_owned(), key))
-                    })
-                    .collect();
+            )
+            .with_openrouter_pricing(Arc::clone(&openrouter_pricing));
             let media = NativeMedia::new(
                 TelegramMediaFiles::new(
                     ReqwestTelegramTransport::new().map_err(CompositionError::MediaTransport)?,
@@ -2294,25 +2303,18 @@ fn build_native_dispatcher(
                     &openrouter_base_url,
                     crate::native_ai::VISION_MODEL,
                     u64::try_from(VISION_OUTPUT_TOKEN_LIMIT).unwrap_or(512),
-                ),
-                FallbackTranscriptionProvider::new(
-                    ReqwestGroqTranscriptionTransport::new().map_err(|error| {
-                        CompositionError::MediaProviderTransport(error.to_string())
-                    })?,
+                )
+                .with_openrouter_pricing(Arc::clone(&openrouter_pricing)),
+                OpenRouterTranscriptionProvider::new(
                     ReqwestOpenRouterTransport::new()
                         .map_err(CompositionError::OpenRouterChatTransport)?,
-                    TranscriptionProviderConfig {
-                        groq_accounts: groq_accounts.clone(),
-                        openrouter_api_key: Some(api_key.clone()),
-                        openrouter_base_url: openrouter_base_url.clone(),
-                        groq_model: crate::native_ai::GROQ_TRANSCRIPTION_MODEL.to_owned(),
-                        openrouter_model: crate::native_ai::OPENROUTER_TRANSCRIPTION_MODEL
-                            .to_owned(),
-                        default_backoff_seconds: 60,
-                    },
+                    &api_key,
+                    &openrouter_base_url,
+                    crate::native_ai::OPENROUTER_TRANSCRIPTION_MODEL,
                 ),
                 crate::native_ai::VISION_MODEL,
-            );
+            )
+            .with_openrouter_pricing(Arc::clone(&openrouter_pricing));
             let youtube: Box<dyn YoutubeContextRuntime> = Box::new(NativeYoutubeContext::new(
                 ReqwestYoutubeTranscriptTransport::new()
                     .map_err(|error| CompositionError::MediaProviderTransport(error.to_string()))?,
@@ -2325,6 +2327,7 @@ fn build_native_dispatcher(
                     .map_err(|error| CompositionError::ConversationState(error.to_string()))?,
                 options.database_url,
                 &system_prompt,
+                Some(Arc::clone(&openrouter_pricing)),
             );
             let mut conversation = NativeConversation::new(
                 provider,
@@ -2333,7 +2336,8 @@ fn build_native_dispatcher(
                     options.database_url,
                     conversation_coinmarketcap_key,
                     conversation_firecrawl_key,
-                ),
+                )
+                .with_openrouter_pricing(Arc::clone(&openrouter_pricing)),
                 RedisConversationState::new(options.redis_endpoint)
                     .map_err(CompositionError::ConversationState)?,
                 PostgresConversationBilling::new(options.database_url)
@@ -2345,6 +2349,7 @@ fn build_native_dispatcher(
                 crate::native_ai::PRIMARY_CHAT_MODEL,
                 DEFAULT_MAX_TOOL_ROUNDS,
             )
+            .with_openrouter_pricing(Arc::clone(&openrouter_pricing))
             .with_media(Box::new(media))
             .with_compaction_scheduler(Box::new(compaction_scheduler));
             conversation = conversation.with_youtube(youtube);
@@ -2445,6 +2450,7 @@ mod tests {
     use bot_adapters::link_preview::{
         LinkPreviewTransport, PreviewFailure, PreviewRequest, PreviewResponse,
     };
+    use bot_adapters::openrouter_chat::OpenRouterPricingCache;
     use bot_adapters::polymarket::{
         HttpResponse as PolymarketHttpResponse, MidpointsRequest, PolymarketTransport,
         TransportFailureKind as PolymarketFailure,
@@ -3753,8 +3759,7 @@ mod tests {
             giphy_api_key: None,
             openrouter_api_key: None,
             openrouter_base_url: None,
-            groq_free_api_key: None,
-            groq_api_key: None,
+            openrouter_pricing: None,
             firecrawl_api_key: None,
             supadata_api_key: None,
             apify_api_key: None,
@@ -3776,8 +3781,7 @@ mod tests {
             giphy_api_key: None,
             openrouter_api_key: None,
             openrouter_base_url: None,
-            groq_free_api_key: None,
-            groq_api_key: None,
+            openrouter_pricing: None,
             firecrawl_api_key: None,
             supadata_api_key: None,
             apify_api_key: None,
@@ -3799,8 +3803,13 @@ mod tests {
             giphy_api_key: None,
             openrouter_api_key: Some("synthetic-openrouter-key".to_owned()),
             openrouter_base_url: Some("https://openrouter.example.test/v1".to_owned()),
-            groq_free_api_key: Some("synthetic-groq-free-key".to_owned()),
-            groq_api_key: Some("synthetic-groq-paid-key".to_owned()),
+            openrouter_pricing: Some(Arc::new(
+                OpenRouterPricingCache::new(
+                    "synthetic-openrouter-key",
+                    "https://openrouter.example.test/v1",
+                )
+                .unwrap_or_else(|_| unreachable!("pricing cache construction")),
+            )),
             firecrawl_api_key: Some("synthetic-firecrawl-key".to_owned()),
             supadata_api_key: Some("synthetic-supadata-key".to_owned()),
             apify_api_key: Some("synthetic-apify-key".to_owned()),
@@ -3832,8 +3841,7 @@ mod tests {
             giphy_api_key: Some("synthetic-image-key".to_owned()),
             openrouter_api_key: Some("synthetic-ai-key".to_owned()),
             openrouter_base_url: Some("https://provider.example.test/v1".to_owned()),
-            groq_free_api_key: Some("synthetic-audio-free-key".to_owned()),
-            groq_api_key: Some("synthetic-audio-paid-key".to_owned()),
+            openrouter_pricing: None,
             firecrawl_api_key: Some("synthetic-search-key".to_owned()),
             supadata_api_key: Some("synthetic-supadata-key".to_owned()),
             apify_api_key: Some("synthetic-apify-key".to_owned()),
