@@ -153,7 +153,7 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
         let Some(message_id) = self.message_id else {
             return;
         };
-        match self.actions.try_edit(self.edit_action(
+        match self.actions.enqueue_stream_edit(self.edit_action(
             message_id,
             &self.buffer,
             disable_web_page_preview,
@@ -233,7 +233,7 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
                 };
                 match self
                     .actions
-                    .try_edit(self.edit_action(message_id, &plan.text, false))
+                    .finalize_stream_edit(self.edit_action(message_id, &plan.text, false))
                 {
                     Ok(true) => self.sent_text = plan.text,
                     Ok(false) | Err(_) => self.ignored_edit_failures += 1,
@@ -247,6 +247,7 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
 
     pub fn cancel(&mut self) {
         if let Some(message_id) = self.message_id {
+            self.actions.cancel_stream_edits(self.chat_id, message_id);
             let _result = self.actions.execute(TelegramAction::DeleteMessage {
                 chat_id: self.chat_id,
                 message_id,
@@ -261,19 +262,13 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TraceLineKind {
-    Thought,
-    ToolCall,
-}
-
-/// Shows only the latest reasoning block or tool activity in one replaceable
+/// Shows a localized thinking status or tool activity in one replaceable
 /// Telegram draft before handing the message over to the final answer stream.
 pub struct TelegramAiStream<'a, Actions> {
     stream: TelegramStream<'a, Actions>,
     trace: String,
+    thinking_text: String,
     final_text: String,
-    last_trace_line: Option<TraceLineKind>,
     final_started: bool,
     final_message_started: bool,
 }
@@ -307,44 +302,44 @@ impl<'a, Actions: ActionSink> TelegramAiStream<'a, Actions> {
                 min_chars_between_edits,
             ),
             trace: String::new(),
+            thinking_text: "Thinking...".to_owned(),
             final_text: String::new(),
-            last_trace_line: None,
             final_started: false,
             final_message_started: false,
         }
     }
 
+    #[must_use]
+    pub fn with_thinking_text(mut self, text: impl Into<String>) -> Self {
+        self.thinking_text = text.into();
+        self
+    }
+
+    pub fn show_thinking(&mut self) -> Result<(), Actions::Error> {
+        self.final_started = false;
+        self.final_message_started = false;
+        self.final_text.clear();
+        self.trace.clone_from(&self.thinking_text);
+        self.stream.replace_draft(&self.trace, true)
+    }
+
     pub fn feed(&mut self, event: AiStreamEvent) -> Result<(), Actions::Error> {
         match event {
-            AiStreamEvent::Thought(text) if !self.final_started => {
-                if text.is_empty() {
-                    return Ok(());
-                }
-                let force = self.last_trace_line != Some(TraceLineKind::Thought);
-                self.append_thought(&text);
-                self.stream.replace_draft(&self.trace, force)
-            }
-            AiStreamEvent::ResetToTrace => {
-                self.final_started = false;
-                self.final_message_started = false;
-                self.final_text.clear();
-                self.stream.replace_draft(&self.trace, true)
-            }
+            // Keep reasoning internal to the model; Telegram only receives a
+            // localized status message while the provider is thinking.
+            AiStreamEvent::Thought(_) if !self.final_started => Ok(()),
+            AiStreamEvent::ResetToTrace => self.show_thinking(),
             AiStreamEvent::ToolCall {
                 name, arguments, ..
             } if !self.final_started => {
-                self.replace_trace_line(
-                    TraceLineKind::ToolCall,
-                    &format!("🔧 {}({})", name, format_tool_arguments(&arguments)),
-                );
+                self.replace_trace_line(&format!(
+                    "🔧 {}({})",
+                    name,
+                    format_tool_arguments(&arguments)
+                ));
                 self.stream.replace_draft(&self.trace, true)
             }
-            // Tool results stay internal; keep the visible trace anchored to the call
-            // so the next reasoning block replaces it instead of extending old text.
-            AiStreamEvent::ToolResult { .. } if !self.final_started => {
-                self.last_trace_line = Some(TraceLineKind::ToolCall);
-                Ok(())
-            }
+            AiStreamEvent::ToolResult { .. } if !self.final_started => self.show_thinking(),
             AiStreamEvent::FinalText(text) => {
                 self.final_started = true;
                 self.final_text.push_str(&text);
@@ -358,20 +353,9 @@ impl<'a, Actions: ActionSink> TelegramAiStream<'a, Actions> {
         }
     }
 
-    fn append_thought(&mut self, text: &str) {
-        if self.last_trace_line != Some(TraceLineKind::Thought) {
-            self.trace.clear();
-            self.trace.push_str("💭 ");
-            self.last_trace_line = Some(TraceLineKind::Thought);
-        }
-        self.trace.push_str(text);
-        self.bound_trace();
-    }
-
-    fn replace_trace_line(&mut self, kind: TraceLineKind, line: &str) {
+    fn replace_trace_line(&mut self, line: &str) {
         self.trace.clear();
         self.trace.push_str(line);
-        self.last_trace_line = Some(kind);
         self.bound_trace();
     }
 
@@ -501,6 +485,96 @@ mod tests {
     }
 
     #[test]
+    fn public_feed_and_status_events_handle_empty_and_post_final_inputs() {
+        let mut actions = Actions {
+            next_message_id: Some(MessageId(80)),
+            ..Actions::default()
+        };
+        {
+            let mut stream = TelegramStream::with_policy(
+                &mut actions,
+                ChatId(7),
+                MessageId(4),
+                0.3,
+                DEFAULT_MIN_CHARS_BETWEEN_EDITS,
+            );
+            assert_eq!(stream.feed("hello"), Ok(()));
+        }
+
+        let mut no_message_actions = Actions::default();
+        let mut no_message_stream = TelegramStream::with_policy(
+            &mut no_message_actions,
+            ChatId(7),
+            MessageId(4),
+            0.3,
+            DEFAULT_MIN_CHARS_BETWEEN_EDITS,
+        );
+        no_message_stream.try_edit(0.0, true);
+
+        let mut empty_actions = Actions::default();
+        let mut empty_status = TelegramAiStream::with_policy(
+            &mut empty_actions,
+            ChatId(7),
+            MessageId(4),
+            0.3,
+            DEFAULT_MIN_CHARS_BETWEEN_EDITS,
+        )
+        .with_thinking_text("");
+        assert_eq!(empty_status.show_thinking(), Ok(()));
+
+        let mut final_actions = Actions {
+            next_message_id: Some(MessageId(81)),
+            ..Actions::default()
+        };
+        let mut final_stream =
+            TelegramAiStream::with_policy(&mut final_actions, ChatId(7), MessageId(4), 0.0, 1);
+        assert_eq!(
+            final_stream.feed(AiStreamEvent::FinalText("answer".to_owned())),
+            Ok(())
+        );
+        assert_eq!(
+            final_stream.feed(AiStreamEvent::ToolResult {
+                id: "synthetic".to_owned(),
+                name: "calculate".to_owned(),
+                output: "2".to_owned(),
+            }),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn bounds_long_tool_traces_and_formats_non_string_arguments() {
+        let mut actions = Actions {
+            next_message_id: Some(MessageId(80)),
+            ..Actions::default()
+        };
+        let mut stream =
+            TelegramAiStream::with_policy(&mut actions, ChatId(7), MessageId(4), 0.0, 1);
+        assert_eq!(
+            stream.feed(AiStreamEvent::ToolCall {
+                id: "long-call".to_owned(),
+                name: "synthetic".to_owned(),
+                arguments: "x".repeat(bot_core::telegram_actions::MAX_TELEGRAM_TEXT_LENGTH),
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            stream.feed(AiStreamEvent::ToolCall {
+                id: "numeric-call".to_owned(),
+                name: "calculate".to_owned(),
+                arguments: r#"{"count":2}"#.to_owned(),
+            }),
+            Ok(())
+        );
+        drop(stream);
+        assert!(matches!(
+            actions.actions.first(),
+            Some(TelegramAction::SendMessage(message))
+                if message.text.chars().count() <= bot_core::telegram_actions::MAX_TELEGRAM_TEXT_LENGTH
+        ));
+    }
+
+    #[test]
     fn ignores_draft_edit_failures_and_keeps_confirmed_delivery() {
         let mut actions = Actions {
             next_message_id: Some(MessageId(80)),
@@ -539,13 +613,15 @@ mod tests {
     }
 
     #[test]
-    fn ai_stream_shows_only_the_latest_activity_before_the_final_answer() {
+    fn ai_stream_hides_reasoning_and_shows_localized_status_and_tools() {
         let mut actions = Actions {
             next_message_id: Some(MessageId(80)),
             ..Actions::default()
         };
         let mut stream =
-            TelegramAiStream::with_policy(&mut actions, ChatId(7), MessageId(4), 0.0, 1);
+            TelegramAiStream::with_policy(&mut actions, ChatId(7), MessageId(4), 0.0, 1)
+                .with_thinking_text("Pensando...");
+        stream.show_thinking().unwrap_or_else(|_| unreachable!());
         stream
             .feed(AiStreamEvent::Thought("checking the match".to_owned()))
             .unwrap_or_else(|_| unreachable!());
@@ -577,7 +653,7 @@ mod tests {
 
         assert!(matches!(
             &actions.actions[0],
-            TelegramAction::SendMessage(message) if message.text == "💭 checking the match"
+            TelegramAction::SendMessage(message) if message.text == "Pensando..."
                 && message.disable_web_page_preview
         ));
         assert!(matches!(
@@ -587,10 +663,14 @@ mod tests {
         ));
         assert!(matches!(
             &actions.actions[2],
-            TelegramAction::EditMessageNoPreview { text, .. } if text == "River juega "
+            TelegramAction::EditMessageNoPreview { text, .. } if text == "Pensando..."
         ));
         assert!(matches!(
             &actions.actions[3],
+            TelegramAction::EditMessageNoPreview { text, .. } if text == "River juega "
+        ));
+        assert!(matches!(
+            &actions.actions[4],
             TelegramAction::EditMessage { text, .. } if text == "River juega el sábado"
         ));
     }
@@ -624,7 +704,10 @@ mod tests {
             assert!(stream.finalize("answer").is_ok());
             drop(stream);
             assert!(actions.actions.iter().any(|action| matches!(action,
-                TelegramAction::EditMessageNoPreview { text, .. } if !text.contains("provisional") && (text.contains("checking") || text.contains("calculate"))
+                TelegramAction::EditMessageNoPreview { text, .. } if text == "Thinking..."
+            )));
+            assert!(actions.actions.iter().any(|action| matches!(action,
+                TelegramAction::EditMessageNoPreview { text, .. } if text.contains("calculate")
             )));
             assert!(
                 matches!(actions.actions.last(), Some(TelegramAction::EditMessageNoPreview { text, .. }) if text == "answer")
@@ -639,6 +722,7 @@ mod tests {
         };
         let mut stream =
             TelegramAiStream::with_policy(&mut actions, ChatId(7), MessageId(4), 60.0, 100);
+        assert_eq!(stream.show_thinking(), Ok(()));
         for event in [
             AiStreamEvent::Thought("a long initial reasoning block".to_owned()),
             AiStreamEvent::ToolCall {
@@ -677,26 +761,32 @@ mod tests {
         assert_eq!(
             texts,
             [
-                "💭 a long initial reasoning block",
+                "Thinking...",
                 "🔧 web_search(query=\"synthetic fixture\")",
                 "🔧 calculate()",
-                "💭 done",
+                "Thinking...",
                 "answer",
             ]
         );
     }
 
     #[test]
-    fn reasoning_deltas_extend_only_the_current_reasoning_block() {
+    fn reasoning_deltas_are_hidden_while_status_returns_after_tool_results() {
         let mut actions = Actions {
             next_message_id: Some(MessageId(80)),
             ..Actions::default()
         };
         let mut stream =
             TelegramAiStream::with_policy(&mut actions, ChatId(7), MessageId(4), 0.0, 1);
+        assert_eq!(stream.show_thinking(), Ok(()));
         for event in [
             AiStreamEvent::Thought("first ".to_owned()),
             AiStreamEvent::Thought("thought".to_owned()),
+            AiStreamEvent::ToolCall {
+                id: "synthetic".to_owned(),
+                name: "calculate".to_owned(),
+                arguments: "{}".to_owned(),
+            },
             AiStreamEvent::ToolResult {
                 id: "synthetic".to_owned(),
                 name: "calculate".to_owned(),
@@ -718,14 +808,6 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(
-            texts,
-            [
-                "💭 first ",
-                "💭 first thought",
-                "💭 next ",
-                "💭 next thought"
-            ]
-        );
+        assert_eq!(texts, ["Thinking...", "🔧 calculate()", "Thinking..."]);
     }
 }
