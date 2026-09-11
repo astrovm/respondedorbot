@@ -518,15 +518,12 @@ where
             return Ok(PreparedConversationMedia::default());
         };
         if kind == MediaKind::Image {
-            let direct_image = match self
+            let direct_image = self
                 .media
                 .as_mut()
                 .ok_or_else(|| "native media runtime disappeared".to_owned())?
                 .prepare_image_for_prompt(file_id)
-            {
-                Ok(image) => image,
-                Err(_) => None,
-            };
+                .unwrap_or_default();
             if let Some(image) = direct_image {
                 return Ok(PreparedConversationMedia {
                     image: Some(PromptImage {
