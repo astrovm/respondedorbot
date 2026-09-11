@@ -164,6 +164,12 @@ pub trait ActionSink {
     /// Drop queued intermediate edits for one AI stream before deleting its
     /// temporary Telegram message.
     fn cancel_stream_edits(&mut self, _chat_id: ChatId, _message_id: MessageId) {}
+
+    /// Start a periodic thinking-status animation for one AI stream.
+    fn start_stream_thinking(&mut self, _chat_id: ChatId, _message_id: MessageId, _text: &str) {}
+
+    /// Stop a periodic thinking-status animation for one AI stream.
+    fn stop_stream_thinking(&mut self, _chat_id: ChatId, _message_id: MessageId) {}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

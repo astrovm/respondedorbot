@@ -1353,6 +1353,7 @@ pub struct SystemRuntimeValues {
 }
 
 const TELEGRAM_STREAM_MIN_DELIVERY_INTERVAL: Duration = Duration::from_secs(1);
+const TELEGRAM_STREAM_THINKING_DOT_FRAMES: [&str; 3] = [".", "..", "..."];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct TelegramStreamKey {
@@ -1366,10 +1367,17 @@ struct PendingTelegramStreamEdit {
     final_response: Option<mpsc::Sender<Result<bool, TelegramActionSinkError>>>,
 }
 
+struct TelegramStreamThinkingAnimation {
+    text: String,
+    frame: usize,
+    next_frame_at: std::time::Instant,
+}
+
 struct TelegramStreamDeliveryState {
     pending: HashMap<TelegramStreamKey, PendingTelegramStreamEdit>,
     order: VecDeque<TelegramStreamKey>,
     last_intermediate_edit: HashMap<i64, std::time::Instant>,
+    thinking: HashMap<TelegramStreamKey, TelegramStreamThinkingAnimation>,
 }
 
 enum TelegramStreamDeliveryDecision {
@@ -1380,6 +1388,7 @@ enum TelegramStreamDeliveryDecision {
 
 impl TelegramStreamDeliveryState {
     fn take_next(&mut self) -> TelegramStreamDeliveryDecision {
+        self.enqueue_due_thinking_edits();
         let final_key = self.order.iter().copied().find(|key| {
             self.pending
                 .get(key)
@@ -1392,7 +1401,7 @@ impl TelegramStreamDeliveryState {
         }
 
         let now = std::time::Instant::now();
-        let mut next_wait = None;
+        let mut next_wait = self.next_thinking_wait(now);
         let order_length = self.order.len();
         for _ in 0..order_length {
             let Some(key) = self.order.pop_front() else {
@@ -1419,12 +1428,68 @@ impl TelegramStreamDeliveryState {
         }
 
         if self.pending.is_empty() {
-            TelegramStreamDeliveryDecision::Idle
+            next_wait.map_or(
+                TelegramStreamDeliveryDecision::Idle,
+                TelegramStreamDeliveryDecision::Wait,
+            )
         } else {
             TelegramStreamDeliveryDecision::Wait(
                 next_wait.unwrap_or(TELEGRAM_STREAM_MIN_DELIVERY_INTERVAL),
             )
         }
+    }
+
+    fn enqueue_due_thinking_edits(&mut self) {
+        let now = std::time::Instant::now();
+        let due = self
+            .thinking
+            .iter_mut()
+            .filter_map(|(key, animation)| {
+                if animation.next_frame_at > now {
+                    return None;
+                }
+                let text = format!(
+                    "{}{}",
+                    animation.text, TELEGRAM_STREAM_THINKING_DOT_FRAMES[animation.frame]
+                );
+                animation.frame = (animation.frame + 1) % TELEGRAM_STREAM_THINKING_DOT_FRAMES.len();
+                animation.next_frame_at = now + TELEGRAM_STREAM_MIN_DELIVERY_INTERVAL;
+                Some((*key, text))
+            })
+            .collect::<Vec<_>>();
+
+        for (key, text) in due {
+            if self
+                .pending
+                .get(&key)
+                .is_some_and(|pending| pending.final_response.is_some())
+            {
+                continue;
+            }
+            if !self.pending.contains_key(&key) {
+                self.order.push_back(key);
+            }
+            self.pending.insert(
+                key,
+                PendingTelegramStreamEdit {
+                    key,
+                    action: TelegramAction::EditMessageNoPreview {
+                        chat_id: ChatId(key.chat_id),
+                        message_id: MessageId(key.message_id),
+                        text,
+                        reply_markup: None,
+                    },
+                    final_response: None,
+                },
+            );
+        }
+    }
+
+    fn next_thinking_wait(&self, now: std::time::Instant) -> Option<Duration> {
+        self.thinking
+            .values()
+            .map(|animation| animation.next_frame_at.saturating_duration_since(now))
+            .min()
     }
 
     fn mark_intermediate_edit_started(&mut self, chat_id: i64) {
@@ -1454,6 +1519,7 @@ impl TelegramStreamDelivery {
             pending: HashMap::new(),
             order: VecDeque::new(),
             last_intermediate_edit: HashMap::new(),
+            thinking: HashMap::new(),
         }));
         let (wake, receiver) = mpsc::sync_channel(1);
         let worker_state = Arc::clone(&state);
@@ -1496,6 +1562,43 @@ impl TelegramStreamDelivery {
             );
         }
         self.notify(key)
+    }
+
+    fn start_thinking(&self, chat_id: ChatId, message_id: MessageId, text: &str) {
+        let key = TelegramStreamKey {
+            chat_id: chat_id.0,
+            message_id: message_id.0,
+        };
+        {
+            let mut state = lock_unpoisoned(&self.state);
+            state.thinking.insert(
+                key,
+                TelegramStreamThinkingAnimation {
+                    text: text.to_owned(),
+                    frame: 1,
+                    next_frame_at: std::time::Instant::now()
+                        + TELEGRAM_STREAM_MIN_DELIVERY_INTERVAL,
+                },
+            );
+        }
+        let _ = self.wake.try_send(());
+    }
+
+    fn stop_thinking(&self, chat_id: ChatId, message_id: MessageId) {
+        let key = TelegramStreamKey {
+            chat_id: chat_id.0,
+            message_id: message_id.0,
+        };
+        let mut state = lock_unpoisoned(&self.state);
+        if state.thinking.remove(&key).is_some()
+            && state
+                .pending
+                .get(&key)
+                .is_some_and(|pending| pending.final_response.is_none())
+        {
+            state.pending.remove(&key);
+        }
+        let _ = self.wake.try_send(());
     }
 
     fn finalize(&self, action: TelegramAction) -> Result<bool, TelegramActionSinkError> {
@@ -1541,6 +1644,7 @@ impl TelegramStreamDelivery {
             .pending
             .remove(&key)
             .and_then(|pending| pending.final_response);
+        lock_unpoisoned(&self.state).thinking.remove(&key);
         if let Some(response) = response {
             let _ = response.send(Ok(false));
         }
@@ -1590,6 +1694,7 @@ fn fail_pending_telegram_stream_edits(state: &Arc<Mutex<TelegramStreamDeliverySt
     let pending = {
         let mut state = lock_unpoisoned(state);
         state.order.clear();
+        state.thinking.clear();
         state
             .pending
             .drain()
@@ -2021,6 +2126,18 @@ impl<Transport: TelegramTransport> ActionSink for TelegramActionSink<Transport> 
     fn cancel_stream_edits(&mut self, chat_id: ChatId, message_id: MessageId) {
         if let Some(delivery) = self.stream_delivery.as_ref() {
             delivery.cancel(chat_id, message_id);
+        }
+    }
+
+    fn start_stream_thinking(&mut self, chat_id: ChatId, message_id: MessageId, text: &str) {
+        if let Some(delivery) = self.stream_delivery.as_ref() {
+            delivery.start_thinking(chat_id, message_id, text);
+        }
+    }
+
+    fn stop_stream_thinking(&mut self, chat_id: ChatId, message_id: MessageId) {
+        if let Some(delivery) = self.stream_delivery.as_ref() {
+            delivery.stop_thinking(chat_id, message_id);
         }
     }
 }
@@ -3488,6 +3605,7 @@ mod tests {
             pending: std::collections::HashMap::new(),
             order: std::collections::VecDeque::new(),
             last_intermediate_edit: std::collections::HashMap::new(),
+            thinking: std::collections::HashMap::new(),
         }));
         let (wake, receiver) = mpsc::sync_channel(1);
         let delivery = super::TelegramStreamDelivery {
@@ -3503,6 +3621,7 @@ mod tests {
             pending: std::collections::HashMap::new(),
             order: std::collections::VecDeque::new(),
             last_intermediate_edit: std::collections::HashMap::new(),
+            thinking: std::collections::HashMap::new(),
         }));
         let (wake, _receiver) = mpsc::sync_channel(1);
         let delivery = super::TelegramStreamDelivery {
@@ -3534,6 +3653,115 @@ mod tests {
     }
 
     #[test]
+    fn telegram_stream_delivery_cycles_thinking_status_frames() {
+        let key = super::TelegramStreamKey {
+            chat_id: 7,
+            message_id: 80,
+        };
+        let mut state = super::TelegramStreamDeliveryState {
+            pending: std::collections::HashMap::new(),
+            order: std::collections::VecDeque::new(),
+            last_intermediate_edit: std::collections::HashMap::new(),
+            thinking: std::collections::HashMap::from([(
+                key,
+                super::TelegramStreamThinkingAnimation {
+                    text: "☁️ Pensando".to_owned(),
+                    frame: 1,
+                    next_frame_at: Instant::now(),
+                },
+            )]),
+        };
+
+        for expected in ["☁️ Pensando..", "☁️ Pensando...", "☁️ Pensando."] {
+            state
+                .thinking
+                .get_mut(&key)
+                .unwrap_or_else(|| unreachable!())
+                .next_frame_at = Instant::now();
+            let decision = state.take_next();
+            let super::TelegramStreamDeliveryDecision::Ready(pending) = decision else {
+                unreachable!();
+            };
+            assert!(matches!(
+                pending.action,
+                TelegramAction::EditMessageNoPreview { text, .. } if text == expected
+            ));
+            assert!(pending.final_response.is_none());
+        }
+    }
+
+    #[test]
+    fn telegram_action_sink_forwards_thinking_animation_lifecycle() {
+        let (delivery, state, receiver) = stream_delivery_fixture();
+        let mut sink = TelegramActionSink::new(
+            transport(200, r#"{"ok":true,"result":true}"#),
+            "synthetic-token",
+        )
+        .with_stream_delivery(delivery);
+        let key = super::TelegramStreamKey {
+            chat_id: 7,
+            message_id: 80,
+        };
+
+        sink.start_stream_thinking(ChatId(7), MessageId(80), "☁️ Pensando");
+        assert!(receiver.recv_timeout(Duration::from_secs(1)).is_ok());
+        {
+            let mut state = super::lock_unpoisoned(&state);
+            let animation = state.thinking.get(&key).unwrap_or_else(|| unreachable!());
+            assert_eq!(animation.text, "☁️ Pensando");
+            assert_eq!(animation.frame, 1);
+            assert!(matches!(
+                state.take_next(),
+                super::TelegramStreamDeliveryDecision::Wait(wait) if wait > Duration::ZERO
+            ));
+            state.pending.insert(
+                key,
+                super::PendingTelegramStreamEdit {
+                    key,
+                    action: stream_edit(7, 80, "draft"),
+                    final_response: None,
+                },
+            );
+        }
+
+        sink.stop_stream_thinking(ChatId(7), MessageId(80));
+        assert!(receiver.recv_timeout(Duration::from_secs(1)).is_ok());
+        {
+            let state = super::lock_unpoisoned(&state);
+            assert!(!state.thinking.contains_key(&key));
+            assert!(!state.pending.contains_key(&key));
+        }
+
+        sink.start_stream_thinking(ChatId(7), MessageId(80), "☁️ Pensando");
+        assert!(receiver.recv_timeout(Duration::from_secs(1)).is_ok());
+        let (final_sender, _final_receiver) =
+            mpsc::channel::<Result<bool, TelegramActionSinkError>>();
+        {
+            let mut state = super::lock_unpoisoned(&state);
+            state.pending.insert(
+                key,
+                super::PendingTelegramStreamEdit {
+                    key,
+                    action: TelegramAction::EditMessage {
+                        chat_id: ChatId(7),
+                        message_id: MessageId(80),
+                        text: "final".to_owned(),
+                        reply_markup: None,
+                    },
+                    final_response: Some(final_sender),
+                },
+            );
+        }
+        sink.stop_stream_thinking(ChatId(7), MessageId(80));
+        let state = super::lock_unpoisoned(&state);
+        assert!(!state.thinking.contains_key(&key));
+        assert!(matches!(
+            state.pending.get(&key).map(|pending| &pending.action),
+            Some(TelegramAction::EditMessage { text, .. }) if text == "final"
+        ));
+    }
+
+    #[test]
     fn telegram_stream_delivery_prioritizes_final_answers_over_intermediate_edits() {
         let intermediate_key = super::TelegramStreamKey {
             chat_id: 7,
@@ -3549,6 +3777,14 @@ mod tests {
             pending: std::collections::HashMap::new(),
             order: std::collections::VecDeque::from([intermediate_key, final_key]),
             last_intermediate_edit: std::collections::HashMap::new(),
+            thinking: std::collections::HashMap::from([(
+                final_key,
+                super::TelegramStreamThinkingAnimation {
+                    text: "☁️ Pensando".to_owned(),
+                    frame: 1,
+                    next_frame_at: Instant::now(),
+                },
+            )]),
         };
         state.pending.insert(
             intermediate_key,
@@ -3602,6 +3838,7 @@ mod tests {
             pending: std::collections::HashMap::new(),
             order: std::collections::VecDeque::from([limited_key, ready_key]),
             last_intermediate_edit: std::collections::HashMap::from([(7, Instant::now())]),
+            thinking: std::collections::HashMap::new(),
         };
         state.pending.insert(
             limited_key,
@@ -3785,6 +4022,7 @@ mod tests {
             )]),
             order: std::collections::VecDeque::from([key]),
             last_intermediate_edit: std::collections::HashMap::from([(7, Instant::now())]),
+            thinking: std::collections::HashMap::new(),
         };
         let decision = state.take_next();
         assert!(matches!(
@@ -3848,6 +4086,7 @@ mod tests {
             ]),
             order: std::collections::VecDeque::from([intermediate_key, final_key]),
             last_intermediate_edit: std::collections::HashMap::new(),
+            thinking: std::collections::HashMap::new(),
         }));
         let (wake, receiver) = mpsc::channel();
         let worker_state = Arc::clone(&state);
@@ -3897,6 +4136,66 @@ mod tests {
     }
 
     #[test]
+    fn telegram_stream_delivery_worker_animates_thinking_without_provider_events() {
+        let (completed, completed_receiver) = mpsc::channel();
+        let transport = StreamDeliveryTransport {
+            responses: Arc::new(Mutex::new(vec![Ok(HttpResponse {
+                status_code: 200,
+                body: r#"{"ok":true,"result":true}"#.to_owned(),
+            })])),
+            requests: Arc::new(Mutex::new(Vec::new())),
+            completed,
+        };
+        let requests = Arc::clone(&transport.requests);
+        let key = super::TelegramStreamKey {
+            chat_id: 7,
+            message_id: 80,
+        };
+        let state = Arc::new(Mutex::new(super::TelegramStreamDeliveryState {
+            pending: std::collections::HashMap::new(),
+            order: std::collections::VecDeque::new(),
+            last_intermediate_edit: std::collections::HashMap::new(),
+            thinking: std::collections::HashMap::from([(
+                key,
+                super::TelegramStreamThinkingAnimation {
+                    text: "☁️ Pensando".to_owned(),
+                    frame: 1,
+                    next_frame_at: Instant::now(),
+                },
+            )]),
+        }));
+        let (wake, receiver) = mpsc::channel();
+        let worker_state = Arc::clone(&state);
+        let worker = thread::spawn(move || {
+            super::run_telegram_stream_delivery_worker(
+                transport,
+                "synthetic-token".to_owned(),
+                TelegramDeliveryCoordinator::default(),
+                receiver,
+                worker_state,
+            );
+        });
+
+        assert!(wake.send(()).is_ok());
+        assert!(
+            completed_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .is_ok()
+        );
+        let requests = requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(matches!(
+            requests.first().and_then(|request| request.json_payload.as_ref()),
+            Some(payload) if payload.get("text").and_then(serde_json::Value::as_str)
+                == Some("☁️ Pensando..")
+        ));
+
+        drop(wake);
+        assert!(worker.join().is_ok());
+    }
+
+    #[test]
     fn telegram_stream_delivery_worker_releases_waiting_final_senders_on_shutdown() {
         let (completed, _completed_receiver) = mpsc::channel();
         let transport = StreamDeliveryTransport {
@@ -3926,6 +4225,7 @@ mod tests {
             )]),
             order: std::collections::VecDeque::from([final_key]),
             last_intermediate_edit: std::collections::HashMap::new(),
+            thinking: std::collections::HashMap::new(),
         }));
         let (wake, receiver) = mpsc::channel();
         let worker_state = Arc::clone(&state);
