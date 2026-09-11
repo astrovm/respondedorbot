@@ -2668,6 +2668,40 @@ mod tests {
     }
 
     #[test]
+    fn denied_youtube_reservation_stops_before_provider_io() {
+        let mut service = conversation(
+            Vec::new(),
+            Billing {
+                decisions: VecDeque::from([ReserveDecision {
+                    authorized: false,
+                    user_balance: 0,
+                    chat_balance: 0,
+                    source: None,
+                    denial: None,
+                }]),
+                ..Billing::default()
+            },
+        )
+        .with_youtube(Box::new(Youtube {
+            fail: false,
+            cached: false,
+        }));
+        let mut request = input();
+        request.message_text = "https://youtu.be/synthetic-video".to_owned();
+        let preparation = service
+            .prepare_youtube(&request, "synthetic-operation")
+            .unwrap_or_else(|_| unreachable!());
+
+        assert!(preparation.matched);
+        assert!(
+            preparation
+                .reserve_decision
+                .is_some_and(|decision| !decision.authorized)
+        );
+        assert!(service.provider.prompts.borrow().is_empty());
+    }
+
+    #[test]
     fn youtube_reply_context_reserves_and_charges_caption_context() {
         let mut service = conversation(
             vec![Ok(round("synthetic answer", None))],
