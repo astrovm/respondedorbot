@@ -37,6 +37,9 @@ pub struct TelegramStream<'a, Actions> {
     min_chars_between_edits: usize,
     buffer: String,
     sent_text: String,
+    // Queue acceptance is not final delivery: the final edit must supersede
+    // any accepted draft and restore link previews.
+    draft_edit_pending: bool,
     message_id: Option<MessageId>,
     send_attempted: bool,
     ignored_edit_failures: usize,
@@ -72,6 +75,7 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
             min_chars_between_edits,
             buffer: String::new(),
             sent_text: String::new(),
+            draft_edit_pending: false,
             message_id: None,
             send_attempted: false,
             ignored_edit_failures: 0,
@@ -160,6 +164,7 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
         )) {
             Ok(true) => {
                 self.sent_text.clone_from(&self.buffer);
+                self.draft_edit_pending = true;
                 self.last_edit_seconds = now_seconds;
             }
             Ok(false) | Err(_) => self.ignored_edit_failures += 1,
@@ -216,7 +221,12 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
             self.message_id.is_some(),
             Some(final_text),
         );
-        match plan.action {
+        let action = if self.draft_edit_pending && plan.action == StreamAction::None {
+            StreamAction::Edit
+        } else {
+            plan.action
+        };
+        match action {
             StreamAction::None => {}
             StreamAction::Send => {
                 self.send_attempted = true;
@@ -235,7 +245,10 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
                     .actions
                     .finalize_stream_edit(self.edit_action(message_id, &plan.text, false))
                 {
-                    Ok(true) => self.sent_text = plan.text,
+                    Ok(true) => {
+                        self.sent_text = plan.text;
+                        self.draft_edit_pending = false;
+                    }
                     Ok(false) | Err(_) => self.ignored_edit_failures += 1,
                 }
             }
@@ -427,6 +440,9 @@ mod tests {
         actions: Vec<TelegramAction>,
         next_message_id: Option<MessageId>,
         edit_fails: bool,
+        queue_stream_edits: bool,
+        queued_stream_edits: Vec<TelegramAction>,
+        finalized_stream_edits: Vec<TelegramAction>,
     }
 
     impl ActionSink for Actions {
@@ -445,6 +461,24 @@ mod tests {
                 Err(SyntheticError)
             } else {
                 Ok(true)
+            }
+        }
+
+        fn enqueue_stream_edit(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
+            if self.queue_stream_edits {
+                self.queued_stream_edits.push(action);
+                Ok(true)
+            } else {
+                self.try_edit(action)
+            }
+        }
+
+        fn finalize_stream_edit(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
+            if self.queue_stream_edits {
+                self.finalized_stream_edits.push(action);
+                Ok(true)
+            } else {
+                self.try_edit(action)
             }
         }
     }
@@ -481,6 +515,34 @@ mod tests {
         assert!(matches!(
             &actions.actions[2],
             TelegramAction::EditMessage { text, .. } if text == "cleaned response"
+        ));
+    }
+
+    #[test]
+    fn finalization_replaces_a_queued_same_text_draft() {
+        let mut actions = Actions {
+            next_message_id: Some(MessageId(80)),
+            queue_stream_edits: true,
+            ..Actions::default()
+        };
+        let mut stream = TelegramStream::with_policy(&mut actions, ChatId(7), MessageId(4), 0.0, 1);
+        assert_eq!(stream.feed_at("draft", 0.0), Ok(()));
+        assert_eq!(stream.feed_at(" answer", 0.1), Ok(()));
+        assert_eq!(
+            stream.finalize("draft answer"),
+            Ok(StreamDelivery {
+                message_id: MessageId(80)
+            })
+        );
+        drop(stream);
+
+        assert!(matches!(
+            actions.queued_stream_edits.first(),
+            Some(TelegramAction::EditMessageNoPreview { text, .. }) if text == "draft answer"
+        ));
+        assert!(matches!(
+            actions.finalized_stream_edits.first(),
+            Some(TelegramAction::EditMessage { text, .. }) if text == "draft answer"
         ));
     }
 
@@ -709,9 +771,10 @@ mod tests {
             assert!(actions.actions.iter().any(|action| matches!(action,
                 TelegramAction::EditMessageNoPreview { text, .. } if text.contains("calculate")
             )));
-            assert!(
-                matches!(actions.actions.last(), Some(TelegramAction::EditMessageNoPreview { text, .. }) if text == "answer")
-            );
+            assert!(matches!(
+                actions.actions.last(),
+                Some(TelegramAction::EditMessage { text, .. }) if text == "answer"
+            ));
         }
     }
     #[test]
@@ -765,6 +828,7 @@ mod tests {
                 "🔧 web_search(query=\"synthetic fixture\")",
                 "🔧 calculate()",
                 "Thinking...",
+                "answer",
                 "answer",
             ]
         );
