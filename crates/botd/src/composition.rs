@@ -3691,6 +3691,77 @@ mod tests {
     }
 
     #[test]
+    fn telegram_action_sink_forwards_thinking_animation_lifecycle() {
+        let (delivery, state, receiver) = stream_delivery_fixture();
+        let mut sink = TelegramActionSink::new(
+            transport(200, r#"{"ok":true,"result":true}"#),
+            "synthetic-token",
+        )
+        .with_stream_delivery(delivery);
+        let key = super::TelegramStreamKey {
+            chat_id: 7,
+            message_id: 80,
+        };
+
+        sink.start_stream_thinking(ChatId(7), MessageId(80), "☁️ Pensando");
+        assert!(receiver.recv_timeout(Duration::from_secs(1)).is_ok());
+        {
+            let mut state = super::lock_unpoisoned(&state);
+            let animation = state.thinking.get(&key).unwrap_or_else(|| unreachable!());
+            assert_eq!(animation.text, "☁️ Pensando");
+            assert_eq!(animation.frame, 1);
+            assert!(matches!(
+                state.take_next(),
+                super::TelegramStreamDeliveryDecision::Wait(wait) if wait > Duration::ZERO
+            ));
+            state.pending.insert(
+                key,
+                super::PendingTelegramStreamEdit {
+                    key,
+                    action: stream_edit(7, 80, "draft"),
+                    final_response: None,
+                },
+            );
+        }
+
+        sink.stop_stream_thinking(ChatId(7), MessageId(80));
+        assert!(receiver.recv_timeout(Duration::from_secs(1)).is_ok());
+        {
+            let state = super::lock_unpoisoned(&state);
+            assert!(!state.thinking.contains_key(&key));
+            assert!(!state.pending.contains_key(&key));
+        }
+
+        sink.start_stream_thinking(ChatId(7), MessageId(80), "☁️ Pensando");
+        assert!(receiver.recv_timeout(Duration::from_secs(1)).is_ok());
+        let (final_sender, _final_receiver) =
+            mpsc::channel::<Result<bool, TelegramActionSinkError>>();
+        {
+            let mut state = super::lock_unpoisoned(&state);
+            state.pending.insert(
+                key,
+                super::PendingTelegramStreamEdit {
+                    key,
+                    action: TelegramAction::EditMessage {
+                        chat_id: ChatId(7),
+                        message_id: MessageId(80),
+                        text: "final".to_owned(),
+                        reply_markup: None,
+                    },
+                    final_response: Some(final_sender),
+                },
+            );
+        }
+        sink.stop_stream_thinking(ChatId(7), MessageId(80));
+        let state = super::lock_unpoisoned(&state);
+        assert!(!state.thinking.contains_key(&key));
+        assert!(matches!(
+            state.pending.get(&key).map(|pending| &pending.action),
+            Some(TelegramAction::EditMessage { text, .. }) if text == "final"
+        ));
+    }
+
+    #[test]
     fn telegram_stream_delivery_prioritizes_final_answers_over_intermediate_edits() {
         let intermediate_key = super::TelegramStreamKey {
             chat_id: 7,
@@ -3706,7 +3777,14 @@ mod tests {
             pending: std::collections::HashMap::new(),
             order: std::collections::VecDeque::from([intermediate_key, final_key]),
             last_intermediate_edit: std::collections::HashMap::new(),
-            thinking: std::collections::HashMap::new(),
+            thinking: std::collections::HashMap::from([(
+                final_key,
+                super::TelegramStreamThinkingAnimation {
+                    text: "☁️ Pensando".to_owned(),
+                    frame: 1,
+                    next_frame_at: Instant::now(),
+                },
+            )]),
         };
         state.pending.insert(
             intermediate_key,
