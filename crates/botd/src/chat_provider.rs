@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use bot_adapters::openrouter_chat::{
     ChatCompletionRequest, ChatMessage, ChatRole, ChatStreamEvent, OpenRouterChatError,
     OpenRouterPricingCache, OpenRouterStreamTransport, ReasoningConfig, ToolCall, ToolFunctionCall,
@@ -271,6 +272,22 @@ fn openrouter_message(message: &PromptMessage) -> ChatMessage {
                 .map(|text| json!({"type": "text", "text": text}))
                 .collect(),
         )),
+        PromptContent::Image { text_parts, image } => {
+            let mut parts = text_parts
+                .iter()
+                .map(|text| json!({"type": "text", "text": text}))
+                .collect::<Vec<_>>();
+            let data_uri = format!(
+                "data:{};base64,{}",
+                image.mime,
+                BASE64_STANDARD.encode(image.bytes.as_ref())
+            );
+            parts.push(json!({
+                "type": "image_url",
+                "image_url": {"url": data_uri}
+            }));
+            Some(Value::Array(parts))
+        }
         PromptContent::Empty => None,
     };
     let reasoning_details = message.reasoning_details.clone();
@@ -371,7 +388,9 @@ mod tests {
     use bot_adapters::openrouter_chat::{
         HttpRequest, OpenRouterChatError, OpenRouterPricingCache, OpenRouterStreamTransport,
     };
-    use bot_core::ai_prompt::{PromptContent, PromptMessage, PromptRole, PromptToolCall};
+    use bot_core::ai_prompt::{
+        PromptContent, PromptImage, PromptMessage, PromptRole, PromptToolCall,
+    };
     use bot_core::provider_stream_policy::ProviderStreamEvent;
     use serde_json::{Value, json};
 
@@ -551,6 +570,50 @@ mod tests {
         assert_eq!(error.source, OpenRouterChatError::InvalidBaseUrl);
         assert!(error.partial.text.is_empty());
         assert!(provider.transport.requests.borrow().is_empty());
+    }
+
+    #[test]
+    fn request_conversion_encodes_prompt_images_as_multimodal_content() {
+        let transport = Transport {
+            chunks: vec![b"data: [DONE]\n\n".to_vec()],
+            failure: None,
+            requests: RefCell::new(Vec::new()),
+        };
+        let provider = OpenRouterChatStreamer::new(
+            transport,
+            "synthetic-key",
+            "https://synthetic.invalid",
+            "requested/model",
+        );
+        let messages = [PromptMessage {
+            role: PromptRole::User,
+            content: PromptContent::Image {
+                text_parts: vec!["inspect this".to_owned()],
+                image: PromptImage {
+                    bytes: Arc::from(b"synthetic".to_vec()),
+                    mime: "image/png".to_owned(),
+                },
+            },
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+            reasoning: None,
+            reasoning_details: Vec::new(),
+        }];
+
+        assert!(
+            provider
+                .stream_round(&messages, &[], |_text| Ok(()))
+                .is_ok()
+        );
+        let body = serde_json::from_str::<Value>(&provider.transport.requests.borrow()[0].body)
+            .unwrap_or(Value::Null);
+        assert_eq!(body["messages"][0]["content"][0]["type"], "text");
+        assert_eq!(body["messages"][0]["content"][0]["text"], "inspect this");
+        assert_eq!(body["messages"][0]["content"][1]["type"], "image_url");
+        assert_eq!(
+            body["messages"][0]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,c3ludGhldGlj"
+        );
     }
 
     #[test]

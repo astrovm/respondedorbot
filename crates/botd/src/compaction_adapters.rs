@@ -16,6 +16,7 @@ use bot_core::ai_usage::stable_provider_segment_id;
 use bot_core::command_state::CHAT_STATE_TTL_SECONDS;
 use bot_core::credit_units::{CREDIT_SCALE, rescale_credit_units};
 use bot_core::message_state::{chat_compacted_until_key, chat_summary_key};
+use bot_core::provider_pricing::DEEPSEEK_FLASH_MODEL;
 use bot_core::text_cleanup::sanitize_summary_text;
 use serde_json::{Map, Value, json};
 
@@ -24,7 +25,7 @@ use crate::compaction_worker::{
     CompactionWorker, SettlementRequest,
 };
 
-pub const COMPACTION_MODEL: &str = "deepseek/deepseek-v4.1-flash";
+pub const COMPACTION_MODEL: &str = DEEPSEEK_FLASH_MODEL;
 const MAX_SUMMARY_MESSAGES: usize = 200;
 const PRODUCTION_LOCK_TTL_SECONDS: i64 = 3_600;
 

@@ -17,7 +17,9 @@ use bot_core::ai_reserve::{
 use bot_core::ai_usage::stable_provider_segment_id;
 use bot_core::credit_units::{CreditUnits, format_credit_units};
 use bot_core::locale::{Locale, format_date};
-use bot_core::provider_pricing::{DEEPSEEK_MODEL, GEMINI_FLASH_LITE_MODEL, TokenPricing};
+#[cfg(test)]
+use bot_core::provider_pricing::DEEPSEEK_FLASH_MODEL;
+use bot_core::provider_pricing::{DEEPSEEK_MODEL, TokenPricing};
 use bot_core::scheduled_tasks::ScheduledTask;
 use bot_core::telegram_actions::{SendMessage, TelegramAction};
 use bot_core::telegram_input::ChatId;
@@ -35,7 +37,7 @@ use crate::task_executor::{
 use crate::tool_requests::validate_request;
 
 pub const PRIMARY_CHAT_MODEL: &str = DEEPSEEK_MODEL;
-pub const VISION_MODEL: &str = GEMINI_FLASH_LITE_MODEL;
+pub const VISION_MODEL: &str = DEEPSEEK_MODEL;
 pub const OPENROUTER_TRANSCRIPTION_MODEL: &str =
     bot_core::provider_pricing::OPENROUTER_TRANSCRIPTION_MODEL;
 const SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE: i64 = 4_000;
@@ -62,13 +64,13 @@ pub fn reservation_pricing_for_model(
         });
     }
     #[cfg(test)]
-    if model.split(':').next() == Some(GEMINI_FLASH_LITE_MODEL) {
+    if model.split(':').next() == Some(DEEPSEEK_FLASH_MODEL) {
         return Ok(TokenPricing {
-            input_per_million: 1_000_000,
-            cached_input_per_million: None,
+            input_per_million: 67_900,
+            cached_input_per_million: Some(16_800),
             cache_write_per_million: None,
             audio_input_per_million: None,
-            output_per_million: 1_000_000,
+            output_per_million: 168_000,
         });
     }
     Err(format!("OpenRouter pricing is unavailable for {model}"))

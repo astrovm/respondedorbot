@@ -1,5 +1,7 @@
 //! Typed, deterministic AI system and conversation prompt construction.
 
+use std::sync::Arc;
+
 use crate::locale::Locale;
 use crate::message_state::truncate_text;
 use serde_json::Value;
@@ -15,9 +17,19 @@ pub enum PromptRole {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptImage {
+    pub bytes: Arc<[u8]>,
+    pub mime: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptContent {
     Text(String),
     TextParts(Vec<String>),
+    Image {
+        text_parts: Vec<String>,
+        image: PromptImage,
+    },
     Empty,
 }
 
