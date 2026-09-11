@@ -4,10 +4,13 @@ use serde_json::{Map, Value, json};
 use thiserror::Error;
 
 use crate::provider_pricing::{
-    CREDIT_UNIT_USD_MICROS, FIRECRAWL_STANDARD_USD_MICROS_PER_CREDIT,
-    GROQ_TRANSCRIPTION_MIN_SECONDS, GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR, PRICING_VERSION,
-    YOUTUBE_TRANSCRIPT_USD_MICROS_PER_SUCCESS, published_token_pricing,
+    CREDIT_UNIT_USD_MICROS, FIRECRAWL_STANDARD_USD_MICROS_PER_CREDIT, PRICING_VERSION,
+    YOUTUBE_TRANSCRIPT_USD_MICROS_PER_SUCCESS,
 };
+
+// Keep immutable historical Groq segments billable after the active provider is removed.
+const LEGACY_GROQ_TRANSCRIPTION_MIN_SECONDS: f64 = 10.0;
+const LEGACY_GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR: f64 = 111_000.0;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum AiPricingError {
@@ -198,10 +201,6 @@ impl TokenUsage {
             ("output_tokens".to_owned(), json!(self.output_tokens)),
         ])
     }
-
-    fn has_tokens(self) -> bool {
-        self.input_tokens != 0 || self.output_tokens != 0
-    }
 }
 
 struct ModelCost {
@@ -329,24 +328,8 @@ fn reported_cost(
     Ok(upstream_cost)
 }
 
-/// Return the local input and cached-input rates used by admin cache reports.
-#[must_use]
-pub fn model_cache_input_rates(model: &str) -> Option<(i64, i64)> {
-    let pricing = published_token_pricing("", model)?;
-    let input = i64::try_from(pricing.input_per_million).ok()?;
-    let cached = i64::try_from(
-        pricing
-            .cached_input_per_million
-            .unwrap_or(pricing.input_per_million),
-    )
-    .ok()?;
-    Some((input, cached))
-}
-
 fn model_cost(
-    model: &str,
     usage: &Map<String, Value>,
-    provider: &str,
     accept_reported_zero: bool,
 ) -> Result<ModelCost, AiPricingError> {
     let tokens = token_usage(usage)?;
@@ -366,68 +349,13 @@ fn model_cost(
             tokens,
         });
     }
-    let local_pricing = (provider != "openrouter")
-        .then(|| published_token_pricing(provider, model))
-        .flatten();
-    let Some(pricing) = local_pricing else {
-        return Ok(ModelCost {
-            usd_micros: 0,
-            exact: ExactDecimal::ZERO,
-            pricing_basis: "missing",
-            tokens,
-        });
-    };
-    let details = object(usage.get("prompt_tokens_details"));
-    let audio = python_int(details.and_then(|value| value.get("audio_tokens")))?.max(0);
-    let cache_write = python_int(details.and_then(|value| value.get("cache_write_tokens")))?.max(0);
-    let audio = audio.min(tokens.input_non_cached_tokens);
-    let cache_write = cache_write.min(tokens.input_non_cached_tokens.saturating_sub(audio));
-    let regular = tokens
-        .input_non_cached_tokens
-        .saturating_sub(audio)
-        .saturating_sub(cache_write)
-        .max(0);
-    let cached_rate = pricing
-        .cached_input_per_million
-        .unwrap_or(pricing.input_per_million);
-    let audio_rate = pricing
-        .audio_input_per_million
-        .unwrap_or(pricing.input_per_million);
-    let cache_write_rate = pricing
-        .cache_write_per_million
-        .unwrap_or(pricing.input_per_million);
-    let numerator = i128::from(regular)
-        .checked_mul(pricing.input_per_million)
-        .and_then(|value| {
-            i128::from(tokens.input_cached_tokens)
-                .checked_mul(cached_rate)
-                .and_then(|cost| value.checked_add(cost))
-        })
-        .and_then(|value| {
-            i128::from(audio)
-                .checked_mul(audio_rate)
-                .and_then(|cost| value.checked_add(cost))
-        })
-        .and_then(|value| {
-            i128::from(cache_write)
-                .checked_mul(cache_write_rate)
-                .and_then(|cost| value.checked_add(cost))
-        })
-        .and_then(|value| {
-            i128::from(tokens.output_tokens)
-                .checked_mul(pricing.output_per_million)
-                .and_then(|cost| value.checked_add(cost))
-        })
-        .ok_or(AiPricingError::Overflow)?;
-    let exact = ExactDecimal::from_ratio(numerator, 6);
     Ok(ModelCost {
-        usd_micros: exact.floor_i64()?,
-        exact,
-        pricing_basis: "published_rate",
+        usd_micros: 0,
+        exact: ExactDecimal::ZERO,
+        pricing_basis: "missing",
         tokens,
     })
 }
-
 fn firecrawl_cost(
     metadata: &Map<String, Value>,
     kind: &str,
@@ -460,15 +388,16 @@ fn firecrawl_cost(
     ))
 }
 
-fn transcription_cost(audio_seconds: f64) -> Result<i64, AiPricingError> {
+fn transcription_cost(
+    audio_seconds: f64,
+    minimum_seconds: f64,
+    usd_micros_per_hour: f64,
+) -> Result<i64, AiPricingError> {
     let seconds = audio_seconds.max(0.0);
     if seconds <= 0.0 {
         return Ok(0);
     }
-    let value = (seconds.max(GROQ_TRANSCRIPTION_MIN_SECONDS)
-        * GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR
-        / 3_600.0)
-        .ceil();
+    let value = (seconds.max(minimum_seconds) * usd_micros_per_hour / 3_600.0).ceil();
     if value > i64::MAX as f64 {
         return Err(AiPricingError::Overflow);
     }
@@ -567,25 +496,33 @@ pub fn calculate_billing_for_segments(segments: &Value) -> Result<Value, AiPrici
             continue;
         }
 
-        let has_audio_pricing =
-            matches!(model.as_str(), "whisper-large-v3" | "groq/whisper-large-v3");
+        let legacy_transcription_pricing = match model.as_str() {
+            "whisper-large-v3" | "groq/whisper-large-v3" => Some((
+                LEGACY_GROQ_TRANSCRIPTION_MIN_SECONDS,
+                LEGACY_GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR,
+                "groq",
+            )),
+            _ => None,
+        };
         if kind == "transcribe"
-            && has_audio_pricing
+            && let Some((minimum_seconds, usd_micros_per_hour, default_provider)) =
+                legacy_transcription_pricing
             && !(provider == "openrouter" && reported.is_some())
         {
-            let usd_micros = transcription_cost(audio_seconds)?;
+            let usd_micros =
+                transcription_cost(audio_seconds, minimum_seconds, usd_micros_per_hour)?;
             total = total.add(ExactDecimal::from_ratio(i128::from(usd_micros), 0))?;
             model_breakdown.push(json!({
                 "kind": kind,
-                "model": if model.is_empty() { "whisper-large-v3" } else { &model },
+                "model": model,
                 "usd_micros": usd_micros,
                 "audio_seconds": audio_seconds,
             }));
             segment_breakdown.push(json!({
                 "segment_index": segment_index,
                 "kind": kind,
-                "model": if model.is_empty() { "whisper-large-v3" } else { &model },
-                "provider": if provider.is_empty() { "groq" } else { &provider },
+                "model": model,
+                "provider": if provider.is_empty() { default_provider } else { &provider },
                 "pricing_basis": "published_rate",
                 "cost_complete": audio_seconds > 0.0,
                 "usd_micros_exact": usd_micros.to_string(),
@@ -594,7 +531,7 @@ pub fn calculate_billing_for_segments(segments: &Value) -> Result<Value, AiPrici
                 unsupported_notes.push(format!(
                     "missing_usage_or_cost:segment={segment_index}:provider={}:model={model}",
                     if provider.is_empty() {
-                        "groq"
+                        default_provider
                     } else {
                         &provider
                     }
@@ -603,7 +540,7 @@ pub fn calculate_billing_for_segments(segments: &Value) -> Result<Value, AiPrici
             continue;
         }
 
-        let model_cost = model_cost(&model, usage, &provider, usage_reconciled)?;
+        let model_cost = model_cost(usage, usage_reconciled)?;
         total = total.add(model_cost.exact)?;
         let mut model_item = model_cost.tokens.json_fields();
         model_item.insert("model".to_owned(), json!(model));
@@ -615,8 +552,7 @@ pub fn calculate_billing_for_segments(segments: &Value) -> Result<Value, AiPrici
         if let Some(tool_cost) = tool_cost {
             tool_breakdown.push(tool_cost);
         }
-        let complete = reported.is_some()
-            || (model_cost.tokens.has_tokens() && model_cost.pricing_basis == "published_rate");
+        let complete = reported.is_some();
         if !complete {
             unsupported_notes.push(format!(
                 "missing_usage_or_cost:segment={segment_index}:provider={}:model={}",
@@ -759,8 +695,8 @@ mod tests {
     }
 
     #[test]
-    fn prices_provider_published_cache_tool_and_transcription_segments()
-    -> Result<(), AiPricingError> {
+    fn prices_provider_reported_cache_tool_and_transcription_segments() -> Result<(), AiPricingError>
+    {
         let output = calculate_billing_for_segments(&json!([
             {
                 "kind": "chat",
@@ -772,6 +708,7 @@ mod tests {
                 "kind": "vision",
                 "model": "google/gemini-3.1-flash-lite",
                 "usage": {
+                    "cost": "0.0004133333",
                     "prompt_tokens": 1000,
                     "completion_tokens": 100,
                     "prompt_tokens_details": {
@@ -779,7 +716,8 @@ mod tests {
                         "audio_tokens": 300,
                         "cache_write_tokens": 100
                     }
-                }
+                },
+                "metadata": {"provider": "openrouter"}
             },
             {
                 "kind": "web_search",
@@ -788,13 +726,16 @@ mod tests {
             },
             {
                 "kind": "transcribe",
-                "model": "groq/whisper-large-v3",
-                "audio_seconds": 1
+                "model": "microsoft/mai-transcribe-2",
+                "audio_seconds": 1,
+                "usage": {"seconds": 1, "cost": "0.000028"},
+                "source": "openrouter",
+                "metadata": {"provider": "openrouter"}
             },
             {"kind": "summary", "source": "cache"}
         ]))?;
-        assert_eq!(output["raw_usd_micros_exact"], "2382.36330000");
-        assert_eq!(output["charged_credit_units"], 48);
+        assert_eq!(output["raw_usd_micros_exact"], "2101.3633000000");
+        assert_eq!(output["charged_credit_units"], 43);
         assert_eq!(output["pricing_complete"], true);
         assert_eq!(output["model_breakdown"][0]["usd_micros"], 0);
         assert_eq!(output["model_breakdown"][1]["usd_micros"], 413);
@@ -835,6 +776,83 @@ mod tests {
                 "youtube_transcript_standard"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn openrouter_model_costs_require_provider_reported_settlement() -> Result<(), AiPricingError> {
+        let missing = calculate_billing_for_segments(&json!([{
+            "kind": "chat",
+            "model": "deepseek/deepseek-v4.1-flash",
+            "usage": {
+                "input_tokens": 1_000,
+                "input_cached_tokens": 100,
+                "output_tokens": 50
+            },
+            "metadata": {"provider": "openrouter"}
+        }]))?;
+        assert_eq!(missing["raw_usd_micros"], 0);
+        assert_eq!(missing["charged_credit_units"], 0);
+        assert_eq!(missing["pricing_complete"], false);
+        assert_eq!(missing["segment_breakdown"][0]["pricing_basis"], "missing");
+        assert_eq!(missing["model_breakdown"][0]["input_tokens"], 1_000);
+        assert_eq!(missing["model_breakdown"][0]["input_cached_tokens"], 100);
+        assert_eq!(missing["model_breakdown"][0]["output_tokens"], 50);
+        let settled = calculate_billing_for_segments(&json!([{
+            "kind": "chat",
+            "model": "deepseek/deepseek-v4.1-flash",
+            "usage": {
+                "input_tokens": 1_000,
+                "input_cached_tokens": 100,
+                "output_tokens": 50,
+                "cost": "0.000123"
+            },
+            "metadata": {"provider": "openrouter"}
+        }]))?;
+        assert_eq!(settled["raw_usd_micros"], 123);
+        assert_eq!(settled["charged_credit_units"], 3);
+        assert_eq!(settled["pricing_complete"], true);
+        assert_eq!(
+            settled["segment_breakdown"][0]["pricing_basis"],
+            "provider_reported"
+        );
+        assert_eq!(settled["model_breakdown"][0]["usd_micros"], 123);
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_legacy_groq_transcription_pricing_for_historical_segments()
+    -> Result<(), AiPricingError> {
+        let output = calculate_billing_for_segments(&json!([
+            {
+                "kind": "transcribe",
+                "model": "groq/whisper-large-v3",
+                "source": "groq",
+                "audio_seconds": 3
+            },
+            {
+                "kind": "transcribe",
+                "model": "whisper-large-v3",
+                "audio_seconds": 0
+            },
+            {"kind": "chat", "model": "unknown/model"}
+        ]))?;
+        assert_eq!(output["raw_usd_micros_exact"], "309");
+        assert_eq!(output["charged_credit_units"], 7);
+        assert_eq!(output["pricing_complete"], false);
+        assert_eq!(output["model_breakdown"][0]["usd_micros"], 309);
+        assert_eq!(output["model_breakdown"][1]["usd_micros"], 0);
+        assert_eq!(
+            output["segment_breakdown"][0]["pricing_basis"],
+            "published_rate"
+        );
+        assert_eq!(output["segment_breakdown"][0]["provider"], "groq");
+        assert_eq!(output["segment_breakdown"][1]["cost_complete"], false);
+        assert_eq!(output["segment_breakdown"][2]["pricing_basis"], "missing");
+        assert_eq!(
+            output["unsupported_notes"].as_array().map(Vec::len),
+            Some(2)
+        );
         Ok(())
     }
 

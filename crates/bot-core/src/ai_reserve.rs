@@ -4,9 +4,8 @@ use thiserror::Error;
 
 use crate::provider_pricing::{
     CREDIT_UNIT_USD_MICROS, DEEPSEEK_MODEL, FIRECRAWL_SEARCH_MAX_CREDITS,
-    FIRECRAWL_STANDARD_USD_MICROS_PER_CREDIT, GROQ_TRANSCRIPTION_MIN_SECONDS,
-    GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR, TokenPricing,
-    YOUTUBE_TRANSCRIPT_USD_MICROS_PER_SUCCESS, reservation_token_pricing,
+    FIRECRAWL_STANDARD_USD_MICROS_PER_CREDIT, TokenPricing,
+    YOUTUBE_TRANSCRIPT_USD_MICROS_PER_SUCCESS,
 };
 
 pub const CHAT_OUTPUT_TOKEN_LIMIT: i64 = 1_024;
@@ -35,8 +34,6 @@ pub enum ReserveEstimateError {
     Overflow,
     #[error("AI reserve estimate requires finite audio duration")]
     NonFiniteAudioDuration,
-    #[error("AI model does not define token pricing")]
-    MissingTokenPricing,
 }
 
 #[must_use]
@@ -82,14 +79,14 @@ pub fn estimate_message_tokens(messages: &[EstimatedMessage]) -> i64 {
     })
 }
 
-pub fn estimate_chat_reserve_credit_units(
+pub fn estimate_chat_reserve_credit_units_with_pricing(
     system_message: Option<&EstimatedMessage>,
     messages: &[EstimatedMessage],
     max_output_tokens: Option<i64>,
     extra_input_tokens: i64,
     model: &str,
+    pricing: &TokenPricing,
 ) -> Result<i64, ReserveEstimateError> {
-    let pricing = chat_pricing(model)?;
     let mut input_tokens = i128::from(estimate_message_tokens(messages))
         .checked_add(i128::from(extra_input_tokens))
         .ok_or(ReserveEstimateError::Overflow)?;
@@ -114,14 +111,13 @@ pub fn estimate_chat_reserve_credit_units(
     credit_units_from_usd_micros(usd_micros)
 }
 
-pub fn estimate_vision_reserve_credit_units(
+pub fn estimate_vision_reserve_credit_units_with_pricing(
     prompt_text: &str,
     image_byte_length: usize,
     extra_input_tokens: i64,
     max_output_tokens: i64,
-    model: &str,
+    pricing: &TokenPricing,
 ) -> Result<i64, ReserveEstimateError> {
-    let pricing = vision_pricing(model)?;
     let encoded_length = image_byte_length
         .checked_add(2)
         .and_then(|value| value.checked_div(3))
@@ -156,6 +152,7 @@ pub fn estimate_vision_reserve_credit_units(
 
 pub fn estimate_transcription_reserve_credit_units(
     audio_seconds: f64,
+    usd_micros_per_hour: i128,
 ) -> Result<i64, ReserveEstimateError> {
     if !audio_seconds.is_finite() {
         return Err(ReserveEstimateError::NonFiniteAudioDuration);
@@ -164,10 +161,7 @@ pub fn estimate_transcription_reserve_credit_units(
     if seconds <= 0.0 {
         return Ok(1);
     }
-    let usd_micros = (seconds.max(GROQ_TRANSCRIPTION_MIN_SECONDS)
-        * GROQ_TRANSCRIPTION_USD_MICROS_PER_HOUR
-        / 3_600.0)
-        .ceil();
+    let usd_micros = (seconds * usd_micros_per_hour as f64 / 3_600.0).ceil();
     if usd_micros > i128::MAX as f64 {
         return Err(ReserveEstimateError::Overflow);
     }
@@ -196,26 +190,30 @@ pub fn credit_units_from_usd_micros(usd_micros: i128) -> Result<i64, ReserveEsti
     i64::try_from(units).map_err(|_| ReserveEstimateError::Overflow)
 }
 
-fn chat_pricing(model: &str) -> Result<TokenPricing, ReserveEstimateError> {
-    reservation_token_pricing(model).ok_or(ReserveEstimateError::MissingTokenPricing)
-}
-
-fn vision_pricing(model: &str) -> Result<TokenPricing, ReserveEstimateError> {
-    reservation_token_pricing(model).ok_or(ReserveEstimateError::MissingTokenPricing)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        EstimatedMessage, ReserveEstimateError, TokenEstimateValue, chat_output_token_limit,
-        credit_units_from_usd_micros, estimate_chat_reserve_credit_units,
-        estimate_firecrawl_reserve_credit_units, estimate_message_tokens, estimate_nested_tokens,
-        estimate_text_tokens, estimate_transcription_reserve_credit_units,
-        estimate_vision_reserve_credit_units, estimate_youtube_transcript_reserve_credit_units,
+        EstimatedMessage, ReserveEstimateError, TokenEstimateValue, TokenPricing,
+        chat_output_token_limit, credit_units_from_usd_micros,
+        estimate_chat_reserve_credit_units_with_pricing, estimate_firecrawl_reserve_credit_units,
+        estimate_message_tokens, estimate_nested_tokens, estimate_text_tokens,
+        estimate_transcription_reserve_credit_units,
+        estimate_vision_reserve_credit_units_with_pricing,
+        estimate_youtube_transcript_reserve_credit_units,
     };
 
     fn text(value: &str) -> TokenEstimateValue {
         TokenEstimateValue::Text(value.to_owned())
+    }
+
+    fn synthetic_pricing() -> TokenPricing {
+        TokenPricing {
+            input_per_million: 250_000,
+            cached_input_per_million: Some(25_000),
+            cache_write_per_million: Some(83_333),
+            audio_input_per_million: Some(500_000),
+            output_per_million: 1_500_000,
+        }
     }
 
     #[test]
@@ -251,7 +249,7 @@ mod tests {
         ];
         assert_eq!(estimate_message_tokens(&messages), 10);
         assert_eq!(
-            estimate_chat_reserve_credit_units(
+            estimate_chat_reserve_credit_units_with_pricing(
                 Some(&EstimatedMessage {
                     role: text("system"),
                     content: text("rules"),
@@ -260,16 +258,45 @@ mod tests {
                 &messages,
                 None,
                 0,
-                "deepseek/deepseek-v4-flash-0731",
+                "deepseek/deepseek-v4.1-flash",
+                &TokenPricing {
+                    input_per_million: 300_000,
+                    cached_input_per_million: Some(6_000),
+                    cache_write_per_million: None,
+                    audio_input_per_million: None,
+                    output_per_million: 1_200_000,
+                },
             ),
-            Ok(46)
+            Ok(197)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_or_overflowing_reserve_inputs() {
+        assert_eq!(
+            estimate_transcription_reserve_credit_units(f64::NAN, 100_000),
+            Err(ReserveEstimateError::NonFiniteAudioDuration)
+        );
+        assert_eq!(
+            estimate_vision_reserve_credit_units_with_pricing(
+                "",
+                usize::MAX,
+                0,
+                1,
+                &synthetic_pricing()
+            ),
+            Err(ReserveEstimateError::Overflow)
+        );
+        assert_eq!(
+            credit_units_from_usd_micros(i128::MAX),
+            Err(ReserveEstimateError::Overflow)
         );
     }
 
     #[test]
     fn preserves_model_limits_credit_rounding_and_provider_reserves() {
         assert_eq!(
-            chat_output_token_limit("deepseek/deepseek-v4-flash-0731:free"),
+            chat_output_token_limit("deepseek/deepseek-v4.1-flash:free"),
             8_192
         );
         assert_eq!(chat_output_token_limit("other"), 1_024);
@@ -278,25 +305,31 @@ mod tests {
         }
         assert_eq!(estimate_firecrawl_reserve_credit_units(), Ok(34));
         assert_eq!(estimate_youtube_transcript_reserve_credit_units(), Ok(60));
-        assert_eq!(estimate_transcription_reserve_credit_units(0.0), Ok(1));
-        assert_eq!(estimate_transcription_reserve_credit_units(1.0), Ok(7));
         assert_eq!(
-            estimate_transcription_reserve_credit_units(3_600.0),
-            Ok(2_220)
+            estimate_transcription_reserve_credit_units(0.0, 100_000),
+            Ok(1)
         );
         assert_eq!(
-            estimate_vision_reserve_credit_units(
+            estimate_transcription_reserve_credit_units(1.0, 100_000),
+            Ok(1)
+        );
+        assert_eq!(
+            estimate_transcription_reserve_credit_units(3_600.0, 100_000),
+            Ok(2_000)
+        );
+        assert_eq!(
+            estimate_vision_reserve_credit_units_with_pricing(
                 "describe",
                 100,
                 0,
                 512,
-                "google/gemini-3.1-flash-lite",
+                &synthetic_pricing(),
             ),
             Ok(16)
         );
         assert_eq!(
-            estimate_chat_reserve_credit_units(None, &[], None, 0, "unknown/model"),
-            Err(ReserveEstimateError::MissingTokenPricing)
+            estimate_vision_reserve_credit_units_with_pricing("", 0, 0, 1, &synthetic_pricing()),
+            Ok(1)
         );
     }
 }

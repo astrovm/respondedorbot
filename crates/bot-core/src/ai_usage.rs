@@ -221,7 +221,7 @@ mod tests {
             ),
             (
                 ProviderUsageStatus {
-                    source: "groq",
+                    source: "synthetic-provider",
                     cost_is_positive: false,
                 },
                 false,
