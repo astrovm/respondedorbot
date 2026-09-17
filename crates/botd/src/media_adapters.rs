@@ -7,10 +7,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bot_adapters::media_provider::{
-    MediaProviderResult, VisionRequest, describe_image_with, transcribe_audio_openrouter_with,
+    MediaProviderError, MediaProviderResult, VisionRequest, describe_image_with,
+    transcribe_audio_openrouter_with,
 };
 use bot_adapters::openrouter_chat::{
-    OpenRouterPricingCache, OpenRouterTransport, ReqwestOpenRouterTransport,
+    OpenRouterChatError, OpenRouterPricingCache, OpenRouterTransport, ReqwestOpenRouterTransport,
 };
 use bot_adapters::redis_connection::RedisEndpoint;
 use bot_adapters::redis_media_cache::{cache_media, get_cached_media};
@@ -51,6 +52,9 @@ where
     Transport: TelegramTransport + TelegramFileTransport,
 {
     fn download(&mut self, file_id: &str) -> Result<Option<Vec<u8>>, String> {
+        // request_with cannot fail here: the timeout is a positive constant and
+        // the payload is always valid JSON, so transport problems surface as
+        // TelegramHttpOutcome::TransportError below.
         let outcome = request_with(
             &self.transport,
             &self.token,
@@ -62,20 +66,61 @@ where
         )
         .map_err(|error| error.to_string())?;
         let TelegramHttpOutcome::Response { status_code, body } = outcome else {
+            eprintln!(
+                "Media trace: {}",
+                json!({
+                    "event": "telegram_file_metadata_empty",
+                    "file_id": file_id,
+                    "stage": "getFile",
+                })
+            );
             return Ok(None);
         };
         if !(200..300).contains(&status_code) {
+            eprintln!(
+                "Media trace: {}",
+                json!({
+                    "event": "telegram_file_metadata_failure",
+                    "file_id": file_id,
+                    "stage": "getFile",
+                    "status_code": status_code,
+                })
+            );
             return Ok(None);
         }
-        let payload = serde_json::from_str::<Value>(&body).map_err(|error| error.to_string())?;
+        let payload = serde_json::from_str::<Value>(&body).map_err(|error| {
+            eprintln!(
+                "Media trace: {}",
+                json!({
+                    "event": "telegram_file_metadata_invalid",
+                    "file_id": file_id,
+                    "stage": "getFile",
+                    "status_code": status_code,
+                    "error": truncate_error(&error.to_string(), 300),
+                })
+            );
+            error.to_string()
+        })?;
         let file_path = payload
             .get("result")
             .and_then(|result| result.get("file_path"))
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty());
         let Some(file_path) = file_path else {
+            eprintln!(
+                "Media trace: {}",
+                json!({
+                    "event": "telegram_file_metadata_missing_path",
+                    "file_id": file_id,
+                    "stage": "getFile",
+                    "status_code": status_code,
+                })
+            );
             return Ok(None);
         };
+        // download_file_with cannot fail here either: the timeout is a
+        // positive constant, so transport problems surface as
+        // TelegramFileOutcome variants below.
         match download_file_with(
             &self.transport,
             &self.token,
@@ -84,8 +129,39 @@ where
         )
         .map_err(|error| error.to_string())?
         {
-            TelegramFileOutcome::Downloaded(bytes) => Ok(Some(bytes)),
-            TelegramFileOutcome::HttpError { .. } | TelegramFileOutcome::TransportError { .. } => {
+            TelegramFileOutcome::Downloaded(bytes) => {
+                eprintln!(
+                    "Media trace: {}",
+                    json!({
+                        "event": "telegram_file_download_result",
+                        "file_id": file_id,
+                        "bytes": bytes.len(),
+                    })
+                );
+                Ok(Some(bytes))
+            }
+            TelegramFileOutcome::HttpError { status_code, .. } => {
+                eprintln!(
+                    "Media trace: {}",
+                    json!({
+                        "event": "telegram_file_download_failure",
+                        "file_id": file_id,
+                        "stage": "download",
+                        "status_code": status_code,
+                    })
+                );
+                Ok(None)
+            }
+            TelegramFileOutcome::TransportError { kind } => {
+                eprintln!(
+                    "Media trace: {}",
+                    json!({
+                        "event": "telegram_file_download_failure",
+                        "file_id": file_id,
+                        "stage": "download",
+                        "error": truncate_error(&format!("{kind:?}"), 300),
+                    })
+                );
                 Ok(None)
             }
         }
@@ -294,6 +370,7 @@ impl FfmpegMediaProcessor {
         duration_hint_seconds: Option<f64>,
         max_input_bytes: u64,
     ) -> Result<Option<PreparedAudio>, String> {
+        let started = Instant::now();
         let extracted = Self::run_bounded(
             &self.ffmpeg,
             &[
@@ -315,15 +392,54 @@ impl FfmpegMediaProcessor {
             max_input_bytes,
             MEDIA_PROCESS_OUTPUT_MAX_BYTES,
         )
-        .unwrap_or_else(|_| input.to_vec());
+        .unwrap_or_else(|error| {
+            eprintln!(
+                "{}",
+                audio_conversion_failure_diagnostic(
+                    &error,
+                    &self.ffmpeg,
+                    input.len(),
+                    started.elapsed(),
+                )
+            );
+            input.to_vec()
+        });
         let hinted = duration_hint_seconds.filter(|value| value.is_finite() && *value > 0.0);
         let duration_seconds = hinted
             .or_else(|| self.duration(&extracted))
             .or_else(|| self.duration(input));
-        Ok(duration_seconds.map(|duration_seconds| PreparedAudio {
-            bytes: extracted,
-            duration_seconds,
-        }))
+        match duration_seconds {
+            Some(duration_seconds) => {
+                eprintln!(
+                    "Media trace: {}",
+                    json!({
+                        "event": "audio_prepare_result",
+                        "input_bytes": input.len(),
+                        "output_bytes": extracted.len(),
+                        "duration_seconds": duration_seconds,
+                        "duration_hint_seconds": duration_hint_seconds,
+                        "elapsed_ms": started.elapsed().as_millis(),
+                    })
+                );
+                Ok(Some(PreparedAudio {
+                    bytes: extracted,
+                    duration_seconds,
+                }))
+            }
+            None => {
+                eprintln!(
+                    "Media trace: {}",
+                    json!({
+                        "event": "audio_prepare_invalid",
+                        "input_bytes": input.len(),
+                        "output_bytes": extracted.len(),
+                        "duration_hint_seconds": duration_hint_seconds,
+                        "elapsed_ms": started.elapsed().as_millis(),
+                    })
+                );
+                Ok(None)
+            }
+        }
     }
 }
 
@@ -467,7 +583,12 @@ where
         audio: &PreparedAudio,
         file_id: &str,
     ) -> Result<Option<MediaProviderResult>, String> {
-        transcribe_audio_openrouter_with(
+        let started = Instant::now();
+        eprintln!(
+            "{}",
+            transcription_diagnostic(&self.model, audio, file_id, Duration::ZERO, None)
+        );
+        let result = transcribe_audio_openrouter_with(
             &self.transport,
             &self.api_key,
             &self.openrouter_base_url,
@@ -475,10 +596,117 @@ where
             &audio.bytes,
             audio.duration_seconds,
             Some(file_id),
-        )
-        .map(Some)
-        .map_err(|error| error.to_string())
+        );
+        eprintln!(
+            "{}",
+            transcription_diagnostic(
+                &self.model,
+                audio,
+                file_id,
+                started.elapsed(),
+                Some(&result)
+            )
+        );
+        result.map(Some).map_err(|error| error.to_string())
     }
+}
+
+fn truncate_error(message: &str, max_chars: usize) -> String {
+    let mut truncated: String = message.chars().take(max_chars).collect();
+    if message.chars().count() > max_chars {
+        truncated.push('…');
+    }
+    truncated
+}
+
+fn transcription_diagnostic(
+    model: &str,
+    audio: &PreparedAudio,
+    file_id: &str,
+    elapsed: Duration,
+    result: Option<&Result<MediaProviderResult, MediaProviderError>>,
+) -> String {
+    let event = match result {
+        None => "transcription_start",
+        Some(Ok(output)) if output.text.is_empty() => "transcription_empty",
+        Some(Ok(_)) => "transcription_result",
+        Some(Err(_)) => "transcription_failure",
+    };
+    let mut details = json!({
+        "event": event,
+        "model": model,
+        "file_id": file_id,
+        "bytes": audio.bytes.len(),
+        "duration_seconds": audio.duration_seconds,
+        "elapsed_ms": elapsed.as_millis(),
+    });
+    if let Some(Ok(output)) = result {
+        details["text_chars"] = json!(output.text.chars().count());
+    }
+    if let Some(Err(error)) = result {
+        details["error_kind"] = json!(media_provider_error_kind(error));
+        details["status_code"] = json!(error.status_code());
+        details["retry_after_seconds"] = json!(error.retry_after_seconds());
+        details["error"] = json!(truncate_error(&error.to_string(), 300));
+    }
+    format!("Media trace: {details}")
+}
+
+fn media_provider_error_kind(error: &MediaProviderError) -> &'static str {
+    match error {
+        MediaProviderError::MissingCredential => "MissingCredential",
+        MediaProviderError::Transport(_) => "Transport",
+        MediaProviderError::Http { .. } => "Http",
+        MediaProviderError::InvalidJson(_) => "InvalidJson",
+        MediaProviderError::MissingText => "MissingText",
+        MediaProviderError::OpenRouter(error) => match error {
+            OpenRouterChatError::MissingApiKey => "OpenRouter.MissingApiKey",
+            OpenRouterChatError::MissingModel => "OpenRouter.MissingModel",
+            OpenRouterChatError::MissingModelPricing { .. } => "OpenRouter.MissingModelPricing",
+            OpenRouterChatError::InvalidBaseUrl => "OpenRouter.InvalidBaseUrl",
+            OpenRouterChatError::RequestJson(_) => "OpenRouter.RequestJson",
+            OpenRouterChatError::Transport(_) => "OpenRouter.Transport",
+            OpenRouterChatError::RateLimited { .. } => "OpenRouter.RateLimited",
+            OpenRouterChatError::Http { .. } => "OpenRouter.Http",
+            OpenRouterChatError::InvalidJson(_) => "OpenRouter.InvalidJson",
+            OpenRouterChatError::ResponseTooLarge => "OpenRouter.ResponseTooLarge",
+            OpenRouterChatError::MalformedResponse => "OpenRouter.MalformedResponse",
+            OpenRouterChatError::IncompleteStream => "OpenRouter.IncompleteStream",
+            OpenRouterChatError::Stream(_) => "OpenRouter.Stream",
+        },
+    }
+}
+
+fn audio_conversion_failure_diagnostic(
+    error: &str,
+    program: &str,
+    input_bytes: usize,
+    elapsed: Duration,
+) -> String {
+    let kind = match error {
+        "media input exceeds the size limit" => "InputTooLarge",
+        "media process output exceeds the size limit" => "OutputTooLarge",
+        "media process timeout must be positive" | "media process timeout is too large" => {
+            "InvalidTimeout"
+        }
+        "media process did not expose stdin" | "media process did not expose stdout" => {
+            "MissingPipe"
+        }
+        "media input writer panicked" | "media output reader panicked" => "WorkerPanicked",
+        _ if error == format!("{program} timed out while processing media") => "Timeout",
+        _ if error == format!("{program} could not process media") => "UnsuccessfulOrEmptyOutput",
+        _ => "ProcessIo",
+    };
+    format!(
+        "Media trace: {}",
+        json!({
+            "event": "audio_conversion_failure",
+            "error_kind": kind,
+            "bytes": input_bytes,
+            "fallback": true,
+            "elapsed_ms": elapsed.as_millis(),
+        })
+    )
 }
 
 pub type ProductionVisionProvider = OpenRouterVisionProvider<ReqwestOpenRouterTransport>;
@@ -576,6 +804,188 @@ mod tests {
         let mut failed_download =
             telegram_media(Ok(metadata()), Err(TransportFailureKind::Connection));
         assert_eq!(failed_download.download("synthetic-file"), Ok(None));
+    }
+
+    #[test]
+    fn telegram_media_source_reports_missing_paths_and_http_failures() {
+        let metadata = || TelegramResponse {
+            status_code: 200,
+            body: json!({"result":{"file_path":"media/synthetic.bin"}}).to_string(),
+        };
+        for body in [
+            json!({"result": {}}).to_string(),
+            json!({"result": {"file_path": ""}}).to_string(),
+            json!({}).to_string(),
+        ] {
+            let mut source = telegram_media(
+                Ok(TelegramResponse {
+                    status_code: 200,
+                    body,
+                }),
+                Err(TransportFailureKind::Request),
+            );
+            assert_eq!(source.download("synthetic-file"), Ok(None));
+        }
+
+        let mut http_failure = telegram_media(
+            Ok(metadata()),
+            Ok(BinaryHttpResponse {
+                status_code: 500,
+                body: Vec::new(),
+            }),
+        );
+        assert_eq!(http_failure.download("synthetic-file"), Ok(None));
+    }
+
+    #[test]
+    fn transcription_provider_reports_transport_failures() {
+        let mut provider = OpenRouterTranscriptionProvider::new(
+            VisionTransport {
+                requests: RefCell::new(Vec::new()),
+                responses: RefCell::new(vec![Err(OpenRouterChatError::Transport(
+                    "synthetic transport failure".to_owned(),
+                ))]),
+            },
+            "synthetic-key",
+            "https://example.test/api/v1",
+            "synthetic/transcription-model",
+        );
+        let result = provider.transcribe(
+            &PreparedAudio {
+                bytes: b"\x1aE\xdf\xa3 synthetic audio".to_vec(),
+                duration_seconds: 3.0,
+            },
+            "file-1",
+        );
+        assert!(matches!(result, Err(ref error) if error.contains("synthetic transport failure")));
+    }
+
+    #[test]
+    fn transcription_diagnostics_cover_every_event_and_helper() {
+        let audio = PreparedAudio {
+            bytes: vec![1, 2, 3],
+            duration_seconds: 2.5,
+        };
+        let start = transcription_diagnostic("model", &audio, "file-1", Duration::ZERO, None);
+        assert!(start.contains("transcription_start"));
+        assert!(start.contains("file-1"));
+
+        let ok = Ok(MediaProviderResult {
+            text: "hola".to_owned(),
+            billing_segment: Value::Null,
+        });
+        let result = transcription_diagnostic("model", &audio, "file-1", Duration::ZERO, Some(&ok));
+        assert!(result.contains("transcription_result"));
+        assert!(result.contains("text_chars"));
+
+        let empty = Ok(MediaProviderResult {
+            text: String::new(),
+            billing_segment: Value::Null,
+        });
+        let empty_trace =
+            transcription_diagnostic("model", &audio, "file-1", Duration::ZERO, Some(&empty));
+        assert!(empty_trace.contains("transcription_empty"));
+
+        for error in [
+            MediaProviderError::MissingCredential,
+            MediaProviderError::Transport("broken".to_owned()),
+            MediaProviderError::Http {
+                status_code: 503,
+                code: "busy".to_owned(),
+                message: "slow down".to_owned(),
+                retry_after_seconds: Some(4),
+            },
+            MediaProviderError::InvalidJson("bad".to_owned()),
+            MediaProviderError::MissingText,
+            MediaProviderError::OpenRouter(OpenRouterChatError::MissingApiKey),
+            MediaProviderError::OpenRouter(OpenRouterChatError::MissingModel),
+            MediaProviderError::OpenRouter(OpenRouterChatError::MissingModelPricing {
+                model: "m".to_owned(),
+            }),
+            MediaProviderError::OpenRouter(OpenRouterChatError::InvalidBaseUrl),
+            MediaProviderError::OpenRouter(OpenRouterChatError::RequestJson("bad".to_owned())),
+            MediaProviderError::OpenRouter(OpenRouterChatError::Transport("down".to_owned())),
+            MediaProviderError::OpenRouter(OpenRouterChatError::RateLimited {
+                retry_after_seconds: Some(2),
+                message: "limited".to_owned(),
+            }),
+            MediaProviderError::OpenRouter(OpenRouterChatError::Http {
+                status_code: 502,
+                message: "upstream".to_owned(),
+            }),
+            MediaProviderError::OpenRouter(OpenRouterChatError::InvalidJson("bad".to_owned())),
+            MediaProviderError::OpenRouter(OpenRouterChatError::ResponseTooLarge),
+            MediaProviderError::OpenRouter(OpenRouterChatError::MalformedResponse),
+            MediaProviderError::OpenRouter(OpenRouterChatError::IncompleteStream),
+            MediaProviderError::OpenRouter(OpenRouterChatError::Stream("broken".to_owned())),
+        ] {
+            let failure = Err(error);
+            let trace =
+                transcription_diagnostic("model", &audio, "file-1", Duration::ZERO, Some(&failure));
+            assert!(trace.contains("transcription_failure"));
+            assert!(trace.contains("error_kind"));
+        }
+
+        assert_eq!(truncate_error("short", 300), "short");
+        let long = "x".repeat(400);
+        let truncated = truncate_error(&long, 300);
+        assert_eq!(truncated.chars().count(), 301);
+        assert!(truncated.ends_with('…'));
+
+        for (message, program, kind) in [
+            (
+                "media input exceeds the size limit",
+                "ffmpeg",
+                "InputTooLarge",
+            ),
+            (
+                "media process output exceeds the size limit",
+                "ffmpeg",
+                "OutputTooLarge",
+            ),
+            (
+                "media process timeout must be positive",
+                "ffmpeg",
+                "InvalidTimeout",
+            ),
+            (
+                "media process timeout is too large",
+                "ffmpeg",
+                "InvalidTimeout",
+            ),
+            (
+                "media process did not expose stdin",
+                "ffmpeg",
+                "MissingPipe",
+            ),
+            (
+                "media process did not expose stdout",
+                "ffmpeg",
+                "MissingPipe",
+            ),
+            ("media input writer panicked", "ffmpeg", "WorkerPanicked"),
+            ("media output reader panicked", "ffmpeg", "WorkerPanicked"),
+            (
+                "ffmpeg timed out while processing media",
+                "ffmpeg",
+                "Timeout",
+            ),
+            (
+                "ffmpeg could not process media",
+                "ffmpeg",
+                "UnsuccessfulOrEmptyOutput",
+            ),
+            ("broken pipe", "ffmpeg", "ProcessIo"),
+        ] {
+            let trace = audio_conversion_failure_diagnostic(message, program, 7, Duration::ZERO);
+            assert!(trace.contains(kind), "{message} should map to {kind}");
+        }
+    }
+
+    #[test]
+    fn prepare_audio_without_measurable_duration_reports_invalid() {
+        let mut processor = FfmpegMediaProcessor::default();
+        assert_eq!(processor.prepare_audio(b"not media", None), Ok(None));
     }
 
     #[test]

@@ -542,6 +542,17 @@ where
         {
             Ok(prepared) => prepared,
             Err(error) => {
+                eprintln!(
+                    "Media trace: {}",
+                    serde_json::json!({
+                        "event": "ai_media_preparation_failure",
+                        "operation_id": operation_id,
+                        "kind": format!("{kind:?}"),
+                        "file_id": file_id,
+                        "duration_hint_seconds": duration,
+                        "error": error.chars().take(300).collect::<String>(),
+                    })
+                );
                 return Ok(PreparedConversationMedia {
                     diagnostics: vec![format!("AI media preparation: {error}")],
                     ..PreparedConversationMedia::default()
@@ -590,7 +601,19 @@ where
             }
             Err(error) => Ok(PreparedConversationMedia {
                 reserve_decision: decision,
-                diagnostics: vec![format!("AI media provider: {error}")],
+                diagnostics: {
+                    eprintln!(
+                        "Media trace: {}",
+                        serde_json::json!({
+                            "event": "ai_media_provider_failure",
+                            "operation_id": operation_id,
+                            "kind": format!("{kind:?}"),
+                            "file_id": file_id,
+                            "error": error.chars().take(300).collect::<String>(),
+                        })
+                    );
+                    vec![format!("AI media provider: {error}")]
+                },
                 ..PreparedConversationMedia::default()
             }),
         }
@@ -634,6 +657,17 @@ where
         {
             Ok(prepared) => prepared,
             Err(error) => {
+                eprintln!(
+                    "Media trace: {}",
+                    serde_json::json!({
+                        "event": "media_command_preparation_failure",
+                        "operation_id": operation_id,
+                        "kind": format!("{kind:?}"),
+                        "file_id": file_id,
+                        "duration_hint_seconds": duration,
+                        "error": error.chars().take(300).collect::<String>(),
+                    })
+                );
                 let text = media_command_prepare_error(
                     kind,
                     input.visual_media_kind.as_deref(),
@@ -663,16 +697,28 @@ where
                     Ok(execution) => {
                         AiPreparation::reply(sanitize_summary_text(&execution.text), None)
                     }
-                    Err(error) => AiPreparation::Reply {
-                        text: media_command_provider_error(
-                            kind,
-                            input.visual_media_kind.as_deref(),
-                            input.locale,
-                        )
-                        .to_owned(),
-                        completion_id: None,
-                        diagnostics: vec![format!("media command cached result: {error}")],
-                    },
+                    Err(error) => {
+                        eprintln!(
+                            "Media trace: {}",
+                            serde_json::json!({
+                                "event": "media_command_cached_failure",
+                                "operation_id": operation_id,
+                                "kind": format!("{kind:?}"),
+                                "file_id": file_id,
+                                "error": error.chars().take(300).collect::<String>(),
+                            })
+                        );
+                        AiPreparation::Reply {
+                            text: media_command_provider_error(
+                                kind,
+                                input.visual_media_kind.as_deref(),
+                                input.locale,
+                            )
+                            .to_owned(),
+                            completion_id: None,
+                            diagnostics: vec![format!("media command cached result: {error}")],
+                        }
+                    }
                 },
             );
         }
@@ -706,16 +752,28 @@ where
                     Vec::new(),
                 )
             }
-            Err(error) => (
-                media_command_provider_error(
-                    kind,
-                    input.visual_media_kind.as_deref(),
-                    input.locale,
+            Err(error) => {
+                eprintln!(
+                    "Media trace: {}",
+                    serde_json::json!({
+                        "event": "media_command_provider_failure",
+                        "operation_id": operation_id,
+                        "kind": format!("{kind:?}"),
+                        "file_id": file_id,
+                        "error": error.chars().take(300).collect::<String>(),
+                    })
+                );
+                (
+                    media_command_provider_error(
+                        kind,
+                        input.visual_media_kind.as_deref(),
+                        input.locale,
+                    )
+                    .to_owned(),
+                    Vec::new(),
+                    vec![format!("media command provider: {error}")],
                 )
-                .to_owned(),
-                Vec::new(),
-                vec![format!("media command provider: {error}")],
-            ),
+            }
         };
         Ok(self.prepare_media_command_reply(input, operation_id, text, segments, diagnostics))
     }
