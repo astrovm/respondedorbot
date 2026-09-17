@@ -303,6 +303,15 @@ where
         duration_hint_seconds: Option<f64>,
     ) -> Result<PreparedMedia, String> {
         if let Ok(Some(text)) = self.cache.get(kind.cache_prefix(), file_id) {
+            eprintln!(
+                "Media trace: {}",
+                serde_json::json!({
+                    "event": "media_cache_hit",
+                    "kind": format!("{kind:?}"),
+                    "file_id": file_id,
+                    "text_chars": text.chars().count(),
+                })
+            );
             return Ok(PreparedMedia::Cached {
                 kind,
                 file_id: file_id.to_owned(),
@@ -313,7 +322,28 @@ where
             .files
             .download(file_id)?
             .filter(|bytes| !bytes.is_empty())
-            .ok_or_else(|| MediaPipelineError::Download.to_string())?;
+            .ok_or_else(|| {
+                eprintln!(
+                    "Media trace: {}",
+                    serde_json::json!({
+                        "event": "media_download_empty",
+                        "kind": format!("{kind:?}"),
+                        "file_id": file_id,
+                        "duration_hint_seconds": duration_hint_seconds,
+                    })
+                );
+                MediaPipelineError::Download.to_string()
+            })?;
+        eprintln!(
+            "Media trace: {}",
+            serde_json::json!({
+                "event": "media_download_result",
+                "kind": format!("{kind:?}"),
+                "file_id": file_id,
+                "bytes": bytes.len(),
+                "duration_hint_seconds": duration_hint_seconds,
+            })
+        );
         match kind {
             MediaKind::Image => {
                 let image = self
@@ -337,10 +367,43 @@ where
                     .filter(|audio| {
                         audio.duration_seconds.is_finite() && audio.duration_seconds > 0.0
                     })
-                    .ok_or_else(|| MediaPipelineError::InvalidAudio.to_string())?;
+                    .ok_or_else(|| {
+                        eprintln!(
+                            "Media trace: {}",
+                            serde_json::json!({
+                                "event": "media_audio_invalid",
+                                "file_id": file_id,
+                                "input_bytes": bytes.len(),
+                                "duration_hint_seconds": duration_hint_seconds,
+                            })
+                        );
+                        MediaPipelineError::InvalidAudio.to_string()
+                    })?;
                 let reserve_credit_units = self
                     .estimate_audio_reserve_credit_units(audio.duration_seconds)
-                    .map_err(|error| MediaPipelineError::ReserveEstimate(error).to_string())?;
+                    .map_err(|error| {
+                        eprintln!(
+                            "Media trace: {}",
+                            serde_json::json!({
+                                "event": "media_reserve_estimate_failure",
+                                "kind": "Audio",
+                                "file_id": file_id,
+                                "duration_seconds": audio.duration_seconds,
+                                "error": error.chars().take(300).collect::<String>(),
+                            })
+                        );
+                        MediaPipelineError::ReserveEstimate(error).to_string()
+                    })?;
+                eprintln!(
+                    "Media trace: {}",
+                    serde_json::json!({
+                        "event": "media_audio_prepared",
+                        "file_id": file_id,
+                        "bytes": audio.bytes.len(),
+                        "duration_seconds": audio.duration_seconds,
+                        "reserve_credit_units": reserve_credit_units,
+                    })
+                );
                 Ok(PreparedMedia::Audio {
                     file_id: file_id.to_owned(),
                     bytes: audio.bytes,
@@ -390,7 +453,27 @@ where
                 (MediaKind::Audio, file_id, result)
             }
         };
-        let result = result.ok_or_else(|| MediaPipelineError::ProviderUnavailable.to_string())?;
+        let result = result.ok_or_else(|| {
+            eprintln!(
+                "Media trace: {}",
+                serde_json::json!({
+                    "event": "media_provider_empty",
+                    "kind": format!("{kind:?}"),
+                    "file_id": file_id,
+                })
+            );
+            MediaPipelineError::ProviderUnavailable.to_string()
+        })?;
+        eprintln!(
+            "Media trace: {}",
+            serde_json::json!({
+                "event": "media_provider_result",
+                "kind": format!("{kind:?}"),
+                "file_id": file_id,
+                "text_chars": result.text.chars().count(),
+                "empty": result.text.is_empty(),
+            })
+        );
         if !result.text.is_empty() {
             let _cache_result = self.cache.set(kind.cache_prefix(), &file_id, &result.text);
         }
