@@ -379,12 +379,17 @@ impl FfmpegMediaProcessor {
                 "-i".to_owned(),
                 "pipe:0".to_owned(),
                 "-vn".to_owned(),
+                // OpenRouter speech-to-text documents wav input for
+                // microsoft/mai-transcribe-2; opus-in-webm is rejected
+                // with HTTP 400.
                 "-ac".to_owned(),
                 "1".to_owned(),
+                "-ar".to_owned(),
+                "16000".to_owned(),
                 "-c:a".to_owned(),
-                "libopus".to_owned(),
+                "pcm_s16le".to_owned(),
                 "-f".to_owned(),
-                "webm".to_owned(),
+                "wav".to_owned(),
                 "pipe:1".to_owned(),
             ],
             input,
@@ -647,6 +652,7 @@ fn transcription_diagnostic(
         details["error_kind"] = json!(media_provider_error_kind(error));
         details["status_code"] = json!(error.status_code());
         details["retry_after_seconds"] = json!(error.retry_after_seconds());
+        details["code"] = json!(error.code());
         details["error"] = json!(truncate_error(&error.to_string(), 300));
     }
     format!("Media trace: {details}")
@@ -852,7 +858,7 @@ mod tests {
         );
         let result = provider.transcribe(
             &PreparedAudio {
-                bytes: b"\x1aE\xdf\xa3 synthetic audio".to_vec(),
+                bytes: b"RIFF....WAVE synthetic audio".to_vec(),
                 duration_seconds: 3.0,
             },
             "file-1",
@@ -1173,7 +1179,7 @@ mod tests {
         );
         let result = provider.transcribe(
             &PreparedAudio {
-                bytes: b"\x1aE\xdf\xa3 synthetic audio".to_vec(),
+                bytes: b"RIFF....WAVE synthetic audio".to_vec(),
                 duration_seconds: 3.0,
             },
             "file-1",
@@ -1192,7 +1198,7 @@ mod tests {
         );
         assert_eq!(request.bearer_token, "synthetic-key");
         assert_eq!(payload["model"], "microsoft/mai-transcribe-2");
-        assert_eq!(payload["input_audio"]["format"], "webm");
+        assert_eq!(payload["input_audio"]["format"], "wav");
         assert_eq!(
             result
                 .as_ref()
@@ -1351,7 +1357,8 @@ mod tests {
             .prepare_audio(&wav, None)
             .unwrap_or_else(|_| unreachable!())
             .unwrap_or_else(|| unreachable!());
-        assert!(audio.bytes.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]));
+        assert_eq!(audio.bytes.get(..4), Some(b"RIFF".as_slice()));
+        assert_eq!(audio.bytes.get(8..12), Some(b"WAVE".as_slice()));
         assert!((0.08..=0.2).contains(&audio.duration_seconds));
         Ok(())
     }
