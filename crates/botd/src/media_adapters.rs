@@ -704,7 +704,9 @@ fn audio_conversion_failure_diagnostic(
         "media process timeout must be positive" | "media process timeout is too large" => {
             "InvalidTimeout"
         }
-        "media process did not expose stdin" | "media process did not expose stdout" => "MissingPipe",
+        "media process did not expose stdin" | "media process did not expose stdout" => {
+            "MissingPipe"
+        }
         "media input writer panicked" | "media output reader panicked" => "WorkerPanicked",
         _ if error == format!("{program} timed out while processing media") => "Timeout",
         _ if error == format!("{program} could not process media") => "UnsuccessfulOrEmptyOutput",
