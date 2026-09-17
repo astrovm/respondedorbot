@@ -52,6 +52,9 @@ where
     Transport: TelegramTransport + TelegramFileTransport,
 {
     fn download(&mut self, file_id: &str) -> Result<Option<Vec<u8>>, String> {
+        // request_with cannot fail here: the timeout is a positive constant and
+        // the payload is always valid JSON, so transport problems surface as
+        // TelegramHttpOutcome::TransportError below.
         let outcome = request_with(
             &self.transport,
             &self.token,
@@ -61,18 +64,7 @@ where
             None,
             TELEGRAM_FILE_TIMEOUT_SECONDS,
         )
-        .map_err(|error| {
-            eprintln!(
-                "Media trace: {}",
-                json!({
-                    "event": "telegram_file_metadata_error",
-                    "file_id": file_id,
-                    "stage": "getFile",
-                    "error": truncate_error(&error.to_string(), 300),
-                })
-            );
-            error.to_string()
-        })?;
+        .map_err(|error| error.to_string())?;
         let TelegramHttpOutcome::Response { status_code, body } = outcome else {
             eprintln!(
                 "Media trace: {}",
@@ -126,24 +118,17 @@ where
             );
             return Ok(None);
         };
+        // download_file_with cannot fail here either: the timeout is a
+        // positive constant, so transport problems surface as
+        // TelegramFileOutcome variants below.
         match download_file_with(
             &self.transport,
             &self.token,
             file_path,
             TELEGRAM_FILE_TIMEOUT_SECONDS,
         )
-        .map_err(|error| {
-            eprintln!(
-                "Media trace: {}",
-                json!({
-                    "event": "telegram_file_download_error",
-                    "file_id": file_id,
-                    "stage": "download",
-                    "error": truncate_error(&error.to_string(), 300),
-                })
-            );
-            error.to_string()
-        })? {
+        .map_err(|error| error.to_string())?
+        {
             TelegramFileOutcome::Downloaded(bytes) => {
                 eprintln!(
                     "Media trace: {}",
@@ -819,6 +804,188 @@ mod tests {
         let mut failed_download =
             telegram_media(Ok(metadata()), Err(TransportFailureKind::Connection));
         assert_eq!(failed_download.download("synthetic-file"), Ok(None));
+    }
+
+    #[test]
+    fn telegram_media_source_reports_missing_paths_and_http_failures() {
+        let metadata = || TelegramResponse {
+            status_code: 200,
+            body: json!({"result":{"file_path":"media/synthetic.bin"}}).to_string(),
+        };
+        for body in [
+            json!({"result": {}}).to_string(),
+            json!({"result": {"file_path": ""}}).to_string(),
+            json!({}).to_string(),
+        ] {
+            let mut source = telegram_media(
+                Ok(TelegramResponse {
+                    status_code: 200,
+                    body,
+                }),
+                Err(TransportFailureKind::Request),
+            );
+            assert_eq!(source.download("synthetic-file"), Ok(None));
+        }
+
+        let mut http_failure = telegram_media(
+            Ok(metadata()),
+            Ok(BinaryHttpResponse {
+                status_code: 500,
+                body: Vec::new(),
+            }),
+        );
+        assert_eq!(http_failure.download("synthetic-file"), Ok(None));
+    }
+
+    #[test]
+    fn transcription_provider_reports_transport_failures() {
+        let mut provider = OpenRouterTranscriptionProvider::new(
+            VisionTransport {
+                requests: RefCell::new(Vec::new()),
+                responses: RefCell::new(vec![Err(OpenRouterChatError::Transport(
+                    "synthetic transport failure".to_owned(),
+                ))]),
+            },
+            "synthetic-key",
+            "https://example.test/api/v1",
+            "synthetic/transcription-model",
+        );
+        let result = provider.transcribe(
+            &PreparedAudio {
+                bytes: b"\x1aE\xdf\xa3 synthetic audio".to_vec(),
+                duration_seconds: 3.0,
+            },
+            "file-1",
+        );
+        assert!(matches!(result, Err(ref error) if error.contains("synthetic transport failure")));
+    }
+
+    #[test]
+    fn transcription_diagnostics_cover_every_event_and_helper() {
+        let audio = PreparedAudio {
+            bytes: vec![1, 2, 3],
+            duration_seconds: 2.5,
+        };
+        let start = transcription_diagnostic("model", &audio, "file-1", Duration::ZERO, None);
+        assert!(start.contains("transcription_start"));
+        assert!(start.contains("file-1"));
+
+        let ok = Ok(MediaProviderResult {
+            text: "hola".to_owned(),
+            billing_segment: Value::Null,
+        });
+        let result = transcription_diagnostic("model", &audio, "file-1", Duration::ZERO, Some(&ok));
+        assert!(result.contains("transcription_result"));
+        assert!(result.contains("text_chars"));
+
+        let empty = Ok(MediaProviderResult {
+            text: String::new(),
+            billing_segment: Value::Null,
+        });
+        let empty_trace =
+            transcription_diagnostic("model", &audio, "file-1", Duration::ZERO, Some(&empty));
+        assert!(empty_trace.contains("transcription_empty"));
+
+        for error in [
+            MediaProviderError::MissingCredential,
+            MediaProviderError::Transport("broken".to_owned()),
+            MediaProviderError::Http {
+                status_code: 503,
+                code: "busy".to_owned(),
+                message: "slow down".to_owned(),
+                retry_after_seconds: Some(4),
+            },
+            MediaProviderError::InvalidJson("bad".to_owned()),
+            MediaProviderError::MissingText,
+            MediaProviderError::OpenRouter(OpenRouterChatError::MissingApiKey),
+            MediaProviderError::OpenRouter(OpenRouterChatError::MissingModel),
+            MediaProviderError::OpenRouter(OpenRouterChatError::MissingModelPricing {
+                model: "m".to_owned(),
+            }),
+            MediaProviderError::OpenRouter(OpenRouterChatError::InvalidBaseUrl),
+            MediaProviderError::OpenRouter(OpenRouterChatError::RequestJson("bad".to_owned())),
+            MediaProviderError::OpenRouter(OpenRouterChatError::Transport("down".to_owned())),
+            MediaProviderError::OpenRouter(OpenRouterChatError::RateLimited {
+                retry_after_seconds: Some(2),
+                message: "limited".to_owned(),
+            }),
+            MediaProviderError::OpenRouter(OpenRouterChatError::Http {
+                status_code: 502,
+                message: "upstream".to_owned(),
+            }),
+            MediaProviderError::OpenRouter(OpenRouterChatError::InvalidJson("bad".to_owned())),
+            MediaProviderError::OpenRouter(OpenRouterChatError::ResponseTooLarge),
+            MediaProviderError::OpenRouter(OpenRouterChatError::MalformedResponse),
+            MediaProviderError::OpenRouter(OpenRouterChatError::IncompleteStream),
+            MediaProviderError::OpenRouter(OpenRouterChatError::Stream("broken".to_owned())),
+        ] {
+            let failure = Err(error);
+            let trace =
+                transcription_diagnostic("model", &audio, "file-1", Duration::ZERO, Some(&failure));
+            assert!(trace.contains("transcription_failure"));
+            assert!(trace.contains("error_kind"));
+        }
+
+        assert_eq!(truncate_error("short", 300), "short");
+        let long = "x".repeat(400);
+        let truncated = truncate_error(&long, 300);
+        assert_eq!(truncated.chars().count(), 301);
+        assert!(truncated.ends_with('…'));
+
+        for (message, program, kind) in [
+            (
+                "media input exceeds the size limit",
+                "ffmpeg",
+                "InputTooLarge",
+            ),
+            (
+                "media process output exceeds the size limit",
+                "ffmpeg",
+                "OutputTooLarge",
+            ),
+            (
+                "media process timeout must be positive",
+                "ffmpeg",
+                "InvalidTimeout",
+            ),
+            (
+                "media process timeout is too large",
+                "ffmpeg",
+                "InvalidTimeout",
+            ),
+            (
+                "media process did not expose stdin",
+                "ffmpeg",
+                "MissingPipe",
+            ),
+            (
+                "media process did not expose stdout",
+                "ffmpeg",
+                "MissingPipe",
+            ),
+            ("media input writer panicked", "ffmpeg", "WorkerPanicked"),
+            ("media output reader panicked", "ffmpeg", "WorkerPanicked"),
+            (
+                "ffmpeg timed out while processing media",
+                "ffmpeg",
+                "Timeout",
+            ),
+            (
+                "ffmpeg could not process media",
+                "ffmpeg",
+                "UnsuccessfulOrEmptyOutput",
+            ),
+            ("broken pipe", "ffmpeg", "ProcessIo"),
+        ] {
+            let trace = audio_conversion_failure_diagnostic(message, program, 7, Duration::ZERO);
+            assert!(trace.contains(kind), "{message} should map to {kind}");
+        }
+    }
+
+    #[test]
+    fn prepare_audio_without_measurable_duration_reports_invalid() {
+        let mut processor = FfmpegMediaProcessor::default();
+        assert_eq!(processor.prepare_audio(b"not media", None), Ok(None));
     }
 
     #[test]

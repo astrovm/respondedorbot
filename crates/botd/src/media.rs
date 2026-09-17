@@ -615,6 +615,37 @@ mod tests {
         }
     }
 
+    struct SilentAudioProcessor;
+
+    impl MediaProcessor for SilentAudioProcessor {
+        fn prepare_image(&mut self, input: &[u8]) -> Result<Option<PreparedImage>, String> {
+            Ok(Some(PreparedImage {
+                bytes: input.to_vec(),
+                mime: "image/webp".to_owned(),
+            }))
+        }
+
+        fn prepare_audio(
+            &mut self,
+            _input: &[u8],
+            _duration_hint_seconds: Option<f64>,
+        ) -> Result<Option<PreparedAudio>, String> {
+            Ok(None)
+        }
+    }
+
+    struct SilentTranscription;
+
+    impl TranscriptionProvider for SilentTranscription {
+        fn transcribe(
+            &mut self,
+            _audio: &PreparedAudio,
+            _file_id: &str,
+        ) -> Result<Option<MediaProviderResult>, String> {
+            Ok(None)
+        }
+    }
+
     fn media(cache: Cache) -> NativeMedia<Files, Cache, Processor, Vision, Transcription> {
         NativeMedia::new(
             Files(Some(vec![1, 2, 3])),
@@ -736,5 +767,43 @@ mod tests {
             missing.prepare(MediaKind::Image, "missing", None),
             Err(MediaPipelineError::Download.to_string())
         );
+    }
+
+    #[test]
+    fn unmeasurable_audio_is_rejected_as_invalid() {
+        let mut media = NativeMedia::new(
+            Files(Some(vec![1, 2, 3])),
+            Cache::default(),
+            SilentAudioProcessor,
+            Vision,
+            Transcription,
+            "model",
+        );
+        assert_eq!(
+            media.prepare(MediaKind::Audio, "audio-1", Some(4.5)),
+            Err(MediaPipelineError::InvalidAudio.to_string())
+        );
+    }
+
+    #[test]
+    fn empty_provider_results_are_reported_as_unavailable() {
+        let (pricing, server) = pricing_cache();
+        let mut media = NativeMedia::new(
+            Files(Some(vec![1, 2, 3])),
+            Cache::default(),
+            Processor,
+            Vision,
+            SilentTranscription,
+            "google/gemini-3.1-flash-lite",
+        )
+        .with_openrouter_pricing(pricing);
+        let prepared = media
+            .prepare(MediaKind::Audio, "audio-1", Some(4.5))
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            media.execute(prepared, "ignored"),
+            Err(MediaPipelineError::ProviderUnavailable.to_string())
+        );
+        server.join().unwrap_or_else(|_| unreachable!());
     }
 }
