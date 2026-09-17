@@ -169,11 +169,7 @@ fn transcription_result(
         let error = payload.get("error").unwrap_or(&payload);
         return Err(MediaProviderError::Http {
             status_code: response.status_code,
-            code: error
-                .get("code")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
+            code: error_code(error),
             message: error
                 .get("message")
                 .and_then(Value::as_str)
@@ -231,6 +227,15 @@ fn transcription_result(
             "metadata": metadata
         }),
     })
+}
+
+fn error_code(error: &Value) -> String {
+    match error.get("code") {
+        Some(Value::String(code)) => code.clone(),
+        // OpenRouter speech-to-text failures report numeric codes.
+        Some(Value::Number(code)) => code.to_string(),
+        _ => String::new(),
+    }
 }
 
 fn transcription_url(base_url: &str) -> Result<String, MediaProviderError> {
@@ -591,6 +596,32 @@ mod tests {
                 retry_after_seconds: Some(12),
                 ..
             }) if code == "rate_limit"
+        ));
+
+        let numeric_code = OpenRouter {
+            request: RefCell::new(None),
+            response: HttpResponse {
+                status_code: 400,
+                headers: BTreeMap::new(),
+                body: json!({"error": {"code": 400, "message": "Provider returned 400"}})
+                    .to_string(),
+            },
+        };
+        assert!(matches!(
+            transcribe_audio_openrouter_with(
+                &numeric_code,
+                "synthetic-key",
+                "https://synthetic.invalid/api/v1",
+                "synthetic-model",
+                b"synthetic audio",
+                3.0,
+                None,
+            ),
+            Err(MediaProviderError::Http {
+                status_code: 400,
+                code,
+                ..
+            }) if code == "400"
         ));
 
         let malformed_url = OpenRouter {
