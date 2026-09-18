@@ -318,7 +318,17 @@ fn optional_count(value: &Value) -> String {
 /// Compact token quote for mixed asset lists; unavailable values stay explicit.
 #[must_use]
 pub fn format_signal_quote(signal: &TokenSignal, timeframe: Option<&str>) -> String {
-    let (change, period) = signal_change_for_timeframe(signal, timeframe);
+    format_signal_quote_with_candles(signal, timeframe, None)
+}
+
+/// Like [`format_signal_quote`], using extra history only for the % change.
+#[must_use]
+pub fn format_signal_quote_with_candles(
+    signal: &TokenSignal,
+    timeframe: Option<&str>,
+    candles: Option<&[Vec<f64>]>,
+) -> String {
+    let (change, period) = signal_change_for_timeframe(signal, timeframe, candles);
     crate::output_format::quote(
         &signal.pair.base_token.symbol,
         numeric_value(&signal.pair.price_usd).unwrap_or(f64::NAN),
@@ -332,13 +342,23 @@ pub fn format_signal_quote(signal: &TokenSignal, timeframe: Option<&str>) -> Str
 /// candidates in the unified asset-selection menu.
 #[must_use]
 pub fn signal_market_values(signal: &TokenSignal, timeframe: Option<&str>) -> (String, String) {
+    signal_market_values_with_candles(signal, timeframe, None)
+}
+
+/// Like [`signal_market_values`], using extra history only for the % change.
+#[must_use]
+pub fn signal_market_values_with_candles(
+    signal: &TokenSignal,
+    timeframe: Option<&str>,
+    candles: Option<&[Vec<f64>]>,
+) -> (String, String) {
     let price = number(&signal.pair.price_usd);
     let price = if price.is_finite() && price > 0.0 {
         format_money(price, true).trim_start_matches('$').to_owned()
     } else {
         "N/A".to_owned()
     };
-    let (change, period) = signal_change_for_timeframe(signal, timeframe);
+    let (change, period) = signal_change_for_timeframe(signal, timeframe, candles);
     let change = change.map_or_else(|| "N/A".to_owned(), format_percentage);
     (price, format!("{change} {period}"))
 }
@@ -346,6 +366,7 @@ pub fn signal_market_values(signal: &TokenSignal, timeframe: Option<&str>) -> (S
 fn signal_change_for_timeframe(
     signal: &TokenSignal,
     timeframe: Option<&str>,
+    candles: Option<&[Vec<f64>]>,
 ) -> (Option<f64>, String) {
     let requested = timeframe.unwrap_or("24h");
     let dex = match timeframe {
@@ -363,11 +384,12 @@ fn signal_change_for_timeframe(
             None => return (None, requested.to_owned()),
         },
     };
-    match candle_change_for_span(&signal.candles, requested_seconds) {
-        Some((change, actual_seconds)) if actual_seconds >= requested_seconds => {
-            (Some(change), requested.to_owned())
-        }
-        Some((change, actual_seconds)) => format_available_period(actual_seconds)
+    let history = candles
+        .filter(|candles| !candles.is_empty())
+        .unwrap_or(&signal.candles);
+    match candle_change_for_span(history, requested_seconds) {
+        Some((change, _, true)) => (Some(change), requested.to_owned()),
+        Some((change, actual_seconds, false)) => format_available_period(actual_seconds)
             .map_or((None, requested.to_owned()), |period| {
                 (Some(change), period)
             }),
@@ -382,7 +404,7 @@ fn numeric_value(value: &Value) -> Option<f64> {
         .filter(|value| value.is_finite())
 }
 
-fn candle_change_for_span(candles: &[Vec<f64>], seconds: i64) -> Option<(f64, i64)> {
+fn candle_change_for_span(candles: &[Vec<f64>], seconds: i64) -> Option<(f64, i64, bool)> {
     let mut closes = candles
         .iter()
         .filter_map(|candle| {
@@ -397,17 +419,24 @@ fn candle_change_for_span(candles: &[Vec<f64>], seconds: i64) -> Option<(f64, i6
         .collect::<Vec<_>>();
     closes.sort_by_key(|(timestamp, _)| *timestamp);
     let (latest_timestamp, latest_close) = closes.last().copied()?;
-    if let Some((_, reference)) = closes
+    if let Some((timestamp, reference)) = closes
         .iter()
         .rev()
         .find(|(timestamp, _)| latest_timestamp.saturating_sub(*timestamp) >= seconds)
     {
-        return Some(((latest_close / reference - 1.0) * 100.0, seconds));
+        let actual = latest_timestamp.saturating_sub(*timestamp);
+        let slack = seconds.saturating_div(4).max(3_600);
+        if actual <= seconds.saturating_add(slack) {
+            return Some(((latest_close / reference - 1.0) * 100.0, seconds, true));
+        }
     }
     let (oldest_timestamp, oldest_close) = closes.first().copied()?;
     let actual = latest_timestamp.saturating_sub(oldest_timestamp);
-    (actual > 0 && oldest_close > 0.0)
-        .then_some(((latest_close / oldest_close - 1.0) * 100.0, actual))
+    (actual > 0 && oldest_close > 0.0).then_some((
+        (latest_close / oldest_close - 1.0) * 100.0,
+        actual,
+        false,
+    ))
 }
 
 fn format_available_period(seconds: i64) -> Option<String> {
@@ -929,6 +958,16 @@ pub fn format_signal_caption_for_period(
     now_unix: i64,
     timeframe: Option<&str>,
 ) -> String {
+    format_signal_caption_for_period_with_candles(signal, now_unix, timeframe, None)
+}
+
+#[must_use]
+pub fn format_signal_caption_for_period_with_candles(
+    signal: &TokenSignal,
+    now_unix: i64,
+    timeframe: Option<&str>,
+    candles: Option<&[Vec<f64>]>,
+) -> String {
     let pair = &signal.pair;
     let name = if pair.base_token.name.is_empty() {
         "Token"
@@ -1014,7 +1053,7 @@ pub fn format_signal_caption_for_period(
         || format!("#{}", signal.token.tag),
         |progress| format!("#{} (Pump @ {progress:.0}%)", signal.token.tag),
     );
-    let (change, period) = signal_change_for_timeframe(signal, timeframe);
+    let (change, period) = signal_change_for_timeframe(signal, timeframe, candles);
     let change = change.map_or_else(|| "N/A".to_owned(), format_percentage);
     let mut stats = vec![format!(
         "<b>{}</b> USD · {change} {period}",
@@ -1168,9 +1207,10 @@ mod tests {
         PairTransactions, PairVolume, PairWebsite, PumpMetadata, SignalQuery, SignalState,
         TokenAddress, TokenPair, TokenSignal, age_text, build_signal_keyboard, callback_text,
         choose_best_pair, choose_symbol_pair, detect_signal_query, format_money,
-        format_signal_caption, format_signal_caption_for_period, format_signal_quote,
-        has_usable_chart, is_usable_chart_candle, normalize_token_name, pair_rank,
-        signal_state_key, stable_signal_id, token_from_pair, token_image_url, token_socials,
+        format_signal_caption, format_signal_caption_for_period,
+        format_signal_caption_for_period_with_candles, format_signal_quote, has_usable_chart,
+        is_usable_chart_candle, normalize_token_name, pair_rank, signal_state_key,
+        stable_signal_id, token_from_pair, token_image_url, token_socials,
     };
     use crate::locale::Locale;
 
@@ -1362,7 +1402,7 @@ mod tests {
         let mut signal = signal();
         signal.candles = vec![
             vec![1_700_000_000.0, 1.0, 1.0, 1.0, 100.0],
-            vec![1_700_604_800.0, 2.0, 2.0, 2.0, 125.0],
+            vec![1_701_987_200.0, 2.0, 2.0, 2.0, 125.0],
             vec![1_702_592_000.0, 3.0, 3.0, 3.0, 130.0],
         ];
         let weekly = format_signal_quote(&signal, Some("7d"));
@@ -1400,7 +1440,32 @@ mod tests {
         let caption = format_signal_caption_for_period(&signal, 1_700_864_000, Some("1y"));
         assert!(caption.contains("+25% 10d"), "{caption}");
         let three_day = format_signal_quote(&signal, Some("3d"));
-        assert!(three_day.contains("+25% 3d"), "{three_day}");
+        assert!(three_day.contains("+25% 10d"), "{three_day}");
+        signal.candles = vec![
+            vec![1_700_604_800.0, 1.0, 1.0, 1.0, 100.0],
+            vec![1_700_864_000.0, 2.0, 2.0, 2.0, 125.0],
+        ];
+        let covered = format_signal_quote(&signal, Some("3d"));
+        assert!(covered.contains("+25% 3d"), "{covered}");
+    }
+
+    #[test]
+    fn period_change_candles_do_not_replace_ath_or_age() {
+        let mut signal = signal();
+        signal.pair.pair_created_at = json!(1_700_000_000_000_i64);
+        let hour = vec![
+            vec![1_719_996_400.0, 0.01, 0.02, 0.01, 0.012],
+            vec![1_720_000_000.0, 0.012, 0.013, 0.011, 0.0106],
+        ];
+        let caption = format_signal_caption_for_period_with_candles(
+            &signal,
+            1_720_000_000,
+            Some("7d"),
+            Some(hour.as_slice()),
+        );
+        assert!(caption.contains("ATH <b>$2.50B"), "{caption}");
+        assert!(caption.contains("231d"), "{caption}");
+        assert!(caption.contains("-11.7% 1h"), "{caption}");
     }
 
     #[test]

@@ -925,7 +925,12 @@ where
         period: &str,
         now: i64,
     ) -> Result<Vec<Vec<f64>>, String> {
-        Ok(self.load_period_history(signal, period, now)?.windowed)
+        let history = self.load_period_history(signal, period, now)?;
+        if history.windowed.is_empty() {
+            Ok(history.idle_pump_candles(now))
+        } else {
+            Ok(history.windowed)
+        }
     }
 
     pub fn render_period_photo(
@@ -936,26 +941,14 @@ where
     ) -> Result<Vec<u8>, String> {
         let history = self.load_period_history(signal, period, now)?;
         if history.windowed.is_empty() {
-            if history.pump_history
-                && let Some(price) = history.last_known
-            {
-                let flat = vec![
-                    vec![
-                        (now - history.range_seconds) as f64,
-                        price,
-                        price,
-                        price,
-                        price,
-                        0.0,
-                    ],
-                    vec![now as f64, price, price, price, price, 0.0],
-                ];
+            let flat = history.idle_pump_candles(now);
+            if !flat.is_empty() {
                 let title = format!(
                     "{} · {period}\nLast available trade price",
                     signal.pair.base_token.symbol
                 );
                 let mut pair = signal.pair.clone();
-                pair.price_usd = json!(price);
+                pair.price_usd = json!(flat[1][4]);
                 return render_price_chart(&pair, &flat, Some(&title), None, 1280, 900);
             }
             return Err("requested token history unavailable".into());
@@ -1083,6 +1076,25 @@ struct PeriodHistory {
     last_known: Option<f64>,
     pump_history: bool,
     range_seconds: i64,
+}
+
+impl PeriodHistory {
+    fn idle_pump_candles(&self, now: i64) -> Vec<Vec<f64>> {
+        match (self.pump_history, self.last_known) {
+            (true, Some(price)) => vec![
+                vec![
+                    (now - self.range_seconds) as f64,
+                    price,
+                    price,
+                    price,
+                    price,
+                    0.0,
+                ],
+                vec![now as f64, price, price, price, price, 0.0],
+            ],
+            _ => Vec::new(),
+        }
+    }
 }
 
 fn flexible_number(value: &Value) -> Option<f64> {
@@ -1727,6 +1739,13 @@ mod tests {
                     .starts_with(b"\x89PNG")
             );
         }
+        let mut idle = TokenSignalAdapter::new(
+            PumpHistory(json!([candle(1_799_900_000_000_i64)]), "1m"),
+            Cache::default(),
+        );
+        let idle_candles = idle.period_candles(&signal, "1h", 1_800_000_000)?;
+        assert_eq!(idle_candles.len(), 2);
+        assert_eq!(idle_candles[0][4], idle_candles[1][4]);
         for (period, interval) in [
             ("1h", "1m"),
             ("1d", "5m"),
