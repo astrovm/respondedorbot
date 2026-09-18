@@ -5630,6 +5630,7 @@ mod tests {
                 .is_err()
         );
         assert!(failing_source.load_selection("market-key").is_err());
+        assert!(failing_source.take_selection("market-key").is_err());
         assert!(failing_source.clear_selection("market-key").is_err());
         assert!(source.render_chart(&chart, 1_700_000_000).is_err());
         // The resolver intentionally leaves unknown identities without a

@@ -308,6 +308,12 @@ mod tests {
         })
     }
 
+    #[test]
+    fn cache_take_matches_empty_stub_contract() {
+        let mut cache = Cache;
+        assert_eq!(cache.take("synthetic"), Ok(None));
+    }
+
     fn events() -> &'static str {
         r#"[{"title":"Election","slug":"election","liquidity":1000,"markets":[{"groupItemTitle":"A","outcomes":["Yes","No"],"outcomePrices":[0.4,0.6],"clobTokenIds":["a","a-no"]},{"groupItemTitle":"B","outcomes":["Yes","No"],"outcomePrices":[0.6,0.4],"clobTokenIds":["b","b-no"]}]}]"#
     }

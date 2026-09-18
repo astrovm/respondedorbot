@@ -508,6 +508,12 @@ mod tests {
         })
     }
 
+    #[test]
+    fn cache_take_matches_empty_stub_contract() {
+        let mut cache = Cache::default();
+        assert_eq!(cache.take("synthetic"), Ok(None));
+    }
+
     fn chart() -> &'static str {
         r#"{"chart":{"result":[{"meta":{"symbol":"BZ=F","regularMarketPrice":98.15,"chartPreviousClose":107.6,"currency":"USD"},"indicators":{"quote":[{"close":[107.6,98.15]}]}}]}}"#
     }

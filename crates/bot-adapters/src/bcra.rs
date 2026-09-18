@@ -801,6 +801,14 @@ mod tests {
             Ok(self.values.remove(k))
         }
     }
+
+    #[test]
+    fn cache_take_removes_values() {
+        let mut cache = Cache::default();
+        cache.values.insert("k".to_owned(), "v".to_owned());
+        assert_eq!(cache.take("k"), Ok(Some("v".to_owned())));
+        assert_eq!(cache.take("k"), Ok(None));
+    }
     struct Transport {
         responses: RefCell<VecDeque<Result<HttpResponse, TransportFailureKind>>>,
     }
@@ -944,6 +952,10 @@ mod tests {
         let mut diagnostics = Vec::new();
         let mut cache = FailingCache;
         assert!(read(&mut cache, "synthetic", &mut diagnostics).is_none());
+        assert_eq!(
+            RequestCache::take(&mut cache, "synthetic"),
+            Err("synthetic read failure")
+        );
         store(
             &mut cache,
             "synthetic",

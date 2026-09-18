@@ -583,6 +583,12 @@ mod tests {
     }
 
     #[test]
+    fn cache_take_matches_empty_stub_contract() {
+        let mut cache = Cache::default();
+        assert_eq!(cache.take("synthetic"), Ok(None));
+    }
+
+    #[test]
     fn parses_numeric_and_string_prices_and_missing_payloads() {
         for (body, expected) in [
             (

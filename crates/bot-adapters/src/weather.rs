@@ -470,6 +470,12 @@ mod tests {
         })
     }
 
+    #[test]
+    fn cache_take_matches_empty_stub_contract() {
+        let mut cache = Cache::default();
+        assert_eq!(cache.take("synthetic"), Ok(None));
+    }
+
     fn forecast() -> &'static str {
         r#"{"current":{"time":"2026-01-02T10:00"},"hourly":{"time":["2026-01-02T10:00"],"apparent_temperature":[19.5],"precipitation_probability":[20],"weather_code":[1],"cloud_cover":[30],"visibility":[15000]}}"#
     }

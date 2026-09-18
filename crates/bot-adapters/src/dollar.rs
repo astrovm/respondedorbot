@@ -533,6 +533,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cache_take_removes_values_and_propagates_read_failures() {
+        let mut cache = Cache::default();
+        cache
+            .values
+            .insert("synthetic".to_owned(), "value".to_owned());
+        assert_eq!(cache.take("synthetic"), Ok(Some("value".to_owned())));
+        assert_eq!(cache.take("synthetic"), Ok(None));
+        cache.fail_get = true;
+        assert_eq!(cache.take("synthetic"), Err("synthetic cache read failure"));
+    }
+
     impl DollarCache for Cache {
         fn set_if_absent(
             &mut self,
