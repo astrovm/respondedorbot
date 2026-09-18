@@ -796,6 +796,10 @@ mod tests {
             self.values.insert(k.to_owned(), v.to_owned());
             Ok(())
         }
+
+        fn take(&mut self, k: &str) -> Result<Option<String>, Self::Error> {
+            Ok(self.values.remove(k))
+        }
     }
     struct Transport {
         responses: RefCell<VecDeque<Result<HttpResponse, TransportFailureKind>>>,
@@ -930,6 +934,10 @@ mod tests {
 
             fn set(&mut self, _key: &str, _value: &str, _ttl: i64) -> Result<(), Self::Error> {
                 Err("synthetic write failure")
+            }
+
+            fn take(&mut self, _key: &str) -> Result<Option<String>, Self::Error> {
+                Err("synthetic read failure")
             }
         }
 

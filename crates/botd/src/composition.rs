@@ -474,6 +474,10 @@ where
         self.cache.get(key).map_err(|error| error.to_string())
     }
 
+    fn take_selection(&mut self, key: &str) -> Result<Option<String>, String> {
+        self.cache.take(key).map_err(|error| error.to_string())
+    }
+
     fn clear_selection(&mut self, key: &str) -> Result<(), String> {
         self.cache
             .set(key, &Value::Null.to_string(), 1)
@@ -3285,6 +3289,10 @@ mod tests {
         fn set(&mut self, _key: &str, _value: &str, _ttl_seconds: i64) -> Result<(), Self::Error> {
             Ok(())
         }
+
+        fn take(&mut self, _key: &str) -> Result<Option<String>, Self::Error> {
+            Ok(None)
+        }
     }
 
     impl bot_adapters::dollar::DollarCache for WeatherCacheStub {
@@ -5588,6 +5596,10 @@ mod tests {
 
             fn set(&mut self, _: &str, _: &str, _: i64) -> Result<(), Self::Error> {
                 Err("synthetic cache set failure")
+            }
+
+            fn take(&mut self, _: &str) -> Result<Option<String>, Self::Error> {
+                Err("synthetic cache take failure")
             }
         }
         let failing_stocks = super::YahooStockPriceSource {

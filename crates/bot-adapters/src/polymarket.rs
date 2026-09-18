@@ -295,6 +295,10 @@ mod tests {
         fn set(&mut self, _key: &str, _value: &str, _ttl_seconds: i64) -> Result<(), Self::Error> {
             Ok(())
         }
+
+        fn take(&mut self, _key: &str) -> Result<Option<String>, Self::Error> {
+            Ok(None)
+        }
     }
 
     fn response(body: &str) -> Result<HttpResponse, TransportFailureKind> {

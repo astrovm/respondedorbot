@@ -566,6 +566,10 @@ mod tests {
             self.writes.push((key.to_owned(), value.to_owned(), ttl));
             Ok(())
         }
+
+        fn take(&mut self, _key: &str) -> Result<Option<String>, Self::Error> {
+            Ok(None)
+        }
     }
 
     impl CoinMarketCapTransport for Transport {

@@ -523,6 +523,14 @@ mod tests {
                 .push((key.to_owned(), value.to_owned(), ttl_seconds, false));
             Ok(())
         }
+
+        fn take(&mut self, key: &str) -> Result<Option<String>, Self::Error> {
+            if self.fail_get {
+                Err("synthetic cache read failure")
+            } else {
+                Ok(self.values.remove(key))
+            }
+        }
     }
 
     impl DollarCache for Cache {

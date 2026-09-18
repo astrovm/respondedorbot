@@ -457,6 +457,10 @@ mod tests {
                 .push((key.to_owned(), value.to_owned(), ttl_seconds));
             Ok(())
         }
+
+        fn take(&mut self, _key: &str) -> Result<Option<String>, Self::Error> {
+            Ok(None)
+        }
     }
 
     fn response(body: &str) -> Result<HttpResponse, TransportFailureKind> {

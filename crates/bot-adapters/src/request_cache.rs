@@ -20,6 +20,10 @@ pub trait RequestCache {
 
     /// A zero TTL stores the value without expiration. Positive TTLs expire normally.
     fn set(&mut self, key: &str, value: &str, ttl_seconds: i64) -> Result<(), Self::Error>;
+
+    /// Atomically reads and removes a key. Concurrent takers are serialized:
+    /// exactly one of them observes the value.
+    fn take(&mut self, key: &str) -> Result<Option<String>, Self::Error>;
 }
 
 impl RequestCache for RedisJsonCache {
@@ -32,6 +36,10 @@ impl RequestCache for RedisJsonCache {
     fn set(&mut self, key: &str, value: &str, ttl_seconds: i64) -> Result<(), Self::Error> {
         RedisJsonCache::set(self, key, value, (ttl_seconds != 0).then_some(ttl_seconds))
             .map(|_stored| ())
+    }
+
+    fn take(&mut self, key: &str) -> Result<Option<String>, Self::Error> {
+        RedisJsonCache::take(self, key)
     }
 }
 
@@ -206,6 +214,7 @@ mod tests {
     struct Cache {
         gets: VecDeque<Result<Option<String>, &'static str>>,
         sets: VecDeque<Result<(), &'static str>>,
+        takes: VecDeque<Result<Option<String>, &'static str>>,
         writes: Vec<(String, String, i64)>,
     }
 
@@ -220,6 +229,10 @@ mod tests {
             self.writes
                 .push((key.to_owned(), value.to_owned(), ttl_seconds));
             self.sets.pop_front().unwrap_or(Ok(()))
+        }
+
+        fn take(&mut self, _key: &str) -> Result<Option<String>, Self::Error> {
+            self.takes.pop_front().unwrap_or(Ok(None))
         }
     }
 
