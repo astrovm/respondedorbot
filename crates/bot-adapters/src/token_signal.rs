@@ -919,12 +919,67 @@ where
         .collect()
     }
 
+    pub fn period_candles(
+        &mut self,
+        signal: &TokenSignal,
+        period: &str,
+        now: i64,
+    ) -> Result<Vec<Vec<f64>>, String> {
+        Ok(self.load_period_history(signal, period, now)?.windowed)
+    }
+
     pub fn render_period_photo(
         &mut self,
         signal: &TokenSignal,
         period: &str,
         now: i64,
     ) -> Result<Vec<u8>, String> {
+        let history = self.load_period_history(signal, period, now)?;
+        if history.windowed.is_empty() {
+            if history.pump_history
+                && let Some(price) = history.last_known
+            {
+                let flat = vec![
+                    vec![
+                        (now - history.range_seconds) as f64,
+                        price,
+                        price,
+                        price,
+                        price,
+                        0.0,
+                    ],
+                    vec![now as f64, price, price, price, price, 0.0],
+                ];
+                let title = format!(
+                    "{} · {period}\nLast available trade price",
+                    signal.pair.base_token.symbol
+                );
+                let mut pair = signal.pair.clone();
+                pair.price_usd = json!(price);
+                return render_price_chart(&pair, &flat, Some(&title), None, 1280, 900);
+            }
+            return Err("requested token history unavailable".into());
+        }
+        let title = format!(
+            "{} · {period}\nAvailable history",
+            signal.pair.base_token.symbol
+        );
+        render_price_chart(
+            &signal.pair,
+            &history.windowed,
+            Some(&title),
+            None,
+            1280,
+            900,
+        )
+    }
+
+    fn load_period_history(
+        &mut self,
+        signal: &TokenSignal,
+        period: &str,
+        now: i64,
+    ) -> Result<PeriodHistory, String> {
         let range =
             bot_core::price_queries::ChartPeriod::parse(period).ok_or("invalid chart period")?;
         let (unit, aggregate, step) = match range.seconds {
@@ -982,38 +1037,16 @@ where
             .filter(|row| row[0] < (now - range.seconds) as f64)
             .max_by(|a, b| a[0].total_cmp(&b[0]))
             .map(|row| row[4]);
-        let candles: Vec<_> = candles
+        let windowed = candles
             .into_iter()
             .filter(|row| row[0] >= (now - range.seconds) as f64 && row[0] <= now as f64)
             .collect();
-        if candles.is_empty() {
-            if pump_history && let Some(price) = last_known {
-                let flat = vec![
-                    vec![
-                        (now - range.seconds) as f64,
-                        price,
-                        price,
-                        price,
-                        price,
-                        0.0,
-                    ],
-                    vec![now as f64, price, price, price, price, 0.0],
-                ];
-                let title = format!(
-                    "{} · {period}\nLast available trade price",
-                    signal.pair.base_token.symbol
-                );
-                let mut pair = signal.pair.clone();
-                pair.price_usd = json!(price);
-                return render_price_chart(&pair, &flat, Some(&title), None, 1280, 900);
-            }
-            return Err("requested token history unavailable".into());
-        }
-        let title = format!(
-            "{} · {period}\nAvailable history",
-            signal.pair.base_token.symbol
-        );
-        render_price_chart(&signal.pair, &candles, Some(&title), None, 1280, 900)
+        Ok(PeriodHistory {
+            windowed,
+            last_known,
+            pump_history,
+            range_seconds: range.seconds,
+        })
     }
 
     pub fn load_state(&mut self, signal_id: &str) -> Result<Option<SignalState>, String> {
@@ -1043,6 +1076,13 @@ where
             .set(&key, &encoded, SIGNAL_STATE_TTL_SECONDS)
             .map_err(|error| error.to_string())
     }
+}
+
+struct PeriodHistory {
+    windowed: Vec<Vec<f64>>,
+    last_known: Option<f64>,
+    pump_history: bool,
+    range_seconds: i64,
 }
 
 fn flexible_number(value: &Value) -> Option<f64> {
@@ -1765,6 +1805,12 @@ mod tests {
                     .render_period_photo(&signal, period, 1_800_000_000)?
                     .starts_with(b"\x89PNG")
             );
+            assert!(
+                !adapter
+                    .period_candles(&signal, period, 1_800_000_000)?
+                    .is_empty(),
+                "{period}"
+            );
         }
         let calls = adapter.transport.0.borrow();
         assert!(calls[0].contains("fixed-pool/ohlcv/minute"));
@@ -1774,6 +1820,11 @@ mod tests {
         assert!(
             adapter
                 .render_period_photo(&signal, "bad", 1_800_000_000)
+                .is_err()
+        );
+        assert!(
+            adapter
+                .period_candles(&signal, "bad", 1_800_000_000)
                 .is_err()
         );
         assert!(

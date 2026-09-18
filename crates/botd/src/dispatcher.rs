@@ -818,6 +818,15 @@ pub trait TokenSignalSource {
         Err("requested token history unavailable".into())
     }
 
+    fn period_candles(
+        &mut self,
+        _signal: &TokenSignal,
+        _period: &str,
+        _now: i64,
+    ) -> Result<Vec<Vec<f64>>, String> {
+        Ok(Vec::new())
+    }
+
     fn load_state(&mut self, signal_id: &str) -> Result<Option<SignalState>, String>;
 
     fn save_state(&mut self, signal_id: &str, state: &SignalState) -> Result<(), String>;
@@ -2083,6 +2092,8 @@ where
                         return Ok(Some(outcome));
                     }
                 } else if let Some(signal) = token_signal {
+                    let signal =
+                        self.signal_with_period_candles(&signal, timeframe.as_deref(), timestamp);
                     let quote =
                         bot_core::token_signals::format_signal_quote(&signal, timeframe.as_deref());
                     lines.push(quote);
@@ -2182,6 +2193,23 @@ where
         )
     }
 
+    fn signal_with_period_candles(
+        &mut self,
+        signal: &TokenSignal,
+        timeframe: Option<&str>,
+        timestamp: i64,
+    ) -> TokenSignal {
+        let mut signal = signal.clone();
+        let period = timeframe.unwrap_or("24h");
+        if let Some(source) = self.token_signal_source.as_mut()
+            && let Ok(candles) = source.period_candles(&signal, period, timestamp)
+            && !candles.is_empty()
+        {
+            signal.candles = candles;
+        }
+        signal
+    }
+
     fn try_send_token_signal_photo(
         &mut self,
         request: TokenSignalPhotoRequest<'_>,
@@ -2195,7 +2223,8 @@ where
             locale,
             timestamp,
         } = request;
-        let caption = format_signal_caption_for_period(signal, timestamp, timeframe);
+        let caption_signal = self.signal_with_period_candles(signal, timeframe, timestamp);
+        let caption = format_signal_caption_for_period(&caption_signal, timestamp, timeframe);
         let photo = match self.render_token_signal_photo(signal, timeframe, timestamp) {
             Ok(photo) => photo,
             Err(_) => {
@@ -2530,13 +2559,15 @@ where
         };
         let photo =
             self.render_token_signal_photo(&signal, state.chart_period.as_deref(), timestamp);
+        let caption_signal =
+            self.signal_with_period_candles(&signal, state.chart_period.as_deref(), timestamp);
         let edited = match photo {
             Ok(photo) => match self.actions.try_edit(TelegramAction::EditMessagePhoto {
                 chat_id: ChatId(chat_id),
                 message_id: MessageId(context.message_id),
                 photo: photo.into(),
                 caption: format_signal_caption_for_period(
-                    &signal,
+                    &caption_signal,
                     timestamp,
                     state.chart_period.as_deref(),
                 ),
@@ -6528,6 +6559,18 @@ mod tests {
             Ok(b"stateful-token-card".to_vec())
         }
 
+        fn period_candles(
+            &mut self,
+            _signal: &TokenSignal,
+            _period: &str,
+            _now: i64,
+        ) -> Result<Vec<Vec<f64>>, String> {
+            Ok(vec![
+                vec![1_700_000_000.0, 1.0, 1.0, 1.0, 100.0],
+                vec![1_700_864_000.0, 2.0, 2.0, 2.0, 125.0],
+            ])
+        }
+
         fn load_state(&mut self, _signal_id: &str) -> Result<Option<SignalState>, String> {
             Ok(self.state.borrow().clone())
         }
@@ -6601,6 +6644,15 @@ mod tests {
             _now: i64,
         ) -> Result<Vec<u8>, String> {
             self.photo.clone()
+        }
+
+        fn period_candles(
+            &mut self,
+            _signal: &TokenSignal,
+            _period: &str,
+            _now: i64,
+        ) -> Result<Vec<Vec<f64>>, String> {
+            Err("synthetic period candles failure".into())
         }
 
         fn load_state(&mut self, _signal_id: &str) -> Result<Option<SignalState>, String> {

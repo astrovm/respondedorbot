@@ -12,6 +12,7 @@ use url::Url;
 use url::form_urlencoded;
 
 use crate::locale::Locale;
+use crate::price_queries::ChartPeriod;
 use crate::telegram_actions::{CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup};
 
 /// Zero means persistent button state; quote/history caches still expire.
@@ -323,7 +324,7 @@ pub fn format_signal_quote(signal: &TokenSignal, timeframe: Option<&str>) -> Str
         numeric_value(&signal.pair.price_usd).unwrap_or(f64::NAN),
         "USD",
         change,
-        period,
+        &period,
     )
 }
 
@@ -342,36 +343,35 @@ pub fn signal_market_values(signal: &TokenSignal, timeframe: Option<&str>) -> (S
     (price, format!("{change} {period}"))
 }
 
-fn signal_change_for_timeframe<'period>(
+fn signal_change_for_timeframe(
     signal: &TokenSignal,
-    timeframe: Option<&'period str>,
-) -> (Option<f64>, &'period str) {
-    match timeframe {
-        Some("1h") => (
-            numeric_value(&signal.pair.price_change.h1)
-                .or_else(|| candle_change(&signal.candles, 3_600)),
-            "1h",
-        ),
-        Some("24h") => (
-            numeric_value(&signal.pair.price_change.h24)
-                .or_else(|| candle_change(&signal.candles, 86_400)),
-            "24h",
-        ),
-        Some("1d") => (
-            numeric_value(&signal.pair.price_change.h24)
-                .or_else(|| candle_change(&signal.candles, 86_400)),
-            "1d",
-        ),
-        // DexScreener publishes no 7d/30d rollups, so those periods always
-        // resolve from candle history when it covers them.
-        Some("7d") => (candle_change(&signal.candles, 7 * 86_400), "7d"),
-        Some("30d") => (candle_change(&signal.candles, 30 * 86_400), "30d"),
-        Some(period) => (None, period),
-        None => (
-            numeric_value(&signal.pair.price_change.h24)
-                .or_else(|| candle_change(&signal.candles, 86_400)),
-            "24h",
-        ),
+    timeframe: Option<&str>,
+) -> (Option<f64>, String) {
+    let requested = timeframe.unwrap_or("24h");
+    let dex = match timeframe {
+        Some("1h") => numeric_value(&signal.pair.price_change.h1),
+        Some("24h") | Some("1d") | None => numeric_value(&signal.pair.price_change.h24),
+        _ => None,
+    };
+    if let Some(change) = dex {
+        return (Some(change), requested.to_owned());
+    }
+    let requested_seconds = match timeframe {
+        None => 86_400,
+        Some(period) => match ChartPeriod::parse(period) {
+            Some(parsed) => parsed.seconds,
+            None => return (None, requested.to_owned()),
+        },
+    };
+    match candle_change_for_span(&signal.candles, requested_seconds) {
+        Some((change, actual_seconds)) if actual_seconds >= requested_seconds => {
+            (Some(change), requested.to_owned())
+        }
+        Some((change, actual_seconds)) => format_available_period(actual_seconds)
+            .map_or((None, requested.to_owned()), |period| {
+                (Some(change), period)
+            }),
+        None => (None, requested.to_owned()),
     }
 }
 
@@ -382,7 +382,7 @@ fn numeric_value(value: &Value) -> Option<f64> {
         .filter(|value| value.is_finite())
 }
 
-fn candle_change(candles: &[Vec<f64>], seconds: i64) -> Option<f64> {
+fn candle_change_for_span(candles: &[Vec<f64>], seconds: i64) -> Option<(f64, i64)> {
     let mut closes = candles
         .iter()
         .filter_map(|candle| {
@@ -397,12 +397,32 @@ fn candle_change(candles: &[Vec<f64>], seconds: i64) -> Option<f64> {
         .collect::<Vec<_>>();
     closes.sort_by_key(|(timestamp, _)| *timestamp);
     let (latest_timestamp, latest_close) = closes.last().copied()?;
-    let reference = closes
+    if let Some((_, reference)) = closes
         .iter()
         .rev()
         .find(|(timestamp, _)| latest_timestamp.saturating_sub(*timestamp) >= seconds)
-        .map(|(_, close)| *close)?;
-    Some((latest_close / reference - 1.0) * 100.0)
+    {
+        return Some(((latest_close / reference - 1.0) * 100.0, seconds));
+    }
+    let (oldest_timestamp, oldest_close) = closes.first().copied()?;
+    let actual = latest_timestamp.saturating_sub(oldest_timestamp);
+    (actual > 0 && oldest_close > 0.0)
+        .then_some(((latest_close / oldest_close - 1.0) * 100.0, actual))
+}
+
+fn format_available_period(seconds: i64) -> Option<String> {
+    let seconds = seconds.max(0);
+    if seconds >= 365 * 86_400 {
+        Some(format!("{}y", seconds / (365 * 86_400)))
+    } else if seconds >= 86_400 {
+        Some(format!("{}d", seconds / 86_400))
+    } else if seconds >= 3_600 {
+        Some(format!("{}h", seconds / 3_600))
+    } else if seconds >= 60 {
+        Some(format!("{}min", seconds / 60))
+    } else {
+        None
+    }
 }
 
 fn number(value: &Value) -> f64 {
@@ -1354,16 +1374,65 @@ mod tests {
     }
 
     #[test]
-    fn short_candle_history_stays_honest_for_longer_periods() {
+    fn short_candle_history_uses_the_available_span_instead_of_na() {
         let mut signal = signal();
         signal.candles = vec![
             vec![1_700_000_000.0, 1.0, 1.0, 1.0, 100.0],
             vec![1_700_086_400.0, 2.0, 2.0, 2.0, 125.0],
         ];
         let weekly = format_signal_quote(&signal, Some("7d"));
-        assert!(weekly.contains("N/A 7d"), "{weekly}");
+        assert!(weekly.contains("+25% 1d"), "{weekly}");
         let monthly = format_signal_quote(&signal, Some("30d"));
-        assert!(monthly.contains("N/A 30d"), "{monthly}");
+        assert!(monthly.contains("+25% 1d"), "{monthly}");
+        let year = format_signal_quote(&signal, Some("1y"));
+        assert!(year.contains("+25% 1d"), "{year}");
+    }
+
+    #[test]
+    fn requested_year_labels_the_available_day_span() {
+        let mut signal = signal();
+        signal.candles = vec![
+            vec![1_700_000_000.0, 1.0, 1.0, 1.0, 100.0],
+            vec![1_700_864_000.0, 2.0, 2.0, 2.0, 125.0],
+        ];
+        let year = format_signal_quote(&signal, Some("1y"));
+        assert!(year.contains("+25% 10d"), "{year}");
+        let caption = format_signal_caption_for_period(&signal, 1_700_864_000, Some("1y"));
+        assert!(caption.contains("+25% 10d"), "{caption}");
+        let three_day = format_signal_quote(&signal, Some("3d"));
+        assert!(three_day.contains("+25% 3d"), "{three_day}");
+    }
+
+    #[test]
+    fn unparsed_periods_stay_unavailable() {
+        let quote = format_signal_quote(&signal(), Some("nope"));
+        assert!(quote.contains("N/A nope"), "{quote}");
+    }
+
+    #[test]
+    fn available_span_labels_use_years_hours_and_minutes() {
+        let mut signal = signal();
+        signal.pair.price_change.h1 = serde_json::Value::Null;
+        signal.candles = vec![
+            vec![1_700_000_000.0, 1.0, 1.0, 1.0, 100.0],
+            vec![1_734_560_000.0, 2.0, 2.0, 2.0, 120.0],
+        ];
+        let five_year = format_signal_quote(&signal, Some("5y"));
+        assert!(five_year.contains("+20% 1y"), "{five_year}");
+
+        signal.candles = vec![
+            vec![1_700_000_000.0, 1.0, 1.0, 1.0, 100.0],
+            vec![1_700_036_000.0, 2.0, 2.0, 2.0, 110.0],
+        ];
+        let weekly = format_signal_quote(&signal, Some("7d"));
+        assert!(weekly.contains("+10% 10h"), "{weekly}");
+
+        signal.candles = vec![
+            vec![1_700_000_000.0, 1.0, 1.0, 1.0, 100.0],
+            vec![1_700_000_300.0, 2.0, 2.0, 2.0, 110.0],
+        ];
+        let hourly = format_signal_quote(&signal, Some("1h"));
+        assert!(hourly.contains("+10% 5min"), "{hourly}");
     }
 
     #[test]
