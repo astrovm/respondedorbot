@@ -800,6 +800,18 @@ mod tests {
         fn take(&mut self, k: &str) -> Result<Option<String>, Self::Error> {
             Ok(self.values.remove(k))
         }
+
+        fn claim(&mut self, k: &str, v: &str, _: i64) -> Result<bool, Self::Error> {
+            if self.fail_sets {
+                return Err("synthetic cache write failure");
+            }
+            if self.values.contains_key(k) {
+                Ok(false)
+            } else {
+                self.values.insert(k.to_owned(), v.to_owned());
+                Ok(true)
+            }
+        }
     }
 
     #[test]
@@ -808,6 +820,8 @@ mod tests {
         cache.values.insert("k".to_owned(), "v".to_owned());
         assert_eq!(cache.take("k"), Ok(Some("v".to_owned())));
         assert_eq!(cache.take("k"), Ok(None));
+        assert_eq!(cache.claim("k", "v", 60), Ok(true));
+        assert_eq!(cache.claim("k", "v", 60), Ok(false));
     }
     struct Transport {
         responses: RefCell<VecDeque<Result<HttpResponse, TransportFailureKind>>>,
@@ -947,6 +961,10 @@ mod tests {
             fn take(&mut self, _key: &str) -> Result<Option<String>, Self::Error> {
                 Err("synthetic read failure")
             }
+
+            fn claim(&mut self, _key: &str, _value: &str, _ttl: i64) -> Result<bool, Self::Error> {
+                Err("synthetic write failure")
+            }
         }
 
         let mut diagnostics = Vec::new();
@@ -955,6 +973,10 @@ mod tests {
         assert_eq!(
             RequestCache::take(&mut cache, "synthetic"),
             Err("synthetic read failure")
+        );
+        assert_eq!(
+            RequestCache::claim(&mut cache, "synthetic", "1", 60),
+            Err("synthetic write failure")
         );
         store(
             &mut cache,

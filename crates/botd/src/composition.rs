@@ -478,6 +478,12 @@ where
         self.cache.take(key).map_err(|error| error.to_string())
     }
 
+    fn claim(&mut self, key: &str, value: &str, ttl_seconds: i64) -> Result<bool, String> {
+        self.cache
+            .claim(key, value, ttl_seconds)
+            .map_err(|error| error.to_string())
+    }
+
     fn clear_selection(&mut self, key: &str) -> Result<(), String> {
         self.cache
             .set(key, &Value::Null.to_string(), 1)
@@ -3293,6 +3299,15 @@ mod tests {
         fn take(&mut self, _key: &str) -> Result<Option<String>, Self::Error> {
             Ok(None)
         }
+
+        fn claim(
+            &mut self,
+            _key: &str,
+            _value: &str,
+            _ttl_seconds: i64,
+        ) -> Result<bool, Self::Error> {
+            Ok(true)
+        }
     }
 
     impl bot_adapters::dollar::DollarCache for WeatherCacheStub {
@@ -5585,6 +5600,7 @@ mod tests {
         assert_eq!(source.save_selection("market-key", "value", 60), Ok(()));
         assert_eq!(source.load_selection("market-key"), Ok(None));
         assert_eq!(source.take_selection("market-key"), Ok(None));
+        assert_eq!(source.claim("market-key", "1", 60), Ok(true));
         assert_eq!(source.clear_selection("market-key"), Ok(()));
 
         struct FailingCache;
@@ -5601,6 +5617,10 @@ mod tests {
 
             fn take(&mut self, _: &str) -> Result<Option<String>, Self::Error> {
                 Err("synthetic cache take failure")
+            }
+
+            fn claim(&mut self, _: &str, _: &str, _: i64) -> Result<bool, Self::Error> {
+                Err("synthetic cache claim failure")
             }
         }
         let failing_stocks = super::YahooStockPriceSource {
@@ -5631,6 +5651,7 @@ mod tests {
         );
         assert!(failing_source.load_selection("market-key").is_err());
         assert!(failing_source.take_selection("market-key").is_err());
+        assert!(failing_source.claim("market-key", "1", 60).is_err());
         assert!(failing_source.clear_selection("market-key").is_err());
         assert!(source.render_chart(&chart, 1_700_000_000).is_err());
         // The resolver intentionally leaves unknown identities without a

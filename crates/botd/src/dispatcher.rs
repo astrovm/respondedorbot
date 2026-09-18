@@ -388,6 +388,14 @@ struct StoredMarketSelection {
 // Zero stores menu state until it is consumed, without a time limit.
 const MARKET_SELECTION_TTL_SECONDS: i64 = 0;
 
+// An in-flight invoice marker lives long enough to swallow double taps
+// while still allowing an intentional repurchase shortly after.
+const TOPUP_INVOICE_CLAIM_TTL_SECONDS: i64 = 120;
+
+fn topup_invoice_claim_key(user_id: i64, pack_id: &str) -> String {
+    format!("topup_invoice:{user_id}:{pack_id}")
+}
+
 fn market_selection_key(selection_id: &str) -> String {
     format!("market_selection:{selection_id}")
 }
@@ -719,6 +727,13 @@ pub trait MarketPriceSource {
     /// serialized: exactly one of them observes the value, so a double-tapped
     /// inline button can only resolve into a single quote.
     fn take_selection(&mut self, _key: &str) -> Result<Option<String>, String> {
+        Err("market selection storage unavailable".to_owned())
+    }
+
+    /// Atomically stores a guard key only when absent. Concurrent claimants
+    /// are serialized: exactly one of them wins. Used for single-flight
+    /// guards such as one in-flight invoice per user and pack.
+    fn claim(&mut self, _key: &str, _value: &str, _ttl_seconds: i64) -> Result<bool, String> {
         Err("market selection storage unavailable".to_owned())
     }
 
@@ -2439,13 +2454,21 @@ where
             return Ok(DispatchOutcome::Handled);
         };
         if action == "del" {
-            let _receipt = self
+            // Best effort: a double-tapped delete removes an already gone
+            // message, which must not fail the update into retries.
+            if self
                 .actions
                 .execute(TelegramAction::DeleteMessage {
                     chat_id: ChatId(chat_id),
                     message_id: MessageId(context.message_id),
                 })
-                .map_err(DispatchError::Action)?;
+                .is_err()
+            {
+                self.state_diagnostics.push(format!(
+                    "callback delete failed chat_id={} message_id={}",
+                    context.chat_id, context.message_id
+                ));
+            }
             if let Some(source) = self.token_signal_source.as_mut()
                 && let Err(error) = source.clear_state(signal_id)
             {
@@ -3193,12 +3216,20 @@ where
         if parsed == TaskCallbackParse::Close {
             self.answer_callback_best_effort(context.callback_id.as_deref());
             if let Ok(chat_id) = context.chat_id.parse::<i64>() {
-                self.actions
+                // Best effort: see the signal delete handler above.
+                if self
+                    .actions
                     .execute(TelegramAction::DeleteMessage {
                         chat_id: ChatId(chat_id),
                         message_id: MessageId(context.message_id),
                     })
-                    .map_err(DispatchError::Action)?;
+                    .is_err()
+                {
+                    self.state_diagnostics.push(format!(
+                        "callback delete failed chat_id={} message_id={}",
+                        context.chat_id, context.message_id
+                    ));
+                }
             }
             return Ok(DispatchOutcome::Handled);
         }
@@ -3422,12 +3453,21 @@ where
             };
             self.answer_callback_best_effort(context.callback_id.as_deref());
             if allowed && let Ok(chat_id) = context.chat_id.parse::<i64>() {
-                self.actions
+                // Best effort: a double-tapped close deletes an already gone
+                // message, which must not fail the update into retries.
+                if self
+                    .actions
                     .execute(TelegramAction::DeleteMessage {
                         chat_id: ChatId(chat_id),
                         message_id: MessageId(context.message_id),
                     })
-                    .map_err(DispatchError::Action)?;
+                    .is_err()
+                {
+                    self.state_diagnostics.push(format!(
+                        "callback delete failed chat_id={} message_id={}",
+                        context.chat_id, context.message_id
+                    ));
+                }
             }
             return Ok(DispatchOutcome::Handled);
         }
@@ -3438,12 +3478,20 @@ where
             };
             self.answer_callback_best_effort(context.callback_id.as_deref());
             if page == "close" {
-                self.actions
+                // Best effort: see the signal delete handler above.
+                if self
+                    .actions
                     .execute(TelegramAction::DeleteMessage {
                         chat_id: ChatId(id),
                         message_id: MessageId(context.message_id),
                     })
-                    .map_err(DispatchError::Action)?;
+                    .is_err()
+                {
+                    self.state_diagnostics.push(format!(
+                        "callback delete failed chat_id={} message_id={}",
+                        context.chat_id, context.message_id
+                    ));
+                }
             } else {
                 let config = self
                     .config
@@ -3510,10 +3558,74 @@ where
                     Ok(DispatchOutcome::Handled)
                 }
                 TopupCallbackPlan::Invoice(plan) => {
-                    let sent = self
-                        .actions
-                        .try_invoice(plan.invoice)
-                        .map_err(DispatchError::Action)?;
+                    // One in-flight invoice per user and pack: a double tap
+                    // must not emit two independently payable invoices. The
+                    // marker expires on its own, so an intentional repurchase
+                    // stays possible.
+                    let claim_key = context.user_id.and_then(|user_id| {
+                        let pack_id = context.data.strip_prefix("topup:").unwrap_or_default();
+                        (!pack_id.is_empty()).then(|| topup_invoice_claim_key(user_id, pack_id))
+                    });
+                    let claimed = match claim_key.as_deref() {
+                        None => Ok(true),
+                        Some(claim_key) => self
+                            .market_price_source
+                            .as_mut()
+                            .map_or(Ok(true), |source| {
+                                source.claim(claim_key, "1", TOPUP_INVOICE_CLAIM_TTL_SECONDS)
+                            }),
+                    };
+                    let claimed = match claimed {
+                        Ok(claimed) => claimed,
+                        Err(error) => {
+                            self.state_diagnostics.push(format!(
+                                "topup invoice claim failed chat_id={} user_id={}: {error}",
+                                context.chat_id,
+                                context
+                                    .user_id
+                                    .map_or_else(String::new, |value| value.to_string()),
+                            ));
+                            true
+                        }
+                    };
+                    if !claimed {
+                        let text = match locale {
+                            bot_core::locale::Locale::Es => "ya te dejé la factura más arriba",
+                            bot_core::locale::Locale::En => "the invoice is already above",
+                        };
+                        if let Some(callback_id) = context.callback_id.as_deref() {
+                            let _receipt = self
+                                .actions
+                                .execute(TelegramAction::AnswerCallback {
+                                    callback_id: callback_id.to_owned(),
+                                    text: Some(text.to_owned()),
+                                    show_alert: false,
+                                })
+                                .map_err(DispatchError::Action)?;
+                        }
+                        return Ok(DispatchOutcome::Handled);
+                    }
+                    let release_claim = |dispatcher: &mut Self| {
+                        if let Some(claim_key) = claim_key.as_deref()
+                            && let Some(source) = dispatcher.market_price_source.as_mut()
+                            && let Err(error) = source.take_selection(claim_key)
+                        {
+                            dispatcher.state_diagnostics.push(format!(
+                                "topup invoice claim release failed chat_id={} key={claim_key}: {error}",
+                                context.chat_id,
+                            ));
+                        }
+                    };
+                    let sent = match self.actions.try_invoice(plan.invoice) {
+                        Ok(sent) => sent,
+                        Err(error) => {
+                            release_claim(self);
+                            return Err(DispatchError::Action(error));
+                        }
+                    };
+                    if !sent {
+                        release_claim(self);
+                    }
                     let answer = if sent {
                         plan.success_answer
                     } else {
@@ -3705,17 +3817,25 @@ where
                     username,
                     context.data,
                 ));
-                self.answer_callback_best_effort(context.callback_id.as_deref());
-                let text = match locale {
-                    bot_core::locale::Locale::Es => "este comando es solo para admins del grupo",
-                    bot_core::locale::Locale::En => "Only group admins can use this command",
-                };
-                let mut response = SendMessage::new(chat_id, text);
-                response.reply_to_message_id = Some(message_id);
-                let _receipt = self
-                    .actions
-                    .execute(TelegramAction::SendMessage(response))
-                    .map_err(DispatchError::Action)?;
+                // A toast answers the tapper's own callback: a double tap
+                // shows the warning twice on their screen instead of
+                // delivering a duplicate message to the chat.
+                if let Some(callback_id) = context.callback_id.as_deref() {
+                    let text = match locale {
+                        bot_core::locale::Locale::Es => {
+                            "este comando es solo para admins del grupo"
+                        }
+                        bot_core::locale::Locale::En => "Only group admins can use this command",
+                    };
+                    let _receipt = self
+                        .actions
+                        .execute(TelegramAction::AnswerCallback {
+                            callback_id: callback_id.to_owned(),
+                            text: Some(text.to_owned()),
+                            show_alert: true,
+                        })
+                        .map_err(DispatchError::Action)?;
+                }
                 return Ok(DispatchOutcome::Handled);
             }
         }
@@ -9532,14 +9652,13 @@ mod tests {
             [("-42".to_owned(), "88".to_owned())]
         );
         assert!(matches!(
-            dispatcher.actions.0.first(),
-            Some(TelegramAction::AnswerCallback { .. })
+            dispatcher.actions.0.as_slice(),
+            [TelegramAction::AnswerCallback {
+                text: Some(text),
+                show_alert: true,
+                ..
+            }] if text == "este comando es solo para admins del grupo"
         ));
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.get(1) else {
-            return;
-        };
-        assert_eq!(message.text, "este comando es solo para admins del grupo");
-        assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
         assert!(dispatcher.state_diagnostics()[1].contains("callback_data=cfg:link:off"));
     }
 
@@ -9982,6 +10101,17 @@ mod tests {
             Ok(self.stored.borrow_mut().remove(key))
         }
 
+        fn claim(&mut self, key: &str, value: &str, _: i64) -> Result<bool, String> {
+            if self.stored.borrow().contains_key(key) {
+                Ok(false)
+            } else {
+                self.stored
+                    .borrow_mut()
+                    .insert(key.to_owned(), value.to_owned());
+                Ok(true)
+            }
+        }
+
         fn clear_selection(&mut self, key: &str) -> Result<(), String> {
             self.stored.borrow_mut().remove(key);
             Ok(())
@@ -10054,6 +10184,17 @@ mod tests {
 
         fn take_selection(&mut self, key: &str) -> Result<Option<String>, String> {
             Ok(self.stored.borrow_mut().remove(key))
+        }
+
+        fn claim(&mut self, key: &str, value: &str, _: i64) -> Result<bool, String> {
+            if self.stored.borrow().contains_key(key) {
+                Ok(false)
+            } else {
+                self.stored
+                    .borrow_mut()
+                    .insert(key.to_owned(), value.to_owned());
+                Ok(true)
+            }
         }
 
         fn clear_selection(&mut self, key: &str) -> Result<(), String> {
@@ -10129,6 +10270,17 @@ mod tests {
                 return Err(error.clone());
             }
             Ok(self.stored.borrow_mut().remove(key))
+        }
+
+        fn claim(&mut self, key: &str, value: &str, _: i64) -> Result<bool, String> {
+            if self.stored.borrow().contains_key(key) {
+                Ok(false)
+            } else {
+                self.stored
+                    .borrow_mut()
+                    .insert(key.to_owned(), value.to_owned());
+                Ok(true)
+            }
         }
 
         fn clear_selection(&mut self, key: &str) -> Result<(), String> {
@@ -11389,6 +11541,10 @@ mod tests {
         );
         assert_eq!(
             source.take_selection("key"),
+            Err("market selection storage unavailable".to_owned())
+        );
+        assert_eq!(
+            source.claim("key", "1", 60),
             Err("market selection storage unavailable".to_owned())
         );
         assert_eq!(source.clear_selection("key"), Ok(()));
@@ -13193,10 +13349,68 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.contains("market selection restore failed"))
         );
-        assert!(dispatcher.actions.0.iter().any(|action| matches!(
-            action,
-            TelegramAction::SendMessage(message) if message.text.contains("I could not obtain a usable quote")
-        )));
+        assert!(
+            dispatcher
+                .actions
+                .0
+                .iter()
+                .any(|action| matches!(action, TelegramAction::SendMessage(message) if message.text.contains("I could not obtain a usable quote")))
+        );
+        Ok(())
+    }
+
+    struct DeleteFailureActions {
+        actions: Vec<TelegramAction>,
+    }
+
+    impl ActionSink for DeleteFailureActions {
+        type Error = &'static str;
+
+        fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
+            if matches!(action, TelegramAction::DeleteMessage { .. }) {
+                return Err("synthetic delete failure");
+            }
+            self.actions.push(action);
+            Ok(ActionReceipt {
+                message_id: Some(MessageId(700)),
+            })
+        }
+    }
+
+    #[test]
+    fn failed_menu_deletes_stay_handled_with_diagnostics() -> Result<(), String> {
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            DeleteFailureActions {
+                actions: Vec::new(),
+            },
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_scheduled_task_source(Box::new(Tasks {
+            lists: Vec::new(),
+            cancellations: Rc::new(RefCell::new(Vec::new())),
+        }));
+        // A double-tapped close/delete removes an already gone message. The
+        // failure is a diagnostic, never a retry into quarantine noise.
+        for data in ["topup:close", "help:close", "task:close"] {
+            assert_eq!(
+                dispatcher.dispatch(callback_update(data, "private", Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+        }
+        let failures = dispatcher
+            .state_diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.contains("callback delete failed"))
+            .count();
+        assert_eq!(failures, 3);
         Ok(())
     }
 
@@ -16157,6 +16371,173 @@ mod tests {
                 }
             ] if text == "no pude armar la factura, probá de nuevo"
         ));
+    }
+
+    #[test]
+    fn double_tapped_topup_pack_sends_a_single_invoice() -> Result<(), String> {
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_market_price_source(Box::new(SelectableMarketPrices {
+            initial: market_selection_load(None),
+            candidate: market_candidate_quote(),
+            stored: Rc::clone(&stored),
+            selected: Rc::new(RefCell::new(Vec::new())),
+        }));
+        for _ in 0..2 {
+            assert_eq!(
+                dispatcher.dispatch(callback_update("topup:p50", "private", Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+        }
+        let invoices = dispatcher
+            .actions
+            .0
+            .iter()
+            .filter(|action| matches!(action, TelegramAction::SendInvoice { .. }))
+            .count();
+        assert_eq!(invoices, 1);
+        assert!(dispatcher.actions.0.iter().any(|action| matches!(
+            action,
+            TelegramAction::AnswerCallback {
+                text: Some(text),
+                show_alert: false,
+                ..
+            } if text == "the invoice is already above"
+        )));
+        assert_eq!(stored.borrow().len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn topup_invoice_failure_releases_the_claim_for_retry() -> Result<(), String> {
+        #[derive(Default)]
+        struct FlakyInvoice {
+            actions: Vec<TelegramAction>,
+            invoice_failures: usize,
+        }
+
+        impl ActionSink for FlakyInvoice {
+            type Error = Infallible;
+
+            fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
+                self.actions.push(action);
+                Ok(ActionReceipt {
+                    message_id: Some(MessageId(700)),
+                })
+            }
+
+            fn try_invoice(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
+                self.actions.push(action);
+                if self.invoice_failures > 0 {
+                    self.invoice_failures -= 1;
+                    return Ok(false);
+                }
+                Ok(true)
+            }
+        }
+
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            FlakyInvoice {
+                actions: Vec::new(),
+                invoice_failures: 1,
+            },
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_market_price_source(Box::new(SelectableMarketPrices {
+            initial: market_selection_load(None),
+            candidate: market_candidate_quote(),
+            stored: Rc::clone(&stored),
+            selected: Rc::new(RefCell::new(Vec::new())),
+        }));
+        for _ in 0..2 {
+            assert_eq!(
+                dispatcher.dispatch(callback_update("topup:p50", "private", Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+        }
+        // First attempt failed to invoice and released the claim, so the
+        // retry invoiced normally instead of answering "already above".
+        let invoices = dispatcher
+            .actions
+            .actions
+            .iter()
+            .filter(|action| matches!(action, TelegramAction::SendInvoice { .. }))
+            .count();
+        assert_eq!(invoices, 2);
+        assert_eq!(stored.borrow().len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn topup_without_claim_storage_still_invoices_with_diagnostics() -> Result<(), String> {
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_market_price_source(Box::new(ScriptedTakeMarketPrices {
+            load: None,
+            takes: RefCell::new(VecDeque::new()),
+            saves: RefCell::new(VecDeque::new()),
+            candidate: market_candidate_quote(),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(callback_update("topup:p50", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            dispatcher
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.contains("topup invoice claim failed"))
+        );
+        assert!(
+            dispatcher
+                .actions
+                .0
+                .iter()
+                .any(|action| matches!(action, TelegramAction::SendInvoice { .. }))
+        );
+        Ok(())
     }
 
     #[test]

@@ -24,6 +24,11 @@ pub trait RequestCache {
     /// Atomically reads and removes a key. Concurrent takers are serialized:
     /// exactly one of them observes the value.
     fn take(&mut self, key: &str) -> Result<Option<String>, Self::Error>;
+
+    /// Atomically stores a key only when absent. Concurrent claimants are
+    /// serialized: exactly one of them wins. Used for single-flight guards
+    /// such as one in-flight invoice per user and pack.
+    fn claim(&mut self, key: &str, value: &str, ttl_seconds: i64) -> Result<bool, Self::Error>;
 }
 
 impl RequestCache for RedisJsonCache {
@@ -40,6 +45,10 @@ impl RequestCache for RedisJsonCache {
 
     fn take(&mut self, key: &str) -> Result<Option<String>, Self::Error> {
         RedisJsonCache::take(self, key)
+    }
+
+    fn claim(&mut self, key: &str, value: &str, ttl_seconds: i64) -> Result<bool, Self::Error> {
+        RedisJsonCache::set_if_absent(self, key, value, ttl_seconds)
     }
 }
 
@@ -215,6 +224,7 @@ mod tests {
         gets: VecDeque<Result<Option<String>, &'static str>>,
         sets: VecDeque<Result<(), &'static str>>,
         takes: VecDeque<Result<Option<String>, &'static str>>,
+        claims: VecDeque<Result<bool, &'static str>>,
         writes: Vec<(String, String, i64)>,
     }
 
@@ -234,6 +244,15 @@ mod tests {
         fn take(&mut self, _key: &str) -> Result<Option<String>, Self::Error> {
             self.takes.pop_front().unwrap_or(Ok(None))
         }
+
+        fn claim(
+            &mut self,
+            _key: &str,
+            _value: &str,
+            _ttl_seconds: i64,
+        ) -> Result<bool, Self::Error> {
+            self.claims.pop_front().unwrap_or(Ok(true))
+        }
     }
 
     #[test]
@@ -251,6 +270,21 @@ mod tests {
             Err("synthetic take failure")
         );
         assert_eq!(cache.take("request_cache:key"), Ok(None));
+    }
+
+    #[test]
+    fn claim_returns_scripted_outcomes() {
+        let mut cache = Cache {
+            claims: VecDeque::from([Ok(true), Ok(false), Err("synthetic claim failure")]),
+            ..Cache::default()
+        };
+        assert_eq!(cache.claim("request_cache:key", "1", 60), Ok(true));
+        assert_eq!(cache.claim("request_cache:key", "1", 60), Ok(false));
+        assert_eq!(
+            cache.claim("request_cache:key", "1", 60),
+            Err("synthetic claim failure")
+        );
+        assert_eq!(cache.claim("request_cache:key", "1", 60), Ok(true));
     }
 
     #[test]

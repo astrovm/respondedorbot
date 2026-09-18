@@ -531,6 +531,23 @@ mod tests {
                 Ok(self.values.remove(key))
             }
         }
+
+        fn claim(
+            &mut self,
+            key: &str,
+            value: &str,
+            _ttl_seconds: i64,
+        ) -> Result<bool, Self::Error> {
+            if self.fail_set {
+                return Err("synthetic cache write failure");
+            }
+            if self.values.contains_key(key) {
+                Ok(false)
+            } else {
+                self.values.insert(key.to_owned(), value.to_owned());
+                Ok(true)
+            }
+        }
     }
 
     #[test]

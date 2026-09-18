@@ -461,6 +461,15 @@ mod tests {
         fn take(&mut self, _key: &str) -> Result<Option<String>, Self::Error> {
             Ok(None)
         }
+
+        fn claim(
+            &mut self,
+            _key: &str,
+            _value: &str,
+            _ttl_seconds: i64,
+        ) -> Result<bool, Self::Error> {
+            Ok(true)
+        }
     }
 
     fn response(body: &str) -> Result<HttpResponse, TransportFailureKind> {
@@ -474,6 +483,7 @@ mod tests {
     fn cache_take_matches_empty_stub_contract() {
         let mut cache = Cache::default();
         assert_eq!(cache.take("synthetic"), Ok(None));
+        assert_eq!(cache.claim("synthetic", "1", 60), Ok(true));
     }
 
     fn forecast() -> &'static str {
