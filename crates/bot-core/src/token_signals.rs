@@ -362,6 +362,10 @@ fn signal_change_for_timeframe<'period>(
                 .or_else(|| candle_change(&signal.candles, 86_400)),
             "1d",
         ),
+        // DexScreener publishes no 7d/30d rollups, so those periods always
+        // resolve from candle history when it covers them.
+        Some("7d") => (candle_change(&signal.candles, 7 * 86_400), "7d"),
+        Some("30d") => (candle_change(&signal.candles, 30 * 86_400), "30d"),
         Some(period) => (None, period),
         None => (
             numeric_value(&signal.pair.price_change.h24)
@@ -1331,6 +1335,35 @@ mod tests {
         assert!(quote.contains("+25% 24h"), "{quote}");
         let caption = format_signal_caption(&signal, 1_700_086_400);
         assert!(caption.contains("+25% 24h"), "{caption}");
+    }
+
+    #[test]
+    fn weekly_and_monthly_changes_resolve_from_covering_candle_history() {
+        let mut signal = signal();
+        signal.candles = vec![
+            vec![1_700_000_000.0, 1.0, 1.0, 1.0, 100.0],
+            vec![1_700_604_800.0, 2.0, 2.0, 2.0, 125.0],
+            vec![1_702_592_000.0, 3.0, 3.0, 3.0, 130.0],
+        ];
+        let weekly = format_signal_quote(&signal, Some("7d"));
+        assert!(weekly.contains("+4% 7d"), "{weekly}");
+        let monthly = format_signal_quote(&signal, Some("30d"));
+        assert!(monthly.contains("+30% 30d"), "{monthly}");
+        let caption = format_signal_caption_for_period(&signal, 1_702_592_000, Some("7d"));
+        assert!(caption.contains("+4% 7d"), "{caption}");
+    }
+
+    #[test]
+    fn short_candle_history_stays_honest_for_longer_periods() {
+        let mut signal = signal();
+        signal.candles = vec![
+            vec![1_700_000_000.0, 1.0, 1.0, 1.0, 100.0],
+            vec![1_700_086_400.0, 2.0, 2.0, 2.0, 125.0],
+        ];
+        let weekly = format_signal_quote(&signal, Some("7d"));
+        assert!(weekly.contains("N/A 7d"), "{weekly}");
+        let monthly = format_signal_quote(&signal, Some("30d"));
+        assert!(monthly.contains("N/A 30d"), "{monthly}");
     }
 
     #[test]
