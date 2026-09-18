@@ -129,6 +129,14 @@ mod tests {
                     vec!["GETDEL", "market_selection:trait"],
                     b"$5\r\ntaken\r\n".as_slice(),
                 ),
+                (
+                    vec!["SET", "topup_invoice:1", "1", "NX", "EX", "120"],
+                    b"+OK\r\n".as_slice(),
+                ),
+                (
+                    vec!["SET", "topup_invoice:1", "1", "NX", "EX", "120"],
+                    b"$-1\r\n".as_slice(),
+                ),
             ];
             let (mut stream, _) = listener.accept()?;
             stream.set_read_timeout(Some(Duration::from_secs(2)))?;
@@ -170,6 +178,18 @@ mod tests {
             crate::request_cache::RequestCache::take(&mut cache, "market_selection:trait")?,
             Some("taken".to_owned())
         );
+        assert!(crate::request_cache::RequestCache::claim(
+            &mut cache,
+            "topup_invoice:1",
+            "1",
+            120
+        )?);
+        assert!(!crate::request_cache::RequestCache::claim(
+            &mut cache,
+            "topup_invoice:1",
+            "1",
+            120
+        )?);
         match server.join() {
             Ok(result) => result?,
             Err(_) => return Err("synthetic Redis server panicked".into()),

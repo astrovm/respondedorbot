@@ -13414,6 +13414,62 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn failed_signal_delete_stays_handled_with_diagnostics() -> Result<(), String> {
+        let signal = token_signal();
+        let state = SignalState {
+            chart_period: None,
+            chat_id: "-42".to_owned(),
+            message_id: 7,
+            source_message_id: 6,
+            requester_id: "88".to_owned(),
+            chain_id: signal.token.chain_id.clone(),
+            network: signal.token.network.clone(),
+            tag: signal.token.tag.clone(),
+            address: signal.token.address.clone(),
+            last_refresh_at: None,
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            DeleteFailureActions {
+                actions: Vec::new(),
+            },
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_token_signal_source(Box::new(Signals {
+            query_load: TokenSignalLoad {
+                signal: None,
+                diagnostics: Vec::new(),
+            },
+            token_load: TokenSignalLoad {
+                signal: Some(signal),
+                diagnostics: Vec::new(),
+            },
+            photo: Ok(b"unused".to_vec()),
+            state: Some(state),
+            queries: Rc::new(RefCell::new(Vec::new())),
+            saved: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(callback_update("sig:del:abc", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            dispatcher
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.contains("callback delete failed"))
+        );
+        Ok(())
+    }
+
     struct ToastFailureActions {
         actions: Vec<TelegramAction>,
     }
