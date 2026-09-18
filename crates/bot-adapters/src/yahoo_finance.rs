@@ -495,6 +495,19 @@ mod tests {
                 .push((key.to_owned(), value.to_owned(), ttl_seconds));
             Ok(())
         }
+
+        fn take(&mut self, _key: &str) -> Result<Option<String>, Self::Error> {
+            Ok(None)
+        }
+
+        fn claim(
+            &mut self,
+            _key: &str,
+            _value: &str,
+            _ttl_seconds: i64,
+        ) -> Result<bool, Self::Error> {
+            Ok(true)
+        }
     }
 
     fn response(body: &str) -> Result<HttpResponse, TransportFailureKind> {
@@ -502,6 +515,13 @@ mod tests {
             status_code: 200,
             body: body.to_owned(),
         })
+    }
+
+    #[test]
+    fn cache_take_matches_empty_stub_contract() {
+        let mut cache = Cache::default();
+        assert_eq!(cache.take("synthetic"), Ok(None));
+        assert_eq!(cache.claim("synthetic", "1", 60), Ok(true));
     }
 
     fn chart() -> &'static str {

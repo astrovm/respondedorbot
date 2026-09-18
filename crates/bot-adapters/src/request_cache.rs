@@ -20,6 +20,15 @@ pub trait RequestCache {
 
     /// A zero TTL stores the value without expiration. Positive TTLs expire normally.
     fn set(&mut self, key: &str, value: &str, ttl_seconds: i64) -> Result<(), Self::Error>;
+
+    /// Atomically reads and removes a key. Concurrent takers are serialized:
+    /// exactly one of them observes the value.
+    fn take(&mut self, key: &str) -> Result<Option<String>, Self::Error>;
+
+    /// Atomically stores a key only when absent. Concurrent claimants are
+    /// serialized: exactly one of them wins. Used for single-flight guards
+    /// such as one in-flight invoice per user and pack.
+    fn claim(&mut self, key: &str, value: &str, ttl_seconds: i64) -> Result<bool, Self::Error>;
 }
 
 impl RequestCache for RedisJsonCache {
@@ -32,6 +41,14 @@ impl RequestCache for RedisJsonCache {
     fn set(&mut self, key: &str, value: &str, ttl_seconds: i64) -> Result<(), Self::Error> {
         RedisJsonCache::set(self, key, value, (ttl_seconds != 0).then_some(ttl_seconds))
             .map(|_stored| ())
+    }
+
+    fn take(&mut self, key: &str) -> Result<Option<String>, Self::Error> {
+        RedisJsonCache::take(self, key)
+    }
+
+    fn claim(&mut self, key: &str, value: &str, ttl_seconds: i64) -> Result<bool, Self::Error> {
+        RedisJsonCache::set_if_absent(self, key, value, ttl_seconds)
     }
 }
 
@@ -206,6 +223,8 @@ mod tests {
     struct Cache {
         gets: VecDeque<Result<Option<String>, &'static str>>,
         sets: VecDeque<Result<(), &'static str>>,
+        takes: VecDeque<Result<Option<String>, &'static str>>,
+        claims: VecDeque<Result<bool, &'static str>>,
         writes: Vec<(String, String, i64)>,
     }
 
@@ -221,6 +240,51 @@ mod tests {
                 .push((key.to_owned(), value.to_owned(), ttl_seconds));
             self.sets.pop_front().unwrap_or(Ok(()))
         }
+
+        fn take(&mut self, _key: &str) -> Result<Option<String>, Self::Error> {
+            self.takes.pop_front().unwrap_or(Ok(None))
+        }
+
+        fn claim(
+            &mut self,
+            _key: &str,
+            _value: &str,
+            _ttl_seconds: i64,
+        ) -> Result<bool, Self::Error> {
+            self.claims.pop_front().unwrap_or(Ok(true))
+        }
+    }
+
+    #[test]
+    fn take_returns_scripted_values() {
+        let mut cache = Cache {
+            takes: VecDeque::from([Ok(Some("taken".to_owned())), Err("synthetic take failure")]),
+            ..Cache::default()
+        };
+        assert_eq!(
+            cache.take("request_cache:key"),
+            Ok(Some("taken".to_owned()))
+        );
+        assert_eq!(
+            cache.take("request_cache:key"),
+            Err("synthetic take failure")
+        );
+        assert_eq!(cache.take("request_cache:key"), Ok(None));
+    }
+
+    #[test]
+    fn claim_returns_scripted_outcomes() {
+        let mut cache = Cache {
+            claims: VecDeque::from([Ok(true), Ok(false), Err("synthetic claim failure")]),
+            ..Cache::default()
+        };
+        assert_eq!(cache.claim("request_cache:key", "1", 60), Ok(true));
+        assert_eq!(cache.claim("request_cache:key", "1", 60), Ok(false));
+        assert_eq!(
+            cache.claim("request_cache:key", "1", 60),
+            Err("synthetic claim failure")
+        );
+        assert_eq!(cache.claim("request_cache:key", "1", 60), Ok(true));
     }
 
     #[test]

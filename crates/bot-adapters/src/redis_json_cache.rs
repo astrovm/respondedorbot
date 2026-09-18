@@ -55,6 +55,11 @@ impl RedisJsonCache {
         Ok(true)
     }
 
+    pub fn take(&self, key: &str) -> Result<Option<String>, RedisJsonCacheError> {
+        let mut connection = self.client.get_connection()?;
+        Ok(redis::cmd("GETDEL").arg(key).query(&mut connection)?)
+    }
+
     pub fn set_if_absent(
         &self,
         key: &str,
@@ -112,6 +117,26 @@ mod tests {
                     vec!["SETEX", "token_signal:state:test", "1", "null"],
                     b"+OK\r\n".as_slice(),
                 ),
+                (
+                    vec!["GETDEL", "market_selection:test"],
+                    b"$4\r\nmenu\r\n".as_slice(),
+                ),
+                (
+                    vec!["GETDEL", "market_selection:missing"],
+                    b"$-1\r\n".as_slice(),
+                ),
+                (
+                    vec!["GETDEL", "market_selection:trait"],
+                    b"$5\r\ntaken\r\n".as_slice(),
+                ),
+                (
+                    vec!["SET", "topup_invoice:1", "1", "NX", "EX", "120"],
+                    b"+OK\r\n".as_slice(),
+                ),
+                (
+                    vec!["SET", "topup_invoice:1", "1", "NX", "EX", "120"],
+                    b"$-1\r\n".as_slice(),
+                ),
             ];
             let (mut stream, _) = listener.accept()?;
             stream.set_read_timeout(Some(Duration::from_secs(2)))?;
@@ -144,6 +169,27 @@ mod tests {
             "null",
             1,
         )?;
+        assert_eq!(
+            cache.take("market_selection:test")?,
+            Some("menu".to_owned())
+        );
+        assert_eq!(cache.take("market_selection:missing")?, None);
+        assert_eq!(
+            crate::request_cache::RequestCache::take(&mut cache, "market_selection:trait")?,
+            Some("taken".to_owned())
+        );
+        assert!(crate::request_cache::RequestCache::claim(
+            &mut cache,
+            "topup_invoice:1",
+            "1",
+            120
+        )?);
+        assert!(!crate::request_cache::RequestCache::claim(
+            &mut cache,
+            "topup_invoice:1",
+            "1",
+            120
+        )?);
         match server.join() {
             Ok(result) => result?,
             Err(_) => return Err("synthetic Redis server panicked".into()),

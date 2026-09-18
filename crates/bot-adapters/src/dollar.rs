@@ -523,6 +523,43 @@ mod tests {
                 .push((key.to_owned(), value.to_owned(), ttl_seconds, false));
             Ok(())
         }
+
+        fn take(&mut self, key: &str) -> Result<Option<String>, Self::Error> {
+            if self.fail_get {
+                Err("synthetic cache read failure")
+            } else {
+                Ok(self.values.remove(key))
+            }
+        }
+
+        fn claim(
+            &mut self,
+            key: &str,
+            value: &str,
+            _ttl_seconds: i64,
+        ) -> Result<bool, Self::Error> {
+            if self.fail_set {
+                return Err("synthetic cache write failure");
+            }
+            if self.values.contains_key(key) {
+                Ok(false)
+            } else {
+                self.values.insert(key.to_owned(), value.to_owned());
+                Ok(true)
+            }
+        }
+    }
+
+    #[test]
+    fn cache_take_removes_values_and_propagates_read_failures() {
+        let mut cache = Cache::default();
+        cache
+            .values
+            .insert("synthetic".to_owned(), "value".to_owned());
+        assert_eq!(cache.take("synthetic"), Ok(Some("value".to_owned())));
+        assert_eq!(cache.take("synthetic"), Ok(None));
+        cache.fail_get = true;
+        assert_eq!(cache.take("synthetic"), Err("synthetic cache read failure"));
     }
 
     impl DollarCache for Cache {
