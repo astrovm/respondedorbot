@@ -237,6 +237,23 @@ mod tests {
     }
 
     #[test]
+    fn take_returns_scripted_values() {
+        let mut cache = Cache {
+            takes: VecDeque::from([Ok(Some("taken".to_owned())), Err("synthetic take failure")]),
+            ..Cache::default()
+        };
+        assert_eq!(
+            cache.take("request_cache:key"),
+            Ok(Some("taken".to_owned()))
+        );
+        assert_eq!(
+            cache.take("request_cache:key"),
+            Err("synthetic take failure")
+        );
+        assert_eq!(cache.take("request_cache:key"), Ok(None));
+    }
+
+    #[test]
     fn fresh_cache_is_authoritative_and_future_timestamps_are_fresh() {
         for timestamp in [100, 200] {
             let mut cache = Cache {

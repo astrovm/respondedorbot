@@ -2813,7 +2813,14 @@ where
                 command_name,
                 timestamp,
             );
-            self.answer_market_callback(context, locale, "retry", true)?;
+            // The retry text was delivered; a toast failure must not retry
+            // the update into a second copy of it.
+            if let Err(error) = self.answer_market_callback(context, locale, "retry", true) {
+                self.state_diagnostics.push(format!(
+                    "market selection answer failed chat_id={} selection_id={selection_id}: {error}",
+                    context.chat_id
+                ));
+            }
             return Ok(DispatchOutcome::Handled);
         }
         let mut delivered = false;
@@ -3010,7 +3017,14 @@ where
                 command_name,
                 timestamp,
             );
-            self.answer_market_callback(context, locale, "retry", true)?;
+            // The retry text was delivered; a toast failure must not retry
+            // the update into a second copy of it.
+            if let Err(error) = self.answer_market_callback(context, locale, "retry", true) {
+                self.state_diagnostics.push(format!(
+                    "market selection answer failed chat_id={} selection_id={selection_id}: {error}",
+                    context.chat_id
+                ));
+            }
             return Ok(DispatchOutcome::Handled);
         };
         let timeframe = stored.selection.timeframe.as_deref();
@@ -12966,6 +12980,467 @@ mod tests {
             .filter(|plan| plan.message.text == "LIBRA: 0.007 USD (N/A 24h)")
             .count();
         assert_eq!(delivered, 1);
+        Ok(())
+    }
+
+    struct ScriptedTakeMarketPrices {
+        load: Option<String>,
+        takes: RefCell<VecDeque<Result<Option<String>, String>>>,
+        saves: RefCell<VecDeque<Result<(), String>>>,
+        candidate: MarketPriceLoad,
+    }
+
+    impl MarketPriceSource for ScriptedTakeMarketPrices {
+        fn load(
+            &mut self,
+            _: &str,
+            _: bot_core::market_prices::MarketPriceCommand,
+            _: bot_core::locale::Locale,
+            _: i64,
+        ) -> MarketPriceLoad {
+            market_selection_load(None)
+        }
+
+        fn load_candidate(
+            &mut self,
+            _: &bot_core::market_prices::MarketCandidate,
+            _: Option<&str>,
+            _: &str,
+            _: &str,
+            _: Option<&bot_core::market_prices::MarketConversion>,
+            _: bot_core::market_prices::MarketPriceCommand,
+            _: bot_core::locale::Locale,
+            _: i64,
+        ) -> MarketPriceLoad {
+            self.candidate.clone()
+        }
+
+        fn render_chart(
+            &mut self,
+            _: &bot_core::market_prices::MarketChart,
+            _: i64,
+        ) -> Result<super::MarketChartRender, String> {
+            Err("synthetic chart unavailable".to_owned())
+        }
+
+        fn save_selection(&mut self, _: &str, _: &str, _: i64) -> Result<(), String> {
+            self.saves.borrow_mut().pop_front().unwrap_or(Ok(()))
+        }
+
+        fn load_selection(&mut self, _key: &str) -> Result<Option<String>, String> {
+            Ok(self.load.clone())
+        }
+
+        fn take_selection(&mut self, _key: &str) -> Result<Option<String>, String> {
+            self.takes.borrow_mut().pop_front().unwrap_or(Ok(None))
+        }
+
+        fn clear_selection(&mut self, _key: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn stored_selection_value() -> Result<String, String> {
+        serde_json::to_string(&StoredMarketSelection {
+            selection: market_selection_fixture(None),
+            chat_id: "-42".to_owned(),
+            message_id: 7,
+            source_message_id: Some(6),
+            requester_id: 88,
+            command: "crypto".to_owned(),
+        })
+        .map_err(|error| error.to_string())
+    }
+
+    fn race_callback() -> IncomingUpdate {
+        callback_update_with_context(
+            "mkt:select:race:0",
+            json!(-42),
+            "private",
+            7,
+            Some(88),
+            Some("en"),
+            Some("callback-race"),
+        )
+    }
+
+    #[test]
+    fn losing_the_take_race_answers_expired_without_sending() -> Result<(), String> {
+        let mut dispatcher =
+            dispatcher().with_market_price_source(Box::new(ScriptedTakeMarketPrices {
+                load: Some(stored_selection_value()?),
+                takes: RefCell::new(VecDeque::from([Ok(None)])),
+                saves: RefCell::new(VecDeque::new()),
+                candidate: market_candidate_quote(),
+            }));
+        assert_eq!(
+            dispatcher.dispatch(race_callback()),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [TelegramAction::AnswerCallback {
+                show_alert: true,
+                ..
+            }]
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn failed_take_answers_expired_with_diagnostics() -> Result<(), String> {
+        let mut dispatcher =
+            dispatcher().with_market_price_source(Box::new(ScriptedTakeMarketPrices {
+                load: Some(stored_selection_value()?),
+                takes: RefCell::new(VecDeque::from([Err("synthetic take failure".to_owned())])),
+                saves: RefCell::new(VecDeque::new()),
+                candidate: market_candidate_quote(),
+            }));
+        assert_eq!(
+            dispatcher.dispatch(race_callback()),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            dispatcher
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.contains("market selection take failed"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn undecodable_take_answers_expired_with_diagnostics() -> Result<(), String> {
+        let mut dispatcher =
+            dispatcher().with_market_price_source(Box::new(ScriptedTakeMarketPrices {
+                load: Some(stored_selection_value()?),
+                takes: RefCell::new(VecDeque::from([Ok(Some("not-json".to_owned()))])),
+                saves: RefCell::new(VecDeque::new()),
+                candidate: market_candidate_quote(),
+            }));
+        assert_eq!(
+            dispatcher.dispatch(race_callback()),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            dispatcher
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.contains("market selection take decode failed"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_restore_is_diagnostic_and_keeps_the_retry_text() -> Result<(), String> {
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let mut dispatcher =
+            dispatcher().with_market_price_source(Box::new(SelectionStorageMarketPrices {
+                initial: market_selection_load(None),
+                candidate: MarketPriceLoad {
+                    chart: None,
+                    selection: None,
+                    no_assets_found: true,
+                    text: String::new(),
+                    diagnostics: vec!["candidate quote unavailable".to_owned()],
+                },
+                stored: Rc::clone(&stored),
+                save_calls: Rc::new(RefCell::new(0)),
+                // The menu setup itself saves twice (store plus the
+                // post-delivery update), so the restore is call three.
+                fail_save_at: Some(3),
+                fail_load: None,
+                fail_clear: None,
+                render_success: false,
+                render_caption: None,
+            }));
+        assert_eq!(
+            dispatcher.dispatch(update("/p libra", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let callback = dispatcher
+            .actions
+            .0
+            .iter()
+            .find_map(|action| match action {
+                TelegramAction::SendMessage(message) => message
+                    .reply_markup
+                    .as_ref()?
+                    .inline_keyboard
+                    .first()?
+                    .first()?
+                    .callback_data
+                    .clone(),
+                _ => None,
+            })
+            .ok_or_else(|| "selection callback".to_owned())?;
+        assert_eq!(
+            dispatcher.dispatch(callback_update_for_message(
+                &callback,
+                "private",
+                Some("en"),
+                700
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            dispatcher
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.contains("market selection restore failed"))
+        );
+        assert!(dispatcher.actions.0.iter().any(|action| matches!(
+            action,
+            TelegramAction::SendMessage(message) if message.text.contains("I could not obtain a usable quote")
+        )));
+        Ok(())
+    }
+
+    struct ToastFailureActions {
+        actions: Vec<TelegramAction>,
+    }
+
+    impl ActionSink for ToastFailureActions {
+        type Error = &'static str;
+
+        fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
+            if matches!(action, TelegramAction::AnswerCallback { .. }) {
+                return Err("synthetic toast failure");
+            }
+            self.actions.push(action);
+            Ok(ActionReceipt {
+                message_id: Some(MessageId(700)),
+            })
+        }
+    }
+
+    #[test]
+    fn failed_post_delivery_toast_does_not_retry_into_a_duplicate() -> Result<(), String> {
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            ToastFailureActions {
+                actions: Vec::new(),
+            },
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_market_price_source(Box::new(SelectableMarketPrices {
+            initial: market_selection_load(None),
+            candidate: market_candidate_quote(),
+            stored: Rc::clone(&stored),
+            selected: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(update("/p libra", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let callback = dispatcher
+            .actions
+            .actions
+            .iter()
+            .find_map(|action| match action {
+                TelegramAction::SendMessage(message) => message
+                    .reply_markup
+                    .as_ref()?
+                    .inline_keyboard
+                    .first()?
+                    .first()?
+                    .callback_data
+                    .clone(),
+                _ => None,
+            })
+            .ok_or_else(|| "selection callback".to_owned())?;
+        // The quote was delivered; the dead toast is a diagnostic, not a
+        // retry into a second quote.
+        assert_eq!(
+            dispatcher.dispatch(callback_update_for_message(
+                &callback,
+                "private",
+                Some("en"),
+                700
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            dispatcher
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.contains("market selection answer failed"))
+        );
+        assert!(stored.borrow().is_empty());
+        let delivered = dispatcher
+            .state
+            .outgoing
+            .iter()
+            .filter(|plan| plan.message.text == "LIBRA: 0.007 USD (N/A 24h)")
+            .count();
+        assert_eq!(delivered, 1);
+        Ok(())
+    }
+
+    fn token_selection_value() -> Result<String, String> {
+        let token = TokenAddress {
+            chain_id: "solana".to_owned(),
+            network: "solana".to_owned(),
+            tag: "SOL".to_owned(),
+            address: "J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump".to_owned(),
+        };
+        serde_json::to_string(&StoredMarketSelection {
+            selection: MarketSelection {
+                query: "syn".to_owned(),
+                timeframe: Some("1m".to_owned()),
+                target_symbol: "USD".to_owned(),
+                target_parameter: "USD".to_owned(),
+                conversion: None,
+                candidates: vec![bot_core::market_prices::MarketCandidate {
+                    id: "token:solana:solana:J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump"
+                        .to_owned(),
+                    symbol: "SYN".to_owned(),
+                    name: "Synthetic Token".to_owned(),
+                    slug: "syn".to_owned(),
+                    price: "0.01".to_owned(),
+                    change: "N/A 1m".to_owned(),
+                    currency: String::new(),
+                    exchange: String::new(),
+                    asset_type: String::new(),
+                    contracts: vec![token],
+                }],
+            },
+            chat_id: "-42".to_owned(),
+            message_id: 700,
+            source_message_id: Some(6),
+            requester_id: 88,
+            command: "unified".to_owned(),
+        })
+        .map_err(|error| error.to_string())
+    }
+
+    fn token_selection_dispatcher<Actions>(
+        actions: Actions,
+        stored: Rc<RefCell<HashMap<String, String>>>,
+    ) -> NativeDispatcher<Config, Actions, State, Values, Samples, Authorization>
+    where
+        Actions: ActionSink,
+        Actions::Error: std::fmt::Display,
+    {
+        NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            actions,
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_market_price_source(Box::new(SelectionStorageMarketPrices {
+            initial: market_selection_load(None),
+            candidate: market_candidate_quote(),
+            stored,
+            save_calls: Rc::new(RefCell::new(0)),
+            fail_save_at: None,
+            fail_load: None,
+            fail_clear: None,
+            render_success: false,
+            render_caption: None,
+        }))
+        .with_token_signal_source(Box::new(Signals {
+            query_load: TokenSignalLoad {
+                signal: None,
+                diagnostics: Vec::new(),
+            },
+            token_load: TokenSignalLoad {
+                signal: Some(token_signal()),
+                diagnostics: Vec::new(),
+            },
+            photo: Err("synthetic photo failure".to_owned()),
+            state: None,
+            queries: Rc::new(RefCell::new(Vec::new())),
+            saved: Rc::new(RefCell::new(Vec::new())),
+        }))
+    }
+
+    #[test]
+    fn failed_token_quote_send_restores_the_selection_for_retry() -> Result<(), String> {
+        let selection_id = market_selection_id(-42, 700, 88, 1_672_531_200, 0);
+        let stored = Rc::new(RefCell::new(HashMap::from([(
+            market_selection_key(&selection_id),
+            token_selection_value()?,
+        )])));
+        let mut dispatcher = token_selection_dispatcher(
+            FailOnceCallbackActions {
+                actions: Vec::new(),
+                send_failures: 1,
+            },
+            Rc::clone(&stored),
+        );
+        let callback = format!("mkt:select:{selection_id}:0");
+        let select = |dispatcher: &mut NativeDispatcher<
+            Config,
+            FailOnceCallbackActions,
+            State,
+            Values,
+            Samples,
+            Authorization,
+        >| {
+            dispatcher.dispatch(callback_update_for_message(
+                &callback,
+                "private",
+                Some("en"),
+                700,
+            ))
+        };
+        assert!(matches!(
+            select(&mut dispatcher),
+            Err(DispatchError::Action(_))
+        ));
+        assert_eq!(stored.borrow().len(), 1);
+        assert_eq!(select(&mut dispatcher), Ok(DispatchOutcome::Handled));
+        assert!(stored.borrow().is_empty());
+        assert_eq!(dispatcher.state.outgoing.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_token_post_delivery_toast_does_not_retry_into_a_duplicate() -> Result<(), String> {
+        let selection_id = market_selection_id(-42, 700, 88, 1_672_531_200, 0);
+        let stored = Rc::new(RefCell::new(HashMap::from([(
+            market_selection_key(&selection_id),
+            token_selection_value()?,
+        )])));
+        let mut dispatcher = token_selection_dispatcher(
+            ToastFailureActions {
+                actions: Vec::new(),
+            },
+            Rc::clone(&stored),
+        );
+        let callback = format!("mkt:select:{selection_id}:0");
+        assert_eq!(
+            dispatcher.dispatch(callback_update_for_message(
+                &callback,
+                "private",
+                Some("en"),
+                700
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            dispatcher
+                .state_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.contains("market selection answer failed"))
+        );
+        assert!(stored.borrow().is_empty());
+        assert_eq!(dispatcher.state.outgoing.len(), 1);
         Ok(())
     }
 

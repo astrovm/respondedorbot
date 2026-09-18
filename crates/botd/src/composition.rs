@@ -5584,6 +5584,7 @@ mod tests {
         assert!(stock_candidate_load.diagnostics.is_empty());
         assert_eq!(source.save_selection("market-key", "value", 60), Ok(()));
         assert_eq!(source.load_selection("market-key"), Ok(None));
+        assert_eq!(source.take_selection("market-key"), Ok(None));
         assert_eq!(source.clear_selection("market-key"), Ok(()));
 
         struct FailingCache;
