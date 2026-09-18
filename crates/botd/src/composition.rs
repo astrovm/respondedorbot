@@ -2207,6 +2207,15 @@ where
         TokenSignalAdapter::render_period_photo(self, signal, period, now)
     }
 
+    fn period_candles(
+        &mut self,
+        signal: &bot_core::token_signals::TokenSignal,
+        period: &str,
+        now: i64,
+    ) -> Result<Vec<Vec<f64>>, String> {
+        TokenSignalAdapter::period_candles(self, signal, period, now)
+    }
+
     fn load_state(
         &mut self,
         signal_id: &str,
@@ -4645,6 +4654,10 @@ mod tests {
         assert!(
             TokenSignalSource::render_period_photo(&mut adapter, &signal, "7d", 1_800_000_000)
                 .is_err()
+        );
+        assert_eq!(
+            TokenSignalSource::period_candles(&mut adapter, &signal, "24h", 1_800_000_000),
+            Ok(Vec::new())
         );
 
         let state = SignalState {

@@ -82,8 +82,8 @@ use bot_core::telegram_payments::{
 use bot_core::token_signals::{
     SIGNAL_REFRESH_COOLDOWN_SECONDS, SignalQuery, SignalState, TokenAddress, TokenSignal,
     TokenSignalCandidates, build_signal_keyboard_localized, callback_text as signal_callback_text,
-    detect_signal_query, format_signal_caption_for_period, normalize_token_name,
-    signal_market_values, stable_signal_id,
+    detect_signal_query, format_signal_caption_for_period_with_candles, normalize_token_name,
+    signal_market_values_with_candles, stable_signal_id,
 };
 use bot_core::weather::{
     WeatherObservation, classify_weather_command, render_weather, requested_location,
@@ -419,8 +419,12 @@ fn market_selection_text(selection: &MarketSelection, locale: bot_core::locale::
     format_market_selection(selection, locale)
 }
 
-fn market_token_candidate(signal: &TokenSignal, timeframe: Option<&str>) -> MarketCandidate {
-    let (price, change) = signal_market_values(signal, timeframe);
+fn market_token_candidate(
+    signal: &TokenSignal,
+    timeframe: Option<&str>,
+    candles: Option<&[Vec<f64>]>,
+) -> MarketCandidate {
+    let (price, change) = signal_market_values_with_candles(signal, timeframe, candles);
     let symbol = signal.pair.base_token.symbol.clone();
     let name = if signal.pair.base_token.name.is_empty() {
         symbol.clone()
@@ -816,6 +820,15 @@ pub trait TokenSignalSource {
         _now: i64,
     ) -> Result<Vec<u8>, String> {
         Err("requested token history unavailable".into())
+    }
+
+    fn period_candles(
+        &mut self,
+        _signal: &TokenSignal,
+        _period: &str,
+        _now: i64,
+    ) -> Result<Vec<Vec<f64>>, String> {
+        Ok(Vec::new())
     }
 
     fn load_state(&mut self, signal_id: &str) -> Result<Option<SignalState>, String>;
@@ -1849,10 +1862,17 @@ where
                 .then(|| token_candidates.first().cloned())
                 .flatten();
             if token_candidates.len() > 1 {
-                let token_candidates = token_candidates
-                    .iter()
-                    .map(|signal| market_token_candidate(signal, timeframe.as_deref()))
-                    .collect::<Vec<_>>();
+                let mut menu_candidates = Vec::new();
+                for signal in &token_candidates {
+                    let candles =
+                        self.period_change_candles(signal, timeframe.as_deref(), timestamp);
+                    menu_candidates.push(market_token_candidate(
+                        signal,
+                        timeframe.as_deref(),
+                        candles.as_deref(),
+                    ));
+                }
+                let token_candidates = menu_candidates;
                 let mut selection = if let Some(load) = load.as_ref()
                     && let Some(existing) = load.selection.as_ref()
                 {
@@ -1886,7 +1906,9 @@ where
                 }
             }
             if let Some(signal) = token_signal.as_ref() {
-                let token_candidate = market_token_candidate(signal, timeframe.as_deref());
+                let candles = self.period_change_candles(signal, timeframe.as_deref(), timestamp);
+                let token_candidate =
+                    market_token_candidate(signal, timeframe.as_deref(), candles.as_deref());
                 if let Some(load) = load.as_mut()
                     && let Some(selection) = load.selection.as_mut()
                 {
@@ -2083,8 +2105,13 @@ where
                         return Ok(Some(outcome));
                     }
                 } else if let Some(signal) = token_signal {
-                    let quote =
-                        bot_core::token_signals::format_signal_quote(&signal, timeframe.as_deref());
+                    let candles =
+                        self.period_change_candles(&signal, timeframe.as_deref(), timestamp);
+                    let quote = bot_core::token_signals::format_signal_quote_with_candles(
+                        &signal,
+                        timeframe.as_deref(),
+                        candles.as_deref(),
+                    );
                     lines.push(quote);
                     continue;
                 }
@@ -2182,6 +2209,21 @@ where
         )
     }
 
+    fn period_change_candles(
+        &mut self,
+        signal: &TokenSignal,
+        timeframe: Option<&str>,
+        timestamp: i64,
+    ) -> Option<Vec<Vec<f64>>> {
+        let period = timeframe.unwrap_or("24h");
+        let candles = self
+            .token_signal_source
+            .as_mut()?
+            .period_candles(signal, period, timestamp)
+            .ok()?;
+        (!candles.is_empty()).then_some(candles)
+    }
+
     fn try_send_token_signal_photo(
         &mut self,
         request: TokenSignalPhotoRequest<'_>,
@@ -2195,7 +2237,13 @@ where
             locale,
             timestamp,
         } = request;
-        let caption = format_signal_caption_for_period(signal, timestamp, timeframe);
+        let candles = self.period_change_candles(signal, timeframe, timestamp);
+        let caption = format_signal_caption_for_period_with_candles(
+            signal,
+            timestamp,
+            timeframe,
+            candles.as_deref(),
+        );
         let photo = match self.render_token_signal_photo(signal, timeframe, timestamp) {
             Ok(photo) => photo,
             Err(_) => {
@@ -2530,15 +2578,17 @@ where
         };
         let photo =
             self.render_token_signal_photo(&signal, state.chart_period.as_deref(), timestamp);
+        let candles = self.period_change_candles(&signal, state.chart_period.as_deref(), timestamp);
         let edited = match photo {
             Ok(photo) => match self.actions.try_edit(TelegramAction::EditMessagePhoto {
                 chat_id: ChatId(chat_id),
                 message_id: MessageId(context.message_id),
                 photo: photo.into(),
-                caption: format_signal_caption_for_period(
+                caption: format_signal_caption_for_period_with_candles(
                     &signal,
                     timestamp,
                     state.chart_period.as_deref(),
+                    candles.as_deref(),
                 ),
                 parse_mode: Some(ParseMode::Html),
                 reply_markup: Some(build_signal_keyboard_localized(
@@ -6528,6 +6578,25 @@ mod tests {
             Ok(b"stateful-token-card".to_vec())
         }
 
+        fn period_candles(
+            &mut self,
+            _signal: &TokenSignal,
+            period: &str,
+            now: i64,
+        ) -> Result<Vec<Vec<f64>>, String> {
+            let span = match period {
+                "1h" => 3_600.0,
+                "24h" => 86_400.0,
+                "7d" => 7.0 * 86_400.0,
+                "30d" => 30.0 * 86_400.0,
+                _ => 86_400.0,
+            };
+            Ok(vec![
+                vec![now as f64 - span, 1.0, 1.0, 1.0, 100.0],
+                vec![now as f64, 2.0, 2.0, 2.0, 125.0],
+            ])
+        }
+
         fn load_state(&mut self, _signal_id: &str) -> Result<Option<SignalState>, String> {
             Ok(self.state.borrow().clone())
         }
@@ -6601,6 +6670,15 @@ mod tests {
             _now: i64,
         ) -> Result<Vec<u8>, String> {
             self.photo.clone()
+        }
+
+        fn period_candles(
+            &mut self,
+            _signal: &TokenSignal,
+            _period: &str,
+            _now: i64,
+        ) -> Result<Vec<Vec<f64>>, String> {
+            Err("synthetic period candles failure".into())
         }
 
         fn load_state(&mut self, _signal_id: &str) -> Result<Option<SignalState>, String> {
