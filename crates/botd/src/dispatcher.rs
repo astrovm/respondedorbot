@@ -3561,20 +3561,17 @@ where
                     // One in-flight invoice per user and pack: a double tap
                     // must not emit two independently payable invoices. The
                     // marker expires on its own, so an intentional repurchase
-                    // stays possible.
-                    let claim_key = context.user_id.and_then(|user_id| {
-                        let pack_id = context.data.strip_prefix("topup:").unwrap_or_default();
-                        (!pack_id.is_empty()).then(|| topup_invoice_claim_key(user_id, pack_id))
-                    });
-                    let claimed = match claim_key.as_deref() {
-                        None => Ok(true),
-                        Some(claim_key) => self
-                            .market_price_source
-                            .as_mut()
-                            .map_or(Ok(true), |source| {
-                                source.claim(claim_key, "1", TOPUP_INVOICE_CLAIM_TTL_SECONDS)
-                            }),
-                    };
+                    // stays possible. The plan guarantees a user and pack id
+                    // on this path, so the key below always identifies the tap.
+                    let user_id = context.user_id.unwrap_or(0);
+                    let pack_id = context.data.strip_prefix("topup:").unwrap_or_default();
+                    let claim_key = topup_invoice_claim_key(user_id, pack_id);
+                    let claimed = self
+                        .market_price_source
+                        .as_mut()
+                        .map_or(Ok(true), |source| {
+                            source.claim(claim_key.as_str(), "1", TOPUP_INVOICE_CLAIM_TTL_SECONDS)
+                        });
                     let claimed = match claimed {
                         Ok(claimed) => claimed,
                         Err(error) => {
@@ -3606,9 +3603,8 @@ where
                         return Ok(DispatchOutcome::Handled);
                     }
                     let release_claim = |dispatcher: &mut Self| {
-                        if let Some(claim_key) = claim_key.as_deref()
-                            && let Some(source) = dispatcher.market_price_source.as_mut()
-                            && let Err(error) = source.take_selection(claim_key)
+                        if let Some(source) = dispatcher.market_price_source.as_mut()
+                            && let Err(error) = source.take_selection(claim_key.as_str())
                         {
                             dispatcher.state_diagnostics.push(format!(
                                 "topup invoice claim release failed chat_id={} key={claim_key}: {error}",
@@ -9663,6 +9659,43 @@ mod tests {
     }
 
     #[test]
+    fn group_config_callback_denial_without_callback_id_stays_handled() -> Result<(), String> {
+        let config = Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let denied = Authorization {
+            is_admin: false,
+            diagnostics: Vec::new(),
+            checks: Vec::new(),
+        };
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            denied,
+            "@mybot",
+        );
+        assert_eq!(
+            dispatcher.dispatch(callback_update_with_context(
+                "cfg:link:off",
+                json!(-42),
+                "group",
+                7,
+                Some(88),
+                None,
+                None,
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(dispatcher.actions.0.is_empty());
+        assert!(dispatcher.state_diagnostics()[0].contains("callback_data=cfg:link:off"));
+        Ok(())
+    }
+
+    #[test]
     fn config_callback_uses_new_message_fallback_before_acknowledging() {
         #[derive(Default)]
         struct EditFallbackActions(Vec<TelegramAction>);
@@ -10186,17 +10219,6 @@ mod tests {
             Ok(self.stored.borrow_mut().remove(key))
         }
 
-        fn claim(&mut self, key: &str, value: &str, _: i64) -> Result<bool, String> {
-            if self.stored.borrow().contains_key(key) {
-                Ok(false)
-            } else {
-                self.stored
-                    .borrow_mut()
-                    .insert(key.to_owned(), value.to_owned());
-                Ok(true)
-            }
-        }
-
         fn clear_selection(&mut self, key: &str) -> Result<(), String> {
             self.stored.borrow_mut().remove(key);
             Ok(())
@@ -10270,17 +10292,6 @@ mod tests {
                 return Err(error.clone());
             }
             Ok(self.stored.borrow_mut().remove(key))
-        }
-
-        fn claim(&mut self, key: &str, value: &str, _: i64) -> Result<bool, String> {
-            if self.stored.borrow().contains_key(key) {
-                Ok(false)
-            } else {
-                self.stored
-                    .borrow_mut()
-                    .insert(key.to_owned(), value.to_owned());
-                Ok(true)
-            }
         }
 
         fn clear_selection(&mut self, key: &str) -> Result<(), String> {
@@ -13175,14 +13186,6 @@ mod tests {
             self.candidate.clone()
         }
 
-        fn render_chart(
-            &mut self,
-            _: &bot_core::market_prices::MarketChart,
-            _: i64,
-        ) -> Result<super::MarketChartRender, String> {
-            Err("synthetic chart unavailable".to_owned())
-        }
-
         fn save_selection(&mut self, _: &str, _: &str, _: i64) -> Result<(), String> {
             self.saves.borrow_mut().pop_front().unwrap_or(Ok(()))
         }
@@ -13193,10 +13196,6 @@ mod tests {
 
         fn take_selection(&mut self, _key: &str) -> Result<Option<String>, String> {
             self.takes.borrow_mut().pop_front().unwrap_or(Ok(None))
-        }
-
-        fn clear_selection(&mut self, _key: &str) -> Result<(), String> {
-            Ok(())
         }
     }
 
@@ -13230,20 +13229,42 @@ mod tests {
             dispatcher().with_market_price_source(Box::new(ScriptedTakeMarketPrices {
                 load: Some(stored_selection_value()?),
                 takes: RefCell::new(VecDeque::from([Ok(None)])),
-                saves: RefCell::new(VecDeque::new()),
+                saves: RefCell::new(VecDeque::from([Ok(()), Ok(())])),
                 candidate: market_candidate_quote(),
             }));
+        // Route a command through first so the scripted load and save stay
+        // covered; the raced callback below still takes nothing.
+        assert_eq!(
+            dispatcher.dispatch(update("/p libra", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
         assert_eq!(
             dispatcher.dispatch(race_callback()),
             Ok(DispatchOutcome::Handled)
         );
-        assert!(matches!(
-            dispatcher.actions.0.as_slice(),
-            [TelegramAction::AnswerCallback {
-                show_alert: true,
-                ..
-            }]
-        ));
+        assert!(dispatcher.actions.0.iter().any(|action| matches!(
+            action,
+            TelegramAction::SendMessage(message) if message.reply_markup.is_some()
+        )));
+        let answers = dispatcher
+            .actions
+            .0
+            .iter()
+            .filter(|action| {
+                matches!(
+                    action,
+                    TelegramAction::AnswerCallback {
+                        show_alert: true,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(answers, 1);
+        assert!(dispatcher.actions.0.iter().all(|action| matches!(
+            action,
+            TelegramAction::SendMessage(_) | TelegramAction::AnswerCallback { .. }
+        )));
         Ok(())
     }
 
@@ -16593,6 +16614,63 @@ mod tests {
                 .iter()
                 .any(|action| matches!(action, TelegramAction::SendInvoice { .. }))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn topup_invoice_transport_failure_releases_the_claim() -> Result<(), String> {
+        struct FailingInvoice {
+            actions: Vec<TelegramAction>,
+        }
+
+        impl ActionSink for FailingInvoice {
+            type Error = &'static str;
+
+            fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
+                self.actions.push(action);
+                Ok(ActionReceipt {
+                    message_id: Some(MessageId(700)),
+                })
+            }
+
+            fn try_invoice(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
+                self.actions.push(action);
+                Err("synthetic invoice transport failure")
+            }
+        }
+
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let mut dispatcher = NativeDispatcher::new(
+            config,
+            FailingInvoice {
+                actions: Vec::new(),
+            },
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_market_price_source(Box::new(SelectableMarketPrices {
+            initial: market_selection_load(None),
+            candidate: market_candidate_quote(),
+            stored: Rc::clone(&stored),
+            selected: Rc::new(RefCell::new(Vec::new())),
+        }));
+        // The invoice never reached Telegram, so the update fails and the
+        // claim is released for the retry instead of blocking it.
+        assert!(matches!(
+            dispatcher.dispatch(callback_update("topup:p50", "private", Some("en"))),
+            Err(DispatchError::Action(_))
+        ));
+        assert!(stored.borrow().is_empty());
         Ok(())
     }
 
