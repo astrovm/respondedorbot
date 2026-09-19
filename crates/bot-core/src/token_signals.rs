@@ -405,13 +405,27 @@ fn label_span_change(
     requested: &str,
 ) -> Option<(Option<f64>, String)> {
     match candle_change_for_span(history, requested_seconds) {
-        Some((change, actual_seconds)) if actual_seconds >= requested_seconds => {
-            Some((Some(change), requested.to_owned()))
-        }
         Some((change, actual_seconds)) => {
-            format_available_period(actual_seconds).map(|period| (Some(change), period))
+            span_period_label(actual_seconds, requested_seconds, requested)
+                .map(|period| (Some(change), period))
         }
         None => None,
+    }
+}
+
+/// Label for a covered span: history reaching at least 90% of the window
+/// keeps the requested period, so 29.3 days of a 30d ask reads 30d.
+/// Shorter history is labeled with its actual span instead.
+#[must_use]
+pub fn span_period_label(
+    actual_seconds: i64,
+    requested_seconds: i64,
+    requested: &str,
+) -> Option<String> {
+    if actual_seconds >= requested_seconds.saturating_mul(9) / 10 {
+        Some(requested.to_owned())
+    } else {
+        format_available_period(actual_seconds)
     }
 }
 
@@ -1228,7 +1242,7 @@ mod tests {
         format_signal_caption_for_period_with_candles, format_signal_quote,
         format_signal_quote_with_candles, has_candle_change, has_usable_chart,
         is_usable_chart_candle, normalize_token_name, pair_rank, signal_state_key,
-        stable_signal_id, token_from_pair, token_image_url, token_socials,
+        span_period_label, stable_signal_id, token_from_pair, token_image_url, token_socials,
     };
     use crate::locale::Locale;
 
@@ -1465,6 +1479,27 @@ mod tests {
         ];
         let covered = format_signal_quote(&signal, Some("3d"));
         assert!(covered.contains("+25% 3d"), "{covered}");
+    }
+
+    #[test]
+    fn near_complete_history_keeps_the_requested_label() {
+        let mut signal = signal();
+        signal.candles = vec![
+            vec![1_700_057_600.0, 1.0, 1.0, 1.0, 100.0],
+            vec![1_702_592_000.0, 2.0, 2.0, 2.0, 156.0],
+        ];
+        let monthly = format_signal_quote(&signal, Some("30d"));
+        assert!(monthly.contains("+56% 30d"), "{monthly}");
+        let caption = format_signal_caption_for_period(&signal, 1_702_592_000, Some("30d"));
+        assert!(caption.contains("+56% 30d"), "{caption}");
+        assert_eq!(
+            span_period_label(2_534_400, 2_592_000, "30d"),
+            Some("30d".to_owned())
+        );
+        assert_eq!(
+            span_period_label(864_000, 31_536_000, "1y"),
+            Some("10d".to_owned())
+        );
     }
 
     #[test]
