@@ -419,6 +419,22 @@ fn market_selection_text(selection: &MarketSelection, locale: bot_core::locale::
     format_market_selection(selection, locale)
 }
 
+fn period_seconds(period: &str) -> i64 {
+    bot_core::price_queries::ChartPeriod::parse(period).map_or(86_400, |range| range.seconds)
+}
+
+fn has_period_change(candles: &[Vec<f64>], period: &str) -> bool {
+    bot_core::token_signals::has_candle_change(candles, period_seconds(period))
+}
+
+fn wider_periods(period: &str) -> &'static [&'static str] {
+    match period {
+        "1h" | "24h" | "1d" => &["7d"],
+        "7d" => &["30d"],
+        _ => &[],
+    }
+}
+
 fn market_token_candidate(
     signal: &TokenSignal,
     timeframe: Option<&str>,
@@ -2216,12 +2232,30 @@ where
         timestamp: i64,
     ) -> Option<Vec<Vec<f64>>> {
         let period = timeframe.unwrap_or("24h");
-        let candles = self
-            .token_signal_source
-            .as_mut()?
+        let source = self.token_signal_source.as_mut()?;
+        let candles = source
             .period_candles(signal, period, timestamp)
-            .ok()?;
-        (!candles.is_empty()).then_some(candles)
+            .ok()
+            .filter(|candles| !candles.is_empty());
+        if candles
+            .as_deref()
+            .is_some_and(|candles| has_period_change(candles, period))
+        {
+            return candles;
+        }
+        for wider in wider_periods(period) {
+            let wider_candles = source
+                .period_candles(signal, wider, timestamp)
+                .ok()
+                .filter(|candles| !candles.is_empty());
+            if wider_candles
+                .as_deref()
+                .is_some_and(|candles| has_period_change(candles, wider))
+            {
+                return wider_candles;
+            }
+        }
+        candles
     }
 
     fn try_send_token_signal_photo(
@@ -6538,6 +6572,59 @@ mod tests {
             self.saved
                 .borrow_mut()
                 .push((signal_id.to_owned(), state.clone()));
+            Ok(())
+        }
+    }
+
+    struct WideningSignals {
+        query_load: TokenSignalLoad,
+        photo: Result<Vec<u8>, String>,
+        periods: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl TokenSignalSource for WideningSignals {
+        fn load(&mut self, _query: &SignalQuery) -> TokenSignalLoad {
+            self.query_load.clone()
+        }
+
+        fn load_token(&mut self, _token: &TokenAddress) -> TokenSignalLoad {
+            TokenSignalLoad {
+                signal: None,
+                diagnostics: Vec::new(),
+            }
+        }
+
+        fn render_period_photo(
+            &mut self,
+            _signal: &TokenSignal,
+            period: &str,
+            _now: i64,
+        ) -> Result<Vec<u8>, String> {
+            self.periods.borrow_mut().push(period.to_owned());
+            self.photo.clone()
+        }
+
+        fn period_candles(
+            &mut self,
+            _signal: &TokenSignal,
+            period: &str,
+            now: i64,
+        ) -> Result<Vec<Vec<f64>>, String> {
+            if period == "24h" {
+                Ok(vec![vec![now as f64, 1.0, 1.0, 1.0, 100.0]])
+            } else {
+                Ok(vec![
+                    vec![now as f64 - 172_800.0, 1.0, 1.0, 1.0, 100.0],
+                    vec![now as f64, 2.0, 2.0, 2.0, 125.0],
+                ])
+            }
+        }
+
+        fn load_state(&mut self, _signal_id: &str) -> Result<Option<SignalState>, String> {
+            Ok(None)
+        }
+
+        fn save_state(&mut self, _signal_id: &str, _state: &SignalState) -> Result<(), String> {
             Ok(())
         }
     }
@@ -11966,6 +12053,31 @@ mod tests {
                     if caption.contains("24h")
             )), "{input}");
         }
+    }
+
+    #[test]
+    fn narrow_window_without_trades_widens_to_available_history() {
+        let mut signal = token_signal();
+        signal.candles.clear();
+        signal.pair.price_change.h1 = json!(null);
+        signal.pair.price_change.h24 = json!(null);
+        let periods = Rc::new(RefCell::new(Vec::new()));
+        let mut dispatcher = dispatcher().with_token_signal_source(Box::new(WideningSignals {
+            query_load: TokenSignalLoad {
+                signal: Some(signal),
+                diagnostics: Vec::new(),
+            },
+            photo: Ok(vec![1]),
+            periods: Rc::clone(&periods),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(update("/p syn 7d", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(dispatcher.actions.0.iter().any(|action| matches!(action,
+            TelegramAction::SendPhoto { reply_to_message_id: Some(MessageId(7)), caption, .. }
+                if caption.contains("+25% 2d")
+        )));
     }
 
     #[test]

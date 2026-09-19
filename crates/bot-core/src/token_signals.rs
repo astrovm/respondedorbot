@@ -387,14 +387,38 @@ fn signal_change_for_timeframe(
     let history = candles
         .filter(|candles| !candles.is_empty())
         .unwrap_or(&signal.candles);
-    match candle_change_for_span(history, requested_seconds) {
-        Some((change, _, true)) => (Some(change), requested.to_owned()),
-        Some((change, actual_seconds, false)) => format_available_period(actual_seconds)
-            .map_or((None, requested.to_owned()), |period| {
-                (Some(change), period)
-            }),
-        None => (None, requested.to_owned()),
+    if let Some(labeled) = label_span_change(history, requested_seconds, requested) {
+        return labeled;
     }
+    if candles.is_some_and(|candles| !candles.is_empty())
+        && !signal.candles.is_empty()
+        && let Some(labeled) = label_span_change(&signal.candles, requested_seconds, requested)
+    {
+        return labeled;
+    }
+    (None, requested.to_owned())
+}
+
+fn label_span_change(
+    history: &[Vec<f64>],
+    requested_seconds: i64,
+    requested: &str,
+) -> Option<(Option<f64>, String)> {
+    match candle_change_for_span(history, requested_seconds) {
+        Some((change, actual_seconds)) if actual_seconds >= requested_seconds => {
+            Some((Some(change), requested.to_owned()))
+        }
+        Some((change, actual_seconds)) => {
+            format_available_period(actual_seconds).map(|period| (Some(change), period))
+        }
+        None => None,
+    }
+}
+
+/// Whether a candle set carries a computable move for a span in seconds.
+#[must_use]
+pub fn has_candle_change(candles: &[Vec<f64>], seconds: i64) -> bool {
+    candle_change_for_span(candles, seconds).is_some()
 }
 
 fn numeric_value(value: &Value) -> Option<f64> {
@@ -404,7 +428,7 @@ fn numeric_value(value: &Value) -> Option<f64> {
         .filter(|value| value.is_finite())
 }
 
-fn candle_change_for_span(candles: &[Vec<f64>], seconds: i64) -> Option<(f64, i64, bool)> {
+fn candle_change_for_span(candles: &[Vec<f64>], seconds: i64) -> Option<(f64, i64)> {
     let mut closes = candles
         .iter()
         .filter_map(|candle| {
@@ -419,24 +443,17 @@ fn candle_change_for_span(candles: &[Vec<f64>], seconds: i64) -> Option<(f64, i6
         .collect::<Vec<_>>();
     closes.sort_by_key(|(timestamp, _)| *timestamp);
     let (latest_timestamp, latest_close) = closes.last().copied()?;
-    if let Some((timestamp, reference)) = closes
+    if let Some((_, reference)) = closes
         .iter()
         .rev()
         .find(|(timestamp, _)| latest_timestamp.saturating_sub(*timestamp) >= seconds)
     {
-        let actual = latest_timestamp.saturating_sub(*timestamp);
-        let slack = seconds.saturating_div(4).max(3_600);
-        if actual <= seconds.saturating_add(slack) {
-            return Some(((latest_close / reference - 1.0) * 100.0, seconds, true));
-        }
+        return Some(((latest_close / reference - 1.0) * 100.0, seconds));
     }
     let (oldest_timestamp, oldest_close) = closes.first().copied()?;
     let actual = latest_timestamp.saturating_sub(oldest_timestamp);
-    (actual > 0 && oldest_close > 0.0).then_some((
-        (latest_close / oldest_close - 1.0) * 100.0,
-        actual,
-        false,
-    ))
+    (actual > 0 && oldest_close > 0.0)
+        .then_some(((latest_close / oldest_close - 1.0) * 100.0, actual))
 }
 
 fn format_available_period(seconds: i64) -> Option<String> {
@@ -1208,7 +1225,8 @@ mod tests {
         TokenAddress, TokenPair, TokenSignal, age_text, build_signal_keyboard, callback_text,
         choose_best_pair, choose_symbol_pair, detect_signal_query, format_money,
         format_signal_caption, format_signal_caption_for_period,
-        format_signal_caption_for_period_with_candles, format_signal_quote, has_usable_chart,
+        format_signal_caption_for_period_with_candles, format_signal_quote,
+        format_signal_quote_with_candles, has_candle_change, has_usable_chart,
         is_usable_chart_candle, normalize_token_name, pair_rank, signal_state_key,
         stable_signal_id, token_from_pair, token_image_url, token_socials,
     };
@@ -1440,13 +1458,41 @@ mod tests {
         let caption = format_signal_caption_for_period(&signal, 1_700_864_000, Some("1y"));
         assert!(caption.contains("+25% 10d"), "{caption}");
         let three_day = format_signal_quote(&signal, Some("3d"));
-        assert!(three_day.contains("+25% 10d"), "{three_day}");
+        assert!(three_day.contains("+25% 3d"), "{three_day}");
         signal.candles = vec![
             vec![1_700_604_800.0, 1.0, 1.0, 1.0, 100.0],
             vec![1_700_864_000.0, 2.0, 2.0, 2.0, 125.0],
         ];
         let covered = format_signal_quote(&signal, Some("3d"));
         assert!(covered.contains("+25% 3d"), "{covered}");
+    }
+
+    #[test]
+    fn stale_reference_price_carries_forward_to_the_requested_window() {
+        let mut signal = signal();
+        signal.candles = vec![
+            vec![1_700_000_000.0, 1.0, 1.0, 1.0, 100.0],
+            vec![1_700_864_000.0, 2.0, 2.0, 2.0, 125.0],
+        ];
+        let weekly = format_signal_quote(&signal, Some("7d"));
+        assert!(weekly.contains("+25% 7d"), "{weekly}");
+        let caption = format_signal_caption_for_period(&signal, 1_700_864_000, Some("7d"));
+        assert!(caption.contains("+25% 7d"), "{caption}");
+    }
+
+    #[test]
+    fn uninformative_period_window_retries_load_time_history() {
+        let mut signal = signal();
+        signal.pair.price_change.h24 = serde_json::Value::Null;
+        signal.candles = vec![
+            vec![1_700_000_000.0, 1.0, 1.0, 1.0, 100.0],
+            vec![1_700_086_400.0, 2.0, 2.0, 2.0, 125.0],
+        ];
+        let single = vec![vec![1_700_086_400.0, 2.0, 2.0, 2.0, 125.0]];
+        let quote = format_signal_quote_with_candles(&signal, Some("24h"), Some(&single));
+        assert!(quote.contains("+25% 24h"), "{quote}");
+        assert!(!has_candle_change(&single, 86_400));
+        assert!(has_candle_change(&signal.candles, 86_400));
     }
 
     #[test]
