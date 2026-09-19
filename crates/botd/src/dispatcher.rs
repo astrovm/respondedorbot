@@ -1880,12 +1880,12 @@ where
             if token_candidates.len() > 1 {
                 let mut menu_candidates = Vec::new();
                 for signal in &token_candidates {
-                    let candles =
-                        self.period_change_candles(signal, timeframe.as_deref(), timestamp);
+                    let history =
+                        self.period_change_history(signal, timeframe.as_deref(), timestamp);
                     menu_candidates.push(market_token_candidate(
                         signal,
-                        timeframe.as_deref(),
-                        candles.as_deref(),
+                        Some(history.1.as_str()),
+                        history.0.as_deref(),
                     ));
                 }
                 let token_candidates = menu_candidates;
@@ -1922,9 +1922,9 @@ where
                 }
             }
             if let Some(signal) = token_signal.as_ref() {
-                let candles = self.period_change_candles(signal, timeframe.as_deref(), timestamp);
+                let history = self.period_change_history(signal, timeframe.as_deref(), timestamp);
                 let token_candidate =
-                    market_token_candidate(signal, timeframe.as_deref(), candles.as_deref());
+                    market_token_candidate(signal, Some(history.1.as_str()), history.0.as_deref());
                 if let Some(load) = load.as_mut()
                     && let Some(selection) = load.selection.as_mut()
                 {
@@ -2121,12 +2121,12 @@ where
                         return Ok(Some(outcome));
                     }
                 } else if let Some(signal) = token_signal {
-                    let candles =
-                        self.period_change_candles(&signal, timeframe.as_deref(), timestamp);
+                    let history =
+                        self.period_change_history(&signal, timeframe.as_deref(), timestamp);
                     let quote = bot_core::token_signals::format_signal_quote_with_candles(
                         &signal,
-                        timeframe.as_deref(),
-                        candles.as_deref(),
+                        Some(history.1.as_str()),
+                        history.0.as_deref(),
                     );
                     lines.push(quote);
                     continue;
@@ -2225,25 +2225,27 @@ where
         )
     }
 
-    fn period_change_candles(
+    fn period_change_history(
         &mut self,
         signal: &TokenSignal,
         timeframe: Option<&str>,
         timestamp: i64,
-    ) -> Option<Vec<Vec<f64>>> {
-        let period = timeframe.unwrap_or("24h");
-        let source = self.token_signal_source.as_mut()?;
+    ) -> (Option<Vec<Vec<f64>>>, String) {
+        let period = timeframe.unwrap_or("24h").to_owned();
+        let Some(source) = self.token_signal_source.as_mut() else {
+            return (None, period);
+        };
         let candles = source
-            .period_candles(signal, period, timestamp)
+            .period_candles(signal, &period, timestamp)
             .ok()
             .filter(|candles| !candles.is_empty());
         if candles
             .as_deref()
-            .is_some_and(|candles| has_period_change(candles, period))
+            .is_some_and(|candles| has_period_change(candles, &period))
         {
-            return candles;
+            return (candles, period);
         }
-        for wider in wider_periods(period) {
+        for wider in wider_periods(&period) {
             let wider_candles = source
                 .period_candles(signal, wider, timestamp)
                 .ok()
@@ -2252,10 +2254,10 @@ where
                 .as_deref()
                 .is_some_and(|candles| has_period_change(candles, wider))
             {
-                return wider_candles;
+                return (wider_candles, (*wider).to_owned());
             }
         }
-        candles
+        (candles, period)
     }
 
     fn try_send_token_signal_photo(
@@ -2271,22 +2273,23 @@ where
             locale,
             timestamp,
         } = request;
-        let candles = self.period_change_candles(signal, timeframe, timestamp);
+        let history = self.period_change_history(signal, timeframe, timestamp);
         let caption = format_signal_caption_for_period_with_candles(
             signal,
             timestamp,
-            timeframe,
-            candles.as_deref(),
+            Some(history.1.as_str()),
+            history.0.as_deref(),
         );
-        let photo = match self.render_token_signal_photo(signal, timeframe, timestamp) {
-            Ok(photo) => photo,
-            Err(_) => {
-                return TokenSignalPhotoDelivery::Failed {
-                    caption,
-                    failure: TokenSignalPhotoFailure::HistoryUnavailable,
-                };
-            }
-        };
+        let photo =
+            match self.render_token_signal_photo(signal, Some(history.1.as_str()), timestamp) {
+                Ok(photo) => photo,
+                Err(_) => {
+                    return TokenSignalPhotoDelivery::Failed {
+                        caption,
+                        failure: TokenSignalPhotoFailure::HistoryUnavailable,
+                    };
+                }
+            };
         match self.actions.try_photo(TelegramAction::SendPhoto {
             chat_id,
             photo: photo.into(),
@@ -2610,9 +2613,8 @@ where
             }
             return Ok(DispatchOutcome::Handled);
         };
-        let photo =
-            self.render_token_signal_photo(&signal, state.chart_period.as_deref(), timestamp);
-        let candles = self.period_change_candles(&signal, state.chart_period.as_deref(), timestamp);
+        let history = self.period_change_history(&signal, state.chart_period.as_deref(), timestamp);
+        let photo = self.render_token_signal_photo(&signal, Some(history.1.as_str()), timestamp);
         let edited = match photo {
             Ok(photo) => match self.actions.try_edit(TelegramAction::EditMessagePhoto {
                 chat_id: ChatId(chat_id),
@@ -2621,8 +2623,8 @@ where
                 caption: format_signal_caption_for_period_with_candles(
                     &signal,
                     timestamp,
-                    state.chart_period.as_deref(),
-                    candles.as_deref(),
+                    Some(history.1.as_str()),
+                    history.0.as_deref(),
                 ),
                 parse_mode: Some(ParseMode::Html),
                 reply_markup: Some(build_signal_keyboard_localized(
@@ -12062,7 +12064,7 @@ mod tests {
         signal.pair.price_change.h1 = json!(null);
         signal.pair.price_change.h24 = json!(null);
         let periods = Rc::new(RefCell::new(Vec::new()));
-        let mut dispatcher = dispatcher().with_token_signal_source(Box::new(WideningSignals {
+        let mut direct = dispatcher().with_token_signal_source(Box::new(WideningSignals {
             query_load: TokenSignalLoad {
                 signal: Some(signal),
                 diagnostics: Vec::new(),
@@ -12071,10 +12073,29 @@ mod tests {
             periods: Rc::clone(&periods),
         }));
         assert_eq!(
-            dispatcher.dispatch(update("/p syn 7d", Some("en"))),
+            direct.dispatch(update("/p syn 7d", Some("en"))),
             Ok(DispatchOutcome::Handled)
         );
-        assert!(dispatcher.actions.0.iter().any(|action| matches!(action,
+        assert!(direct.actions.0.iter().any(|action| matches!(action,
+            TelegramAction::SendPhoto { reply_to_message_id: Some(MessageId(7)), caption, .. }
+                if caption.contains("+25% 2d")
+        )));
+        assert_eq!(periods.borrow().as_slice(), ["7d"]);
+
+        let mut widened = dispatcher().with_token_signal_source(Box::new(WideningSignals {
+            query_load: TokenSignalLoad {
+                signal: Some(token_signal()),
+                diagnostics: Vec::new(),
+            },
+            photo: Ok(vec![1]),
+            periods: Rc::clone(&periods),
+        }));
+        assert_eq!(
+            widened.dispatch(update("/p syn", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(periods.borrow().as_slice(), ["7d", "7d"]);
+        assert!(widened.actions.0.iter().any(|action| matches!(action,
             TelegramAction::SendPhoto { reply_to_message_id: Some(MessageId(7)), caption, .. }
                 if caption.contains("+25% 2d")
         )));
