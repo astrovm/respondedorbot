@@ -940,11 +940,14 @@ where
         now: i64,
     ) -> Result<Vec<u8>, String> {
         let history = self.load_period_history(signal, period, now)?;
+        let shown = history
+            .shown_period(period)
+            .unwrap_or_else(|| period.to_owned());
         if history.windowed.is_empty() {
             let flat = history.idle_pump_candles(now);
             if !flat.is_empty() {
                 let title = format!(
-                    "{} · {period}\nLast available trade price",
+                    "{} · {shown}\nLast available trade price",
                     signal.pair.base_token.symbol
                 );
                 let mut pair = signal.pair.clone();
@@ -954,7 +957,7 @@ where
             return Err("requested token history unavailable".into());
         }
         let title = format!(
-            "{} · {period}\nAvailable history",
+            "{} · {shown}\nAvailable history",
             signal.pair.base_token.symbol
         );
         render_price_chart(
@@ -1079,6 +1082,38 @@ struct PeriodHistory {
 }
 
 impl PeriodHistory {
+    #[cfg(test)]
+    fn for_test(windowed: Vec<Vec<f64>>, range_seconds: i64) -> Self {
+        Self {
+            windowed,
+            last_known: None,
+            pump_history: false,
+            range_seconds,
+        }
+    }
+
+    fn shown_period(&self, requested: &str) -> Option<String> {
+        if self.windowed.is_empty() {
+            return None;
+        }
+        let mut oldest = f64::INFINITY;
+        let mut latest = f64::NEG_INFINITY;
+        for row in &self.windowed {
+            if let Some(timestamp) = row.first().copied().filter(|value| value.is_finite()) {
+                oldest = oldest.min(timestamp);
+                latest = latest.max(timestamp);
+            }
+        }
+        if !oldest.is_finite() || !latest.is_finite() {
+            return None;
+        }
+        bot_core::token_signals::span_period_label(
+            (latest - oldest) as i64,
+            self.range_seconds,
+            requested,
+        )
+    }
+
     fn idle_pump_candles(&self, now: i64) -> Vec<Vec<f64>> {
         match (self.pump_history, self.last_known) {
             (true, Some(price)) => vec![
@@ -1544,8 +1579,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        BinaryResponse, JsonResponse, ReqwestTokenSignalTransport, TokenSignalAdapter,
-        TokenSignalCache, TokenSignalTransport, render_signal_chart,
+        BinaryResponse, JsonResponse, PeriodHistory, ReqwestTokenSignalTransport,
+        TokenSignalAdapter, TokenSignalCache, TokenSignalTransport, render_signal_chart,
     };
 
     #[test]
@@ -1746,6 +1781,24 @@ mod tests {
         let idle_candles = idle.period_candles(&signal, "1h", 1_800_000_000)?;
         assert_eq!(idle_candles.len(), 2);
         assert_eq!(idle_candles[0][4], idle_candles[1][4]);
+        let covered = PeriodHistory::for_test(
+            vec![
+                vec![1_702_419_200.0, 1.0, 1.0, 1.0, 100.0],
+                vec![1_702_592_000.0, 2.0, 2.0, 2.0, 125.0],
+            ],
+            604_800,
+        );
+        assert_eq!(covered.shown_period("7d"), Some("2d".to_owned()));
+        let near_complete = PeriodHistory::for_test(
+            vec![
+                vec![1_700_057_600.0, 1.0, 1.0, 1.0, 100.0],
+                vec![1_702_592_000.0, 2.0, 2.0, 2.0, 156.0],
+            ],
+            2_592_000,
+        );
+        assert_eq!(near_complete.shown_period("30d"), Some("30d".to_owned()));
+        let empty = PeriodHistory::for_test(Vec::new(), 86_400);
+        assert_eq!(empty.shown_period("24h"), None);
         for (period, interval) in [
             ("1h", "1m"),
             ("1d", "5m"),
