@@ -651,10 +651,10 @@ fn operation_id(execution_id: &str) -> String {
 fn insufficient_credits_message(locale: &str, balance: i64) -> String {
     let balance = format_credit_units(CreditUnits::new(balance));
     if locale == "en" {
-        format!("you are out of AI credits\nbalance: {balance}\nuse /topup to add more")
+        format!("🪫 You are out of AI credits\n\n👤 Balance: {balance}\n\nUse /topup to add more")
     } else {
         format!(
-            "te quedaste seco de créditos ia, boludo.\nsaldo: {balance}\nmetele /topup si querés que siga laburando"
+            "🪫 Te quedaste seco de créditos de IA, boludo\n\n👤 Saldo: {balance}\n\nMetele /topup si querés que siga laburando"
         )
     }
 }
@@ -1315,7 +1315,7 @@ mod tests {
             .reserve(&task("en"), "task123:1000", &[])
             .unwrap_or_else(|error| panic!("reserve: {error}"));
         assert!(
-            matches!(outcome, TaskReserveOutcome::Denied { message } if message.contains("balance: 1.23"))
+            matches!(outcome, TaskReserveOutcome::Denied { message } if message.contains("Balance: 1.23"))
         );
 
         let settled_store = Store {

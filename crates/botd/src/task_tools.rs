@@ -308,8 +308,8 @@ impl<Store: TaskToolStore> ExternalToolExecutor for TaskListTool<Store> {
             Err(error) => ToolExecutionResult::with_diagnostics(
                 bot_core::menu_ui::localized(
                     self.locale,
-                    "No pude cargar las tareas. Probá de nuevo.",
-                    "I could not load tasks. Try again.",
+                    "No pude cargar las tareas. Probá de nuevo",
+                    "I could not load tasks. Try again",
                 ),
                 vec![format!("task list failed: {error}")],
             ),
@@ -359,8 +359,8 @@ impl<Store: TaskToolStore> ExternalToolExecutor for TaskCancelTool<Store> {
                 return ToolExecutionResult::with_diagnostics(
                     bot_core::menu_ui::localized(
                         self.locale,
-                        "No pude cargar las tareas. Probá de nuevo.",
-                        "I could not load tasks. Try again.",
+                        "No pude cargar las tareas. Probá de nuevo",
+                        "I could not load tasks. Try again",
                     ),
                     vec![format!("task cancel list failed: {error}")],
                 );
@@ -375,8 +375,8 @@ impl<Store: TaskToolStore> ExternalToolExecutor for TaskCancelTool<Store> {
             Err(error) => ToolExecutionResult::with_diagnostics(
                 bot_core::menu_ui::localized(
                     self.locale,
-                    "No pude cancelar la tarea. Probá de nuevo.",
-                    "I could not cancel the task. Try again.",
+                    "No pude cancelar la tarea. Probá de nuevo",
+                    "I could not cancel the task. Try again",
                 ),
                 vec![format!("task cancellation failed: {error}")],
             ),
@@ -599,21 +599,21 @@ fn credit_user(locale: Locale) -> &'static str {
     if locale == Locale::En {
         "I could not identify your user to charge for the task"
     } else {
-        "no pude identificar tu usuario para cobrar la tarea"
+        "No pude identificar tu usuario para cobrar la tarea"
     }
 }
 pub fn task_credit_check(locale: Locale) -> &'static str {
     if locale == Locale::En {
-        "I could not check your personal credits, try again"
+        "I could not check your personal credits. Try again"
     } else {
-        "no pude verificar tus créditos personales, probá de nuevo"
+        "No pude verificar tus créditos personales. Probá de nuevo"
     }
 }
 pub fn task_cost_error(locale: Locale) -> &'static str {
     if locale == Locale::En {
-        "I could not calculate the task cost, try again"
+        "I could not calculate the task cost. Try again"
     } else {
-        "no se pudo calcular el costo de la tarea, probá de nuevo"
+        "No pude calcular el costo de la tarea. Probá de nuevo"
     }
 }
 fn create_error(locale: Locale) -> &'static str {
@@ -625,9 +625,9 @@ fn create_error(locale: Locale) -> &'static str {
 }
 fn task_not_found(locale: Locale) -> &'static str {
     if locale == Locale::En {
-        "that task does not exist in this chat"
+        "That task does not exist in this chat"
     } else {
-        "esa tarea no existe en este chat"
+        "Esa tarea no existe en este chat"
     }
 }
 
@@ -636,10 +636,10 @@ pub fn task_credit_insufficient(balance: i64, required: i64, locale: Locale) -> 
     let required = format_credit_units(CreditUnits::new(required));
     match locale {
         Locale::Es => format!(
-            "no tenés créditos personales suficientes para ejecutar esa tarea\n- tenés: {balance}\n- necesitás: {required}\ncargá con /topup antes de crearla"
+            "❌ No te alcanzan los créditos personales para esa tarea\n\n👤 Tenés: {balance}\n💳 Necesitás: {required}\n\nCargá con /topup antes de crearla"
         ),
         Locale::En => format!(
-            "you do not have enough personal credits to run this task\n- available: {balance}\n- required: {required}\nuse /topup before creating it"
+            "❌ Not enough personal credits for this task\n\n👤 Available: {balance}\n💳 Required: {required}\n\nUse /topup before creating it"
         ),
     }
 }
@@ -653,8 +653,8 @@ fn created(schedule: &str, text: &str, locale: Locale) -> String {
 
 fn task_canceled(task_id: &TaskId, locale: Locale) -> String {
     match locale {
-        Locale::Es => format!("tarea {} cancelada", task_id.as_str()),
-        Locale::En => format!("task {} canceled", task_id.as_str()),
+        Locale::Es => format!("✅ Tarea {} cancelada", task_id.as_str()),
+        Locale::En => format!("✅ Task {} canceled", task_id.as_str()),
     }
 }
 
@@ -921,7 +921,7 @@ mod tests {
         assert!(
             tool.execute(set_request(Some(60), None, None), "call")
                 .output
-                .contains("not have enough personal credits")
+                .contains("Not enough personal credits")
         );
         assert!(state.borrow().saved.is_empty());
 
@@ -978,7 +978,7 @@ mod tests {
                     "call"
                 )
                 .output,
-            "task abc12345 canceled"
+            "✅ Task abc12345 canceled"
         );
         assert_eq!(
             state.borrow().canceled,
@@ -995,7 +995,7 @@ mod tests {
                     "call"
                 )
                 .output,
-            "esa tarea no existe en este chat"
+            "Esa tarea no existe en este chat"
         );
         assert_eq!(state.borrow().canceled.len(), 1);
     }
@@ -1009,7 +1009,7 @@ mod tests {
         }));
         let mut list = TaskListTool::new(Store(Rc::clone(&state)), "-100", Locale::Es);
         let result = list.execute(ExternalToolRequest::TaskList, "call");
-        assert_eq!(result.output, "No pude cargar las tareas. Probá de nuevo.");
+        assert_eq!(result.output, "No pude cargar las tareas. Probá de nuevo");
         assert!(result.diagnostics[0].contains("synthetic list failure"));
 
         let mut cancel = TaskCancelTool::new(Store(state), "-100", Locale::En);
@@ -1019,7 +1019,7 @@ mod tests {
             },
             "call",
         );
-        assert_eq!(result.output, "I could not load tasks. Try again.");
+        assert_eq!(result.output, "I could not load tasks. Try again");
         assert!(result.diagnostics[0].contains("synthetic list failure"));
     }
 
@@ -1149,7 +1149,7 @@ mod tests {
             },
             "call",
         );
-        assert_eq!(result.output, "I could not cancel the task. Try again.");
+        assert_eq!(result.output, "I could not cancel the task. Try again");
         assert!(result.diagnostics[0].contains("synthetic cancel failure"));
     }
 

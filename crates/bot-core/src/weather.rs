@@ -152,8 +152,8 @@ pub fn render_weather(observation: &WeatherObservation, locale: Locale) -> Strin
 #[must_use]
 pub fn weather_load_error(location: &str, locale: Locale) -> String {
     match locale {
-        Locale::Es => format!("no se pudo obtener el clima de {location}"),
-        Locale::En => format!("I could not load the weather for {location}"),
+        Locale::Es => format!("No pude conseguir el clima de {location}. Probá más tarde"),
+        Locale::En => format!("I could not load the weather for {location}. Try again later"),
     }
 }
 
@@ -314,11 +314,11 @@ mod tests {
         assert_eq!(weather_description(999, Locale::En), "unusual weather");
         assert_eq!(
             weather_load_error("Rosario", Locale::En),
-            "I could not load the weather for Rosario"
+            "I could not load the weather for Rosario. Try again later"
         );
         assert_eq!(
             weather_load_error("Rosario", Locale::Es),
-            "no se pudo obtener el clima de Rosario"
+            "No pude conseguir el clima de Rosario. Probá más tarde"
         );
     }
 

@@ -198,47 +198,51 @@ pub fn telegram_commands(locale: Locale) -> Vec<TelegramCommand> {
     commands
 }
 
-/// The `/` picker shows one entry per command, most useful first; every alias
-/// in [`telegram_commands`] still works when typed.
-const MENU_ORDER: &[&str] = &[
-    "ask",
-    "p",
-    "c",
-    "s",
-    "dolar",
-    "clima",
-    "tarea",
-    "resumen",
-    "transcribe",
-    "balance",
-    "topup",
-    "charges",
-    "transfer",
-    "config",
-    "language",
-    "help",
-    "bcra",
-    "rulo",
-    "devo",
-    "petroleo",
-    "elecciones",
-    "powerlaw",
-    "rainbow",
-    "satoshi",
-    "random",
-    "convertbase",
-    "comando",
-    "time",
-    "gm",
-    "gn",
-    "instance",
+/// The `/` picker shows one entry per command, most useful first, named in
+/// the menu's language; every alias in [`telegram_commands`] still works.
+const MENU_ORDER: &[(&str, &str)] = &[
+    ("ask", "ask"),
+    ("p", "p"),
+    ("c", "c"),
+    ("s", "s"),
+    ("dolar", "dollar"),
+    ("clima", "weather"),
+    ("tarea", "task"),
+    ("resumen", "summary"),
+    ("transcribe", "transcribe"),
+    ("balance", "balance"),
+    ("topup", "topup"),
+    ("gastos", "charges"),
+    ("transfer", "transfer"),
+    ("config", "config"),
+    ("idioma", "language"),
+    ("help", "help"),
+    ("bcra", "bcra"),
+    ("rulo", "rulo"),
+    ("devo", "devo"),
+    ("petroleo", "oil"),
+    ("elecciones", "elections"),
+    ("powerlaw", "powerlaw"),
+    ("rainbow", "rainbow"),
+    ("satoshi", "satoshi"),
+    ("random", "random"),
+    ("convertbase", "convertbase"),
+    ("comando", "command"),
+    ("time", "time"),
+    ("gm", "gm"),
+    ("gn", "gn"),
+    ("instance", "instance"),
 ];
 
 #[must_use]
 pub fn primary_telegram_commands(locale: Locale) -> Vec<TelegramCommand> {
     MENU_ORDER
         .iter()
-        .filter_map(|command| {
+        .filter_map(|(spanish, english)| {
+            let command = match locale {
+                Locale::Es => spanish,
+                Locale::En => english,
+            };
             COMMAND_GROUPS
                 .iter()
                 .find(|group| group.aliases.contains(command))
@@ -325,8 +329,15 @@ mod tests {
 
     #[test]
     fn primary_menu_keeps_aliases_out_of_picker_only() {
+        assert!(
+            super::primary_telegram_commands(Locale::Es)
+                .iter()
+                .any(|c| c.command == "idioma")
+        );
         let commands = super::primary_telegram_commands(Locale::En);
-        for name in ["p", "c", "s", "help", "config"] {
+        for name in [
+            "p", "c", "s", "help", "config", "weather", "task", "summary",
+        ] {
             assert!(commands.iter().any(|c| c.command == name));
         }
         for alias in ["prices", "precios", "settings", "tldr"] {

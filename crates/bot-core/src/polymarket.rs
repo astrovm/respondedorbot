@@ -251,13 +251,13 @@ pub fn render_elections(
             "Polymarket · Elecciones por liquidez",
             "Liquidez",
             "Cierra",
-            "No pude traer las elecciones desde Polymarket",
+            "No pude traer las elecciones de Polymarket. Probá más tarde",
         ),
         Locale::En => (
             "Polymarket · Elections by liquidity",
             "Liquidity",
             "Closes",
-            "I could not load the elections from Polymarket",
+            "I could not load the elections from Polymarket. Try again later",
         ),
     };
     if events.is_empty() {
@@ -469,7 +469,7 @@ mod tests {
         );
         assert_eq!(
             render_elections(&[], &HashMap::new(), Locale::En),
-            "I could not load the elections from Polymarket"
+            "I could not load the elections from Polymarket. Try again later"
         );
     }
 }

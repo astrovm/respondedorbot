@@ -226,67 +226,65 @@ pub fn evaluate_rulo(input: &RuloInput) -> RuloEvaluation {
 pub fn render_rulo(evaluation: &RuloEvaluation, locale: Locale) -> String {
     let RuloEvaluation::Routes(plan) = evaluation else {
         return match locale {
-            Locale::Es => "No pude conseguir el oficial para armar el rulo".to_owned(),
+            Locale::Es => {
+                "No pude conseguir el dólar oficial para armar los rulos. Probá más tarde"
+                    .to_owned()
+            }
             Locale::En => {
-                "I could not load the official rate for the arbitrage calculation".to_owned()
+                "I could not load the official rate for the arbitrage routes. Try again later"
+                    .to_owned()
             }
         };
     };
     if plan.routes.is_empty() {
         return match locale {
-            Locale::Es => "No encontré ningún rulo potable".to_owned(),
-            Locale::En => "I could not find a viable arbitrage route".to_owned(),
+            Locale::Es => "Ahora no hay ningún rulo que cierre".to_owned(),
+            Locale::En => "There is no viable arbitrage route right now".to_owned(),
         };
     }
     let mut lines = match locale {
         Locale::Es => vec![
+            "🔁 Rulos desde el oficial".to_owned(),
             format!(
-                "Rulos desde Oficial (precio oficial: {} ARS/USD)",
-                plan.official
+                "💵 Oficial: ${} · Invertís {} USD = ${} ARS",
+                plan.official, plan.base_usd, plan.base_ars
             ),
-            format!(
-                "Inversión base: {} USD → {} ARS",
-                plan.base_usd, plan.base_ars
-            ),
-            String::new(),
         ],
         Locale::En => vec![
+            "🔁 Arbitrage from the official rate".to_owned(),
             format!(
-                "Arbitrage from the official rate (official rate: {} ARS/USD)",
-                plan.official
+                "💵 Official: ${} · Investing {} USD = ${} ARS",
+                plan.official, plan.base_usd, plan.base_ars
             ),
-            format!(
-                "Base investment: {} USD → {} ARS",
-                plan.base_usd, plan.base_ars
-            ),
-            String::new(),
         ],
     };
     for route in &plan.routes {
-        if !lines.last().is_some_and(String::is_empty) {
-            lines.push(String::new());
-        }
-        lines.push(route.label.to_owned());
-        lines.push(match locale {
-            Locale::Es => format!("Precio venta: {} ARS/USD", route.sell_price),
-            Locale::En => format!("Sell price: {} ARS/USD", route.sell_price),
-        });
+        let marker = if route.difference.starts_with('-') {
+            "🔴"
+        } else {
+            "🟢"
+        };
+        let percentage = match locale {
+            Locale::Es => route.percentage.replace('.', ","),
+            Locale::En => route.percentage.clone(),
+        };
+        lines.push(String::new());
+        lines.push(format!("{marker} {} · {percentage}%", route.label));
         lines.push(match locale {
             Locale::Es => format!(
-                "Diferencia vs oficial: {} ARS ({}%)",
-                route.difference, route.percentage
+                "Vendés a ${} ({} vs oficial)",
+                route.sell_price, route.difference
             ),
             Locale::En => format!(
-                "Difference from official: {} ARS ({}%)",
-                route.difference, route.percentage
+                "Sell at ${} ({} vs official)",
+                route.sell_price, route.difference
             ),
         });
         for detail in &route.details {
             lines.push(match (detail, locale) {
-                (RuloDetail::Steps(text), Locale::Es) => format!("Tramos: {text}"),
-                (RuloDetail::Steps(text), Locale::En) => format!("Steps: {text}"),
-                (RuloDetail::Result(text), Locale::Es) => format!("Resultado: {text}"),
-                (RuloDetail::Result(text), Locale::En) => format!("Result: {text}"),
+                (RuloDetail::Steps(text), Locale::Es) => format!("Ruta: {text}"),
+                (RuloDetail::Steps(text), Locale::En) => format!("Route: {text}"),
+                (RuloDetail::Result(text), _) => text.clone(),
                 (RuloDetail::Profit(text), Locale::Es) => format!("Ganancia: {text} ARS"),
                 (RuloDetail::Profit(text), Locale::En) => format!("Profit: {text} ARS"),
             });
@@ -364,18 +362,20 @@ mod tests {
     fn renders_exact_bilingual_routes_and_guard_messages() {
         let evaluation = evaluate_rulo(&complete_input());
         let spanish = render_rulo(&evaluation, Locale::Es);
-        assert!(spanish.starts_with("Rulos desde Oficial (precio oficial: 1.440 ARS/USD)"));
+        assert!(spanish.starts_with(
+            "🔁 Rulos desde el oficial\n💵 Oficial: $1.440 · Invertís 1.000 USD = $1.440.000 ARS"
+        ));
         assert!(spanish.contains("Ganancia: +19.730 ARS"));
-        assert!(spanish.contains("Tramos: USD→USDT BUENBIT, USDT→ARS BUENBIT"));
+        assert!(spanish.contains("Ruta: USD→USDT BUENBIT, USDT→ARS BUENBIT"));
         let english = render_rulo(&evaluation, Locale::En);
-        assert!(
-            english.starts_with("Arbitrage from the official rate (official rate: 1.440 ARS/USD)")
-        );
+        assert!(english.starts_with("🔁 Arbitrage from the official rate"));
         assert!(english.contains("Profit: -10.000 ARS"));
+        assert!(spanish.contains("🟢 MEP (AL30 CI) · +1,37%"));
+        assert!(spanish.contains("🔴 Blue"));
 
         assert_eq!(
             render_rulo(&RuloEvaluation::OfficialError, Locale::Es),
-            "No pude conseguir el oficial para armar el rulo"
+            "No pude conseguir el dólar oficial para armar los rulos. Probá más tarde"
         );
         let mut input = complete_input();
         input.mep = None;
@@ -384,7 +384,7 @@ mod tests {
         input.usdt_to_ars.clear();
         assert_eq!(
             render_rulo(&evaluate_rulo(&input), Locale::En),
-            "I could not find a viable arbitrage route"
+            "There is no viable arbitrage route right now"
         );
     }
 }

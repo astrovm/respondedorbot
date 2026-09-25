@@ -1209,21 +1209,21 @@ pub fn build_signal_keyboard_localized(
 #[must_use]
 pub fn callback_text(key: &str, locale: Locale) -> &'static str {
     match (key, locale) {
-        ("expired", Locale::Es) => "card vencida",
-        ("expired", Locale::En) => "card expired",
-        ("owner_only", Locale::Es) => "solo quien pidió la tarjeta o un admin puede hacer eso",
-        ("owner_only", Locale::En) => "only the requester or an admin can do that",
-        ("deleted", Locale::Es) => "tarjeta borrada",
-        ("deleted", Locale::En) => "card deleted",
+        ("expired", Locale::Es) => "Esta tarjeta ya venció",
+        ("expired", Locale::En) => "This card expired",
+        ("owner_only", Locale::Es) => "Solo quien pidió la tarjeta o un admin puede hacer eso",
+        ("owner_only", Locale::En) => "Only the requester or an admin can do that",
+        ("deleted", Locale::Es) => "Tarjeta borrada",
+        ("deleted", Locale::En) => "Card deleted",
         ("cooldown", Locale::Es) => "Podés actualizar cada 15s",
         ("cooldown", Locale::En) => "You can refresh every 15s",
-        ("no_data", Locale::Es) => "no encontré datos nuevos",
+        ("no_data", Locale::Es) => "No encontré datos nuevos",
         ("no_data", Locale::En) => "I could not find new data",
-        ("refresh_failed", Locale::Es) => "no pude actualizar la tarjeta",
+        ("refresh_failed", Locale::Es) => "No pude actualizar la tarjeta",
         ("refresh_failed", Locale::En) => "I could not refresh the card",
-        ("refreshed", Locale::Es) => "tarjeta actualizada",
-        ("refreshed", Locale::En) => "card refreshed",
-        _ => "card expired",
+        ("refreshed", Locale::Es) => "Tarjeta actualizada",
+        ("refreshed", Locale::En) => "Card refreshed",
+        _ => "This card expired",
     }
 }
 
@@ -1908,13 +1908,13 @@ mod tests {
     #[test]
     fn callback_copy_covers_every_localized_result() {
         for (key, spanish, english) in [
-            ("expired", "card vencida", "card expired"),
+            ("expired", "Esta tarjeta ya venció", "This card expired"),
             (
                 "owner_only",
-                "solo quien pidió la tarjeta o un admin puede hacer eso",
-                "only the requester or an admin can do that",
+                "Solo quien pidió la tarjeta o un admin puede hacer eso",
+                "Only the requester or an admin can do that",
             ),
-            ("deleted", "tarjeta borrada", "card deleted"),
+            ("deleted", "Tarjeta borrada", "Card deleted"),
             (
                 "cooldown",
                 "Podés actualizar cada 15s",
@@ -1922,19 +1922,19 @@ mod tests {
             ),
             (
                 "no_data",
-                "no encontré datos nuevos",
+                "No encontré datos nuevos",
                 "I could not find new data",
             ),
             (
                 "refresh_failed",
-                "no pude actualizar la tarjeta",
+                "No pude actualizar la tarjeta",
                 "I could not refresh the card",
             ),
-            ("refreshed", "tarjeta actualizada", "card refreshed"),
+            ("refreshed", "Tarjeta actualizada", "Card refreshed"),
         ] {
             assert_eq!(callback_text(key, Locale::Es), spanish);
             assert_eq!(callback_text(key, Locale::En), english);
         }
-        assert_eq!(callback_text("unknown", Locale::Es), "card expired");
+        assert_eq!(callback_text("unknown", Locale::Es), "This card expired");
     }
 }

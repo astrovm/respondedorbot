@@ -53,8 +53,8 @@ where
         let output = if load.text.trim().is_empty() {
             load.selection.as_ref().map_or_else(
                 || match self.locale {
-                    Locale::Es => "no pude obtener una cotización usable".to_owned(),
-                    Locale::En => "I could not obtain a usable quote".to_owned(),
+                    Locale::Es => "No pude conseguir una cotización. Probá más tarde".to_owned(),
+                    Locale::En => "I could not get a quote. Try again later".to_owned(),
                 },
                 |selection| format_market_selection(selection, self.locale),
             )
@@ -311,7 +311,7 @@ mod tests {
         tool.source.0.quotes = None;
         assert_eq!(
             tool.execute(request, "call").output,
-            "I could not load the top stocks, try again"
+            "I could not load the top stocks. Try again"
         );
     }
 
@@ -361,7 +361,7 @@ mod tests {
                 "call"
             )
             .output,
-            "timeframe '7h' no soportado, uso: 1h, 6h, 12h, 24h, 48h"
+            "No conozco el período '7h'. Usá uno de estos: 1h, 6h, 12h, 24h, 48h"
         );
     }
 
@@ -402,7 +402,7 @@ mod tests {
         tool.source.0.observation = None;
         assert_eq!(
             tool.execute(request, "call").output,
-            "I could not load the weather for Synthetic City"
+            "I could not load the weather for Synthetic City. Try again later"
         );
     }
 

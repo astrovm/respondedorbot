@@ -510,7 +510,7 @@ fn credit_user_message(locale: &str) -> &'static str {
     if locale == "en" {
         "I could not identify your user to charge for the task"
     } else {
-        "no pude identificar tu usuario para cobrar la tarea"
+        "No pude identificar tu usuario para cobrar la tarea"
     }
 }
 

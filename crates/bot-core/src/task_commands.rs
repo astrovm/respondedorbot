@@ -259,7 +259,7 @@ pub fn render_task_page(tasks: &[ScheduledTask], locale: Locale, page: usize) ->
             localized(
                 locale,
                 "⏰ No hay tareas en este chat.\n\nCreá una contándome qué y cuándo:\n/tarea mañana a las 9 recordame pagar el alquiler",
-                "⏰ There are no tasks in this chat.\n\nCreate one by telling me what and when:\n/tarea tomorrow at 9 remind me to pay rent",
+                "⏰ There are no tasks in this chat.\n\nCreate one by telling me what and when:\n/task tomorrow at 9 remind me to pay rent",
             )
             .to_owned()
         } else {
@@ -348,40 +348,40 @@ pub fn render_task_detail(task: &ScheduledTask, locale: Locale, confirm: bool) -
 #[must_use]
 pub fn task_not_found(locale: Locale) -> &'static str {
     match locale {
-        Locale::Es => "esa tarea no existe",
-        Locale::En => "that task does not exist",
+        Locale::Es => "Esa tarea ya no existe",
+        Locale::En => "That task no longer exists",
     }
 }
 
 #[must_use]
 pub fn task_load_failed(locale: Locale) -> &'static str {
     match locale {
-        Locale::Es => "no pude leer las tareas, probá de nuevo",
-        Locale::En => "I could not load the tasks, try again",
+        Locale::Es => "No pude leer las tareas. Probá de nuevo",
+        Locale::En => "I could not load the tasks. Try again",
     }
 }
 
 #[must_use]
 pub fn task_delete_failed(locale: Locale) -> &'static str {
     match locale {
-        Locale::Es => "no pude borrar la tarea, probá de nuevo",
-        Locale::En => "I could not delete the task, try again",
+        Locale::Es => "No pude cancelar la tarea. Probá de nuevo",
+        Locale::En => "I could not cancel the task. Try again",
     }
 }
 
 #[must_use]
 pub fn task_delete_forbidden(locale: Locale) -> &'static str {
     match locale {
-        Locale::Es => "solo el creador o un admin pueden borrar esta tarea",
-        Locale::En => "only the creator or an admin can delete this task",
+        Locale::Es => "Solo quien la creó o un admin puede cancelar esta tarea",
+        Locale::En => "Only the creator or an admin can cancel this task",
     }
 }
 
 #[must_use]
 pub fn task_deleted(task_id: &TaskId, locale: Locale) -> String {
     match locale {
-        Locale::Es => format!("tarea {} cancelada", task_id.as_str()),
-        Locale::En => format!("task {} canceled", task_id.as_str()),
+        Locale::Es => format!("✅ Tarea {} cancelada", task_id.as_str()),
+        Locale::En => format!("✅ Task {} canceled", task_id.as_str()),
     }
 }
 
@@ -593,22 +593,22 @@ mod tests {
     #[test]
     fn localizes_callback_answers() {
         let id = TaskId::new("once0001");
-        assert_eq!(task_not_found(Locale::Es), "esa tarea no existe");
+        assert_eq!(task_not_found(Locale::Es), "Esa tarea ya no existe");
         assert_eq!(
             task_delete_forbidden(Locale::En),
-            "only the creator or an admin can delete this task"
+            "Only the creator or an admin can cancel this task"
         );
         assert_eq!(
             task_load_failed(Locale::Es),
-            "no pude leer las tareas, probá de nuevo"
+            "No pude leer las tareas. Probá de nuevo"
         );
         assert_eq!(
             task_delete_failed(Locale::En),
-            "I could not delete the task, try again"
+            "I could not cancel the task. Try again"
         );
         assert_eq!(
             id.as_ref().map(|id| task_deleted(id, Locale::En)),
-            Ok("task once0001 canceled".to_owned())
+            Ok("✅ Task once0001 canceled".to_owned())
         );
     }
 
@@ -695,13 +695,13 @@ mod tests {
                 .map(|button| button.text),
             Some("🔁 30/04 01:30 · avisar a @\u{200b}user".to_owned())
         );
-        assert_eq!(task_not_found(Locale::En), "that task does not exist");
+        assert_eq!(task_not_found(Locale::En), "That task no longer exists");
         assert_eq!(
             task_delete_forbidden(Locale::Es),
-            "solo el creador o un admin pueden borrar esta tarea"
+            "Solo quien la creó o un admin puede cancelar esta tarea"
         );
         let id = TaskId::new("once0001")?;
-        assert_eq!(task_deleted(&id, Locale::Es), "tarea once0001 cancelada");
+        assert_eq!(task_deleted(&id, Locale::Es), "✅ Tarea once0001 cancelada");
         Ok(())
     }
 }

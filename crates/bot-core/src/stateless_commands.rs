@@ -30,7 +30,7 @@ fn render_base_conversion(result: &BaseConversion, locale: Locale) -> String {
                 result,
                 target,
             },
-        ) => format!("ahí tenés boludo, {number} en base {source} es {result} en base {target}"),
+        ) => format!("Ahí tenés, boludo: {number} en base {source} es {result} en base {target}"),
         (
             Locale::En,
             BaseConversion::Success {
@@ -41,34 +41,34 @@ fn render_base_conversion(result: &BaseConversion, locale: Locale) -> String {
             },
         ) => format!("{number} in base {source} is {result} in base {target}"),
         (Locale::Es, BaseConversion::Usage) => {
-            "capo mandate algo como /convertbase 101, 2, 10 y te paso de binario a decimal"
+            "Capo, mandate algo como /convertbase 101, 2, 10 y te paso de binario a decimal"
                 .to_owned()
         }
         (Locale::En, BaseConversion::Usage) => {
-            "use /convertbase 101, 2, 10 to convert binary to decimal".to_owned()
+            "Use /convertbase 101, 2, 10 to convert binary to decimal".to_owned()
         }
         (Locale::Es, BaseConversion::AlphanumericRequired) => {
-            "el número tiene que ser alfanumérico boludo".to_owned()
+            "El número tiene que ser alfanumérico, boludo".to_owned()
         }
         (Locale::En, BaseConversion::AlphanumericRequired) => {
-            "the number must be alphanumeric".to_owned()
+            "The number must be alphanumeric".to_owned()
         }
         (Locale::Es, BaseConversion::SourceRange { input }) => {
-            format!("base origen '{input}' tiene que ser entre 2 y 36 gordo")
+            format!("La base de origen '{input}' tiene que estar entre 2 y 36, gordo")
         }
         (Locale::En, BaseConversion::SourceRange { input }) => {
-            format!("source base '{input}' must be between 2 and 36")
+            format!("Source base '{input}' must be between 2 and 36")
         }
         (Locale::Es, BaseConversion::TargetRange { input }) => {
-            format!("base destino '{input}' tiene que ser entre 2 y 36 boludo")
+            format!("La base de destino '{input}' tiene que estar entre 2 y 36, boludo")
         }
         (Locale::En, BaseConversion::TargetRange { input }) => {
-            format!("target base '{input}' must be between 2 and 36")
+            format!("Target base '{input}' must be between 2 and 36")
         }
         (Locale::Es, BaseConversion::NumbersRequired) => {
-            "mandate números posta gordo, no me hagas perder el tiempo".to_owned()
+            "Mandate números posta, gordo, no me hagas perder el tiempo".to_owned()
         }
-        (Locale::En, BaseConversion::NumbersRequired) => "send valid numbers".to_owned(),
+        (Locale::En, BaseConversion::NumbersRequired) => "Send valid numbers".to_owned(),
     }
 }
 
@@ -108,8 +108,8 @@ pub fn plan_stateless_command_with_reply(
         };
         if conversion_text.is_empty() {
             let text = match locale {
-                Locale::Es => "¿y qué querés que convierta, boludo? mandate texto",
-                Locale::En => "send the text you want to convert",
+                Locale::Es => "¿Y qué querés que convierta, boludo? Mandate texto",
+                Locale::En => "Send the text you want to convert",
             };
             let mut message = SendMessage::new(chat_id, text);
             message.reply_to_message_id = Some(message_id);
@@ -118,9 +118,9 @@ pub fn plan_stateless_command_with_reply(
         let preprocessed = preprocess_command_text(conversion_text, locale);
         let text = normalize_command_text(&preprocessed).unwrap_or_else(|| match locale {
             Locale::Es => {
-                "no me mandes giladas boludo, tiene que tener letras o números".to_owned()
+                "No me mandes giladas, boludo: tiene que tener letras o números".to_owned()
             }
-            Locale::En => "the command must contain letters or numbers".to_owned(),
+            Locale::En => "The command must contain letters or numbers".to_owned(),
         });
         let mut message = SendMessage::new(chat_id, &text);
         message.reply_to_message_id = Some(message_id);
@@ -150,10 +150,10 @@ pub fn plan_runtime_stateless_command(
     let text = match parsed.command.as_str() {
         "/time" => context.unix_timestamp.to_string(),
         "/instance" => match (locale, context.instance_name) {
-            (Locale::Es, Some(name)) => format!("estoy corriendo en {name} boludo"),
+            (Locale::Es, Some(name)) => format!("Estoy corriendo en {name}, boludo"),
             (Locale::En, Some(name)) => format!("I am running on {name}"),
-            (Locale::Es, None) => "no tengo nombre de instancia configurado".to_owned(),
-            (Locale::En, None) => "this instance has no name configured".to_owned(),
+            (Locale::Es, None) => "No tengo nombre de instancia configurado".to_owned(),
+            (Locale::En, None) => "This instance has no name configured".to_owned(),
         },
         _ => return StatelessCommandPlan::NotHandled,
     };
@@ -191,7 +191,7 @@ mod tests {
                 "@mybot",
                 Locale::Es,
             )),
-            Some("ahí tenés boludo, 101 en base 2 es 5 en base 10".to_owned())
+            Some("Ahí tenés, boludo: 101 en base 2 es 5 en base 10".to_owned())
         );
         assert_eq!(
             message_text(plan_stateless_command(
@@ -248,7 +248,7 @@ mod tests {
                 "@bot",
                 Locale::Es,
             )),
-            Some("¿y qué querés que convierta, boludo? mandate texto".to_owned())
+            Some("¿Y qué querés que convierta, boludo? Mandate texto".to_owned())
         );
         assert_eq!(
             message_text(plan_stateless_command(
@@ -298,7 +298,7 @@ mod tests {
                 "@bot",
                 Locale::En,
             )),
-            Some("the command must contain letters or numbers".to_owned())
+            Some("The command must contain letters or numbers".to_owned())
         );
     }
 
@@ -335,7 +335,7 @@ mod tests {
                 "testbot",
                 Locale::En,
             )),
-            Some("send the text you want to convert".to_owned())
+            Some("Send the text you want to convert".to_owned())
         );
     }
 
@@ -344,12 +344,12 @@ mod tests {
         let cases = [
             (
                 "bad",
-                "use /convertbase 101, 2, 10 to convert binary to decimal",
+                "Use /convertbase 101, 2, 10 to convert binary to decimal",
             ),
-            ("10!,2,10", "the number must be alphanumeric"),
-            ("10,1,10", "source base '1' must be between 2 and 36"),
-            ("10,2,40", "target base '40' must be between 2 and 36"),
-            ("10,no,2", "send valid numbers"),
+            ("10!,2,10", "The number must be alphanumeric"),
+            ("10,1,10", "Source base '1' must be between 2 and 36"),
+            ("10,2,40", "Target base '40' must be between 2 and 36"),
+            ("10,no,2", "Send valid numbers"),
         ];
         for (input, expected) in cases {
             assert_eq!(
@@ -379,7 +379,7 @@ mod tests {
                 "@bot",
                 Locale::Es,
             )),
-            Some("ahí tenés boludo, １２ en base 10 es 1100 en base 2".to_owned())
+            Some("Ahí tenés, boludo: １２ en base 10 es 1100 en base 2".to_owned())
         );
     }
 
@@ -445,7 +445,7 @@ mod tests {
                     instance_name: None,
                 },
             )),
-            Some("no tengo nombre de instancia configurado".to_owned())
+            Some("No tengo nombre de instancia configurado".to_owned())
         );
     }
 

@@ -86,7 +86,8 @@ fn format_bcra_value(value: &str, percentage: bool) -> String {
             format!("{number:.1}%")
         } else {
             format!("{number:.2}%")
-        };
+        }
+        .replace('.', ",");
     }
     if number >= 1_000_000.0 {
         return grouped(number / 1_000.0, 0, '.');
@@ -95,6 +96,11 @@ fn format_bcra_value(value: &str, percentage: bool) -> String {
         return grouped(number, 0, '.');
     }
     format!("{number:.2}").replace('.', ",")
+}
+
+/// BCRA figures are Argentine data, so they use Argentine separators in every locale.
+fn argentine(value: &str) -> String {
+    crate::output_format::localized_number(value, Locale::Es)
 }
 
 fn grouped(value: f64, decimals: usize, separator: char) -> String {
@@ -238,8 +244,8 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 pub fn render_bcra(snapshot: &BcraSnapshot, locale: Locale, today_days: i64) -> String {
     if snapshot.variables.is_empty() {
         return match locale {
-            Locale::Es => "No se pudieron obtener las variables del BCRA".to_owned(),
-            Locale::En => "I could not load the BCRA variables".to_owned(),
+            Locale::Es => "No pude conseguir las variables del BCRA. Probá más tarde".to_owned(),
+            Locale::En => "I could not load the BCRA variables. Try again later".to_owned(),
         };
     }
     let mut lines = vec![
@@ -303,8 +309,8 @@ pub fn render_bcra(snapshot: &BcraSnapshot, locale: Locale, today_days: i64) -> 
         lines.push(line);
     }
     if let Some(bands) = &snapshot.bands {
-        let lower = trimmed(bands.lower, 2);
-        let upper = trimmed(bands.upper, 2);
+        let lower = argentine(&trimmed(bands.lower, 2));
+        let upper = argentine(&trimmed(bands.upper, 2));
         let mut line = match locale {
             Locale::Es => format!("Bandas cambiarias: piso ${lower} / techo ${upper}"),
             Locale::En => format!("Exchange-rate bands: floor ${lower} / ceiling ${upper}"),
@@ -320,7 +326,10 @@ pub fn render_bcra(snapshot: &BcraSnapshot, locale: Locale, today_days: i64) -> 
         } else {
             format!(" ({})", itcrm.date)
         };
-        lines.push(format!("TCRM: {}{suffix}", trimmed(itcrm.value, 2)));
+        lines.push(format!(
+            "TCRM: {}{suffix}",
+            argentine(&trimmed(itcrm.value, 2))
+        ));
     }
     let notes_start = lines.len();
     if snapshot.stale {
@@ -412,15 +421,15 @@ mod tests {
         for expected in [
             "BCRA · Indicadores",
             "Base monetaria: $5.000 mill. pesos (15/01/25)",
-            "Inflación mensual: 5.20%",
-            "Inflación interanual: 150.5%",
-            "Inflación esperada: 3.10%",
-            "TAMAR: 45.0%",
+            "Inflación mensual: 5,20%",
+            "Inflación interanual: 150,5%",
+            "Inflación esperada: 3,10%",
+            "TAMAR: 45,0%",
             "Dólar minorista: $1.250,75",
             "Reservas: USD 25.000 millones",
             "Riesgo país: 685 bps (29/10 12:34 | -12,3 bps vs ayer)",
-            "Bandas cambiarias: piso $950.12 / techo $1460.34 (15/09/25)",
-            "TCRM: 123.45 (01/02/25)",
+            "Bandas cambiarias: piso $950,12 / techo $1.460,34 (15/09/25)",
+            "TCRM: 123,45 (01/02/25)",
             "\n\n⚠️ No hay actualización nueva del BCRA",
             "⚠️ Datos del BCRA con 5 días de atraso",
         ] {
@@ -446,7 +455,7 @@ mod tests {
         };
         assert_eq!(
             render_bcra(&empty, Locale::En, 0),
-            "I could not load the BCRA variables"
+            "I could not load the BCRA variables. Try again later"
         );
         let snapshot = BcraSnapshot {
             variables: vec![BcraVariable {

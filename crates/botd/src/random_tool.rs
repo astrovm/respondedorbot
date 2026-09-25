@@ -74,10 +74,10 @@ fn random_failure(locale: Locale, error: &impl Display) -> ToolExecutionResult {
 fn invalid(locale: Locale) -> String {
     match locale {
         Locale::Es => {
-            "mandate algo como 'pizza, carne, sushi' o '1-10' boludo, no me hagas laburar al pedo"
+            "Mandate algo como 'pizza, carne, sushi' o '1-10', boludo, no me hagas laburar al pedo"
                 .to_owned()
         }
-        Locale::En => "send options like 'pizza, steak, sushi' or a range like '1-10'".to_owned(),
+        Locale::En => "Send options like 'pizza, steak, sushi' or a range like '1-10'".to_owned(),
     }
 }
 

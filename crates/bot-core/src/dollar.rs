@@ -69,8 +69,8 @@ pub fn invalid_timeframe_message(message_text: &str, locale: Locale) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     match locale {
-        Locale::Es => format!("timeframe '{token}' no soportado, uso: {valid}"),
-        Locale::En => format!("unsupported timeframe '{token}', use: {valid}"),
+        Locale::Es => format!("No conozco el período '{token}'. Usá uno de estos: {valid}"),
+        Locale::En => format!("Unknown period '{token}'. Use one of: {valid}"),
     }
 }
 
@@ -125,28 +125,36 @@ pub fn render_dollar_rates(
                 (Locale::En, "Banda techo") => "Upper band",
                 _ => rate.name,
             };
-            let mut line = format!("{name}: {}", trimmed(rate.price, 2));
-            if let Some(change) = rate.change {
-                line.push_str(&format!(" ({}%)", signed(change)));
-            } else {
-                line.push_str(" (N/A)");
-            }
-            line
+            let number = |value: &str| crate::output_format::localized_number(value, locale);
+            let change = rate.change.map_or_else(
+                || crate::menu_ui::localized(locale, "sin datos", "no data").to_owned(),
+                |change| {
+                    let arrow = if change > 0.0 {
+                        "▲"
+                    } else if change < 0.0 {
+                        "▼"
+                    } else {
+                        "="
+                    };
+                    format!("{arrow} {}%", number(&signed(change)))
+                },
+            );
+            format!("{name}: ${} ({change})", number(&trimmed(rate.price, 2)))
         })
         .collect::<Vec<_>>();
     lines.insert(0, String::new());
     lines.insert(
         0,
-        format!(
-            "{} · ARS/USD · {hours_ago}h",
-            crate::menu_ui::localized(locale, "Dólar", "Dollar")
-        ),
+        match locale {
+            Locale::Es => format!("💵 Dólar en pesos · variación {hours_ago}h"),
+            Locale::En => format!("💵 Dollar in pesos · {hours_ago}h change"),
+        },
     );
     if hours_ago != 24 && no_history {
         lines.push(String::new());
         lines.push(match locale {
-            Locale::Es => format!("Sin datos históricos para {hours_ago}h. Probá más tarde."),
-            Locale::En => format!("No historical data for {hours_ago}h yet. Try again later."),
+            Locale::Es => format!("⚠️ Todavía no tengo historial de {hours_ago}h. Probá más tarde"),
+            Locale::En => format!("⚠️ No {hours_ago}h history yet. Try again later"),
         });
     }
     Some(lines.join("\n"))
@@ -181,7 +189,7 @@ mod tests {
         assert_eq!(DOLLAR_TIMEFRAMES.len(), 5);
         assert_eq!(
             invalid_timeframe_message("7D", Locale::En),
-            "unsupported timeframe '7d', use: 1h, 6h, 12h, 24h, 48h"
+            "Unknown period '7d'. Use one of: 1h, 6h, 12h, 24h, 48h"
         );
     }
 
@@ -212,14 +220,15 @@ mod tests {
         };
         assert_eq!(
             render_dollar_rates(&rates, Some(&bands), 24, Locale::Es).as_deref(),
-            Some(concat!(
-                "Dólar · ARS/USD · 24h\n\n",
-                "Banda piso: 950.12 (+0.25%)\n",
-                "Mayorista: 1400 (+7.69%)\n",
-                "TCRM 100: 1410 (-0.5%)\n",
-                "Oficial: 1420 (+2%)\n",
-                "Banda techo: 1460.34 (-0.1%)"
-            ))
+            Some(
+                "💵 Dólar en pesos · variación 24h
+
+Banda piso: $950,12 (▲ +0,25%)
+Mayorista: $1.400 (▲ +7,69%)
+TCRM 100: $1.410 (▼ -0,5%)
+Oficial: $1.420 (▲ +2%)
+Banda techo: $1.460,34 (▼ -0,1%)"
+            )
         );
     }
 
@@ -238,13 +247,15 @@ mod tests {
         };
         assert_eq!(
             render_dollar_rates(&rates, Some(&bands), 6, Locale::En).as_deref(),
-            Some(concat!(
-                "Dollar · ARS/USD · 6h\n\n",
-                "Lower band: 900 (N/A)\n",
-                "Official: 1000 (N/A)\n",
-                "Upper band: 1100 (N/A)\n\n",
-                "No historical data for 6h yet. Try again later."
-            ))
+            Some(
+                "💵 Dollar in pesos · 6h change
+
+Lower band: $900 (no data)
+Official: $1,000 (no data)
+Upper band: $1,100 (no data)
+
+⚠️ No 6h history yet. Try again later"
+            )
         );
         assert_eq!(render_dollar_rates(&[], None, 24, Locale::Es), None);
     }

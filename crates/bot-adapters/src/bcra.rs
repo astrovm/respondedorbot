@@ -1036,9 +1036,9 @@ mod tests {
         for expected in [
             "Dólar mayorista: $1.180,25",
             "Reservas: USD 25.000 millones",
-            "Inflación esperada: 21.8%",
-            "BADLAR: 26.7%",
-            "Bandas cambiarias: piso $944.32 / techo $1481.7",
+            "Inflación esperada: 21,8%",
+            "BADLAR: 26,7%",
+            "Bandas cambiarias: piso $944,32 / techo $1.481,7",
             "Riesgo país: 685 bps",
         ] {
             assert!(text.contains(expected), "{text}");

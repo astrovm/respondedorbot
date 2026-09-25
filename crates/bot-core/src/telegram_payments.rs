@@ -102,21 +102,21 @@ pub fn plan_topup_command(
     }
     let (text, keyboard) = if !billing_available {
         (
-            match locale {
-                Locale::Es => "el cobro de ia no está andando, avisale al admin",
-                Locale::En => "AI billing is unavailable, please tell the admin",
-            }
-            .to_owned(),
+            crate::billing_commands::billing_unavailable(locale).to_owned(),
             None,
         )
     } else if chat_type != "private" {
         let username = bot_name.trim().trim_start_matches('@');
         (
             match (locale, username.is_empty()) {
-                (Locale::Es, false) => format!("la recarga va por privado, abrime en @{username}"),
-                (Locale::En, false) => format!("top-ups are private, open @{username}"),
-                (Locale::Es, true) => "la recarga va por privado, abrime en dm".to_owned(),
-                (Locale::En, true) => "top-ups are private, open a DM with me".to_owned(),
+                (Locale::Es, false) => format!("La recarga va por privado: abrime en @{username}"),
+                (Locale::En, false) => format!("Top-ups happen in private: open @{username}"),
+                (Locale::Es, true) => {
+                    "La recarga va por privado: escribime por mensaje directo".to_owned()
+                }
+                (Locale::En, true) => {
+                    "Top-ups happen in private: send me a direct message".to_owned()
+                }
             },
             (!username.is_empty()).then(|| InlineKeyboardMarkup {
                 inline_keyboard: vec![vec![InlineKeyboardButton {
@@ -186,10 +186,7 @@ pub fn plan_balance_command(
         return BalanceCommandPlan::Reply(reply(
             context.chat_id,
             context.message_id,
-            match context.locale {
-                Locale::Es => "el cobro de ia no está andando, avisale al admin",
-                Locale::En => "AI billing is unavailable, please tell the admin",
-            },
+            crate::billing_commands::billing_unavailable(context.locale),
         ));
     }
     let Some(user_id) = context.user_id else {
@@ -197,7 +194,7 @@ pub fn plan_balance_command(
             context.chat_id,
             context.message_id,
             match context.locale {
-                Locale::Es => "no te pude leer bien el usuario para ver los saldos",
+                Locale::Es => "No pude identificar tu usuario para ver los saldos",
                 Locale::En => "I could not identify the user or chat to load the balances",
             },
         ));
@@ -305,15 +302,12 @@ pub fn plan_topup_callback(
         TopupCallbackPlan::Answer(callback_answer(callback_id, Some(text.to_owned()), true))
     };
     if !billing_available {
-        return alert(match locale {
-            Locale::Es => "el cobro de ia no está andando, avisale al admin",
-            Locale::En => "AI billing is unavailable, please tell the admin",
-        });
+        return alert(crate::billing_commands::billing_unavailable(locale));
     }
     if chat_type != "private" {
         return alert(match locale {
-            Locale::Es => "cargá por privado, maestro",
-            Locale::En => "open this in a private chat",
+            Locale::Es => "Cargá por privado, maestro",
+            Locale::En => "Open this in a private chat",
         });
     }
     let pack = data
@@ -322,8 +316,8 @@ pub fn plan_topup_callback(
         .and_then(|(_, pack_id)| default_billing_pack(pack_id));
     let Some(pack) = pack else {
         return alert(match locale {
-            Locale::Es => "ese pack es fruta, elegí otro",
-            Locale::En => "that credit pack is invalid",
+            Locale::Es => "Ese pack es fruta, elegí otro",
+            Locale::En => "That credit pack is invalid, choose another one",
         });
     };
     let Some(user_id) = user_id else {
@@ -335,8 +329,8 @@ pub fn plan_topup_callback(
             callback_id,
             Some(
                 match locale {
-                    Locale::Es => "listo, te dejé la factura",
-                    Locale::En => "invoice ready",
+                    Locale::Es => "Listo, te dejé la factura",
+                    Locale::En => "Invoice ready",
                 }
                 .to_owned(),
             ),
@@ -346,8 +340,8 @@ pub fn plan_topup_callback(
             callback_id,
             Some(
                 match locale {
-                    Locale::Es => "no pude armar la factura, probá de nuevo",
-                    Locale::En => "I could not create the invoice, try again",
+                    Locale::Es => "No pude armar la factura. Probá de nuevo",
+                    Locale::En => "I could not create the invoice. Try again",
                 }
                 .to_owned(),
             ),
@@ -414,10 +408,12 @@ pub fn successful_payment_reply(
             )
         }
         (false, Locale::Es) => {
-            format!("Ese pago ya fue acreditado.\nSaldo personal: {balance} créditos")
+            format!("✅ Ese pago ya estaba acreditado\n\n👤 Saldo personal: {balance} créditos")
         }
         (false, Locale::En) => {
-            format!("This payment was already credited.\nPersonal balance: {balance} credits")
+            format!(
+                "✅ This payment was already credited\n\n👤 Personal balance: {balance} credits"
+            )
         }
     }
 }
@@ -577,17 +573,16 @@ pub fn plan_pre_checkout(
             Some(TelegramAction::AnswerPreCheckout {
                 query_id,
                 ok: false,
-                error_message: Some(match locale {
-                    Locale::Es => "el cobro de ia no está andando, avisale al admin".to_owned(),
-                    Locale::En => "AI billing is unavailable, please tell the admin".to_owned(),
-                }),
+                error_message: Some(
+                    crate::billing_commands::billing_unavailable(locale).to_owned(),
+                ),
             })
         }
         PreCheckoutDecision::InvalidUser { query_id } => Some(TelegramAction::AnswerPreCheckout {
             query_id,
             ok: false,
             error_message: Some(match locale {
-                Locale::Es => "tu usuario vino medio roto para cobrar".to_owned(),
+                Locale::Es => "No pude identificar tu usuario para cobrarte".to_owned(),
                 Locale::En => "I could not identify your user for this payment".to_owned(),
             }),
         }),
@@ -596,7 +591,7 @@ pub fn plan_pre_checkout(
                 query_id,
                 ok: false,
                 error_message: Some(match locale {
-                    Locale::Es => "ese pago vino raro y no te lo pude validar".to_owned(),
+                    Locale::Es => "Ese pago vino raro y no te lo pude validar".to_owned(),
                     Locale::En => "I could not validate this payment".to_owned(),
                 }),
             })
@@ -751,21 +746,21 @@ mod tests {
                 true,
                 "@mybot",
                 Locale::Es,
-                "la recarga va por privado, abrime en @mybot",
+                "La recarga va por privado: abrime en @mybot",
             ),
             (
                 "group",
                 true,
                 "",
                 Locale::En,
-                "top-ups are private, open a DM with me",
+                "Top-ups happen in private: send me a direct message",
             ),
             (
                 "private",
                 false,
                 "@mybot",
                 Locale::En,
-                "AI billing is unavailable, please tell the admin",
+                "⚠️ AI credits are unavailable right now. Try again later or tell the admin",
             ),
         ] {
             let Some(TelegramAction::SendMessage(message)) = plan_topup_command(
@@ -843,13 +838,13 @@ mod tests {
                 Some(88),
                 false,
                 Locale::En,
-                "AI billing is unavailable, please tell the admin",
+                "⚠️ AI credits are unavailable right now. Try again later or tell the admin",
             ),
             (
                 None,
                 true,
                 Locale::Es,
-                "no te pude leer bien el usuario para ver los saldos",
+                "No pude identificar tu usuario para ver los saldos",
             ),
         ] {
             let BalanceCommandPlan::Reply(TelegramAction::SendMessage(message)) =
@@ -920,12 +915,12 @@ mod tests {
                 },
                 success_answer: Some(TelegramAction::AnswerCallback {
                     callback_id: "callback-1".to_owned(),
-                    text: Some("invoice ready".to_owned()),
+                    text: Some("Invoice ready".to_owned()),
                     show_alert: false,
                 }),
                 failure_answer: Some(TelegramAction::AnswerCallback {
                     callback_id: "callback-1".to_owned(),
-                    text: Some("I could not create the invoice, try again".to_owned()),
+                    text: Some("I could not create the invoice. Try again".to_owned()),
                     show_alert: true,
                 }),
             }))
@@ -938,7 +933,9 @@ mod tests {
                 Some(42),
                 false,
                 Locale::Es,
-                Some("el cobro de ia no está andando, avisale al admin"),
+                Some(
+                    "⚠️ Los créditos de IA no están disponibles en este momento. Probá más tarde o avisale al admin",
+                ),
                 true,
             ),
             (
@@ -947,7 +944,7 @@ mod tests {
                 Some(42),
                 true,
                 Locale::En,
-                Some("open this in a private chat"),
+                Some("Open this in a private chat"),
                 true,
             ),
             (
@@ -956,7 +953,7 @@ mod tests {
                 Some(42),
                 true,
                 Locale::Es,
-                Some("ese pack es fruta, elegí otro"),
+                Some("Ese pack es fruta, elegí otro"),
                 true,
             ),
             ("topup:p50", "private", None, true, Locale::En, None, false),
@@ -1016,7 +1013,7 @@ mod tests {
                 json!({"id":"checkout-2"}),
                 false,
                 Locale::Es,
-                "el cobro de ia no está andando, avisale al admin",
+                "⚠️ Los créditos de IA no están disponibles en este momento. Probá más tarde o avisale al admin",
             ),
             (
                 json!({"id":"checkout-3"}),
@@ -1034,7 +1031,7 @@ mod tests {
                 }),
                 true,
                 Locale::Es,
-                "ese pago vino raro y no te lo pude validar",
+                "Ese pago vino raro y no te lo pude validar",
             ),
         ] {
             assert_eq!(
@@ -1099,11 +1096,11 @@ mod tests {
         );
         assert_eq!(
             successful_payment_reply(5_000, 5_300, false, Locale::Es),
-            "Ese pago ya fue acreditado.\nSaldo personal: 53.00 créditos"
+            "✅ Ese pago ya estaba acreditado\n\n👤 Saldo personal: 53.00 créditos"
         );
         assert_eq!(
             successful_payment_reply(5_000, 5_300, false, Locale::En),
-            "This payment was already credited.\nPersonal balance: 53.00 credits"
+            "✅ This payment was already credited\n\n👤 Personal balance: 53.00 credits"
         );
     }
 

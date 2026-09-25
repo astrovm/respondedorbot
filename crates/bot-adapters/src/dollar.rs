@@ -641,17 +641,17 @@ mod tests {
         let load = load_dollar_market(&transport, &mut cache, 24, Locale::Es, 1_725_000_000);
         let text = load.text.unwrap_or_default();
         for expected in [
-            "Mayorista: 1400 (+1%)",
-            "Oficial: 1420 (+2%)",
-            "Tarjeta: 1988 (+3%)",
-            "MEP: 1450 (+4%)",
-            "CCL: 1460 (+5%)",
-            "Blue: 1430 (+6%)",
-            "Bitcoin: 1470 (+7%)",
-            "USDC: 1480 (+8%)",
-            "USDT: 1490 (+9%)",
-            "TCRM 100: 1410",
-            "Banda piso: 950 (+0.1%)",
+            "Mayorista: $1.400 (▲ +1%)",
+            "Oficial: $1.420 (▲ +2%)",
+            "Tarjeta: $1.988 (▲ +3%)",
+            "MEP: $1.450 (▲ +4%)",
+            "CCL: $1.460 (▲ +5%)",
+            "Blue: $1.430 (▲ +6%)",
+            "Bitcoin: $1.470 (▲ +7%)",
+            "USDC: $1.480 (▲ +8%)",
+            "USDT: $1.490 (▲ +9%)",
+            "TCRM 100: $1.410",
+            "Banda piso: $950 (▲ +0,1%)",
         ] {
             assert!(text.contains(expected), "missing {expected} in {text}");
         }
@@ -693,14 +693,14 @@ mod tests {
             first
                 .text
                 .unwrap_or_default()
-                .contains("Wholesale: 1500 (+7.14%)")
+                .contains("Wholesale: $1,500 (▲ +7.14%)")
         );
         let spanish = load_dollar_market(&transport, &mut cache, 6, Locale::Es, now);
         assert!(
             spanish
                 .text
                 .as_deref()
-                .is_some_and(|text| text.starts_with("Dólar"))
+                .is_some_and(|text| text.starts_with("💵 Dólar"))
         );
         assert!(cache.values.contains_key("market:dolar:formatted:v2:es:6"));
         let second = load_dollar_market(&transport, &mut cache, 6, Locale::En, now + 301);
@@ -818,7 +818,7 @@ mod tests {
         assert!(
             load.text
                 .as_deref()
-                .is_some_and(|text| text.contains("1420.5")),
+                .is_some_and(|text| text.contains("1,420.5")),
             "text={:?}, diagnostics={:?}",
             load.text,
             load.diagnostics

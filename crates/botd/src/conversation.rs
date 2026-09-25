@@ -261,8 +261,8 @@ impl<Provider, Tools, State, Billing> NativeConversation<Provider, Tools, State,
 
     fn preparation_error(locale: Locale) -> &'static str {
         match locale {
-            Locale::Es => "me quedé reculando y no te pude responder, probá de nuevo",
-            Locale::En => "I could not answer, try again",
+            Locale::Es => "Me quedé reculando y no te pude responder. Probá de nuevo",
+            Locale::En => "I could not answer. Try again",
         }
     }
 
@@ -274,22 +274,22 @@ impl<Provider, Tools, State, Billing> NativeConversation<Provider, Tools, State,
         if let Some(ReserveDenial::CreditlessHourlyCap { limit }) = decision.denial {
             return match locale {
                 Locale::Es => format!(
-                    "llegaste al limite de {limit} mensajes de ia pagados por el grupo por hora, boludo. cargá créditos con /topup si querés seguir"
+                    "Llegaste al límite de {limit} mensajes de IA por hora que paga el grupo, boludo. Cargá créditos con /topup si querés seguir"
                 ),
                 Locale::En => format!(
-                    "you reached the limit of {limit} group-funded AI messages per hour. use /topup to continue"
+                    "You reached the limit of {limit} group-funded AI messages per hour. Use /topup to keep going"
                 ),
             };
         }
         if matches!(input.chat_type.as_str(), "group" | "supergroup") {
             match locale {
                 Locale::Es => format!(
-                    "se quedaron secos de créditos ia en este grupo, boludo.\n- lo tuyo: {}\n- lo del grupo: {}\nmetele /topup por privado y si querés pasá saldo al grupo con /transfer <monto>\nsi querés ver bien la miseria, mandá /balance",
+                    "🪫 Se quedaron secos de créditos de IA en este grupo, boludo\n\n👤 Lo tuyo: {}\n👥 Lo del grupo: {}\n\nMetele /topup por privado y, si querés, pasale saldo al grupo con /transfer <monto>\nPara ver bien la miseria, mandá /balance",
                     format_credit_units(decision.user_balance),
                     format_credit_units(decision.chat_balance),
                 ),
                 Locale::En => format!(
-                    "this group is out of AI credits\n- yours: {}\n- group: {}\nuse /topup in private and /transfer <amount> to fund the group\nuse /balance to see the balances",
+                    "🪫 This group is out of AI credits\n\n👤 Yours: {}\n👥 Group: {}\n\nUse /topup in private and /transfer <amount> to fund the group\nUse /balance to see the balances",
                     format_credit_units(decision.user_balance),
                     format_credit_units(decision.chat_balance),
                 ),
@@ -297,11 +297,11 @@ impl<Provider, Tools, State, Billing> NativeConversation<Provider, Tools, State,
         } else {
             match locale {
                 Locale::Es => format!(
-                    "te quedaste seco de créditos ia, boludo.\nsaldo: {}\nmetele /topup si querés que siga laburando",
+                    "🪫 Te quedaste seco de créditos de IA, boludo\n\n👤 Saldo: {}\n\nMetele /topup si querés que siga laburando",
                     format_credit_units(decision.user_balance),
                 ),
                 Locale::En => format!(
-                    "you are out of AI credits\nbalance: {}\nuse /topup to add more",
+                    "🪫 You are out of AI credits\n\n👤 Balance: {}\n\nUse /topup to add more",
                     format_credit_units(decision.user_balance),
                 ),
             }
@@ -1056,10 +1056,7 @@ where
                 Ok(Some(_)) => {}
                 Ok(None) => {
                     return Ok(AiPreparation::reply(
-                        match input.locale {
-                            Locale::Es => "el cobro de ia no está andando, avisale al admin",
-                            Locale::En => "AI billing is unavailable, please tell the admin",
-                        },
+                        bot_core::billing_commands::billing_unavailable(input.locale),
                         None,
                     ));
                 }
@@ -1561,10 +1558,10 @@ fn gif_prompt(locale: Locale) -> &'static str {
 fn media_command_reply_required(locale: Locale) -> &'static str {
     match locale {
         Locale::Es => {
-            "respondeme un audio, video, imagen, sticker, GIF o link de YouTube y te digo qué carajo hay ahí"
+            "Respondé a un audio, video, imagen, sticker, GIF o link de YouTube y te digo qué carajo hay ahí"
         }
         Locale::En => {
-            "reply to audio, video, an image, sticker, GIF, or YouTube link and I will process it"
+            "Reply to an audio, video, image, sticker, GIF or YouTube link and I will tell you what is in it"
         }
     }
 }
@@ -1572,18 +1569,18 @@ fn media_command_reply_required(locale: Locale) -> &'static str {
 fn media_command_none(locale: Locale) -> &'static str {
     match locale {
         Locale::Es => {
-            "ese mensaje no tiene audio, video, imagen, sticker, GIF ni link de YouTube para laburar"
+            "Ese mensaje no tiene audio, video, imagen, sticker, GIF ni link de YouTube para laburar"
         }
         Locale::En => {
-            "that message has no audio, video, image, sticker, GIF, or YouTube link to process"
+            "That message has no audio, video, image, sticker, GIF or YouTube link to process"
         }
     }
 }
 
 fn youtube_context_error(locale: Locale) -> &'static str {
     match locale {
-        Locale::Es => "no pude obtener los subtítulos de ese video de YouTube, probá más tarde",
-        Locale::En => "I could not retrieve captions for that YouTube video, try again later",
+        Locale::Es => "No pude conseguir los subtítulos de ese video de YouTube. Probá más tarde",
+        Locale::En => "I could not get captions for that YouTube video. Try again later",
     }
 }
 
@@ -1596,34 +1593,34 @@ fn media_command_prepare_error(
     if error == MediaPipelineError::Download.to_string() {
         return match (kind, visual_kind, locale) {
             (MediaKind::Audio, _, Locale::Es) => {
-                "no pude bajar el audio, mandalo de nuevo".to_owned()
+                "No pude bajar el audio. Mandalo de nuevo".to_owned()
             }
             (MediaKind::Audio, _, Locale::En) => {
-                "I could not download the audio, send it again".to_owned()
+                "I could not download the audio. Send it again".to_owned()
             }
             (MediaKind::Image, Some("sticker"), Locale::Es) => {
-                "no pude bajar el sticker, mandalo de nuevo".to_owned()
+                "No pude bajar el sticker. Mandalo de nuevo".to_owned()
             }
             (MediaKind::Image, Some("sticker"), Locale::En) => {
-                "I could not download the sticker, send it again".to_owned()
+                "I could not download the sticker. Send it again".to_owned()
             }
             (MediaKind::Image, Some("animation"), Locale::Es) => {
-                "no pude bajar el GIF, mandalo de nuevo".to_owned()
+                "No pude bajar el GIF. Mandalo de nuevo".to_owned()
             }
             (MediaKind::Image, Some("animation"), Locale::En) => {
-                "I could not download the GIF, send it again".to_owned()
+                "I could not download the GIF. Send it again".to_owned()
             }
             (MediaKind::Image, _, Locale::Es) => {
-                "no pude bajar la imagen, mandala de nuevo".to_owned()
+                "No pude bajar la imagen. Mandala de nuevo".to_owned()
             }
             (MediaKind::Image, _, Locale::En) => {
-                "I could not download the image, send it again".to_owned()
+                "I could not download the image. Send it again".to_owned()
             }
         };
     }
     if kind == MediaKind::Audio && error == MediaPipelineError::InvalidAudio.to_string() {
         return match locale {
-            Locale::Es => "no pude medir la duración del audio".to_owned(),
+            Locale::Es => "No pude medir la duración del audio".to_owned(),
             Locale::En => "I could not measure the audio duration".to_owned(),
         };
     }
@@ -1636,24 +1633,24 @@ fn media_command_provider_error(
     locale: Locale,
 ) -> &'static str {
     match (kind, visual_kind, locale) {
-        (MediaKind::Audio, _, Locale::Es) => "no pude sacar nada de ese audio, probá más tarde",
-        (MediaKind::Audio, _, Locale::En) => "I could not transcribe that audio, try again later",
+        (MediaKind::Audio, _, Locale::Es) => "No pude sacar nada de ese audio. Probá más tarde",
+        (MediaKind::Audio, _, Locale::En) => "I could not transcribe that audio. Try again later",
         (MediaKind::Image, Some("sticker"), Locale::Es) => {
-            "no pude sacar qué carajo tiene el sticker, probá más tarde"
+            "No pude sacar qué carajo tiene el sticker. Probá más tarde"
         }
         (MediaKind::Image, Some("sticker"), Locale::En) => {
-            "I could not describe the sticker, try again later"
+            "I could not describe the sticker. Try again later"
         }
         (MediaKind::Image, Some("animation"), Locale::Es) => {
-            "no pude sacar qué mierda tiene el GIF, probá más tarde"
+            "No pude sacar qué mierda tiene el GIF. Probá más tarde"
         }
         (MediaKind::Image, Some("animation"), Locale::En) => {
-            "I could not describe the GIF, try again later"
+            "I could not describe the GIF. Try again later"
         }
         (MediaKind::Image, _, Locale::Es) => {
-            "no pude sacar qué mierda tiene la imagen, probá más tarde"
+            "No pude sacar qué mierda tiene la imagen. Probá más tarde"
         }
-        (MediaKind::Image, _, Locale::En) => "I could not describe the image, try again later",
+        (MediaKind::Image, _, Locale::En) => "I could not describe the image. Try again later",
     }
 }
 
@@ -1683,15 +1680,15 @@ fn summary_prompt(custom: &str, locale: Locale) -> String {
 
 fn summary_empty(locale: Locale) -> &'static str {
     match locale {
-        Locale::Es => "no hay mensajes para resumir",
-        Locale::En => "there are no messages to summarize",
+        Locale::Es => "No hay mensajes para resumir todavía",
+        Locale::En => "There are no messages to summarize yet",
     }
 }
 
 fn summary_error(locale: Locale) -> &'static str {
     match locale {
-        Locale::Es => "no pude generar el resumen",
-        Locale::En => "I could not generate the summary",
+        Locale::Es => "No pude generar el resumen. Probá de nuevo",
+        Locale::En => "I could not generate the summary. Try again",
     }
 }
 
@@ -2630,7 +2627,7 @@ mod tests {
                 &private,
                 &denied,
             )
-            .contains("te quedaste seco")
+            .contains("Te quedaste seco")
         );
         private.chat_type = "supergroup".to_owned();
         assert!(
@@ -2639,7 +2636,7 @@ mod tests {
                 &private,
                 &denied,
             )
-            .contains("this group")
+            .contains("This group")
         );
         let capped = ReserveDecision {
             denial: Some(ReserveDenial::CreditlessHourlyCap { limit: 5 }),
@@ -2655,7 +2652,7 @@ mod tests {
         );
         assert_eq!(
             NativeConversation::<Provider, Tools, State, Billing>::preparation_error(Locale::En),
-            "I could not answer, try again"
+            "I could not answer. Try again"
         );
     }
 
@@ -3172,7 +3169,7 @@ mod tests {
         assert!(matches!(
             denied_reply,
             AiPreparation::Reply { ref text, completion_id: None, .. }
-                if text.starts_with("you do not have enough personal credits")
+                if text.starts_with("❌ Not enough personal credits")
         ));
         assert!(denied.provider.prompts.borrow().is_empty());
         assert!(denied.billing.reserves.is_empty());
@@ -3485,7 +3482,7 @@ mod tests {
         else {
             return;
         };
-        assert_eq!(text, "I could not download the audio, send it again");
+        assert_eq!(text, "I could not download the audio. Send it again");
         assert_eq!(diagnostics.len(), 1);
         assert!(service.billing.reserves.is_empty());
         assert!(service.billing.settlements.is_empty());
@@ -3949,7 +3946,7 @@ mod tests {
         assert!(matches!(
             unavailable.prepare(task.clone()),
             Ok(AiPreparation::Reply { ref text, completion_id: None, .. })
-                if text.contains("cobro de ia")
+                if text.contains("créditos de IA no están disponibles")
         ));
 
         let mut failed = conversation(
@@ -4160,7 +4157,7 @@ mod tests {
         assert!(matches!(
             empty_result,
             Ok(Some(AiPreparation::Reply { ref text, .. }))
-                if text == "there are no messages to summarize"
+                if text == "There are no messages to summarize yet"
         ));
         assert!(empty.provider.prompts.borrow().is_empty());
     }
@@ -4190,7 +4187,7 @@ mod tests {
         else {
             return;
         };
-        assert_eq!(text, "I could not generate the summary");
+        assert_eq!(text, "I could not generate the summary. Try again");
         assert_eq!(
             service.complete_delivery(AiDelivery {
                 completion_id,
@@ -4230,7 +4227,7 @@ mod tests {
         else {
             return;
         };
-        assert!(text.contains("balance: 0.25"));
+        assert!(text.contains("Balance: 0.25"));
         assert_eq!(completion_id, None);
         assert!(explicit.provider.prompts.borrow().is_empty());
 
@@ -4271,7 +4268,7 @@ mod tests {
         assert_eq!(
             service.prepare(request),
             Ok(AiPreparation::reply(
-                "you reached the limit of 3 group-funded AI messages per hour. use /topup to continue",
+                "You reached the limit of 3 group-funded AI messages per hour. Use /topup to keep going",
                 None,
             ))
         );
@@ -4334,7 +4331,7 @@ mod tests {
     fn localized_media_summary_and_prompt_helpers_cover_supported_shapes() {
         assert!(
             NativeConversation::<Provider, Tools, State, Billing>::preparation_error(Locale::Es)
-                .contains("probá")
+                .contains("Probá")
         );
         for (kind, locale) in [
             (MediaKind::Image, Locale::Es),

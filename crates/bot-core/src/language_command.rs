@@ -41,23 +41,23 @@ pub fn plan_language_command(
             Locale::En => "English",
         };
         let text = match locale {
-            Locale::Es => format!("idioma actual: {language}"),
-            Locale::En => format!("current language: {language}"),
+            Locale::Es => format!("🌐 Idioma actual: {language}"),
+            Locale::En => format!("🌐 Current language: {language}"),
         };
         (text, None)
     } else if !matches!(requested.as_str(), "es" | "en") {
         let text = match locale {
-            Locale::Es => "mandalo bien: /language [es|en]",
-            Locale::En => "usage: /language [es|en]",
+            Locale::Es => "Mandalo así: /idioma [es|en]",
+            Locale::En => "Usage: /language [es|en]",
         };
         (text.to_owned(), None)
     } else {
         let mut updated = config.clone();
         updated.language.clone_from(&requested);
         let text = if requested == "es" {
-            "listo, ahora hablo en español"
+            "✅ Listo, ahora hablo en español"
         } else {
-            "done, I will speak English now"
+            "✅ Done, I will speak English now"
         };
         (text.to_owned(), Some(updated))
     };
@@ -111,18 +111,18 @@ mod tests {
     #[test]
     fn plans_current_usage_and_persisted_language_changes() {
         let cases = [
-            ("/language", Locale::Es, "idioma actual: Español", None),
-            ("/idioma nope", Locale::En, "usage: /language [es|en]", None),
+            ("/language", Locale::Es, "🌐 Idioma actual: Español", None),
+            ("/idioma nope", Locale::En, "Usage: /language [es|en]", None),
             (
                 "/language@mybot en",
                 Locale::Es,
-                "done, I will speak English now",
+                "✅ Done, I will speak English now",
                 Some("en"),
             ),
             (
                 "/idioma ES",
                 Locale::En,
-                "listo, ahora hablo en español",
+                "✅ Listo, ahora hablo en español",
                 Some("es"),
             ),
         ];
