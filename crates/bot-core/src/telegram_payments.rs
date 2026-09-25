@@ -71,8 +71,8 @@ fn topup_keyboard(locale: Locale) -> InlineKeyboardMarkup {
                 let credits = format_credit_units(CreditUnits::new(*credits_awarded));
                 vec![InlineKeyboardButton {
                     text: match locale {
-                        Locale::Es => format!("{credits} créditos · {xtr_amount} ⭐"),
-                        Locale::En => format!("{credits} credits · {xtr_amount} ⭐"),
+                        Locale::Es => format!("{credits} créditos por {xtr_amount} ⭐"),
+                        Locale::En => format!("{credits} credits for {xtr_amount} ⭐"),
                     },
                     url: None,
                     callback_data: Some(format!("topup:{id}")),
@@ -738,7 +738,10 @@ mod tests {
             keyboard.inline_keyboard[0][0].callback_data.as_deref(),
             Some("topup:p50")
         );
-        assert_eq!(keyboard.inline_keyboard[0][0].text, "50.00 credits · 25 ⭐");
+        assert_eq!(
+            keyboard.inline_keyboard[0][0].text,
+            "50.00 credits for 25 ⭐"
+        );
 
         for (chat_type, available, bot_name, locale, expected) in [
             (

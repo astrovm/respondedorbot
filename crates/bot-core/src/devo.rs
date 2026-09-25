@@ -179,7 +179,7 @@ pub fn render_devo_result(result: &DevoResult, locale: Locale) -> String {
     };
     let summary = match locale {
         Locale::Es => format!(
-            "💳 Arbitraje tarjeta ↔ crypto\n{marker} Ganancia: {}% · Comisión: {}%\n\n💵 Cotizaciones en ARS\nOficial: ${}\nUSDT: ${}\nTarjeta: ${}",
+            "💳 Arbitraje tarjeta ↔ crypto\n{marker} Ganancia: {}% (comisión {}%)\n\n💵 Cotizaciones en ARS\nOficial: ${}\nUSDT: ${}\nTarjeta: ${}",
             number(&result.profit),
             number(&result.fee),
             number(&result.official),
@@ -187,7 +187,7 @@ pub fn render_devo_result(result: &DevoResult, locale: Locale) -> String {
             number(&result.card)
         ),
         Locale::En => format!(
-            "💳 Card ↔ crypto arbitrage\n{marker} Profit: {}% · Fee: {}%\n\n💵 Rates in ARS\nOfficial: ${}\nUSDT: ${}\nCard: ${}",
+            "💳 Card ↔ crypto arbitrage\n{marker} Profit: {}% (fee {}%)\n\n💵 Rates in ARS\nOfficial: ${}\nUSDT: ${}\nCard: ${}",
             number(&result.profit),
             number(&result.fee),
             number(&result.official),
@@ -331,7 +331,7 @@ mod tests {
         .unwrap_or_else(|_| unreachable!());
         assert_eq!(
             render_devo_result(&summary, Locale::Es),
-            "💳 Arbitraje tarjeta ↔ crypto\n🟢 Ganancia: 62,68% · Comisión: 0,5%\n\n💵 Cotizaciones en ARS\nOficial: $100\nUSDT: $195\nTarjeta: $150"
+            "💳 Arbitraje tarjeta ↔ crypto\n🟢 Ganancia: 62,68% (comisión 0,5%)\n\n💵 Cotizaciones en ARS\nOficial: $100\nUSDT: $195\nTarjeta: $150"
         );
         let purchase = calculate_devo(
             0.005,
@@ -346,7 +346,7 @@ mod tests {
         .unwrap_or_else(|_| unreachable!());
         assert_eq!(
             render_devo_result(&purchase, Locale::En),
-            "💳 Card ↔ crypto arbitrage\n🟢 Profit: 62.68% · Fee: 0.5%\n\n💵 Rates in ARS\nOfficial: $100\nUSDT: $195\nCard: $150\n\n🧾 100 USD card purchase\n= $15,000 ARS = 76.92 USDT\nProfit: $9,402.5 ARS / 48.22 USDT\nTotal: $24,402.5 ARS / 125.14 USDT"
+            "💳 Card ↔ crypto arbitrage\n🟢 Profit: 62.68% (fee 0.5%)\n\n💵 Rates in ARS\nOfficial: $100\nUSDT: $195\nCard: $150\n\n🧾 100 USD card purchase\n= $15,000 ARS = 76.92 USDT\nProfit: $9,402.5 ARS / 48.22 USDT\nTotal: $24,402.5 ARS / 125.14 USDT"
         );
     }
 }

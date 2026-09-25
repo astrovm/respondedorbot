@@ -569,7 +569,7 @@ fn market_selection_prompt(
     locale: bot_core::locale::Locale,
 ) -> String {
     format!(
-        "{} · {}",
+        "{}: {}",
         bot_core::menu_ui::localized(locale, "Elegí un activo", "Choose an asset"),
         selection.query
     )
@@ -592,11 +592,11 @@ fn market_selection_page(
             if candidate.exchange.trim().is_empty() {
                 symbol.to_owned()
             } else {
-                format!("{symbol} · {}", candidate.exchange)
+                format!("{symbol} ({})", candidate.exchange)
             }
         } else {
             format!(
-                "{} · {}",
+                "{} ({})",
                 candidate.symbol,
                 candidate
                     .contracts
@@ -613,7 +613,7 @@ fn market_selection_page(
         if name == &candidate.symbol {
             detail
         } else {
-            format!("{short_name} · {detail}")
+            format!("{short_name}, {detail}")
         }
     };
     let mut rows = selection
@@ -635,7 +635,7 @@ fn market_selection_page(
                     || candidate.id.clone(),
                     |contract| short_market_address(&contract.address),
                 );
-                label.push_str(&format!(" · {suffix}"));
+                label.push_str(&format!(" [{suffix}]"));
             }
             vec![button(label, format!("mkt:select:{selection_id}:{index}"))]
         })
@@ -8199,7 +8199,7 @@ mod tests {
             return;
         };
         assert!(message.text.contains("Example City, Exampleland"));
-        assert!(message.text.contains("Mostly clear · feels like"));
+        assert!(message.text.contains("Mostly clear, feels like"));
         assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
         assert_eq!(dispatcher.state.incoming.len(), 1);
         assert_eq!(dispatcher.state.outgoing.len(), 1);
@@ -8283,7 +8283,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert!(message.text.contains("Elections by liquidity"));
+        assert!(message.text.contains("Polymarket elections, by liquidity"));
         assert!(message.text.contains("Candidate A 72%"));
         assert_eq!(
             message.parse_mode,
@@ -9004,7 +9004,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "💳 Card ↔ crypto arbitrage\n🟢 Profit: 62.68% · Fee: 0.5%\n\n💵 Rates in ARS\nOfficial: $100\nUSDT: $195\nCard: $150\n\n🧾 100 USD card purchase\n= $15,000 ARS = 76.92 USDT\nProfit: $9,402.5 ARS / 48.22 USDT\nTotal: $24,402.5 ARS / 125.14 USDT"
+            "💳 Card ↔ crypto arbitrage\n🟢 Profit: 62.68% (fee 0.5%)\n\n💵 Rates in ARS\nOfficial: $100\nUSDT: $195\nCard: $150\n\n🧾 100 USD card purchase\n= $15,000 ARS = 76.92 USDT\nProfit: $9,402.5 ARS / 48.22 USDT\nTotal: $24,402.5 ARS / 125.14 USDT"
         );
         assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
         assert_eq!(dispatcher.state.incoming.len(), 1);
@@ -11840,7 +11840,7 @@ mod tests {
             keyboard
                 .inline_keyboard
                 .iter()
-                .any(|row| row[0].text.contains("EXM-USD · Synthetic"))
+                .any(|row| row[0].text.contains("EXM-USD (Synthetic)"))
         );
         let second =
             super::market_selection_page("selection", &selection, bot_core::locale::Locale::En, 1);
@@ -16248,7 +16248,7 @@ mod tests {
         else {
             return;
         };
-        assert_eq!(text, "🧾 Gastos IA\n\n26/08 14:00 · respuesta · 0.04 cr");
+        assert_eq!(text, "🧾 Gastos IA\n\n26/08 14:00 | respuesta: 0.04 cr");
         assert_eq!(
             reply_markup
                 .as_ref()
@@ -17152,7 +17152,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "🧾 Gastos IA\n\n26/08 14:32 · 0.08 cr\n  respuesta 0.03 cr\n  web 0.05 cr"
+            "🧾 Gastos IA\n\n26/08 14:32 | 0.08 cr\n  respuesta 0.03 cr\n  web 0.05 cr"
         );
         let Some(keyboard) = message.reply_markup.as_ref() else {
             return;

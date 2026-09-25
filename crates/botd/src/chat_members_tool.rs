@@ -112,7 +112,7 @@ mod tests {
         assert_eq!(
             tool.execute(ExternalToolRequest::GetChatMembers, "call")
                 .output,
-            "Miembros conocidos:\n- Ana (@ana) — visto hace 10 min"
+            "Miembros conocidos:\n- Ana (@ana), visto hace 10 min"
         );
     }
 

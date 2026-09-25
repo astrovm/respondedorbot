@@ -219,7 +219,7 @@ pub fn render_task_page(tasks: &[ScheduledTask], locale: Locale, page: usize) ->
                 "🔁 "
             };
             format!(
-                "{recurring}{} · {name}",
+                "{recurring}{} | {name}",
                 local_time(task.next_run_at, task.timezone_offset, locale)
             )
         })
@@ -232,7 +232,7 @@ pub fn render_task_page(tasks: &[ScheduledTask], locale: Locale, page: usize) ->
         .map(|(index, task)| {
             let label = &labels[index];
             let label = if labels.iter().filter(|other| *other == label).count() > 1 {
-                format!("{} · {label}", index + 1)
+                format!("{}. {label}", index + 1)
             } else {
                 label.clone()
             };
@@ -560,7 +560,7 @@ mod tests {
         let keyboard = list
             .keyboard
             .map_or(Vec::new(), |value| value.inline_keyboard);
-        assert_eq!(keyboard[0][0].text, "30/04 01:30 · avisar a @\u{200b}user");
+        assert_eq!(keyboard[0][0].text, "30/04 01:30 | avisar a @\u{200b}user");
         assert_eq!(
             keyboard[0][0].callback_data.as_deref(),
             Some("task:view:once0001")
@@ -693,7 +693,7 @@ mod tests {
                 .and_then(|keyboard| keyboard.inline_keyboard.into_iter().next())
                 .and_then(|row| row.into_iter().next())
                 .map(|button| button.text),
-            Some("🔁 30/04 01:30 · avisar a @\u{200b}user".to_owned())
+            Some("🔁 30/04 01:30 | avisar a @\u{200b}user".to_owned())
         );
         assert_eq!(task_not_found(Locale::En), "That task no longer exists");
         assert_eq!(

@@ -156,7 +156,7 @@ pub fn format_market_selection(selection: &MarketSelection, locale: Locale) -> S
                     target.as_str()
                 };
             format!(
-                "{}. {} ({}) — {} {} ({}; {})",
+                "{}. {} ({}): {} {} ({}; {})",
                 index + 1,
                 shorten(name, 100),
                 shorten(&candidate.symbol, 24),
@@ -180,7 +180,7 @@ fn candidate_identity(candidate: &MarketCandidate) -> String {
         if !candidate.asset_type.trim().is_empty() {
             identity.push(shorten(&candidate.asset_type, 24));
         }
-        return identity.join(" · ");
+        return identity.join(", ");
     }
     if candidate.id.starts_with("token:") {
         return candidate

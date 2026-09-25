@@ -546,10 +546,10 @@ fn payer_suffix(entries: &[ChargeHistoryEntry], locale: Locale) -> String {
     if chat <= 0 {
         String::new()
     } else if user <= 0 {
-        format!(" · {}", label(locale, "group"))
+        format!(" ({})", label(locale, "group"))
     } else {
         format!(
-            " · {} {} · {} {}",
+            " ({} {}, {} {})",
             label(locale, "group"),
             format_credit_units(CreditUnits::new(chat)),
             label(locale, "personal"),
@@ -693,24 +693,24 @@ pub fn render_charge_history_page(
         lines.push(String::new());
         if let [component] = components.as_slice() {
             let pending = if component.pending {
-                format!(" · {}", label(locale, "pending"))
+                format!(" ({})", label(locale, "pending"))
             } else {
                 String::new()
             };
             lines.push(format!(
-                "{timestamp} · {} · {} cr{pending}{payer}",
+                "{timestamp} | {}: {} cr{pending}{payer}",
                 component.label,
                 format_credit_units(CreditUnits::new(component.units))
             ));
             continue;
         }
         lines.push(format!(
-            "{timestamp} · {} cr{payer}",
+            "{timestamp} | {} cr{payer}",
             format_credit_units(CreditUnits::new(total))
         ));
         for component in components {
             let pending = if component.pending {
-                format!(" · {}", label(locale, "pending"))
+                format!(" ({})", label(locale, "pending"))
             } else {
                 String::new()
             };
@@ -857,7 +857,7 @@ mod tests {
         let (text, keyboard) = render_charge_history_page(&page, 55, 2, -180, Locale::Es);
         assert_eq!(
             text,
-            "🧾 Gastos IA\n\n26/08 14:32 · 0.08 cr\n  respuesta 0.03 cr\n  web (2x) 0.05 cr\n\n26/08 13:00 · audio · 0.07 cr · grupo"
+            "🧾 Gastos IA\n\n26/08 14:32 | 0.08 cr\n  respuesta 0.03 cr\n  web (2x) 0.05 cr\n\n26/08 13:00 | audio: 0.07 cr (grupo)"
         );
         let Some(keyboard) = keyboard else {
             return;
@@ -896,11 +896,11 @@ mod tests {
         };
         assert_eq!(
             render_charge_history_page(&page, 55, 10, -180, Locale::Es).0,
-            "🧾 Gastos IA\n\n26/08 14:32 · transcripción · 0.60 cr"
+            "🧾 Gastos IA\n\n26/08 14:32 | transcripción: 0.60 cr"
         );
         assert_eq!(
             render_charge_history_page(&page, 55, 10, -180, Locale::En).0,
-            "🧾 AI expenses\n\n26/08 14:32 · transcript · 0.60 cr"
+            "🧾 AI expenses\n\n26/08 14:32 | transcript: 0.60 cr"
         );
     }
 
@@ -949,7 +949,7 @@ mod tests {
         };
         assert_eq!(
             render_charge_history_page(&page, 55, 10, 0, Locale::Es).0,
-            "🧾 Gastos IA\n\n26/08 17:00 · 1.17 cr · grupo 1.05 · personal 0.12\n  respuesta 0.08 cr\n  memoria 0.02 cr\n  memoria 1.07 cr · pendiente"
+            "🧾 Gastos IA\n\n26/08 17:00 | 1.17 cr (grupo 1.05, personal 0.12)\n  respuesta 0.08 cr\n  memoria 0.02 cr\n  memoria 1.07 cr (pendiente)"
         );
         let empty = ChargeHistoryPage {
             groups: Vec::new(),

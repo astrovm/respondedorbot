@@ -250,8 +250,8 @@ pub fn render_bcra(snapshot: &BcraSnapshot, locale: Locale, today_days: i64) -> 
     }
     let mut lines = vec![
         match locale {
-            Locale::Es => "🏦 BCRA · Indicadores",
-            Locale::En => "🏦 BCRA · Indicators",
+            Locale::Es => "🏦 Indicadores del BCRA",
+            Locale::En => "🏦 BCRA indicators",
         }
         .to_owned(),
         String::new(),
@@ -419,7 +419,7 @@ mod tests {
         };
         let text = render_bcra(&snapshot, Locale::Es, days_from_civil(2025, 1, 20));
         for expected in [
-            "BCRA · Indicadores",
+            "Indicadores del BCRA",
             "Base monetaria: $5.000 mill. pesos (15/01/25)",
             "Inflación mensual: 5,20%",
             "Inflación interanual: 150,5%",

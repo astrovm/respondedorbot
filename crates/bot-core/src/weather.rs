@@ -138,11 +138,11 @@ pub fn render_weather(observation: &WeatherObservation, locale: Locale) -> Strin
     let description = capitalized(weather_description(observation.weather_code, locale));
     match locale {
         Locale::Es => format!(
-            "{icon} {}\n{description} · sensación térmica {temperature} °C\n\n💧 Probabilidad de lluvia: {}%\n☁️ Nubosidad: {}%\n👁️ Visibilidad: {visibility}",
+            "{icon} {}\n{description}, sensación térmica {temperature} °C\n\n💧 Probabilidad de lluvia: {}%\n☁️ Nubosidad: {}%\n👁️ Visibilidad: {visibility}",
             observation.location, observation.precipitation_probability, observation.cloud_cover,
         ),
         Locale::En => format!(
-            "{icon} {}\n{description} · feels like {temperature} °C\n\n💧 Chance of rain: {}%\n☁️ Cloud cover: {}%\n👁️ Visibility: {visibility}",
+            "{icon} {}\n{description}, feels like {temperature} °C\n\n💧 Chance of rain: {}%\n☁️ Cloud cover: {}%\n👁️ Visibility: {visibility}",
             observation.location, observation.precipitation_probability, observation.cloud_cover,
         ),
     }
@@ -289,10 +289,10 @@ mod tests {
         };
         assert_eq!(
             render_weather(&observation, Locale::Es),
-            "🌤️ Example City, Exampleland\nMayormente despejado · sensación térmica 19,5 °C\n\n💧 Probabilidad de lluvia: 20%\n☁️ Nubosidad: 30%\n👁️ Visibilidad: 15,0 km"
+            "🌤️ Example City, Exampleland\nMayormente despejado, sensación térmica 19,5 °C\n\n💧 Probabilidad de lluvia: 20%\n☁️ Nubosidad: 30%\n👁️ Visibilidad: 15,0 km"
         );
         assert!(
-            render_weather(&observation, Locale::En).contains("Mostly clear · feels like 19.5 °C")
+            render_weather(&observation, Locale::En).contains("Mostly clear, feels like 19.5 °C")
         );
         for (code, icon) in [
             (0, "☀️"),

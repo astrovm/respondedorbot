@@ -79,8 +79,8 @@ pub fn render_chat_members(members: &[KnownChatMember], now_unix: i64, locale: L
                 format!("{} (@{})", member.first_name, member.username)
             };
             match locale {
-                Locale::Es => format!("- {name} — visto {ago}"),
-                Locale::En => format!("- {name} — seen {ago}"),
+                Locale::Es => format!("- {name}, visto {ago}"),
+                Locale::En => format!("- {name}, seen {ago}"),
             }
         })
         .collect::<Vec<_>>()
@@ -146,7 +146,7 @@ mod tests {
         ];
         assert_eq!(
             render_chat_members(&members, 10_000, Locale::Es),
-            "Miembros conocidos:\n- A (@a) — visto hace unos segundos\n- B — visto hace 10 min\n- C — visto hace 2 h\n- D — visto hace 1 d"
+            "Miembros conocidos:\n- A (@a), visto hace unos segundos\n- B, visto hace 10 min\n- C, visto hace 2 h\n- D, visto hace 1 d"
         );
         assert_eq!(
             render_chat_members(&[], 10_000, Locale::Es),
@@ -154,7 +154,7 @@ mod tests {
         );
         assert_eq!(
             render_chat_members(&members, 10_000, Locale::En),
-            "Known members:\n- A (@a) — seen a few seconds ago\n- B — seen 10 min ago\n- C — seen 2 h ago\n- D — seen 1 d ago"
+            "Known members:\n- A (@a), seen a few seconds ago\n- B, seen 10 min ago\n- C, seen 2 h ago\n- D, seen 1 d ago"
         );
     }
 }

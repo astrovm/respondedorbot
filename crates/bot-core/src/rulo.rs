@@ -246,14 +246,14 @@ pub fn render_rulo(evaluation: &RuloEvaluation, locale: Locale) -> String {
         Locale::Es => vec![
             "🔁 Rulos desde el oficial".to_owned(),
             format!(
-                "💵 Oficial: ${} · Invertís {} USD = ${} ARS",
+                "💵 Oficial: ${}\nInvertís {} USD = ${} ARS",
                 plan.official, plan.base_usd, plan.base_ars
             ),
         ],
         Locale::En => vec![
             "🔁 Arbitrage from the official rate".to_owned(),
             format!(
-                "💵 Official: ${} · Investing {} USD = ${} ARS",
+                "💵 Official: ${}\nInvesting {} USD = ${} ARS",
                 plan.official, plan.base_usd, plan.base_ars
             ),
         ],
@@ -269,7 +269,7 @@ pub fn render_rulo(evaluation: &RuloEvaluation, locale: Locale) -> String {
             Locale::En => route.percentage.clone(),
         };
         lines.push(String::new());
-        lines.push(format!("{marker} {} · {percentage}%", route.label));
+        lines.push(format!("{marker} {}: {percentage}%", route.label));
         lines.push(match locale {
             Locale::Es => format!(
                 "Vendés a ${} ({} vs oficial)",
@@ -363,14 +363,14 @@ mod tests {
         let evaluation = evaluate_rulo(&complete_input());
         let spanish = render_rulo(&evaluation, Locale::Es);
         assert!(spanish.starts_with(
-            "🔁 Rulos desde el oficial\n💵 Oficial: $1.440 · Invertís 1.000 USD = $1.440.000 ARS"
+            "🔁 Rulos desde el oficial\n💵 Oficial: $1.440\nInvertís 1.000 USD = $1.440.000 ARS"
         ));
         assert!(spanish.contains("Ganancia: +19.730 ARS"));
         assert!(spanish.contains("Ruta: USD→USDT BUENBIT, USDT→ARS BUENBIT"));
         let english = render_rulo(&evaluation, Locale::En);
         assert!(english.starts_with("🔁 Arbitrage from the official rate"));
         assert!(english.contains("Profit: -10.000 ARS"));
-        assert!(spanish.contains("🟢 MEP (AL30 CI) · +1,37%"));
+        assert!(spanish.contains("🟢 MEP (AL30 CI): +1,37%"));
         assert!(spanish.contains("🔴 Blue"));
 
         assert_eq!(

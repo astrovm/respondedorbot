@@ -646,8 +646,8 @@ pub fn task_credit_insufficient(balance: i64, required: i64, locale: Locale) -> 
 
 fn created(schedule: &str, text: &str, locale: Locale) -> String {
     match locale {
-        Locale::Es => format!("✅ Tarea programada · {schedule}\n{text}"),
-        Locale::En => format!("✅ Task scheduled · {schedule}\n{text}"),
+        Locale::Es => format!("✅ Tarea programada: {schedule}\n{text}"),
+        Locale::En => format!("✅ Task scheduled: {schedule}\n{text}"),
     }
 }
 
@@ -842,11 +842,11 @@ mod tests {
         let result = tool.execute(set_request(Some(3_600), None, None), "call");
         assert_eq!(
             result.output,
-            "✅ Task scheduled · in 1 hour\ncheck the synthetic result"
+            "✅ Task scheduled: in 1 hour\ncheck the synthetic result"
         );
         assert_eq!(
             result.failure_fallback.as_deref(),
-            Some("✅ Task scheduled · in 1 hour\ncheck the synthetic result")
+            Some("✅ Task scheduled: in 1 hour\ncheck the synthetic result")
         );
         let state = state.borrow();
         assert_eq!(state.saved.len(), 1);
@@ -872,7 +872,7 @@ mod tests {
             interval
                 .execute(set_request(None, Some(86_400), None), "call")
                 .output,
-            "✅ Tarea programada · cada día\ncheck the synthetic result"
+            "✅ Tarea programada: cada día\ncheck the synthetic result"
         );
         assert_eq!(
             state.borrow().saved[0].0.task.schedule,
@@ -891,7 +891,7 @@ mod tests {
                 "call"
             )
             .output,
-            "✅ Tarea programada · los lun, mié a las 09:05\ncheck the synthetic result"
+            "✅ Tarea programada: los lun, mié a las 09:05\ncheck the synthetic result"
         );
         assert!(matches!(
             state.borrow().saved[1].0.task.schedule,

@@ -188,7 +188,7 @@ fn descriptions(locale: Locale) -> [&'static str; 7] {
             "Si alguien responde a un link que arreglé, no lo tomo como una pregunta para mí.",
             "La hora que uso para tareas, recordatorios y fechas.",
             "De vez en cuando me meto en la charla del grupo aunque nadie me llame.",
-            "Cuántos mensajes de IA por hora puede usar cada persona con el saldo del grupo.\n\n0 = nadie · ∞ = sin límite",
+            "Cuántos mensajes de IA por hora puede usar cada persona con el saldo del grupo.\n\n0 = nadie, ∞ = sin límite",
         ],
         Locale::En => [
             "The language of my messages, menus and replies.",
@@ -197,7 +197,7 @@ fn descriptions(locale: Locale) -> [&'static str; 7] {
             "When someone replies to a link I fixed, I do not treat it as a question for me.",
             "The time I use for tasks, reminders and dates.",
             "Every now and then I join the group conversation without being called.",
-            "How many AI messages per hour each person can use from the group balance.\n\n0 = nobody · ∞ = no limit",
+            "How many AI messages per hour each person can use from the group balance.\n\n0 = nobody, ∞ = no limit",
         ],
     }
 }
@@ -277,7 +277,7 @@ pub fn render_config_page(
     let mut rows = (0..if is_group { 7 } else { 5 })
         .map(|i| {
             vec![button(
-                format!("{} · {}", names[i], values[i]),
+                format!("{}: {}", names[i], values[i]),
                 format!("cfg:page:{}", PAGES[i]),
             )]
         })

@@ -805,7 +805,7 @@ fn social_rows(socials: &BTreeMap<String, String>) -> Vec<String> {
     if links.is_empty() {
         Vec::new()
     } else {
-        vec![String::new(), links.join(" · ")]
+        vec![String::new(), links.join(" | ")]
     }
 }
 
@@ -835,7 +835,7 @@ fn link_rows(signal: &TokenSignal, symbol: &str) -> [String; 2] {
                 html_link("Dexscreener", &dex),
                 html_link("Search X", &search),
             ]
-            .join(" · "),
+            .join(" | "),
             String::new(),
         ];
     }
@@ -875,7 +875,7 @@ fn link_rows(signal: &TokenSignal, symbol: &str) -> [String; 2] {
             html_link("Explorer", &explorer),
             html_link("Search X", &x_search),
         ]
-        .join(" · ")
+        .join(" | ")
     } else {
         [
             html_link("Defined", &defined),
@@ -884,7 +884,7 @@ fn link_rows(signal: &TokenSignal, symbol: &str) -> [String; 2] {
             html_link("Explorer", &explorer),
             html_link("Search X", &x_search),
         ]
-        .join(" · ")
+        .join(" | ")
     };
     let trade = if token.chain_id == "ethereum" {
         [
@@ -904,7 +904,7 @@ fn link_rows(signal: &TokenSignal, symbol: &str) -> [String; 2] {
                 ),
             ),
         ]
-        .join(" · ")
+        .join(" | ")
     } else {
         [
             html_link(
@@ -928,7 +928,7 @@ fn link_rows(signal: &TokenSignal, symbol: &str) -> [String; 2] {
                 ),
             ),
         ]
-        .join(" · ")
+        .join(" | ")
     };
     [primary, trade]
 }
@@ -1087,7 +1087,7 @@ pub fn format_signal_caption_for_period_with_candles(
     let (change, period) = signal_change_for_timeframe(signal, timeframe, candles);
     let change = change.map_or_else(|| "N/A".to_owned(), format_percentage);
     let mut stats = vec![format!(
-        "<b>{}</b> USD · {change} {period}",
+        "<b>{}</b> USD ({change} {period})",
         optional_money(&pair.price_usd, true)
     )];
     if !pair.market_cap.is_null() || !pair.fdv.is_null() {
@@ -1109,7 +1109,7 @@ pub fn format_signal_caption_for_period_with_candles(
         stats.push(format!("Supply <b>{}</b>", format_amount(supply)));
     }
     if period == "1h" && (!pair.txns.h1.buys.is_null() || !pair.txns.h1.sells.is_null()) {
-        stats.push(format!("1h · 🟩 {buys} · 🟥 {sells}"));
+        stats.push(format!("1h: 🟩 {buys} 🟥 {sells}"));
     }
     if ath_value > 0.0 {
         stats.push(format!("ATH <b>{ath_line}</b>"));
@@ -1119,7 +1119,7 @@ pub fn format_signal_caption_for_period_with_candles(
         if age == "?" {
             chain
         } else {
-            format!("{chain} · {age}")
+            format!("{chain}, {age}")
         },
         format!(
             "<code>{}</code>",
@@ -1325,7 +1325,7 @@ mod tests {
         s.pair.liquidity = Default::default();
         s.pair.txns = Default::default();
         let caption = format_signal_caption(&s, 0);
-        assert!(caption.contains("<b>N/A</b> USD · N/A 24h"));
+        assert!(caption.contains("<b>N/A</b> USD (N/A 24h)"));
         assert!(!caption.contains("Vol 24h"));
         assert!(!caption.contains("LP <b>"));
         assert!(!caption.contains("🟩 N/A"));
@@ -1410,9 +1410,9 @@ mod tests {
     fn signal_captions_use_the_requested_period_when_supplied() {
         let signal = signal();
         let caption = format_signal_caption_for_period(&signal, 1_720_000_000, Some("1h"));
-        assert!(caption.contains("<b>$0.0106</b> USD · +5.1% 1h"));
+        assert!(caption.contains("<b>$0.0106</b> USD (+5.1% 1h)"));
         let unavailable = format_signal_caption_for_period(&signal, 1_720_000_000, Some("7d"));
-        assert!(unavailable.contains("<b>$0.0106</b> USD · N/A 7d"));
+        assert!(unavailable.contains("<b>$0.0106</b> USD (N/A 7d)"));
     }
 
     #[test]

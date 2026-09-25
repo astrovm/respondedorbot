@@ -52,7 +52,7 @@ where
                         (Locale::En, false) => format!("Tweet by {}", tweet.author),
                     };
                     if !tweet.date.is_empty() {
-                        heading.push_str(" · ");
+                        heading.push_str(", ");
                         heading.push_str(&tweet.date);
                     }
                     parts.push(heading);
@@ -206,7 +206,7 @@ mod tests {
         assert_eq!(
             tool.execute(request("https://x.com/user/status/123"), "call")
                 .output,
-            "Tweet by Example User · Jan 1, 2020\nA status update."
+            "Tweet by Example User, Jan 1, 2020\nA status update."
         );
 
         let empty = serde_json::json!({"html": "<blockquote></blockquote>"}).to_string();
@@ -225,7 +225,7 @@ mod tests {
         assert_eq!(
             tool.execute(request("https://x.com/user/status/123"), "call")
                 .output,
-            "Tweet · Sep 2, 2026\nActualización sintética."
+            "Tweet, Sep 2, 2026\nActualización sintética."
         );
 
         let mut tool = make_tool(
