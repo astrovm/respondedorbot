@@ -5488,9 +5488,13 @@ where
                         .execute(action)
                         .map_err(DispatchError::Action)?
                 };
-                if is_settings_command {
+                // Only chats with an explicit language get their own menu; "auto"
+                // chats keep Telegram's app-language and all-groups menus, which
+                // already match how they are answered.
+                let menu_language = &updated_config.as_ref().unwrap_or(&config).language;
+                if is_settings_command && matches!(menu_language.as_str(), "es" | "en") {
                     let menu_locale = resolve_locale(
-                        Some(&updated_config.as_ref().unwrap_or(&config).language),
+                        Some(menu_language),
                         message.sender_language_code.as_deref(),
                         message.chat_type.as_deref().unwrap_or_default(),
                     );
@@ -9693,6 +9697,14 @@ mod tests {
         );
         assert_eq!(dispatcher.state.incoming.len(), 1);
         assert_eq!(dispatcher.state.outgoing.len(), 1);
+        // An "auto" chat keeps Telegram's app-language and all-groups menus.
+        assert!(
+            !dispatcher
+                .actions
+                .0
+                .iter()
+                .any(|action| matches!(action, TelegramAction::SetCommands { .. }))
+        );
     }
 
     #[test]
