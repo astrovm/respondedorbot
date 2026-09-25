@@ -294,11 +294,12 @@ pub fn render_bcra(snapshot: &BcraSnapshot, locale: Locale, today_days: i64) -> 
         .map(|(_, variable)| variable)
         .collect::<Vec<_>>();
     // Most indicators share one publication date; state it once in the title.
-    let common_date = shown
+    // Count days in one spelling, since sources mix `24/09/26` and `24/09/2026`.
+    let common_day = shown
         .iter()
-        .map(|variable| variable.date.as_str())
+        .map(|variable| short_year(&variable.date))
         .filter(|date| !date.is_empty())
-        .fold(Vec::<(&str, usize)>::new(), |mut counts, date| {
+        .fold(Vec::<(String, usize)>::new(), |mut counts, date| {
             match counts.iter_mut().find(|(known, _)| *known == date) {
                 Some((_, count)) => *count += 1,
                 None => counts.push((date, 1)),
@@ -309,10 +310,11 @@ pub fn render_bcra(snapshot: &BcraSnapshot, locale: Locale, today_days: i64) -> 
         .filter(|(_, count)| *count > 1)
         .max_by_key(|(_, count)| *count)
         .map(|(date, _)| date);
+    let common_date = common_day.as_deref();
     let mut lines = vec![
         match (locale, common_date) {
-            (Locale::Es, Some(date)) => format!("Indicadores del BCRA al {}", short_year(date)),
-            (Locale::En, Some(date)) => format!("BCRA indicators as of {}", short_year(date)),
+            (Locale::Es, Some(date)) => format!("Indicadores del BCRA al {date}"),
+            (Locale::En, Some(date)) => format!("BCRA indicators as of {date}"),
             (Locale::Es, None) => "Indicadores del BCRA".to_owned(),
             (Locale::En, None) => "BCRA indicators".to_owned(),
         },
@@ -507,6 +509,28 @@ mod tests {
         let text = render_bcra(&snapshot, Locale::Es, 0);
         assert_eq!(text.matches("Inflación esperada: 21.8%").count(), 1);
         assert!(text.contains("Inflación interanual: 33.6%"));
+    }
+
+    #[test]
+    fn counts_the_same_day_across_both_date_spellings() {
+        let variable = |description: &str, date: &str| BcraVariable {
+            description: description.to_owned(),
+            value: "10,0".to_owned(),
+            date: date.to_owned(),
+        };
+        let snapshot = BcraSnapshot {
+            variables: vec![
+                variable("Tasa BADLAR", "24/09/26"),
+                variable("Tasa TAMAR", "24/09/2026"),
+            ],
+            bands: None,
+            itcrm: None,
+            country_risk: None,
+            stale: false,
+        };
+        let text = render_bcra(&snapshot, Locale::Es, 0);
+        assert!(text.starts_with("Indicadores del BCRA al 24/09/26\n\n"));
+        assert!(text.contains("TAMAR: 10.0%\nBADLAR: 10.0%"));
     }
 
     #[test]
