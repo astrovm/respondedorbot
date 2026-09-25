@@ -295,6 +295,11 @@ pub fn render_bcra(snapshot: &BcraSnapshot, locale: Locale, today_days: i64) -> 
         .collect::<Vec<_>>();
     // Most indicators share one publication date; state it once in the title.
     // Count days in one spelling, since sources mix `24/09/26` and `24/09/2026`.
+    // Only a day most indicators share becomes the title date.
+    let dated = shown
+        .iter()
+        .filter(|variable| !variable.date.is_empty())
+        .count();
     let common_day = shown
         .iter()
         .map(|variable| short_year(&variable.date))
@@ -307,7 +312,7 @@ pub fn render_bcra(snapshot: &BcraSnapshot, locale: Locale, today_days: i64) -> 
             counts
         })
         .into_iter()
-        .filter(|(_, count)| *count > 1)
+        .filter(|(_, count)| *count > 1 && *count * 2 > dated)
         .max_by_key(|(_, count)| *count)
         .map(|(date, _)| date);
     let common_date = common_day.as_deref();
@@ -531,6 +536,31 @@ mod tests {
         let text = render_bcra(&snapshot, Locale::Es, 0);
         assert!(text.starts_with("Indicadores del BCRA al 24/09/26\n\n"));
         assert!(text.contains("TAMAR: 10.0%\nBADLAR: 10.0%"));
+    }
+
+    #[test]
+    fn keeps_per_line_dates_when_no_day_has_a_majority() {
+        let variable = |description: &str, date: &str| BcraVariable {
+            description: description.to_owned(),
+            value: "10,0".to_owned(),
+            date: date.to_owned(),
+        };
+        let snapshot = BcraSnapshot {
+            variables: vec![
+                variable("Tasa TAMAR", "31/08/26"),
+                variable("Tasa BADLAR", "31/08/26"),
+                variable("Tipo de cambio mayorista de referencia", "20/09/26"),
+                variable("Reservas internacionales", "24/09/26"),
+            ],
+            bands: None,
+            itcrm: None,
+            country_risk: None,
+            stale: false,
+        };
+        let text = render_bcra(&snapshot, Locale::En, 0);
+        assert!(text.starts_with("BCRA indicators\n\n"));
+        assert!(text.contains("TAMAR: 10.0% (31/08/26)"));
+        assert!(text.contains("(24/09/26)"));
     }
 
     #[test]
