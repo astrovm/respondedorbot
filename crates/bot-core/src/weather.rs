@@ -128,23 +128,22 @@ fn capitalized(value: &str) -> String {
 
 #[must_use]
 pub fn render_weather(observation: &WeatherObservation, locale: Locale) -> String {
-    let visibility = format!("{:.1} km", observation.visibility_meters / 1_000.0);
+    let number = |value: &str| crate::output_format::localized_number(value, locale);
+    let visibility = format!(
+        "{} km",
+        number(&format!("{:.1}", observation.visibility_meters / 1_000.0))
+    );
+    let temperature = number(&observation.apparent_temperature);
     let icon = weather_icon(observation.weather_code);
     let description = capitalized(weather_description(observation.weather_code, locale));
     match locale {
         Locale::Es => format!(
-            "{icon} {}\n{description} · sensación térmica {}°C\n\n💧 Probabilidad de lluvia: {}%\n☁️ Nubosidad: {}%\n👁️ Visibilidad: {visibility}",
-            observation.location,
-            observation.apparent_temperature,
-            observation.precipitation_probability,
-            observation.cloud_cover,
+            "{icon} {}\n{description} · sensación térmica {temperature} °C\n\n💧 Probabilidad de lluvia: {}%\n☁️ Nubosidad: {}%\n👁️ Visibilidad: {visibility}",
+            observation.location, observation.precipitation_probability, observation.cloud_cover,
         ),
         Locale::En => format!(
-            "{icon} {}\n{description} · feels like {}°C\n\n💧 Chance of rain: {}%\n☁️ Cloud cover: {}%\n👁️ Visibility: {visibility}",
-            observation.location,
-            observation.apparent_temperature,
-            observation.precipitation_probability,
-            observation.cloud_cover,
+            "{icon} {}\n{description} · feels like {temperature} °C\n\n💧 Chance of rain: {}%\n☁️ Cloud cover: {}%\n👁️ Visibility: {visibility}",
+            observation.location, observation.precipitation_probability, observation.cloud_cover,
         ),
     }
 }
@@ -290,10 +289,10 @@ mod tests {
         };
         assert_eq!(
             render_weather(&observation, Locale::Es),
-            "🌤️ Example City, Exampleland\nMayormente despejado · sensación térmica 19.5°C\n\n💧 Probabilidad de lluvia: 20%\n☁️ Nubosidad: 30%\n👁️ Visibilidad: 15.0 km"
+            "🌤️ Example City, Exampleland\nMayormente despejado · sensación térmica 19,5 °C\n\n💧 Probabilidad de lluvia: 20%\n☁️ Nubosidad: 30%\n👁️ Visibilidad: 15,0 km"
         );
         assert!(
-            render_weather(&observation, Locale::En).contains("Mostly clear · feels like 19.5°C")
+            render_weather(&observation, Locale::En).contains("Mostly clear · feels like 19.5 °C")
         );
         for (code, icon) in [
             (0, "☀️"),

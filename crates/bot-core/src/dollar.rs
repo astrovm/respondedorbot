@@ -129,14 +129,14 @@ pub fn render_dollar_rates(
             let change = rate.change.map_or_else(
                 || crate::menu_ui::localized(locale, "sin datos", "no data").to_owned(),
                 |change| {
-                    let arrow = if change > 0.0 {
-                        "▲"
-                    } else if change < 0.0 {
-                        "▼"
+                    let change_text = number(&signed(change));
+                    if change_text == "+0" {
+                        "= 0%".to_owned()
+                    } else if change > 0.0 {
+                        format!("▲ {change_text}%")
                     } else {
-                        "="
-                    };
-                    format!("{arrow} {}%", number(&signed(change)))
+                        format!("▼ {change_text}%")
+                    }
                 },
             );
             format!("{name}: ${} ({change})", number(&trimmed(rate.price, 2)))
@@ -211,6 +211,11 @@ mod tests {
                 price: 1410.0,
                 change: Some(-0.5),
             },
+            DollarRate {
+                name: "Blue",
+                price: 1415.0,
+                change: Some(0.001),
+            },
         ];
         let bands = CurrencyBands {
             lower: 950.12,
@@ -221,13 +226,7 @@ mod tests {
         assert_eq!(
             render_dollar_rates(&rates, Some(&bands), 24, Locale::Es).as_deref(),
             Some(
-                "💵 Dólar en pesos · variación 24h
-
-Banda piso: $950,12 (▲ +0,25%)
-Mayorista: $1.400 (▲ +7,69%)
-TCRM 100: $1.410 (▼ -0,5%)
-Oficial: $1.420 (▲ +2%)
-Banda techo: $1.460,34 (▼ -0,1%)"
+                "💵 Dólar en pesos · variación 24h\n\nBanda piso: $950,12 (▲ +0,25%)\nMayorista: $1.400 (▲ +7,69%)\nTCRM 100: $1.410 (▼ -0,5%)\nBlue: $1.415 (= 0%)\nOficial: $1.420 (▲ +2%)\nBanda techo: $1.460,34 (▼ -0,1%)"
             )
         );
     }
@@ -248,13 +247,7 @@ Banda techo: $1.460,34 (▼ -0,1%)"
         assert_eq!(
             render_dollar_rates(&rates, Some(&bands), 6, Locale::En).as_deref(),
             Some(
-                "💵 Dollar in pesos · 6h change
-
-Lower band: $900 (no data)
-Official: $1,000 (no data)
-Upper band: $1,100 (no data)
-
-⚠️ No 6h history yet. Try again later"
+                "💵 Dollar in pesos · 6h change\n\nLower band: $900 (no data)\nOfficial: $1,000 (no data)\nUpper band: $1,100 (no data)\n\n⚠️ No 6h history yet. Try again later"
             )
         );
         assert_eq!(render_dollar_rates(&[], None, 24, Locale::Es), None);
