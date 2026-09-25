@@ -47,6 +47,8 @@ where
     S: ActionSink,
     S::Error: Display,
 {
+    // Each menu is independent, so one failure must not keep the others
+    // (like the all-groups menu) from being published.
     let mut diagnostics = Vec::new();
     for action in command_publication_actions() {
         if let Err(error) = sink.execute(action) {
@@ -54,7 +56,6 @@ where
                 format!("falló la publicación de comandos de Telegram: {error}"),
                 format!("Telegram command publication failed: {error}"),
             ));
-            break;
         }
     }
     diagnostics
@@ -289,14 +290,17 @@ mod tests {
     #[derive(Default)]
     struct Sink {
         actions: Vec<TelegramAction>,
-        fail_after: Option<usize>,
+        calls: usize,
+        fail_call: Option<usize>,
     }
 
     impl ActionSink for Sink {
         type Error = &'static str;
 
         fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
-            if self.fail_after == Some(self.actions.len()) {
+            let call = self.calls;
+            self.calls += 1;
+            if self.fail_call == Some(call) {
                 return Err("synthetic publication failure");
             }
             self.actions.push(action);
@@ -341,13 +345,21 @@ mod tests {
     }
 
     #[test]
-    fn command_publication_stops_after_failure_without_failing_startup() {
+    fn command_publication_failure_still_publishes_the_other_menus() {
         let mut sink = Sink {
-            fail_after: Some(1),
+            fail_call: Some(1),
             ..Sink::default()
         };
         let diagnostics = publish_commands(&mut sink);
-        assert_eq!(sink.actions.len(), 1);
+        assert_eq!(sink.calls, 4);
+        assert_eq!(sink.actions.len(), 3);
+        assert!(matches!(
+            sink.actions.last(),
+            Some(TelegramAction::SetCommands {
+                scope: bot_core::telegram_actions::CommandScope::AllGroupChats,
+                ..
+            })
+        ));
         assert_eq!(diagnostics.len(), 1);
         assert!(
             diagnostics[0]
