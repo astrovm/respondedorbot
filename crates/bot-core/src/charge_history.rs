@@ -6,7 +6,7 @@ use num_bigint::BigInt;
 use serde_json::{Map, Value};
 
 use crate::command_parsing::parse_command;
-use crate::credit_units::{CreditUnits, format_credit_units};
+use crate::credit_units::{CreditUnits, display_credit_units};
 use crate::locale::Locale;
 use crate::telegram_actions::{InlineKeyboardButton, InlineKeyboardMarkup, TelegramAction};
 use crate::telegram_input::{ChatId, MessageId};
@@ -300,10 +300,10 @@ fn charged_units(metadata: &Map<String, Value>, event_type: &str) -> i64 {
 
 fn label(locale: Locale, kind: &str) -> &'static str {
     match (locale, kind) {
-        (Locale::Es, "title") => "🧾 Gastos IA",
-        (Locale::En, "title") => "🧾 AI expenses",
-        (Locale::Es, "empty") => "🧾 No tenés gastos de IA recientes",
-        (Locale::En, "empty") => "🧾 You have no recent AI spending",
+        (Locale::Es, "title") => "Gastos de IA",
+        (Locale::En, "title") => "AI spending",
+        (Locale::Es, "empty") => "No tenés gastos de IA recientes",
+        (Locale::En, "empty") => "You have no recent AI spending",
         (Locale::Es, "previous") => "‹ Más recientes",
         (Locale::En, "previous") => "‹ Newer",
         (Locale::Es, "next") => "Más antiguos ›",
@@ -551,9 +551,9 @@ fn payer_suffix(entries: &[ChargeHistoryEntry], locale: Locale) -> String {
         format!(
             " ({} {}, {} {})",
             label(locale, "group"),
-            format_credit_units(CreditUnits::new(chat)),
+            display_credit_units(CreditUnits::new(chat)),
             label(locale, "personal"),
-            format_credit_units(CreditUnits::new(user))
+            display_credit_units(CreditUnits::new(user))
         )
     }
 }
@@ -700,13 +700,13 @@ pub fn render_charge_history_page(
             lines.push(format!(
                 "{timestamp} | {}: {} cr{pending}{payer}",
                 component.label,
-                format_credit_units(CreditUnits::new(component.units))
+                display_credit_units(CreditUnits::new(component.units))
             ));
             continue;
         }
         lines.push(format!(
             "{timestamp} | {} cr{payer}",
-            format_credit_units(CreditUnits::new(total))
+            display_credit_units(CreditUnits::new(total))
         ));
         for component in components {
             let pending = if component.pending {
@@ -717,7 +717,7 @@ pub fn render_charge_history_page(
             lines.push(format!(
                 "  {} {} cr{pending}",
                 component.label,
-                format_credit_units(CreditUnits::new(component.units))
+                display_credit_units(CreditUnits::new(component.units))
             ));
         }
     }
@@ -857,7 +857,7 @@ mod tests {
         let (text, keyboard) = render_charge_history_page(&page, 55, 2, -180, Locale::Es);
         assert_eq!(
             text,
-            "🧾 Gastos IA\n\n26/08 14:32 | 0.08 cr\n  respuesta 0.03 cr\n  web (2x) 0.05 cr\n\n26/08 13:00 | audio: 0.07 cr (grupo)"
+            "Gastos de IA\n\n26/08 14:32 | 0.08 cr\n  respuesta 0.03 cr\n  web (2x) 0.05 cr\n\n26/08 13:00 | audio: 0.07 cr (grupo)"
         );
         let Some(keyboard) = keyboard else {
             return;
@@ -896,11 +896,11 @@ mod tests {
         };
         assert_eq!(
             render_charge_history_page(&page, 55, 10, -180, Locale::Es).0,
-            "🧾 Gastos IA\n\n26/08 14:32 | transcripción: 0.60 cr"
+            "Gastos de IA\n\n26/08 14:32 | transcripción: 0.60 cr"
         );
         assert_eq!(
             render_charge_history_page(&page, 55, 10, -180, Locale::En).0,
-            "🧾 AI expenses\n\n26/08 14:32 | transcript: 0.60 cr"
+            "AI spending\n\n26/08 14:32 | transcript: 0.60 cr"
         );
     }
 
@@ -949,7 +949,7 @@ mod tests {
         };
         assert_eq!(
             render_charge_history_page(&page, 55, 10, 0, Locale::Es).0,
-            "🧾 Gastos IA\n\n26/08 17:00 | 1.17 cr (grupo 1.05, personal 0.12)\n  respuesta 0.08 cr\n  memoria 0.02 cr\n  memoria 1.07 cr (pendiente)"
+            "Gastos de IA\n\n26/08 17:00 | 1.17 cr (grupo 1.05, personal 0.12)\n  respuesta 0.08 cr\n  memoria 0.02 cr\n  memoria 1.07 cr (pendiente)"
         );
         let empty = ChargeHistoryPage {
             groups: Vec::new(),
@@ -960,7 +960,7 @@ mod tests {
         };
         assert_eq!(
             render_charge_history_page(&empty, 55, 10, 0, Locale::En).0,
-            "🧾 You have no recent AI spending"
+            "You have no recent AI spending"
         );
     }
 

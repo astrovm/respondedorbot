@@ -258,20 +258,17 @@ pub fn render_task_page(tasks: &[ScheduledTask], locale: Locale, page: usize) ->
         text: if tasks.is_empty() {
             localized(
                 locale,
-                "⏰ No hay tareas en este chat.\n\nCreá una contándome qué y cuándo:\n/tarea mañana a las 9 recordame pagar el alquiler",
-                "⏰ There are no tasks in this chat.\n\nCreate one by telling me what and when:\n/task tomorrow at 9 remind me to pay rent",
+                "No hay tareas en este chat\n\nPara crear una, decime qué y cuándo:\n/tarea mañana a las 9 recordame pagar el alquiler",
+                "There are no tasks in this chat\n\nTo create one, tell me what and when:\n/task tomorrow at 9 remind me to pay rent",
             )
             .to_owned()
         } else {
             match locale {
                 Locale::Es => format!(
-                    "⏰ Tareas ({})\n\nTocá una para ver los detalles o cancelarla.",
+                    "Tareas ({})\n\nTocá una para verla o cancelarla.",
                     tasks.len()
                 ),
-                Locale::En => format!(
-                    "⏰ Tasks ({})\n\nTap one to see its details or cancel it.",
-                    tasks.len()
-                ),
+                Locale::En => format!("Tasks ({})\n\nTap one to see or cancel it.", tasks.len()),
             }
         },
         keyboard: Some(InlineKeyboardMarkup {
@@ -282,19 +279,22 @@ pub fn render_task_page(tasks: &[ScheduledTask], locale: Locale, page: usize) ->
 
 #[must_use]
 pub fn render_task_detail(task: &ScheduledTask, locale: Locale, confirm: bool) -> TaskListView {
-    let mut lines = vec![format!("⏰ {}", no_mention(&task.text)), String::new()];
+    let mut lines = vec![no_mention(&task.text), String::new()];
     if let Some(frequency) = frequency(&task.schedule, locale) {
-        lines.push(format!("🔁 {frequency}"));
+        lines.push(match locale {
+            Locale::Es => format!("Se repite {frequency}"),
+            Locale::En => format!("Repeats {frequency}"),
+        });
     }
     let next = local_time(task.next_run_at, task.timezone_offset, locale);
     lines.push(match locale {
-        Locale::Es => format!("📅 Próxima: {next}"),
-        Locale::En => format!("📅 Next: {next}"),
+        Locale::Es => format!("Próxima: {next}"),
+        Locale::En => format!("Next: {next}"),
     });
     if !task.user_name.is_empty() {
         lines.push(match locale {
-            Locale::Es => format!("👤 Creada por {}", no_mention(&task.user_name)),
-            Locale::En => format!("👤 Created by {}", no_mention(&task.user_name)),
+            Locale::Es => format!("Creada por {}", no_mention(&task.user_name)),
+            Locale::En => format!("Created by {}", no_mention(&task.user_name)),
         });
     }
     let card = lines.join("\n");
@@ -314,14 +314,14 @@ pub fn render_task_detail(task: &ScheduledTask, locale: Locale, confirm: bool) -
     let label = localized(
         locale,
         if confirm {
-            "🗑 Sí, cancelar tarea"
+            "Sí, cancelar tarea"
         } else {
-            "🗑 Cancelar tarea"
+            "Cancelar tarea"
         },
         if confirm {
-            "🗑 Yes, cancel task"
+            "Yes, cancel task"
         } else {
-            "🗑 Cancel task"
+            "Cancel task"
         },
     );
     TaskListView {
@@ -380,8 +380,8 @@ pub fn task_delete_forbidden(locale: Locale) -> &'static str {
 #[must_use]
 pub fn task_deleted(task_id: &TaskId, locale: Locale) -> String {
     match locale {
-        Locale::Es => format!("✅ Tarea {} cancelada", task_id.as_str()),
-        Locale::En => format!("✅ Task {} canceled", task_id.as_str()),
+        Locale::Es => format!("Tarea {} cancelada", task_id.as_str()),
+        Locale::En => format!("Task {} canceled", task_id.as_str()),
     }
 }
 
@@ -555,7 +555,7 @@ mod tests {
     fn renders_list_keyboard_and_empty_state() -> Result<(), TaskStateError> {
         let item = task("once0001", TaskSchedule::Once, 1_777_523_400)?;
         let list = render_task_list(&[item], Locale::Es);
-        assert!(list.text.starts_with("⏰ Tareas (1)"));
+        assert!(list.text.starts_with("Tareas (1)"));
         assert!(!list.text.contains("once0001"));
         let keyboard = list
             .keyboard
@@ -568,7 +568,7 @@ mod tests {
         assert!(
             render_task_list(&[], Locale::En)
                 .text
-                .starts_with("⏰ There are no tasks")
+                .starts_with("There are no tasks")
         );
         Ok(())
     }
@@ -608,7 +608,7 @@ mod tests {
         );
         assert_eq!(
             id.as_ref().map(|id| task_deleted(id, Locale::En)),
-            Ok("✅ Task once0001 canceled".to_owned())
+            Ok("Task once0001 canceled".to_owned())
         );
     }
 
@@ -684,7 +684,7 @@ mod tests {
         assert!(
             render_task_list(&[], Locale::Es)
                 .text
-                .starts_with("⏰ No hay tareas")
+                .starts_with("No hay tareas")
         );
         let english = render_task_list(&[weekly], Locale::En);
         assert_eq!(
@@ -701,7 +701,7 @@ mod tests {
             "Solo quien la creó o un admin puede cancelar esta tarea"
         );
         let id = TaskId::new("once0001")?;
-        assert_eq!(task_deleted(&id, Locale::Es), "✅ Tarea once0001 cancelada");
+        assert_eq!(task_deleted(&id, Locale::Es), "Tarea once0001 cancelada");
         Ok(())
     }
 }

@@ -6,7 +6,9 @@ use serde_json::{Map, Value};
 
 use crate::admin_reports::{CreditLogLimit, parse_creditlog_limit, truncate_report};
 use crate::command_parsing::parse_command;
-use crate::credit_units::{CreditUnits, format_credit_units, parse_credit_units};
+use crate::credit_units::{
+    CreditUnits, display_credit_units, format_credit_units, parse_credit_units,
+};
 use crate::locale::Locale;
 use crate::telegram_actions::{SendMessage, TelegramAction};
 use crate::telegram_input::{ChatId, MessageId};
@@ -112,11 +114,11 @@ pub fn plan_printcredits_command(
 
 #[must_use]
 pub fn printcredits_result_reply(amount: i64, balance: i64, locale: Locale) -> String {
-    let amount = format_credit_units(CreditUnits::new(amount));
-    let balance = format_credit_units(CreditUnits::new(balance));
+    let amount = display_credit_units(CreditUnits::new(amount));
+    let balance = display_credit_units(CreditUnits::new(balance));
     match locale {
-        Locale::Es => format!("✅ Listo, te imprimí {amount} créditos\nTe quedaron {balance}"),
-        Locale::En => format!("✅ Minted {amount} credits\nYour balance is {balance}"),
+        Locale::Es => format!("Listo, te imprimí {amount} créditos\nTe quedaron {balance}"),
+        Locale::En => format!("Minted {amount} credits\nYour balance is {balance}"),
     }
 }
 
@@ -528,11 +530,11 @@ mod tests {
         );
         assert_eq!(
             printcredits_result_reply(10_000, 12_000, Locale::Es),
-            "✅ Listo, te imprimí 100.00 créditos\nTe quedaron 120.00"
+            "Listo, te imprimí 100.00 créditos\nTe quedaron 120.00"
         );
         assert_eq!(
             printcredits_result_reply(10_000, 12_000, Locale::En),
-            "✅ Minted 100.00 credits\nYour balance is 120.00"
+            "Minted 100.00 credits\nYour balance is 120.00"
         );
         assert_eq!(
             plan("/other 1", Some(99), true, Locale::Es),

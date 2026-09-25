@@ -1,7 +1,7 @@
 //! Pure plans and bilingual replies for user-facing billing commands.
 
 use crate::command_parsing::parse_command;
-use crate::credit_units::{CreditUnits, format_credit_units, parse_credit_units};
+use crate::credit_units::{CreditUnits, display_credit_units, parse_credit_units};
 use crate::locale::Locale;
 use crate::telegram_actions::{SendMessage, TelegramAction};
 use crate::telegram_input::{ChatId, MessageId};
@@ -39,9 +39,9 @@ pub struct TransferResult {
 pub const fn billing_unavailable(locale: Locale) -> &'static str {
     match locale {
         Locale::Es => {
-            "⚠️ Los créditos de IA no están disponibles en este momento. Probá más tarde o avisale al admin"
+            "Los créditos de IA no están disponibles en este momento. Probá más tarde o avisale al admin"
         }
-        Locale::En => "⚠️ AI credits are unavailable right now. Try again later or tell the admin",
+        Locale::En => "AI credits are unavailable right now. Try again later or tell the admin",
     }
 }
 
@@ -118,28 +118,28 @@ pub fn plan_transfer_command(
 
 #[must_use]
 pub fn transfer_result_reply(amount: i64, result: TransferResult, locale: Locale) -> String {
-    let user_balance = format_credit_units(CreditUnits::new(result.user_balance));
+    let user_balance = display_credit_units(CreditUnits::new(result.user_balance));
     if !result.transferred {
         return match locale {
             Locale::Es => format!(
-                "❌ No te alcanza el saldo personal\n\n👤 Disponible: {user_balance} créditos\n\nProbá con un monto menor o cargá con /topup."
+                "No te alcanza el saldo personal: tenés {user_balance} créditos\nProbá con un monto menor o cargá con /topup"
             ),
             Locale::En => {
                 format!(
-                    "❌ Not enough personal balance\n\n👤 Available: {user_balance} credits\n\nTry a smaller amount or add credits with /topup."
+                    "Not enough personal balance: you have {user_balance} credits\nTry a smaller amount or add credits with /topup"
                 )
             }
         };
     }
 
-    let amount = format_credit_units(CreditUnits::new(amount));
-    let chat_balance = format_credit_units(CreditUnits::new(result.chat_balance));
+    let amount = display_credit_units(CreditUnits::new(amount));
+    let chat_balance = display_credit_units(CreditUnits::new(result.chat_balance));
     match locale {
         Locale::Es => format!(
-            "✅ Pasaste {amount} créditos al grupo\n\n👤 Personal: {user_balance} créditos\n👥 Grupo: {chat_balance} créditos"
+            "Pasaste {amount} créditos al grupo\n\nTu saldo: {user_balance} créditos\nSaldo del grupo: {chat_balance} créditos"
         ),
         Locale::En => format!(
-            "✅ Moved {amount} credits to the group\n\n👤 Personal: {user_balance} credits\n👥 Group: {chat_balance} credits"
+            "Moved {amount} credits to the group\n\nYour balance: {user_balance} credits\nGroup balance: {chat_balance} credits"
         ),
     }
 }
@@ -196,7 +196,7 @@ mod tests {
         unavailable.is_group = false;
         assert_eq!(
             reply_text(plan_transfer_command("/transfer bad", "", unavailable)),
-            "⚠️ AI credits are unavailable right now. Try again later or tell the admin"
+            "AI credits are unavailable right now. Try again later or tell the admin"
         );
 
         let mut private = context(Locale::Es);
@@ -243,7 +243,7 @@ mod tests {
                 },
                 Locale::Es,
             ),
-            "✅ Pasaste 0.10 créditos al grupo\n\n👤 Personal: 2.85 créditos\n👥 Grupo: 12.15 créditos"
+            "Pasaste 0.10 créditos al grupo\n\nTu saldo: 2.85 créditos\nSaldo del grupo: 12.15 créditos"
         );
         assert_eq!(
             transfer_result_reply(
@@ -255,7 +255,7 @@ mod tests {
                 },
                 Locale::En,
             ),
-            "✅ Moved 1.50 credits to the group\n\n👤 Personal: 0.70 credits\n👥 Group: 2.30 credits"
+            "Moved 1.50 credits to the group\n\nYour balance: 0.70 credits\nGroup balance: 2.30 credits"
         );
         assert_eq!(
             transfer_result_reply(
@@ -267,7 +267,7 @@ mod tests {
                 },
                 Locale::Es,
             ),
-            "❌ No te alcanza el saldo personal\n\n👤 Disponible: 0.70 créditos\n\nProbá con un monto menor o cargá con /topup."
+            "No te alcanza el saldo personal: tenés 0.70 créditos\nProbá con un monto menor o cargá con /topup"
         );
     }
 }

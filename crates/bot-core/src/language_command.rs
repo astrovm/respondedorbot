@@ -41,8 +41,8 @@ pub fn plan_language_command(
             Locale::En => "English",
         };
         let text = match locale {
-            Locale::Es => format!("🌐 Idioma actual: {language}"),
-            Locale::En => format!("🌐 Current language: {language}"),
+            Locale::Es => format!("Idioma actual: {language}"),
+            Locale::En => format!("Current language: {language}"),
         };
         (text, None)
     } else if !matches!(requested.as_str(), "es" | "en") {
@@ -55,9 +55,9 @@ pub fn plan_language_command(
         let mut updated = config.clone();
         updated.language.clone_from(&requested);
         let text = if requested == "es" {
-            "✅ Listo, ahora hablo en español"
+            "Listo, ahora hablo en español"
         } else {
-            "✅ Done, I will speak English now"
+            "Done, I will speak English now"
         };
         (text.to_owned(), Some(updated))
     };
@@ -111,18 +111,18 @@ mod tests {
     #[test]
     fn plans_current_usage_and_persisted_language_changes() {
         let cases = [
-            ("/language", Locale::Es, "🌐 Idioma actual: Español", None),
+            ("/language", Locale::Es, "Idioma actual: Español", None),
             ("/idioma nope", Locale::En, "Usage: /language [es|en]", None),
             (
                 "/language@mybot en",
                 Locale::Es,
-                "✅ Done, I will speak English now",
+                "Done, I will speak English now",
                 Some("en"),
             ),
             (
                 "/idioma ES",
                 Locale::En,
-                "✅ Listo, ahora hablo en español",
+                "Listo, ahora hablo en español",
                 Some("es"),
             ),
         ];

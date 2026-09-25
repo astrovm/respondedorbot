@@ -151,6 +151,12 @@ pub fn format_credit_units(units: CreditUnits) -> String {
     format!("{sign}{whole}.{decimal:02}")
 }
 
+/// Credit amount for display, with thousands grouped: `1,234.50`.
+#[must_use]
+pub fn display_credit_units(units: CreditUnits) -> String {
+    crate::output_format::readable_number(&format_credit_units(units))
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;

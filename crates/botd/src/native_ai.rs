@@ -15,7 +15,7 @@ use bot_core::ai_reserve::{
     estimate_chat_reserve_credit_units_with_pricing, estimate_firecrawl_reserve_credit_units,
 };
 use bot_core::ai_usage::stable_provider_segment_id;
-use bot_core::credit_units::{CreditUnits, format_credit_units};
+use bot_core::credit_units::{CreditUnits, display_credit_units};
 use bot_core::locale::{Locale, format_date};
 #[cfg(test)]
 use bot_core::provider_pricing::DEEPSEEK_FLASH_MODEL;
@@ -649,12 +649,12 @@ fn operation_id(execution_id: &str) -> String {
 }
 
 fn insufficient_credits_message(locale: &str, balance: i64) -> String {
-    let balance = format_credit_units(CreditUnits::new(balance));
+    let balance = display_credit_units(CreditUnits::new(balance));
     if locale == "en" {
-        format!("🪫 You are out of AI credits\n\n👤 Balance: {balance}\n\nUse /topup to add more")
+        format!("You are out of AI credits. Balance: {balance}\nUse /topup to add more")
     } else {
         format!(
-            "🪫 Te quedaste seco de créditos de IA, boludo\n\n👤 Saldo: {balance}\n\nMetele /topup si querés que siga laburando"
+            "Te quedaste seco de créditos de IA, boludo. Saldo: {balance}\nMetele /topup si querés que siga laburando"
         )
     }
 }

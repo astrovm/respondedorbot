@@ -330,7 +330,7 @@ impl<'a, Actions: ActionSink> TelegramAiStream<'a, Actions> {
                 min_chars_between_edits,
             ),
             trace: String::new(),
-            thinking_text: "💭 Thinking".to_owned(),
+            thinking_text: "Thinking".to_owned(),
             final_text: String::new(),
             final_started: false,
             final_message_started: false,
@@ -669,7 +669,7 @@ mod tests {
 
         assert!(matches!(
             &actions.actions[0],
-            TelegramAction::SendMessage(message) if message.text == "💭 Thinking."
+            TelegramAction::SendMessage(message) if message.text == "Thinking."
         ));
         assert!(matches!(
             &actions.actions[1],
@@ -755,7 +755,7 @@ mod tests {
         };
         let mut stream =
             TelegramAiStream::with_policy(&mut actions, ChatId(7), MessageId(4), 0.0, 1)
-                .with_thinking_text("💭 Pensando");
+                .with_thinking_text("Pensando");
         stream.show_thinking().unwrap_or_else(|_| unreachable!());
         stream
             .feed(AiStreamEvent::Thought("checking the match".to_owned()))
@@ -788,7 +788,7 @@ mod tests {
 
         assert!(matches!(
             &actions.actions[0],
-            TelegramAction::SendMessage(message) if message.text == "💭 Pensando."
+            TelegramAction::SendMessage(message) if message.text == "Pensando."
                 && message.disable_web_page_preview
         ));
         assert!(matches!(
@@ -798,7 +798,7 @@ mod tests {
         ));
         assert!(matches!(
             &actions.actions[2],
-            TelegramAction::EditMessageNoPreview { text, .. } if text == "💭 Pensando."
+            TelegramAction::EditMessageNoPreview { text, .. } if text == "Pensando."
         ));
         assert!(matches!(
             &actions.actions[3],
@@ -839,7 +839,7 @@ mod tests {
             assert!(stream.finalize("answer").is_ok());
             drop(stream);
             assert!(actions.actions.iter().any(|action| matches!(action,
-                TelegramAction::EditMessageNoPreview { text, .. } if text.starts_with("💭 Thinking")
+                TelegramAction::EditMessageNoPreview { text, .. } if text.starts_with("Thinking")
             )));
             assert!(actions.actions.iter().any(|action| matches!(action,
                 TelegramAction::EditMessageNoPreview { text, .. } if text.contains("calculate")
@@ -897,10 +897,10 @@ mod tests {
         assert_eq!(
             texts,
             [
-                "💭 Thinking.",
+                "Thinking.",
                 "🔧 web_search(query=\"synthetic fixture\")",
                 "🔧 calculate()",
-                "💭 Thinking.",
+                "Thinking.",
                 "answer",
                 "answer",
             ]
@@ -945,6 +945,6 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(texts, ["💭 Thinking.", "🔧 calculate()", "💭 Thinking."]);
+        assert_eq!(texts, ["Thinking.", "🔧 calculate()", "Thinking."]);
     }
 }

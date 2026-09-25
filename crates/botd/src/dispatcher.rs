@@ -102,8 +102,8 @@ use crate::telegram_stream::{StreamFinalizeError, TelegramAiStream};
 
 fn thinking_text(locale: bot_core::locale::Locale) -> &'static str {
     match locale {
-        bot_core::locale::Locale::Es => "💭 Pensando",
-        bot_core::locale::Locale::En => "💭 Thinking",
+        bot_core::locale::Locale::Es => "Pensando",
+        bot_core::locale::Locale::En => "Thinking",
     }
 }
 
@@ -7312,7 +7312,7 @@ mod tests {
         assert_eq!(dispatcher.actions.0.len(), 3);
         assert!(matches!(
             &dispatcher.actions.0[0],
-            TelegramAction::SendMessage(message) if message.text == "💭 Thinking."
+            TelegramAction::SendMessage(message) if message.text == "Thinking."
         ));
         assert!(matches!(
             &dispatcher.actions.0[1],
@@ -7432,7 +7432,7 @@ mod tests {
                     assert_eq!(dispatcher.actions.0.len(), 3);
                     assert!(matches!(
                         &dispatcher.actions.0[0],
-                        TelegramAction::SendMessage(message) if message.text == "💭 Thinking."
+                        TelegramAction::SendMessage(message) if message.text == "Thinking."
                     ));
                     assert!(matches!(
                         &dispatcher.actions.0[1],
@@ -7448,7 +7448,7 @@ mod tests {
                     assert_eq!(dispatcher.actions.0.len(), 2);
                     assert!(matches!(
                         &dispatcher.actions.0[0],
-                        TelegramAction::SendMessage(message) if message.text == "💭 Thinking."
+                        TelegramAction::SendMessage(message) if message.text == "Thinking."
                     ));
                     assert!(matches!(
                         &dispatcher.actions.0[1],
@@ -7608,7 +7608,7 @@ mod tests {
         assert_eq!(dispatcher.actions.0.len(), 3);
         assert!(matches!(
             &dispatcher.actions.0[0],
-            TelegramAction::SendMessage(message) if message.text == "💭 Thinking."
+            TelegramAction::SendMessage(message) if message.text == "Thinking."
         ));
         assert!(matches!(
             &dispatcher.actions.0[1],
@@ -7734,7 +7734,7 @@ mod tests {
             [
                 TelegramAction::SendMessage(message),
                 TelegramAction::DeleteMessage { .. },
-            ] if message.text == "💭 Pensando."
+            ] if message.text == "Pensando."
         ));
     }
 
@@ -7876,7 +7876,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert!(message.text.starts_with("👋 Help\n\n"));
+        assert!(message.text.starts_with("Help\n\n"));
         assert!(message.reply_markup.is_some());
         assert_eq!(dispatcher.state.incoming.len(), 1);
         assert_eq!(dispatcher.state.outgoing.len(), 1);
@@ -8283,7 +8283,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert!(message.text.contains("Polymarket elections, by liquidity"));
+        assert!(message.text.contains("Polymarket elections by liquidity"));
         assert!(message.text.contains("Candidate A 72%"));
         assert_eq!(
             message.parse_mode,
@@ -8896,9 +8896,9 @@ mod tests {
         assert!(
             message
                 .text
-                .starts_with("🔁 Rulos desde el oficial\n💵 Oficial: $1.440")
+                .starts_with("Rulos desde el oficial\nOficial: $1,440")
         );
-        assert!(message.text.contains("Ganancia: +19.730 ARS"));
+        assert!(message.text.contains("Ganancia: +19,730 ARS"));
         assert!(
             message
                 .text
@@ -9004,7 +9004,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "💳 Card ↔ crypto arbitrage\n🟢 Profit: 62.68% (fee 0.5%)\n\n💵 Rates in ARS\nOfficial: $100\nUSDT: $195\nCard: $150\n\n🧾 100 USD card purchase\n= $15,000 ARS = 76.92 USDT\nProfit: $9,402.5 ARS / 48.22 USDT\nTotal: $24,402.5 ARS / 125.14 USDT"
+            "Card and crypto arbitrage\nProfit: 62.68% (fee 0.5%)\n\nRates in ARS\nOfficial: 100\nUSDT: 195\nCard: 150\n\n100 USD card purchase\n= 15,000 ARS = 76.92 USDT\nProfit: 9,402.5 ARS / 48.22 USDT\nTotal: 24,402.5 ARS / 125.14 USDT"
         );
         assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
         assert_eq!(dispatcher.state.incoming.len(), 1);
@@ -9242,7 +9242,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "✅ Minted 100.00 credits\nYour balance is 120.00"
+            "Minted 100.00 credits\nYour balance is 120.00"
         );
         assert_eq!(dispatcher.state.incoming.len(), 1);
         assert_eq!(dispatcher.state.outgoing.len(), 1);
@@ -9492,7 +9492,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.last() else {
             return;
         };
-        assert_eq!(message.text, "✅ Done, I will speak English now");
+        assert_eq!(message.text, "Done, I will speak English now");
         assert_eq!(
             message
                 .reply_markup
@@ -9604,7 +9604,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert!(message.text.starts_with("⚙️ Settings"));
+        assert!(message.text.starts_with("Settings"));
         assert_eq!(
             message
                 .reply_markup
@@ -9646,7 +9646,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert!(message.text.starts_with("⚙️ Configuración"));
+        assert!(message.text.starts_with("Configuración"));
         assert_eq!(
             message
                 .reply_markup
@@ -9761,7 +9761,7 @@ mod tests {
         );
         assert!(matches!(
             dispatcher.actions.0.first(),
-            Some(TelegramAction::EditMessage { text, .. }) if text.starts_with("🌐 Language")
+            Some(TelegramAction::EditMessage { text, .. }) if text.starts_with("Language")
         ));
     }
 
@@ -10061,7 +10061,7 @@ mod tests {
             Some(TelegramAction::SendMessage(_))
         ));
         if let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() {
-            assert!(message.text.starts_with("⏰ Tareas"));
+            assert!(message.text.starts_with("Tareas"));
             assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
             let callback = message
                 .reply_markup
@@ -15985,7 +15985,7 @@ mod tests {
                     ..
                 },
                 TelegramAction::EditMessage { text: edit_text, .. }
-            ] if text == "✅ Tarea task0001 cancelada" && edit_text.starts_with("⏰ No hay tareas")
+            ] if text == "Tarea task0001 cancelada" && edit_text.starts_with("No hay tareas")
         ));
         Ok(())
     }
@@ -16248,7 +16248,7 @@ mod tests {
         else {
             return;
         };
-        assert_eq!(text, "🧾 Gastos IA\n\n26/08 14:00 | respuesta: 0.04 cr");
+        assert_eq!(text, "Gastos de IA\n\n26/08 14:00 | respuesta: 0.04 cr");
         assert_eq!(
             reply_markup
                 .as_ref()
@@ -16546,7 +16546,7 @@ mod tests {
                 query_id: "checkout-unavailable".to_owned(),
                 ok: false,
                 error_message: Some(
-                    "⚠️ AI credits are unavailable right now. Try again later or tell the admin"
+                    "AI credits are unavailable right now. Try again later or tell the admin"
                         .to_owned()
                 ),
             }]
@@ -16623,7 +16623,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(command)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert!(command.text.starts_with("💳 Cargar créditos\n\n"));
+        assert!(command.text.starts_with("Cargar créditos\n\n"));
         assert_eq!(
             command
                 .reply_markup
@@ -16964,7 +16964,7 @@ mod tests {
                     ..
                 }
             ] if invalid == "That credit pack is invalid, choose another one"
-                && unavailable == "⚠️ Los créditos de IA no están disponibles en este momento. Probá más tarde o avisale al admin"
+                && unavailable == "Los créditos de IA no están disponibles en este momento. Probá más tarde o avisale al admin"
         ));
     }
 
@@ -17002,7 +17002,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "💳 Saldo IA\n\n👤 Personal: 42.00 créditos\n\nCargá más con /topup"
+            "Saldo de IA: 42.00 créditos\n\nCargá más con /topup"
         );
         assert_eq!(
             private.state_diagnostics(),
@@ -17043,9 +17043,9 @@ mod tests {
             return;
         };
         assert!(
-            message.text.starts_with(
-                "💳 AI balances\n\n👤 Personal: 30.00 credits\n👥 Group: 120.00 credits"
-            )
+            message
+                .text
+                .starts_with("AI balances\n\nYours: 30.00 credits\nGroup: 120.00 credits")
         );
     }
 
@@ -17152,7 +17152,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "🧾 Gastos IA\n\n26/08 14:32 | 0.08 cr\n  respuesta 0.03 cr\n  web 0.05 cr"
+            "Gastos de IA\n\n26/08 14:32 | 0.08 cr\n  respuesta 0.03 cr\n  web 0.05 cr"
         );
         let Some(keyboard) = message.reply_markup.as_ref() else {
             return;
@@ -17198,7 +17198,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = empty.actions.0.first() else {
             return;
         };
-        assert_eq!(message.text, "🧾 You have no recent AI spending");
+        assert_eq!(message.text, "You have no recent AI spending");
 
         let config = Config {
             value: Ok(ChatConfig::default()),
@@ -17304,7 +17304,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "✅ Pasaste 0.10 créditos al grupo\n\n👤 Personal: 2.85 créditos\n👥 Grupo: 12.15 créditos"
+            "Pasaste 0.10 créditos al grupo\n\nTu saldo: 2.85 créditos\nSaldo del grupo: 12.15 créditos"
         );
 
         let config = Config {
@@ -17344,7 +17344,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "❌ Not enough personal balance\n\n👤 Available: 0.70 credits\n\nTry a smaller amount or add credits with /topup."
+            "Not enough personal balance: you have 0.70 credits\nTry a smaller amount or add credits with /topup"
         );
     }
 
@@ -17471,7 +17471,7 @@ mod tests {
         assert_eq!(message.chat_id, ChatId(42));
         assert_eq!(
             message.text,
-            "✅ Top-up complete: +50.00 credits\n\n👤 Personal balance: 53.00 credits"
+            "Top-up complete: +50.00 credits\nPersonal balance: 53.00 credits"
         );
     }
 
@@ -17483,7 +17483,7 @@ mod tests {
                     inserted: false,
                     user_balance: 5_300,
                 }),
-                "✅ This payment was already credited\n\n👤 Personal balance: 53.00 credits",
+                "This payment was already credited\nPersonal balance: 53.00 credits",
                 false,
             ),
             (
@@ -17563,7 +17563,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "⚠️ AI credits are unavailable right now. Try again later or tell the admin"
+            "AI credits are unavailable right now. Try again later or tell the admin"
         );
     }
 
@@ -18180,7 +18180,7 @@ mod tests {
                 TelegramAction::SendMessage(thinking),
                 TelegramAction::DeleteMessage { .. },
                 TelegramAction::SendMessage(failure),
-            ] if thinking.text == "💭 Pensando."
+            ] if thinking.text == "Pensando."
                 && failure.text == "Me quedé reculando y no te pude responder. Probá de nuevo"
         ));
 

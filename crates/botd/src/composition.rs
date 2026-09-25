@@ -3715,14 +3715,14 @@ mod tests {
             thinking: std::collections::HashMap::from([(
                 key,
                 super::TelegramStreamThinkingAnimation {
-                    text: "💭 Pensando".to_owned(),
+                    text: "Pensando".to_owned(),
                     frame: 1,
                     next_frame_at: Instant::now(),
                 },
             )]),
         };
 
-        for expected in ["💭 Pensando..", "💭 Pensando...", "💭 Pensando."] {
+        for expected in ["Pensando..", "Pensando...", "Pensando."] {
             state
                 .thinking
                 .get_mut(&key)
@@ -3753,12 +3753,12 @@ mod tests {
             message_id: 80,
         };
 
-        sink.start_stream_thinking(ChatId(7), MessageId(80), "💭 Pensando");
+        sink.start_stream_thinking(ChatId(7), MessageId(80), "Pensando");
         assert!(receiver.recv_timeout(Duration::from_secs(1)).is_ok());
         {
             let mut state = super::lock_unpoisoned(&state);
             let animation = state.thinking.get(&key).unwrap_or_else(|| unreachable!());
-            assert_eq!(animation.text, "💭 Pensando");
+            assert_eq!(animation.text, "Pensando");
             assert_eq!(animation.frame, 1);
             assert!(matches!(
                 state.take_next(),
@@ -3782,7 +3782,7 @@ mod tests {
             assert!(!state.pending.contains_key(&key));
         }
 
-        sink.start_stream_thinking(ChatId(7), MessageId(80), "💭 Pensando");
+        sink.start_stream_thinking(ChatId(7), MessageId(80), "Pensando");
         assert!(receiver.recv_timeout(Duration::from_secs(1)).is_ok());
         let (final_sender, _final_receiver) =
             mpsc::channel::<Result<bool, TelegramActionSinkError>>();
@@ -3830,7 +3830,7 @@ mod tests {
             thinking: std::collections::HashMap::from([(
                 final_key,
                 super::TelegramStreamThinkingAnimation {
-                    text: "💭 Pensando".to_owned(),
+                    text: "Pensando".to_owned(),
                     frame: 1,
                     next_frame_at: Instant::now(),
                 },
@@ -4236,7 +4236,7 @@ mod tests {
             thinking: std::collections::HashMap::from([(
                 key,
                 super::TelegramStreamThinkingAnimation {
-                    text: "💭 Pensando".to_owned(),
+                    text: "Pensando".to_owned(),
                     frame: 1,
                     next_frame_at: Instant::now(),
                 },
@@ -4266,7 +4266,7 @@ mod tests {
         assert!(matches!(
             requests.first().and_then(|request| request.json_payload.as_ref()),
             Some(payload) if payload.get("text").and_then(serde_json::Value::as_str)
-                == Some("💭 Pensando..")
+                == Some("Pensando..")
         ));
 
         drop(wake);

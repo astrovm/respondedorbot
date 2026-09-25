@@ -248,13 +248,13 @@ pub fn render_elections(
 ) -> String {
     let (title, liquidity_label, closes_label, error) = match locale {
         Locale::Es => (
-            "🗳️ Elecciones en Polymarket, por liquidez",
+            "Elecciones en Polymarket por liquidez",
             "Liquidez",
             "Cierra",
             "No pude traer las elecciones de Polymarket. Probá más tarde",
         ),
         Locale::En => (
-            "🗳️ Polymarket elections, by liquidity",
+            "Polymarket elections by liquidity",
             "Liquidity",
             "Closes",
             "I could not load the elections from Polymarket. Try again later",
@@ -461,7 +461,7 @@ mod tests {
         assert_eq!(
             render_elections(&events, &live, Locale::Es),
             concat!(
-                "🗳️ Elecciones en Polymarket, por liquidez\n\n",
+                "Elecciones en Polymarket por liquidez\n\n",
                 "<a href=\"https://polymarket.com/event/us-election\">🇺🇸 US election &amp; runoff</a>\n",
                 "Candidate A 72% | Candidate B 55%\n",
                 "Liquidez US$2.5M | Cierra 2027-04-30"
