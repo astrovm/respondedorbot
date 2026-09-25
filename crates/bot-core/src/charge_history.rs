@@ -111,18 +111,15 @@ pub fn plan_charges_command(
     if !context.billing_available {
         return reply(
             context,
-            match context.locale {
-                Locale::Es => "el cobro de ia no está andando, avisale al admin",
-                Locale::En => "AI billing is unavailable, please tell the admin",
-            },
+            crate::billing_commands::billing_unavailable(context.locale),
         );
     }
     let Some(user_id) = context.user_id else {
         return reply(
             context,
             match context.locale {
-                Locale::Es => "no te pude leer el usuario para ver tu saldo",
-                Locale::En => "I could not identify your user to load the balance",
+                Locale::Es => "No pude identificar tu usuario para ver tus gastos",
+                Locale::En => "I could not identify your user to load your spending",
             },
         );
     };
@@ -151,8 +148,8 @@ pub fn plan_charges_command(
 
 const fn charges_usage(locale: Locale) -> &'static str {
     match locale {
-        Locale::Es => "mandalo bien: /charges [cantidad]",
-        Locale::En => "usage: /charges [count]",
+        Locale::Es => "Mandalo así: /gastos [cantidad]",
+        Locale::En => "Usage: /charges [count]",
     }
 }
 
@@ -201,8 +198,8 @@ pub fn plan_charge_history_callback(
         return callback_answer(
             callback_id,
             match locale {
-                Locale::Es => "botón vencido",
-                Locale::En => "this button expired",
+                Locale::Es => "Este botón ya venció",
+                Locale::En => "This button expired",
             },
             true,
         );
@@ -211,8 +208,8 @@ pub fn plan_charge_history_callback(
         return callback_answer(
             callback_id,
             match locale {
-                Locale::Es => "este historial no es tuyo",
-                Locale::En => "this history is not yours",
+                Locale::Es => "Este historial no es tuyo",
+                Locale::En => "This history is not yours",
             },
             true,
         );
@@ -303,14 +300,14 @@ fn charged_units(metadata: &Map<String, Value>, event_type: &str) -> i64 {
 
 fn label(locale: Locale, kind: &str) -> &'static str {
     match (locale, kind) {
-        (Locale::Es, "title") => "Gastos IA",
-        (Locale::En, "title") => "AI expenses",
-        (Locale::Es, "empty") => "no tenés gastos IA recientes",
-        (Locale::En, "empty") => "you have no recent AI expenses",
-        (Locale::Es, "previous") => "‹ Anterior",
-        (Locale::En, "previous") => "‹ Previous",
-        (Locale::Es, "next") => "Siguiente ›",
-        (Locale::En, "next") => "Next ›",
+        (Locale::Es, "title") => "🧾 Gastos IA",
+        (Locale::En, "title") => "🧾 AI expenses",
+        (Locale::Es, "empty") => "🧾 No tenés gastos de IA recientes",
+        (Locale::En, "empty") => "🧾 You have no recent AI spending",
+        (Locale::Es, "previous") => "‹ Más recientes",
+        (Locale::En, "previous") => "‹ Newer",
+        (Locale::Es, "next") => "Más antiguos ›",
+        (Locale::En, "next") => "Older ›",
         (Locale::Es, "pending") => "pendiente",
         (Locale::En, "pending") => "pending",
         (Locale::Es, "group") => "grupo",
@@ -549,10 +546,10 @@ fn payer_suffix(entries: &[ChargeHistoryEntry], locale: Locale) -> String {
     if chat <= 0 {
         String::new()
     } else if user <= 0 {
-        format!(" · {}", label(locale, "group"))
+        format!(" ({})", label(locale, "group"))
     } else {
         format!(
-            " · {} {} · {} {}",
+            " ({} {}, {} {})",
             label(locale, "group"),
             format_credit_units(CreditUnits::new(chat)),
             label(locale, "personal"),
@@ -696,24 +693,24 @@ pub fn render_charge_history_page(
         lines.push(String::new());
         if let [component] = components.as_slice() {
             let pending = if component.pending {
-                format!(" · {}", label(locale, "pending"))
+                format!(" ({})", label(locale, "pending"))
             } else {
                 String::new()
             };
             lines.push(format!(
-                "{timestamp} · {} · {} cr{pending}{payer}",
+                "{timestamp} | {}: {} cr{pending}{payer}",
                 component.label,
                 format_credit_units(CreditUnits::new(component.units))
             ));
             continue;
         }
         lines.push(format!(
-            "{timestamp} · {} cr{payer}",
+            "{timestamp} | {} cr{payer}",
             format_credit_units(CreditUnits::new(total))
         ));
         for component in components {
             let pending = if component.pending {
-                format!(" · {}", label(locale, "pending"))
+                format!(" ({})", label(locale, "pending"))
             } else {
                 String::new()
             };
@@ -814,7 +811,7 @@ mod tests {
         else {
             return;
         };
-        assert_eq!(message.text, "usage: /charges [count]");
+        assert_eq!(message.text, "Usage: /charges [count]");
     }
 
     #[test]
@@ -860,12 +857,12 @@ mod tests {
         let (text, keyboard) = render_charge_history_page(&page, 55, 2, -180, Locale::Es);
         assert_eq!(
             text,
-            "Gastos IA\n\n26/08 14:32 · 0.08 cr\n  respuesta 0.03 cr\n  web (2x) 0.05 cr\n\n26/08 13:00 · audio · 0.07 cr · grupo"
+            "🧾 Gastos IA\n\n26/08 14:32 | 0.08 cr\n  respuesta 0.03 cr\n  web (2x) 0.05 cr\n\n26/08 13:00 | audio: 0.07 cr (grupo)"
         );
         let Some(keyboard) = keyboard else {
             return;
         };
-        assert_eq!(keyboard.inline_keyboard[0][0].text, "Siguiente ›");
+        assert_eq!(keyboard.inline_keyboard[0][0].text, "Más antiguos ›");
         assert_eq!(
             keyboard.inline_keyboard[0][0].callback_data.as_deref(),
             Some("chg:55:2:o:29:-180")
@@ -899,11 +896,11 @@ mod tests {
         };
         assert_eq!(
             render_charge_history_page(&page, 55, 10, -180, Locale::Es).0,
-            "Gastos IA\n\n26/08 14:32 · transcripción · 0.60 cr"
+            "🧾 Gastos IA\n\n26/08 14:32 | transcripción: 0.60 cr"
         );
         assert_eq!(
             render_charge_history_page(&page, 55, 10, -180, Locale::En).0,
-            "AI expenses\n\n26/08 14:32 · transcript · 0.60 cr"
+            "🧾 AI expenses\n\n26/08 14:32 | transcript: 0.60 cr"
         );
     }
 
@@ -952,7 +949,7 @@ mod tests {
         };
         assert_eq!(
             render_charge_history_page(&page, 55, 10, 0, Locale::Es).0,
-            "Gastos IA\n\n26/08 17:00 · 1.17 cr · grupo 1.05 · personal 0.12\n  respuesta 0.08 cr\n  memoria 0.02 cr\n  memoria 1.07 cr · pendiente"
+            "🧾 Gastos IA\n\n26/08 17:00 | 1.17 cr (grupo 1.05, personal 0.12)\n  respuesta 0.08 cr\n  memoria 0.02 cr\n  memoria 1.07 cr (pendiente)"
         );
         let empty = ChargeHistoryPage {
             groups: Vec::new(),
@@ -963,7 +960,7 @@ mod tests {
         };
         assert_eq!(
             render_charge_history_page(&empty, 55, 10, 0, Locale::En).0,
-            "you have no recent AI expenses"
+            "🧾 You have no recent AI spending"
         );
     }
 
@@ -987,9 +984,9 @@ mod tests {
             }
         ));
         for (data, requester, expected) in [
-            ("chg:55:0:o:29:-180", Some(55), "this button expired"),
-            ("chg:55:2:x:29:-180", Some(55), "this button expired"),
-            ("chg:55:2:o:29:-180", Some(99), "this history is not yours"),
+            ("chg:55:0:o:29:-180", Some(55), "This button expired"),
+            ("chg:55:2:x:29:-180", Some(55), "This button expired"),
+            ("chg:55:2:o:29:-180", Some(99), "This history is not yours"),
         ] {
             let ChargeHistoryCallbackPlan::Answer(Some(TelegramAction::AnswerCallback {
                 text,

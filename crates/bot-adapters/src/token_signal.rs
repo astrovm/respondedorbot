@@ -947,7 +947,7 @@ where
             let flat = history.idle_pump_candles(now);
             if !flat.is_empty() {
                 let title = format!(
-                    "{} · {shown}\nLast available trade price",
+                    "{} ({shown})\nLast available trade price",
                     signal.pair.base_token.symbol
                 );
                 let mut pair = signal.pair.clone();
@@ -957,7 +957,7 @@ where
             return Err("requested token history unavailable".into());
         }
         let title = format!(
-            "{} · {shown}\nAvailable history",
+            "{} ({shown})\nAvailable history",
             signal.pair.base_token.symbol
         );
         render_price_chart(
@@ -1265,7 +1265,7 @@ pub fn render_market_chart_for_period(
         price_usd: json!(quote.price),
         ..TokenPair::default()
     };
-    let title = format!("{} · {period}\n{}", quote.symbol, quote.name);
+    let title = format!("{} ({period})\n{}", quote.symbol, quote.name);
     render_price_chart(
         &pair,
         candles,

@@ -69,8 +69,8 @@ pub fn render_stock_quotes(
 ) -> String {
     let Some(quotes) = quotes else {
         return match locale {
-            Locale::Es => "no pude traer el top de acciones, probá de nuevo".to_owned(),
-            Locale::En => "I could not load the top stocks, try again".to_owned(),
+            Locale::Es => "No pude traer el top de acciones. Probá de nuevo".to_owned(),
+            Locale::En => "I could not load the top stocks. Try again".to_owned(),
         };
     };
     let lines = quotes
@@ -84,15 +84,15 @@ pub fn render_stock_quotes(
                 "24h",
             ),
             None => match locale {
-                Locale::Es => format!("{query}: no se pudo encontrar"),
+                Locale::Es => format!("{query}: no lo encontré"),
                 Locale::En => format!("{query}: not found"),
             },
         })
         .collect::<Vec<_>>();
     if lines.is_empty() {
         match locale {
-            Locale::Es => "no se pudo obtener ninguna cotización".to_owned(),
-            Locale::En => "I could not load any quote".to_owned(),
+            Locale::Es => "No pude conseguir ninguna cotización. Probá más tarde".to_owned(),
+            Locale::En => "I could not load any quote. Try again later".to_owned(),
         }
     } else {
         lines.join("\n")
@@ -120,8 +120,10 @@ pub fn render_oil_quotes(
     }
     if lines.is_empty() {
         match locale {
-            Locale::Es => "no pude traer el precio del petróleo boludo".to_owned(),
-            Locale::En => "I could not load the oil price".to_owned(),
+            Locale::Es => {
+                "No pude traer el precio del petróleo, boludo. Probá más tarde".to_owned()
+            }
+            Locale::En => "I could not load the oil price. Try again later".to_owned(),
         }
     } else {
         lines.join("\n")
@@ -680,11 +682,11 @@ mod tests {
         );
         assert_eq!(
             render_oil_quotes(None, None, Locale::Es),
-            "no pude traer el precio del petróleo boludo"
+            "No pude traer el precio del petróleo, boludo. Probá más tarde"
         );
         assert_eq!(
             render_oil_quotes(None, None, Locale::En),
-            "I could not load the oil price"
+            "I could not load the oil price. Try again later"
         );
     }
 
@@ -711,7 +713,7 @@ mod tests {
         ];
         assert_eq!(
             render_stock_quotes(Some(&entries), Locale::Es),
-            "EXM: 12.5 USD (-1.25% 24h)\nMissing Corp: no se pudo encontrar"
+            "EXM: 12.5 USD (-1.25% 24h)\nMissing Corp: no lo encontré"
         );
         assert_eq!(
             render_stock_quotes(Some(&[("Unknown".to_owned(), None)]), Locale::En),
@@ -719,15 +721,15 @@ mod tests {
         );
         assert_eq!(
             render_stock_quotes(None, Locale::Es),
-            "no pude traer el top de acciones, probá de nuevo"
+            "No pude traer el top de acciones. Probá de nuevo"
         );
         assert_eq!(
             render_stock_quotes(None, Locale::En),
-            "I could not load the top stocks, try again"
+            "I could not load the top stocks. Try again"
         );
         assert_eq!(
             render_stock_quotes(Some(&[]), Locale::En),
-            "I could not load any quote"
+            "I could not load any quote. Try again later"
         );
     }
 }

@@ -86,7 +86,8 @@ fn format_bcra_value(value: &str, percentage: bool) -> String {
             format!("{number:.1}%")
         } else {
             format!("{number:.2}%")
-        };
+        }
+        .replace('.', ",");
     }
     if number >= 1_000_000.0 {
         return grouped(number / 1_000.0, 0, '.');
@@ -95,6 +96,11 @@ fn format_bcra_value(value: &str, percentage: bool) -> String {
         return grouped(number, 0, '.');
     }
     format!("{number:.2}").replace('.', ",")
+}
+
+/// BCRA figures are Argentine data, so they use Argentine separators in every locale.
+fn argentine(value: &str) -> String {
+    crate::output_format::localized_number(value, Locale::Es)
 }
 
 fn grouped(value: f64, decimals: usize, separator: char) -> String {
@@ -119,17 +125,27 @@ fn grouped(value: f64, decimals: usize, separator: char) -> String {
     output
 }
 
+/// Shorten `dd/mm/yyyy` dates to `dd/mm/yy` to keep lines compact.
+fn short_year(date: &str) -> String {
+    match date.rsplit_once('/') {
+        Some((prefix, year)) if year.len() == 4 && year.starts_with("20") => {
+            format!("{prefix}/{}", &year[2..])
+        }
+        _ => date.to_owned(),
+    }
+}
+
 fn variable_line(variable: &BcraVariable, locale: Locale) -> Option<String> {
     let description = variable.description.as_str();
     let value = variable.value.as_str();
     let line = if matches(description, r"base\s*monetaria") {
         match locale {
             Locale::Es => format!(
-                "base monetaria: ${} mill. pesos",
+                "Base monetaria: ${} mill. pesos",
                 format_bcra_value(value, false)
             ),
             Locale::En => format!(
-                "monetary base: ${} million pesos",
+                "Monetary base: ${} million pesos",
                 format_bcra_value(value, false)
             ),
         }
@@ -138,24 +154,24 @@ fn variable_line(variable: &BcraVariable, locale: Locale) -> Option<String> {
         r"variacion.*mensual.*indice.*precios.*consumidor|inflacion.*mensual",
     ) {
         match locale {
-            Locale::Es => format!("inflación mensual: {}", format_bcra_value(value, true)),
-            Locale::En => format!("monthly inflation: {}", format_bcra_value(value, true)),
+            Locale::Es => format!("Inflación mensual: {}", format_bcra_value(value, true)),
+            Locale::En => format!("Monthly inflation: {}", format_bcra_value(value, true)),
         }
     } else if matches(
         description,
         r"mediana.*variacion.*interanual.*(12|doce).*meses.*(relevamiento.*expectativas.*mercado|rem)|inflacion.*esperada",
     ) {
         match locale {
-            Locale::Es => format!("inflación esperada: {}", format_bcra_value(value, true)),
-            Locale::En => format!("expected inflation: {}", format_bcra_value(value, true)),
+            Locale::Es => format!("Inflación esperada: {}", format_bcra_value(value, true)),
+            Locale::En => format!("Expected inflation: {}", format_bcra_value(value, true)),
         }
     } else if matches(
         description,
         r"variacion.*interanual.*indice.*precios.*consumidor|inflacion.*interanual",
     ) {
         match locale {
-            Locale::Es => format!("inflación interanual: {}", format_bcra_value(value, true)),
-            Locale::En => format!("yearly inflation: {}", format_bcra_value(value, true)),
+            Locale::Es => format!("Inflación interanual: {}", format_bcra_value(value, true)),
+            Locale::En => format!("Yearly inflation: {}", format_bcra_value(value, true)),
         }
     } else if matches(description, "tamar") {
         format!("TAMAR: {}", format_bcra_value(value, true))
@@ -166,13 +182,13 @@ fn variable_line(variable: &BcraVariable, locale: Locale) -> Option<String> {
         r"tipo.*cambio.*minorista|minorista.*promedio.*vendedor",
     ) {
         match locale {
-            Locale::Es => format!("dólar minorista: ${value}"),
-            Locale::En => format!("retail dollar: ${value}"),
+            Locale::Es => format!("Dólar minorista: ${value}"),
+            Locale::En => format!("Retail dollar: ${value}"),
         }
     } else if matches(description, r"tipo.*cambio.*mayorista") {
         match locale {
-            Locale::Es => format!("dólar mayorista: ${value}"),
-            Locale::En => format!("wholesale dollar: ${value}"),
+            Locale::Es => format!("Dólar mayorista: ${value}"),
+            Locale::En => format!("Wholesale dollar: ${value}"),
         }
     } else if matches(description, r"unidad.*valor.*adquisitivo|\buva\b") {
         format!("UVA: ${value}")
@@ -183,8 +199,8 @@ fn variable_line(variable: &BcraVariable, locale: Locale) -> Option<String> {
         format!("CER: {value}")
     } else if matches(description, r"reservas.*internacionales") {
         match locale {
-            Locale::Es => format!("reservas: USD {} millones", format_bcra_value(value, false)),
-            Locale::En => format!("reserves: USD {} million", format_bcra_value(value, false)),
+            Locale::Es => format!("Reservas: USD {} millones", format_bcra_value(value, false)),
+            Locale::En => format!("Reserves: USD {} million", format_bcra_value(value, false)),
         }
     } else {
         return None;
@@ -192,10 +208,7 @@ fn variable_line(variable: &BcraVariable, locale: Locale) -> Option<String> {
     if variable.date.is_empty() || variable.date == variable.value {
         Some(line)
     } else {
-        Some(format!(
-            "{line} ({})",
-            variable.date.replace("/2025", "/25")
-        ))
+        Some(format!("{line} ({})", short_year(&variable.date)))
     }
 }
 
@@ -231,14 +244,14 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 pub fn render_bcra(snapshot: &BcraSnapshot, locale: Locale, today_days: i64) -> String {
     if snapshot.variables.is_empty() {
         return match locale {
-            Locale::Es => "No se pudieron obtener las variables del BCRA".to_owned(),
-            Locale::En => "I could not load the BCRA variables".to_owned(),
+            Locale::Es => "No pude conseguir las variables del BCRA. Probá más tarde".to_owned(),
+            Locale::En => "I could not load the BCRA variables. Try again later".to_owned(),
         };
     }
     let mut lines = vec![
         match locale {
-            Locale::Es => "BCRA · Indicadores",
-            Locale::En => "BCRA · Indicators",
+            Locale::Es => "🏦 Indicadores del BCRA",
+            Locale::En => "🏦 BCRA indicators",
         }
         .to_owned(),
         String::new(),
@@ -287,8 +300,8 @@ pub fn render_bcra(snapshot: &BcraSnapshot, locale: Locale, today_days: i64) -> 
             });
         }
         let mut line = match locale {
-            Locale::Es => format!("riesgo país: {value} bps"),
-            Locale::En => format!("country risk: {value} bps"),
+            Locale::Es => format!("Riesgo país: {value} bps"),
+            Locale::En => format!("Country risk: {value} bps"),
         };
         if !details.is_empty() {
             line.push_str(&format!(" ({})", details.join(" | ")));
@@ -296,11 +309,11 @@ pub fn render_bcra(snapshot: &BcraSnapshot, locale: Locale, today_days: i64) -> 
         lines.push(line);
     }
     if let Some(bands) = &snapshot.bands {
-        let lower = trimmed(bands.lower, 2);
-        let upper = trimmed(bands.upper, 2);
+        let lower = argentine(&trimmed(bands.lower, 2));
+        let upper = argentine(&trimmed(bands.upper, 2));
         let mut line = match locale {
-            Locale::Es => format!("bandas cambiarias: piso ${lower} / techo ${upper}"),
-            Locale::En => format!("exchange-rate bands: floor ${lower} / ceiling ${upper}"),
+            Locale::Es => format!("Bandas cambiarias: piso ${lower} / techo ${upper}"),
+            Locale::En => format!("Exchange-rate bands: floor ${lower} / ceiling ${upper}"),
         };
         if !bands.date.is_empty() {
             line.push_str(&format!(" ({})", bands.date));
@@ -313,13 +326,19 @@ pub fn render_bcra(snapshot: &BcraSnapshot, locale: Locale, today_days: i64) -> 
         } else {
             format!(" ({})", itcrm.date)
         };
-        lines.push(format!("tcrm: {}{suffix}", trimmed(itcrm.value, 2)));
+        lines.push(format!(
+            "TCRM: {}{suffix}",
+            argentine(&trimmed(itcrm.value, 2))
+        ));
     }
+    let notes_start = lines.len();
     if snapshot.stale {
         lines.push(
             match locale {
-                Locale::Es => "no hay actualización nueva del BCRA, te muestro lo último que tengo",
-                Locale::En => "there is no new BCRA update, showing the latest available data",
+                Locale::Es => {
+                    "⚠️ No hay actualización nueva del BCRA, te muestro lo último que tengo."
+                }
+                Locale::En => "⚠️ There is no new BCRA update, showing the latest available data.",
             }
             .to_owned(),
         );
@@ -328,10 +347,15 @@ pub fn render_bcra(snapshot: &BcraSnapshot, locale: Locale, today_days: i64) -> 
         let age = today_days - latest_days;
         if age >= 3 {
             lines.push(match locale {
-                Locale::Es => format!("datos del BCRA con {age} días de atraso, chequeá más tarde"),
-                Locale::En => format!("BCRA data is {age} days old, check again later"),
+                Locale::Es => {
+                    format!("⚠️ Datos del BCRA con {age} días de atraso, chequeá más tarde.")
+                }
+                Locale::En => format!("⚠️ BCRA data is {age} days old, check again later."),
             });
         }
+    }
+    if lines.len() > notes_start {
+        lines.insert(notes_start, String::new());
     }
     lines.join("\n")
 }
@@ -395,22 +419,29 @@ mod tests {
         };
         let text = render_bcra(&snapshot, Locale::Es, days_from_civil(2025, 1, 20));
         for expected in [
-            "BCRA · Indicadores",
-            "base monetaria: $5.000 mill. pesos (15/01/25)",
-            "inflación mensual: 5.20%",
-            "inflación interanual: 150.5%",
-            "inflación esperada: 3.10%",
-            "TAMAR: 45.0%",
-            "dólar minorista: $1.250,75",
-            "reservas: USD 25.000 millones",
-            "riesgo país: 685 bps (29/10 12:34 | -12,3 bps vs ayer)",
-            "bandas cambiarias: piso $950.12 / techo $1460.34 (15/09/25)",
-            "tcrm: 123.45 (01/02/25)",
-            "no hay actualización nueva del BCRA",
-            "datos del BCRA con 5 días de atraso",
+            "Indicadores del BCRA",
+            "Base monetaria: $5.000 mill. pesos (15/01/25)",
+            "Inflación mensual: 5,20%",
+            "Inflación interanual: 150,5%",
+            "Inflación esperada: 3,10%",
+            "TAMAR: 45,0%",
+            "Dólar minorista: $1.250,75",
+            "Reservas: USD 25.000 millones",
+            "Riesgo país: 685 bps (29/10 12:34 | -12,3 bps vs ayer)",
+            "Bandas cambiarias: piso $950,12 / techo $1.460,34 (15/09/25)",
+            "TCRM: 123,45 (01/02/25)",
+            "\n\n⚠️ No hay actualización nueva del BCRA",
+            "⚠️ Datos del BCRA con 5 días de atraso",
         ] {
             assert!(text.contains(expected), "missing {expected} in {text}");
         }
+    }
+
+    #[test]
+    fn shortens_any_four_digit_year() {
+        assert_eq!(super::short_year("15/01/2026"), "15/01/26");
+        assert_eq!(super::short_year("15/01/26"), "15/01/26");
+        assert_eq!(super::short_year("2026-01-15"), "2026-01-15");
     }
 
     #[test]
@@ -424,7 +455,7 @@ mod tests {
         };
         assert_eq!(
             render_bcra(&empty, Locale::En, 0),
-            "I could not load the BCRA variables"
+            "I could not load the BCRA variables. Try again later"
         );
         let snapshot = BcraSnapshot {
             variables: vec![BcraVariable {
@@ -442,8 +473,8 @@ mod tests {
             stale: false,
         };
         let text = render_bcra(&snapshot, Locale::En, 0);
-        assert!(text.contains("reserves: USD 25.000 million"));
-        assert!(text.contains("country risk: 55,5 bps"));
+        assert!(text.contains("Reserves: USD 25.000 million"));
+        assert!(text.contains("Country risk: 55,5 bps"));
         assert!(!text.contains("yesterday"));
     }
 }

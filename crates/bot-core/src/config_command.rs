@@ -4,7 +4,9 @@ use crate::chat_config::ChatConfig;
 use crate::command_parsing::parse_command;
 use crate::locale::Locale;
 use crate::menu_ui::{back, button, close, localized};
-use crate::telegram_actions::{InlineKeyboardMarkup, SendMessage, TelegramAction};
+use crate::telegram_actions::{
+    InlineKeyboardButton, InlineKeyboardMarkup, SendMessage, TelegramAction,
+};
 use crate::telegram_input::{ChatId, MessageId};
 
 pub const TIMEZONE_OFFSET_MIN: i64 = -12;
@@ -26,15 +28,42 @@ fn selected_label(selected: bool, label: &str) -> String {
     }
 }
 
-fn toggle_label(enabled: bool, locale: Locale) -> String {
-    selected_label(
-        enabled,
-        localized(
-            locale,
-            if enabled { "Activado" } else { "Desactivado" },
-            if enabled { "On" } else { "Off" },
-        ),
+fn on_off_text(enabled: bool, locale: Locale) -> &'static str {
+    localized(
+        locale,
+        if enabled { "Activado" } else { "Desactivado" },
+        if enabled { "On" } else { "Off" },
     )
+}
+
+/// Explicit on/off buttons, so the selected state never reads as an action.
+fn toggle_buttons(action: &str, enabled: bool, locale: Locale) -> Vec<InlineKeyboardButton> {
+    vec![
+        button(
+            selected_label(enabled, on_off_text(true, locale)),
+            format!("cfg:{action}:on"),
+        ),
+        button(
+            selected_label(!enabled, on_off_text(false, locale)),
+            format!("cfg:{action}:off"),
+        ),
+    ]
+}
+
+fn link_mode_text(mode: &str, locale: Locale) -> &'static str {
+    match mode {
+        "delete" => localized(locale, "Reemplazar original", "Replace original"),
+        "off" => on_off_text(false, locale),
+        _ => localized(locale, "Responder con link", "Reply with link"),
+    }
+}
+
+fn creditless_text(limit: i64) -> String {
+    if limit < 0 {
+        "∞".to_owned()
+    } else {
+        limit.to_string()
+    }
 }
 
 fn render_config_keyboard(
@@ -47,10 +76,6 @@ fn render_config_keyboard(
         "en" => Locale::En,
         _ => locale,
     };
-    let labels = match locale {
-        Locale::Es => ("Responder con link", "Reemplazar original", "Desactivado"),
-        Locale::En => ("Reply with link", "Replace original", "off"),
-    };
     let mut rows = vec![
         vec![
             button(
@@ -62,28 +87,17 @@ fn render_config_keyboard(
                 "cfg:language:en".to_owned(),
             ),
         ],
-        vec![
-            button(
-                selected_label(config.link_mode == "reply", labels.0),
-                "cfg:link:reply".to_owned(),
-            ),
-            button(
-                selected_label(config.link_mode == "delete", labels.1),
-                "cfg:link:delete".to_owned(),
-            ),
-            button(
-                selected_label(config.link_mode == "off", labels.2),
-                "cfg:link:off".to_owned(),
-            ),
-        ],
-        vec![button(
-            toggle_label(config.ai_command_followups, locale),
-            "cfg:followups:toggle".to_owned(),
-        )],
-        vec![button(
-            toggle_label(config.ignore_link_fix_followups, locale),
-            "cfg:linkfixfollowups:toggle".to_owned(),
-        )],
+        ["reply", "delete", "off"]
+            .into_iter()
+            .map(|mode| {
+                button(
+                    selected_label(config.link_mode == mode, link_mode_text(mode, locale)),
+                    format!("cfg:link:{mode}"),
+                )
+            })
+            .collect(),
+        toggle_buttons("followups", config.ai_command_followups, locale),
+        toggle_buttons("linkfixfollowups", config.ignore_link_fix_followups, locale),
         vec![
             button(
                 "➖ 1h".to_owned(),
@@ -112,22 +126,18 @@ fn render_config_keyboard(
         ],
     ];
     if is_group {
-        rows.push(vec![button(
-            toggle_label(config.ai_random_replies, locale),
-            "cfg:random:toggle".to_owned(),
-        )]);
+        rows.push(toggle_buttons("random", config.ai_random_replies, locale));
         rows.push(vec![
             button("0".to_owned(), "cfg:creditless:none".to_owned()),
-            button("-".to_owned(), "cfg:creditless:decrease".to_owned()),
+            button("➖".to_owned(), "cfg:creditless:decrease".to_owned()),
             button(
-                if config.creditless_user_hourly_limit < 0 {
-                    "∞".to_owned()
-                } else {
-                    config.creditless_user_hourly_limit.to_string()
-                },
+                format!(
+                    "🎁 {}",
+                    creditless_text(config.creditless_user_hourly_limit)
+                ),
                 "cfg:creditless:current".to_owned(),
             ),
-            button("+".to_owned(), "cfg:creditless:increase".to_owned()),
+            button("➕".to_owned(), "cfg:creditless:increase".to_owned()),
             button("∞".to_owned(), "cfg:creditless:unlimited".to_owned()),
         ]);
     }
@@ -149,22 +159,45 @@ const PAGES: [&str; 7] = [
 fn titles(locale: Locale) -> [&'static str; 7] {
     match locale {
         Locale::Es => [
-            "Idioma",
-            "Links",
-            "Seguir conversaciones",
-            "Ignorar replies a links",
-            "Zona horaria",
-            "Respuestas random",
-            "Mensajes gratis por hora",
+            "🌐 Idioma",
+            "🔗 Links",
+            "💬 Seguir conversaciones",
+            "🙈 Ignorar replies a links",
+            "🕒 Zona horaria",
+            "🎲 Respuestas random",
+            "🎁 Mensajes gratis por hora",
         ],
         Locale::En => [
-            "Language",
-            "Links",
-            "Follow conversations",
-            "Ignore replies to links",
-            "Timezone",
-            "Random replies",
-            "Free messages per hour",
+            "🌐 Language",
+            "🔗 Links",
+            "💬 Follow conversations",
+            "🙈 Ignore replies to links",
+            "🕒 Timezone",
+            "🎲 Random replies",
+            "🎁 Free messages per hour",
+        ],
+    }
+}
+
+fn descriptions(locale: Locale) -> [&'static str; 7] {
+    match locale {
+        Locale::Es => [
+            "El idioma de mis mensajes, menús y respuestas.",
+            "Qué hago cuando alguien manda un link de X, Bluesky, Instagram o Reddit.\n\n• Responder con link: contesto con el link arreglado.\n• Reemplazar original: borro el mensaje y lo vuelvo a mandar arreglado.\n• Desactivado: no toco los links.",
+            "Si respondés a una respuesta mía de un comando, sigo la conversación sin que tengas que usar /ask.",
+            "Si alguien responde a un link que arreglé, no lo tomo como una pregunta para mí.",
+            "La hora que uso para tareas, recordatorios y fechas.",
+            "De vez en cuando me meto en la charla del grupo aunque nadie me llame.",
+            "Cuántos mensajes de IA por hora puede usar cada persona con el saldo del grupo.\n\n0 = nadie, ∞ = sin límite",
+        ],
+        Locale::En => [
+            "The language of my messages, menus and replies.",
+            "What I do when someone sends an X, Bluesky, Instagram or Reddit link.\n\n• Reply with link: I reply with the fixed link.\n• Replace original: I delete the message and send it again, fixed.\n• Off: I leave links alone.",
+            "When you reply to one of my command answers, I keep the conversation going without /ask.",
+            "When someone replies to a link I fixed, I do not treat it as a question for me.",
+            "The time I use for tasks, reminders and dates.",
+            "Every now and then I join the group conversation without being called.",
+            "How many AI messages per hour each person can use from the group balance.\n\n0 = nobody, ∞ = no limit",
         ],
     }
 }
@@ -186,7 +219,20 @@ pub fn render_config_page(
     page: &str,
 ) -> (String, InlineKeyboardMarkup) {
     if page == "help" {
-        return (localized(locale, "Configuración\n\nLos cambios se guardan al tocar una opción. En grupos, solo los admins pueden cambiarlos.", "Settings\n\nChanges are saved when you choose an option. In groups, only admins can change settings.").to_owned(), InlineKeyboardMarkup { inline_keyboard: vec![vec![back(locale, "cfg:page:home"), close(locale, "cfg:page:close")]] });
+        return (
+            localized(
+                locale,
+                "❔ Cómo funciona\n\nTocá un ajuste para ver qué hace y cambiarlo. Los cambios se guardan al instante.\n\nEn grupos, solo los admins pueden cambiar la configuración.",
+                "❔ How it works\n\nTap a setting to see what it does and change it. Changes are saved instantly.\n\nIn groups, only admins can change settings.",
+            )
+            .to_owned(),
+            InlineKeyboardMarkup {
+                inline_keyboard: vec![vec![
+                    back(locale, "cfg:page:home"),
+                    close(locale, "cfg:page:close"),
+                ]],
+            },
+        );
     }
     let names = titles(locale);
     let index = PAGES
@@ -194,26 +240,7 @@ pub fn render_config_page(
         .position(|name| *name == page)
         .filter(|index| is_group || *index < 5);
     if let Some(index) = index {
-        let descriptions = match locale {
-            Locale::Es => [
-                "Idioma de mis mensajes y respuestas.",
-                "Qué hago con los links compatibles.",
-                "Sigo la conversación cuando respondés a un comando.",
-                "Ignoro respuestas normales a links que arreglé.",
-                "Hora usada en comandos y tareas.",
-                "A veces respondo en el grupo aunque nadie me llame.",
-                "Mensajes de IA que paga el grupo por usuario, por hora.",
-            ],
-            Locale::En => [
-                "Language used for my messages and responses.",
-                "What I do with supported links.",
-                "Continue the conversation when you reply to a command.",
-                "Ignore normal replies to links I fixed.",
-                "Time used in commands and tasks.",
-                "Sometimes join group conversations without being called.",
-                "AI messages paid by the group per user, per hour.",
-            ],
-        };
+        let descriptions = descriptions(locale);
         let options = render_config_keyboard(config, locale, is_group)
             .inline_keyboard
             .remove(index);
@@ -238,49 +265,41 @@ pub fn render_config_page(
         "es" => "Español",
         _ => localized(locale, "Español", "English"),
     };
-    let yes_no = |value| {
-        localized(
-            locale,
-            if value { "Sí" } else { "No" },
-            if value { "On" } else { "Off" },
-        )
-    };
-    let links = match config.link_mode.as_str() {
-        "delete" => localized(locale, "Reemplazar original", "Replace original"),
-        "off" => localized(locale, "Desactivados", "Off"),
-        _ => localized(locale, "Responder con link", "Reply with link"),
-    };
     let values = [
         language.to_owned(),
-        links.to_owned(),
-        yes_no(config.ai_command_followups).to_owned(),
-        yes_no(config.ignore_link_fix_followups).to_owned(),
+        link_mode_text(&config.link_mode, locale).to_owned(),
+        on_off_text(config.ai_command_followups, locale).to_owned(),
+        on_off_text(config.ignore_link_fix_followups, locale).to_owned(),
         offset_text(config.timezone_offset),
-        yes_no(config.ai_random_replies).to_owned(),
-        if config.creditless_user_hourly_limit < 0 {
-            "∞".to_owned()
-        } else {
-            config.creditless_user_hourly_limit.to_string()
-        },
+        on_off_text(config.ai_random_replies, locale).to_owned(),
+        creditless_text(config.creditless_user_hourly_limit),
     ];
     let mut rows = (0..if is_group { 7 } else { 5 })
         .map(|i| {
             vec![button(
-                format!("{} · {}", names[i], values[i]),
+                format!("{}: {}", names[i], values[i]),
                 format!("cfg:page:{}", PAGES[i]),
             )]
         })
         .collect::<Vec<_>>();
     rows.push(vec![
-        button(localized(locale, "Ayuda", "Help"), "cfg:page:help"),
+        button(localized(locale, "❔ Ayuda", "❔ Help"), "cfg:page:help"),
         close(locale, "cfg:page:close"),
     ]);
     (
-        localized(
-            locale,
-            "⚙️ Configuración\n\nElegí qué querés cambiar.",
-            "⚙️ Settings\n\nChoose a setting to change.",
-        )
+        if is_group {
+            localized(
+                locale,
+                "⚙️ Configuración del grupo\n\nTocá un ajuste para cambiarlo.",
+                "⚙️ Group settings\n\nTap a setting to change it.",
+            )
+        } else {
+            localized(
+                locale,
+                "⚙️ Configuración\n\nTocá un ajuste para cambiarlo.",
+                "⚙️ Settings\n\nTap a setting to change it.",
+            )
+        }
         .to_owned(),
         InlineKeyboardMarkup {
             inline_keyboard: rows,

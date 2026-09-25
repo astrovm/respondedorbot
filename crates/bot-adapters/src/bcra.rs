@@ -1034,12 +1034,12 @@ mod tests {
         let load = load_bcra(&transport, &mut cache, Locale::Es, 1_758_297_600);
         let text = load.text.unwrap_or_default();
         for expected in [
-            "dólar mayorista: $1.180,25",
-            "reservas: USD 25.000 millones",
-            "inflación esperada: 21.8%",
-            "BADLAR: 26.7%",
-            "bandas cambiarias: piso $944.32 / techo $1481.7",
-            "riesgo país: 685 bps",
+            "Dólar mayorista: $1.180,25",
+            "Reservas: USD 25.000 millones",
+            "Inflación esperada: 21,8%",
+            "BADLAR: 26,7%",
+            "Bandas cambiarias: piso $944,32 / techo $1.481,7",
+            "Riesgo país: 685 bps",
         ] {
             assert!(text.contains(expected), "{text}");
         }
@@ -1092,8 +1092,8 @@ mod tests {
         );
         let load = load_bcra(&transport, &mut cache, Locale::En, 1_758_297_600);
         let text = load.text.unwrap_or_default();
-        assert!(text.contains("reserves: USD 25.000 million"));
-        assert!(text.contains("there is no new BCRA update"));
+        assert!(text.contains("Reserves: USD 25.000 million"));
+        assert!(text.contains("There is no new BCRA update"));
     }
 
     #[test]

@@ -156,7 +156,7 @@ pub fn format_market_selection(selection: &MarketSelection, locale: Locale) -> S
                     target.as_str()
                 };
             format!(
-                "{}. {} ({}) — {} {} ({}; {})",
+                "{}. {} ({}): {} {} ({}; {})",
                 index + 1,
                 shorten(name, 100),
                 shorten(&candidate.symbol, 24),
@@ -180,7 +180,7 @@ fn candidate_identity(candidate: &MarketCandidate) -> String {
         if !candidate.asset_type.trim().is_empty() {
             identity.push(shorten(&candidate.asset_type, 24));
         }
-        return identity.join(" · ");
+        return identity.join(", ");
     }
     if candidate.id.starts_with("token:") {
         return candidate
@@ -1889,31 +1889,31 @@ fn signed_trimmed(value: f64, decimals: usize) -> String {
 fn invalid_timeframe(value: &str, locale: Locale) -> String {
     match locale {
         Locale::Es => format!(
-            "timeframe '{value}' no soportado, uso: {} o N[h/d/w/m/mo/y]",
+            "No conozco el período '{value}'. Usá {} o N[h/d/w/m/mo/y]",
             TIMEFRAMES.join(", ")
         ),
         Locale::En => format!(
-            "unsupported timeframe '{value}', use: {} or N[h/d/w/m/mo/y]",
+            "Unknown period '{value}'. Use {} or N[h/d/w/m/mo/y]",
             TIMEFRAMES.join(", ")
         ),
     }
 }
 fn unsupported_currency(value: &str, locale: Locale) -> String {
     match locale {
-        Locale::Es => format!("Moneda no soportada: {value}. Probá con USD, ARS o EUR."),
-        Locale::En => format!("Unsupported currency: {value}. Try USD, ARS or EUR."),
+        Locale::Es => format!("No manejo la moneda {value}. Probá con USD, ARS o EUR"),
+        Locale::En => format!("Unsupported currency: {value}. Try USD, ARS or EUR"),
     }
 }
 fn load_error(locale: Locale) -> String {
     match locale {
-        Locale::Es => "No pude cargar los precios de crypto. Probá de nuevo.",
-        Locale::En => "I could not load crypto prices. Try again.",
+        Locale::Es => "No pude cargar los precios de crypto. Probá de nuevo",
+        Locale::En => "I could not load crypto prices. Try again",
     }
     .to_owned()
 }
 fn unsupported_pair(locale: Locale) -> String {
     match locale {
-        Locale::Es => "no laburo con esos ponzis boludo",
+        Locale::Es => "No laburo con esos ponzis, boludo",
         Locale::En => "I do not support that asset pair",
     }
     .to_owned()
@@ -1922,25 +1922,25 @@ fn missing_assets(values: &[String], locale: Locale) -> String {
     let values = values.join(", ");
     match locale {
         Locale::Es => format!(
-            "No encontré estos activos: {values}. Probá el nombre completo, ticker con mercado o contrato."
+            "No encontré estos activos: {values}. Probá con el nombre completo, el ticker con su mercado o el contrato"
         ),
         Locale::En => format!(
-            "I could not find these assets: {values}. Try the full name, exchange-qualified ticker or contract."
+            "I could not find these assets: {values}. Try the full name, an exchange-qualified ticker or the contract"
         ),
     }
 }
 
 fn quote_unavailable(symbol: &str, locale: Locale) -> String {
     match locale {
-        Locale::Es => format!("no pude obtener una cotización usable para {symbol}"),
-        Locale::En => format!("I could not obtain a usable quote for {symbol}"),
+        Locale::Es => format!("No pude conseguir una cotización para {symbol}"),
+        Locale::En => format!("I could not get a quote for {symbol}"),
     }
 }
 fn stock_conversion_error(value: &str, locale: Locale) -> String {
     let value = value.to_uppercase();
     match locale {
-        Locale::Es => format!("{value}: las acciones solo soportan moneda nativa"),
-        Locale::En => format!("{value}: stocks only support native currency"),
+        Locale::Es => format!("{value}: las acciones solo se cotizan en su moneda original"),
+        Locale::En => format!("{value}: stocks are only quoted in their own currency"),
     }
 }
 
@@ -2607,7 +2607,7 @@ mod tests {
         );
         assert!(result.text.contains("BTC:"));
         assert!(result.text.contains("ZZZ:"));
-        assert!(result.text.ends_with("No encontré estos activos: YYY. Probá el nombre completo, ticker con mercado o contrato."));
+        assert!(result.text.ends_with("No encontré estos activos: YYY. Probá con el nombre completo, el ticker con su mercado o el contrato"));
     }
 
     #[test]
@@ -2628,7 +2628,7 @@ mod tests {
 
         assert_eq!(
             result.text,
-            "BTC: 50000 USD (+2.5% 24h)\nNo encontré estos activos: USD. Probá el nombre completo, ticker con mercado o contrato."
+            "BTC: 50000 USD (+2.5% 24h)\nNo encontré estos activos: USD. Probá con el nombre completo, el ticker con su mercado o el contrato"
         );
     }
 
@@ -2688,7 +2688,10 @@ mod tests {
             &mut Crypto::default(),
             &mut Stocks::default(),
         );
-        assert_eq!(result.text, "NVDA: stocks only support native currency");
+        assert_eq!(
+            result.text,
+            "NVDA: stocks are only quoted in their own currency"
+        );
 
         let result = execute_market_price_command(
             "crypto:META",
@@ -2702,7 +2705,7 @@ mod tests {
         );
         assert_eq!(
             result.text,
-            "I could not find these assets: META. Try the full name, exchange-qualified ticker or contract."
+            "I could not find these assets: META. Try the full name, an exchange-qualified ticker or the contract"
         );
     }
 
@@ -3028,7 +3031,7 @@ mod tests {
             },
         );
         assert!(wrong.no_assets_found);
-        assert!(wrong.text.contains("usable quote"));
+        assert!(wrong.text.contains("get a quote"));
 
         let mut unusable_asset = coin("LIBRA", 0.0);
         unusable_asset.id = candidate.id.clone();
@@ -3136,7 +3139,7 @@ mod tests {
             &mut FailedCrypto,
             &mut Stocks::default(),
         );
-        assert_eq!(result.text, "I could not load crypto prices. Try again.");
+        assert_eq!(result.text, "I could not load crypto prices. Try again");
 
         let result = execute_market_price_command(
             "btc",
@@ -3145,7 +3148,7 @@ mod tests {
             &mut FailedCrypto,
             &mut Stocks(vec![("btc".to_owned(), Some(stock("BTC")))]),
         );
-        assert_eq!(result.text, "I could not load crypto prices. Try again.");
+        assert_eq!(result.text, "I could not load crypto prices. Try again");
     }
 
     #[test]

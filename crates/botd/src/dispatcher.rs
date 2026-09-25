@@ -569,7 +569,7 @@ fn market_selection_prompt(
     locale: bot_core::locale::Locale,
 ) -> String {
     format!(
-        "{} · {}",
+        "{}: {}",
         bot_core::menu_ui::localized(locale, "Elegí un activo", "Choose an asset"),
         selection.query
     )
@@ -592,11 +592,11 @@ fn market_selection_page(
             if candidate.exchange.trim().is_empty() {
                 symbol.to_owned()
             } else {
-                format!("{symbol} · {}", candidate.exchange)
+                format!("{symbol} ({})", candidate.exchange)
             }
         } else {
             format!(
-                "{} · {}",
+                "{} ({})",
                 candidate.symbol,
                 candidate
                     .contracts
@@ -613,7 +613,7 @@ fn market_selection_page(
         if name == &candidate.symbol {
             detail
         } else {
-            format!("{short_name} · {detail}")
+            format!("{short_name}, {detail}")
         }
     };
     let mut rows = selection
@@ -635,7 +635,7 @@ fn market_selection_page(
                     || candidate.id.clone(),
                     |contract| short_market_address(&contract.address),
                 );
-                label.push_str(&format!(" · {suffix}"));
+                label.push_str(&format!(" [{suffix}]"));
             }
             vec![button(label, format!("mkt:select:{selection_id}:{index}"))]
         })
@@ -1317,14 +1317,7 @@ where
             SuccessfulPaymentDecision::Ignore => return Ok(DispatchOutcome::Handled),
             SuccessfulPaymentDecision::BillingUnavailable { chat_id } => (
                 chat_id,
-                match locale {
-                    bot_core::locale::Locale::Es => {
-                        "el cobro de ia no está andando, avisale al admin".to_owned()
-                    }
-                    bot_core::locale::Locale::En => {
-                        "AI billing is unavailable, please tell the admin".to_owned()
-                    }
-                },
+                bot_core::billing_commands::billing_unavailable(locale).to_owned(),
             ),
             SuccessfulPaymentDecision::InvalidPayment {
                 chat_id,
@@ -1341,10 +1334,10 @@ where
                     chat_id,
                     match locale {
                         bot_core::locale::Locale::Es => {
-                            "me cayó un pago raro y no lo pude validar, avisale al admin".to_owned()
+                            "Me cayó un pago raro y no lo pude validar. Avisale al admin".to_owned()
                         }
                         bot_core::locale::Locale::En => {
-                            "I received an invalid payment, please tell the admin".to_owned()
+                            "I received an invalid payment. Please tell the admin".to_owned()
                         }
                     },
                 )
@@ -1375,8 +1368,8 @@ where
                             payment.user_id, payment.charge_id
                         ));
                         match locale {
-                            bot_core::locale::Locale::Es => "me entró la guita pero se trabó la acreditación, avisale al admin".to_owned(),
-                            bot_core::locale::Locale::En => "I received the payment but could not add the credits, please tell the admin".to_owned(),
+                            bot_core::locale::Locale::Es => "Me entró la guita pero se trabó la acreditación. Avisale al admin".to_owned(),
+                            bot_core::locale::Locale::En => "I received the payment but could not add the credits. Please tell the admin".to_owned(),
                         }
                     }
                 };
@@ -1678,8 +1671,12 @@ where
         }
         let output = if load.text.trim().is_empty() {
             match locale {
-                bot_core::locale::Locale::Es => "no pude obtener una cotización usable".to_owned(),
-                bot_core::locale::Locale::En => "I could not obtain a usable quote".to_owned(),
+                bot_core::locale::Locale::Es => {
+                    "No pude conseguir una cotización. Probá más tarde".to_owned()
+                }
+                bot_core::locale::Locale::En => {
+                    "I could not get a quote. Try again later".to_owned()
+                }
             }
         } else {
             load.text
@@ -2078,8 +2075,8 @@ where
                         caption,
                         match locale {
                             bot_core::locale::Locale::Es =>
-                                "Gráfico no disponible. Probá de nuevo más tarde.",
-                            bot_core::locale::Locale::En => "Chart unavailable. Try again later.",
+                                "Gráfico no disponible. Probá más tarde",
+                            bot_core::locale::Locale::En => "Chart unavailable. Try again later",
                         }
                     ));
                     continue;
@@ -2090,7 +2087,7 @@ where
                     lines.push(match locale {
                         bot_core::locale::Locale::Es => {
                             format!(
-                                "no pude obtener una cotización usable para {}",
+                                "No pude conseguir una cotización para {}",
                                 load.chart
                                     .as_ref()
                                     .map_or(request, |chart| chart.symbol.as_str())
@@ -2098,7 +2095,7 @@ where
                         }
                         bot_core::locale::Locale::En => {
                             format!(
-                                "I could not obtain a usable quote for {}",
+                                "I could not get a quote for {}",
                                 load.chart
                                     .as_ref()
                                     .map_or(request, |chart| chart.symbol.as_str())
@@ -2137,10 +2134,10 @@ where
                     if load.text.trim().is_empty() {
                         match locale {
                             bot_core::locale::Locale::Es => {
-                                format!("no pude obtener una cotización usable para {request}")
+                                format!("No pude conseguir una cotización para {request}")
                             }
                             bot_core::locale::Locale::En => {
-                                format!("I could not obtain a usable quote for {request}")
+                                format!("I could not get a quote for {request}")
                             }
                         }
                     } else {
@@ -2149,7 +2146,7 @@ where
                 })
                 .unwrap_or_else(|| match locale {
                     bot_core::locale::Locale::Es => {
-                        format!("no pude encontrar datos para {request}")
+                        format!("No encontré datos para {request}")
                     }
                     bot_core::locale::Locale::En => format!("I could not find data for {request}"),
                 }),
@@ -2424,10 +2421,10 @@ where
                     let period = timeframe.unwrap_or("24h");
                     let unavailable = match locale {
                         bot_core::locale::Locale::Es => {
-                            format!("historial {period} no disponible; te dejo la cotización")
+                            format!("No tengo historial de {period}; te dejo la cotización")
                         }
                         bot_core::locale::Locale::En => {
-                            format!("{period} history unavailable; showing the quote")
+                            format!("No {period} history available; showing the quote")
                         }
                     };
                     format!("{caption}\n{unavailable}")
@@ -2889,13 +2886,10 @@ where
         let text = if load.text.trim().is_empty() {
             match locale {
                 bot_core::locale::Locale::Es => {
-                    format!(
-                        "no pude obtener una cotización usable para {}",
-                        candidate.symbol
-                    )
+                    format!("No pude conseguir una cotización para {}", candidate.symbol)
                 }
                 bot_core::locale::Locale::En => {
-                    format!("I could not obtain a usable quote for {}", candidate.symbol)
+                    format!("I could not get a quote for {}", candidate.symbol)
                 }
             }
         } else {
@@ -3103,13 +3097,10 @@ where
         let Some(signal) = load.signal else {
             let text = match locale {
                 bot_core::locale::Locale::Es => {
-                    format!(
-                        "no pude obtener una cotización usable para {}",
-                        candidate.symbol
-                    )
+                    format!("No pude conseguir una cotización para {}", candidate.symbol)
                 }
                 bot_core::locale::Locale::En => {
-                    format!("I could not obtain a usable quote for {}", candidate.symbol)
+                    format!("I could not get a quote for {}", candidate.symbol)
                 }
             };
             let mut reply = SendMessage::new(ChatId(chat_id_value), &text);
@@ -3254,22 +3245,22 @@ where
             return Ok(DispatchOutcome::Handled);
         };
         let text = match (kind, locale) {
-            ("expired", bot_core::locale::Locale::Es) => "la selección venció",
-            ("expired", bot_core::locale::Locale::En) => "that selection expired",
-            ("owner_only", bot_core::locale::Locale::Es) => "esa selección es de otra persona",
+            ("expired", bot_core::locale::Locale::Es) => "Esta selección ya venció",
+            ("expired", bot_core::locale::Locale::En) => "This selection expired",
+            ("owner_only", bot_core::locale::Locale::Es) => "Esa selección es de otra persona",
             ("owner_only", bot_core::locale::Locale::En) => {
-                "that selection belongs to someone else"
+                "That selection belongs to someone else"
             }
-            ("invalid", bot_core::locale::Locale::Es) => "opción inválida",
-            ("invalid", bot_core::locale::Locale::En) => "invalid option",
-            ("selected", bot_core::locale::Locale::Es) => "cotización cargada",
-            ("selected", bot_core::locale::Locale::En) => "quote loaded",
-            ("quote", bot_core::locale::Locale::Es) => "te dejé la cotización",
-            ("quote", bot_core::locale::Locale::En) => "showing the quote",
-            ("retry", bot_core::locale::Locale::Es) => "no pude cargarla; probá de nuevo",
-            ("retry", bot_core::locale::Locale::En) => "I could not load it; try again",
-            (_, bot_core::locale::Locale::Es) => "listo",
-            (_, bot_core::locale::Locale::En) => "done",
+            ("invalid", bot_core::locale::Locale::Es) => "Esa opción no es válida",
+            ("invalid", bot_core::locale::Locale::En) => "That option is not valid",
+            ("selected", bot_core::locale::Locale::Es) => "Cotización cargada",
+            ("selected", bot_core::locale::Locale::En) => "Quote loaded",
+            ("quote", bot_core::locale::Locale::Es) => "Te dejé la cotización",
+            ("quote", bot_core::locale::Locale::En) => "Showing the quote",
+            ("retry", bot_core::locale::Locale::Es) => "No pude cargarla. Probá de nuevo",
+            ("retry", bot_core::locale::Locale::En) => "I could not load it. Try again",
+            (_, bot_core::locale::Locale::Es) => "Listo",
+            (_, bot_core::locale::Locale::En) => "Done",
         };
         let _receipt = self
             .actions
@@ -3673,8 +3664,8 @@ where
                     };
                     if !claimed {
                         let text = match locale {
-                            bot_core::locale::Locale::Es => "ya te dejé la factura más arriba",
-                            bot_core::locale::Locale::En => "the invoice is already above",
+                            bot_core::locale::Locale::Es => "Ya te dejé la factura más arriba",
+                            bot_core::locale::Locale::En => "The invoice is already above",
                         };
                         if let Some(callback_id) = context.callback_id.as_deref() {
                             let _receipt = self
@@ -3777,8 +3768,12 @@ where
                     if let Some(action) = charge_callback_answer(
                         context.callback_id.as_deref(),
                         Some(match locale {
-                            bot_core::locale::Locale::Es => "se trabó leyendo tus gastos",
-                            bot_core::locale::Locale::En => "I could not load your expenses",
+                            bot_core::locale::Locale::Es => {
+                                "Se trabó leyendo tus gastos. Probá de nuevo"
+                            }
+                            bot_core::locale::Locale::En => {
+                                "I could not load your spending. Try again"
+                            }
                         }),
                         true,
                     ) {
@@ -3794,8 +3789,8 @@ where
                 if let Some(action) = charge_callback_answer(
                     context.callback_id.as_deref(),
                     Some(match locale {
-                        bot_core::locale::Locale::Es => "no hay más gastos",
-                        bot_core::locale::Locale::En => "there are no more expenses",
+                        bot_core::locale::Locale::Es => "No hay más gastos para mostrar",
+                        bot_core::locale::Locale::En => "There is no more spending to show",
                     }),
                     false,
                 ) {
@@ -3827,8 +3822,12 @@ where
                     if let Some(action) = charge_callback_answer(
                         context.callback_id.as_deref(),
                         Some(match locale {
-                            bot_core::locale::Locale::Es => "se trabó leyendo tus gastos",
-                            bot_core::locale::Locale::En => "I could not load your expenses",
+                            bot_core::locale::Locale::Es => {
+                                "Se trabó leyendo tus gastos. Probá de nuevo"
+                            }
+                            bot_core::locale::Locale::En => {
+                                "I could not load your spending. Try again"
+                            }
                         }),
                         true,
                     ) {
@@ -3843,8 +3842,10 @@ where
             if let Some(action) = charge_callback_answer(
                 context.callback_id.as_deref(),
                 (!edited).then_some(match locale {
-                    bot_core::locale::Locale::Es => "no pude actualizar el historial",
-                    bot_core::locale::Locale::En => "I could not update the history",
+                    bot_core::locale::Locale::Es => {
+                        "No pude actualizar el historial. Probá de nuevo"
+                    }
+                    bot_core::locale::Locale::En => "I could not update the history. Try again",
                 }),
                 !edited,
             ) {
@@ -3905,7 +3906,7 @@ where
                 if let Some(callback_id) = context.callback_id.as_deref() {
                     let text = match locale {
                         bot_core::locale::Locale::Es => {
-                            "este comando es solo para admins del grupo"
+                            "Este comando es solo para admins del grupo"
                         }
                         bot_core::locale::Locale::En => "Only group admins can use this command",
                     };
@@ -4002,7 +4003,9 @@ where
                 return Err(DispatchError::Action(error));
             }
         };
-        let fallback = if edited {
+        // Re-tapping the selected option leaves the menu identical, which
+        // Telegram rejects as an edit; that must not post a duplicate menu.
+        let fallback = if edited || config == current_config {
             Ok(())
         } else {
             self.state_diagnostics.push(format!(
@@ -4213,9 +4216,9 @@ where
                     .push(format!("AI conversation: {error}"));
                 let text = match locale {
                     bot_core::locale::Locale::Es => {
-                        "me quedé reculando y no te pude responder, probá de nuevo"
+                        "Me quedé reculando y no te pude responder. Probá de nuevo"
                     }
-                    bot_core::locale::Locale::En => "I could not answer, try again",
+                    bot_core::locale::Locale::En => "I could not answer. Try again",
                 };
                 return self.send_failure_reply(chat_id, message_id, text);
             }
@@ -4339,8 +4342,8 @@ where
                         .push(format!("media command: {error}"));
                 }
                 let text = match locale {
-                    bot_core::locale::Locale::Es => "se trabó el /transcribe, probá más tarde",
-                    bot_core::locale::Locale::En => "/transcribe failed, try again later",
+                    bot_core::locale::Locale::Es => "Se trabó el /transcribe. Probá más tarde",
+                    bot_core::locale::Locale::En => "/transcribe failed. Try again later",
                 };
                 return self.send_failure_reply(chat_id, message_id, text);
             }
@@ -4558,8 +4561,8 @@ where
             Ok(Some(preparation)) => preparation,
             Ok(None) => {
                 let text = match locale {
-                    bot_core::locale::Locale::Es => "no pude generar el resumen",
-                    bot_core::locale::Locale::En => "I could not generate the summary",
+                    bot_core::locale::Locale::Es => "No pude generar el resumen. Probá de nuevo",
+                    bot_core::locale::Locale::En => "I could not generate the summary. Try again",
                 };
                 return self.send_failure_reply(chat_id, message_id, text);
             }
@@ -4567,8 +4570,8 @@ where
                 self.state_diagnostics
                     .push(format!("summary command: {error}"));
                 let text = match locale {
-                    bot_core::locale::Locale::Es => "no pude generar el resumen",
-                    bot_core::locale::Locale::En => "I could not generate the summary",
+                    bot_core::locale::Locale::Es => "No pude generar el resumen. Probá de nuevo",
+                    bot_core::locale::Locale::En => "I could not generate the summary. Try again",
                 };
                 return self.send_failure_reply(chat_id, message_id, text);
             }
@@ -4767,7 +4770,7 @@ where
                     parsed.command,
                 ));
                 let text = match locale {
-                    bot_core::locale::Locale::Es => "este comando es solo para admins del grupo",
+                    bot_core::locale::Locale::Es => "Este comando es solo para admins del grupo",
                     bot_core::locale::Locale::En => "Only group admins can use this command",
                 };
                 let mut response = SendMessage::new(chat_id, text);
@@ -4886,10 +4889,10 @@ where
                             ));
                             match locale {
                                 bot_core::locale::Locale::Es => {
-                                    "se trabó leyendo tu saldo, probá de nuevo".to_owned()
+                                    "Se trabó leyendo tu saldo. Probá de nuevo".to_owned()
                                 }
                                 bot_core::locale::Locale::En => {
-                                    "I could not load your balance, try again".to_owned()
+                                    "I could not load your balance. Try again".to_owned()
                                 }
                             }
                         }
@@ -4937,10 +4940,10 @@ where
                             ));
                             let text = match locale {
                                 bot_core::locale::Locale::Es => {
-                                    "se trabó leyendo tus gastos, probá de nuevo"
+                                    "Se trabó leyendo tus gastos. Probá de nuevo"
                                 }
                                 bot_core::locale::Locale::En => {
-                                    "I could not load your expenses, try again"
+                                    "I could not load your spending. Try again"
                                 }
                             };
                             (text.to_owned(), None)
@@ -4983,10 +4986,10 @@ where
                             ));
                             match locale {
                                 bot_core::locale::Locale::Es => {
-                                    "se trabó la transferencia, probá de nuevo".to_owned()
+                                    "Se trabó la transferencia. Probá de nuevo".to_owned()
                                 }
                                 bot_core::locale::Locale::En => {
-                                    "the transfer failed, try again".to_owned()
+                                    "The transfer failed. Try again".to_owned()
                                 }
                             }
                         }
@@ -5024,10 +5027,10 @@ where
                             ));
                             match locale {
                                 bot_core::locale::Locale::Es => {
-                                    "se trabó imprimiendo créditos, probá de nuevo".to_owned()
+                                    "Se trabó imprimiendo créditos. Probá de nuevo".to_owned()
                                 }
                                 bot_core::locale::Locale::En => {
-                                    "I could not mint credits, try again".to_owned()
+                                    "I could not mint credits. Try again".to_owned()
                                 }
                             }
                         }
@@ -5059,10 +5062,10 @@ where
                     let text = match source.load(limit) {
                         Ok(entries) if entries.is_empty() => match locale {
                             bot_core::locale::Locale::Es => {
-                                "no hay liquidaciones IA recientes".to_owned()
+                                "No hay liquidaciones de IA recientes".to_owned()
                             }
                             bot_core::locale::Locale::En => {
-                                "there are no recent AI settlements".to_owned()
+                                "There are no recent AI settlements".to_owned()
                             }
                         },
                         Ok(entries) => render_creditlog(&entries, locale),
@@ -5073,10 +5076,10 @@ where
                             ));
                             match locale {
                                 bot_core::locale::Locale::Es => {
-                                    "se trabó leyendo el creditlog, probá de nuevo".to_owned()
+                                    "Se trabó leyendo el creditlog. Probá de nuevo".to_owned()
                                 }
                                 bot_core::locale::Locale::En => {
-                                    "I could not load the credit log, try again".to_owned()
+                                    "I could not load the credit log. Try again".to_owned()
                                 }
                             }
                         }
@@ -5095,11 +5098,10 @@ where
             self.state_diagnostics.extend(load.diagnostics);
             let text = load.text.unwrap_or_else(|| match locale {
                 bot_core::locale::Locale::Es => {
-                    "No pude obtener las variables del BCRA en este momento, probá más tarde"
-                        .to_owned()
+                    "No pude conseguir las variables del BCRA. Probá más tarde".to_owned()
                 }
                 bot_core::locale::Locale::En => {
-                    "I could not load the BCRA variables right now".to_owned()
+                    "I could not load the BCRA variables. Try again later".to_owned()
                 }
             });
             let mut message = SendMessage::new(chat_id, &text);
@@ -5121,9 +5123,12 @@ where
                     self.state_diagnostics.extend(load.diagnostics);
                     let text = load.text.unwrap_or_else(|| match locale {
                         bot_core::locale::Locale::Es => {
-                            "no pude traer cotizaciones del dólar boludo".to_owned()
+                            "No pude traer las cotizaciones del dólar, boludo. Probá más tarde"
+                                .to_owned()
                         }
-                        bot_core::locale::Locale::En => "I could not load dollar rates".to_owned(),
+                        bot_core::locale::Locale::En => {
+                            "I could not load dollar rates. Try again later".to_owned()
+                        }
                     });
                     let mut message = SendMessage::new(chat_id, &text);
                     message.reply_to_message_id = Some(message_id);
@@ -5161,10 +5166,10 @@ where
                 load.selection.as_ref().map_or_else(
                     || match locale {
                         bot_core::locale::Locale::Es => {
-                            "no pude obtener una cotización usable".to_owned()
+                            "No pude conseguir una cotización. Probá más tarde".to_owned()
                         }
                         bot_core::locale::Locale::En => {
-                            "I could not obtain a usable quote".to_owned()
+                            "I could not get a quote. Try again later".to_owned()
                         }
                     },
                     |selection| format_market_selection(selection, locale),
@@ -5351,10 +5356,10 @@ where
                 Err(_) => {
                     let text = match locale {
                         bot_core::locale::Locale::Es => {
-                            "mandate algo como 'pizza, carne, sushi' o '1-10' boludo, no me hagas laburar al pedo"
+                            "Mandate algo como 'pizza, carne, sushi' o '1-10', boludo, no me hagas laburar al pedo"
                         }
                         bot_core::locale::Locale::En => {
-                            "send options like 'pizza, steak, sushi' or a range like '1-10'"
+                            "Send options like 'pizza, steak, sushi' or a range like '1-10'"
                         }
                     };
                     let mut message = SendMessage::new(chat_id, text);
@@ -5364,10 +5369,10 @@ where
                 Ok(RandomSelection::Invalid) => {
                     let text = match locale {
                         bot_core::locale::Locale::Es => {
-                            "mandate algo como 'pizza, carne, sushi' o '1-10' boludo, no me hagas laburar al pedo"
+                            "Mandate algo como 'pizza, carne, sushi' o '1-10', boludo, no me hagas laburar al pedo"
                         }
                         bot_core::locale::Locale::En => {
-                            "send options like 'pizza, steak, sushi' or a range like '1-10'"
+                            "Send options like 'pizza, steak, sushi' or a range like '1-10'"
                         }
                     };
                     let mut message = SendMessage::new(chat_id, text);
@@ -5539,7 +5544,7 @@ where
                                     ok: false,
                                     error_message: Some(match locale {
                                         bot_core::locale::Locale::Es => {
-                                            "ese pago vino raro y no te lo pude validar".to_owned()
+                                            "Ese pago vino raro y no te lo pude validar".to_owned()
                                         }
                                         bot_core::locale::Locale::En => {
                                             "I could not validate this payment".to_owned()
@@ -6984,7 +6989,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             texts,
-            ["ahi tenes boludo, １２ en base 10 es 1100 en base 2", "2"]
+            ["Ahí tenés, boludo: １２ en base 10 es 1100 en base 2", "2"]
         );
     }
 
@@ -7101,7 +7106,7 @@ mod tests {
         let [TelegramAction::SendMessage(message)] = dispatcher.actions.0.as_slice() else {
             return;
         };
-        assert_eq!(message.text, "I could not answer, try again");
+        assert_eq!(message.text, "I could not answer. Try again");
         assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
         assert_eq!(
             dispatcher.state_diagnostics(),
@@ -7260,7 +7265,7 @@ mod tests {
         let [TelegramAction::SendMessage(message)] = dispatcher.actions.0.as_slice() else {
             return;
         };
-        assert_eq!(message.text, "se trabó el /transcribe, probá más tarde");
+        assert_eq!(message.text, "Se trabó el /transcribe. Probá más tarde");
         assert_eq!(
             dispatcher.state_diagnostics(),
             ["media command: synthetic media failure"]
@@ -7355,7 +7360,7 @@ mod tests {
         let [TelegramAction::SendMessage(message)] = dispatcher.actions.0.as_slice() else {
             return;
         };
-        assert_eq!(message.text, "I could not generate the summary");
+        assert_eq!(message.text, "I could not generate the summary. Try again");
         assert_eq!(
             dispatcher.state_diagnostics(),
             ["summary command: synthetic summary failure"]
@@ -7436,7 +7441,7 @@ mod tests {
                     assert!(matches!(
                         &dispatcher.actions.0[2],
                         TelegramAction::SendMessage(message)
-                            if message.text == "I could not generate the summary"
+                            if message.text == "I could not generate the summary. Try again"
                     ));
                 }
                 CommandCase::SummarySilent => {
@@ -7871,7 +7876,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert_eq!(message.text, "Help\n\nWhat would you like to do?");
+        assert!(message.text.starts_with("👋 Help\n\n"));
         assert!(message.reply_markup.is_some());
         assert_eq!(dispatcher.state.incoming.len(), 1);
         assert_eq!(dispatcher.state.outgoing.len(), 1);
@@ -7930,7 +7935,7 @@ mod tests {
             texts,
             vec![
                 "/HELLO_SIGNODEEXCLAMACION_WORLD",
-                "send the text you want to convert",
+                "Send the text you want to convert",
                 "/MOUSUGUDESU",
                 "/QUOTED_CONTENT"
             ]
@@ -8008,7 +8013,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
             return;
         };
-        assert!(message.text.contains("No pude obtener las variables"));
+        assert!(message.text.contains("No pude conseguir las variables"));
 
         let config = Config {
             value: Ok(ChatConfig::default()),
@@ -8096,7 +8101,7 @@ mod tests {
             return;
         };
         assert!(message.text.contains("7d"));
-        assert!(message.text.contains("no soportado"));
+        assert!(message.text.contains("No conozco el período"));
 
         let config = Config {
             value: Ok(ChatConfig::default()),
@@ -8125,7 +8130,10 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
             return;
         };
-        assert_eq!(message.text, "no pude traer cotizaciones del dólar boludo");
+        assert_eq!(
+            message.text,
+            "No pude traer las cotizaciones del dólar, boludo. Probá más tarde"
+        );
 
         let config = Config {
             value: Ok(ChatConfig::default()),
@@ -8190,8 +8198,8 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert!(message.text.contains("Location: Example City, Exampleland"));
-        assert!(message.text.contains("Condition: mostly clear"));
+        assert!(message.text.contains("Example City, Exampleland"));
+        assert!(message.text.contains("Mostly clear, feels like"));
         assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
         assert_eq!(dispatcher.state.incoming.len(), 1);
         assert_eq!(dispatcher.state.outgoing.len(), 1);
@@ -8229,7 +8237,10 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = default.actions.0.first() else {
             return;
         };
-        assert_eq!(message.text, "no se pudo obtener el clima de Buenos Aires");
+        assert_eq!(
+            message.text,
+            "No pude conseguir el clima de Buenos Aires. Probá más tarde"
+        );
     }
 
     #[test]
@@ -8272,7 +8283,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert!(message.text.contains("Elections by liquidity"));
+        assert!(message.text.contains("Polymarket elections, by liquidity"));
         assert!(message.text.contains("Candidate A 72%"));
         assert_eq!(
             message.parse_mode,
@@ -8320,7 +8331,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "No pude traer las elecciones desde Polymarket"
+            "No pude traer las elecciones de Polymarket. Probá más tarde"
         );
 
         let config = Config {
@@ -8506,7 +8517,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "no pude traer el top de acciones, probá de nuevo"
+            "No pude traer el top de acciones. Probá de nuevo"
         );
         assert!(failed.state_diagnostics()[0].contains("Finviz failure"));
 
@@ -8614,7 +8625,10 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
             return;
         };
-        assert_eq!(message.text, "no pude traer el precio del petróleo boludo");
+        assert_eq!(
+            message.text,
+            "No pude traer el precio del petróleo, boludo. Probá más tarde"
+        );
         assert!(failed.state_diagnostics()[0].contains("Yahoo failure"));
 
         let config = Config {
@@ -8734,7 +8748,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = fallback.actions.0.first() else {
             return;
         };
-        assert_eq!(message.text, "buenas noches boludo");
+        assert_eq!(message.text, "Buenas noches, boludo");
 
         let config = Config {
             value: Ok(ChatConfig::default()),
@@ -8882,13 +8896,13 @@ mod tests {
         assert!(
             message
                 .text
-                .starts_with("Rulos desde Oficial (precio oficial: 1.440 ARS/USD)")
+                .starts_with("🔁 Rulos desde el oficial\n💵 Oficial: $1.440")
         );
         assert!(message.text.contains("Ganancia: +19.730 ARS"));
         assert!(
             message
                 .text
-                .contains("Tramos: USD→USDT BUENBIT, USDT→ARS BUENBIT")
+                .contains("Ruta: USD→USDT BUENBIT, USDT→ARS BUENBIT")
         );
         assert_eq!(
             dispatcher.state_diagnostics(),
@@ -8927,7 +8941,10 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
             return;
         };
-        assert_eq!(message.text, "I could not load dollar rates");
+        assert_eq!(
+            message.text,
+            "I could not load dollar rates. Try again later"
+        );
         assert!(failed.state_diagnostics()[0].contains("synthetic primary failure"));
 
         let config = Config {
@@ -8987,7 +9004,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "100 USD card = 15000 ARS = 76.92 USDT\nProfit: 9402.5 ARS / 48.22 USDT\nTotal: 24402.5 ARS / 125.14 USDT\n\nProfit: 62.68%\nFee: 0.5%\n\nRates · ARS\nOfficial: 100\nUSDT: 195\nCard: 150"
+            "💳 Card ↔ crypto arbitrage\n🟢 Profit: 62.68% (fee 0.5%)\n\n💵 Rates in ARS\nOfficial: $100\nUSDT: $195\nCard: $150\n\n🧾 100 USD card purchase\n= $15,000 ARS = 76.92 USDT\nProfit: $9,402.5 ARS / 48.22 USDT\nTotal: $24,402.5 ARS / 125.14 USDT"
         );
         assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
         assert_eq!(dispatcher.state.incoming.len(), 1);
@@ -9037,8 +9054,8 @@ mod tests {
         assert_eq!(
             texts,
             vec![
-                "mandá bien los datos: fee entre 0 y 100 y monto de compra positivo",
-                "no pude traer cotizaciones del dólar boludo"
+                "Mandá bien los datos: comisión entre 0 y 100 y monto de compra positivo",
+                "No pude traer las cotizaciones del dólar, boludo. Probá más tarde"
             ]
         );
         assert_eq!(
@@ -9050,7 +9067,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "uso: /devo <fee_porcentaje>[, <monto_compra>]"
+            "Usá: /devo <comisión %>[, <monto de la compra en USD>]\nEjemplo: /devo 0.5, 100"
         );
 
         let config = Config {
@@ -9120,8 +9137,8 @@ mod tests {
             texts[0],
             "1 satoshi = $0.00050000 USD\n1 satoshi = $0.1000 ARS\n\n$1 USD = 2,000 sats\n$1 ARS = 10.000 sats"
         );
-        assert!(texts[1].starts_with("power law estimates BTC at "));
-        assert!(texts[2].starts_with("rainbow chart estimates BTC at "));
+        assert!(texts[1].starts_with("Power law estimates BTC at "));
+        assert!(texts[2].starts_with("The rainbow chart estimates BTC at "));
         assert_eq!(dispatcher.state.incoming.len(), 3);
         assert_eq!(dispatcher.state.outgoing.len(), 3);
     }
@@ -9171,8 +9188,8 @@ mod tests {
         assert_eq!(
             texts,
             vec![
-                "no pude traer el precio de BTC para calcular power law",
-                "no pude traer el precio de BTC en ARS"
+                "No pude traer el precio de BTC para calcular power law. Probá más tarde",
+                "No pude traer el precio de BTC en ARS. Probá más tarde"
             ]
         );
         let config = Config {
@@ -9225,7 +9242,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "minted 100.00 credits\nyour balance is 120.00"
+            "✅ Minted 100.00 credits\nYour balance is 120.00"
         );
         assert_eq!(dispatcher.state.incoming.len(), 1);
         assert_eq!(dispatcher.state.outgoing.len(), 1);
@@ -9263,7 +9280,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = denied.actions.0.first() else {
             return;
         };
-        assert_eq!(message.text, "this command is only for the admin");
+        assert_eq!(message.text, "This command is only for the admin");
 
         let failed_calls = Rc::new(RefCell::new(Vec::new()));
         let config = Config {
@@ -9294,7 +9311,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "se trabó imprimiendo créditos, probá de nuevo"
+            "Se trabó imprimiendo créditos. Probá de nuevo"
         );
         assert!(failed.state_diagnostics()[0].contains("synthetic database failure"));
 
@@ -9363,7 +9380,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert!(message.text.starts_with("latest AI settlements:"));
+        assert!(message.text.starts_with("Latest AI settlements:"));
         assert!(
             message
                 .text
@@ -9381,11 +9398,11 @@ mod tests {
         for (result, expected) in [
             (
                 Ok(Vec::new()),
-                "no hay liquidaciones IA recientes".to_owned(),
+                "No hay liquidaciones de IA recientes".to_owned(),
             ),
             (
                 Err("synthetic read failure".to_owned()),
-                "se trabó leyendo el creditlog, probá de nuevo".to_owned(),
+                "Se trabó leyendo el creditlog. Probá de nuevo".to_owned(),
             ),
         ] {
             let config = Config {
@@ -9475,7 +9492,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.last() else {
             return;
         };
-        assert_eq!(message.text, "done, I will speak English now");
+        assert_eq!(message.text, "✅ Done, I will speak English now");
         assert_eq!(
             message
                 .reply_markup
@@ -9549,7 +9566,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert_eq!(message.text, "este comando es solo para admins del grupo");
+        assert_eq!(message.text, "Este comando es solo para admins del grupo");
         assert!(dispatcher.state.incoming.is_empty());
         assert!(dispatcher.state.outgoing.is_empty());
         assert_eq!(
@@ -9744,7 +9761,7 @@ mod tests {
         );
         assert!(matches!(
             dispatcher.actions.0.first(),
-            Some(TelegramAction::EditMessage { text, .. }) if text.starts_with("Language")
+            Some(TelegramAction::EditMessage { text, .. }) if text.starts_with("🌐 Language")
         ));
     }
 
@@ -9820,7 +9837,7 @@ mod tests {
                 text: Some(text),
                 show_alert: true,
                 ..
-            }] if text == "este comando es solo para admins del grupo"
+            }] if text == "Este comando es solo para admins del grupo"
         ));
         assert!(dispatcher.state_diagnostics()[1].contains("callback_data=cfg:link:off"));
     }
@@ -9912,6 +9929,30 @@ mod tests {
                 .iter()
                 .any(|message| message.starts_with("Falling back to new config message"))
         );
+
+        let mut unchanged = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            EditFallbackActions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            unchanged.dispatch(callback_update("cfg:link:reply", "private", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            unchanged.actions.0.as_slice(),
+            [
+                TelegramAction::EditMessage { .. },
+                TelegramAction::AnswerCallback { .. }
+            ]
+        ));
     }
 
     #[test]
@@ -10020,7 +10061,7 @@ mod tests {
             Some(TelegramAction::SendMessage(_))
         ));
         if let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() {
-            assert!(message.text.starts_with("Tareas"));
+            assert!(message.text.starts_with("⏰ Tareas"));
             assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
             let callback = message
                 .reply_markup
@@ -10987,7 +11028,7 @@ mod tests {
                 text: Some(text),
                 show_alert: true,
                 ..
-            }] if text == "that selection expired"
+            }] if text == "This selection expired"
         ));
 
         let mut read_failed = dispatcher().with_market_price_source(Box::new(source(
@@ -11051,7 +11092,7 @@ mod tests {
                 text: Some(text),
                 show_alert: true,
                 ..
-            }] if text == "that selection belongs to someone else"
+            }] if text == "That selection belongs to someone else"
         ));
 
         let stored = Rc::new(RefCell::new(HashMap::from([(
@@ -11074,7 +11115,7 @@ mod tests {
                 text: Some(text),
                 show_alert: true,
                 ..
-            } if text == "that selection belongs to someone else"
+            } if text == "That selection belongs to someone else"
         )));
 
         let stored = Rc::new(RefCell::new(HashMap::from([(
@@ -11132,7 +11173,7 @@ mod tests {
                 text: Some(text),
                 show_alert: true,
                 ..
-            }) if text == "esa selección es de otra persona"
+            }) if text == "Esa selección es de otra persona"
         ));
 
         let stored = Rc::new(RefCell::new(HashMap::from([(
@@ -11180,7 +11221,7 @@ mod tests {
                 text: Some(text),
                 show_alert: true,
                 ..
-            }] if text == "opción inválida"
+            }] if text == "Esa opción no es válida"
         ));
 
         let mut no_callback_id = dispatcher().with_market_price_source(Box::new(source(
@@ -11600,7 +11641,7 @@ mod tests {
                 TelegramAction::SendMessage(message),
                 TelegramAction::AnswerCallback { show_alert: true, .. }
             ] if message.reply_to_message_id == Some(MessageId(6))
-                && message.text.contains("no pude obtener una cotización usable")
+                && message.text.contains("No pude conseguir una cotización")
         ));
         assert!(
             dispatcher
@@ -11799,7 +11840,7 @@ mod tests {
             keyboard
                 .inline_keyboard
                 .iter()
-                .any(|row| row[0].text.contains("EXM-USD · Synthetic"))
+                .any(|row| row[0].text.contains("EXM-USD (Synthetic)"))
         );
         let second =
             super::market_selection_page("selection", &selection, bot_core::locale::Locale::En, 1);
@@ -12406,7 +12447,7 @@ mod tests {
             action,
             TelegramAction::SendMessage(message)
                 if message.reply_to_message_id == Some(MessageId(7))
-                    && message.text.contains("usable quote")
+                    && message.text.contains("get a quote")
         )));
         assert!(!dispatcher.actions.actions.iter().any(|action| matches!(
             action,
@@ -12483,11 +12524,7 @@ mod tests {
 
         for (input, language, expected) in [
             ("/p apple", "es", "Gráfico no disponible"),
-            (
-                "/p apple,banana",
-                "en",
-                "I could not obtain a usable quote for",
-            ),
+            ("/p apple,banana", "en", "I could not get a quote for"),
         ] {
             let mut dispatcher = dispatcher().with_market_price_source(Box::new(EmptyMarket {
                 with_chart: input == "/p apple",
@@ -12583,7 +12620,7 @@ mod tests {
         );
         assert!(matches!(
             dispatcher.actions.0.as_slice(),
-            [TelegramAction::SendMessage(message)] if message.text.contains("history unavailable")
+            [TelegramAction::SendMessage(message)] if message.text.contains("history available")
         ));
 
         let mut undelivered_token = NativeDispatcher::new(
@@ -12726,11 +12763,11 @@ mod tests {
         for (locale, expected) in [
             (
                 bot_core::locale::Locale::Es,
-                "no pude obtener una cotización usable",
+                "No pude conseguir una cotización. Probá más tarde",
             ),
             (
                 bot_core::locale::Locale::En,
-                "I could not obtain a usable quote",
+                "I could not get a quote. Try again later",
             ),
         ] {
             let mut empty = dispatcher().with_market_price_source(Box::new(MarketPrices {
@@ -13586,7 +13623,7 @@ mod tests {
                 .actions
                 .0
                 .iter()
-                .any(|action| matches!(action, TelegramAction::SendMessage(message) if message.text.contains("I could not obtain a usable quote")))
+                .any(|action| matches!(action, TelegramAction::SendMessage(message) if message.text.contains("I could not get a quote")))
         );
         Ok(())
     }
@@ -14028,7 +14065,7 @@ mod tests {
         );
         assert!(dispatcher.actions.actions.iter().any(|action| matches!(
             action,
-            TelegramAction::SendMessage(message) if message.text.contains("I could not obtain a usable quote")
+            TelegramAction::SendMessage(message) if message.text.contains("I could not get a quote")
         )));
         Ok(())
     }
@@ -14697,7 +14734,7 @@ mod tests {
             action,
             TelegramAction::SendMessage(message)
                 if message.reply_to_message_id == Some(MessageId(6))
-                    && message.text.contains("usable quote")
+                    && message.text.contains("get a quote")
         )));
 
         let mut no_chart_signal = token_signal();
@@ -15439,7 +15476,7 @@ mod tests {
             [
                 TelegramAction::EditMessagePhoto { photo, message_id: MessageId(7), .. },
                 TelegramAction::AnswerCallback { text: Some(text), show_alert: false, .. },
-            ] if photo.as_ref() == b"refreshed-png" && text == "tarjeta actualizada"
+            ] if photo.as_ref() == b"refreshed-png" && text == "Tarjeta actualizada"
         ));
         let saved = saved.borrow();
         assert_eq!(saved.len(), 1);
@@ -15501,7 +15538,7 @@ mod tests {
         assert!(matches!(
             denied.actions.0.as_slice(),
             [TelegramAction::AnswerCallback { text: Some(text), show_alert: true, .. }]
-                if text == "solo quien pidió la tarjeta o un admin puede hacer eso"
+                if text == "Solo quien pidió la tarjeta o un admin puede hacer eso"
         ));
 
         let mut cooldown_state = base_state;
@@ -15865,7 +15902,7 @@ mod tests {
             );
             assert!(cancellations.borrow().is_empty());
         }
-        assert!(dispatcher.actions.0.iter().any(|a| matches!(a, TelegramAction::EditMessage { text, .. } if text.contains("Cancelar esta tarea") || text.contains("Cancel this task"))));
+        assert!(dispatcher.actions.0.iter().any(|a| matches!(a, TelegramAction::EditMessage { text, .. } if text.contains("cancelar esta tarea") || text.contains("cancel this task"))));
         assert!(
             dispatcher
                 .actions
@@ -15948,7 +15985,7 @@ mod tests {
                     ..
                 },
                 TelegramAction::EditMessage { text: edit_text, .. }
-            ] if text == "tarea task0001 borrada" && edit_text == "no hay tareas"
+            ] if text == "✅ Tarea task0001 cancelada" && edit_text.starts_with("⏰ No hay tareas")
         ));
         Ok(())
     }
@@ -15987,7 +16024,7 @@ mod tests {
                 text: Some(text),
                 show_alert: true,
                 ..
-            }] if text == "solo el creador o un admin pueden borrar esta tarea"
+            }] if text == "Solo quien la creó o un admin puede cancelar esta tarea"
         ));
         Ok(())
     }
@@ -16022,7 +16059,7 @@ mod tests {
                 text: Some(text),
                 show_alert: true,
                 ..
-            }] if text == "no pude leer las tareas, probá de nuevo"
+            }] if text == "No pude leer las tareas. Probá de nuevo"
         ));
         assert!(dispatcher.state_diagnostics()[0].contains("synthetic list failure"));
     }
@@ -16030,10 +16067,10 @@ mod tests {
     #[test]
     fn task_callback_never_claims_failed_cancellation() -> Result<(), TaskStateError> {
         for (cancel_result, expected, has_diagnostic) in [
-            (Ok(false), "esa tarea no existe", false),
+            (Ok(false), "Esa tarea ya no existe", false),
             (
                 Err("synthetic cancellation failure".to_owned()),
-                "no pude borrar la tarea, probá de nuevo",
+                "No pude cancelar la tarea. Probá de nuevo",
                 true,
             ),
         ] {
@@ -16089,7 +16126,7 @@ mod tests {
                 text: Some(text),
                 show_alert: true,
                 ..
-            }] if text == "that task does not exist"
+            }] if text == "That task no longer exists"
         ));
 
         let mut refresh_failed =
@@ -16211,7 +16248,7 @@ mod tests {
         else {
             return;
         };
-        assert_eq!(text, "Gastos IA\n\n26/08 14:00 · respuesta · 0.04 cr");
+        assert_eq!(text, "🧾 Gastos IA\n\n26/08 14:00 | respuesta: 0.04 cr");
         assert_eq!(
             reply_markup
                 .as_ref()
@@ -16258,7 +16295,7 @@ mod tests {
             .actions
             .0
             .iter()
-            .zip(["this button expired", "this history is not yours"])
+            .zip(["This button expired", "This history is not yours"])
         {
             let TelegramAction::AnswerCallback {
                 text, show_alert, ..
@@ -16303,7 +16340,7 @@ mod tests {
                 text: Some(text),
                 show_alert: false,
                 ..
-            }) if text == "no hay más gastos"
+            }) if text == "No hay más gastos para mostrar"
         ));
 
         let config = Config {
@@ -16333,7 +16370,7 @@ mod tests {
                 text: Some(text),
                 show_alert: true,
                 ..
-            }) if text == "se trabó leyendo tus gastos"
+            }) if text == "Se trabó leyendo tus gastos. Probá de nuevo"
         ));
         assert!(failed.state_diagnostics()[0].contains("synthetic callback read failure"));
     }
@@ -16392,7 +16429,7 @@ mod tests {
                 text: Some(text),
                 show_alert: true,
                 ..
-            }) if text == "I could not load your expenses"
+            }) if text == "I could not load your spending. Try again"
         ));
 
         let mut skipped = NativeDispatcher::new(
@@ -16418,7 +16455,7 @@ mod tests {
                 text: Some(text),
                 show_alert: true,
                 ..
-            }) if text == "I could not update the history"
+            }) if text == "I could not update the history. Try again"
         ));
     }
 
@@ -16508,7 +16545,10 @@ mod tests {
             vec![TelegramAction::AnswerPreCheckout {
                 query_id: "checkout-unavailable".to_owned(),
                 ok: false,
-                error_message: Some("AI billing is unavailable, please tell the admin".to_owned()),
+                error_message: Some(
+                    "⚠️ AI credits are unavailable right now. Try again later or tell the admin"
+                        .to_owned()
+                ),
             }]
         );
     }
@@ -16583,7 +16623,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(command)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert_eq!(command.text, "Créditos\n\nElegí cuánto querés cargar.");
+        assert!(command.text.starts_with("💳 Cargar créditos\n\n"));
         assert_eq!(
             command
                 .reply_markup
@@ -16608,7 +16648,7 @@ mod tests {
                     show_alert: false,
                     ..
                 }
-            ] if payload == "topup:p50:88:es" && text == "listo, te dejé la factura"
+            ] if payload == "topup:p50:88:es" && text == "Listo, te dejé la factura"
         ));
     }
 
@@ -16657,7 +16697,7 @@ mod tests {
                     show_alert: true,
                     ..
                 }
-            ] if text == "no pude armar la factura, probá de nuevo"
+            ] if text == "No pude armar la factura. Probá de nuevo"
         ));
     }
 
@@ -16705,7 +16745,7 @@ mod tests {
                 text: Some(text),
                 show_alert: false,
                 ..
-            } if text == "the invoice is already above"
+            } if text == "The invoice is already above"
         )));
         assert_eq!(stored.borrow().len(), 1);
         Ok(())
@@ -16923,8 +16963,8 @@ mod tests {
                     show_alert: true,
                     ..
                 }
-            ] if invalid == "that credit pack is invalid"
-                && unavailable == "el cobro de ia no está andando, avisale al admin"
+            ] if invalid == "That credit pack is invalid, choose another one"
+                && unavailable == "⚠️ Los créditos de IA no están disponibles en este momento. Probá más tarde o avisale al admin"
         ));
     }
 
@@ -16962,7 +17002,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "Saldo IA\n\nPersonal: 42.00 créditos\n\nCargar: /topup"
+            "💳 Saldo IA\n\n👤 Personal: 42.00 créditos\n\nCargá más con /topup"
         );
         assert_eq!(
             private.state_diagnostics(),
@@ -17003,9 +17043,9 @@ mod tests {
             return;
         };
         assert!(
-            message
-                .text
-                .starts_with("AI balances\n\nPersonal: 30.00 credits\nGroup: 120.00 credits")
+            message.text.starts_with(
+                "💳 AI balances\n\n👤 Personal: 30.00 credits\n👥 Group: 120.00 credits"
+            )
         );
     }
 
@@ -17038,7 +17078,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
             return;
         };
-        assert_eq!(message.text, "I could not load your balance, try again");
+        assert_eq!(message.text, "I could not load your balance. Try again");
         assert!(failed.state_diagnostics()[0].contains("synthetic database failure"));
 
         let config = Config {
@@ -17112,7 +17152,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "Gastos IA\n\n26/08 14:32 · 0.08 cr\n  respuesta 0.03 cr\n  web 0.05 cr"
+            "🧾 Gastos IA\n\n26/08 14:32 | 0.08 cr\n  respuesta 0.03 cr\n  web 0.05 cr"
         );
         let Some(keyboard) = message.reply_markup.as_ref() else {
             return;
@@ -17158,7 +17198,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = empty.actions.0.first() else {
             return;
         };
-        assert_eq!(message.text, "you have no recent AI expenses");
+        assert_eq!(message.text, "🧾 You have no recent AI spending");
 
         let config = Config {
             value: Ok(ChatConfig::default()),
@@ -17180,7 +17220,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = invalid.actions.0.first() else {
             return;
         };
-        assert_eq!(message.text, "mandalo bien: /charges [cantidad]");
+        assert_eq!(message.text, "Mandalo así: /gastos [cantidad]");
 
         let config = Config {
             value: Ok(ChatConfig::default()),
@@ -17206,7 +17246,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
             return;
         };
-        assert_eq!(message.text, "se trabó leyendo tus gastos, probá de nuevo");
+        assert_eq!(message.text, "Se trabó leyendo tus gastos. Probá de nuevo");
         assert!(failed.state_diagnostics()[0].contains("synthetic history failure"));
 
         let config = Config {
@@ -17264,7 +17304,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "Transferencia al grupo: 0.10 créditos\n\nSaldo personal: 2.85 créditos\nSaldo del grupo: 12.15 créditos"
+            "✅ Pasaste 0.10 créditos al grupo\n\n👤 Personal: 2.85 créditos\n👥 Grupo: 12.15 créditos"
         );
 
         let config = Config {
@@ -17304,7 +17344,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "Insufficient personal balance.\nAvailable: 0.70 credits\nTry a smaller amount or add credits with /topup."
+            "❌ Not enough personal balance\n\n👤 Available: 0.70 credits\n\nTry a smaller amount or add credits with /topup."
         );
     }
 
@@ -17330,7 +17370,10 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = private.actions.0.first() else {
             return;
         };
-        assert_eq!(message.text, "esto es para grupos, capo: /transfer <monto>");
+        assert_eq!(
+            message.text,
+            "Esto es para grupos, capo. Usalo ahí: /transfer <monto>"
+        );
 
         let config = Config {
             value: Ok(ChatConfig::default()),
@@ -17357,7 +17400,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
             return;
         };
-        assert_eq!(message.text, "se trabó la transferencia, probá de nuevo");
+        assert_eq!(message.text, "Se trabó la transferencia. Probá de nuevo");
         assert!(failed.state_diagnostics()[0].contains("synthetic uncertain transaction"));
 
         let config = Config {
@@ -17428,7 +17471,7 @@ mod tests {
         assert_eq!(message.chat_id, ChatId(42));
         assert_eq!(
             message.text,
-            "Top-up: +50.00 credits\nPersonal balance: 53.00 credits"
+            "✅ Top-up complete: +50.00 credits\n\n👤 Personal balance: 53.00 credits"
         );
     }
 
@@ -17440,12 +17483,12 @@ mod tests {
                     inserted: false,
                     user_balance: 5_300,
                 }),
-                "This payment was already credited.\nPersonal balance: 53.00 credits",
+                "✅ This payment was already credited\n\n👤 Personal balance: 53.00 credits",
                 false,
             ),
             (
                 Err("synthetic database failure".to_owned()),
-                "I received the payment but could not add the credits, please tell the admin",
+                "I received the payment but could not add the credits. Please tell the admin",
                 true,
             ),
         ] {
@@ -17520,7 +17563,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "AI billing is unavailable, please tell the admin"
+            "⚠️ AI credits are unavailable right now. Try again later or tell the admin"
         );
     }
 
@@ -17595,7 +17638,7 @@ mod tests {
             [
                 "beta",
                 "100000000000000000002",
-                "send options like 'pizza, steak, sushi' or a range like '1-10'",
+                "Send options like 'pizza, steak, sushi' or a range like '1-10'",
             ]
         );
         assert_eq!(dispatcher.state.incoming.len(), 3);
@@ -18138,7 +18181,7 @@ mod tests {
                 TelegramAction::DeleteMessage { .. },
                 TelegramAction::SendMessage(failure),
             ] if thinking.text == "💭 Pensando."
-                && failure.text == "me quedé reculando y no te pude responder, probá de nuevo"
+                && failure.text == "Me quedé reculando y no te pude responder. Probá de nuevo"
         ));
 
         let (source, _observations) = ai_source(Ok(AiPreparation::silent()));

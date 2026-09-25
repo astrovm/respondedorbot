@@ -310,7 +310,7 @@ pub fn plan_link_actions(
                 };
                 let verb = crate::menu_ui::localized(context.locale, "Abrir", "Open");
                 if replacement.original_links.len() > 1 {
-                    format!("{verb} {site} · {}", index + 1)
+                    format!("{verb} {site} ({})", index + 1)
                 } else {
                     format!("{verb} {site}")
                 }

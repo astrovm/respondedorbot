@@ -28,7 +28,7 @@ impl GreetingCategory {
                 "morning coffee",
                 "rise and shine",
             ],
-            Self::Night => ["good night", "buenas noches", "sweet dreams", "go to sleep"],
+            Self::Night => ["Good night", "buenas noches", "sweet dreams", "go to sleep"],
         }
     }
 }
@@ -45,10 +45,10 @@ pub fn classify_greeting_command(command: &str) -> Option<GreetingCategory> {
 #[must_use]
 pub fn greeting_fallback(category: GreetingCategory, locale: Locale) -> &'static str {
     match (category, locale) {
-        (GreetingCategory::Morning, Locale::Es) => "buen día boludo",
-        (GreetingCategory::Morning, Locale::En) => "good morning",
-        (GreetingCategory::Night, Locale::Es) => "buenas noches boludo",
-        (GreetingCategory::Night, Locale::En) => "good night",
+        (GreetingCategory::Morning, Locale::Es) => "Buen día, boludo",
+        (GreetingCategory::Morning, Locale::En) => "Good morning",
+        (GreetingCategory::Night, Locale::Es) => "Buenas noches, boludo",
+        (GreetingCategory::Night, Locale::En) => "Good night",
     }
 }
 
@@ -80,11 +80,11 @@ mod tests {
         assert_eq!(GreetingCategory::Night.cache_name(), "gn");
         assert_eq!(
             greeting_fallback(GreetingCategory::Morning, Locale::Es),
-            "buen día boludo"
+            "Buen día, boludo"
         );
         assert_eq!(
             greeting_fallback(GreetingCategory::Night, Locale::En),
-            "good night"
+            "Good night"
         );
     }
 }

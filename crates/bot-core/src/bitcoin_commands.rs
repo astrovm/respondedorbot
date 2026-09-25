@@ -29,33 +29,36 @@ pub fn classify_bitcoin_command(command: &str) -> Option<BitcoinCommand> {
 pub fn bitcoin_price_error(command: BitcoinCommand, currency: &str, locale: Locale) -> String {
     match (command, currency, locale) {
         (BitcoinCommand::Satoshi, "USD", Locale::Es) => {
-            "no pude traer el precio de BTC en USD".to_owned()
+            "No pude traer el precio de BTC en USD. Probá más tarde".to_owned()
         }
         (BitcoinCommand::Satoshi, "ARS", Locale::Es) => {
-            "no pude traer el precio de BTC en ARS".to_owned()
+            "No pude traer el precio de BTC en ARS. Probá más tarde".to_owned()
         }
         (BitcoinCommand::Satoshi, "USD", Locale::En) => {
-            "I could not load the BTC price in USD".to_owned()
+            "I could not load the BTC price in USD. Try again later".to_owned()
         }
         (BitcoinCommand::Satoshi, "ARS", Locale::En) => {
-            "I could not load the BTC price in ARS".to_owned()
+            "I could not load the BTC price in ARS. Try again later".to_owned()
         }
         (BitcoinCommand::PowerLaw, _, Locale::Es) => {
-            "no pude traer el precio de BTC para calcular power law".to_owned()
+            "No pude traer el precio de BTC para calcular power law. Probá más tarde".to_owned()
         }
         (BitcoinCommand::PowerLaw, _, Locale::En) => {
-            "I could not load the BTC price for power law".to_owned()
+            "I could not load the BTC price for power law. Try again later".to_owned()
         }
         (BitcoinCommand::Rainbow, _, Locale::Es) => {
-            "no pude traer el precio de BTC para calcular rainbow".to_owned()
+            "No pude traer el precio de BTC para calcular el rainbow chart. Probá más tarde"
+                .to_owned()
         }
         (BitcoinCommand::Rainbow, _, Locale::En) => {
-            "I could not load the BTC price for rainbow chart".to_owned()
+            "I could not load the BTC price for the rainbow chart. Try again later".to_owned()
         }
         (BitcoinCommand::Satoshi, _, Locale::Es) => {
-            "no pude conseguir el precio de BTC boludo".to_owned()
+            "No pude conseguir el precio de BTC, boludo. Probá más tarde".to_owned()
         }
-        (BitcoinCommand::Satoshi, _, Locale::En) => "I could not load the BTC price".to_owned(),
+        (BitcoinCommand::Satoshi, _, Locale::En) => {
+            "I could not load the BTC price. Try again later".to_owned()
+        }
     }
 }
 
@@ -86,23 +89,23 @@ pub fn render_market_model(
     let value = format!("{:.2}", result.model_value);
     let percentage = format!("{:.2}", result.percentage);
     let valuation = match (result.valuation, locale) {
-        (Valuation::Expensive, Locale::Es) => format!("{percentage}% caro boludo"),
-        (Valuation::Cheap, Locale::Es) => format!("{percentage}% regalado gordo"),
+        (Valuation::Expensive, Locale::Es) => format!("{percentage}% caro, boludo"),
+        (Valuation::Cheap, Locale::Es) => format!("{percentage}% regalado, gordo"),
         (Valuation::Expensive, Locale::En) => format!("{percentage}% expensive"),
         (Valuation::Cheap, Locale::En) => format!("{percentage}% undervalued"),
     };
     match (command, locale) {
         (BitcoinCommand::PowerLaw, Locale::Es) => {
-            format!("segun power law btc deberia estar en {value} usd ({valuation})")
+            format!("Según power law, BTC debería estar en {value} USD ({valuation})")
         }
         (BitcoinCommand::PowerLaw, Locale::En) => {
-            format!("power law estimates BTC at {value} USD ({valuation})")
+            format!("Power law estimates BTC at {value} USD ({valuation})")
         }
         (BitcoinCommand::Rainbow, Locale::Es) => {
-            format!("segun rainbow chart btc deberia estar en {value} usd ({valuation})")
+            format!("Según el rainbow chart, BTC debería estar en {value} USD ({valuation})")
         }
         (BitcoinCommand::Rainbow, Locale::En) => {
-            format!("rainbow chart estimates BTC at {value} USD ({valuation})")
+            format!("The rainbow chart estimates BTC at {value} USD ({valuation})")
         }
         (BitcoinCommand::Satoshi, _) => bitcoin_price_error(command, "invalid", locale),
     }
@@ -135,11 +138,11 @@ mod tests {
         assert_eq!(classify_bitcoin_command("/other"), None);
         assert_eq!(
             bitcoin_price_error(BitcoinCommand::Satoshi, "ARS", Locale::En),
-            "I could not load the BTC price in ARS"
+            "I could not load the BTC price in ARS. Try again later"
         );
         assert_eq!(
             bitcoin_price_error(BitcoinCommand::Rainbow, "USD", Locale::Es),
-            "no pude traer el precio de BTC para calcular rainbow"
+            "No pude traer el precio de BTC para calcular el rainbow chart. Probá más tarde"
         );
     }
 
@@ -157,7 +160,7 @@ mod tests {
                 50_000.0,
                 Locale::En
             ),
-            "power law estimates BTC at 57869.18 USD (13.60% undervalued)"
+            "Power law estimates BTC at 57869.18 USD (13.60% undervalued)"
         );
         let rainbow_timestamp = 1_231_459_200 + 5_470 * 86_400;
         assert_eq!(
@@ -167,7 +170,7 @@ mod tests {
                 50_000.0,
                 Locale::Es
             ),
-            "segun rainbow chart btc deberia estar en 97886.11 usd (48.92% regalado gordo)"
+            "Según el rainbow chart, BTC debería estar en 97886.11 USD (48.92% regalado, gordo)"
         );
     }
 
@@ -175,15 +178,15 @@ mod tests {
     fn invalid_prices_and_dates_use_existing_safe_errors() {
         assert_eq!(
             render_satoshi(0.0, 1.0, Locale::En),
-            "I could not load the BTC price"
+            "I could not load the BTC price. Try again later"
         );
         assert_eq!(
             render_market_model(BitcoinCommand::PowerLaw, 0, 1.0, Locale::Es),
-            "no pude traer el precio de BTC para calcular power law"
+            "No pude traer el precio de BTC para calcular power law. Probá más tarde"
         );
         assert_eq!(
             render_market_model(BitcoinCommand::Satoshi, 0, 1.0, Locale::Es),
-            "no pude conseguir el precio de BTC boludo"
+            "No pude conseguir el precio de BTC, boludo. Probá más tarde"
         );
     }
 }

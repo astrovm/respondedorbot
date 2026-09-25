@@ -34,6 +34,17 @@ pub struct TransferResult {
     pub chat_balance: i64,
 }
 
+/// Shared reply for every credit command while billing storage is unavailable.
+#[must_use]
+pub const fn billing_unavailable(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Es => {
+            "⚠️ Los créditos de IA no están disponibles en este momento. Probá más tarde o avisale al admin"
+        }
+        Locale::En => "⚠️ AI credits are unavailable right now. Try again later or tell the admin",
+    }
+}
+
 fn reply(context: TransferCommandContext, text: &str) -> TransferCommandPlan {
     let mut message = SendMessage::new(context.chat_id, text);
     message.reply_to_message_id = Some(context.message_id);
@@ -53,18 +64,15 @@ pub fn plan_transfer_command(
     if !context.billing_available {
         return reply(
             context,
-            match context.locale {
-                Locale::Es => "el cobro de ia no está andando, avisale al admin",
-                Locale::En => "AI billing is unavailable, please tell the admin",
-            },
+            crate::billing_commands::billing_unavailable(context.locale),
         );
     }
     if !context.is_group {
         return reply(
             context,
             match context.locale {
-                Locale::Es => "esto es para grupos, capo: /transfer <monto>",
-                Locale::En => "this command is for groups: /transfer <amount>",
+                Locale::Es => "Esto es para grupos, capo. Usalo ahí: /transfer <monto>",
+                Locale::En => "This command is for groups. Use it there: /transfer <amount>",
             },
         );
     }
@@ -72,7 +80,7 @@ pub fn plan_transfer_command(
         return reply(
             context,
             match context.locale {
-                Locale::Es => "no te pude sacar bien el usuario o el grupo para transferir",
+                Locale::Es => "No pude identificar tu usuario o el grupo para transferir",
                 Locale::En => "I could not identify the user or group for the transfer",
             },
         );
@@ -87,8 +95,8 @@ pub fn plan_transfer_command(
         return reply(
             context,
             match context.locale {
-                Locale::Es => "mandalo bien: /transfer <monto>",
-                Locale::En => "usage: /transfer <amount>",
+                Locale::Es => "Mandalo así: /transfer <monto>\nEjemplo: /transfer 1.5",
+                Locale::En => "Usage: /transfer <amount>\nExample: /transfer 1.5",
             },
         );
     };
@@ -96,8 +104,8 @@ pub fn plan_transfer_command(
         return reply(
             context,
             match context.locale {
-                Locale::Es => "el monto tiene que ser mayor a 0, no me rompas las bolas",
-                Locale::En => "the amount must be greater than 0",
+                Locale::Es => "El monto tiene que ser mayor a 0, no me rompas las bolas",
+                Locale::En => "The amount must be greater than 0",
             },
         );
     }
@@ -114,11 +122,11 @@ pub fn transfer_result_reply(amount: i64, result: TransferResult, locale: Locale
     if !result.transferred {
         return match locale {
             Locale::Es => format!(
-                "Saldo personal insuficiente.\nDisponible: {user_balance} créditos\nProbá un monto menor o cargá con /topup."
+                "❌ No te alcanza el saldo personal\n\n👤 Disponible: {user_balance} créditos\n\nProbá con un monto menor o cargá con /topup."
             ),
             Locale::En => {
                 format!(
-                    "Insufficient personal balance.\nAvailable: {user_balance} credits\nTry a smaller amount or add credits with /topup."
+                    "❌ Not enough personal balance\n\n👤 Available: {user_balance} credits\n\nTry a smaller amount or add credits with /topup."
                 )
             }
         };
@@ -128,10 +136,10 @@ pub fn transfer_result_reply(amount: i64, result: TransferResult, locale: Locale
     let chat_balance = format_credit_units(CreditUnits::new(result.chat_balance));
     match locale {
         Locale::Es => format!(
-            "Transferencia al grupo: {amount} créditos\n\nSaldo personal: {user_balance} créditos\nSaldo del grupo: {chat_balance} créditos"
+            "✅ Pasaste {amount} créditos al grupo\n\n👤 Personal: {user_balance} créditos\n👥 Grupo: {chat_balance} créditos"
         ),
         Locale::En => format!(
-            "Transferred to group: {amount} credits\n\nPersonal balance: {user_balance} credits\nGroup balance: {chat_balance} credits"
+            "✅ Moved {amount} credits to the group\n\n👤 Personal: {user_balance} credits\n👥 Group: {chat_balance} credits"
         ),
     }
 }
@@ -188,14 +196,14 @@ mod tests {
         unavailable.is_group = false;
         assert_eq!(
             reply_text(plan_transfer_command("/transfer bad", "", unavailable)),
-            "AI billing is unavailable, please tell the admin"
+            "⚠️ AI credits are unavailable right now. Try again later or tell the admin"
         );
 
         let mut private = context(Locale::Es);
         private.is_group = false;
         assert_eq!(
             reply_text(plan_transfer_command("/transfer 1", "", private)),
-            "esto es para grupos, capo: /transfer <monto>"
+            "Esto es para grupos, capo. Usalo ahí: /transfer <monto>"
         );
 
         let mut missing_user = context(Locale::En);
@@ -211,7 +219,7 @@ mod tests {
                 "",
                 context(Locale::Es)
             )),
-            "mandalo bien: /transfer <monto>"
+            "Mandalo así: /transfer <monto>\nEjemplo: /transfer 1.5"
         );
         assert_eq!(
             reply_text(plan_transfer_command(
@@ -219,7 +227,7 @@ mod tests {
                 "",
                 context(Locale::En)
             )),
-            "the amount must be greater than 0"
+            "The amount must be greater than 0"
         );
     }
 
@@ -235,7 +243,7 @@ mod tests {
                 },
                 Locale::Es,
             ),
-            "Transferencia al grupo: 0.10 créditos\n\nSaldo personal: 2.85 créditos\nSaldo del grupo: 12.15 créditos"
+            "✅ Pasaste 0.10 créditos al grupo\n\n👤 Personal: 2.85 créditos\n👥 Grupo: 12.15 créditos"
         );
         assert_eq!(
             transfer_result_reply(
@@ -247,7 +255,7 @@ mod tests {
                 },
                 Locale::En,
             ),
-            "Transferred to group: 1.50 credits\n\nPersonal balance: 0.70 credits\nGroup balance: 2.30 credits"
+            "✅ Moved 1.50 credits to the group\n\n👤 Personal: 0.70 credits\n👥 Group: 2.30 credits"
         );
         assert_eq!(
             transfer_result_reply(
@@ -259,7 +267,7 @@ mod tests {
                 },
                 Locale::Es,
             ),
-            "Saldo personal insuficiente.\nDisponible: 0.70 créditos\nProbá un monto menor o cargá con /topup."
+            "❌ No te alcanza el saldo personal\n\n👤 Disponible: 0.70 créditos\n\nProbá con un monto menor o cargá con /topup."
         );
     }
 }

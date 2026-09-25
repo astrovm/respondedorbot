@@ -1045,7 +1045,8 @@ mod tests {
         assert!(
             commands.is_some_and(|commands| commands.iter().any(|command| {
                 command.get("command") == Some(&serde_json::json!("help"))
-                    && command.get("description") == Some(&serde_json::json!("show all commands"))
+                    && command.get("description")
+                        == Some(&serde_json::json!("help and command list"))
             }))
         );
     }

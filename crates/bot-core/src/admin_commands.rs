@@ -64,8 +64,8 @@ pub fn plan_printcredits_command(
             context.chat_id,
             context.message_id,
             match context.locale {
-                Locale::Es => "este comando es solo para el admin",
-                Locale::En => "this command is only for the admin",
+                Locale::Es => "Este comando es solo para el admin",
+                Locale::En => "This command is only for the admin",
             },
         );
     }
@@ -74,7 +74,7 @@ pub fn plan_printcredits_command(
             context.chat_id,
             context.message_id,
             match context.locale {
-                Locale::Es => "los créditos IA no están disponibles ahora",
+                Locale::Es => "Los créditos de IA no están disponibles en este momento",
                 Locale::En => "AI credits are not available right now",
             },
         );
@@ -89,8 +89,8 @@ pub fn plan_printcredits_command(
             context.chat_id,
             context.message_id,
             match context.locale {
-                Locale::Es => "mandalo bien: /printcredits <monto>",
-                Locale::En => "usage: /printcredits <amount>",
+                Locale::Es => "Mandalo así: /printcredits <monto>",
+                Locale::En => "Usage: /printcredits <amount>",
             },
         );
     };
@@ -99,8 +99,8 @@ pub fn plan_printcredits_command(
             context.chat_id,
             context.message_id,
             match context.locale {
-                Locale::Es => "el monto tiene que ser mayor a 0",
-                Locale::En => "the amount must be greater than 0",
+                Locale::Es => "El monto tiene que ser mayor a 0",
+                Locale::En => "The amount must be greater than 0",
             },
         );
     }
@@ -115,8 +115,8 @@ pub fn printcredits_result_reply(amount: i64, balance: i64, locale: Locale) -> S
     let amount = format_credit_units(CreditUnits::new(amount));
     let balance = format_credit_units(CreditUnits::new(balance));
     match locale {
-        Locale::Es => format!("listo, te imprimí {amount} créditos\nte quedaron {balance}"),
-        Locale::En => format!("minted {amount} credits\nyour balance is {balance}"),
+        Locale::Es => format!("✅ Listo, te imprimí {amount} créditos\nTe quedaron {balance}"),
+        Locale::En => format!("✅ Minted {amount} credits\nYour balance is {balance}"),
     }
 }
 
@@ -136,25 +136,25 @@ pub fn plan_creditlog_command(
     };
     if context.admin_user_id != Some(context.user_id) {
         return reply(match context.locale {
-            Locale::Es => "este comando es solo para el admin",
-            Locale::En => "this command is only for the admin",
+            Locale::Es => "Este comando es solo para el admin",
+            Locale::En => "This command is only for the admin",
         });
     }
     if !context.billing_available {
         return reply(match context.locale {
-            Locale::Es => "los créditos IA no están disponibles ahora",
+            Locale::Es => "Los créditos de IA no están disponibles en este momento",
             Locale::En => "AI credits are not available right now",
         });
     }
     match parse_creditlog_limit(&parsed.message_text) {
         CreditLogLimit::Valid(limit) => CreditLogPlan::Load { limit },
         CreditLogLimit::Invalid => reply(match context.locale {
-            Locale::Es => "mandalo bien: /creditlog [límite]",
-            Locale::En => "usage: /creditlog [limit]",
+            Locale::Es => "Mandalo así: /creditlog [límite]",
+            Locale::En => "Usage: /creditlog [limit]",
         }),
         CreditLogLimit::UnsupportedNumericInput => reply(match context.locale {
-            Locale::Es => "mandalo bien: /creditlog [límite]",
-            Locale::En => "usage: /creditlog [limit]",
+            Locale::Es => "Mandalo así: /creditlog [límite]",
+            Locale::En => "Usage: /creditlog [limit]",
         }),
     }
 }
@@ -434,8 +434,8 @@ fn format_creditlog_entry(entry: &CreditLogEntry, locale: Locale) -> String {
 #[must_use]
 pub fn render_creditlog(entries: &[CreditLogEntry], locale: Locale) -> String {
     let title = match locale {
-        Locale::Es => "últimas liquidaciones IA:",
-        Locale::En => "latest AI settlements:",
+        Locale::Es => "Últimas liquidaciones de IA:",
+        Locale::En => "Latest AI settlements:",
     };
     let text = std::iter::once(title.to_owned())
         .chain(
@@ -496,7 +496,7 @@ mod tests {
     fn preserves_authorization_billing_and_input_guard_order() {
         assert_eq!(
             reply_text(plan("/printcredits bad", None, false, Locale::Es)),
-            Some("este comando es solo para el admin".to_owned())
+            Some("Este comando es solo para el admin".to_owned())
         );
         assert_eq!(
             reply_text(plan("/printcredits bad", Some(99), false, Locale::En)),
@@ -504,11 +504,11 @@ mod tests {
         );
         assert_eq!(
             reply_text(plan("/printcredits bad", Some(99), true, Locale::Es)),
-            Some("mandalo bien: /printcredits <monto>".to_owned())
+            Some("Mandalo así: /printcredits <monto>".to_owned())
         );
         assert_eq!(
             reply_text(plan("/printcredits -1", Some(99), true, Locale::En)),
-            Some("the amount must be greater than 0".to_owned())
+            Some("The amount must be greater than 0".to_owned())
         );
     }
 
@@ -528,11 +528,11 @@ mod tests {
         );
         assert_eq!(
             printcredits_result_reply(10_000, 12_000, Locale::Es),
-            "listo, te imprimí 100.00 créditos\nte quedaron 120.00"
+            "✅ Listo, te imprimí 100.00 créditos\nTe quedaron 120.00"
         );
         assert_eq!(
             printcredits_result_reply(10_000, 12_000, Locale::En),
-            "minted 100.00 credits\nyour balance is 120.00"
+            "✅ Minted 100.00 credits\nYour balance is 120.00"
         );
         assert_eq!(
             plan("/other 1", Some(99), true, Locale::Es),
@@ -557,7 +557,7 @@ mod tests {
         assert!(matches!(
             plan_creditlog_command("/creditlog", "@bot", context(None, false, Locale::Es)),
             CreditLogPlan::Reply(TelegramAction::SendMessage(message))
-                if message.text == "este comando es solo para el admin"
+                if message.text == "Este comando es solo para el admin"
         ));
         assert!(matches!(
             plan_creditlog_command(
@@ -575,7 +575,7 @@ mod tests {
                 context(Some(99), true, Locale::En)
             ),
             CreditLogPlan::Reply(TelegramAction::SendMessage(message))
-                if message.text == "usage: /creditlog [limit]"
+                if message.text == "Usage: /creditlog [limit]"
         ));
         assert_eq!(
             plan_creditlog_command("/creditlog ２", "@bot", context(Some(99), true, Locale::Es)),
@@ -620,7 +620,7 @@ mod tests {
         };
         assert_eq!(
             render_creditlog(&[entry], Locale::Es),
-            "últimas liquidaciones IA:\n\n2026-03-11 17:35:10 | cmd=/ask | estado=ok\nchat=202 user=99 reservado=2.00 cobrado=1.00 refund=1.00 extra=0.00 deuda=0.00\nusd_micros=390\nrequests: chat=3\ncache_hits: chat=1\ncacheados=900\nmodelos: deepseek/deepseek-v4.1-flash=390\ntools: web_search=8000 (2x), python=500 (1x)"
+            "Últimas liquidaciones de IA:\n\n2026-03-11 17:35:10 | cmd=/ask | estado=ok\nchat=202 user=99 reservado=2.00 cobrado=1.00 refund=1.00 extra=0.00 deuda=0.00\nusd_micros=390\nrequests: chat=3\ncache_hits: chat=1\ncacheados=900\nmodelos: deepseek/deepseek-v4.1-flash=390\ntools: web_search=8000 (2x), python=500 (1x)"
         );
     }
 
