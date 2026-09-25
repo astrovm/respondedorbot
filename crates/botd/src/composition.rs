@@ -2236,13 +2236,17 @@ where
     }
 }
 
+/// Try every menu, since they are independent, and report the first failure.
 pub fn publish_telegram_commands<Actions: ActionSink>(
     actions: &mut Actions,
 ) -> Result<(), Actions::Error> {
+    let mut first_error = None;
     for action in command_publication_actions() {
-        let _receipt = actions.execute(action)?;
+        if let Err(error) = actions.execute(action) {
+            first_error.get_or_insert(error);
+        }
     }
-    Ok(())
+    first_error.map_or(Ok(()), Err)
 }
 
 pub const UPDATE_WORKER_COUNT: usize = 8;
@@ -4695,6 +4699,29 @@ mod tests {
     }
 
     #[test]
+    fn command_publication_tries_every_menu_and_reports_the_first_failure() {
+        #[derive(Default)]
+        struct Flaky(usize);
+
+        impl ActionSink for Flaky {
+            type Error = usize;
+
+            fn execute(&mut self, _action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
+                self.0 += 1;
+                if self.0 <= 2 {
+                    Err(self.0)
+                } else {
+                    Ok(ActionReceipt { message_id: None })
+                }
+            }
+        }
+
+        let mut flaky = Flaky::default();
+        assert_eq!(publish_telegram_commands(&mut flaky), Err(1));
+        assert_eq!(flaky.0, 4);
+    }
+
+    #[test]
     fn command_publication_executes_default_spanish_and_english_in_order() {
         #[derive(Default)]
         struct Published(Vec<TelegramAction>);
@@ -4719,7 +4746,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(languages, ["es", "en"]);
-        assert_eq!(published.0.len(), 3);
+        assert_eq!(published.0.len(), 4);
     }
 
     #[test]
