@@ -86,24 +86,23 @@ fn format_bcra_value(value: &str, percentage: bool) -> String {
             format!("{number:.1}%")
         } else {
             format!("{number:.2}%")
-        }
-        .replace('.', ",");
+        };
     }
     if number >= 1_000_000.0 {
-        return grouped(number / 1_000.0, 0, '.');
+        return grouped(number / 1_000.0, 0);
     }
     if number >= 1_000.0 {
-        return grouped(number, 0, '.');
+        return grouped(number, 0);
     }
-    format!("{number:.2}").replace('.', ",")
+    format!("{number:.2}")
 }
 
-/// BCRA figures are Argentine data, so they use Argentine separators in every locale.
-fn argentine(value: &str) -> String {
-    crate::output_format::localized_number(value, Locale::Es)
+/// The BCRA publishes values as `1.250,75`; show them as `1,250.75`.
+fn source_number(value: &str) -> String {
+    crate::output_format::readable_number(&value.replace('.', "").replace(',', "."))
 }
 
-fn grouped(value: f64, decimals: usize, separator: char) -> String {
+fn grouped(value: f64, decimals: usize) -> String {
     let rendered = format!("{value:.decimals$}");
     let (whole, fractional) = rendered.split_once('.').unwrap_or((&rendered, ""));
     let negative = whole.starts_with('-');
@@ -114,12 +113,12 @@ fn grouped(value: f64, decimals: usize, separator: char) -> String {
     }
     for (index, character) in digits.chars().enumerate() {
         if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            output.push(separator);
+            output.push(',');
         }
         output.push(character);
     }
     if !fractional.is_empty() {
-        output.push(',');
+        output.push('.');
         output.push_str(fractional);
     }
     output
@@ -191,21 +190,21 @@ fn variable_line(
         r"tipo.*cambio.*minorista|minorista.*promedio.*vendedor",
     ) {
         match locale {
-            Locale::Es => format!("Dólar minorista: ${value}"),
-            Locale::En => format!("Retail dollar: ${value}"),
+            Locale::Es => format!("Dólar minorista: ${}", source_number(value)),
+            Locale::En => format!("Retail dollar: ${}", source_number(value)),
         }
     } else if matches(description, r"tipo.*cambio.*mayorista") {
         match locale {
-            Locale::Es => format!("Dólar mayorista: ${value}"),
-            Locale::En => format!("Wholesale dollar: ${value}"),
+            Locale::Es => format!("Dólar mayorista: ${}", source_number(value)),
+            Locale::En => format!("Wholesale dollar: ${}", source_number(value)),
         }
     } else if matches(description, r"unidad.*valor.*adquisitivo|\buva\b") {
-        format!("UVA: ${value}")
+        format!("UVA: ${}", source_number(value))
     } else if matches(
         description,
         r"coeficiente.*estabilizacion.*referencia|\bcer\b",
     ) {
-        format!("CER: {value}")
+        format!("CER: {}", source_number(value))
     } else if matches(description, r"reservas.*internacionales") {
         match locale {
             Locale::Es => format!("Reservas: USD {} millones", format_bcra_value(value, false)),
@@ -274,14 +273,25 @@ pub fn render_bcra(snapshot: &BcraSnapshot, locale: Locale, today_days: i64) -> 
         r"coeficiente.*estabilizacion.*referencia|\bcer\b",
         r"reservas.*internacionales",
     ];
-    let shown = PATTERNS
-        .iter()
-        .filter_map(|pattern| {
-            snapshot
-                .variables
-                .iter()
-                .find(|variable| matches(&variable.description, pattern))
-        })
+    // A series can match more than one pattern (the REM expectation also reads
+    // as year-over-year inflation); list each series once.
+    // Match the specific expectation pattern (index 3) before the broader
+    // year-over-year one (index 2), then show lines in the usual order.
+    let mut matched = Vec::<(usize, &BcraVariable)>::new();
+    for index in [0, 1, 3, 2, 4, 5, 6, 7, 8, 9, 10] {
+        if let Some(variable) = snapshot.variables.iter().find(|variable| {
+            matches(&variable.description, PATTERNS[index])
+                && !matched
+                    .iter()
+                    .any(|(_, known)| std::ptr::eq(*known, *variable))
+        }) {
+            matched.push((index, variable));
+        }
+    }
+    matched.sort_by_key(|(index, _)| *index);
+    let shown = matched
+        .into_iter()
+        .map(|(_, variable)| variable)
         .collect::<Vec<_>>();
     // Most indicators share one publication date; state it once in the title.
     let common_date = shown
@@ -319,12 +329,12 @@ pub fn render_bcra(snapshot: &BcraSnapshot, locale: Locale, today_days: i64) -> 
     }
     if let Some(risk) = &snapshot.country_risk {
         let decimals = usize::from(risk.value_bps.abs() < 100.0);
-        let value = trimmed(risk.value_bps, decimals).replace('.', ",");
+        let value = trimmed(risk.value_bps, decimals);
         let mut details = risk.valuation_label.iter().cloned().collect::<Vec<_>>();
         if let Some(delta) = risk.delta_one_day.filter(|delta| delta.abs() >= 0.05) {
             let decimals = usize::from(delta.abs() < 100.0);
             let sign = if delta > 0.0 { "+" } else { "-" };
-            let change = format!("{sign}{}", trimmed(delta.abs(), decimals).replace('.', ","));
+            let change = format!("{sign}{}", trimmed(delta.abs(), decimals));
             details.push(match locale {
                 Locale::Es => format!("{change} bps vs ayer"),
                 Locale::En => format!("{change} bps from yesterday"),
@@ -340,8 +350,8 @@ pub fn render_bcra(snapshot: &BcraSnapshot, locale: Locale, today_days: i64) -> 
         lines.push(line);
     }
     if let Some(bands) = &snapshot.bands {
-        let lower = argentine(&trimmed(bands.lower, 2));
-        let upper = argentine(&trimmed(bands.upper, 2));
+        let lower = crate::output_format::readable_number(&trimmed(bands.lower, 2));
+        let upper = crate::output_format::readable_number(&trimmed(bands.upper, 2));
         let mut line = match locale {
             Locale::Es => format!("Bandas cambiarias: piso ${lower} / techo ${upper}"),
             Locale::En => format!("Exchange-rate bands: floor ${lower} / ceiling ${upper}"),
@@ -359,7 +369,7 @@ pub fn render_bcra(snapshot: &BcraSnapshot, locale: Locale, today_days: i64) -> 
         };
         lines.push(format!(
             "TCRM: {}{suffix}",
-            argentine(&trimmed(itcrm.value, 2))
+            crate::output_format::readable_number(&trimmed(itcrm.value, 2))
         ));
     }
     let notes_start = lines.len();
@@ -454,21 +464,49 @@ mod tests {
         let text = render_bcra(&snapshot, Locale::Es, days_from_civil(2025, 1, 20));
         for expected in [
             "Indicadores del BCRA al 15/01/25\n\n",
-            "Base monetaria: $5.000 mill. pesos\n",
-            "Inflación mensual: 5,20% (31/12/24)",
-            "Inflación interanual: 150,5%",
-            "Inflación esperada: 3,10%",
-            "TAMAR: 45,0%",
-            "Dólar minorista: $1.250,75",
-            "Reservas: USD 25.000 millones",
-            "Riesgo país: 685 bps (29/10 12:34 | -12,3 bps vs ayer)",
-            "Bandas cambiarias: piso $950,12 / techo $1.460,34 (15/09/25)",
-            "TCRM: 123,45 (01/02/25)",
+            "Base monetaria: $5,000 mill. pesos\n",
+            "Inflación mensual: 5.20% (31/12/24)",
+            "Inflación interanual: 150.5%",
+            "Inflación esperada: 3.10%",
+            "TAMAR: 45.0%",
+            "Dólar minorista: $1,250.75",
+            "Reservas: USD 25,000 millones",
+            "Riesgo país: 685 bps (29/10 12:34 | -12.3 bps vs ayer)",
+            "Bandas cambiarias: piso $950.12 / techo $1,460.34 (15/09/25)",
+            "TCRM: 123.45 (01/02/25)",
             "\n\nNo hay actualización nueva del BCRA",
             "Los datos del BCRA tienen 5 días de atraso",
         ] {
             assert!(text.contains(expected), "missing {expected} in {text}");
         }
+    }
+
+    #[test]
+    fn lists_each_series_once_even_when_it_matches_two_patterns() {
+        let variable = |description: &str, value: &str| BcraVariable {
+            description: description.to_owned(),
+            value: value.to_owned(),
+            date: "19/09/25".to_owned(),
+        };
+        let snapshot = BcraSnapshot {
+            variables: vec![
+                variable(
+                    "Mediana de la variación interanual esperada del índice de precios al consumidor para los próximos 12 meses (REM)",
+                    "21,8",
+                ),
+                variable(
+                    "Variación interanual del índice de precios al consumidor",
+                    "33,6",
+                ),
+            ],
+            bands: None,
+            itcrm: None,
+            country_risk: None,
+            stale: false,
+        };
+        let text = render_bcra(&snapshot, Locale::Es, 0);
+        assert_eq!(text.matches("Inflación esperada: 21.8%").count(), 1);
+        assert!(text.contains("Inflación interanual: 33.6%"));
     }
 
     #[test]
@@ -510,8 +548,8 @@ mod tests {
             stale: false,
         };
         let text = render_bcra(&snapshot, Locale::En, 0);
-        assert!(text.contains("Reserves: USD 25.000 million"));
-        assert!(text.contains("Country risk: 55,5 bps"));
+        assert!(text.contains("Reserves: USD 25,000 million"));
+        assert!(text.contains("Country risk: 55.5 bps"));
         assert!(!text.contains("yesterday"));
     }
 }

@@ -641,17 +641,17 @@ mod tests {
         let load = load_dollar_market(&transport, &mut cache, 24, Locale::Es, 1_725_000_000);
         let text = load.text.unwrap_or_default();
         for expected in [
-            "Mayorista: $1.400 (+1%)",
-            "Oficial: $1.420 (+2%)",
-            "Tarjeta: $1.988 (+3%)",
-            "MEP: $1.450 (+4%)",
-            "CCL: $1.460 (+5%)",
-            "Blue: $1.430 (+6%)",
-            "Bitcoin: $1.470 (+7%)",
-            "USDC: $1.480 (+8%)",
-            "USDT: $1.490 (+9%)",
-            "TCRM 100: $1.410",
-            "Banda piso: $950 (+0,1%)",
+            "Mayorista: $1,400 (+1%)",
+            "Oficial: $1,420 (+2%)",
+            "Tarjeta: $1,988 (+3%)",
+            "MEP: $1,450 (+4%)",
+            "CCL: $1,460 (+5%)",
+            "Blue: $1,430 (+6%)",
+            "Bitcoin: $1,470 (+7%)",
+            "USDC: $1,480 (+8%)",
+            "USDT: $1,490 (+9%)",
+            "TCRM 100: $1,410",
+            "Banda piso: $950 (+0.1%)",
         ] {
             assert!(text.contains(expected), "missing {expected} in {text}");
         }

@@ -171,7 +171,7 @@ pub fn render_devo_reply(reply: DevoReply, locale: Locale) -> String {
 
 #[must_use]
 pub fn render_devo_result(result: &DevoResult, locale: Locale) -> String {
-    let number = |value: &str| crate::output_format::localized_number(value, locale);
+    let number = |value: &str| crate::output_format::readable_number(value);
     let summary = match locale {
         Locale::Es => format!(
             "Arbitraje tarjeta y crypto\nGanancia: {}% (comisión {}%)\n\nCotizaciones en ARS\nOficial: ${}\nUSDT: ${}\nTarjeta: ${}",
@@ -326,7 +326,7 @@ mod tests {
         .unwrap_or_else(|_| unreachable!());
         assert_eq!(
             render_devo_result(&summary, Locale::Es),
-            "Arbitraje tarjeta y crypto\nGanancia: 62,68% (comisión 0,5%)\n\nCotizaciones en ARS\nOficial: $100\nUSDT: $195\nTarjeta: $150"
+            "Arbitraje tarjeta y crypto\nGanancia: 62.68% (comisión 0.5%)\n\nCotizaciones en ARS\nOficial: $100\nUSDT: $195\nTarjeta: $150"
         );
         let purchase = calculate_devo(
             0.005,

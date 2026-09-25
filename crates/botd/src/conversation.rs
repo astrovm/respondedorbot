@@ -285,24 +285,24 @@ impl<Provider, Tools, State, Billing> NativeConversation<Provider, Tools, State,
             match locale {
                 Locale::Es => format!(
                     "Se quedaron secos de créditos de IA en este grupo, boludo\n\nTuyo: {}\nDel grupo: {}\n\nMetele /topup por privado y, si querés, pasale saldo al grupo con /transfer <monto>. Para ver bien la miseria, mandá /balance",
-                    format_credit_units(decision.user_balance, locale),
-                    format_credit_units(decision.chat_balance, locale),
+                    format_credit_units(decision.user_balance),
+                    format_credit_units(decision.chat_balance),
                 ),
                 Locale::En => format!(
                     "This group is out of AI credits\n\nYours: {}\nGroup: {}\n\nUse /topup in private and /transfer <amount> to fund the group. Use /balance to see the balances",
-                    format_credit_units(decision.user_balance, locale),
-                    format_credit_units(decision.chat_balance, locale),
+                    format_credit_units(decision.user_balance),
+                    format_credit_units(decision.chat_balance),
                 ),
             }
         } else {
             match locale {
                 Locale::Es => format!(
                     "Te quedaste seco de créditos de IA, boludo. Saldo: {}\nMetele /topup si querés que siga laburando",
-                    format_credit_units(decision.user_balance, locale),
+                    format_credit_units(decision.user_balance),
                 ),
                 Locale::En => format!(
                     "You are out of AI credits. Balance: {}\nUse /topup to add more",
-                    format_credit_units(decision.user_balance, locale),
+                    format_credit_units(decision.user_balance),
                 ),
             }
         }
@@ -1992,12 +1992,9 @@ fn shifted_time(timestamp: i64, timezone_offset_hours: i64) -> DateTime<FixedOff
     utc.with_timezone(&offset)
 }
 
-fn format_credit_units(units: i64, locale: Locale) -> String {
+fn format_credit_units(units: i64) -> String {
     let units = units.max(0);
-    bot_core::output_format::localized_number(
-        &format!("{}.{:02}", units / 100, units % 100),
-        locale,
-    )
+    bot_core::output_format::readable_number(&format!("{}.{:02}", units / 100, units % 100))
 }
 
 #[cfg(test)]
@@ -4481,8 +4478,8 @@ mod tests {
             TokenEstimateValue::Empty
         );
         assert!(!formatted_date(i64::MAX, i64::MAX, Locale::En).is_empty());
-        assert_eq!(format_credit_units(-1, Locale::En), "0.00");
-        assert_eq!(format_credit_units(123_456, Locale::Es), "1.234,56");
+        assert_eq!(format_credit_units(-1), "0.00");
+        assert_eq!(format_credit_units(123_456), "1,234.56");
 
         let mut tools = NoTools;
         assert!(!tools.contains("synthetic", false));

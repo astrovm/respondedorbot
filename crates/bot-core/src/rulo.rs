@@ -60,7 +60,7 @@ fn group_integer_digits(value: &str) -> String {
     result.push_str(sign);
     result.push_str(&digits[..first_group]);
     for chunk in digits.as_bytes()[first_group..].chunks(3) {
-        result.push('.');
+        result.push(',');
         result.extend(chunk.iter().map(|byte| char::from(*byte)));
     }
     result
@@ -75,12 +75,12 @@ fn format_local_currency(value: f64, decimals: usize) -> String {
         });
     let mut result = group_integer_digits(integer);
     if let Some(fraction) = fraction {
-        result.push(',');
+        result.push('.');
         result.push_str(fraction);
         while result.ends_with('0') {
             result.pop();
         }
-        if result.ends_with(',') {
+        if result.ends_with('.') {
             result.pop();
         }
     }
@@ -222,21 +222,6 @@ pub fn evaluate_rulo(input: &RuloInput) -> RuloEvaluation {
     })
 }
 
-/// Plan amounts are built with Argentine separators; English readers get `1,452.3`.
-fn reader_numbers(text: &str, locale: Locale) -> String {
-    match locale {
-        Locale::Es => text.to_owned(),
-        Locale::En => text
-            .chars()
-            .map(|character| match character {
-                '.' => ',',
-                ',' => '.',
-                other => other,
-            })
-            .collect(),
-    }
-}
-
 #[must_use]
 pub fn render_rulo(evaluation: &RuloEvaluation, locale: Locale) -> String {
     let RuloEvaluation::Routes(plan) = evaluation else {
@@ -269,19 +254,13 @@ pub fn render_rulo(evaluation: &RuloEvaluation, locale: Locale) -> String {
             "Arbitrage from the official rate".to_owned(),
             format!(
                 "Official: {} ARS\nInvesting {} USD = {} ARS",
-                reader_numbers(&plan.official, locale),
-                reader_numbers(&plan.base_usd, locale),
-                reader_numbers(&plan.base_ars, locale)
+                plan.official, plan.base_usd, plan.base_ars
             ),
         ],
     };
     for route in &plan.routes {
-        let percentage = match locale {
-            Locale::Es => route.percentage.replace('.', ","),
-            Locale::En => route.percentage.clone(),
-        };
         lines.push(String::new());
-        lines.push(format!("{}: {percentage}%", route.label));
+        lines.push(format!("{}: {}%", route.label, route.percentage));
         lines.push(match locale {
             Locale::Es => format!(
                 "Vendés a ${} ({} vs oficial)",
@@ -289,19 +268,16 @@ pub fn render_rulo(evaluation: &RuloEvaluation, locale: Locale) -> String {
             ),
             Locale::En => format!(
                 "Sell at {} ARS ({} vs official)",
-                reader_numbers(&route.sell_price, locale),
-                reader_numbers(&route.difference, locale)
+                route.sell_price, route.difference
             ),
         });
         for detail in &route.details {
             lines.push(match (detail, locale) {
                 (RuloDetail::Steps(text), Locale::Es) => format!("Ruta: {text}"),
                 (RuloDetail::Steps(text), Locale::En) => format!("Route: {text}"),
-                (RuloDetail::Result(text), _) => reader_numbers(text, locale),
+                (RuloDetail::Result(text), _) => text.clone(),
                 (RuloDetail::Profit(text), Locale::Es) => format!("Ganancia: {text} ARS"),
-                (RuloDetail::Profit(text), Locale::En) => {
-                    format!("Profit: {} ARS", reader_numbers(text, locale))
-                }
+                (RuloDetail::Profit(text), Locale::En) => format!("Profit: {text} ARS"),
             });
         }
     }
@@ -341,13 +317,13 @@ mod tests {
         let RuloEvaluation::Routes(plan) = evaluate_rulo(&complete_input()) else {
             return;
         };
-        assert_eq!(plan.official, "1.440");
-        assert_eq!(plan.base_ars, "1.440.000");
+        assert_eq!(plan.official, "1,440");
+        assert_eq!(plan.base_ars, "1,440,000");
         assert_eq!(plan.routes.len(), 3);
-        assert_eq!(plan.routes[0].difference, "+19,73");
+        assert_eq!(plan.routes[0].difference, "+19.73");
         assert_eq!(
             plan.routes[0].details[1],
-            super::RuloDetail::Profit("+19.730".to_owned())
+            super::RuloDetail::Profit("+19,730".to_owned())
         );
         assert_eq!(plan.routes[2].label, "USDT");
     }
@@ -365,9 +341,9 @@ mod tests {
         assert_eq!(
             evaluate_rulo(&input),
             RuloEvaluation::Routes(super::RuloPlan {
-                official: "1.440".to_owned(),
-                base_usd: "1.000".to_owned(),
-                base_ars: "1.440.000".to_owned(),
+                official: "1,440".to_owned(),
+                base_usd: "1,000".to_owned(),
+                base_ars: "1,440,000".to_owned(),
                 routes: Vec::new(),
             })
         );
@@ -378,14 +354,14 @@ mod tests {
         let evaluation = evaluate_rulo(&complete_input());
         let spanish = render_rulo(&evaluation, Locale::Es);
         assert!(spanish.starts_with(
-            "Rulos desde el oficial\nOficial: $1.440\nInvertís 1.000 USD = $1.440.000\n"
+            "Rulos desde el oficial\nOficial: $1,440\nInvertís 1,000 USD = $1,440,000\n"
         ));
-        assert!(spanish.contains("Ganancia: +19.730 ARS"));
+        assert!(spanish.contains("Ganancia: +19,730 ARS"));
         assert!(spanish.contains("Ruta: USD→USDT BUENBIT, USDT→ARS BUENBIT"));
         let english = render_rulo(&evaluation, Locale::En);
         assert!(english.starts_with("Arbitrage from the official rate"));
         assert!(english.contains("Profit: -10,000 ARS"));
-        assert!(spanish.contains("MEP (AL30 CI): +1,37%"));
+        assert!(spanish.contains("MEP (AL30 CI): +1.37%"));
         assert!(spanish.contains("Blue"));
 
         assert_eq!(

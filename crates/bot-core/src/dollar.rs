@@ -125,7 +125,7 @@ pub fn render_dollar_rates(
                 (Locale::En, "Banda techo") => "Upper band",
                 _ => rate.name,
             };
-            let number = |value: &str| crate::output_format::localized_number(value, locale);
+            let number = |value: &str| crate::output_format::readable_number(value);
             let change = rate.change.map_or_else(
                 || crate::menu_ui::localized(locale, "sin datos", "no data").to_owned(),
                 |change| {
@@ -228,7 +228,7 @@ mod tests {
         assert_eq!(
             render_dollar_rates(&rates, Some(&bands), 24, Locale::Es).as_deref(),
             Some(
-                "Dólar en pesos, variación 24h\n\nBanda piso: $950,12 (+0,25%)\nMayorista: $1.400 (+7,69%)\nTCRM 100: $1.410 (-0,5%)\nBlue: $1.415 (0%)\nOficial: $1.420 (+2%)\nBanda techo: $1.460,34 (-0,1%)"
+                "Dólar en pesos, variación 24h\n\nBanda piso: $950.12 (+0.25%)\nMayorista: $1,400 (+7.69%)\nTCRM 100: $1,410 (-0.5%)\nBlue: $1,415 (0%)\nOficial: $1,420 (+2%)\nBanda techo: $1,460.34 (-0.1%)"
             )
         );
     }

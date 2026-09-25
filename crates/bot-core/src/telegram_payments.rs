@@ -5,7 +5,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::command_parsing::parse_command;
-use crate::credit_units::{CreditUnits, format_credit_units_for};
+use crate::credit_units::{CreditUnits, display_credit_units};
 use crate::locale::Locale;
 use crate::telegram_actions::{
     InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, SendMessage, TelegramAction,
@@ -64,14 +64,10 @@ pub fn invoice_payload_locale(payload: &str) -> Option<&str> {
 }
 
 /// Pack sizes are whole credits, so buttons drop the ",00".
-fn whole_credits(units: i64, locale: Locale) -> String {
-    let formatted = format_credit_units_for(CreditUnits::new(units), locale);
-    let decimals = match locale {
-        Locale::Es => ",00",
-        Locale::En => ".00",
-    };
+fn whole_credits(units: i64) -> String {
+    let formatted = display_credit_units(CreditUnits::new(units));
     formatted
-        .strip_suffix(decimals)
+        .strip_suffix(".00")
         .map_or_else(|| formatted.clone(), ToOwned::to_owned)
 }
 
@@ -80,8 +76,8 @@ fn topup_keyboard(locale: Locale) -> InlineKeyboardMarkup {
         inline_keyboard: DEFAULT_BILLING_PACKS
             .iter()
             .map(|(id, xtr_amount, credits_awarded)| {
-                let credits = whole_credits(*credits_awarded, locale);
-                let stars = crate::output_format::localized_number(&xtr_amount.to_string(), locale);
+                let credits = whole_credits(*credits_awarded);
+                let stars = crate::output_format::readable_number(&xtr_amount.to_string());
                 vec![InlineKeyboardButton {
                     text: match locale {
                         Locale::Es => format!("{credits} créditos por {stars} ⭐"),
@@ -221,7 +217,7 @@ pub fn plan_balance_command(
 
 #[must_use]
 pub fn balance_reply(user_balance: i64, chat_balance: Option<i64>, locale: Locale) -> String {
-    let user = format_credit_units_for(CreditUnits::new(user_balance), locale);
+    let user = display_credit_units(CreditUnits::new(user_balance));
     match (chat_balance, locale) {
         (None, Locale::Es) => {
             format!("Saldo de IA: {user} créditos\n\nCargá más con /topup")
@@ -230,13 +226,13 @@ pub fn balance_reply(user_balance: i64, chat_balance: Option<i64>, locale: Local
             format!("AI balance: {user} credits\n\nAdd more with /topup")
         }
         (Some(chat), Locale::Es) => {
-            let chat = format_credit_units_for(CreditUnits::new(chat), locale);
+            let chat = display_credit_units(CreditUnits::new(chat));
             format!(
                 "Saldos de IA\n\nTuyo: {user} créditos\nDel grupo: {chat} créditos\n\nPrimero uso tu saldo y, si no alcanza, el del grupo.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
             )
         }
         (Some(chat), Locale::En) => {
-            let chat = format_credit_units_for(CreditUnits::new(chat), locale);
+            let chat = display_credit_units(CreditUnits::new(chat));
             format!(
                 "AI balances\n\nYours: {user} credits\nGroup: {chat} credits\n\nI use your balance first, then the group's.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
             )
@@ -275,7 +271,7 @@ fn invoice_action(
     pack: &BillingPackTerms,
     locale: Locale,
 ) -> TelegramAction {
-    let credits = whole_credits(pack.credits_awarded, locale);
+    let credits = whole_credits(pack.credits_awarded);
     let (title, description, label) = match locale {
         Locale::Es => (
             format!("{credits} créditos de IA"),
@@ -407,8 +403,8 @@ pub fn successful_payment_reply(
     inserted: bool,
     locale: Locale,
 ) -> String {
-    let credits = format_credit_units_for(CreditUnits::new(credits_awarded), locale);
-    let balance = format_credit_units_for(CreditUnits::new(user_balance), locale);
+    let credits = display_credit_units(CreditUnits::new(credits_awarded));
+    let balance = display_credit_units(CreditUnits::new(user_balance));
     match (inserted, locale) {
         (true, Locale::Es) => {
             format!("Recarga acreditada: +{credits} créditos\nSaldo personal: {balance} créditos")
@@ -879,7 +875,7 @@ mod tests {
     fn balance_replies_match_private_and_group_credit_formatting() {
         assert_eq!(
             balance_reply(4_200, None, Locale::Es),
-            "Saldo de IA: 42,00 créditos\n\nCargá más con /topup"
+            "Saldo de IA: 42.00 créditos\n\nCargá más con /topup"
         );
         assert_eq!(
             balance_reply(4_200, None, Locale::En),
@@ -887,7 +883,7 @@ mod tests {
         );
         assert_eq!(
             balance_reply(3_000, Some(12_000), Locale::Es),
-            "Saldos de IA\n\nTuyo: 30,00 créditos\nDel grupo: 120,00 créditos\n\nPrimero uso tu saldo y, si no alcanza, el del grupo.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
+            "Saldos de IA\n\nTuyo: 30.00 créditos\nDel grupo: 120.00 créditos\n\nPrimero uso tu saldo y, si no alcanza, el del grupo.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
         );
         assert_eq!(
             balance_reply(3_000, Some(12_000), Locale::En),
@@ -1095,7 +1091,7 @@ mod tests {
     fn successful_payment_replies_preserve_exact_credit_format_and_locale() {
         assert_eq!(
             successful_payment_reply(5_000, 5_300, true, Locale::Es),
-            "Recarga acreditada: +50,00 créditos\nSaldo personal: 53,00 créditos"
+            "Recarga acreditada: +50.00 créditos\nSaldo personal: 53.00 créditos"
         );
         assert_eq!(
             successful_payment_reply(5_000, 5_300, true, Locale::En),
@@ -1103,7 +1099,7 @@ mod tests {
         );
         assert_eq!(
             successful_payment_reply(5_000, 5_300, false, Locale::Es),
-            "Ese pago ya estaba acreditado\nSaldo personal: 53,00 créditos"
+            "Ese pago ya estaba acreditado\nSaldo personal: 53.00 créditos"
         );
         assert_eq!(
             successful_payment_reply(5_000, 5_300, false, Locale::En),

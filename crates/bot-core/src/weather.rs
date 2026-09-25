@@ -113,7 +113,7 @@ fn capitalized(value: &str) -> String {
 
 #[must_use]
 pub fn render_weather(observation: &WeatherObservation, locale: Locale) -> String {
-    let number = |value: &str| crate::output_format::localized_number(value, locale);
+    let number = |value: &str| crate::output_format::readable_number(value);
     let visibility = format!(
         "{} km",
         number(&format!("{:.1}", observation.visibility_meters / 1_000.0))
@@ -273,7 +273,7 @@ mod tests {
         };
         assert_eq!(
             render_weather(&observation, Locale::Es),
-            "Example City, Exampleland\nMayormente despejado, sensación térmica 19,5 °C\n\nProbabilidad de lluvia: 20%\nNubosidad: 30%\nVisibilidad: 15,0 km"
+            "Example City, Exampleland\nMayormente despejado, sensación térmica 19.5 °C\n\nProbabilidad de lluvia: 20%\nNubosidad: 30%\nVisibilidad: 15.0 km"
         );
         assert!(
             render_weather(&observation, Locale::En).contains("Mostly clear, feels like 19.5 °C")

@@ -151,10 +151,10 @@ pub fn format_credit_units(units: CreditUnits) -> String {
     format!("{sign}{whole}.{decimal:02}")
 }
 
-/// Credit amount as a reader expects it: `1.234,50` in Spanish, `1,234.50` in English.
+/// Credit amount for display, with thousands grouped: `1,234.50`.
 #[must_use]
-pub fn format_credit_units_for(units: CreditUnits, locale: crate::locale::Locale) -> String {
-    crate::output_format::localized_number(&format_credit_units(units), locale)
+pub fn display_credit_units(units: CreditUnits) -> String {
+    crate::output_format::readable_number(&format_credit_units(units))
 }
 
 #[cfg(test)]

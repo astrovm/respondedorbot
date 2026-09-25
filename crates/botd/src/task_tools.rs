@@ -7,7 +7,7 @@ use bot_adapters::billing_read::BillingRepository;
 use bot_adapters::openrouter_chat::OpenRouterPricingCache;
 use bot_adapters::redis_task_store::RedisTaskStore;
 use bot_adapters::task_record::TaskRecordDocument;
-use bot_core::credit_units::{CreditUnits, format_credit_units_for};
+use bot_core::credit_units::{CreditUnits, display_credit_units};
 use bot_core::locale::Locale;
 use bot_core::scheduled_tasks::{
     ScheduledTask, TaskId, TaskSchedule, initial_next_run, parse_weekday,
@@ -632,8 +632,8 @@ fn task_not_found(locale: Locale) -> &'static str {
 }
 
 pub fn task_credit_insufficient(balance: i64, required: i64, locale: Locale) -> String {
-    let balance = format_credit_units_for(CreditUnits::new(balance), locale);
-    let required = format_credit_units_for(CreditUnits::new(required), locale);
+    let balance = display_credit_units(CreditUnits::new(balance));
+    let required = display_credit_units(CreditUnits::new(required));
     match locale {
         Locale::Es => format!(
             "No te alcanzan los créditos personales para esa tarea: tenés {balance} y necesitás {required}\nCargá con /topup antes de crearla"

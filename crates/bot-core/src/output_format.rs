@@ -53,11 +53,11 @@ pub fn quote(
     )
 }
 
-/// Regroup a plain decimal such as `-24402.5` for the reader: Argentine
-/// `-24.402,5` in Spanish, `-24,402.5` in English. Anything that is not a
-/// plain decimal is returned unchanged.
+/// Group a plain decimal such as `-24402.5` as `-24,402.5`. The bot uses a dot
+/// for decimals in every language. Anything that is not a plain decimal is
+/// returned unchanged.
 #[must_use]
-pub fn localized_number(text: &str, locale: crate::locale::Locale) -> String {
+pub fn readable_number(text: &str) -> String {
     let (sign, unsigned) = match text.chars().next() {
         Some(sign @ ('+' | '-')) => (sign.to_string(), &text[1..]),
         _ => (String::new(), text),
@@ -75,19 +75,15 @@ pub fn localized_number(text: &str, locale: crate::locale::Locale) -> String {
     {
         return text.to_owned();
     }
-    let (group, decimal) = match locale {
-        crate::locale::Locale::Es => ('.', ','),
-        crate::locale::Locale::En => (',', '.'),
-    };
     let mut grouped = String::with_capacity(text.len() + integer.len() / 3);
     for (index, digit) in integer.chars().enumerate() {
         if index > 0 && (integer.len() - index) % 3 == 0 {
-            grouped.push(group);
+            grouped.push(',');
         }
         grouped.push(digit);
     }
     match fraction {
-        Some(fraction) => format!("{sign}{grouped}{decimal}{fraction}"),
+        Some(fraction) => format!("{sign}{grouped}.{fraction}"),
         None => format!("{sign}{grouped}"),
     }
 }
@@ -97,15 +93,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn localized_numbers_use_argentine_and_english_grouping() {
-        use crate::locale::Locale;
-        assert_eq!(localized_number("24402.5", Locale::Es), "24.402,5");
-        assert_eq!(localized_number("-1234567", Locale::Es), "-1.234.567");
-        assert_eq!(localized_number("+62.68", Locale::Es), "+62,68");
-        assert_eq!(localized_number("24402.5", Locale::En), "24,402.5");
-        assert_eq!(localized_number("150", Locale::En), "150");
+    fn readable_numbers_group_thousands_and_keep_the_decimal_dot() {
+        assert_eq!(readable_number("24402.5"), "24,402.5");
+        assert_eq!(readable_number("-1234567"), "-1,234,567");
+        assert_eq!(readable_number("+62.68"), "+62.68");
+        assert_eq!(readable_number("150"), "150");
         for raw in ["N/A", "nan", "", "1.", ".5", "1e-20", "+"] {
-            assert_eq!(localized_number(raw, Locale::Es), raw);
+            assert_eq!(readable_number(raw), raw);
         }
     }
     #[test]

@@ -8896,9 +8896,9 @@ mod tests {
         assert!(
             message
                 .text
-                .starts_with("Rulos desde el oficial\nOficial: $1.440")
+                .starts_with("Rulos desde el oficial\nOficial: $1,440")
         );
-        assert!(message.text.contains("Ganancia: +19.730 ARS"));
+        assert!(message.text.contains("Ganancia: +19,730 ARS"));
         assert!(
             message
                 .text
@@ -16248,7 +16248,7 @@ mod tests {
         else {
             return;
         };
-        assert_eq!(text, "Gastos de IA\n\n26/08 14:00 | respuesta: 0,04 cr");
+        assert_eq!(text, "Gastos de IA\n\n26/08 14:00 | respuesta: 0.04 cr");
         assert_eq!(
             reply_markup
                 .as_ref()
@@ -17002,7 +17002,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "Saldo de IA: 42,00 créditos\n\nCargá más con /topup"
+            "Saldo de IA: 42.00 créditos\n\nCargá más con /topup"
         );
         assert_eq!(
             private.state_diagnostics(),
@@ -17152,7 +17152,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "Gastos de IA\n\n26/08 14:32 | 0,08 cr\n  respuesta 0,03 cr\n  web 0,05 cr"
+            "Gastos de IA\n\n26/08 14:32 | 0.08 cr\n  respuesta 0.03 cr\n  web 0.05 cr"
         );
         let Some(keyboard) = message.reply_markup.as_ref() else {
             return;
@@ -17304,7 +17304,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "Pasaste 0,10 créditos al grupo\n\nTu saldo: 2,85 créditos\nSaldo del grupo: 12,15 créditos"
+            "Pasaste 0.10 créditos al grupo\n\nTu saldo: 2.85 créditos\nSaldo del grupo: 12.15 créditos"
         );
 
         let config = Config {

@@ -1,7 +1,7 @@
 //! Pure plans and bilingual replies for user-facing billing commands.
 
 use crate::command_parsing::parse_command;
-use crate::credit_units::{CreditUnits, format_credit_units_for, parse_credit_units};
+use crate::credit_units::{CreditUnits, display_credit_units, parse_credit_units};
 use crate::locale::Locale;
 use crate::telegram_actions::{SendMessage, TelegramAction};
 use crate::telegram_input::{ChatId, MessageId};
@@ -118,7 +118,7 @@ pub fn plan_transfer_command(
 
 #[must_use]
 pub fn transfer_result_reply(amount: i64, result: TransferResult, locale: Locale) -> String {
-    let user_balance = format_credit_units_for(CreditUnits::new(result.user_balance), locale);
+    let user_balance = display_credit_units(CreditUnits::new(result.user_balance));
     if !result.transferred {
         return match locale {
             Locale::Es => format!(
@@ -132,8 +132,8 @@ pub fn transfer_result_reply(amount: i64, result: TransferResult, locale: Locale
         };
     }
 
-    let amount = format_credit_units_for(CreditUnits::new(amount), locale);
-    let chat_balance = format_credit_units_for(CreditUnits::new(result.chat_balance), locale);
+    let amount = display_credit_units(CreditUnits::new(amount));
+    let chat_balance = display_credit_units(CreditUnits::new(result.chat_balance));
     match locale {
         Locale::Es => format!(
             "Pasaste {amount} créditos al grupo\n\nTu saldo: {user_balance} créditos\nSaldo del grupo: {chat_balance} créditos"
@@ -243,7 +243,7 @@ mod tests {
                 },
                 Locale::Es,
             ),
-            "Pasaste 0,10 créditos al grupo\n\nTu saldo: 2,85 créditos\nSaldo del grupo: 12,15 créditos"
+            "Pasaste 0.10 créditos al grupo\n\nTu saldo: 2.85 créditos\nSaldo del grupo: 12.15 créditos"
         );
         assert_eq!(
             transfer_result_reply(
@@ -267,7 +267,7 @@ mod tests {
                 },
                 Locale::Es,
             ),
-            "No te alcanza el saldo personal: tenés 0,70 créditos\nProbá con un monto menor o cargá con /topup"
+            "No te alcanza el saldo personal: tenés 0.70 créditos\nProbá con un monto menor o cargá con /topup"
         );
     }
 }
