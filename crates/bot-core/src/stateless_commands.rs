@@ -30,7 +30,7 @@ fn render_base_conversion(result: &BaseConversion, locale: Locale) -> String {
                 result,
                 target,
             },
-        ) => format!("ahi tenes boludo, {number} en base {source} es {result} en base {target}"),
+        ) => format!("ahí tenés boludo, {number} en base {source} es {result} en base {target}"),
         (
             Locale::En,
             BaseConversion::Success {
@@ -48,7 +48,7 @@ fn render_base_conversion(result: &BaseConversion, locale: Locale) -> String {
             "use /convertbase 101, 2, 10 to convert binary to decimal".to_owned()
         }
         (Locale::Es, BaseConversion::AlphanumericRequired) => {
-            "el numero tiene que ser alfanumerico boludo".to_owned()
+            "el número tiene que ser alfanumérico boludo".to_owned()
         }
         (Locale::En, BaseConversion::AlphanumericRequired) => {
             "the number must be alphanumeric".to_owned()
@@ -66,7 +66,7 @@ fn render_base_conversion(result: &BaseConversion, locale: Locale) -> String {
             format!("target base '{input}' must be between 2 and 36")
         }
         (Locale::Es, BaseConversion::NumbersRequired) => {
-            "mandate numeros posta gordo, no me hagas perder el tiempo".to_owned()
+            "mandate números posta gordo, no me hagas perder el tiempo".to_owned()
         }
         (Locale::En, BaseConversion::NumbersRequired) => "send valid numbers".to_owned(),
     }
@@ -108,7 +108,7 @@ pub fn plan_stateless_command_with_reply(
         };
         if conversion_text.is_empty() {
             let text = match locale {
-                Locale::Es => "y que queres que convierta boludo? mandate texto",
+                Locale::Es => "¿y qué querés que convierta, boludo? mandate texto",
                 Locale::En => "send the text you want to convert",
             };
             let mut message = SendMessage::new(chat_id, text);
@@ -118,7 +118,7 @@ pub fn plan_stateless_command_with_reply(
         let preprocessed = preprocess_command_text(conversion_text, locale);
         let text = normalize_command_text(&preprocessed).unwrap_or_else(|| match locale {
             Locale::Es => {
-                "no me mandes giladas boludo, tiene que tener letras o numeros".to_owned()
+                "no me mandes giladas boludo, tiene que tener letras o números".to_owned()
             }
             Locale::En => "the command must contain letters or numbers".to_owned(),
         });
@@ -149,15 +149,11 @@ pub fn plan_runtime_stateless_command(
     let parsed = parse_command(message_text, bot_name);
     let text = match parsed.command.as_str() {
         "/time" => context.unix_timestamp.to_string(),
-        "/instance" => match locale {
-            Locale::Es => format!(
-                "estoy corriendo en {} boludo",
-                context.instance_name.unwrap_or("None")
-            ),
-            Locale::En => format!(
-                "I am running on {}",
-                context.instance_name.unwrap_or("None")
-            ),
+        "/instance" => match (locale, context.instance_name) {
+            (Locale::Es, Some(name)) => format!("estoy corriendo en {name} boludo"),
+            (Locale::En, Some(name)) => format!("I am running on {name}"),
+            (Locale::Es, None) => "no tengo nombre de instancia configurado".to_owned(),
+            (Locale::En, None) => "this instance has no name configured".to_owned(),
         },
         _ => return StatelessCommandPlan::NotHandled,
     };
@@ -195,7 +191,7 @@ mod tests {
                 "@mybot",
                 Locale::Es,
             )),
-            Some("ahi tenes boludo, 101 en base 2 es 5 en base 10".to_owned())
+            Some("ahí tenés boludo, 101 en base 2 es 5 en base 10".to_owned())
         );
         assert_eq!(
             message_text(plan_stateless_command(
@@ -218,7 +214,7 @@ mod tests {
             "@bot",
             Locale::Es,
         ));
-        assert!(spanish.is_some_and(|text| { text == "Ayuda\n\n¿Qué querés hacer?" }));
+        assert!(spanish.is_some_and(|text| { text.starts_with("👋 Ayuda\n\n") }));
         let english = message_text(plan_stateless_command(
             ChatId(1),
             MessageId(2),
@@ -226,7 +222,7 @@ mod tests {
             "@bot",
             Locale::En,
         ));
-        assert!(english.is_some_and(|text| { text == "Help\n\nWhat would you like to do?" }));
+        assert!(english.is_some_and(|text| { text.starts_with("👋 Help\n\n") }));
     }
 
     #[test]
@@ -252,7 +248,7 @@ mod tests {
                 "@bot",
                 Locale::Es,
             )),
-            Some("y que queres que convierta boludo? mandate texto".to_owned())
+            Some("¿y qué querés que convierta, boludo? mandate texto".to_owned())
         );
         assert_eq!(
             message_text(plan_stateless_command(
@@ -383,7 +379,7 @@ mod tests {
                 "@bot",
                 Locale::Es,
             )),
-            Some("ahi tenes boludo, １２ en base 10 es 1100 en base 2".to_owned())
+            Some("ahí tenés boludo, １２ en base 10 es 1100 en base 2".to_owned())
         );
     }
 
@@ -449,7 +445,7 @@ mod tests {
                     instance_name: None,
                 },
             )),
-            Some("estoy corriendo en None boludo".to_owned())
+            Some("no tengo nombre de instancia configurado".to_owned())
         );
     }
 

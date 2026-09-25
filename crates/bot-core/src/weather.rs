@@ -104,28 +104,47 @@ pub fn weather_description(code: i64, locale: Locale) -> &'static str {
     }
 }
 
+const fn weather_icon(code: i64) -> &'static str {
+    match code {
+        0 => "☀️",
+        1 => "🌤️",
+        2 => "⛅",
+        3 => "☁️",
+        45 | 48 => "🌫️",
+        51..=57 => "🌦️",
+        61..=67 | 80..=82 => "🌧️",
+        71..=77 | 85 | 86 => "🌨️",
+        95..=99 => "⛈️",
+        _ => "🌡️",
+    }
+}
+
+fn capitalized(value: &str) -> String {
+    let mut characters = value.chars();
+    characters.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(characters).collect()
+    })
+}
+
 #[must_use]
 pub fn render_weather(observation: &WeatherObservation, locale: Locale) -> String {
-    let visibility = format!("{:.1}km", observation.visibility_meters / 1_000.0);
-    let description = weather_description(observation.weather_code, locale);
+    let visibility = format!("{:.1} km", observation.visibility_meters / 1_000.0);
+    let icon = weather_icon(observation.weather_code);
+    let description = capitalized(weather_description(observation.weather_code, locale));
     match locale {
         Locale::Es => format!(
-            "- Lugar: {}\n- Temperatura aparente: {}°C\n- Probabilidad de lluvia: {}%\n- Estado: {}\n- Nubosidad: {}%\n- Visibilidad: {}",
+            "{icon} {}\n{description} · sensación térmica {}°C\n\n💧 Probabilidad de lluvia: {}%\n☁️ Nubosidad: {}%\n👁️ Visibilidad: {visibility}",
             observation.location,
             observation.apparent_temperature,
             observation.precipitation_probability,
-            description,
             observation.cloud_cover,
-            visibility
         ),
         Locale::En => format!(
-            "- Location: {}\n- Feels like: {}°C\n- Chance of rain: {}%\n- Condition: {}\n- Cloud cover: {}%\n- Visibility: {}",
+            "{icon} {}\n{description} · feels like {}°C\n\n💧 Chance of rain: {}%\n☁️ Cloud cover: {}%\n👁️ Visibility: {visibility}",
             observation.location,
             observation.apparent_temperature,
             observation.precipitation_probability,
-            description,
             observation.cloud_cover,
-            visibility
         ),
     }
 }
@@ -271,9 +290,26 @@ mod tests {
         };
         assert_eq!(
             render_weather(&observation, Locale::Es),
-            "- Lugar: Example City, Exampleland\n- Temperatura aparente: 19.5°C\n- Probabilidad de lluvia: 20%\n- Estado: mayormente despejado\n- Nubosidad: 30%\n- Visibilidad: 15.0km"
+            "🌤️ Example City, Exampleland\nMayormente despejado · sensación térmica 19.5°C\n\n💧 Probabilidad de lluvia: 20%\n☁️ Nubosidad: 30%\n👁️ Visibilidad: 15.0 km"
         );
-        assert!(render_weather(&observation, Locale::En).contains("Condition: mostly clear"));
+        assert!(
+            render_weather(&observation, Locale::En).contains("Mostly clear · feels like 19.5°C")
+        );
+        for (code, icon) in [
+            (0, "☀️"),
+            (48, "🌫️"),
+            (53, "🌦️"),
+            (81, "🌧️"),
+            (85, "🌨️"),
+            (96, "⛈️"),
+            (999, "🌡️"),
+        ] {
+            let observation = WeatherObservation {
+                weather_code: code,
+                ..observation.clone()
+            };
+            assert!(render_weather(&observation, Locale::En).starts_with(icon));
+        }
         assert_eq!(weather_description(999, Locale::Es), "clima raro");
         assert_eq!(weather_description(999, Locale::En), "unusual weather");
         assert_eq!(

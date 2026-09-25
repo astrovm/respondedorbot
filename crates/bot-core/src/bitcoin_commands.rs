@@ -93,13 +93,13 @@ pub fn render_market_model(
     };
     match (command, locale) {
         (BitcoinCommand::PowerLaw, Locale::Es) => {
-            format!("segun power law btc deberia estar en {value} usd ({valuation})")
+            format!("según power law btc debería estar en {value} usd ({valuation})")
         }
         (BitcoinCommand::PowerLaw, Locale::En) => {
             format!("power law estimates BTC at {value} USD ({valuation})")
         }
         (BitcoinCommand::Rainbow, Locale::Es) => {
-            format!("segun rainbow chart btc deberia estar en {value} usd ({valuation})")
+            format!("según rainbow chart btc debería estar en {value} usd ({valuation})")
         }
         (BitcoinCommand::Rainbow, Locale::En) => {
             format!("rainbow chart estimates BTC at {value} USD ({valuation})")
@@ -167,7 +167,7 @@ mod tests {
                 50_000.0,
                 Locale::Es
             ),
-            "segun rainbow chart btc deberia estar en 97886.11 usd (48.92% regalado gordo)"
+            "según rainbow chart btc debería estar en 97886.11 usd (48.92% regalado gordo)"
         );
     }
 

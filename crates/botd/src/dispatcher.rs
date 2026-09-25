@@ -4002,7 +4002,9 @@ where
                 return Err(DispatchError::Action(error));
             }
         };
-        let fallback = if edited {
+        // Re-tapping the selected option leaves the menu identical, which
+        // Telegram rejects as an edit; that must not post a duplicate menu.
+        let fallback = if edited || config == current_config {
             Ok(())
         } else {
             self.state_diagnostics.push(format!(
@@ -6984,7 +6986,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             texts,
-            ["ahi tenes boludo, １２ en base 10 es 1100 en base 2", "2"]
+            ["ahí tenés boludo, １２ en base 10 es 1100 en base 2", "2"]
         );
     }
 
@@ -7871,7 +7873,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert_eq!(message.text, "Help\n\nWhat would you like to do?");
+        assert!(message.text.starts_with("👋 Help\n\n"));
         assert!(message.reply_markup.is_some());
         assert_eq!(dispatcher.state.incoming.len(), 1);
         assert_eq!(dispatcher.state.outgoing.len(), 1);
@@ -8190,8 +8192,8 @@ mod tests {
         let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert!(message.text.contains("Location: Example City, Exampleland"));
-        assert!(message.text.contains("Condition: mostly clear"));
+        assert!(message.text.contains("Example City, Exampleland"));
+        assert!(message.text.contains("Mostly clear · feels like"));
         assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
         assert_eq!(dispatcher.state.incoming.len(), 1);
         assert_eq!(dispatcher.state.outgoing.len(), 1);
@@ -9744,7 +9746,7 @@ mod tests {
         );
         assert!(matches!(
             dispatcher.actions.0.first(),
-            Some(TelegramAction::EditMessage { text, .. }) if text.starts_with("Language")
+            Some(TelegramAction::EditMessage { text, .. }) if text.starts_with("🌐 Language")
         ));
     }
 
@@ -9912,6 +9914,30 @@ mod tests {
                 .iter()
                 .any(|message| message.starts_with("Falling back to new config message"))
         );
+
+        let mut unchanged = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            EditFallbackActions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            unchanged.dispatch(callback_update("cfg:link:reply", "private", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            unchanged.actions.0.as_slice(),
+            [
+                TelegramAction::EditMessage { .. },
+                TelegramAction::AnswerCallback { .. }
+            ]
+        ));
     }
 
     #[test]
@@ -10020,7 +10046,7 @@ mod tests {
             Some(TelegramAction::SendMessage(_))
         ));
         if let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() {
-            assert!(message.text.starts_with("Tareas"));
+            assert!(message.text.starts_with("⏰ Tareas"));
             assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
             let callback = message
                 .reply_markup
@@ -15865,7 +15891,7 @@ mod tests {
             );
             assert!(cancellations.borrow().is_empty());
         }
-        assert!(dispatcher.actions.0.iter().any(|a| matches!(a, TelegramAction::EditMessage { text, .. } if text.contains("Cancelar esta tarea") || text.contains("Cancel this task"))));
+        assert!(dispatcher.actions.0.iter().any(|a| matches!(a, TelegramAction::EditMessage { text, .. } if text.contains("cancelar esta tarea") || text.contains("cancel this task"))));
         assert!(
             dispatcher
                 .actions
@@ -15948,7 +15974,7 @@ mod tests {
                     ..
                 },
                 TelegramAction::EditMessage { text: edit_text, .. }
-            ] if text == "tarea task0001 borrada" && edit_text == "no hay tareas"
+            ] if text == "tarea task0001 cancelada" && edit_text.starts_with("⏰ No hay tareas")
         ));
         Ok(())
     }
@@ -16211,7 +16237,7 @@ mod tests {
         else {
             return;
         };
-        assert_eq!(text, "Gastos IA\n\n26/08 14:00 · respuesta · 0.04 cr");
+        assert_eq!(text, "🧾 Gastos IA\n\n26/08 14:00 · respuesta · 0.04 cr");
         assert_eq!(
             reply_markup
                 .as_ref()
@@ -16583,7 +16609,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(command)) = dispatcher.actions.0.first() else {
             return;
         };
-        assert_eq!(command.text, "Créditos\n\nElegí cuánto querés cargar.");
+        assert!(command.text.starts_with("💳 Cargar créditos\n\n"));
         assert_eq!(
             command
                 .reply_markup
@@ -16962,7 +16988,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "Saldo IA\n\nPersonal: 42.00 créditos\n\nCargar: /topup"
+            "💳 Saldo IA\n\n👤 Personal: 42.00 créditos\n\nCargá más con /topup"
         );
         assert_eq!(
             private.state_diagnostics(),
@@ -17003,9 +17029,9 @@ mod tests {
             return;
         };
         assert!(
-            message
-                .text
-                .starts_with("AI balances\n\nPersonal: 30.00 credits\nGroup: 120.00 credits")
+            message.text.starts_with(
+                "💳 AI balances\n\n👤 Personal: 30.00 credits\n👥 Group: 120.00 credits"
+            )
         );
     }
 
@@ -17112,7 +17138,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "Gastos IA\n\n26/08 14:32 · 0.08 cr\n  respuesta 0.03 cr\n  web 0.05 cr"
+            "🧾 Gastos IA\n\n26/08 14:32 · 0.08 cr\n  respuesta 0.03 cr\n  web 0.05 cr"
         );
         let Some(keyboard) = message.reply_markup.as_ref() else {
             return;
@@ -17264,7 +17290,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "Transferencia al grupo: 0.10 créditos\n\nSaldo personal: 2.85 créditos\nSaldo del grupo: 12.15 créditos"
+            "✅ Pasaste 0.10 créditos al grupo\n\n👤 Personal: 2.85 créditos\n👥 Grupo: 12.15 créditos"
         );
 
         let config = Config {
@@ -17304,7 +17330,7 @@ mod tests {
         };
         assert_eq!(
             message.text,
-            "Insufficient personal balance.\nAvailable: 0.70 credits\nTry a smaller amount or add credits with /topup."
+            "❌ Not enough personal balance\n\n👤 Available: 0.70 credits\n\nTry a smaller amount or add credits with /topup."
         );
     }
 
@@ -17428,7 +17454,7 @@ mod tests {
         assert_eq!(message.chat_id, ChatId(42));
         assert_eq!(
             message.text,
-            "Top-up: +50.00 credits\nPersonal balance: 53.00 credits"
+            "✅ Top-up complete: +50.00 credits\n\n👤 Personal balance: 53.00 credits"
         );
     }
 

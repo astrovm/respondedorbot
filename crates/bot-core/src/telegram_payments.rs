@@ -118,13 +118,23 @@ pub fn plan_topup_command(
                 (Locale::Es, true) => "la recarga va por privado, abrime en dm".to_owned(),
                 (Locale::En, true) => "top-ups are private, open a DM with me".to_owned(),
             },
-            None,
+            (!username.is_empty()).then(|| InlineKeyboardMarkup {
+                inline_keyboard: vec![vec![InlineKeyboardButton {
+                    text: match locale {
+                        Locale::Es => "💬 Abrir chat privado".to_owned(),
+                        Locale::En => "💬 Open private chat".to_owned(),
+                    },
+                    url: Some(format!("https://t.me/{username}")),
+                    callback_data: None,
+                    copy_text: None,
+                }]],
+            }),
         )
     } else {
         (
             match locale {
-                Locale::Es => "Créditos\n\nElegí cuánto querés cargar.",
-                Locale::En => "Credits\n\nChoose how much to add.",
+                Locale::Es => "💳 Cargar créditos\n\nElegí un pack. Se paga con Telegram Stars ⭐ y los créditos van a tu saldo personal.",
+                Locale::En => "💳 Add credits\n\nChoose a pack. You pay with Telegram Stars ⭐ and the credits go to your personal balance.",
             }
             .to_owned(),
             Some(topup_keyboard(locale)),
@@ -204,21 +214,21 @@ pub fn balance_reply(user_balance: i64, chat_balance: Option<i64>, locale: Local
     let user = format_credit_units(CreditUnits::new(user_balance));
     match (chat_balance, locale) {
         (None, Locale::Es) => {
-            format!("Saldo IA\n\nPersonal: {user} créditos\n\nCargar: /topup")
+            format!("💳 Saldo IA\n\n👤 Personal: {user} créditos\n\nCargá más con /topup")
         }
         (None, Locale::En) => {
-            format!("AI balance\n\nPersonal: {user} credits\n\nAdd credits: /topup")
+            format!("💳 AI balance\n\n👤 Personal: {user} credits\n\nAdd more with /topup")
         }
         (Some(chat), Locale::Es) => {
             let chat = format_credit_units(CreditUnits::new(chat));
             format!(
-                "Saldos IA\n\nPersonal: {user} créditos\nGrupo: {chat} créditos\n\nSi no alcanza tu saldo, uso el del grupo.\nCargar: /topup por privado\nTransferir al grupo: /transfer <monto>"
+                "💳 Saldos IA\n\n👤 Personal: {user} créditos\n👥 Grupo: {chat} créditos\n\nPrimero uso tu saldo; si no alcanza, el del grupo.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
             )
         }
         (Some(chat), Locale::En) => {
             let chat = format_credit_units(CreditUnits::new(chat));
             format!(
-                "AI balances\n\nPersonal: {user} credits\nGroup: {chat} credits\n\nI use the group balance when yours runs out.\nAdd credits: /topup in private\nTransfer to group: /transfer <amount>"
+                "💳 AI balances\n\n👤 Personal: {user} credits\n👥 Group: {chat} credits\n\nI use your balance first, then the group's.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
             )
         }
     }
@@ -394,10 +404,14 @@ pub fn successful_payment_reply(
     let balance = format_credit_units(CreditUnits::new(user_balance));
     match (inserted, locale) {
         (true, Locale::Es) => {
-            format!("Recarga: +{credits} créditos\nSaldo personal: {balance} créditos")
+            format!(
+                "✅ Recarga lista: +{credits} créditos\n\n👤 Saldo personal: {balance} créditos"
+            )
         }
         (true, Locale::En) => {
-            format!("Top-up: +{credits} credits\nPersonal balance: {balance} credits")
+            format!(
+                "✅ Top-up complete: +{credits} credits\n\n👤 Personal balance: {balance} credits"
+            )
         }
         (false, Locale::Es) => {
             format!("Ese pago ya fue acreditado.\nSaldo personal: {balance} créditos")
@@ -716,7 +730,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(private)) = private else {
             return;
         };
-        assert_eq!(private.text, "Credits\n\nChoose how much to add.");
+        assert!(private.text.starts_with("💳 Add credits\n\n"));
         assert_eq!(private.reply_to_message_id, Some(MessageId(7)));
         let keyboard =
             private
@@ -766,7 +780,13 @@ mod tests {
                 return;
             };
             assert_eq!(message.text, expected);
-            assert!(message.reply_markup.is_none());
+            let url = message
+                .reply_markup
+                .and_then(|markup| markup.inline_keyboard.into_iter().flatten().next())
+                .and_then(|button| button.url);
+            let expected_url = (chat_type == "group" && !bot_name.is_empty())
+                .then(|| "https://t.me/mybot".to_owned());
+            assert_eq!(url, expected_url);
         }
         assert_eq!(
             plan_topup_command(
@@ -857,19 +877,19 @@ mod tests {
     fn balance_replies_match_private_and_group_credit_formatting() {
         assert_eq!(
             balance_reply(4_200, None, Locale::Es),
-            "Saldo IA\n\nPersonal: 42.00 créditos\n\nCargar: /topup"
+            "💳 Saldo IA\n\n👤 Personal: 42.00 créditos\n\nCargá más con /topup"
         );
         assert_eq!(
             balance_reply(4_200, None, Locale::En),
-            "AI balance\n\nPersonal: 42.00 credits\n\nAdd credits: /topup"
+            "💳 AI balance\n\n👤 Personal: 42.00 credits\n\nAdd more with /topup"
         );
         assert_eq!(
             balance_reply(3_000, Some(12_000), Locale::Es),
-            "Saldos IA\n\nPersonal: 30.00 créditos\nGrupo: 120.00 créditos\n\nSi no alcanza tu saldo, uso el del grupo.\nCargar: /topup por privado\nTransferir al grupo: /transfer <monto>"
+            "💳 Saldos IA\n\n👤 Personal: 30.00 créditos\n👥 Grupo: 120.00 créditos\n\nPrimero uso tu saldo; si no alcanza, el del grupo.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
         );
         assert_eq!(
             balance_reply(3_000, Some(12_000), Locale::En),
-            "AI balances\n\nPersonal: 30.00 credits\nGroup: 120.00 credits\n\nI use the group balance when yours runs out.\nAdd credits: /topup in private\nTransfer to group: /transfer <amount>"
+            "💳 AI balances\n\n👤 Personal: 30.00 credits\n👥 Group: 120.00 credits\n\nI use your balance first, then the group's.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
         );
     }
 
@@ -1071,11 +1091,11 @@ mod tests {
     fn successful_payment_replies_preserve_exact_credit_format_and_locale() {
         assert_eq!(
             successful_payment_reply(5_000, 5_300, true, Locale::Es),
-            "Recarga: +50.00 créditos\nSaldo personal: 53.00 créditos"
+            "✅ Recarga lista: +50.00 créditos\n\n👤 Saldo personal: 53.00 créditos"
         );
         assert_eq!(
             successful_payment_reply(5_000, 5_300, true, Locale::En),
-            "Top-up: +50.00 credits\nPersonal balance: 53.00 credits"
+            "✅ Top-up complete: +50.00 credits\n\n👤 Personal balance: 53.00 credits"
         );
         assert_eq!(
             successful_payment_reply(5_000, 5_300, false, Locale::Es),

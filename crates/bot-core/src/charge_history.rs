@@ -303,14 +303,14 @@ fn charged_units(metadata: &Map<String, Value>, event_type: &str) -> i64 {
 
 fn label(locale: Locale, kind: &str) -> &'static str {
     match (locale, kind) {
-        (Locale::Es, "title") => "Gastos IA",
-        (Locale::En, "title") => "AI expenses",
+        (Locale::Es, "title") => "🧾 Gastos IA",
+        (Locale::En, "title") => "🧾 AI expenses",
         (Locale::Es, "empty") => "no tenés gastos IA recientes",
         (Locale::En, "empty") => "you have no recent AI expenses",
-        (Locale::Es, "previous") => "‹ Anterior",
-        (Locale::En, "previous") => "‹ Previous",
-        (Locale::Es, "next") => "Siguiente ›",
-        (Locale::En, "next") => "Next ›",
+        (Locale::Es, "previous") => "‹ Más recientes",
+        (Locale::En, "previous") => "‹ Newer",
+        (Locale::Es, "next") => "Más antiguos ›",
+        (Locale::En, "next") => "Older ›",
         (Locale::Es, "pending") => "pendiente",
         (Locale::En, "pending") => "pending",
         (Locale::Es, "group") => "grupo",
@@ -860,12 +860,12 @@ mod tests {
         let (text, keyboard) = render_charge_history_page(&page, 55, 2, -180, Locale::Es);
         assert_eq!(
             text,
-            "Gastos IA\n\n26/08 14:32 · 0.08 cr\n  respuesta 0.03 cr\n  web (2x) 0.05 cr\n\n26/08 13:00 · audio · 0.07 cr · grupo"
+            "🧾 Gastos IA\n\n26/08 14:32 · 0.08 cr\n  respuesta 0.03 cr\n  web (2x) 0.05 cr\n\n26/08 13:00 · audio · 0.07 cr · grupo"
         );
         let Some(keyboard) = keyboard else {
             return;
         };
-        assert_eq!(keyboard.inline_keyboard[0][0].text, "Siguiente ›");
+        assert_eq!(keyboard.inline_keyboard[0][0].text, "Más antiguos ›");
         assert_eq!(
             keyboard.inline_keyboard[0][0].callback_data.as_deref(),
             Some("chg:55:2:o:29:-180")
@@ -899,11 +899,11 @@ mod tests {
         };
         assert_eq!(
             render_charge_history_page(&page, 55, 10, -180, Locale::Es).0,
-            "Gastos IA\n\n26/08 14:32 · transcripción · 0.60 cr"
+            "🧾 Gastos IA\n\n26/08 14:32 · transcripción · 0.60 cr"
         );
         assert_eq!(
             render_charge_history_page(&page, 55, 10, -180, Locale::En).0,
-            "AI expenses\n\n26/08 14:32 · transcript · 0.60 cr"
+            "🧾 AI expenses\n\n26/08 14:32 · transcript · 0.60 cr"
         );
     }
 
@@ -952,7 +952,7 @@ mod tests {
         };
         assert_eq!(
             render_charge_history_page(&page, 55, 10, 0, Locale::Es).0,
-            "Gastos IA\n\n26/08 17:00 · 1.17 cr · grupo 1.05 · personal 0.12\n  respuesta 0.08 cr\n  memoria 0.02 cr\n  memoria 1.07 cr · pendiente"
+            "🧾 Gastos IA\n\n26/08 17:00 · 1.17 cr · grupo 1.05 · personal 0.12\n  respuesta 0.08 cr\n  memoria 0.02 cr\n  memoria 1.07 cr · pendiente"
         );
         let empty = ChargeHistoryPage {
             groups: Vec::new(),

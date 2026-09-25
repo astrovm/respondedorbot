@@ -397,7 +397,7 @@ mod tests {
         };
         assert_eq!(
             tool.execute(request.clone(), "call").output,
-            "- Location: Synthetic City\n- Feels like: 20°C\n- Chance of rain: 15%\n- Condition: mostly clear\n- Cloud cover: 30%\n- Visibility: 12.5km"
+            "🌤️ Synthetic City\nMostly clear · feels like 20°C\n\n💧 Chance of rain: 15%\n☁️ Cloud cover: 30%\n👁️ Visibility: 12.5 km"
         );
         tool.source.0.observation = None;
         assert_eq!(

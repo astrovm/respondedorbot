@@ -457,23 +457,23 @@ fn locale_code(locale: Locale) -> &'static str {
 
 fn trigger_error(error: TriggerError, locale: Locale) -> String {
     match (error, locale) {
-        (TriggerError::Required, Locale::Es) => "necesito usar algun parametro de tiempo: delay_seconds (una vez), interval_seconds (repetir), o trigger_config.".to_owned(),
+        (TriggerError::Required, Locale::Es) => "necesito usar algún parámetro de tiempo: delay_seconds (una vez), interval_seconds (repetir), o trigger_config.".to_owned(),
         (TriggerError::Required, Locale::En) => "provide delay_seconds, interval_seconds, or trigger_config".to_owned(),
         (TriggerError::UnsupportedType, Locale::Es) => "trigger_config.type debe ser 'interval' o 'cron'".to_owned(),
         (TriggerError::UnsupportedType, Locale::En) => "trigger_config.type must be 'interval' or 'cron'".to_owned(),
         (TriggerError::DelayPositive, Locale::Es) => "delay_seconds debe ser un entero positivo".to_owned(),
         (TriggerError::DelayPositive, Locale::En) => "delay_seconds must be a positive integer".to_owned(),
-        (TriggerError::DelayMaximum, Locale::Es) => "el maximo es 10 años".to_owned(),
+        (TriggerError::DelayMaximum, Locale::Es) => "el máximo es 10 años".to_owned(),
         (TriggerError::DelayMaximum, Locale::En) => "the maximum delay is 10 years".to_owned(),
-        (TriggerError::IntervalMinimum, Locale::Es) => "el intervalo minimo es 300 segundos (5 min)".to_owned(),
+        (TriggerError::IntervalMinimum, Locale::Es) => "el intervalo mínimo es 300 segundos (5 min)".to_owned(),
         (TriggerError::IntervalMinimum, Locale::En) => "the minimum interval is 300 seconds (5 minutes)".to_owned(),
-        (TriggerError::IntervalMaximum, Locale::Es) => "el intervalo maximo es 7 dias".to_owned(),
+        (TriggerError::IntervalMaximum, Locale::Es) => "el intervalo máximo es 7 días".to_owned(),
         (TriggerError::IntervalMaximum, Locale::En) => "the maximum interval is 7 days".to_owned(),
         (TriggerError::DaysRequired, Locale::Es) => "days es requerido para trigger interval".to_owned(),
         (TriggerError::DaysRequired, Locale::En) => "days is required for an interval trigger".to_owned(),
         (TriggerError::DaysPositive, Locale::Es) => "days debe ser un entero positivo".to_owned(),
         (TriggerError::DaysPositive, Locale::En) => "days must be a positive integer".to_owned(),
-        (TriggerError::DaysMaximum, Locale::Es) => "el maximo son 90 dias".to_owned(),
+        (TriggerError::DaysMaximum, Locale::Es) => "el máximo son 90 días".to_owned(),
         (TriggerError::DaysMaximum, Locale::En) => "the maximum interval is 90 days".to_owned(),
         (TriggerError::HourRequired, Locale::Es) => "hour es requerido para trigger cron".to_owned(),
         (TriggerError::HourRequired, Locale::En) => "hour is required for a cron trigger".to_owned(),
@@ -483,9 +483,9 @@ fn trigger_error(error: TriggerError, locale: Locale) -> String {
         (TriggerError::MinuteRequired, Locale::En) => "minute is required for a cron trigger".to_owned(),
         (TriggerError::MinuteRange, Locale::Es) => "minute debe ser 0-59".to_owned(),
         (TriggerError::MinuteRange, Locale::En) => "minute must be between 0 and 59".to_owned(),
-        (TriggerError::Weekday { value }, Locale::Es) => format!("day_of_week invalido: {value}"),
+        (TriggerError::Weekday { value }, Locale::Es) => format!("day_of_week inválido: {value}"),
         (TriggerError::Weekday { value }, Locale::En) => format!("invalid day_of_week: {value}"),
-        (TriggerError::WeekdayEmpty, Locale::Es) => "day_of_week invalido".to_owned(),
+        (TriggerError::WeekdayEmpty, Locale::Es) => "day_of_week inválido".to_owned(),
         (TriggerError::WeekdayEmpty, Locale::En) => "invalid day_of_week".to_owned(),
         (TriggerError::DayRange, Locale::Es) => "day debe ser 1-31".to_owned(),
         (TriggerError::DayRange, Locale::En) => "day must be between 1 and 31".to_owned(),
@@ -497,7 +497,7 @@ fn describe_trigger(trigger: &TaskTrigger, locale: Locale) -> String {
         TaskTrigger::Delay { seconds } => interval_description(*seconds, true, locale),
         TaskTrigger::IntervalSeconds { seconds } => interval_description(*seconds, false, locale),
         TaskTrigger::IntervalDays { days } => match locale {
-            Locale::Es => format!("cada {days} dias"),
+            Locale::Es => format!("cada {days} días"),
             Locale::En => format!("every {days} days"),
         },
         TaskTrigger::Cron {
@@ -519,12 +519,12 @@ fn describe_trigger(trigger: &TaskTrigger, locale: Locale) -> String {
                 }
             } else if let Some(day) = day {
                 match locale {
-                    Locale::Es => format!("el dia {day} de cada mes a las {time}"),
+                    Locale::Es => format!("el día {day} de cada mes a las {time}"),
                     Locale::En => format!("on day {day} of every month at {time}"),
                 }
             } else {
                 match locale {
-                    Locale::Es => format!("todos los dias a las {time}"),
+                    Locale::Es => format!("todos los días a las {time}"),
                     Locale::En => format!("every day at {time}"),
                 }
             }
@@ -537,7 +537,7 @@ fn interval_description(seconds: i64, delayed: bool, locale: Locale) -> String {
         let value = seconds / 86_400;
         (
             value,
-            if value == 1 { "dia" } else { "dias" },
+            if value == 1 { "día" } else { "días" },
             if value == 1 { "day" } else { "days" },
         )
     } else if seconds >= 3_600 {
@@ -558,6 +558,8 @@ fn interval_description(seconds: i64, delayed: bool, locale: Locale) -> String {
     match (delayed, locale) {
         (true, Locale::Es) => format!("en {value} {es_unit}"),
         (true, Locale::En) => format!("in {value} {en_unit}"),
+        (false, Locale::Es) if value == 1 => format!("cada {es_unit}"),
+        (false, Locale::En) if value == 1 => format!("every {en_unit}"),
         (false, Locale::Es) => format!("cada {value} {es_unit}"),
         (false, Locale::En) => format!("every {value} {en_unit}"),
     }
@@ -570,10 +572,10 @@ fn localized_weekday(day: &str, locale: Locale) -> &str {
     match day {
         "mon" => "lun",
         "tue" => "mar",
-        "wed" => "mie",
+        "wed" => "mié",
         "thu" => "jue",
         "fri" => "vie",
-        "sat" => "sab",
+        "sat" => "sáb",
         "sun" => "dom",
         other => other,
     }
@@ -583,7 +585,7 @@ fn no_chat(locale: Locale) -> &'static str {
     if locale == Locale::En {
         "I could not identify the chat"
     } else {
-        "no se en que chat estoy"
+        "no sé en qué chat estoy"
     }
 }
 fn no_tasks(locale: Locale) -> &'static str {
@@ -644,8 +646,8 @@ pub fn task_credit_insufficient(balance: i64, required: i64, locale: Locale) -> 
 
 fn created(schedule: &str, text: &str, locale: Locale) -> String {
     match locale {
-        Locale::Es => format!("Tarea programada · {schedule}\n{text}"),
-        Locale::En => format!("Task scheduled · {schedule}\n{text}"),
+        Locale::Es => format!("✅ Tarea programada · {schedule}\n{text}"),
+        Locale::En => format!("✅ Task scheduled · {schedule}\n{text}"),
     }
 }
 
@@ -840,11 +842,11 @@ mod tests {
         let result = tool.execute(set_request(Some(3_600), None, None), "call");
         assert_eq!(
             result.output,
-            "Task scheduled · in 1 hour\ncheck the synthetic result"
+            "✅ Task scheduled · in 1 hour\ncheck the synthetic result"
         );
         assert_eq!(
             result.failure_fallback.as_deref(),
-            Some("Task scheduled · in 1 hour\ncheck the synthetic result")
+            Some("✅ Task scheduled · in 1 hour\ncheck the synthetic result")
         );
         let state = state.borrow();
         assert_eq!(state.saved.len(), 1);
@@ -870,7 +872,7 @@ mod tests {
             interval
                 .execute(set_request(None, Some(86_400), None), "call")
                 .output,
-            "Tarea programada · cada 1 dia\ncheck the synthetic result"
+            "✅ Tarea programada · cada día\ncheck the synthetic result"
         );
         assert_eq!(
             state.borrow().saved[0].0.task.schedule,
@@ -889,7 +891,7 @@ mod tests {
                 "call"
             )
             .output,
-            "Tarea programada · los lun, mie a las 09:05\ncheck the synthetic result"
+            "✅ Tarea programada · los lun, mié a las 09:05\ncheck the synthetic result"
         );
         assert!(matches!(
             state.borrow().saved[1].0.task.schedule,
@@ -1050,7 +1052,7 @@ mod tests {
         );
         assert_eq!(
             list.execute(ExternalToolRequest::TaskList, "call").output,
-            "no se en que chat estoy"
+            "no sé en qué chat estoy"
         );
 
         let mut cancel = TaskCancelTool::new(Store(state), "", Locale::En);

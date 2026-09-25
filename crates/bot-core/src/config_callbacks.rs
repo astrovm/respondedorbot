@@ -104,11 +104,16 @@ pub fn evaluate_config_callback(input: &ConfigCallbackInput) -> ConfigCallbackEv
                 })
         }
         ("creditless", _) => evaluate_creditless(input),
-        (action, _) => toggle_field(action).zip(input.current_toggle).map_or(
+        (action, value) => toggle_field(action).zip(input.current_toggle).map_or(
             ConfigCallbackEvaluation::NoChange,
             |(field, current)| ConfigCallbackEvaluation::SetToggle {
                 field,
-                value: !current,
+                value: match value {
+                    "on" => true,
+                    "off" => false,
+                    // Messages rendered before explicit on/off buttons still flip.
+                    _ => !current,
+                },
             },
         ),
     }
@@ -353,6 +358,23 @@ mod tests {
             evaluate_config_callback(&explicit),
             ConfigCallbackEvaluation::InvalidCreditlessLimit
         );
+    }
+
+    #[test]
+    fn explicit_on_and_off_set_toggles_regardless_of_current_value() {
+        for (value, expected) in [("on", true), ("off", false)] {
+            for current in [true, false] {
+                let mut request = input("random", value);
+                request.current_toggle = Some(current);
+                assert_eq!(
+                    evaluate_config_callback(&request),
+                    ConfigCallbackEvaluation::SetToggle {
+                        field: ToggleField::RandomReplies,
+                        value: expected,
+                    }
+                );
+            }
+        }
     }
 
     #[test]

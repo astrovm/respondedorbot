@@ -114,11 +114,11 @@ pub fn transfer_result_reply(amount: i64, result: TransferResult, locale: Locale
     if !result.transferred {
         return match locale {
             Locale::Es => format!(
-                "Saldo personal insuficiente.\nDisponible: {user_balance} créditos\nProbá un monto menor o cargá con /topup."
+                "❌ No te alcanza el saldo personal\n\n👤 Disponible: {user_balance} créditos\n\nProbá con un monto menor o cargá con /topup."
             ),
             Locale::En => {
                 format!(
-                    "Insufficient personal balance.\nAvailable: {user_balance} credits\nTry a smaller amount or add credits with /topup."
+                    "❌ Not enough personal balance\n\n👤 Available: {user_balance} credits\n\nTry a smaller amount or add credits with /topup."
                 )
             }
         };
@@ -128,10 +128,10 @@ pub fn transfer_result_reply(amount: i64, result: TransferResult, locale: Locale
     let chat_balance = format_credit_units(CreditUnits::new(result.chat_balance));
     match locale {
         Locale::Es => format!(
-            "Transferencia al grupo: {amount} créditos\n\nSaldo personal: {user_balance} créditos\nSaldo del grupo: {chat_balance} créditos"
+            "✅ Pasaste {amount} créditos al grupo\n\n👤 Personal: {user_balance} créditos\n👥 Grupo: {chat_balance} créditos"
         ),
         Locale::En => format!(
-            "Transferred to group: {amount} credits\n\nPersonal balance: {user_balance} credits\nGroup balance: {chat_balance} credits"
+            "✅ Moved {amount} credits to the group\n\n👤 Personal: {user_balance} credits\n👥 Group: {chat_balance} credits"
         ),
     }
 }
@@ -235,7 +235,7 @@ mod tests {
                 },
                 Locale::Es,
             ),
-            "Transferencia al grupo: 0.10 créditos\n\nSaldo personal: 2.85 créditos\nSaldo del grupo: 12.15 créditos"
+            "✅ Pasaste 0.10 créditos al grupo\n\n👤 Personal: 2.85 créditos\n👥 Grupo: 12.15 créditos"
         );
         assert_eq!(
             transfer_result_reply(
@@ -247,7 +247,7 @@ mod tests {
                 },
                 Locale::En,
             ),
-            "Transferred to group: 1.50 credits\n\nPersonal balance: 0.70 credits\nGroup balance: 2.30 credits"
+            "✅ Moved 1.50 credits to the group\n\n👤 Personal: 0.70 credits\n👥 Group: 2.30 credits"
         );
         assert_eq!(
             transfer_result_reply(
@@ -259,7 +259,7 @@ mod tests {
                 },
                 Locale::Es,
             ),
-            "Saldo personal insuficiente.\nDisponible: 0.70 créditos\nProbá un monto menor o cargá con /topup."
+            "❌ No te alcanza el saldo personal\n\n👤 Disponible: 0.70 créditos\n\nProbá con un monto menor o cargá con /topup."
         );
     }
 }

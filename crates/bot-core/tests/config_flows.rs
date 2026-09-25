@@ -35,7 +35,7 @@ fn public_config_renderer_covers_bilingual_private_and_group_states() {
             },
             Locale::En,
             true,
-            "Settings",
+            "Group settings",
             8,
         ),
         (
@@ -91,6 +91,8 @@ fn public_config_callback_planner_covers_every_transition_family() {
         "cfg:random:toggle",
         "cfg:followups:toggle",
         "cfg:linkfixfollowups:toggle",
+        "cfg:random:on",
+        "cfg:followups:off",
         "cfg:timezone:2",
         "cfg:timezone:999999999999999999999999999999999",
         "cfg:timezone:invalid",
