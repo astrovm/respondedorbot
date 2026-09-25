@@ -3,7 +3,8 @@
 use serde::Serialize;
 
 use crate::locale::Locale;
-use crate::telegram_actions::TelegramAction;
+use crate::telegram_actions::{CommandScope, TelegramAction};
+use crate::telegram_input::ChatId;
 
 #[derive(Debug, Clone, Copy)]
 struct CommandGroup {
@@ -257,19 +258,36 @@ pub fn primary_telegram_commands(locale: Locale) -> Vec<TelegramCommand> {
         .collect()
 }
 
+/// Startup menus. Groups speak Spanish unless configured otherwise, so they
+/// get the Spanish menu whatever language each member's Telegram app uses.
 #[must_use]
 pub fn command_publication_actions() -> Vec<TelegramAction> {
     [
-        (None, Locale::Es),
-        (Some("es"), Locale::Es),
-        (Some("en"), Locale::En),
+        (None, Locale::Es, CommandScope::Default),
+        (Some("es"), Locale::Es, CommandScope::Default),
+        (Some("en"), Locale::En, CommandScope::Default),
+        (None, Locale::Es, CommandScope::AllGroupChats),
     ]
     .into_iter()
-    .map(|(language_code, locale)| TelegramAction::SetCommands {
-        commands: primary_telegram_commands(locale),
-        language_code: language_code.map(ToOwned::to_owned),
-    })
+    .map(
+        |(language_code, locale, scope)| TelegramAction::SetCommands {
+            commands: primary_telegram_commands(locale),
+            language_code: language_code.map(ToOwned::to_owned),
+            scope,
+        },
+    )
     .collect()
+}
+
+/// Menu for one chat in its configured language, so it matches the replies
+/// even when a member's Telegram app uses another language.
+#[must_use]
+pub fn chat_command_menu_action(chat_id: ChatId, locale: Locale) -> TelegramAction {
+    TelegramAction::SetCommands {
+        commands: primary_telegram_commands(locale),
+        language_code: None,
+        scope: CommandScope::Chat(chat_id),
+    }
 }
 
 #[cfg(test)]
@@ -280,6 +298,7 @@ mod tests {
 
     use super::{command_publication_actions, telegram_commands};
     use crate::locale::Locale;
+    use crate::telegram_input::ChatId;
 
     fn sha256_hex(value: &str) -> String {
         let mut encoded = String::with_capacity(64);
@@ -369,19 +388,46 @@ mod tests {
     }
 
     #[test]
-    fn publication_plans_default_spanish_and_english_menus() {
+    fn publication_plans_default_spanish_and_english_menus_and_a_spanish_group_menu() {
+        use crate::telegram_actions::{CommandScope, TelegramAction};
         let actions = command_publication_actions();
-        assert_eq!(actions.len(), 3);
-        let languages = actions
+        let plans = actions
             .iter()
             .filter_map(|action| match action {
-                crate::telegram_actions::TelegramAction::SetCommands {
+                TelegramAction::SetCommands {
                     commands,
                     language_code,
-                } => Some((commands.len(), language_code.as_deref())),
+                    scope,
+                } => Some((commands[4].command, language_code.as_deref(), *scope)),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(languages, [(31, None), (31, Some("es")), (31, Some("en"))]);
+        assert_eq!(
+            plans,
+            [
+                ("dolar", None, CommandScope::Default),
+                ("dolar", Some("es"), CommandScope::Default),
+                ("dollar", Some("en"), CommandScope::Default),
+                ("dolar", None, CommandScope::AllGroupChats),
+            ]
+        );
+    }
+
+    #[test]
+    fn chat_menu_uses_the_chat_scope_and_its_language() {
+        use crate::telegram_actions::{CommandScope, TelegramAction};
+        for (locale, expected) in [(Locale::Es, "idioma"), (Locale::En, "language")] {
+            let TelegramAction::SetCommands {
+                commands,
+                language_code,
+                scope,
+            } = super::chat_command_menu_action(ChatId(-42), locale)
+            else {
+                unreachable!("chat menu is a SetCommands action");
+            };
+            assert_eq!(scope, CommandScope::Chat(ChatId(-42)));
+            assert_eq!(language_code, None);
+            assert!(commands.iter().any(|entry| entry.command == expected));
+        }
     }
 }

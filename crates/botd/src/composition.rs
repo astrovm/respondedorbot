@@ -4719,7 +4719,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(languages, ["es", "en"]);
-        assert_eq!(published.0.len(), 3);
+        assert_eq!(published.0.len(), 4);
     }
 
     #[test]

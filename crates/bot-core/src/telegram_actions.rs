@@ -54,11 +54,22 @@ pub struct LabeledPrice {
     pub amount: i64,
 }
 
+/// Who sees a published command menu. Telegram prefers a chat's own menu,
+/// then the all-groups menu, then the default one; within each scope it
+/// prefers the menu matching the user's app language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandScope {
+    Default,
+    AllGroupChats,
+    Chat(ChatId),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TelegramAction {
     SetCommands {
         commands: Vec<TelegramCommand>,
         language_code: Option<String>,
+        scope: CommandScope,
     },
     SendMessage(SendMessage),
     SendDocument {

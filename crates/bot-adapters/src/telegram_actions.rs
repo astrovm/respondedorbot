@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use thiserror::Error;
 
-use bot_core::telegram_actions::{ParseMode, TelegramAction, truncate_text};
+use bot_core::telegram_actions::{CommandScope, ParseMode, TelegramAction, truncate_text};
 
 use crate::telegram_http::{
     TelegramHttpError, TelegramHttpOutcome, TelegramMultipartRequest, TelegramTransport,
@@ -107,11 +107,24 @@ fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
         TelegramAction::SetCommands {
             commands,
             language_code,
+            scope,
         } => {
             let commands =
                 serde_json::to_string(&commands).map_err(|_| ActionError::InvalidAction)?;
             let mut payload = Map::from_iter([("commands".to_owned(), json!(commands))]);
             insert_optional(&mut payload, "language_code", language_code)?;
+            match scope {
+                CommandScope::Default => {}
+                CommandScope::AllGroupChats => {
+                    payload.insert("scope".to_owned(), json!({"type": "all_group_chats"}));
+                }
+                CommandScope::Chat(chat_id) => {
+                    payload.insert(
+                        "scope".to_owned(),
+                        json!({"type": "chat", "chat_id": chat_id.0}),
+                    );
+                }
+            }
             (
                 "setMyCommands",
                 Method::POST,
@@ -528,8 +541,8 @@ mod tests {
     use std::time::Duration;
 
     use bot_core::telegram_actions::{
-        InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, ParseMode, SendMessage,
-        TelegramAction,
+        CommandScope, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, ParseMode,
+        SendMessage, TelegramAction,
     };
     use bot_core::telegram_input::{ChatId, MessageId};
     use bot_core::{locale::Locale, telegram_commands::telegram_commands};
@@ -1021,6 +1034,7 @@ mod tests {
                 TelegramAction::SetCommands {
                     commands: telegram_commands(Locale::En),
                     language_code: Some("en".to_owned()),
+                    scope: CommandScope::Default,
                 },
             ),
             Ok(ActionOutcome::Completed { message_id: None })
@@ -1049,6 +1063,45 @@ mod tests {
                         == Some(&serde_json::json!("help and command list"))
             }))
         );
+    }
+
+    #[test]
+    fn set_commands_sends_group_and_chat_scopes() {
+        for (scope, expected) in [
+            (CommandScope::Default, None),
+            (
+                CommandScope::AllGroupChats,
+                Some(serde_json::json!({"type": "all_group_chats"})),
+            ),
+            (
+                CommandScope::Chat(ChatId(-42)),
+                Some(serde_json::json!({"type": "chat", "chat_id": -42})),
+            ),
+        ] {
+            let transport = transport(r#"{"ok":true,"result":true}"#);
+            assert_eq!(
+                execute_with(
+                    &transport,
+                    "synthetic-token",
+                    TelegramAction::SetCommands {
+                        commands: telegram_commands(Locale::Es),
+                        language_code: None,
+                        scope,
+                    },
+                ),
+                Ok(ActionOutcome::Completed { message_id: None })
+            );
+            let requests = transport.requests.borrow();
+            let payload = requests[0]
+                .json_payload
+                .as_ref()
+                .and_then(serde_json::Value::as_object);
+            assert_eq!(
+                payload.and_then(|value| value.get("scope")).cloned(),
+                expected
+            );
+            assert!(payload.is_some_and(|value| !value.contains_key("language_code")));
+        }
     }
 
     #[test]

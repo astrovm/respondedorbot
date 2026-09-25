@@ -308,7 +308,7 @@ mod tests {
     fn publishes_default_spanish_and_english_command_menus_in_order() {
         let mut sink = Sink::default();
         assert!(publish_commands(&mut sink).is_empty());
-        assert_eq!(sink.actions.len(), 3);
+        assert_eq!(sink.actions.len(), 4);
         assert!(matches!(
             &sink.actions[0],
             TelegramAction::SetCommands {
@@ -329,6 +329,14 @@ mod tests {
                 language_code: Some(language),
                 ..
             } if language == "en"
+        ));
+        assert!(matches!(
+            &sink.actions[3],
+            TelegramAction::SetCommands {
+                language_code: None,
+                scope: bot_core::telegram_actions::CommandScope::AllGroupChats,
+                ..
+            }
         ));
     }
 

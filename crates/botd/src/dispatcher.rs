@@ -1416,6 +1416,23 @@ where
         Ok(DispatchOutcome::Handled)
     }
 
+    /// Keep the chat's `/` menu in the language its replies use. Best effort:
+    /// a failure is logged and never blocks the reply.
+    fn sync_chat_command_menu(&mut self, chat_id: ChatId, locale: bot_core::locale::Locale) {
+        if self
+            .actions
+            .execute(bot_core::telegram_commands::chat_command_menu_action(
+                chat_id, locale,
+            ))
+            .is_err()
+        {
+            self.state_diagnostics.push(format!(
+                "chat command menu update failed chat_id={}",
+                chat_id.0
+            ));
+        }
+    }
+
     fn answer_callback_best_effort(&mut self, callback_id: Option<&str>) {
         if let Some(callback_id) = callback_id {
             let _result = self.actions.execute(TelegramAction::AnswerCallback {
@@ -4020,6 +4037,9 @@ where
         };
         self.answer_callback_best_effort(context.callback_id.as_deref());
         fallback.map_err(DispatchError::Action)?;
+        if config.language != current_config.language {
+            self.sync_chat_command_menu(chat_id, rendered_locale);
+        }
         Ok(DispatchOutcome::Handled)
     }
 
@@ -5426,9 +5446,9 @@ where
         };
         match plan {
             StatelessCommandPlan::Action(action) => {
-                if let Some(updated_config) = updated_config {
+                if let Some(updated_config) = &updated_config {
                     self.config
-                        .set_changed(&chat_id.0.to_string(), &config, &updated_config)
+                        .set_changed(&chat_id.0.to_string(), &config, updated_config)
                         .map_err(DispatchError::Config)?;
                 }
                 let command = parsed.command;
@@ -5468,6 +5488,14 @@ where
                         .execute(action)
                         .map_err(DispatchError::Action)?
                 };
+                if is_settings_command {
+                    let menu_locale = resolve_locale(
+                        Some(&updated_config.as_ref().unwrap_or(&config).language),
+                        message.sender_language_code.as_deref(),
+                        message.chat_type.as_deref().unwrap_or_default(),
+                    );
+                    self.sync_chat_command_menu(chat_id, menu_locale);
+                }
                 if let Some(response_text) = response_text {
                     let outgoing = prepare_outgoing_command_state(OutgoingCommandState {
                         chat_id,
@@ -9614,6 +9642,15 @@ mod tests {
         );
         assert_eq!(dispatcher.state.incoming.len(), 1);
         assert_eq!(dispatcher.state.outgoing.len(), 1);
+        // The chat's own menu follows its configured language, not the app's.
+        assert!(matches!(
+            dispatcher.actions.0.last(),
+            Some(TelegramAction::SetCommands {
+                commands,
+                language_code: None,
+                scope: bot_core::telegram_actions::CommandScope::Chat(_),
+            }) if commands.iter().any(|entry| entry.command == "language")
+        ));
     }
 
     #[test]
@@ -9763,6 +9800,38 @@ mod tests {
             dispatcher.actions.0.first(),
             Some(TelegramAction::EditMessage { text, .. }) if text.starts_with("Language")
         ));
+        assert!(matches!(
+            dispatcher.actions.0.last(),
+            Some(TelegramAction::SetCommands {
+                commands,
+                scope: bot_core::telegram_actions::CommandScope::Chat(_),
+                ..
+            }) if commands.iter().any(|entry| entry.command == "weather")
+        ));
+
+        let mut other_setting = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            other_setting.dispatch(callback_update("cfg:link:off", "private", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            !other_setting
+                .actions
+                .0
+                .iter()
+                .any(|action| matches!(action, TelegramAction::SetCommands { .. }))
+        );
     }
 
     #[test]
