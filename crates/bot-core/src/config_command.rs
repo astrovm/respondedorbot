@@ -100,7 +100,7 @@ fn render_config_keyboard(
         toggle_buttons("linkfixfollowups", config.ignore_link_fix_followups, locale),
         vec![
             button(
-                "➖ 1h".to_owned(),
+                "-1 h".to_owned(),
                 format!(
                     "cfg:timezone:{}",
                     config
@@ -110,11 +110,11 @@ fn render_config_keyboard(
                 ),
             ),
             button(
-                format!("🌍 {}", offset_text(config.timezone_offset)),
+                offset_text(config.timezone_offset),
                 "cfg:timezone:current".to_owned(),
             ),
             button(
-                "➕ 1h".to_owned(),
+                "+1 h".to_owned(),
                 format!(
                     "cfg:timezone:{}",
                     config
@@ -129,15 +129,12 @@ fn render_config_keyboard(
         rows.push(toggle_buttons("random", config.ai_random_replies, locale));
         rows.push(vec![
             button("0".to_owned(), "cfg:creditless:none".to_owned()),
-            button("➖".to_owned(), "cfg:creditless:decrease".to_owned()),
+            button("-1".to_owned(), "cfg:creditless:decrease".to_owned()),
             button(
-                format!(
-                    "🎁 {}",
-                    creditless_text(config.creditless_user_hourly_limit)
-                ),
+                format!("{}/h", creditless_text(config.creditless_user_hourly_limit)),
                 "cfg:creditless:current".to_owned(),
             ),
-            button("➕".to_owned(), "cfg:creditless:increase".to_owned()),
+            button("+1".to_owned(), "cfg:creditless:increase".to_owned()),
             button("∞".to_owned(), "cfg:creditless:unlimited".to_owned()),
         ]);
     }
@@ -159,22 +156,22 @@ const PAGES: [&str; 7] = [
 fn titles(locale: Locale) -> [&'static str; 7] {
     match locale {
         Locale::Es => [
-            "🌐 Idioma",
-            "🔗 Links",
-            "💬 Seguir conversaciones",
-            "🙈 Ignorar replies a links",
-            "🕒 Zona horaria",
-            "🎲 Respuestas random",
-            "🎁 Mensajes gratis por hora",
+            "Idioma",
+            "Links",
+            "Seguir conversaciones",
+            "Ignorar replies a links",
+            "Zona horaria",
+            "Respuestas random",
+            "Mensajes gratis por hora",
         ],
         Locale::En => [
-            "🌐 Language",
-            "🔗 Links",
-            "💬 Follow conversations",
-            "🙈 Ignore replies to links",
-            "🕒 Timezone",
-            "🎲 Random replies",
-            "🎁 Free messages per hour",
+            "Language",
+            "Links",
+            "Follow conversations",
+            "Ignore replies to links",
+            "Timezone",
+            "Random replies",
+            "Free messages per hour",
         ],
     }
 }
@@ -222,8 +219,8 @@ pub fn render_config_page(
         return (
             localized(
                 locale,
-                "❔ Cómo funciona\n\nTocá un ajuste para ver qué hace y cambiarlo. Los cambios se guardan al instante.\n\nEn grupos, solo los admins pueden cambiar la configuración.",
-                "❔ How it works\n\nTap a setting to see what it does and change it. Changes are saved instantly.\n\nIn groups, only admins can change settings.",
+                "Cómo funciona\n\nCada cambio se guarda al instante. En grupos, solo los admins pueden cambiar la configuración.",
+                "How it works\n\nEvery change is saved right away. In groups, only admins can change settings.",
             )
             .to_owned(),
             InlineKeyboardMarkup {
@@ -283,22 +280,14 @@ pub fn render_config_page(
         })
         .collect::<Vec<_>>();
     rows.push(vec![
-        button(localized(locale, "❔ Ayuda", "❔ Help"), "cfg:page:help"),
+        button(localized(locale, "Ayuda", "Help"), "cfg:page:help"),
         close(locale, "cfg:page:close"),
     ]);
     (
         if is_group {
-            localized(
-                locale,
-                "⚙️ Configuración del grupo\n\nTocá un ajuste para cambiarlo.",
-                "⚙️ Group settings\n\nTap a setting to change it.",
-            )
+            localized(locale, "Configuración del grupo", "Group settings")
         } else {
-            localized(
-                locale,
-                "⚙️ Configuración\n\nTocá un ajuste para cambiarlo.",
-                "⚙️ Settings\n\nTap a setting to change it.",
-            )
+            localized(locale, "Configuración", "Settings")
         }
         .to_owned(),
         InlineKeyboardMarkup {

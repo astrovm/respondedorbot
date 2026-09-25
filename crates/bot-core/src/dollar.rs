@@ -131,30 +131,32 @@ pub fn render_dollar_rates(
                 |change| {
                     let change_text = number(&signed(change));
                     if change_text == "+0" {
-                        "= 0%".to_owned()
-                    } else if change > 0.0 {
-                        format!("▲ {change_text}%")
+                        "0%".to_owned()
                     } else {
-                        format!("▼ {change_text}%")
+                        format!("{change_text}%")
                     }
                 },
             );
-            format!("{name}: ${} ({change})", number(&trimmed(rate.price, 2)))
+            let price = number(&trimmed(rate.price, 2));
+            match locale {
+                Locale::Es => format!("{name}: ${price} ({change})"),
+                Locale::En => format!("{name}: {price} ({change})"),
+            }
         })
         .collect::<Vec<_>>();
     lines.insert(0, String::new());
     lines.insert(
         0,
         match locale {
-            Locale::Es => format!("💵 Dólar en pesos (variación {hours_ago}h)"),
-            Locale::En => format!("💵 Dollar in pesos ({hours_ago}h change)"),
+            Locale::Es => format!("Dólar en pesos, variación {hours_ago}h"),
+            Locale::En => format!("Dollar in pesos, {hours_ago}h change"),
         },
     );
     if hours_ago != 24 && no_history {
         lines.push(String::new());
         lines.push(match locale {
-            Locale::Es => format!("⚠️ Todavía no tengo historial de {hours_ago}h. Probá más tarde"),
-            Locale::En => format!("⚠️ No {hours_ago}h history yet. Try again later"),
+            Locale::Es => format!("Todavía no tengo historial de {hours_ago}h. Probá más tarde"),
+            Locale::En => format!("No {hours_ago}h history yet. Try again later"),
         });
     }
     Some(lines.join("\n"))
@@ -226,7 +228,7 @@ mod tests {
         assert_eq!(
             render_dollar_rates(&rates, Some(&bands), 24, Locale::Es).as_deref(),
             Some(
-                "💵 Dólar en pesos (variación 24h)\n\nBanda piso: $950,12 (▲ +0,25%)\nMayorista: $1.400 (▲ +7,69%)\nTCRM 100: $1.410 (▼ -0,5%)\nBlue: $1.415 (= 0%)\nOficial: $1.420 (▲ +2%)\nBanda techo: $1.460,34 (▼ -0,1%)"
+                "Dólar en pesos, variación 24h\n\nBanda piso: $950,12 (+0,25%)\nMayorista: $1.400 (+7,69%)\nTCRM 100: $1.410 (-0,5%)\nBlue: $1.415 (0%)\nOficial: $1.420 (+2%)\nBanda techo: $1.460,34 (-0,1%)"
             )
         );
     }
@@ -247,7 +249,7 @@ mod tests {
         assert_eq!(
             render_dollar_rates(&rates, Some(&bands), 6, Locale::En).as_deref(),
             Some(
-                "💵 Dollar in pesos (6h change)\n\nLower band: $900 (no data)\nOfficial: $1,000 (no data)\nUpper band: $1,100 (no data)\n\n⚠️ No 6h history yet. Try again later"
+                "Dollar in pesos, 6h change\n\nLower band: 900 (no data)\nOfficial: 1,000 (no data)\nUpper band: 1,100 (no data)\n\nNo 6h history yet. Try again later"
             )
         );
         assert_eq!(render_dollar_rates(&[], None, 24, Locale::Es), None);

@@ -214,7 +214,7 @@ mod tests {
             "@bot",
             Locale::Es,
         ));
-        assert!(spanish.is_some_and(|text| { text.starts_with("👋 Ayuda\n\n") }));
+        assert!(spanish.is_some_and(|text| { text.starts_with("Ayuda\n\n") }));
         let english = message_text(plan_stateless_command(
             ChatId(1),
             MessageId(2),
@@ -222,7 +222,7 @@ mod tests {
             "@bot",
             Locale::En,
         ));
-        assert!(english.is_some_and(|text| { text.starts_with("👋 Help\n\n") }));
+        assert!(english.is_some_and(|text| { text.starts_with("Help\n\n") }));
     }
 
     #[test]

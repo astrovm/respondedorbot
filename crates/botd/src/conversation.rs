@@ -284,25 +284,25 @@ impl<Provider, Tools, State, Billing> NativeConversation<Provider, Tools, State,
         if matches!(input.chat_type.as_str(), "group" | "supergroup") {
             match locale {
                 Locale::Es => format!(
-                    "🪫 Se quedaron secos de créditos de IA en este grupo, boludo\n\n👤 Lo tuyo: {}\n👥 Lo del grupo: {}\n\nMetele /topup por privado y, si querés, pasale saldo al grupo con /transfer <monto>\nPara ver bien la miseria, mandá /balance",
-                    format_credit_units(decision.user_balance),
-                    format_credit_units(decision.chat_balance),
+                    "Se quedaron secos de créditos de IA en este grupo, boludo\n\nTuyo: {}\nDel grupo: {}\n\nMetele /topup por privado y, si querés, pasale saldo al grupo con /transfer <monto>. Para ver bien la miseria, mandá /balance",
+                    format_credit_units(decision.user_balance, locale),
+                    format_credit_units(decision.chat_balance, locale),
                 ),
                 Locale::En => format!(
-                    "🪫 This group is out of AI credits\n\n👤 Yours: {}\n👥 Group: {}\n\nUse /topup in private and /transfer <amount> to fund the group\nUse /balance to see the balances",
-                    format_credit_units(decision.user_balance),
-                    format_credit_units(decision.chat_balance),
+                    "This group is out of AI credits\n\nYours: {}\nGroup: {}\n\nUse /topup in private and /transfer <amount> to fund the group. Use /balance to see the balances",
+                    format_credit_units(decision.user_balance, locale),
+                    format_credit_units(decision.chat_balance, locale),
                 ),
             }
         } else {
             match locale {
                 Locale::Es => format!(
-                    "🪫 Te quedaste seco de créditos de IA, boludo\n\n👤 Saldo: {}\n\nMetele /topup si querés que siga laburando",
-                    format_credit_units(decision.user_balance),
+                    "Te quedaste seco de créditos de IA, boludo. Saldo: {}\nMetele /topup si querés que siga laburando",
+                    format_credit_units(decision.user_balance, locale),
                 ),
                 Locale::En => format!(
-                    "🪫 You are out of AI credits\n\n👤 Balance: {}\n\nUse /topup to add more",
-                    format_credit_units(decision.user_balance),
+                    "You are out of AI credits. Balance: {}\nUse /topup to add more",
+                    format_credit_units(decision.user_balance, locale),
                 ),
             }
         }
@@ -1992,9 +1992,12 @@ fn shifted_time(timestamp: i64, timezone_offset_hours: i64) -> DateTime<FixedOff
     utc.with_timezone(&offset)
 }
 
-fn format_credit_units(units: i64) -> String {
+fn format_credit_units(units: i64, locale: Locale) -> String {
     let units = units.max(0);
-    format!("{}.{:02}", units / 100, units % 100)
+    bot_core::output_format::localized_number(
+        &format!("{}.{:02}", units / 100, units % 100),
+        locale,
+    )
 }
 
 #[cfg(test)]
@@ -3169,7 +3172,7 @@ mod tests {
         assert!(matches!(
             denied_reply,
             AiPreparation::Reply { ref text, completion_id: None, .. }
-                if text.starts_with("❌ Not enough personal credits")
+                if text.starts_with("Not enough personal credits")
         ));
         assert!(denied.provider.prompts.borrow().is_empty());
         assert!(denied.billing.reserves.is_empty());
@@ -4478,7 +4481,8 @@ mod tests {
             TokenEstimateValue::Empty
         );
         assert!(!formatted_date(i64::MAX, i64::MAX, Locale::En).is_empty());
-        assert_eq!(format_credit_units(-1), "0.00");
+        assert_eq!(format_credit_units(-1, Locale::En), "0.00");
+        assert_eq!(format_credit_units(123_456, Locale::Es), "1.234,56");
 
         let mut tools = NoTools;
         assert!(!tools.contains("synthetic", false));

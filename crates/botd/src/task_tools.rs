@@ -7,7 +7,7 @@ use bot_adapters::billing_read::BillingRepository;
 use bot_adapters::openrouter_chat::OpenRouterPricingCache;
 use bot_adapters::redis_task_store::RedisTaskStore;
 use bot_adapters::task_record::TaskRecordDocument;
-use bot_core::credit_units::{CreditUnits, format_credit_units};
+use bot_core::credit_units::{CreditUnits, format_credit_units_for};
 use bot_core::locale::Locale;
 use bot_core::scheduled_tasks::{
     ScheduledTask, TaskId, TaskSchedule, initial_next_run, parse_weekday,
@@ -632,29 +632,29 @@ fn task_not_found(locale: Locale) -> &'static str {
 }
 
 pub fn task_credit_insufficient(balance: i64, required: i64, locale: Locale) -> String {
-    let balance = format_credit_units(CreditUnits::new(balance));
-    let required = format_credit_units(CreditUnits::new(required));
+    let balance = format_credit_units_for(CreditUnits::new(balance), locale);
+    let required = format_credit_units_for(CreditUnits::new(required), locale);
     match locale {
         Locale::Es => format!(
-            "❌ No te alcanzan los créditos personales para esa tarea\n\n👤 Tenés: {balance}\n💳 Necesitás: {required}\n\nCargá con /topup antes de crearla"
+            "No te alcanzan los créditos personales para esa tarea: tenés {balance} y necesitás {required}\nCargá con /topup antes de crearla"
         ),
         Locale::En => format!(
-            "❌ Not enough personal credits for this task\n\n👤 Available: {balance}\n💳 Required: {required}\n\nUse /topup before creating it"
+            "Not enough personal credits for this task: you have {balance} and need {required}\nUse /topup before creating it"
         ),
     }
 }
 
 fn created(schedule: &str, text: &str, locale: Locale) -> String {
     match locale {
-        Locale::Es => format!("✅ Tarea programada: {schedule}\n{text}"),
-        Locale::En => format!("✅ Task scheduled: {schedule}\n{text}"),
+        Locale::Es => format!("Tarea programada: {schedule}\n{text}"),
+        Locale::En => format!("Task scheduled: {schedule}\n{text}"),
     }
 }
 
 fn task_canceled(task_id: &TaskId, locale: Locale) -> String {
     match locale {
-        Locale::Es => format!("✅ Tarea {} cancelada", task_id.as_str()),
-        Locale::En => format!("✅ Task {} canceled", task_id.as_str()),
+        Locale::Es => format!("Tarea {} cancelada", task_id.as_str()),
+        Locale::En => format!("Task {} canceled", task_id.as_str()),
     }
 }
 
@@ -842,11 +842,11 @@ mod tests {
         let result = tool.execute(set_request(Some(3_600), None, None), "call");
         assert_eq!(
             result.output,
-            "✅ Task scheduled: in 1 hour\ncheck the synthetic result"
+            "Task scheduled: in 1 hour\ncheck the synthetic result"
         );
         assert_eq!(
             result.failure_fallback.as_deref(),
-            Some("✅ Task scheduled: in 1 hour\ncheck the synthetic result")
+            Some("Task scheduled: in 1 hour\ncheck the synthetic result")
         );
         let state = state.borrow();
         assert_eq!(state.saved.len(), 1);
@@ -872,7 +872,7 @@ mod tests {
             interval
                 .execute(set_request(None, Some(86_400), None), "call")
                 .output,
-            "✅ Tarea programada: cada día\ncheck the synthetic result"
+            "Tarea programada: cada día\ncheck the synthetic result"
         );
         assert_eq!(
             state.borrow().saved[0].0.task.schedule,
@@ -891,7 +891,7 @@ mod tests {
                 "call"
             )
             .output,
-            "✅ Tarea programada: los lun, mié a las 09:05\ncheck the synthetic result"
+            "Tarea programada: los lun, mié a las 09:05\ncheck the synthetic result"
         );
         assert!(matches!(
             state.borrow().saved[1].0.task.schedule,
@@ -978,7 +978,7 @@ mod tests {
                     "call"
                 )
                 .output,
-            "✅ Task abc12345 canceled"
+            "Task abc12345 canceled"
         );
         assert_eq!(
             state.borrow().canceled,

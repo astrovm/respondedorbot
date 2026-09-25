@@ -125,6 +125,11 @@ fn grouped(value: f64, decimals: usize, separator: char) -> String {
     output
 }
 
+/// Sources write the same day as `24/09/26` or `24/09/2026`.
+fn same_day(date: &str, common_date: Option<&str>) -> bool {
+    common_date.is_some_and(|common| short_year(date) == short_year(common))
+}
+
 /// Shorten `dd/mm/yyyy` dates to `dd/mm/yy` to keep lines compact.
 fn short_year(date: &str) -> String {
     match date.rsplit_once('/') {
@@ -135,7 +140,11 @@ fn short_year(date: &str) -> String {
     }
 }
 
-fn variable_line(variable: &BcraVariable, locale: Locale) -> Option<String> {
+fn variable_line(
+    variable: &BcraVariable,
+    locale: Locale,
+    common_date: Option<&str>,
+) -> Option<String> {
     let description = variable.description.as_str();
     let value = variable.value.as_str();
     let line = if matches(description, r"base\s*monetaria") {
@@ -205,7 +214,10 @@ fn variable_line(variable: &BcraVariable, locale: Locale) -> Option<String> {
     } else {
         return None;
     };
-    if variable.date.is_empty() || variable.date == variable.value {
+    if variable.date.is_empty()
+        || variable.date == variable.value
+        || same_day(&variable.date, common_date)
+    {
         Some(line)
     } else {
         Some(format!("{line} ({})", short_year(&variable.date)))
@@ -248,14 +260,6 @@ pub fn render_bcra(snapshot: &BcraSnapshot, locale: Locale, today_days: i64) -> 
             Locale::En => "I could not load the BCRA variables. Try again later".to_owned(),
         };
     }
-    let mut lines = vec![
-        match locale {
-            Locale::Es => "🏦 Indicadores del BCRA",
-            Locale::En => "🏦 BCRA indicators",
-        }
-        .to_owned(),
-        String::new(),
-    ];
     let mut latest_days = None;
     const PATTERNS: [&str; 11] = [
         r"base\s*monetaria",
@@ -270,20 +274,47 @@ pub fn render_bcra(snapshot: &BcraSnapshot, locale: Locale, today_days: i64) -> 
         r"coeficiente.*estabilizacion.*referencia|\bcer\b",
         r"reservas.*internacionales",
     ];
-    for pattern in PATTERNS {
-        if let Some(variable) = snapshot
-            .variables
-            .iter()
-            .find(|variable| matches(&variable.description, pattern))
-        {
-            if let Some(line) = variable_line(variable, locale) {
-                lines.push(line);
+    let shown = PATTERNS
+        .iter()
+        .filter_map(|pattern| {
+            snapshot
+                .variables
+                .iter()
+                .find(|variable| matches(&variable.description, pattern))
+        })
+        .collect::<Vec<_>>();
+    // Most indicators share one publication date; state it once in the title.
+    let common_date = shown
+        .iter()
+        .map(|variable| variable.date.as_str())
+        .filter(|date| !date.is_empty())
+        .fold(Vec::<(&str, usize)>::new(), |mut counts, date| {
+            match counts.iter_mut().find(|(known, _)| *known == date) {
+                Some((_, count)) => *count += 1,
+                None => counts.push((date, 1)),
             }
-            if let Some((year, month, day)) = parse_date(&variable.date) {
-                let candidate = days_from_civil(year, month, day);
-                latest_days =
-                    Some(latest_days.map_or(candidate, |latest: i64| latest.max(candidate)));
-            }
+            counts
+        })
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .max_by_key(|(_, count)| *count)
+        .map(|(date, _)| date);
+    let mut lines = vec![
+        match (locale, common_date) {
+            (Locale::Es, Some(date)) => format!("Indicadores del BCRA al {}", short_year(date)),
+            (Locale::En, Some(date)) => format!("BCRA indicators as of {}", short_year(date)),
+            (Locale::Es, None) => "Indicadores del BCRA".to_owned(),
+            (Locale::En, None) => "BCRA indicators".to_owned(),
+        },
+        String::new(),
+    ];
+    for variable in shown {
+        if let Some(line) = variable_line(variable, locale, common_date) {
+            lines.push(line);
+        }
+        if let Some((year, month, day)) = parse_date(&variable.date) {
+            let candidate = days_from_civil(year, month, day);
+            latest_days = Some(latest_days.map_or(candidate, |latest: i64| latest.max(candidate)));
         }
     }
     if let Some(risk) = &snapshot.country_risk {
@@ -315,13 +346,13 @@ pub fn render_bcra(snapshot: &BcraSnapshot, locale: Locale, today_days: i64) -> 
             Locale::Es => format!("Bandas cambiarias: piso ${lower} / techo ${upper}"),
             Locale::En => format!("Exchange-rate bands: floor ${lower} / ceiling ${upper}"),
         };
-        if !bands.date.is_empty() {
+        if !bands.date.is_empty() && !same_day(&bands.date, common_date) {
             line.push_str(&format!(" ({})", bands.date));
         }
         lines.push(line);
     }
     if let Some(itcrm) = &snapshot.itcrm {
-        let suffix = if itcrm.date.is_empty() {
+        let suffix = if itcrm.date.is_empty() || same_day(&itcrm.date, common_date) {
             String::new()
         } else {
             format!(" ({})", itcrm.date)
@@ -335,10 +366,8 @@ pub fn render_bcra(snapshot: &BcraSnapshot, locale: Locale, today_days: i64) -> 
     if snapshot.stale {
         lines.push(
             match locale {
-                Locale::Es => {
-                    "⚠️ No hay actualización nueva del BCRA, te muestro lo último que tengo."
-                }
-                Locale::En => "⚠️ There is no new BCRA update, showing the latest available data.",
+                Locale::Es => "No hay actualización nueva del BCRA; te muestro lo último que tengo",
+                Locale::En => "There is no new BCRA update; showing the latest data",
             }
             .to_owned(),
         );
@@ -348,9 +377,9 @@ pub fn render_bcra(snapshot: &BcraSnapshot, locale: Locale, today_days: i64) -> 
         if age >= 3 {
             lines.push(match locale {
                 Locale::Es => {
-                    format!("⚠️ Datos del BCRA con {age} días de atraso, chequeá más tarde.")
+                    format!("Los datos del BCRA tienen {age} días de atraso. Chequeá más tarde")
                 }
-                Locale::En => format!("⚠️ BCRA data is {age} days old, check again later."),
+                Locale::En => format!("BCRA data is {age} days old. Check again later"),
             });
         }
     }
@@ -394,7 +423,12 @@ mod tests {
         .map(|(description, value)| BcraVariable {
             description: description.to_owned(),
             value: value.to_owned(),
-            date: "15/01/2025".to_owned(),
+            // Monthly inflation is published on a different day than the rest.
+            date: if description == "Inflación mensual" {
+                "31/12/2024".to_owned()
+            } else {
+                "15/01/2025".to_owned()
+            },
         })
         .collect();
         let snapshot = BcraSnapshot {
@@ -419,9 +453,9 @@ mod tests {
         };
         let text = render_bcra(&snapshot, Locale::Es, days_from_civil(2025, 1, 20));
         for expected in [
-            "Indicadores del BCRA",
-            "Base monetaria: $5.000 mill. pesos (15/01/25)",
-            "Inflación mensual: 5,20%",
+            "Indicadores del BCRA al 15/01/25\n\n",
+            "Base monetaria: $5.000 mill. pesos\n",
+            "Inflación mensual: 5,20% (31/12/24)",
             "Inflación interanual: 150,5%",
             "Inflación esperada: 3,10%",
             "TAMAR: 45,0%",
@@ -430,8 +464,8 @@ mod tests {
             "Riesgo país: 685 bps (29/10 12:34 | -12,3 bps vs ayer)",
             "Bandas cambiarias: piso $950,12 / techo $1.460,34 (15/09/25)",
             "TCRM: 123,45 (01/02/25)",
-            "\n\n⚠️ No hay actualización nueva del BCRA",
-            "⚠️ Datos del BCRA con 5 días de atraso",
+            "\n\nNo hay actualización nueva del BCRA",
+            "Los datos del BCRA tienen 5 días de atraso",
         ] {
             assert!(text.contains(expected), "missing {expected} in {text}");
         }
@@ -442,6 +476,9 @@ mod tests {
         assert_eq!(super::short_year("15/01/2026"), "15/01/26");
         assert_eq!(super::short_year("15/01/26"), "15/01/26");
         assert_eq!(super::short_year("2026-01-15"), "2026-01-15");
+        assert!(super::same_day("24/09/26", Some("24/09/2026")));
+        assert!(!super::same_day("25/09/26", Some("24/09/2026")));
+        assert!(!super::same_day("24/09/26", None));
     }
 
     #[test]

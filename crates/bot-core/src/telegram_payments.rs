@@ -5,7 +5,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::command_parsing::parse_command;
-use crate::credit_units::{CreditUnits, format_credit_units};
+use crate::credit_units::{CreditUnits, format_credit_units_for};
 use crate::locale::Locale;
 use crate::telegram_actions::{
     InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, SendMessage, TelegramAction,
@@ -63,16 +63,29 @@ pub fn invoice_payload_locale(payload: &str) -> Option<&str> {
         .flatten()
 }
 
+/// Pack sizes are whole credits, so buttons drop the ",00".
+fn whole_credits(units: i64, locale: Locale) -> String {
+    let formatted = format_credit_units_for(CreditUnits::new(units), locale);
+    let decimals = match locale {
+        Locale::Es => ",00",
+        Locale::En => ".00",
+    };
+    formatted
+        .strip_suffix(decimals)
+        .map_or_else(|| formatted.clone(), ToOwned::to_owned)
+}
+
 fn topup_keyboard(locale: Locale) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup {
         inline_keyboard: DEFAULT_BILLING_PACKS
             .iter()
             .map(|(id, xtr_amount, credits_awarded)| {
-                let credits = format_credit_units(CreditUnits::new(*credits_awarded));
+                let credits = whole_credits(*credits_awarded, locale);
+                let stars = crate::output_format::localized_number(&xtr_amount.to_string(), locale);
                 vec![InlineKeyboardButton {
                     text: match locale {
-                        Locale::Es => format!("{credits} créditos por {xtr_amount} ⭐"),
-                        Locale::En => format!("{credits} credits for {xtr_amount} ⭐"),
+                        Locale::Es => format!("{credits} créditos por {stars} ⭐"),
+                        Locale::En => format!("{credits} credits for {stars} ⭐"),
                     },
                     url: None,
                     callback_data: Some(format!("topup:{id}")),
@@ -121,8 +134,8 @@ pub fn plan_topup_command(
             (!username.is_empty()).then(|| InlineKeyboardMarkup {
                 inline_keyboard: vec![vec![InlineKeyboardButton {
                     text: match locale {
-                        Locale::Es => "💬 Abrir chat privado".to_owned(),
-                        Locale::En => "💬 Open private chat".to_owned(),
+                        Locale::Es => "Abrir chat privado".to_owned(),
+                        Locale::En => "Open private chat".to_owned(),
                     },
                     url: Some(format!("https://t.me/{username}")),
                     callback_data: None,
@@ -133,8 +146,8 @@ pub fn plan_topup_command(
     } else {
         (
             match locale {
-                Locale::Es => "💳 Cargar créditos\n\nElegí un pack. Se paga con Telegram Stars ⭐ y los créditos van a tu saldo personal.",
-                Locale::En => "💳 Add credits\n\nChoose a pack. You pay with Telegram Stars ⭐ and the credits go to your personal balance.",
+                Locale::Es => "Cargar créditos\n\nElegí un pack. Pagás con Telegram Stars y los créditos van a tu saldo personal.",
+                Locale::En => "Add credits\n\nChoose a pack. You pay with Telegram Stars and the credits go to your personal balance.",
             }
             .to_owned(),
             Some(topup_keyboard(locale)),
@@ -208,24 +221,24 @@ pub fn plan_balance_command(
 
 #[must_use]
 pub fn balance_reply(user_balance: i64, chat_balance: Option<i64>, locale: Locale) -> String {
-    let user = format_credit_units(CreditUnits::new(user_balance));
+    let user = format_credit_units_for(CreditUnits::new(user_balance), locale);
     match (chat_balance, locale) {
         (None, Locale::Es) => {
-            format!("💳 Saldo IA\n\n👤 Personal: {user} créditos\n\nCargá más con /topup")
+            format!("Saldo de IA: {user} créditos\n\nCargá más con /topup")
         }
         (None, Locale::En) => {
-            format!("💳 AI balance\n\n👤 Personal: {user} credits\n\nAdd more with /topup")
+            format!("AI balance: {user} credits\n\nAdd more with /topup")
         }
         (Some(chat), Locale::Es) => {
-            let chat = format_credit_units(CreditUnits::new(chat));
+            let chat = format_credit_units_for(CreditUnits::new(chat), locale);
             format!(
-                "💳 Saldos IA\n\n👤 Personal: {user} créditos\n👥 Grupo: {chat} créditos\n\nPrimero uso tu saldo; si no alcanza, el del grupo.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
+                "Saldos de IA\n\nTuyo: {user} créditos\nDel grupo: {chat} créditos\n\nPrimero uso tu saldo y, si no alcanza, el del grupo.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
             )
         }
         (Some(chat), Locale::En) => {
-            let chat = format_credit_units(CreditUnits::new(chat));
+            let chat = format_credit_units_for(CreditUnits::new(chat), locale);
             format!(
-                "💳 AI balances\n\n👤 Personal: {user} credits\n👥 Group: {chat} credits\n\nI use your balance first, then the group's.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
+                "AI balances\n\nYours: {user} credits\nGroup: {chat} credits\n\nI use your balance first, then the group's.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
             )
         }
     }
@@ -262,12 +275,12 @@ fn invoice_action(
     pack: &BillingPackTerms,
     locale: Locale,
 ) -> TelegramAction {
-    let credits = format_credit_units(CreditUnits::new(pack.credits_awarded));
+    let credits = whole_credits(pack.credits_awarded, locale);
     let (title, description, label) = match locale {
         Locale::Es => (
-            format!("Pack IA {credits} créditos"),
-            format!("Recarga de {credits} créditos para mensajes IA"),
-            format!("{credits} créditos IA"),
+            format!("{credits} créditos de IA"),
+            format!("Recarga de {credits} créditos para mensajes de IA"),
+            format!("{credits} créditos de IA"),
         ),
         Locale::En => (
             format!("{credits} AI credit pack"),
@@ -394,26 +407,20 @@ pub fn successful_payment_reply(
     inserted: bool,
     locale: Locale,
 ) -> String {
-    let credits = format_credit_units(CreditUnits::new(credits_awarded));
-    let balance = format_credit_units(CreditUnits::new(user_balance));
+    let credits = format_credit_units_for(CreditUnits::new(credits_awarded), locale);
+    let balance = format_credit_units_for(CreditUnits::new(user_balance), locale);
     match (inserted, locale) {
         (true, Locale::Es) => {
-            format!(
-                "✅ Recarga lista: +{credits} créditos\n\n👤 Saldo personal: {balance} créditos"
-            )
+            format!("Recarga acreditada: +{credits} créditos\nSaldo personal: {balance} créditos")
         }
         (true, Locale::En) => {
-            format!(
-                "✅ Top-up complete: +{credits} credits\n\n👤 Personal balance: {balance} credits"
-            )
+            format!("Top-up complete: +{credits} credits\nPersonal balance: {balance} credits")
         }
         (false, Locale::Es) => {
-            format!("✅ Ese pago ya estaba acreditado\n\n👤 Saldo personal: {balance} créditos")
+            format!("Ese pago ya estaba acreditado\nSaldo personal: {balance} créditos")
         }
         (false, Locale::En) => {
-            format!(
-                "✅ This payment was already credited\n\n👤 Personal balance: {balance} credits"
-            )
+            format!("This payment was already credited\nPersonal balance: {balance} credits")
         }
     }
 }
@@ -725,7 +732,7 @@ mod tests {
         let Some(TelegramAction::SendMessage(private)) = private else {
             return;
         };
-        assert!(private.text.starts_with("💳 Add credits\n\n"));
+        assert!(private.text.starts_with("Add credits\n\n"));
         assert_eq!(private.reply_to_message_id, Some(MessageId(7)));
         let keyboard =
             private
@@ -738,10 +745,7 @@ mod tests {
             keyboard.inline_keyboard[0][0].callback_data.as_deref(),
             Some("topup:p50")
         );
-        assert_eq!(
-            keyboard.inline_keyboard[0][0].text,
-            "50.00 credits for 25 ⭐"
-        );
+        assert_eq!(keyboard.inline_keyboard[0][0].text, "50 credits for 25 ⭐");
 
         for (chat_type, available, bot_name, locale, expected) in [
             (
@@ -763,7 +767,7 @@ mod tests {
                 false,
                 "@mybot",
                 Locale::En,
-                "⚠️ AI credits are unavailable right now. Try again later or tell the admin",
+                "AI credits are unavailable right now. Try again later or tell the admin",
             ),
         ] {
             let Some(TelegramAction::SendMessage(message)) = plan_topup_command(
@@ -841,7 +845,7 @@ mod tests {
                 Some(88),
                 false,
                 Locale::En,
-                "⚠️ AI credits are unavailable right now. Try again later or tell the admin",
+                "AI credits are unavailable right now. Try again later or tell the admin",
             ),
             (
                 None,
@@ -875,19 +879,19 @@ mod tests {
     fn balance_replies_match_private_and_group_credit_formatting() {
         assert_eq!(
             balance_reply(4_200, None, Locale::Es),
-            "💳 Saldo IA\n\n👤 Personal: 42.00 créditos\n\nCargá más con /topup"
+            "Saldo de IA: 42,00 créditos\n\nCargá más con /topup"
         );
         assert_eq!(
             balance_reply(4_200, None, Locale::En),
-            "💳 AI balance\n\n👤 Personal: 42.00 credits\n\nAdd more with /topup"
+            "AI balance: 42.00 credits\n\nAdd more with /topup"
         );
         assert_eq!(
             balance_reply(3_000, Some(12_000), Locale::Es),
-            "💳 Saldos IA\n\n👤 Personal: 30.00 créditos\n👥 Grupo: 120.00 créditos\n\nPrimero uso tu saldo; si no alcanza, el del grupo.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
+            "Saldos de IA\n\nTuyo: 30,00 créditos\nDel grupo: 120,00 créditos\n\nPrimero uso tu saldo y, si no alcanza, el del grupo.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
         );
         assert_eq!(
             balance_reply(3_000, Some(12_000), Locale::En),
-            "💳 AI balances\n\n👤 Personal: 30.00 credits\n👥 Group: 120.00 credits\n\nI use your balance first, then the group's.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
+            "AI balances\n\nYours: 30.00 credits\nGroup: 120.00 credits\n\nI use your balance first, then the group's.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
         );
     }
 
@@ -907,12 +911,12 @@ mod tests {
             TopupCallbackPlan::Invoice(Box::new(super::TopupInvoicePlan {
                 invoice: TelegramAction::SendInvoice {
                     chat_id: ChatId(42),
-                    title: "50.00 AI credit pack".to_owned(),
-                    description: "Add 50.00 credits for AI messages".to_owned(),
+                    title: "50 AI credit pack".to_owned(),
+                    description: "Add 50 credits for AI messages".to_owned(),
                     payload: "topup:p50:42:en".to_owned(),
                     currency: "XTR".to_owned(),
                     prices: vec![LabeledPrice {
-                        label: "50.00 AI credits".to_owned(),
+                        label: "50 AI credits".to_owned(),
                         amount: 25,
                     }],
                 },
@@ -937,7 +941,7 @@ mod tests {
                 false,
                 Locale::Es,
                 Some(
-                    "⚠️ Los créditos de IA no están disponibles en este momento. Probá más tarde o avisale al admin",
+                    "Los créditos de IA no están disponibles en este momento. Probá más tarde o avisale al admin",
                 ),
                 true,
             ),
@@ -1016,7 +1020,7 @@ mod tests {
                 json!({"id":"checkout-2"}),
                 false,
                 Locale::Es,
-                "⚠️ Los créditos de IA no están disponibles en este momento. Probá más tarde o avisale al admin",
+                "Los créditos de IA no están disponibles en este momento. Probá más tarde o avisale al admin",
             ),
             (
                 json!({"id":"checkout-3"}),
@@ -1091,19 +1095,19 @@ mod tests {
     fn successful_payment_replies_preserve_exact_credit_format_and_locale() {
         assert_eq!(
             successful_payment_reply(5_000, 5_300, true, Locale::Es),
-            "✅ Recarga lista: +50.00 créditos\n\n👤 Saldo personal: 53.00 créditos"
+            "Recarga acreditada: +50,00 créditos\nSaldo personal: 53,00 créditos"
         );
         assert_eq!(
             successful_payment_reply(5_000, 5_300, true, Locale::En),
-            "✅ Top-up complete: +50.00 credits\n\n👤 Personal balance: 53.00 credits"
+            "Top-up complete: +50.00 credits\nPersonal balance: 53.00 credits"
         );
         assert_eq!(
             successful_payment_reply(5_000, 5_300, false, Locale::Es),
-            "✅ Ese pago ya estaba acreditado\n\n👤 Saldo personal: 53.00 créditos"
+            "Ese pago ya estaba acreditado\nSaldo personal: 53,00 créditos"
         );
         assert_eq!(
             successful_payment_reply(5_000, 5_300, false, Locale::En),
-            "✅ This payment was already credited\n\n👤 Personal balance: 53.00 credits"
+            "This payment was already credited\nPersonal balance: 53.00 credits"
         );
     }
 

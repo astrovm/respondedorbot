@@ -172,14 +172,9 @@ pub fn render_devo_reply(reply: DevoReply, locale: Locale) -> String {
 #[must_use]
 pub fn render_devo_result(result: &DevoResult, locale: Locale) -> String {
     let number = |value: &str| crate::output_format::localized_number(value, locale);
-    let marker = if result.profit.starts_with('-') {
-        "🔴"
-    } else {
-        "🟢"
-    };
     let summary = match locale {
         Locale::Es => format!(
-            "💳 Arbitraje tarjeta ↔ crypto\n{marker} Ganancia: {}% (comisión {}%)\n\n💵 Cotizaciones en ARS\nOficial: ${}\nUSDT: ${}\nTarjeta: ${}",
+            "Arbitraje tarjeta y crypto\nGanancia: {}% (comisión {}%)\n\nCotizaciones en ARS\nOficial: ${}\nUSDT: ${}\nTarjeta: ${}",
             number(&result.profit),
             number(&result.fee),
             number(&result.official),
@@ -187,7 +182,7 @@ pub fn render_devo_result(result: &DevoResult, locale: Locale) -> String {
             number(&result.card)
         ),
         Locale::En => format!(
-            "💳 Card ↔ crypto arbitrage\n{marker} Profit: {}% (fee {}%)\n\n💵 Rates in ARS\nOfficial: ${}\nUSDT: ${}\nCard: ${}",
+            "Card and crypto arbitrage\nProfit: {}% (fee {}%)\n\nRates in ARS\nOfficial: {}\nUSDT: {}\nCard: {}",
             number(&result.profit),
             number(&result.fee),
             number(&result.official),
@@ -200,7 +195,7 @@ pub fn render_devo_result(result: &DevoResult, locale: Locale) -> String {
     };
     let purchase_text = match locale {
         Locale::Es => format!(
-            "🧾 Compra de {} USD con tarjeta\n= ${} ARS = {} USDT\nGanancia: ${} ARS / {} USDT\nTotal: ${} ARS / {} USDT",
+            "Compra de {} USD con tarjeta\n= ${} = {} USDT\nGanancia: ${} / {} USDT\nTotal: ${} / {} USDT",
             number(&purchase.usd),
             number(&purchase.ars),
             number(&purchase.usdt),
@@ -210,7 +205,7 @@ pub fn render_devo_result(result: &DevoResult, locale: Locale) -> String {
             number(&purchase.total_usdt),
         ),
         Locale::En => format!(
-            "🧾 {} USD card purchase\n= ${} ARS = {} USDT\nProfit: ${} ARS / {} USDT\nTotal: ${} ARS / {} USDT",
+            "{} USD card purchase\n= {} ARS = {} USDT\nProfit: {} ARS / {} USDT\nTotal: {} ARS / {} USDT",
             number(&purchase.usd),
             number(&purchase.ars),
             number(&purchase.usdt),
@@ -331,7 +326,7 @@ mod tests {
         .unwrap_or_else(|_| unreachable!());
         assert_eq!(
             render_devo_result(&summary, Locale::Es),
-            "💳 Arbitraje tarjeta ↔ crypto\n🟢 Ganancia: 62,68% (comisión 0,5%)\n\n💵 Cotizaciones en ARS\nOficial: $100\nUSDT: $195\nTarjeta: $150"
+            "Arbitraje tarjeta y crypto\nGanancia: 62,68% (comisión 0,5%)\n\nCotizaciones en ARS\nOficial: $100\nUSDT: $195\nTarjeta: $150"
         );
         let purchase = calculate_devo(
             0.005,
@@ -346,7 +341,7 @@ mod tests {
         .unwrap_or_else(|_| unreachable!());
         assert_eq!(
             render_devo_result(&purchase, Locale::En),
-            "💳 Card ↔ crypto arbitrage\n🟢 Profit: 62.68% (fee 0.5%)\n\n💵 Rates in ARS\nOfficial: $100\nUSDT: $195\nCard: $150\n\n🧾 100 USD card purchase\n= $15,000 ARS = 76.92 USDT\nProfit: $9,402.5 ARS / 48.22 USDT\nTotal: $24,402.5 ARS / 125.14 USDT"
+            "Card and crypto arbitrage\nProfit: 62.68% (fee 0.5%)\n\nRates in ARS\nOfficial: 100\nUSDT: 195\nCard: 150\n\n100 USD card purchase\n= 15,000 ARS = 76.92 USDT\nProfit: 9,402.5 ARS / 48.22 USDT\nTotal: 24,402.5 ARS / 125.14 USDT"
         );
     }
 }
