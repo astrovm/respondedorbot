@@ -3,9 +3,11 @@
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use redis::{Commands, ConnectionLike, IntoConnectionInfo, RedisConnectionInfo};
+
+use crate::idle_pool::{IdleList, MAX_IDLE_AGE};
 
 const MAX_IDLE_CONNECTIONS: usize = 16;
 /// Bound how long a worker can hang on an unreachable or stalled Redis
@@ -15,7 +17,7 @@ const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct RedisPoolInner {
     client: redis::Client,
-    idle: Mutex<Vec<redis::Connection>>,
+    idle: Mutex<IdleList<redis::Connection>>,
     max_idle_connections: usize,
 }
 
@@ -36,7 +38,7 @@ impl RedisPool {
             .idle
             .lock()
             .ok()
-            .and_then(|mut idle| idle.pop())
+            .and_then(|mut idle| idle.pop_fresh(Instant::now(), MAX_IDLE_AGE))
             .map_or_else(|| open_connection(&self.inner.client), Ok)?;
         Ok(RedisPooledConnection {
             connection: Some(connection),
@@ -72,7 +74,7 @@ impl Drop for RedisPooledConnection {
             && let Ok(mut idle) = self.pool.idle.lock()
             && idle.len() < self.pool.max_idle_connections
         {
-            idle.push(connection);
+            idle.push(Instant::now(), connection);
         }
     }
 }
@@ -128,7 +130,7 @@ pub(crate) fn pool(endpoint: &RedisEndpoint) -> redis::RedisResult<RedisPool> {
         }
         let inner = Arc::new(RedisPoolInner {
             client: client(endpoint)?,
-            idle: Mutex::new(Vec::new()),
+            idle: Mutex::new(IdleList::new()),
             max_idle_connections: MAX_IDLE_CONNECTIONS,
         });
         pools.insert(key, Arc::downgrade(&inner));
@@ -137,7 +139,7 @@ pub(crate) fn pool(endpoint: &RedisEndpoint) -> redis::RedisResult<RedisPool> {
     Ok(RedisPool {
         inner: Arc::new(RedisPoolInner {
             client: client(endpoint)?,
-            idle: Mutex::new(Vec::new()),
+            idle: Mutex::new(IdleList::new()),
             max_idle_connections: MAX_IDLE_CONNECTIONS,
         }),
     })

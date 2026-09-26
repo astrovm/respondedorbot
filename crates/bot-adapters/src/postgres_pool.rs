@@ -3,11 +3,12 @@
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use postgres::{Client, Config};
 use thiserror::Error;
 
+use crate::idle_pool::{IdleList, MAX_IDLE_AGE};
 use crate::postgres_connection::postgres_tls_connector;
 
 const MAX_IDLE_CONNECTIONS: usize = 16;
@@ -22,7 +23,7 @@ pub enum PostgresPoolError {
 
 struct PostgresPoolInner {
     database_url: String,
-    idle: Mutex<Vec<Client>>,
+    idle: Mutex<IdleList<Client>>,
 }
 
 #[derive(Clone)]
@@ -48,7 +49,7 @@ impl PostgresPool {
             }
             let inner = Arc::new(PostgresPoolInner {
                 database_url: database_url.to_owned(),
-                idle: Mutex::new(Vec::new()),
+                idle: Mutex::new(IdleList::new()),
             });
             pools.insert(database_url.to_owned(), Arc::downgrade(&inner));
             return Self { inner };
@@ -56,7 +57,7 @@ impl PostgresPool {
         Self {
             inner: Arc::new(PostgresPoolInner {
                 database_url: database_url.to_owned(),
-                idle: Mutex::new(Vec::new()),
+                idle: Mutex::new(IdleList::new()),
             }),
         }
     }
@@ -67,7 +68,7 @@ impl PostgresPool {
             .idle
             .lock()
             .ok()
-            .and_then(|mut idle| idle.pop())
+            .and_then(|mut idle| idle.pop_fresh(Instant::now(), MAX_IDLE_AGE))
             .map_or_else(
                 || -> Result<Client, PostgresPoolError> {
                     let mut config = self.inner.database_url.parse::<Config>()?;
@@ -114,7 +115,7 @@ impl Drop for PooledPostgresClient {
             && let Ok(mut idle) = self.pool.idle.lock()
             && idle.len() < MAX_IDLE_CONNECTIONS
         {
-            idle.push(client);
+            idle.push(Instant::now(), client);
         }
     }
 }

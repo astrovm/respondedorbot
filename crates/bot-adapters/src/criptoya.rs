@@ -7,10 +7,16 @@ use bot_core::rulo::{ExchangeQuote, RuloInput};
 use reqwest::blocking::Client;
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
+use serde_json::{Value, json};
+
+use crate::request_cache::{RequestCache, python_request_cache_key};
 
 const DOLLAR_URL: &str = "https://criptoya.com/api/dolar";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const RULO_USD_AMOUNT: f64 = 1000.0;
+/// CriptoYa quotes move slowly enough that repeated /devo and /rulo commands
+/// within this window can share one provider response.
+pub const CACHE_TTL_SECONDS: i64 = 45;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CriptoYaRequest {
@@ -420,14 +426,155 @@ pub fn fetch_exchange_quotes<T: CriptoYaTransport>(
     fiat: &str,
     side: ExchangeSide,
 ) -> ExchangeQuotesOutcome {
-    let request = CriptoYaRequest::Exchange {
+    match transport.get(&exchange_request(fiat)) {
+        Ok(response) => parse_exchange_quotes(response, side),
+        Err(error) => ExchangeQuotesOutcome::TransportError(error),
+    }
+}
+
+/// The USDT order-book request used by `/rulo` for one fiat currency.
+#[must_use]
+pub fn exchange_request(fiat: &str) -> CriptoYaRequest {
+    CriptoYaRequest::Exchange {
         asset: "USDT".to_owned(),
         fiat: fiat.to_owned(),
         amount: RULO_USD_AMOUNT,
+    }
+}
+
+/// Provider responses for [`cached_get_all`], in request order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CachedResponses {
+    pub results: Vec<Result<HttpResponse, TransportFailureKind>>,
+    pub diagnostics: Vec<String>,
+}
+
+fn cache_key(request: &CriptoYaRequest) -> String {
+    let path = match request {
+        CriptoYaRequest::Dollar => "dolar".to_owned(),
+        CriptoYaRequest::Exchange {
+            asset,
+            fiat,
+            amount,
+        } => format!("{asset}/{fiat}/{amount:.0}"),
     };
-    match transport.get(&request) {
-        Ok(response) => parse_exchange_quotes(response, side),
-        Err(error) => ExchangeQuotesOutcome::TransportError(error),
+    python_request_cache_key(&format!("criptoya:{path}"))
+}
+
+#[derive(Deserialize)]
+struct CachedEntry {
+    timestamp: i64,
+    data: Value,
+}
+
+fn cached_response<C: RequestCache>(
+    cache: &mut C,
+    key: &str,
+    now_unix: i64,
+    diagnostics: &mut Vec<String>,
+) -> Option<HttpResponse> {
+    let raw = match cache.get(key) {
+        Ok(raw) => raw?,
+        Err(error) => {
+            diagnostics.push(format!("could not read CriptoYa cache key {key}: {error}"));
+            return None;
+        }
+    };
+    match serde_json::from_str::<CachedEntry>(&raw) {
+        Ok(entry) if now_unix.saturating_sub(entry.timestamp) <= CACHE_TTL_SECONDS => {
+            Some(HttpResponse {
+                status_code: 200,
+                body: entry.data.to_string(),
+            })
+        }
+        Ok(_) => None,
+        Err(error) => {
+            diagnostics.push(format!("invalid CriptoYa cache key {key}: {error}"));
+            None
+        }
+    }
+}
+
+fn store_response<C: RequestCache>(
+    cache: &mut C,
+    key: &str,
+    response: &HttpResponse,
+    now_unix: i64,
+    diagnostics: &mut Vec<String>,
+) {
+    if response.status_code >= 400 {
+        return;
+    }
+    let Ok(data) = serde_json::from_str::<Value>(&response.body) else {
+        return;
+    };
+    let value = json!({"timestamp": now_unix, "data": data}).to_string();
+    if let Err(error) = cache.set(key, &value, CACHE_TTL_SECONDS) {
+        diagnostics.push(format!("could not write CriptoYa cache key {key}: {error}"));
+    }
+}
+
+/// Answer each request from the shared request cache when a response younger
+/// than [`CACHE_TTL_SECONDS`] exists; fetch the rest from CriptoYa at the same
+/// time instead of one after another, and cache every successful JSON
+/// response. Failures are returned typed and never cached.
+pub fn cached_get_all<T, C>(
+    transport: &T,
+    cache: &mut C,
+    requests: &[CriptoYaRequest],
+    now_unix: i64,
+) -> CachedResponses
+where
+    T: CriptoYaTransport + Sync,
+    C: RequestCache,
+{
+    let mut diagnostics = Vec::new();
+    let keys = requests.iter().map(cache_key).collect::<Vec<_>>();
+    let cached = keys
+        .iter()
+        .map(|key| cached_response(cache, key, now_unix, &mut diagnostics))
+        .collect::<Vec<_>>();
+    let missing = requests
+        .iter()
+        .zip(&cached)
+        .filter(|(_request, cached)| cached.is_none())
+        .map(|(request, _cached)| request)
+        .collect::<Vec<_>>();
+    let mut fetched = if missing.len() > 1 {
+        std::thread::scope(|scope| {
+            let handles = missing
+                .iter()
+                .map(|request| scope.spawn(move || transport.get(request)))
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap_or(Err(TransportFailureKind::Request)))
+                .collect::<Vec<_>>()
+        })
+    } else {
+        missing
+            .iter()
+            .map(|request| transport.get(request))
+            .collect()
+    }
+    .into_iter();
+    let mut results = Vec::with_capacity(requests.len());
+    for (key, cached) in keys.iter().zip(cached) {
+        let result = match cached {
+            Some(response) => Ok(response),
+            None => {
+                let result = fetched.next().unwrap_or(Err(TransportFailureKind::Request));
+                if let Ok(response) = &result {
+                    store_response(cache, key, response, now_unix, &mut diagnostics);
+                }
+                result
+            }
+        };
+        results.push(result);
+    }
+    CachedResponses {
+        results,
+        diagnostics,
     }
 }
 
@@ -702,5 +849,168 @@ mod tests {
         let unavailable = ReqwestCriptoYaTransport::with_api_base("http://127.0.0.1:1/api/")
             .unwrap_or_else(|_| unreachable!());
         assert!(unavailable.get(&CriptoYaRequest::Dollar).is_err());
+    }
+
+    struct KeyedTransport {
+        requests: std::sync::Mutex<Vec<CriptoYaRequest>>,
+        barrier: Option<std::sync::Barrier>,
+    }
+
+    impl CriptoYaTransport for KeyedTransport {
+        fn get(&self, request: &CriptoYaRequest) -> Result<HttpResponse, TransportFailureKind> {
+            if let Ok(mut requests) = self.requests.lock() {
+                requests.push(request.clone());
+            }
+            // Only concurrent calls get past the barrier; a sequential
+            // implementation would deadlock here.
+            if let Some(barrier) = &self.barrier {
+                barrier.wait();
+            }
+            match request {
+                CriptoYaRequest::Dollar => Ok(HttpResponse {
+                    status_code: 200,
+                    body: r#"{"oficial":{"price":100}}"#.to_owned(),
+                }),
+                CriptoYaRequest::Exchange { fiat, .. } if fiat == "USD" => Ok(HttpResponse {
+                    status_code: 503,
+                    body: String::new(),
+                }),
+                CriptoYaRequest::Exchange { fiat, .. } if fiat == "ARS" => Ok(HttpResponse {
+                    status_code: 200,
+                    body: "not-json".to_owned(),
+                }),
+                CriptoYaRequest::Exchange { .. } => Err(TransportFailureKind::Timeout),
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct MemoryCache {
+        values: std::collections::HashMap<String, String>,
+        fail: bool,
+    }
+
+    impl crate::request_cache::RequestCache for MemoryCache {
+        type Error = String;
+
+        fn get(&mut self, key: &str) -> Result<Option<String>, Self::Error> {
+            if self.fail {
+                return Err("synthetic read failure".to_owned());
+            }
+            Ok(self.values.get(key).cloned())
+        }
+
+        fn set(&mut self, key: &str, value: &str, _ttl_seconds: i64) -> Result<(), Self::Error> {
+            if self.fail {
+                return Err("synthetic write failure".to_owned());
+            }
+            self.values.insert(key.to_owned(), value.to_owned());
+            Ok(())
+        }
+
+        fn take(&mut self, key: &str) -> Result<Option<String>, Self::Error> {
+            Ok(self.values.remove(key))
+        }
+
+        fn claim(&mut self, _key: &str, _value: &str, _ttl: i64) -> Result<bool, Self::Error> {
+            Ok(true)
+        }
+    }
+
+    fn rulo_requests() -> Vec<CriptoYaRequest> {
+        vec![
+            CriptoYaRequest::Dollar,
+            super::exchange_request("USD"),
+            super::exchange_request("ARS"),
+        ]
+    }
+
+    #[test]
+    fn cached_get_all_fetches_misses_concurrently_and_caches_only_json_successes() {
+        let transport = KeyedTransport {
+            requests: std::sync::Mutex::new(Vec::new()),
+            barrier: Some(std::sync::Barrier::new(3)),
+        };
+        let mut cache = MemoryCache::default();
+        let now = 1_700_000_000;
+        let load = super::cached_get_all(&transport, &mut cache, &rulo_requests(), now);
+        assert!(load.diagnostics.is_empty());
+        assert_eq!(load.results.len(), 3);
+        assert!(load.results[0].as_ref().is_ok_and(|r| r.status_code == 200));
+        assert!(load.results[1].as_ref().is_ok_and(|r| r.status_code == 503));
+        assert!(load.results[2].as_ref().is_ok_and(|r| r.body == "not-json"));
+        assert_eq!(cache.values.len(), 1);
+
+        // A fresh cached dollar response is served without contacting CriptoYa;
+        // the two uncached requests still run (concurrently, or the barrier
+        // would block).
+        let transport = KeyedTransport {
+            requests: std::sync::Mutex::new(Vec::new()),
+            barrier: Some(std::sync::Barrier::new(2)),
+        };
+        let load = super::cached_get_all(
+            &transport,
+            &mut cache,
+            &rulo_requests(),
+            now + super::CACHE_TTL_SECONDS,
+        );
+        assert_eq!(
+            load.results[0],
+            Ok(HttpResponse {
+                status_code: 200,
+                body: r#"{"oficial":{"price":100}}"#.to_owned(),
+            })
+        );
+        assert_eq!(transport.requests.lock().map(|r| r.len()).ok(), Some(2));
+
+        // Once the entry is older than the TTL it is fetched again, alone.
+        let transport = KeyedTransport {
+            requests: std::sync::Mutex::new(Vec::new()),
+            barrier: None,
+        };
+        let load = super::cached_get_all(
+            &transport,
+            &mut cache,
+            &[CriptoYaRequest::Dollar],
+            now + super::CACHE_TTL_SECONDS + 1,
+        );
+        assert!(load.results[0].is_ok());
+        assert_eq!(transport.requests.lock().map(|r| r.len()).ok(), Some(1));
+    }
+
+    #[test]
+    fn cached_get_all_reports_cache_failures_and_still_fetches() {
+        let transport = KeyedTransport {
+            requests: std::sync::Mutex::new(Vec::new()),
+            barrier: None,
+        };
+        let mut cache = MemoryCache {
+            fail: true,
+            ..MemoryCache::default()
+        };
+        let load = super::cached_get_all(
+            &transport,
+            &mut cache,
+            &[CriptoYaRequest::Dollar, super::exchange_request("EUR")],
+            1_700_000_000,
+        );
+        assert_eq!(load.results[1], Err(TransportFailureKind::Timeout));
+        assert!(load.results[0].is_ok());
+        assert_eq!(load.diagnostics.len(), 3);
+        assert!(load.diagnostics[0].contains("could not read"));
+        assert!(load.diagnostics[2].contains("could not write"));
+
+        let mut cache = MemoryCache::default();
+        cache
+            .values
+            .insert(super::cache_key(&CriptoYaRequest::Dollar), "bad".to_owned());
+        let load = super::cached_get_all(
+            &transport,
+            &mut cache,
+            &[CriptoYaRequest::Dollar],
+            1_700_000_000,
+        );
+        assert!(load.results[0].is_ok());
+        assert!(load.diagnostics[0].contains("invalid CriptoYa cache key"));
     }
 }

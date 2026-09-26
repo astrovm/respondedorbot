@@ -19,10 +19,10 @@ use bot_adapters::coinmarketcap::{
     load_market_assets,
 };
 use bot_adapters::criptoya::{
-    CriptoYaTransport, DollarQuotesOutcome, ExchangeQuotesOutcome, ExchangeSide,
-    ReqwestCriptoYaTransport, RuloMarketOutcome,
-    TransportFailureKind as CriptoYaTransportFailureKind, fetch_dollar_quotes,
-    fetch_exchange_quotes, fetch_rulo_market,
+    CriptoYaRequest, CriptoYaTransport, DollarQuotesOutcome, ExchangeQuotesOutcome, ExchangeSide,
+    HttpResponse as CriptoYaHttpResponse, ReqwestCriptoYaTransport, RuloMarketOutcome,
+    TransportFailureKind as CriptoYaTransportFailureKind, cached_get_all, exchange_request,
+    parse_dollar_quotes, parse_exchange_quotes, parse_rulo_market,
 };
 use bot_adapters::dollar::{
     DollarCache, DollarTransport, ReqwestDollarTransport,
@@ -581,8 +581,9 @@ where
     }
 }
 
-struct CriptoYaDollarQuotesSource<T> {
+struct CriptoYaDollarQuotesSource<T, C> {
     transport: T,
+    cache: C,
 }
 
 struct CriptoYaDollarMarketSource<T, B, C> {
@@ -631,9 +632,21 @@ impl<T: DollarTransport, B: BcraTransport, C: DollarCache> DollarMarketSource
     }
 }
 
-impl<T: CriptoYaTransport> DollarQuotesSource for CriptoYaDollarQuotesSource<T> {
+impl<T: CriptoYaTransport + Sync, C: RequestCache> DollarQuotesSource
+    for CriptoYaDollarQuotesSource<T, C>
+{
     fn devo_quotes(&mut self) -> Result<Option<bot_core::devo::DevoQuotes>, String> {
-        match fetch_dollar_quotes(&self.transport) {
+        let outcome = cached_get_all(
+            &self.transport,
+            &mut self.cache,
+            &[CriptoYaRequest::Dollar],
+            current_unix_timestamp(),
+        )
+        .results
+        .pop()
+        .unwrap_or(Err(CriptoYaTransportFailureKind::Request))
+        .map_or_else(DollarQuotesOutcome::TransportError, parse_dollar_quotes);
+        match outcome {
             DollarQuotesOutcome::Quotes(quotes) => Ok(Some(quotes)),
             DollarQuotesOutcome::Missing => Ok(None),
             DollarQuotesOutcome::HttpError { status_code } => {
@@ -647,8 +660,9 @@ impl<T: CriptoYaTransport> DollarQuotesSource for CriptoYaDollarQuotesSource<T> 
     }
 }
 
-struct CriptoYaRuloSource<T> {
+struct CriptoYaRuloSource<T, C> {
     transport: T,
+    cache: C,
 }
 
 fn exchange_failure(label: &str, outcome: ExchangeQuotesOutcome) -> String {
@@ -664,9 +678,36 @@ fn exchange_failure(label: &str, outcome: ExchangeQuotesOutcome) -> String {
     }
 }
 
-impl<T: CriptoYaTransport> RuloSource for CriptoYaRuloSource<T> {
+impl<T: CriptoYaTransport + Sync, C: RequestCache> RuloSource for CriptoYaRuloSource<T, C> {
     fn rulo_input(&mut self) -> Result<RuloInputLoad, String> {
-        let mut input = match fetch_rulo_market(&self.transport) {
+        // The dollar market and both USDT books are independent: serve fresh
+        // ones from cache and fetch the rest concurrently.
+        let load = cached_get_all(
+            &self.transport,
+            &mut self.cache,
+            &[
+                CriptoYaRequest::Dollar,
+                exchange_request("USD"),
+                exchange_request("ARS"),
+            ],
+            current_unix_timestamp(),
+        );
+        let mut results = load.results.into_iter();
+        let mut next = || -> Result<CriptoYaHttpResponse, CriptoYaTransportFailureKind> {
+            results
+                .next()
+                .unwrap_or(Err(CriptoYaTransportFailureKind::Request))
+        };
+        let market = next().map_or_else(RuloMarketOutcome::TransportError, parse_rulo_market);
+        let exchange = |result: Result<CriptoYaHttpResponse, CriptoYaTransportFailureKind>,
+                        side| {
+            result.map_or_else(ExchangeQuotesOutcome::TransportError, |response| {
+                parse_exchange_quotes(response, side)
+            })
+        };
+        let usd_to_usdt = exchange(next(), ExchangeSide::Ask);
+        let usdt_to_ars = exchange(next(), ExchangeSide::Bid);
+        let mut input = match market {
             RuloMarketOutcome::Input(input) => input,
             RuloMarketOutcome::InvalidJson => {
                 return Err("CriptoYa dollar market returned invalid JSON".to_owned());
@@ -680,12 +721,12 @@ impl<T: CriptoYaTransport> RuloSource for CriptoYaRuloSource<T> {
                 return Err(format!("CriptoYa dollar market transport failed: {kind:?}"));
             }
         };
-        let mut diagnostics = Vec::new();
-        match fetch_exchange_quotes(&self.transport, "USD", ExchangeSide::Ask) {
+        let mut diagnostics = load.diagnostics;
+        match usd_to_usdt {
             ExchangeQuotesOutcome::Quotes(quotes) => input.usd_to_usdt = quotes,
             failure => diagnostics.push(exchange_failure("USDT/USD", failure)),
         }
-        match fetch_exchange_quotes(&self.transport, "ARS", ExchangeSide::Bid) {
+        match usdt_to_ars {
             ExchangeQuotesOutcome::Quotes(quotes) => input.usdt_to_ars = quotes,
             failure => diagnostics.push(exchange_failure("USDT/ARS", failure)),
         }
@@ -2768,6 +2809,8 @@ fn build_native_dispatcher_with_stream_delivery(
         ReqwestTelegramTransport::new().map_err(CompositionError::AdminTransport)?;
     let criptoya_transport =
         ReqwestCriptoYaTransport::new().map_err(CompositionError::CriptoYaTransport)?;
+    let criptoya_cache =
+        RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::DollarCache)?;
     let dollar_transport =
         ReqwestDollarTransport::new().map_err(CompositionError::DollarTransport)?;
     let dollar_bcra_transport =
@@ -2779,6 +2822,8 @@ fn build_native_dispatcher_with_stream_delivery(
         RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::BcraCache)?;
     let rulo_transport =
         ReqwestCriptoYaTransport::new().map_err(CompositionError::CriptoYaTransport)?;
+    let rulo_cache =
+        RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::DollarCache)?;
     let giphy_transport = ReqwestGiphyTransport::new().map_err(CompositionError::GiphyTransport)?;
     let giphy_cache =
         RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::GiphyCache)?;
@@ -2841,6 +2886,7 @@ fn build_native_dispatcher_with_stream_delivery(
     .with_admin_creditlog_source(Box::new(BillingRepository::new(options.database_url)))
     .with_dollar_quotes_source(Box::new(CriptoYaDollarQuotesSource {
         transport: criptoya_transport,
+        cache: criptoya_cache,
     }))
     .with_dollar_market_source(Box::new(CriptoYaDollarMarketSource {
         transport: dollar_transport,
@@ -2853,6 +2899,7 @@ fn build_native_dispatcher_with_stream_delivery(
     }))
     .with_rulo_source(Box::new(CriptoYaRuloSource {
         transport: rulo_transport,
+        cache: rulo_cache,
     }))
     .with_greeting_pool_source(Box::new(GiphyGreetingPoolSource {
         transport: giphy_transport,
@@ -3200,9 +3247,11 @@ mod tests {
         completed: mpsc::Sender<()>,
     }
 
+    /// Answers by request (dollar market, USDT/USD, then USDT/ARS) so the
+    /// concurrent CriptoYa fetches stay deterministic.
     struct CriptoTransport {
-        results: RefCell<Vec<Result<CriptoYaHttpResponse, CriptoYaFailure>>>,
-        requests: RefCell<Vec<CriptoYaRequest>>,
+        results: Mutex<Vec<Result<CriptoYaHttpResponse, CriptoYaFailure>>>,
+        requests: Mutex<Vec<CriptoYaRequest>>,
     }
 
     struct DollarTransportStub;
@@ -3466,11 +3515,19 @@ mod tests {
 
     impl CriptoYaTransport for CriptoTransport {
         fn get(&self, request: &CriptoYaRequest) -> Result<CriptoYaHttpResponse, CriptoYaFailure> {
-            self.requests.borrow_mut().push(request.clone());
-            if self.results.borrow().is_empty() {
-                return Err(CriptoYaFailure::Request);
+            if let Ok(mut requests) = self.requests.lock() {
+                requests.push(request.clone());
             }
-            self.results.borrow_mut().remove(0)
+            let index = match request {
+                CriptoYaRequest::Dollar => 0,
+                CriptoYaRequest::Exchange { fiat, .. } if fiat == "USD" => 1,
+                CriptoYaRequest::Exchange { .. } => 2,
+            };
+            self.results
+                .lock()
+                .ok()
+                .and_then(|results| results.get(index).cloned())
+                .unwrap_or(Err(CriptoYaFailure::Request))
         }
     }
 
@@ -5282,7 +5339,7 @@ mod tests {
     #[test]
     fn rulo_source_keeps_exchange_failures_nonfatal_and_primary_failures_explicit() {
         let transport = CriptoTransport {
-            results: RefCell::new(vec![
+            results: Mutex::new(vec![
                 Ok(CriptoYaHttpResponse {
                     status_code: 200,
                     body: r#"{"oficial":{"price":1440},"blue":{"bid":1430}}"#.to_owned(),
@@ -5296,25 +5353,39 @@ mod tests {
                     body: r#"{"buenbit":{"totalBid":1458.44}}"#.to_owned(),
                 }),
             ]),
-            requests: RefCell::new(Vec::new()),
+            requests: Mutex::new(Vec::new()),
         };
-        let mut source = CriptoYaRuloSource { transport };
+        let mut source = CriptoYaRuloSource {
+            transport,
+            cache: WeatherCacheStub,
+        };
         let load = source.rulo_input().unwrap_or_else(|_| unreachable!());
         assert_eq!(load.input.official, Some(1440.0));
         assert!(load.input.usd_to_usdt.is_empty());
         assert_eq!(load.input.usdt_to_ars[0].exchange, "buenbit");
         assert_eq!(load.diagnostics.len(), 1);
         assert!(load.diagnostics[0].contains("USDT/USD"));
-        assert_eq!(source.transport.requests.borrow().len(), 3);
+        assert_eq!(
+            source
+                .transport
+                .requests
+                .lock()
+                .map(|requests| requests.len())
+                .ok(),
+            Some(3)
+        );
 
         let transport = CriptoTransport {
-            results: RefCell::new(vec![Ok(CriptoYaHttpResponse {
+            results: Mutex::new(vec![Ok(CriptoYaHttpResponse {
                 status_code: 503,
                 body: String::new(),
             })]),
-            requests: RefCell::new(Vec::new()),
+            requests: Mutex::new(Vec::new()),
         };
-        let mut source = CriptoYaRuloSource { transport };
+        let mut source = CriptoYaRuloSource {
+            transport,
+            cache: WeatherCacheStub,
+        };
         assert!(
             source
                 .rulo_input()
@@ -5602,7 +5673,7 @@ mod tests {
 
         let mut dollar = super::CriptoYaDollarQuotesSource {
             transport: CriptoTransport {
-                results: RefCell::new(vec![Ok(CriptoYaHttpResponse {
+                results: Mutex::new(vec![Ok(CriptoYaHttpResponse {
                     status_code: 200,
                     body: serde_json::json!({
                         "oficial":{"price":100},
@@ -5611,8 +5682,9 @@ mod tests {
                     })
                     .to_string(),
                 })]),
-                requests: RefCell::new(Vec::new()),
+                requests: Mutex::new(Vec::new()),
             },
+            cache: WeatherCacheStub,
         };
         assert!(dollar.devo_quotes().is_ok_and(|quotes| quotes.is_some()));
 
@@ -5684,9 +5756,10 @@ mod tests {
         ] {
             let mut source = super::CriptoYaDollarQuotesSource {
                 transport: CriptoTransport {
-                    results: RefCell::new(vec![result]),
-                    requests: RefCell::new(Vec::new()),
+                    results: Mutex::new(vec![result]),
+                    requests: Mutex::new(Vec::new()),
                 },
+                cache: WeatherCacheStub,
             };
             assert_eq!(source.devo_quotes(), expected);
         }
@@ -5699,13 +5772,14 @@ mod tests {
         };
         let mut rulo = CriptoYaRuloSource {
             transport: CriptoTransport {
-                results: RefCell::new(vec![
+                results: Mutex::new(vec![
                     exchange(r#"{"oficial":{"price":100},"blue":{"bid":110}}"#),
                     exchange(r#"{"synthetic_exchange":{"totalAsk":1.1}}"#),
                     exchange(r#"{"synthetic_exchange":{"totalBid":120}}"#),
                 ]),
-                requests: RefCell::new(Vec::new()),
+                requests: Mutex::new(Vec::new()),
             },
+            cache: WeatherCacheStub,
         };
         let input = rulo.rulo_input().unwrap_or_else(|_| unreachable!());
         assert_eq!(input.input.official, Some(100.0));
@@ -5735,16 +5809,17 @@ mod tests {
         ] {
             let mut source = CriptoYaRuloSource {
                 transport: CriptoTransport {
-                    results: RefCell::new(vec![result]),
-                    requests: RefCell::new(Vec::new()),
+                    results: Mutex::new(vec![result]),
+                    requests: Mutex::new(Vec::new()),
                 },
+                cache: WeatherCacheStub,
             };
             assert_eq!(source.rulo_input(), Err(expected.to_owned()));
         }
 
         let mut partial_rulo = CriptoYaRuloSource {
             transport: CriptoTransport {
-                results: RefCell::new(vec![
+                results: Mutex::new(vec![
                     exchange("{}"),
                     Err(CriptoYaFailure::Timeout),
                     Ok(CriptoYaHttpResponse {
@@ -5752,8 +5827,9 @@ mod tests {
                         body: String::new(),
                     }),
                 ]),
-                requests: RefCell::new(Vec::new()),
+                requests: Mutex::new(Vec::new()),
             },
+            cache: WeatherCacheStub,
         };
         let input = partial_rulo.rulo_input().unwrap_or_else(|_| unreachable!());
         assert_eq!(input.diagnostics.len(), 2);
