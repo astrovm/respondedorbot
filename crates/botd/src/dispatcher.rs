@@ -400,6 +400,14 @@ const MARKET_SELECTION_TTL_SECONDS: i64 = 0;
 // while still allowing an intentional repurchase shortly after.
 const TOPUP_INVOICE_CLAIM_TTL_SECONDS: i64 = 120;
 
+/// How long a sent link fix for an addressed message is remembered, so a
+/// retried update answers again without posting the fixed link twice.
+const SENT_LINK_FIX_TTL_SECONDS: i64 = 600;
+
+fn sent_link_fix_key(chat_id: ChatId, message_id: MessageId) -> String {
+    format!("sent_link_fix:{}:{}", chat_id.0, message_id.0)
+}
+
 fn topup_invoice_claim_key(user_id: i64, pack_id: &str) -> String {
     format!("topup_invoice:{user_id}:{pack_id}")
 }
@@ -1165,7 +1173,15 @@ where
     /// Whether the AI would answer this message on its own merits: it
     /// mentions or replies to the bot, or is a private message with more
     /// than bare links (a bare link in private is only a link-fix request).
-    fn is_addressed_to_bot(&self, message: &IncomingMessage, text: &str) -> bool {
+    /// Replies routing ignores (to a link fix, or to a non-AI command when
+    /// those followups are off) are not addressed, so their original is
+    /// still handled like any other link message.
+    fn is_addressed_to_bot(
+        &mut self,
+        message: &IncomingMessage,
+        text: &str,
+        config: &ChatConfig,
+    ) -> bool {
         let bot_username = self.bot_name.trim().trim_start_matches('@');
         if bot_username.is_empty() {
             return message.chat_type.as_deref() == Some("private")
@@ -1175,10 +1191,41 @@ where
             .to_lowercase()
             .contains(&format!("@{}", bot_username.to_lowercase()));
         let reply_to_bot = message.replied_sender_username.as_deref() == Some(bot_username);
-        mention
+        let addressed = mention
             || reply_to_bot
             || (message.chat_type.as_deref() == Some("private")
-                && !text_without_links(text).trim().is_empty())
+                && !text_without_links(text).trim().is_empty());
+        if !addressed || !reply_to_bot {
+            return addressed;
+        }
+        if config.ignore_link_fix_followups
+            && bot_core::routing::is_link_fix_text(
+                message.replied_text.as_deref().unwrap_or_default(),
+            )
+        {
+            return false;
+        }
+        config.ai_command_followups
+            || !self
+                .replied_bot_metadata(message)
+                .is_some_and(|metadata| metadata.is_non_ai_command())
+    }
+
+    /// Stored metadata for the bot message this message replies to.
+    fn replied_bot_metadata(
+        &mut self,
+        message: &IncomingMessage,
+    ) -> Option<crate::ai_dispatch::AiReplyMetadata> {
+        let (chat_id, reply_id) = (message.chat_id?, message.replied_message_id?);
+        let source = self.ai_conversation_source.as_mut()?;
+        match source.reply_metadata(&chat_id.0.to_string(), &reply_id.0.to_string()) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                self.state_diagnostics
+                    .push(format!("AI reply metadata: {error}"));
+                None
+            }
+        }
     }
 
     /// Returns `Some` when link replacement fully handled the message. A
@@ -1269,6 +1316,18 @@ where
         ) else {
             return Ok(None);
         };
+        let sent_key = addressed.then(|| sent_link_fix_key(chat_id, message_id));
+        if let Some(key) = sent_key.as_deref()
+            && let Some(source) = self.market_price_source.as_mut()
+        {
+            match source.load_selection(key) {
+                Ok(Some(_)) => return Ok(None),
+                Ok(None) => {}
+                Err(error) => self
+                    .state_diagnostics
+                    .push(format!("sent link fix lookup: {error}")),
+            }
+        }
         let video_action = load.oversized_video.map(|video| {
             let TelegramAction::SendMessage(message) = &plan.send else {
                 return plan.send.clone();
@@ -1298,6 +1357,13 @@ where
                 .execute(plan.send)
                 .map_err(DispatchError::Action)?
         };
+        if let Some(key) = sent_key.as_deref()
+            && let Some(source) = self.market_price_source.as_mut()
+            && let Err(error) = source.save_selection(key, "1", SENT_LINK_FIX_TTL_SECONDS)
+        {
+            self.state_diagnostics
+                .push(format!("sent link fix marker: {error}"));
+        }
         if let Some(delete) = plan.delete_original.filter(|_| !addressed) {
             let _receipt = self
                 .actions
@@ -4122,17 +4188,7 @@ where
                     .any(|candidate| candidate.command == command_name)
         });
         let reply_metadata = if reply_to_bot {
-            message.replied_message_id.and_then(|reply_id| {
-                let source = self.ai_conversation_source.as_mut()?;
-                match source.reply_metadata(&chat_id.0.to_string(), &reply_id.0.to_string()) {
-                    Ok(metadata) => metadata,
-                    Err(error) => {
-                        self.state_diagnostics
-                            .push(format!("AI reply metadata: {error}"));
-                        None
-                    }
-                }
-            })
+            self.replied_bot_metadata(message)
         } else {
             None
         };
@@ -4785,7 +4841,7 @@ where
         }
         self.prefetched_link_context = None;
         if !content.text.starts_with('/') && has_replaceable_link(&content.text) {
-            let addressed = self.is_addressed_to_bot(message, &content.text);
+            let addressed = self.is_addressed_to_bot(message, &content.text, &config);
             if let Some(outcome) =
                 self.dispatch_link_replacement(message, &config, locale, timestamp, addressed)?
             {
@@ -18153,6 +18209,58 @@ mod tests {
     }
 
     #[test]
+    fn retried_addressed_link_messages_answer_again_without_a_second_fixed_link() {
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let (source, (prepared, _ignored, _deliveries)) =
+            ai_source(Ok(AiPreparation::reply("respuesta", Some("c1".to_owned()))));
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_link_replacement_source(Box::new(links(true)))
+        .with_ai_conversation_source(Box::new(source))
+        .with_market_price_source(Box::new(SelectableMarketPrices {
+            initial: market_selection_load(None),
+            candidate: market_candidate_quote(),
+            stored: Rc::clone(&stored),
+            selected: Rc::new(RefCell::new(Vec::new())),
+        }));
+        let fixed_links = |actions: &[TelegramAction]| {
+            actions
+                .iter()
+                .filter(|action| {
+                    matches!(
+                        action,
+                        TelegramAction::SendMessage(fixed) if fixed.text.contains("fixupx.com")
+                    )
+                })
+                .count()
+        };
+        for _ in 0..2 {
+            assert_eq!(
+                dispatcher.dispatch(group_link_update(
+                    "@mybot qué onda esto https://x.com/a/status/1"
+                )),
+                Ok(DispatchOutcome::Handled)
+            );
+        }
+        assert_eq!(fixed_links(&dispatcher.actions.0), 1);
+        assert_eq!(prepared.borrow().len(), 2);
+        assert_eq!(
+            stored.borrow().keys().cloned().collect::<Vec<_>>(),
+            [super::sent_link_fix_key(ChatId(-42), MessageId(7))]
+        );
+    }
+
+    #[test]
     fn unreplaced_links_addressed_to_the_bot_fall_through_to_the_ai() {
         let (source, (prepared, _ignored, _deliveries)) = ai_source(Ok(AiPreparation::silent()));
         let mut dispatcher = NativeDispatcher::new(
@@ -18231,10 +18339,14 @@ mod tests {
         else {
             return;
         };
-        let addressed = |bot_name: &str, message: &IncomingMessage| {
-            let dispatcher = NativeDispatcher::new(
+        let addressed_with = |bot_name: &str,
+                              message: &IncomingMessage,
+                              config: &ChatConfig,
+                              metadata: Option<AiReplyMetadata>| {
+            let (source, _observations) = ai_source(Ok(AiPreparation::silent()));
+            let mut dispatcher = NativeDispatcher::new(
                 Config {
-                    value: Ok(ChatConfig::default()),
+                    value: Ok(config.clone()),
                     chat_ids: Vec::new(),
                 },
                 Actions::default(),
@@ -18243,13 +18355,17 @@ mod tests {
                 random(),
                 authorization(),
                 bot_name,
-            );
+            )
+            .with_ai_conversation_source(Box::new(AiSource { metadata, ..source }));
             let text = message
                 .content
                 .as_ref()
                 .map(|content| content.text.clone())
                 .unwrap_or_default();
-            dispatcher.is_addressed_to_bot(message, &text)
+            dispatcher.is_addressed_to_bot(message, &text, config)
+        };
+        let addressed = |bot_name: &str, message: &IncomingMessage| {
+            addressed_with(bot_name, message, &ChatConfig::default(), None)
         };
         assert!(!addressed("@MyBot", &group_link));
         assert!(!addressed("@MyBot", &private_link));
@@ -18260,6 +18376,57 @@ mod tests {
         assert!(!addressed(" ", &private_link));
         assert!(addressed(" ", &private_text));
         assert!(!addressed(" ", &group_mention));
+
+        // Replies routing ignores are not addressed, so delete mode still
+        // removes their original.
+        let mut link_fix_reply = group_reply.clone();
+        link_fix_reply.replied_message_id = Some(MessageId(3));
+        link_fix_reply.replied_text = Some("https://fixupx.com/a/status/9".to_owned());
+        assert!(!addressed("@MyBot", &link_fix_reply));
+        let followups_on = ChatConfig {
+            ignore_link_fix_followups: false,
+            ..ChatConfig::default()
+        };
+        assert!(addressed_with(
+            "@MyBot",
+            &link_fix_reply,
+            &followups_on,
+            None
+        ));
+
+        let mut command_reply = group_reply;
+        command_reply.replied_message_id = Some(MessageId(3));
+        let command = || {
+            Some(AiReplyMetadata {
+                kind: "command".to_owned(),
+                uses_ai: false,
+            })
+        };
+        let command_followups_off = ChatConfig {
+            ai_command_followups: false,
+            ..ChatConfig::default()
+        };
+        assert!(!addressed_with(
+            "@MyBot",
+            &command_reply,
+            &command_followups_off,
+            command()
+        ));
+        assert!(addressed_with(
+            "@MyBot",
+            &command_reply,
+            &ChatConfig {
+                ai_command_followups: true,
+                ..ChatConfig::default()
+            },
+            command()
+        ));
+        assert!(addressed_with(
+            "@MyBot",
+            &command_reply,
+            &command_followups_off,
+            None
+        ));
     }
 
     #[test]

@@ -160,7 +160,7 @@ impl LinkPreviewTransport for ReqwestLinkPreviewTransport {
                 .take(MAX_BODY_BYTES)
                 .read_to_end(&mut bytes)
                 .map_err(|_| PreviewFailure::Request)?;
-            String::from_utf8_lossy(&bytes).into_owned()
+            decode_body(&bytes, &content_type)
         } else {
             String::new()
         };
@@ -202,6 +202,36 @@ impl LinkPreviewTransport for ReqwestLinkPreviewTransport {
         }
         Ok(bytes)
     }
+}
+
+/// Decodes a page with the charset its `Content-Type` or leading `<meta>`
+/// declares (older sites still serve windows-1252), falling back to UTF-8.
+fn decode_body(bytes: &[u8], content_type: &str) -> String {
+    let declared = charset_label(content_type).or_else(|| {
+        let head = String::from_utf8_lossy(&bytes[..bytes.len().min(1024)]).to_ascii_lowercase();
+        head.match_indices("<meta")
+            .filter_map(|(start, _)| {
+                let tag = &head[start..];
+                charset_label(&tag[..tag.find('>').unwrap_or(tag.len())])
+            })
+            .next()
+    });
+    let encoding = declared
+        .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
+        .unwrap_or(encoding_rs::UTF_8);
+    encoding.decode(bytes).0.into_owned()
+}
+
+fn charset_label(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let value = &lower[lower.find("charset=")? + "charset=".len()..];
+    let label = value
+        .trim_start_matches(['"', '\''])
+        .split(|character: char| {
+            character.is_whitespace() || matches!(character, '"' | '\'' | ';' | '/' | '>')
+        })
+        .next()?;
+    (!label.is_empty()).then(|| label.to_owned())
 }
 
 pub const TELEGRAM_REMOTE_VIDEO_MAX_BYTES: u64 = 20_000_000;
@@ -551,6 +581,29 @@ mod tests {
         PreviewRequest, PreviewResponse, ReqwestLinkPreviewTransport, download_oversized_video,
         inspect_with, meta_tags, scan_prefix,
     };
+
+    #[test]
+    fn page_bodies_decode_with_their_declared_charset() {
+        let latin1 = b"<title>Econom\xeda y pol\xedtica</title>";
+        assert_eq!(
+            super::decode_body(latin1, "text/html; charset=ISO-8859-1"),
+            "<title>Econom\u{ed}a y pol\u{ed}tica</title>"
+        );
+        let meta = b"<meta charset=\"windows-1252\"/><title>Ca\xf1a</title>";
+        assert_eq!(
+            super::decode_body(meta, "text/html"),
+            "<meta charset=\"windows-1252\"/><title>Ca\u{f1}a</title>"
+        );
+        let http_equiv =
+            b"<meta http-equiv='Content-Type' content='text/html; charset=latin1'>\xe1";
+        assert!(super::decode_body(http_equiv, "text/html").ends_with('\u{e1}'));
+        assert_eq!(super::decode_body("año".as_bytes(), "text/html"), "año");
+        assert_eq!(
+            super::decode_body("año".as_bytes(), "text/html; charset=bogus"),
+            "año"
+        );
+        assert_eq!(super::charset_label("text/html; charset="), None);
+    }
 
     #[test]
     fn meta_scan_cuts_multibyte_text_on_a_character_boundary() {
