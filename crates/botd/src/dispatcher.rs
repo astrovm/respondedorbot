@@ -400,6 +400,14 @@ const MARKET_SELECTION_TTL_SECONDS: i64 = 0;
 // while still allowing an intentional repurchase shortly after.
 const TOPUP_INVOICE_CLAIM_TTL_SECONDS: i64 = 120;
 
+/// How long a sent link fix for an addressed message is remembered, so a
+/// retried update answers again without posting the fixed link twice.
+const SENT_LINK_FIX_TTL_SECONDS: i64 = 600;
+
+fn sent_link_fix_key(chat_id: ChatId, message_id: MessageId) -> String {
+    format!("sent_link_fix:{}:{}", chat_id.0, message_id.0)
+}
+
 fn topup_invoice_claim_key(user_id: i64, pack_id: &str) -> String {
     format!("topup_invoice:{user_id}:{pack_id}")
 }
@@ -1269,6 +1277,18 @@ where
         ) else {
             return Ok(None);
         };
+        let sent_key = addressed.then(|| sent_link_fix_key(chat_id, message_id));
+        if let Some(key) = sent_key.as_deref()
+            && let Some(source) = self.market_price_source.as_mut()
+        {
+            match source.load_selection(key) {
+                Ok(Some(_)) => return Ok(None),
+                Ok(None) => {}
+                Err(error) => self
+                    .state_diagnostics
+                    .push(format!("sent link fix lookup: {error}")),
+            }
+        }
         let video_action = load.oversized_video.map(|video| {
             let TelegramAction::SendMessage(message) = &plan.send else {
                 return plan.send.clone();
@@ -1298,6 +1318,13 @@ where
                 .execute(plan.send)
                 .map_err(DispatchError::Action)?
         };
+        if let Some(key) = sent_key.as_deref()
+            && let Some(source) = self.market_price_source.as_mut()
+            && let Err(error) = source.save_selection(key, "1", SENT_LINK_FIX_TTL_SECONDS)
+        {
+            self.state_diagnostics
+                .push(format!("sent link fix marker: {error}"));
+        }
         if let Some(delete) = plan.delete_original.filter(|_| !addressed) {
             let _receipt = self
                 .actions
@@ -18150,6 +18177,58 @@ mod tests {
             assert_eq!(deliveries.borrow().len(), 1);
             assert_eq!(dispatcher.state.outgoing.len(), 1);
         }
+    }
+
+    #[test]
+    fn retried_addressed_link_messages_answer_again_without_a_second_fixed_link() {
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let (source, (prepared, _ignored, _deliveries)) =
+            ai_source(Ok(AiPreparation::reply("respuesta", Some("c1".to_owned()))));
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_link_replacement_source(Box::new(links(true)))
+        .with_ai_conversation_source(Box::new(source))
+        .with_market_price_source(Box::new(SelectableMarketPrices {
+            initial: market_selection_load(None),
+            candidate: market_candidate_quote(),
+            stored: Rc::clone(&stored),
+            selected: Rc::new(RefCell::new(Vec::new())),
+        }));
+        let fixed_links = |actions: &[TelegramAction]| {
+            actions
+                .iter()
+                .filter(|action| {
+                    matches!(
+                        action,
+                        TelegramAction::SendMessage(fixed) if fixed.text.contains("fixupx.com")
+                    )
+                })
+                .count()
+        };
+        for _ in 0..2 {
+            assert_eq!(
+                dispatcher.dispatch(group_link_update(
+                    "@mybot qué onda esto https://x.com/a/status/1"
+                )),
+                Ok(DispatchOutcome::Handled)
+            );
+        }
+        assert_eq!(fixed_links(&dispatcher.actions.0), 1);
+        assert_eq!(prepared.borrow().len(), 2);
+        assert_eq!(
+            stored.borrow().keys().cloned().collect::<Vec<_>>(),
+            [super::sent_link_fix_key(ChatId(-42), MessageId(7))]
+        );
     }
 
     #[test]
