@@ -104,7 +104,8 @@ impl ConversationState for RedisConversationState {
         chat_id: &str,
         search_text: &str,
         _reply_to_message_id: Option<&str>,
-        _max_history_messages: usize,
+        current_message_id: Option<&str>,
+        max_history_messages: usize,
     ) -> Result<ConversationMemory, String> {
         let limit = i64::try_from(CHAT_HISTORY_MAX_MESSAGES)
             .map_err(|_| "history limit exceeds the Redis range".to_owned())?;
@@ -126,10 +127,13 @@ impl ConversationState for RedisConversationState {
         } else {
             None
         };
+        // Compaction planning sees the full delta; only the prompt view is trimmed.
         let (visible, compaction_plan) = build_compaction_view(&parsed, &summary, &marker, chat_id);
+        let visible = prompt_history_window(visible, current_message_id, max_history_messages);
         let recent_ids = visible
             .iter()
             .map(|entry| entry.id.clone())
+            .chain(current_message_id.map(str::to_owned))
             .filter(|id| !id.is_empty())
             .collect::<std::collections::HashSet<_>>();
         let history = visible
@@ -363,6 +367,22 @@ fn build_compaction_view(
         delta.to_vec()
     };
     (visible, plan)
+}
+
+/// Drops the message being answered (it is sent separately as the current
+/// message) and keeps only the newest `max_history_messages` entries.
+fn prompt_history_window(
+    visible: Vec<StoredHistoryEntry>,
+    current_message_id: Option<&str>,
+    max_history_messages: usize,
+) -> Vec<StoredHistoryEntry> {
+    let mut visible = visible
+        .into_iter()
+        .filter(|entry| current_message_id.is_none_or(|current| entry.id != current))
+        .collect::<Vec<_>>();
+    let excess = visible.len().saturating_sub(max_history_messages);
+    visible.drain(..excess);
+    visible
 }
 
 pub struct PostgresConversationBilling {
@@ -716,7 +736,8 @@ mod tests {
     use super::{
         MESSAGE_HISTORY_SCHEMA_VERSION, PayerSource, PostgresConversationBilling,
         RedisConversationState, StoredHistoryEntry, build_compaction_view, decode_history,
-        decode_retrieved, decode_summary_memory, history_sort_key, role, user_identity,
+        decode_retrieved, decode_summary_memory, history_sort_key, prompt_history_window, role,
+        user_identity,
     };
     use crate::ai_dispatch::AiConversationInput;
     use crate::conversation::{ConversationBilling, ConversationState, SettlementRequest};
@@ -812,8 +833,14 @@ mod tests {
         state.record_incoming(&english)?;
         state.record_outgoing(&english, None, "second synthetic reply")?;
 
-        let memory = state.load_memory(&chat_id.to_string(), "synthetic", Some("2"), 20)?;
+        let memory = state.load_memory(&chat_id.to_string(), "synthetic", Some("2"), None, 20)?;
         assert_eq!(memory.history.len(), 4);
+        let current =
+            state.load_memory(&chat_id.to_string(), "synthetic", Some("2"), Some("4"), 20)?;
+        assert_eq!(current.history.len(), 3);
+        let capped = state.load_memory(&chat_id.to_string(), "", None, None, 2)?;
+        assert_eq!(capped.history.len(), 2);
+        assert_eq!(capped.history[1].text, "second synthetic reply");
         assert!(memory.history.iter().any(|entry| {
             entry.role == PromptRole::Assistant && entry.text == "synthetic assistant reply"
         }));
@@ -872,7 +899,7 @@ mod tests {
                 60,
             )
             .map_err(|error| error.to_string())?;
-        let compacted = state.load_memory(&chat_id.to_string(), "", None, 20)?;
+        let compacted = state.load_memory(&chat_id.to_string(), "", None, None, 20)?;
         assert_eq!(compacted.summary.as_deref(), Some("synthetic summary"));
 
         let summary = state.load_summary_memory(&chat_id.to_string(), 20)?;
@@ -925,6 +952,33 @@ mod tests {
         let mut input = conversation_input(1, 2, Locale::En);
         input.sender_username.clear();
         assert_eq!(user_identity(&input), "Synthetic");
+    }
+
+    #[test]
+    fn prompt_history_window_drops_current_message_and_keeps_newest_entries() {
+        let entries = decode_history(
+            (1..=5)
+                .map(|id| {
+                    format!(r#"{{"schema_version":1,"id":"{id}","text":"m{id}","timestamp":{id}}}"#)
+                })
+                .collect(),
+        );
+        let ids = |window: Vec<StoredHistoryEntry>| {
+            window.into_iter().map(|entry| entry.id).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(prompt_history_window(entries.clone(), Some("5"), 3)),
+            vec!["2", "3", "4"]
+        );
+        assert_eq!(
+            ids(prompt_history_window(entries.clone(), None, 2)),
+            vec!["4", "5"]
+        );
+        assert_eq!(
+            ids(prompt_history_window(entries.clone(), Some("missing"), 10)).len(),
+            5
+        );
+        assert!(prompt_history_window(entries, None, 0).is_empty());
     }
 
     #[test]

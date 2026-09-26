@@ -59,6 +59,7 @@ pub trait ConversationState {
         chat_id: &str,
         search_text: &str,
         reply_to_message_id: Option<&str>,
+        current_message_id: Option<&str>,
         max_history_messages: usize,
     ) -> Result<ConversationMemory, String>;
 
@@ -76,7 +77,7 @@ pub trait ConversationState {
         chat_id: &str,
         max_history_messages: usize,
     ) -> Result<ConversationMemory, String> {
-        self.load_memory(chat_id, "", None, max_history_messages)
+        self.load_memory(chat_id, "", None, None, max_history_messages)
     }
 }
 
@@ -400,6 +401,7 @@ where
                 .reply_to_message_id
                 .map(|id| id.0.to_string())
                 .as_deref(),
+            Some(&input.message_id.0.to_string()),
             MAX_HISTORY_MESSAGES,
         )?;
         let date = formatted_date(input.timestamp, input.timezone_offset_hours, input.locale);
@@ -2491,6 +2493,7 @@ mod tests {
             _chat_id: &str,
             _search_text: &str,
             _reply_to_message_id: Option<&str>,
+            _current_message_id: Option<&str>,
             _max_history_messages: usize,
         ) -> Result<ConversationMemory, String> {
             Ok(self.memory.clone())
@@ -4569,6 +4572,7 @@ mod tests {
                 _chat_id: &str,
                 _search_text: &str,
                 _reply_to_message_id: Option<&str>,
+                _current_message_id: Option<&str>,
                 _max_history_messages: usize,
             ) -> Result<ConversationMemory, String> {
                 Err("synthetic memory failure".to_owned())

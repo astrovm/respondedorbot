@@ -539,6 +539,8 @@ pub struct ProviderPreferences {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReasoningConfig {
     pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

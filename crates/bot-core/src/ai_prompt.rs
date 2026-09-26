@@ -192,6 +192,20 @@ pub fn build_conversation_prompt(input: &ConversationPromptInput) -> Vec<PromptM
             format!("{header}\n{summary}"),
         ));
     }
+    messages.extend(input.history.iter().map(|message| PromptMessage {
+        role: message.role,
+        content: PromptContent::TextParts(vec![message.text.clone()]),
+        tool_call_id: None,
+        tool_calls: Vec::new(),
+        reasoning: None,
+        reasoning_details: Vec::new(),
+    }));
+    let last_is_assistant = input
+        .history
+        .last()
+        .is_some_and(|message| message.role == PromptRole::Assistant);
+    // Retrieved messages change every turn, so they go after the history to
+    // keep the summary + history prefix stable for provider prompt caching.
     let retrieved = input
         .retrieved
         .iter()
@@ -212,14 +226,6 @@ pub fn build_conversation_prompt(input: &ConversationPromptInput) -> Vec<PromptM
             format!("{header}\n{body}"),
         ));
     }
-    messages.extend(input.history.iter().map(|message| PromptMessage {
-        role: message.role,
-        content: PromptContent::TextParts(vec![message.text.clone()]),
-        tool_call_id: None,
-        tool_calls: Vec::new(),
-        reasoning: None,
-        reasoning_details: Vec::new(),
-    }));
 
     let (
         context_header,
@@ -270,9 +276,6 @@ pub fn build_conversation_prompt(input: &ConversationPromptInput) -> Vec<PromptM
         format!("- {user_label}: {first_name}{username}"),
         format!("- {time_label}: {}", input.formatted_time),
     ];
-    let last_is_assistant = messages
-        .last()
-        .is_some_and(|message| message.role == PromptRole::Assistant);
     if !last_is_assistant
         && let Some(reply) = input
             .reply_context
@@ -390,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn conversation_prompt_preserves_summary_retrieval_history_and_context_order() {
+    fn conversation_prompt_keeps_summary_and_history_before_retrieval_and_context() {
         let messages = build_conversation_prompt(&input(Locale::En));
         assert_eq!(
             messages[..3],
@@ -399,10 +402,6 @@ mod tests {
                     PromptRole::System,
                     "ACCUMULATED CHAT SUMMARY:\nprior summary"
                 ),
-                PromptMessage::text(
-                    PromptRole::System,
-                    "RELEVANT EARLIER MESSAGES:\n- assistant: older answer"
-                ),
                 PromptMessage {
                     role: PromptRole::User,
                     content: PromptContent::TextParts(vec!["recent history".to_owned()]),
@@ -410,7 +409,11 @@ mod tests {
                     tool_calls: Vec::new(),
                     reasoning: None,
                     reasoning_details: Vec::new(),
-                }
+                },
+                PromptMessage::text(
+                    PromptRole::System,
+                    "RELEVANT EARLIER MESSAGES:\n- assistant: older answer"
+                ),
             ]
         );
         let PromptContent::Text(final_prompt) = &messages[3].content else {
@@ -424,6 +427,26 @@ mod tests {
         assert!(
             final_prompt.ends_with("- for dates and times, search with the year and current date; if a date is past or sources conflict, use web_fetch on an official source before answering; if the conflict remains, say so and do not pick a date at random")
         );
+    }
+
+    #[test]
+    fn retrieval_after_assistant_history_still_suppresses_reply_context() {
+        let mut value = input(Locale::En);
+        value.history = vec![HistoryMessage {
+            role: PromptRole::Assistant,
+            text: "last answer".to_owned(),
+        }];
+        let messages = build_conversation_prompt(&value);
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[2].role, PromptRole::System);
+        let Some(PromptMessage {
+            content: PromptContent::Text(prompt),
+            ..
+        }) = messages.last()
+        else {
+            return;
+        };
+        assert!(!prompt.contains("MESSAGE BEING REPLIED TO"));
     }
 
     #[test]
