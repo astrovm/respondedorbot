@@ -6235,11 +6235,11 @@ mod tests {
             follow_redirects,
         };
         for blocked in [
-            "http://127.0.0.1:8080/admin",
-            "http://169.254.169.254/latest/meta-data/",
-            "http://localhost/",
+            "https://127.0.0.1:8080/admin",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://localhost/",
             "https://internal.example.com/",
-            "https://example.com/hop/http://10.0.0.5/secret",
+            "https://example.com/hop/https://10.0.0.5/secret",
         ] {
             assert_eq!(
                 public.request(&get(blocked, true)),
@@ -6288,7 +6288,7 @@ mod tests {
         assert_eq!(
             crate::dispatcher::LinkReplacementSource::preview_context(
                 &mut source,
-                "qué dice http://169.254.169.254/latest/meta-data/ y http://127.0.0.1:6379/"
+                "qué dice https://169.254.169.254/latest/meta-data/ y https://127.0.0.1:6379/"
             ),
             None
         );
