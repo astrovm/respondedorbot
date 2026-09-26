@@ -467,7 +467,8 @@ mod tests {
 
     use super::*;
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+    #[error("synthetic Telegram failure")]
     struct SyntheticError;
 
     #[derive(Default)]

@@ -1387,6 +1387,9 @@ struct TelegramStreamDeliveryState {
     pending: HashMap<TelegramStreamKey, PendingTelegramStreamEdit>,
     order: VecDeque<TelegramStreamKey>,
     last_intermediate_edit: HashMap<i64, std::time::Instant>,
+    // Telegram's retry_after for a chat applies to every edit there, so
+    // intermediate snapshots pause until it passes instead of retrying into it.
+    rate_limited_until: HashMap<i64, std::time::Instant>,
     thinking: HashMap<TelegramStreamKey, TelegramStreamThinkingAnimation>,
 }
 
@@ -1420,13 +1423,7 @@ impl TelegramStreamDeliveryState {
             if !self.pending.contains_key(&key) {
                 continue;
             }
-            let wait =
-                self.last_intermediate_edit
-                    .get(&key.chat_id)
-                    .map_or(Duration::ZERO, |last| {
-                        TELEGRAM_STREAM_MIN_DELIVERY_INTERVAL
-                            .saturating_sub(now.saturating_duration_since(*last))
-                    });
+            let wait = self.intermediate_edit_wait(key.chat_id, now);
             if wait.is_zero() {
                 if let Some(pending) = self.pending.remove(&key) {
                     return TelegramStreamDeliveryDecision::Ready(pending);
@@ -1502,6 +1499,27 @@ impl TelegramStreamDeliveryState {
             .min()
     }
 
+    fn intermediate_edit_wait(&self, chat_id: i64, now: std::time::Instant) -> Duration {
+        let interval = self
+            .last_intermediate_edit
+            .get(&chat_id)
+            .map_or(Duration::ZERO, |last| {
+                TELEGRAM_STREAM_MIN_DELIVERY_INTERVAL
+                    .saturating_sub(now.saturating_duration_since(*last))
+            });
+        let rate_limit = self
+            .rate_limited_until
+            .get(&chat_id)
+            .map_or(Duration::ZERO, |until| until.saturating_duration_since(now));
+        interval.max(rate_limit)
+    }
+
+    fn pause_intermediate_edits(&mut self, chat_id: i64, duration: Duration) {
+        let now = std::time::Instant::now();
+        self.rate_limited_until.retain(|_, until| *until > now);
+        self.rate_limited_until.insert(chat_id, now + duration);
+    }
+
     fn mark_intermediate_edit_started(&mut self, chat_id: i64) {
         self.last_intermediate_edit
             .insert(chat_id, std::time::Instant::now());
@@ -1512,6 +1530,8 @@ impl TelegramStreamDeliveryState {
             || self.thinking.keys().any(|key| key.chat_id == chat_id);
         if !chat_is_active {
             self.last_intermediate_edit.remove(&chat_id);
+            let now = std::time::Instant::now();
+            self.rate_limited_until.retain(|_, until| *until > now);
         }
     }
 }
@@ -1537,6 +1557,7 @@ impl TelegramStreamDelivery {
             pending: HashMap::new(),
             order: VecDeque::new(),
             last_intermediate_edit: HashMap::new(),
+            rate_limited_until: HashMap::new(),
             thinking: HashMap::new(),
         }));
         let (wake, receiver) = mpsc::sync_channel(1);
@@ -1721,6 +1742,7 @@ fn fail_pending_telegram_stream_edits(state: &Arc<Mutex<TelegramStreamDeliverySt
         state.order.clear();
         state.thinking.clear();
         state.last_intermediate_edit.clear();
+        state.rate_limited_until.clear();
         state
             .pending
             .drain()
@@ -1770,21 +1792,38 @@ fn run_telegram_stream_delivery_worker<Transport>(
                     } else {
                         match sink.execute_once(pending.action) {
                             Ok(ActionOutcome::Completed { .. }) => Ok(true),
-                            Ok(outcome) => {
+                            Ok(ActionOutcome::RateLimited {
+                                retry_after_seconds,
+                            }) => {
+                                let seconds = retry_after_seconds
+                                    .unwrap_or(TELEGRAM_ACTION_DEFAULT_RETRY_SECONDS)
+                                    .max(1);
+                                lock_unpoisoned(&state).pause_intermediate_edits(
+                                    key.chat_id,
+                                    Duration::from_secs(seconds),
+                                );
                                 eprintln!(
-                                    "Telegram intermediate AI edit was not delivered: {outcome:?}"
+                                    "Telegram intermediate AI edits paused for {seconds}s after a rate limit: chat_id={}",
+                                    key.chat_id,
                                 );
                                 Ok(false)
                             }
-                            Err(error) => Err(TelegramActionSinkError::from(error)),
+                            Ok(outcome) => {
+                                eprintln!(
+                                    "Telegram intermediate AI edit was not delivered: elapsed_ms={} outcome={outcome:?}",
+                                    started.elapsed().as_millis(),
+                                );
+                                Ok(false)
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "Telegram intermediate AI edit failed: elapsed_ms={} error={error}",
+                                    started.elapsed().as_millis(),
+                                );
+                                Err(TelegramActionSinkError::from(error))
+                            }
                         }
                     };
-                    if !is_final && !matches!(&result, Ok(true)) {
-                        eprintln!(
-                            "Telegram intermediate AI edit failed: elapsed_ms={} result={result:?}",
-                            started.elapsed().as_millis(),
-                        );
-                    }
                     if let Some(response) = pending.final_response {
                         let _ = response.send(result);
                     }
@@ -3659,6 +3698,7 @@ mod tests {
             pending: std::collections::HashMap::new(),
             order: std::collections::VecDeque::new(),
             last_intermediate_edit: std::collections::HashMap::new(),
+            rate_limited_until: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         }));
         let (wake, receiver) = mpsc::sync_channel(1);
@@ -3675,6 +3715,7 @@ mod tests {
             pending: std::collections::HashMap::new(),
             order: std::collections::VecDeque::new(),
             last_intermediate_edit: std::collections::HashMap::new(),
+            rate_limited_until: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         }));
         let (wake, _receiver) = mpsc::sync_channel(1);
@@ -3716,6 +3757,7 @@ mod tests {
             pending: std::collections::HashMap::new(),
             order: std::collections::VecDeque::new(),
             last_intermediate_edit: std::collections::HashMap::new(),
+            rate_limited_until: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::from([(
                 key,
                 super::TelegramStreamThinkingAnimation {
@@ -3831,6 +3873,7 @@ mod tests {
             pending: std::collections::HashMap::new(),
             order: std::collections::VecDeque::from([intermediate_key, final_key]),
             last_intermediate_edit: std::collections::HashMap::new(),
+            rate_limited_until: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::from([(
                 final_key,
                 super::TelegramStreamThinkingAnimation {
@@ -3892,6 +3935,7 @@ mod tests {
             pending: std::collections::HashMap::new(),
             order: std::collections::VecDeque::from([limited_key, ready_key]),
             last_intermediate_edit: std::collections::HashMap::from([(7, Instant::now())]),
+            rate_limited_until: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         };
         state.pending.insert(
@@ -3923,6 +3967,65 @@ mod tests {
     }
 
     #[test]
+    fn telegram_stream_delivery_pauses_intermediate_edits_until_rate_limit_passes() {
+        let key = super::TelegramStreamKey {
+            chat_id: 7,
+            message_id: 80,
+        };
+        let final_key = super::TelegramStreamKey {
+            chat_id: 7,
+            message_id: 81,
+        };
+        let mut state = super::TelegramStreamDeliveryState {
+            pending: std::collections::HashMap::from([(
+                key,
+                super::PendingTelegramStreamEdit {
+                    key,
+                    action: stream_edit(7, 80, "draft"),
+                    final_response: None,
+                },
+            )]),
+            order: std::collections::VecDeque::from([key]),
+            last_intermediate_edit: std::collections::HashMap::new(),
+            rate_limited_until: std::collections::HashMap::new(),
+            thinking: std::collections::HashMap::new(),
+        };
+        state.pause_intermediate_edits(7, Duration::from_secs(20));
+
+        let decision = state.take_next();
+        assert!(matches!(
+            decision,
+            super::TelegramStreamDeliveryDecision::Wait(wait)
+                if wait > Duration::from_secs(19) && wait <= Duration::from_secs(20)
+        ));
+        assert!(state.pending.contains_key(&key));
+
+        let (final_sender, _final_receiver) = std::sync::mpsc::channel();
+        state.order.push_back(final_key);
+        state.pending.insert(
+            final_key,
+            super::PendingTelegramStreamEdit {
+                key: final_key,
+                action: stream_edit(7, 81, "final"),
+                final_response: Some(final_sender),
+            },
+        );
+        let decision = state.take_next();
+        assert!(matches!(
+            decision,
+            super::TelegramStreamDeliveryDecision::Ready(pending) if pending.key == final_key
+        ));
+
+        state.rate_limited_until.insert(7, Instant::now());
+        assert!(matches!(
+            state.take_next(),
+            super::TelegramStreamDeliveryDecision::Ready(pending) if pending.key == key
+        ));
+        state.prune_inactive_intermediate_edit(7);
+        assert!(state.rate_limited_until.is_empty());
+    }
+
+    #[test]
     fn telegram_stream_delivery_prunes_throttle_state_when_chat_is_idle() {
         let key = super::TelegramStreamKey {
             chat_id: 7,
@@ -3939,6 +4042,7 @@ mod tests {
             )]),
             order: std::collections::VecDeque::from([key]),
             last_intermediate_edit: std::collections::HashMap::from([(7, Instant::now())]),
+            rate_limited_until: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         };
 
@@ -4104,6 +4208,7 @@ mod tests {
             )]),
             order: std::collections::VecDeque::from([key]),
             last_intermediate_edit: std::collections::HashMap::from([(7, Instant::now())]),
+            rate_limited_until: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         };
         let decision = state.take_next();
@@ -4168,6 +4273,7 @@ mod tests {
             ]),
             order: std::collections::VecDeque::from([intermediate_key, final_key]),
             last_intermediate_edit: std::collections::HashMap::new(),
+            rate_limited_until: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         }));
         let (wake, receiver) = mpsc::channel();
@@ -4237,6 +4343,7 @@ mod tests {
             pending: std::collections::HashMap::new(),
             order: std::collections::VecDeque::new(),
             last_intermediate_edit: std::collections::HashMap::new(),
+            rate_limited_until: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::from([(
                 key,
                 super::TelegramStreamThinkingAnimation {
@@ -4307,6 +4414,7 @@ mod tests {
             )]),
             order: std::collections::VecDeque::from([final_key]),
             last_intermediate_edit: std::collections::HashMap::new(),
+            rate_limited_until: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         }));
         let (wake, receiver) = mpsc::channel();

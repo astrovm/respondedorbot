@@ -1766,7 +1766,7 @@ fn provider_failure_diagnostic(operation_id: &str, error: &ChatToolLoopError) ->
         .and_then(|segment| segment.get("metadata"))
         .and_then(Value::as_object);
     let field = |value: Option<&str>| sanitize_log_field(value.unwrap_or("unknown"));
-    format!(
+    let mut diagnostic = format!(
         "AI provider failure: operation_id={} provider_rounds={} error_kind={} generation_id={} model={} upstream_provider={}",
         sanitize_log_field(operation_id),
         error.provider_rounds,
@@ -1786,7 +1786,15 @@ fn provider_failure_diagnostic(operation_id: &str, error: &ChatToolLoopError) ->
                 .and_then(|metadata| metadata.get("upstream_provider"))
                 .and_then(Value::as_str)
         ),
-    )
+    );
+    // Stream errors carry either the provider's in-band error message or the
+    // Telegram delivery failure that stopped the consumer; transport errors
+    // may include request details and stay out of the log.
+    if let bot_adapters::openrouter_chat::OpenRouterChatError::Stream(message) = &error.source {
+        let message = message.chars().take(300).collect::<String>();
+        diagnostic.push_str(&format!(" detail={message:?}"));
+    }
+    diagnostic
 }
 
 fn tool_limit_diagnostic(
@@ -3007,6 +3015,21 @@ mod tests {
         assert!(diagnostic.contains("upstream_provider=Synthetic_Provider"));
         assert!(!diagnostic.contains("previous-generation"));
         assert!(!diagnostic.contains("secret transport detail"));
+        assert!(!diagnostic.contains('\n'));
+        assert!(!diagnostic.contains("detail="));
+
+        let stream_error = ChatToolLoopError {
+            source: OpenRouterChatError::Stream(
+                "Telegram rejected the streamed response:\nBad Request".to_owned(),
+            ),
+            ..error
+        };
+        let diagnostic = provider_failure_diagnostic("ai:1:2:3", &stream_error);
+        assert!(diagnostic.contains("error_kind=stream_consumer_or_provider"));
+        assert!(
+            diagnostic
+                .contains(r#"detail="Telegram rejected the streamed response:\nBad Request""#)
+        );
         assert!(!diagnostic.contains('\n'));
 
         let limit = tool_limit_diagnostic("ai:1:2:\n3", 5, 4);
