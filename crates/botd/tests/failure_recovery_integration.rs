@@ -33,6 +33,9 @@ use botd::runtime::{
 use serde_json::{Value, json};
 
 const TEST_MODEL: &str = "deepseek/deepseek-v4.1-flash";
+/// Polls every 2 ms for up to 5 s; background threads can be slow under
+/// coverage instrumentation or when a panic backtrace is being captured.
+const WAIT_POLLS: usize = 2_500;
 
 #[derive(Default)]
 struct Reporter {
@@ -117,7 +120,7 @@ fn background_failures_are_reported_even_when_reporting_or_shutdown_fails() {
         reporter.clone(),
     )
     .unwrap_or_else(|_| unreachable!());
-    for _ in 0..100 {
+    for _ in 0..WAIT_POLLS {
         if panicking.has_failed() {
             break;
         }
@@ -875,7 +878,7 @@ fn durable_parallel_handler_surfaces_queue_and_recovery_failures() {
     .unwrap_or_else(|_| unreachable!());
     assert!(panicking.handle(incoming(39)).is_ok());
     let mut panic_failure = None;
-    for _ in 0..100 {
+    for _ in 0..WAIT_POLLS {
         let failures = panicking.take_background_failures();
         panic_failure = failures.retrying.first().cloned();
         if panic_failure.is_some() {
@@ -939,7 +942,7 @@ fn durable_parallel_handler_surfaces_queue_and_recovery_failures() {
     })
     .unwrap_or_else(|_| unreachable!());
     assert!(handler.handle(incoming(50)).is_ok());
-    for _ in 0..100 {
+    for _ in 0..WAIT_POLLS {
         let failures = handler.take_background_failures();
         if failures.fatal.is_some()
             || queue
@@ -1000,7 +1003,7 @@ fn durable_parallel_handler_surfaces_queue_and_recovery_failures() {
     .unwrap_or_else(|_| unreachable!());
     assert!(handler.handle(incoming(71)).is_ok());
     let mut fatal = None;
-    for _ in 0..100 {
+    for _ in 0..WAIT_POLLS {
         fatal = handler.take_background_failures().fatal;
         if fatal.is_some() {
             break;
@@ -1016,7 +1019,7 @@ fn durable_parallel_handler_surfaces_queue_and_recovery_failures() {
     .unwrap_or_else(|_| unreachable!());
     assert!(retrying.handle(incoming(74)).is_ok());
     let mut retried = false;
-    for _ in 0..100 {
+    for _ in 0..WAIT_POLLS {
         retried |= !retrying.take_background_failures().retrying.is_empty();
         if retry_queue
             .state
@@ -1035,7 +1038,7 @@ fn durable_parallel_handler_surfaces_queue_and_recovery_failures() {
     })
     .unwrap_or_else(|_| unreachable!());
     assert!(handler.handle(incoming(72)).is_ok());
-    for _ in 0..100 {
+    for _ in 0..WAIT_POLLS {
         let _failures = handler.take_background_failures();
         if deletion
             .state
@@ -1074,7 +1077,7 @@ fn durable_parallel_handler_surfaces_queue_and_recovery_failures() {
     .unwrap_or_else(|_| unreachable!());
     assert!(handler.prepare().is_ok());
     let mut fatal = None;
-    for _ in 0..100 {
+    for _ in 0..WAIT_POLLS {
         fatal = handler.take_background_failures().fatal;
         if fatal.is_some() {
             break;
