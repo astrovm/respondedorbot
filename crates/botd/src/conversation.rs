@@ -1101,6 +1101,11 @@ where
                 AiPreparation::reply(Self::insufficient(input.locale, &input, &base), None)
             });
         }
+        if !input.spontaneous {
+            // Only now is a reply certain enough to show a thinking status;
+            // denied or spontaneous turns may still end silently.
+            on_event(AiStreamEvent::Admitted)?;
+        }
 
         let prepared_youtube = self.prepare_youtube(&input, &operation_id)?;
         if let Some(decision) = prepared_youtube
@@ -1175,7 +1180,11 @@ where
             &provider_input,
             prepared_media.execution.as_ref(),
             prepared_media.image.as_ref(),
-            prepared_youtube.context.as_deref(),
+            merged_link_context(
+                prepared_youtube.context.as_deref(),
+                input.link_context.as_deref(),
+            )
+            .as_deref(),
         ) {
             Ok(value) => value,
             Err(error) => {
@@ -1324,6 +1333,18 @@ where
     }
 }
 
+/// Joins the YouTube transcript context with link preview metadata so both
+/// reach the prompt's single link-context slot.
+fn merged_link_context(youtube: Option<&str>, previews: Option<&str>) -> Option<String> {
+    let parts = [youtube, previews]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
 impl<Provider, ToolFactory, State, Billing> AiConversationSource
     for NativeConversation<Provider, ToolFactory, State, Billing>
 where
@@ -1353,7 +1374,8 @@ where
     ) -> Result<AiPreparation, String> {
         let mut on_event = |event: AiStreamEvent| match event {
             AiStreamEvent::FinalText(text) => on_token(&text),
-            AiStreamEvent::Thought(_)
+            AiStreamEvent::Admitted
+            | AiStreamEvent::Thought(_)
             | AiStreamEvent::ResetToTrace
             | AiStreamEvent::ToolCall { .. }
             | AiStreamEvent::ToolResult { .. } => Ok(()),
@@ -1393,7 +1415,8 @@ where
     ) -> Result<Option<AiPreparation>, String> {
         let mut on_event = |event: AiStreamEvent| match event {
             AiStreamEvent::FinalText(text) => on_token(&text),
-            AiStreamEvent::Thought(_)
+            AiStreamEvent::Admitted
+            | AiStreamEvent::Thought(_)
             | AiStreamEvent::ResetToTrace
             | AiStreamEvent::ToolCall { .. }
             | AiStreamEvent::ToolResult { .. } => Ok(()),
@@ -2610,6 +2633,7 @@ mod tests {
             creditless_user_hourly_limit: 5,
             timestamp: 1_672_531_200,
             spontaneous: false,
+            link_context: None,
         }
     }
 
@@ -4271,6 +4295,78 @@ mod tests {
             Ok(AiPreparation::silent())
         );
         assert!(spontaneous.provider.prompts.borrow().is_empty());
+    }
+
+    #[test]
+    fn admitted_event_follows_the_credit_check_and_previews_reach_the_prompt() {
+        let mut service = conversation(vec![Ok(round("answer", None))], Billing::default());
+        let mut request = input();
+        request.link_context =
+            Some("LINKS DEL MENSAJE:\n1. https://example.com/nota\ntitulo: nota".to_owned());
+        let mut events = Vec::new();
+        let preparation = service.prepare_streaming_events(request, &mut |event| {
+            events.push(event);
+            Ok(())
+        });
+        assert!(matches!(preparation, Ok(AiPreparation::Reply { .. })));
+        assert_eq!(events.first(), Some(&AiStreamEvent::Admitted));
+        let prompt = service.provider.prompts.borrow()[0]
+            .iter()
+            .filter_map(|message| match &message.content {
+                PromptContent::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(prompt.contains("titulo: nota"));
+
+        let denied = ReserveDecision {
+            authorized: false,
+            user_balance: 0,
+            chat_balance: 0,
+            source: None,
+            denial: None,
+        };
+        for spontaneous in [false, true] {
+            let mut request = input();
+            request.spontaneous = spontaneous;
+            let mut service = conversation(
+                vec![Ok(round("must not run", None))],
+                Billing {
+                    decisions: VecDeque::from([denied.clone()]),
+                    ..Billing::default()
+                },
+            );
+            let mut events = Vec::new();
+            let _preparation = service.prepare_streaming_events(request, &mut |event| {
+                events.push(event);
+                Ok(())
+            });
+            assert!(events.is_empty());
+        }
+
+        let mut spontaneous_input = input();
+        spontaneous_input.spontaneous = true;
+        let mut spontaneous = conversation(vec![Ok(round("answer", None))], Billing::default());
+        let mut events = Vec::new();
+        let _preparation = spontaneous.prepare_streaming_events(spontaneous_input, &mut |event| {
+            events.push(event);
+            Ok(())
+        });
+        assert!(!events.contains(&AiStreamEvent::Admitted));
+    }
+
+    #[test]
+    fn merged_link_context_joins_non_empty_parts() {
+        assert_eq!(merged_link_context(None, Some("  ")), None);
+        assert_eq!(
+            merged_link_context(Some("transcript"), None).as_deref(),
+            Some("transcript")
+        );
+        assert_eq!(
+            merged_link_context(Some("transcript"), Some("previews")).as_deref(),
+            Some("transcript\n\npreviews")
+        );
     }
 
     #[test]

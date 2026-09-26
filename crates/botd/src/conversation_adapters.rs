@@ -109,24 +109,19 @@ impl ConversationState for RedisConversationState {
     ) -> Result<ConversationMemory, String> {
         let limit = i64::try_from(CHAT_HISTORY_MAX_MESSAGES)
             .map_err(|_| "history limit exceeds the Redis range".to_owned())?;
-        let entries = self
+        let (entries, summary, marker) = self
             .state
-            .get_history_entries(chat_id, limit)
+            .get_history_with_summary(
+                chat_id,
+                limit,
+                &chat_summary_key(chat_id),
+                &chat_compacted_until_key(chat_id),
+            )
             .map_err(|error| error.to_string())?;
         let parsed = decode_history(entries);
-        let summary = self
-            .state
-            .get_value(&chat_summary_key(chat_id))
-            .map_err(|error| error.to_string())?
-            .filter(|value| !value.is_empty());
-        let marker = if summary.is_some() {
-            self.state
-                .get_value(&chat_compacted_until_key(chat_id))
-                .map_err(|error| error.to_string())?
-                .filter(|value| !value.is_empty())
-        } else {
-            None
-        };
+        let summary = summary.filter(|value| !value.is_empty());
+        // A marker without its summary is stale and must not trim history.
+        let marker = marker.filter(|value| summary.is_some() && !value.is_empty());
         // Compaction planning sees the full delta; only the prompt view is trimmed.
         let (visible, compaction_plan) = build_compaction_view(&parsed, &summary, &marker, chat_id);
         let visible = prompt_history_window(visible, current_message_id, max_history_messages);
@@ -233,23 +228,18 @@ impl ConversationState for RedisConversationState {
     ) -> Result<ConversationMemory, String> {
         let limit = i64::try_from(max_history_messages)
             .map_err(|_| "summary history limit exceeds the Redis range".to_owned())?;
-        let entries = self
+        let (entries, summary, marker) = self
             .state
-            .get_history_entries(chat_id, limit)
+            .get_history_with_summary(
+                chat_id,
+                limit,
+                &chat_summary_key(chat_id),
+                &chat_compacted_until_key(chat_id),
+            )
             .map_err(|error| error.to_string())?;
-        let summary = self
-            .state
-            .get_value(&chat_summary_key(chat_id))
-            .map_err(|error| error.to_string())?
-            .filter(|value| !value.is_empty());
-        let marker = if summary.is_some() {
-            self.state
-                .get_value(&chat_compacted_until_key(chat_id))
-                .map_err(|error| error.to_string())?
-                .filter(|value| !value.is_empty())
-        } else {
-            None
-        };
+        let summary = summary.filter(|value| !value.is_empty());
+        // A marker without its summary is stale and must not trim history.
+        let marker = marker.filter(|value| summary.is_some() && !value.is_empty());
         Ok(decode_summary_memory(entries, summary, marker))
     }
 
@@ -811,6 +801,7 @@ mod tests {
             creditless_user_hourly_limit: 10,
             timestamp: 1_700_000_000 + message_id,
             spontaneous: false,
+            link_context: None,
         }
     }
 

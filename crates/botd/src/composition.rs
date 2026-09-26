@@ -4,7 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bot_adapters::bcra::{
     BcraTransport, ReqwestBcraTransport, TransportFailureKind as BcraTransportFailureKind,
@@ -38,8 +38,8 @@ use bot_adapters::giphy::{
 use bot_adapters::giphy_pool::{GiphyPoolCache, load_giphy_pool};
 use bot_adapters::hacker_news::ReqwestHackerNewsTransport;
 use bot_adapters::link_preview::{
-    LinkPreviewTransport, ReqwestLinkPreviewTransport, download_oversized_video,
-    inspect_with as inspect_link_preview,
+    LinkPreviewTransport, PreviewFailure, PreviewInspection, PreviewRequest, PreviewResponse,
+    ReqwestLinkPreviewTransport, download_oversized_video, inspect_with as inspect_link_preview,
 };
 use bot_adapters::openrouter_chat::{
     DEFAULT_OPENROUTER_BASE_URL, OpenRouterChatError, OpenRouterPricingCache,
@@ -312,6 +312,54 @@ struct NativeMarketPriceSource<T, C, Y, F, S> {
 
 struct NativeLinkReplacementSource<T> {
     transport: T,
+    /// Short-timeout transport for optional AI link context.
+    context_transport: T,
+}
+
+/// Links whose previews may feed one AI turn, and the wall-clock budget for
+/// fetching them all.
+const AI_LINK_CONTEXT_MAX_LINKS: usize = 3;
+const AI_LINK_CONTEXT_DEADLINE: Duration = Duration::from_secs(4);
+const AI_LINK_CONTEXT_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Fails requests once a shared deadline passes, so several optional
+/// previews cannot stack their individual timeouts.
+struct DeadlineLinkPreviewTransport<'a, T> {
+    inner: &'a T,
+    deadline: Instant,
+}
+
+impl<T: LinkPreviewTransport> LinkPreviewTransport for DeadlineLinkPreviewTransport<'_, T> {
+    fn request(&self, request: &PreviewRequest) -> Result<PreviewResponse, PreviewFailure> {
+        if Instant::now() >= self.deadline {
+            return Err(PreviewFailure::Timeout);
+        }
+        self.inner.request(request)
+    }
+}
+
+fn is_youtube_link(url: &str) -> bool {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| {
+            let host = host.trim_start_matches("www.").trim_start_matches("m.");
+            host == "youtu.be" || host == "youtube.com" || host.ends_with(".youtube.com")
+        })
+}
+
+fn format_link_context(previews: &[PreviewInspection]) -> Option<String> {
+    let mut lines = vec!["LINKS DEL MENSAJE:".to_owned()];
+    for (index, preview) in previews.iter().enumerate() {
+        lines.push(format!("{}. {}", index + 1, preview.final_url));
+        if let Some(title) = bounded_link_text(preview.metadata.title.as_deref(), 160) {
+            lines.push(format!("titulo: {title}"));
+        }
+        if let Some(description) = bounded_link_text(preview.metadata.description.as_deref(), 280) {
+            lines.push(format!("descripcion: {description}"));
+        }
+    }
+    (!previews.is_empty()).then(|| lines.join("\n"))
 }
 
 fn bounded_link_text(value: Option<&str>, limit: usize) -> Option<String> {
@@ -342,21 +390,7 @@ impl<T: LinkPreviewTransport> LinkReplacementSource for NativeLinkReplacementSou
                 false
             }
         });
-        let context = (!previews.is_empty()).then(|| {
-            let mut lines = vec!["LINKS DEL MENSAJE:".to_owned()];
-            for (index, preview) in previews.iter().enumerate() {
-                lines.push(format!("{}. {}", index + 1, preview.final_url));
-                if let Some(title) = bounded_link_text(preview.metadata.title.as_deref(), 160) {
-                    lines.push(format!("titulo: {title}"));
-                }
-                if let Some(description) =
-                    bounded_link_text(preview.metadata.description.as_deref(), 280)
-                {
-                    lines.push(format!("descripcion: {description}"));
-                }
-            }
-            lines.join("\n")
-        });
+        let context = format_link_context(&previews);
         let oversized_video = previews
             .iter()
             .find_map(|preview| download_oversized_video(&self.transport, preview));
@@ -366,6 +400,29 @@ impl<T: LinkPreviewTransport> LinkReplacementSource for NativeLinkReplacementSou
             oversized_video,
             diagnostics: Vec::new(),
         }
+    }
+
+    fn preview_context(&mut self, text: &str) -> Option<String> {
+        let pattern = bot_core::regex_cache::cached_regex(r"https?://[^\s<>]+")?;
+        let mut urls = Vec::<&str>::new();
+        for url in pattern.find_iter(text).map(|found| found.as_str()) {
+            if !is_youtube_link(url) && !urls.contains(&url) {
+                urls.push(url);
+            }
+        }
+        let transport = DeadlineLinkPreviewTransport {
+            inner: &self.context_transport,
+            deadline: Instant::now() + AI_LINK_CONTEXT_DEADLINE,
+        };
+        let previews = urls
+            .into_iter()
+            .take(AI_LINK_CONTEXT_MAX_LINKS)
+            .map(|url| inspect_link_preview(&transport, url))
+            .filter(|preview| {
+                preview.metadata.title.is_some() || preview.metadata.description.is_some()
+            })
+            .collect::<Vec<_>>();
+        format_link_context(&previews)
     }
 }
 
@@ -2727,6 +2784,9 @@ fn build_native_dispatcher_with_stream_delivery(
         RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::GiphyCache)?;
     let link_preview_transport =
         ReqwestLinkPreviewTransport::new().map_err(CompositionError::LinkPreviewTransport)?;
+    let link_context_transport =
+        ReqwestLinkPreviewTransport::with_timeout(AI_LINK_CONTEXT_REQUEST_TIMEOUT)
+            .map_err(CompositionError::LinkPreviewTransport)?;
     let weather_transport =
         ReqwestWeatherTransport::new().map_err(CompositionError::WeatherTransport)?;
     let weather_cache =
@@ -2818,6 +2878,7 @@ fn build_native_dispatcher_with_stream_delivery(
     }))
     .with_link_replacement_source(Box::new(NativeLinkReplacementSource {
         transport: link_preview_transport,
+        context_transport: link_context_transport,
     }))
     .with_scheduled_task_source(Box::new(task_source))
     .with_token_signal_source(Box::new(TokenSignalAdapter::new(
@@ -5411,6 +5472,7 @@ mod tests {
             creditless_user_hourly_limit: 10,
             timestamp: 1_700_000_000,
             spontaneous: false,
+            link_context: None,
         };
         assert!(factory.create(&input).is_ok());
 
@@ -5422,6 +5484,7 @@ mod tests {
     fn link_replacement_includes_bounded_preview_context_and_large_video() {
         let mut source = super::NativeLinkReplacementSource {
             transport: LinkPreviewTransportStub,
+            context_transport: LinkPreviewTransportStub,
         };
         let load = crate::dispatcher::LinkReplacementSource::load(
             &mut source,
@@ -5446,6 +5509,60 @@ mod tests {
         assert_eq!(
             super::bounded_link_text(Some("abcdefgh"), 6),
             Some("abc...".to_owned())
+        );
+    }
+
+    #[test]
+    fn ai_link_context_previews_unique_non_youtube_links_under_a_deadline() {
+        let mut source = super::NativeLinkReplacementSource {
+            transport: LinkPreviewTransportStub,
+            context_transport: LinkPreviewTransportStub,
+        };
+        let context = crate::dispatcher::LinkReplacementSource::preview_context(
+            &mut source,
+            "mirá https://example.com/nota https://example.com/nota https://youtu.be/abc",
+        );
+        assert!(context.as_deref().is_some_and(|context| {
+            context.starts_with("LINKS DEL MENSAJE:\n1. https://example.com/nota\ntitulo: ")
+                && context.contains("descripcion: ")
+                && !context.contains("2. ")
+        }));
+        assert_eq!(
+            crate::dispatcher::LinkReplacementSource::preview_context(
+                &mut source,
+                "solo https://www.youtube.com/watch?v=abc y https://m.youtube.com/x"
+            ),
+            None
+        );
+        assert!(super::is_youtube_link(
+            "https://music.youtube.com/watch?v=abc"
+        ));
+        assert!(!super::is_youtube_link("https://notyoutube.com/watch"));
+        assert!(!super::is_youtube_link("not a url"));
+
+        let expired = super::DeadlineLinkPreviewTransport {
+            inner: &LinkPreviewTransportStub,
+            deadline: std::time::Instant::now(),
+        };
+        assert_eq!(
+            expired.request(&PreviewRequest {
+                url: "https://example.com".to_owned(),
+                method: bot_adapters::link_preview::PreviewMethod::Get,
+                follow_redirects: true,
+            }),
+            Err(PreviewFailure::Timeout)
+        );
+        let open = super::DeadlineLinkPreviewTransport {
+            inner: &LinkPreviewTransportStub,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+        };
+        assert!(
+            open.request(&PreviewRequest {
+                url: "https://example.com".to_owned(),
+                method: bot_adapters::link_preview::PreviewMethod::Get,
+                follow_redirects: true,
+            })
+            .is_ok()
         );
     }
 

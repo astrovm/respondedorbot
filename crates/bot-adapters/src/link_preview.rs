@@ -72,14 +72,20 @@ pub struct ReqwestLinkPreviewTransport {
 
 impl ReqwestLinkPreviewTransport {
     pub fn new() -> Result<Self, PreviewFailure> {
+        Self::with_timeout(REQUEST_TIMEOUT)
+    }
+
+    /// Builds a transport whose every request, body included, ends within
+    /// `timeout`; used where a preview is optional context, not the product.
+    pub fn with_timeout(timeout: Duration) -> Result<Self, PreviewFailure> {
         let following = Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(timeout)
+            .connect_timeout(CONNECT_TIMEOUT.min(timeout))
             .build()
             .map_err(classify_error)?;
         let no_redirect = Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(timeout)
+            .connect_timeout(CONNECT_TIMEOUT.min(timeout))
             .redirect(Policy::none())
             .build()
             .map_err(classify_error)?;
