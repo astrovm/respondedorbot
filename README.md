@@ -173,7 +173,7 @@ cargo test --locked --workspace --all-features
 
 Integration tests use synthetic data. Set `TEST_DATABASE_URL`,
 `TEST_REDIS_HOST`, and `TEST_REDIS_PORT` to include PostgreSQL and Redis Stack
-tests, and run them with `-- --test-threads=1` on a fresh database.
+tests.
 
 Coverage requirements:
 
