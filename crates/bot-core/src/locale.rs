@@ -114,4 +114,64 @@ mod tests {
         assert_eq!(format_date(date, Locale::Es), "martes 01/09/2026");
         assert_eq!(format_date(date, Locale::En), "Tuesday 01/09/2026");
     }
+
+    #[test]
+    fn names_every_weekday_in_both_locales() {
+        let expected = [
+            ("lunes", "Monday"),
+            ("martes", "Tuesday"),
+            ("miércoles", "Wednesday"),
+            ("jueves", "Thursday"),
+            ("viernes", "Friday"),
+            ("sábado", "Saturday"),
+            ("domingo", "Sunday"),
+        ];
+        for (offset, (spanish, english)) in (0_u32..).zip(expected) {
+            // 2026-08-31 is a Monday.
+            let Some(date) = NaiveDate::from_ymd_opt(2026, 8, 31)
+                .and_then(|monday| monday.checked_add_days(chrono::Days::new(offset.into())))
+            else {
+                return;
+            };
+            let formatted = date.format("%d/%m/%Y");
+            assert_eq!(
+                format_date(date, Locale::Es),
+                format!("{spanish} {formatted}")
+            );
+            assert_eq!(
+                format_date(date, Locale::En),
+                format!("{english} {formatted}")
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_or_partial_codes_fall_back_to_the_default() {
+        for code in ["", "  ", "e", "eng", "english", "esp", "en_", "fr-FR"] {
+            let expected = if code == "en_" {
+                Locale::En
+            } else {
+                Locale::Es
+            };
+            assert_eq!(normalize_locale(code, Locale::Es), expected, "{code:?}");
+        }
+        assert_eq!(normalize_locale("es", Locale::En), Locale::Es);
+        assert_eq!(normalize_locale("EN", Locale::Es), Locale::En);
+    }
+
+    #[test]
+    fn auto_locale_defaults_to_spanish_outside_private_chats_and_without_a_language() {
+        assert_eq!(resolve_locale(None, None, "private"), Locale::Es);
+        assert_eq!(resolve_locale(None, Some("en"), "private"), Locale::En);
+        assert_eq!(resolve_locale(None, Some("en"), "supergroup"), Locale::Es);
+        assert_eq!(resolve_locale(Some(" EN "), None, "group"), Locale::En);
+        assert_eq!(
+            resolve_locale(Some("unknown"), Some("en-GB"), "private"),
+            Locale::En
+        );
+        assert_eq!(
+            resolve_locale(Some("unknown"), Some("en"), "channel"),
+            Locale::Es
+        );
+    }
 }

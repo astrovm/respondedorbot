@@ -1784,11 +1784,29 @@ mod tests {
         assert_eq!(refund["settlement_id"], "original-reservation");
     }
 
+    /// Recreates `schema` and returns a URL whose tables live only there, so
+    /// rerunning global billing migrations cannot touch other tests' rows.
+    fn isolated_schema_url(
+        database_url: &str,
+        schema: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let connector = TlsConnector::builder().build()?;
+        let mut client = Client::connect(database_url, MakeTlsConnector::new(connector))?;
+        client.batch_execute(&format!(
+            "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}"
+        ))?;
+        let separator = if database_url.contains('?') { '&' } else { '?' };
+        Ok(format!(
+            "{database_url}{separator}options=-csearch_path%3D{schema}"
+        ))
+    }
+
     #[test]
     fn reads_existing_and_missing_balances() -> Result<(), Box<dyn std::error::Error>> {
         let Ok(database_url) = std::env::var("TEST_DATABASE_URL") else {
             return Ok(());
         };
+        let database_url = isolated_schema_url(&database_url, "billing_read_test")?;
         let connector = TlsConnector::builder().build()?;
         let mut client = Client::connect(&database_url, MakeTlsConnector::new(connector))?;
         BillingSchemaRepository::new(&database_url).ensure_schema()?;
@@ -1898,7 +1916,8 @@ mod tests {
                 (SELECT balance FROM credit_accounts \
                     WHERE scope_type = 'user' AND scope_id = 7000000000044), \
                 (SELECT COUNT(*) FROM credit_schema_migrations), \
-                (SELECT COUNT(*) FROM pg_indexes WHERE indexname IN ( \
+                (SELECT COUNT(*) FROM pg_indexes \
+                    WHERE schemaname = current_schema() AND indexname IN ( \
                     'idx_credit_ledger_compaction_usage_tag', \
                     'idx_credit_ledger_user_ai_settlements', \
                     'idx_credit_ledger_unique_ai_settlement', \
