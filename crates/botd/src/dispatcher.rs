@@ -108,7 +108,7 @@ fn thinking_text(locale: bot_core::locale::Locale) -> &'static str {
 }
 
 pub trait ChatConfigSource {
-    type Error;
+    type Error: std::fmt::Display;
 
     fn get(&mut self, chat_id: &str) -> Result<ChatConfig, Self::Error>;
 
@@ -125,7 +125,7 @@ pub trait ChatConfigSource {
 }
 
 pub trait ActionSink {
-    type Error;
+    type Error: std::fmt::Display;
 
     fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error>;
 
@@ -192,7 +192,7 @@ pub trait RuntimeValues {
 }
 
 pub trait RandomSource {
-    type Error;
+    type Error: std::fmt::Display;
 
     fn choice_index(&mut self, upper_exclusive: usize) -> Result<usize, Self::Error>;
 
@@ -875,11 +875,11 @@ pub enum DispatchOutcome {
 
 #[derive(Debug, PartialEq, Eq, Error)]
 pub enum DispatchError<ConfigError, ActionError, RandomError> {
-    #[error("could not load chat configuration")]
+    #[error("could not load chat configuration: {0}")]
     Config(ConfigError),
-    #[error("could not execute Telegram action")]
+    #[error("could not execute Telegram action: {0}")]
     Action(ActionError),
-    #[error("could not obtain a random value")]
+    #[error("could not obtain a random value: {0}")]
     Random(RandomError),
     #[error("required native service is not configured: {0}")]
     MissingService(&'static str),
@@ -4180,7 +4180,7 @@ where
             let preparation = source.prepare_streaming_events(input, &mut |event| {
                 stream
                     .feed(event)
-                    .map_err(|_error| "Telegram rejected the initial streamed response".to_owned())
+                    .map_err(|error| format!("Telegram rejected the streamed response: {error}"))
             });
             match preparation {
                 Err(error) => {
@@ -4523,7 +4523,7 @@ where
                 source.prepare_summary_command_streaming_events(input, &mut |event| {
                     stream
                         .feed(event)
-                        .map_err(|_error| "Telegram rejected the initial summary stream".to_owned())
+                        .map_err(|error| format!("Telegram rejected the summary stream: {error}"))
                 });
             match preparation {
                 Err(error) => {
@@ -7836,10 +7836,15 @@ mod tests {
             authorization(),
             "@mybot",
         );
+        let result = dispatcher.dispatch(update("/convertbase 1,2,10", None));
         assert!(matches!(
-            dispatcher.dispatch(update("/convertbase 1,2,10", None)),
+            result,
             Err(DispatchError::Action("synthetic action failure"))
         ));
+        assert_eq!(
+            result.err().map(|error| error.to_string()),
+            Some("could not execute Telegram action: synthetic action failure".to_owned())
+        );
     }
 
     #[test]
