@@ -681,6 +681,15 @@ fn billing_schema_repairs_user_and_chat_funded_duplicate_refunds()
     let Some(database_url) = std::env::var("TEST_DATABASE_URL").ok() else {
         return Ok(());
     };
+    // The repair migration scans the whole ledger, so run it in a schema no
+    // other test writes to.
+    let mut client = postgres::Client::connect(&database_url, postgres::NoTls)?;
+    client.batch_execute(
+        "DROP SCHEMA IF EXISTS billing_repair_test CASCADE; CREATE SCHEMA billing_repair_test",
+    )?;
+    let separator = if database_url.contains('?') { '&' } else { '?' };
+    let database_url =
+        format!("{database_url}{separator}options=-csearch_path%3Dbilling_repair_test");
     BillingSchemaRepository::new(&database_url).ensure_schema()?;
     let mut client = postgres::Client::connect(&database_url, postgres::NoTls)?;
     client.batch_execute(
