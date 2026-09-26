@@ -164,6 +164,7 @@ dependencies = [
  "bot-core",
  "calamine",
  "chrono",
+ "encoding_rs",
  "image",
  "imageproc",
  "native-tls",
