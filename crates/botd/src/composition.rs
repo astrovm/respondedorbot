@@ -1363,6 +1363,7 @@ pub struct SystemRuntimeValues {
 }
 
 const TELEGRAM_STREAM_MIN_DELIVERY_INTERVAL: Duration = Duration::from_secs(1);
+const TELEGRAM_STREAM_MAX_RATE_LIMIT_PAUSE: Duration = Duration::from_secs(300);
 const TELEGRAM_STREAM_THINKING_DOT_FRAMES: [&str; 3] = [".", "..", "..."];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1517,7 +1518,12 @@ impl TelegramStreamDeliveryState {
     fn pause_intermediate_edits(&mut self, chat_id: i64, duration: Duration) {
         let now = std::time::Instant::now();
         self.rate_limited_until.retain(|_, until| *until > now);
-        self.rate_limited_until.insert(chat_id, now + duration);
+        // retry_after comes from the network; cap it so a hostile or broken
+        // value can neither overflow Instant nor silence a chat indefinitely.
+        self.rate_limited_until.insert(
+            chat_id,
+            now + duration.min(TELEGRAM_STREAM_MAX_RATE_LIMIT_PAUSE),
+        );
     }
 
     fn mark_intermediate_edit_started(&mut self, chat_id: i64) {
@@ -1797,7 +1803,7 @@ fn run_telegram_stream_delivery_worker<Transport>(
                             }) => {
                                 let seconds = retry_after_seconds
                                     .unwrap_or(TELEGRAM_ACTION_DEFAULT_RETRY_SECONDS)
-                                    .max(1);
+                                    .clamp(1, TELEGRAM_STREAM_MAX_RATE_LIMIT_PAUSE.as_secs());
                                 lock_unpoisoned(&state).pause_intermediate_edits(
                                     key.chat_id,
                                     Duration::from_secs(seconds),
@@ -4378,6 +4384,116 @@ mod tests {
             requests.first().and_then(|request| request.json_payload.as_ref()),
             Some(payload) if payload.get("text").and_then(serde_json::Value::as_str)
                 == Some("Pensando..")
+        ));
+
+        drop(wake);
+        assert!(worker.join().is_ok());
+    }
+
+    #[test]
+    fn telegram_stream_delivery_worker_pauses_rate_limited_chats_and_still_delivers_finals() {
+        let (completed, completed_receiver) = mpsc::channel();
+        // Responses pop from the end: rate limit, rejected edit, then the final.
+        let transport = StreamDeliveryTransport {
+            responses: Arc::new(Mutex::new(vec![
+                telegram_response(200, r#"{"ok":true,"result":true}"#),
+                telegram_response(
+                    400,
+                    r#"{"ok":false,"error_code":400,"description":"Bad Request: message is not modified"}"#,
+                ),
+                telegram_response(
+                    429,
+                    &format!(
+                        r#"{{"ok":false,"error_code":429,"description":"Too Many Requests","parameters":{{"retry_after":{}}}}}"#,
+                        u64::MAX
+                    ),
+                ),
+            ])),
+            requests: Arc::new(Mutex::new(Vec::new())),
+            completed,
+        };
+        let limited_key = super::TelegramStreamKey {
+            chat_id: 7,
+            message_id: 80,
+        };
+        let rejected_key = super::TelegramStreamKey {
+            chat_id: 9,
+            message_id: 90,
+        };
+        let final_key = super::TelegramStreamKey {
+            chat_id: 7,
+            message_id: 81,
+        };
+        let state = Arc::new(Mutex::new(super::TelegramStreamDeliveryState {
+            pending: std::collections::HashMap::from([
+                (
+                    limited_key,
+                    super::PendingTelegramStreamEdit {
+                        key: limited_key,
+                        action: stream_edit(7, 80, "draft"),
+                        final_response: None,
+                    },
+                ),
+                (
+                    rejected_key,
+                    super::PendingTelegramStreamEdit {
+                        key: rejected_key,
+                        action: stream_edit(9, 90, "same"),
+                        final_response: None,
+                    },
+                ),
+            ]),
+            order: std::collections::VecDeque::from([limited_key, rejected_key]),
+            last_intermediate_edit: std::collections::HashMap::new(),
+            rate_limited_until: std::collections::HashMap::new(),
+            thinking: std::collections::HashMap::new(),
+        }));
+        let (wake, receiver) = mpsc::channel();
+        let worker_state = Arc::clone(&state);
+        let worker = thread::spawn(move || {
+            super::run_telegram_stream_delivery_worker(
+                transport,
+                "synthetic-token".to_owned(),
+                TelegramDeliveryCoordinator::default(),
+                receiver,
+                worker_state,
+            );
+        });
+
+        assert!(wake.send(()).is_ok());
+        for _ in 0..2 {
+            assert!(
+                completed_receiver
+                    .recv_timeout(Duration::from_secs(1))
+                    .is_ok()
+            );
+        }
+        let (final_sender, final_receiver) = mpsc::channel();
+        {
+            let mut state = super::lock_unpoisoned(&state);
+            state.order.push_back(final_key);
+            state.pending.insert(
+                final_key,
+                super::PendingTelegramStreamEdit {
+                    key: final_key,
+                    action: stream_edit(7, 81, "final"),
+                    final_response: Some(final_sender),
+                },
+            );
+        }
+        assert!(wake.send(()).is_ok());
+        assert_eq!(
+            final_receiver.recv_timeout(Duration::from_secs(1)),
+            Ok(Ok(true))
+        );
+        let pause = super::lock_unpoisoned(&state)
+            .rate_limited_until
+            .get(&7)
+            .map(|until| until.saturating_duration_since(Instant::now()));
+        assert!(matches!(
+            pause,
+            Some(pause) if pause > Duration::from_secs(290)
+                && pause <= super::TELEGRAM_STREAM_MAX_RATE_LIMIT_PAUSE
         ));
 
         drop(wake);
