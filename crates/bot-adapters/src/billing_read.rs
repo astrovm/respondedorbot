@@ -1785,9 +1785,8 @@ mod tests {
     }
 
     #[test]
-    fn reads_existing_and_missing_balances_when_test_postgres_is_available()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let Ok(database_url) = std::env::var("TEST_POSTGRES_URL") else {
+    fn reads_existing_and_missing_balances() -> Result<(), Box<dyn std::error::Error>> {
+        let Ok(database_url) = std::env::var("TEST_DATABASE_URL") else {
             return Ok(());
         };
         let connector = TlsConnector::builder().build()?;

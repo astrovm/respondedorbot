@@ -196,13 +196,49 @@ fn unsupported_timeframe(text: &str) -> Option<String> {
     }
 }
 
+/// Explicit chart duration. `m` and `mo` both mean 30 days.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChartPeriod {
+    pub seconds: i64,
+}
+
+impl ChartPeriod {
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.to_ascii_lowercase();
+        let split = value.find(|c: char| !c.is_ascii_digit())?;
+        let count = value[..split].parse::<i64>().ok()?;
+        let unit = match &value[split..] {
+            "m" | "mo" => 30 * 86400,
+            "h" => 3600,
+            "d" => 86400,
+            "w" => 7 * 86400,
+            "y" => 365 * 86400,
+            _ => return None,
+        };
+        let seconds = count.checked_mul(unit)?;
+        (seconds > 0 && seconds <= 100 * 365 * 86400).then_some(Self { seconds })
+    }
+
+    #[must_use]
+    pub fn yahoo_interval(self) -> &'static str {
+        match self.seconds {
+            0..=86400 => "1m",
+            86401..=604800 => "15m",
+            604801..=5184000 => "1h",
+            5184001..=63072000 => "1d",
+            _ => "1wk",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
 
     use super::{
-        AmountConversion, PriceQuery, ProviderScope, normalize_price_symbol, parse_price_query,
-        price_query_parameter,
+        AmountConversion, ChartPeriod, PriceQuery, ProviderScope, normalize_price_symbol,
+        parse_price_query, price_query_parameter,
     };
 
     fn timeframes() -> Vec<String> {
@@ -310,47 +346,7 @@ mod tests {
             let _query = parse_price_query(&input, &timeframes());
         }
     }
-}
 
-/// Explicit chart duration. `m` and `mo` both mean 30 days.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChartPeriod {
-    pub seconds: i64,
-}
-
-impl ChartPeriod {
-    #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        let value = value.to_ascii_lowercase();
-        let split = value.find(|c: char| !c.is_ascii_digit())?;
-        let count = value[..split].parse::<i64>().ok()?;
-        let unit = match &value[split..] {
-            "m" | "mo" => 30 * 86400,
-            "h" => 3600,
-            "d" => 86400,
-            "w" => 7 * 86400,
-            "y" => 365 * 86400,
-            _ => return None,
-        };
-        let seconds = count.checked_mul(unit)?;
-        (seconds > 0 && seconds <= 100 * 365 * 86400).then_some(Self { seconds })
-    }
-
-    #[must_use]
-    pub fn yahoo_interval(self) -> &'static str {
-        match self.seconds {
-            0..=86400 => "1m",
-            86401..=604800 => "15m",
-            604801..=5184000 => "1h",
-            5184001..=63072000 => "1d",
-            _ => "1wk",
-        }
-    }
-}
-
-#[cfg(test)]
-mod chart_period_tests {
-    use super::ChartPeriod;
     #[test]
     fn ranges_are_unambiguous_bounded_and_choose_usable_candles() {
         for (input, seconds, interval) in [

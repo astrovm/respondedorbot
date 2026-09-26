@@ -1,6 +1,7 @@
 //! Typed Polymarket global-election and live-midpoint adapter.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use bot_core::polymarket::{ElectionEvent, parse_election_events};
@@ -50,15 +51,16 @@ pub struct ReqwestPolymarketTransport {
 
 impl ReqwestPolymarketTransport {
     pub fn new() -> Result<Self, TransportFailureKind> {
-        Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .map(|client| Self {
-                client,
-                events_url: EVENTS_URL.to_owned(),
-                midpoints_url: MIDPOINTS_URL.to_owned(),
-            })
-            .map_err(|_| TransportFailureKind::Request)
+        static CLIENT: OnceLock<Client> = OnceLock::new();
+        crate::http_client::shared_client(&CLIENT, || {
+            Client::builder().timeout(REQUEST_TIMEOUT).build()
+        })
+        .map(|client| Self {
+            client,
+            events_url: EVENTS_URL.to_owned(),
+            midpoints_url: MIDPOINTS_URL.to_owned(),
+        })
+        .map_err(|_| TransportFailureKind::Request)
     }
 
     #[cfg(test)]

@@ -1,7 +1,7 @@
 //! DexScreener/GeckoTerminal token-card adapter and PNG renderer.
 
 use std::io::Cursor;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
 
 use ab_glyph::FontArc;
@@ -46,11 +46,14 @@ pub struct ReqwestTokenSignalTransport {
 
 impl ReqwestTokenSignalTransport {
     pub fn new() -> Result<Self, String> {
-        Client::builder()
-            .timeout(Duration::from_secs(HTTP_TIMEOUT_SECONDS))
-            .build()
-            .map(|client| Self { client })
-            .map_err(|error| format!("could not build token-signal HTTP client: {error}"))
+        static CLIENT: OnceLock<Client> = OnceLock::new();
+        crate::http_client::shared_client(&CLIENT, || {
+            Client::builder()
+                .timeout(Duration::from_secs(HTTP_TIMEOUT_SECONDS))
+                .build()
+        })
+        .map(|client| Self { client })
+        .map_err(|error| format!("could not build token-signal HTTP client: {error}"))
     }
 }
 

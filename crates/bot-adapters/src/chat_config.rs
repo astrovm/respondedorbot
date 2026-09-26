@@ -207,7 +207,7 @@ mod tests {
     }
 
     fn test_database_url() -> Option<String> {
-        env::var("TEST_POSTGRES_URL").ok()
+        env::var("TEST_DATABASE_URL").ok()
     }
 
     fn cleanup(database_url: &str, chat_id: &str) {

@@ -103,7 +103,7 @@ mod tests {
         })
         .map_err(|error| error.to_string())?;
         assert_eq!(report.ledger["reason"], "postgres not configured");
-        if let Ok(database_url) = std::env::var("TEST_POSTGRES_URL") {
+        if let Ok(database_url) = std::env::var("TEST_DATABASE_URL") {
             let report = run_maintenance(MaintenanceOptions {
                 redis_endpoint: &endpoint,
                 database_url: Some(&database_url),

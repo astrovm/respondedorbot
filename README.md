@@ -171,9 +171,9 @@ cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
 ```
 
-Integration tests use synthetic data. Set `TEST_REDIS_URL`,
-`TEST_POSTGRES_URL`, and `TEST_DATABASE_URL` to include Redis Stack and
-PostgreSQL tests.
+Integration tests use synthetic data. Set `TEST_DATABASE_URL`,
+`TEST_REDIS_HOST`, and `TEST_REDIS_PORT` to include PostgreSQL and Redis Stack
+tests, and run them with `-- --test-threads=1` on a fresh database.
 
 Coverage requirements:
 
