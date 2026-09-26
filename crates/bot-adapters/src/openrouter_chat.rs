@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Read;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -41,6 +42,7 @@ pub struct OpenRouterPricingCache {
     api_key: String,
     base_url: String,
     state: Arc<Mutex<OpenRouterPricingState>>,
+    refreshing: Arc<AtomicBool>,
 }
 
 impl OpenRouterPricingCache {
@@ -55,6 +57,7 @@ impl OpenRouterPricingCache {
             api_key: api_key.to_owned(),
             base_url: base_url.to_owned(),
             state: Arc::new(Mutex::new(OpenRouterPricingState::default())),
+            refreshing: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -202,25 +205,46 @@ impl OpenRouterPricingCache {
             let state = self.lock_state()?;
             lookup(&state, model)
         };
+        if cached.is_some() {
+            // A known price is good enough for this request; refresh the
+            // catalog off the request path so no reply waits on it.
+            if self.refresh_is_due()? {
+                self.refresh_in_background();
+            }
+            return Ok(cached);
+        }
         if self.refresh_is_due()?
             && let Err(error) = self.refresh()
-            && cached.is_none()
         {
             return Err(error);
         }
-        let current = {
-            let state = self.lock_state()?;
-            if let Some(current) = lookup(&state, model) {
-                return Ok(Some(current));
-            }
-            if cached.is_none()
-                && let Some(error) = state.last_refresh_error.clone()
-            {
-                return Err(error);
-            }
-            lookup(&state, model)
-        };
-        Ok(current.or(cached))
+        let state = self.lock_state()?;
+        if let Some(current) = lookup(&state, model) {
+            return Ok(Some(current));
+        }
+        state.last_refresh_error.clone().map_or(Ok(None), Err)
+    }
+
+    fn refresh_in_background(&self) {
+        if self
+            .refreshing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let cache = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("openrouter-pricing".to_owned())
+            .spawn(move || {
+                if let Err(error) = cache.refresh() {
+                    eprintln!("could not refresh OpenRouter pricing: {error}");
+                }
+                cache.refreshing.store(false, Ordering::Release);
+            });
+        if spawned.is_err() {
+            self.refreshing.store(false, Ordering::Release);
+        }
     }
 
     fn record_refresh_success(&self) -> Result<(), OpenRouterChatError> {
@@ -515,6 +539,8 @@ pub struct ProviderPreferences {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReasoningConfig {
     pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1218,6 +1244,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::atomic::Ordering;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -1451,6 +1478,7 @@ mod tests {
             .unwrap_or_else(|_| unreachable!("cached lookup"))
             .unwrap_or_else(|| unreachable!("cached transcription model"));
         assert_eq!(cached, first);
+        wait_for_background_refresh(&cache);
         cache
             .state
             .lock()
@@ -1460,6 +1488,7 @@ mod tests {
             .transcription_pricing(OPENROUTER_TRANSCRIPTION_MODEL)
             .unwrap_or_else(|_| unreachable!("outage fallback"))
             .unwrap_or_else(|| unreachable!("cached transcription model"));
+        wait_for_background_refresh(&cache);
         assert_eq!(outage_fallback, first);
         cache
             .state
@@ -1475,6 +1504,7 @@ mod tests {
             .transcription_pricing(OPENROUTER_TRANSCRIPTION_MODEL)
             .unwrap_or_else(|_| unreachable!("second outage fallback"))
             .unwrap_or_else(|| unreachable!("cached transcription model"));
+        wait_for_background_refresh(&cache);
         assert_eq!(second_outage_fallback, first);
         assert_eq!(
             cache
@@ -1507,6 +1537,14 @@ mod tests {
         server
             .join()
             .unwrap_or_else(|_| unreachable!("catalog server"));
+    }
+
+    fn wait_for_background_refresh(cache: &OpenRouterPricingCache) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while cache.refreshing.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!cache.refreshing.load(Ordering::Acquire));
     }
 
     #[test]

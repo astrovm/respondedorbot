@@ -70,6 +70,9 @@ pub struct SearchRow {
     pub fields: BTreeMap<String, String>,
 }
 
+/// Recent history entries, the chat summary, and its compaction marker.
+pub type HistoryWithSummary = (Vec<String>, Option<String>, Option<String>);
+
 pub struct RedisMessageState {
     client: RedisPool,
     search_index_ready: AtomicBool,
@@ -211,6 +214,28 @@ impl RedisMessageState {
             .arg(format!("chat_history:{chat_id}"))
             .arg(0)
             .arg(max_messages.saturating_sub(1))
+            .query(&mut connection)?)
+    }
+
+    /// Reads recent history, the chat summary, and its compaction marker in
+    /// one pipelined round trip.
+    pub fn get_history_with_summary(
+        &self,
+        chat_id: &str,
+        max_messages: i64,
+        summary_key: &str,
+        marker_key: &str,
+    ) -> Result<HistoryWithSummary, RedisMessageStateError> {
+        let mut connection = self.client.get_connection()?;
+        Ok(redis::pipe()
+            .cmd("LRANGE")
+            .arg(format!("chat_history:{chat_id}"))
+            .arg(0)
+            .arg(max_messages.saturating_sub(1))
+            .cmd("GET")
+            .arg(summary_key)
+            .cmd("GET")
+            .arg(marker_key)
             .query(&mut connection)?)
     }
 
@@ -446,6 +471,44 @@ mod tests {
             ]
         );
 
+        match server.join() {
+            Ok(result) => result?,
+            Err(_) => return Err("synthetic Redis server panicked".into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn pipelines_history_summary_and_marker_reads() -> Result<(), Box<dyn Error + Send + Sync>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            let (stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+            let mut reader = BufReader::new(stream);
+            assert_eq!(
+                read_command_from(&mut reader)?,
+                ["LRANGE", "chat_history:1", "0", "1"]
+            );
+            assert_eq!(read_command_from(&mut reader)?, ["GET", "chat_summary:1"]);
+            assert_eq!(
+                read_command_from(&mut reader)?,
+                ["GET", "chat_compacted_until:1"]
+            );
+            reader
+                .get_mut()
+                .write_all(b"*1\r\n$3\r\none\r\n$7\r\nsummary\r\n$-1\r\n")?;
+            Ok(())
+        });
+        let state = RedisMessageState::new(&RedisEndpoint {
+            host: "127.0.0.1".to_owned(),
+            port,
+            password: None,
+        })?;
+        assert_eq!(
+            state.get_history_with_summary("1", 2, "chat_summary:1", "chat_compacted_until:1")?,
+            (vec!["one".to_owned()], Some("summary".to_owned()), None)
+        );
         match server.join() {
             Ok(result) => result?,
             Err(_) => return Err("synthetic Redis server panicked".into()),

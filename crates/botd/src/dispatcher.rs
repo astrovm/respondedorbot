@@ -95,10 +95,18 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 
 use crate::ai_dispatch::{
-    AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, reply_context,
+    AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, AiStreamEvent,
+    reply_context,
 };
 use crate::runtime::UpdateHandler;
 use crate::telegram_stream::{StreamFinalizeError, TelegramAiStream};
+
+fn text_without_links(text: &str) -> String {
+    bot_core::links::HTTP_URL.as_ref().map_or_else(
+        || text.to_owned(),
+        |pattern| pattern.replace_all(text, "").into_owned(),
+    )
+}
 
 fn thinking_text(locale: bot_core::locale::Locale) -> &'static str {
     match locale {
@@ -772,6 +780,12 @@ pub struct LinkReplacementLoad {
 
 pub trait LinkReplacementSource {
     fn load(&mut self, text: &str, now_unix: i64) -> LinkReplacementLoad;
+
+    /// Bounded title/description context for links in a message the AI will
+    /// answer, fetched under a short deadline. `None` when nothing is known.
+    fn preview_context(&mut self, _text: &str) -> Option<String> {
+        None
+    }
 }
 
 pub trait ScheduledTaskSource {
@@ -937,6 +951,9 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     token_signal_source: Option<Box<dyn TokenSignalSource>>,
     ai_conversation_source: Option<Box<dyn AiConversationSource>>,
     trigger_words: Vec<String>,
+    /// Link preview context already fetched by link replacement for the
+    /// current message, so the AI turn does not fetch it again.
+    prefetched_link_context: Option<Option<String>>,
     last_outcome: Option<DispatchOutcome>,
     state_diagnostics: Vec<String>,
 }
@@ -993,6 +1010,7 @@ where
             token_signal_source: None,
             ai_conversation_source: None,
             trigger_words: vec!["bot".to_owned(), "assistant".to_owned()],
+            prefetched_link_context: None,
             last_outcome: None,
             state_diagnostics: Vec::new(),
         }
@@ -1144,12 +1162,36 @@ where
         self
     }
 
+    /// Whether the AI would answer this message on its own merits: it
+    /// mentions or replies to the bot, or is a private message with more
+    /// than bare links (a bare link in private is only a link-fix request).
+    fn is_addressed_to_bot(&self, message: &IncomingMessage, text: &str) -> bool {
+        let bot_username = self.bot_name.trim().trim_start_matches('@');
+        if bot_username.is_empty() {
+            return message.chat_type.as_deref() == Some("private")
+                && !text_without_links(text).trim().is_empty();
+        }
+        let mention = text
+            .to_lowercase()
+            .contains(&format!("@{}", bot_username.to_lowercase()));
+        let reply_to_bot = message.replied_sender_username.as_deref() == Some(bot_username);
+        mention
+            || reply_to_bot
+            || (message.chat_type.as_deref() == Some("private")
+                && !text_without_links(text).trim().is_empty())
+    }
+
+    /// Returns `Some` when link replacement fully handled the message. A
+    /// message addressed to the bot gets its links fixed (without deleting
+    /// the original, which the answer replies to) and then `None`, so the AI
+    /// still answers with the fetched preview context.
     fn dispatch_link_replacement(
         &mut self,
         message: &IncomingMessage,
         config: &ChatConfig,
         locale: bot_core::locale::Locale,
         timestamp: i64,
+        addressed: bool,
     ) -> OptionalNativeDispatchResult<Config, Actions, Random> {
         let (Some(chat_id), Some(message_id), Some(sender_id), Some(content)) = (
             message.chat_id,
@@ -1164,14 +1206,8 @@ where
         if mode == LinkMode::Off || text.is_empty() || text.starts_with('/') {
             return Ok(None);
         }
-        if message.has_reply {
-            let without_links = regex::Regex::new(r"https?://[^\s]+").ok().map_or_else(
-                || text.to_owned(),
-                |pattern| pattern.replace_all(text, "").into_owned(),
-            );
-            if !without_links.trim().is_empty() {
-                return Ok(None);
-            }
+        if message.has_reply && !text_without_links(text).trim().is_empty() {
+            return Ok(None);
         }
         if !has_replaceable_link(text) {
             return Ok(None);
@@ -1181,7 +1217,13 @@ where
         };
         let load = source.load(text, timestamp);
         self.state_diagnostics.extend(load.diagnostics);
+        if addressed {
+            self.prefetched_link_context = Some(load.context.clone());
+        }
         if !load.replacement.changed {
+            if addressed {
+                return Ok(None);
+            }
             let incoming = prepare_incoming_command_state(IncomingCommandState {
                 chat_id,
                 message_id,
@@ -1256,7 +1298,7 @@ where
                 .execute(plan.send)
                 .map_err(DispatchError::Action)?
         };
-        if let Some(delete) = plan.delete_original {
+        if let Some(delete) = plan.delete_original.filter(|_| !addressed) {
             let _receipt = self
                 .actions
                 .execute(delete)
@@ -1276,7 +1318,7 @@ where
             self.state_diagnostics
                 .push(format!("fixed link state: {error}"));
         }
-        Ok(Some(DispatchOutcome::Handled))
+        Ok((!addressed).then_some(DispatchOutcome::Handled))
     }
 
     fn dispatch_successful_payment(
@@ -4159,6 +4201,7 @@ where
             creditless_user_hourly_limit: config.creditless_user_hourly_limit,
             timestamp,
             spontaneous,
+            link_context: None,
         };
         if evaluation == ResponseRoutingEvaluation::Ignore {
             if let Some(source) = self.ai_conversation_source.as_mut()
@@ -4169,6 +4212,18 @@ where
             }
             return Ok(DispatchOutcome::Handled);
         }
+        let link_context = match self.prefetched_link_context.take() {
+            Some(context) => context,
+            None if text_without_links(ai_prompt_text) != ai_prompt_text => self
+                .link_replacement_source
+                .as_mut()
+                .and_then(|source| source.preview_context(ai_prompt_text)),
+            None => None,
+        };
+        let input = AiConversationInput {
+            link_context,
+            ..input
+        };
 
         let (preparation, stream_finalize, ignored_edit_failures, thinking_status_failed) = {
             let Some(source) = self.ai_conversation_source.as_mut() else {
@@ -4176,8 +4231,14 @@ where
             };
             let mut stream = TelegramAiStream::new(&mut self.actions, chat_id, message_id)
                 .with_thinking_text(thinking_text(locale));
-            let thinking_status_failed = stream.show_thinking().is_err();
+            // The thinking status waits for the source to admit the turn, so
+            // denied or spontaneous turns that end silently never flash it.
+            let mut thinking_status_failed = false;
             let preparation = source.prepare_streaming_events(input, &mut |event| {
+                if event == AiStreamEvent::Admitted {
+                    thinking_status_failed |= stream.feed(event).is_err();
+                    return Ok(());
+                }
                 stream
                     .feed(event)
                     .map_err(|error| format!("Telegram rejected the streamed response: {error}"))
@@ -4353,6 +4414,7 @@ where
             creditless_user_hourly_limit: config.creditless_user_hourly_limit,
             timestamp,
             spontaneous: false,
+            link_context: None,
         };
         let preparation = match source.prepare_media_command(input) {
             Ok(Some(preparation)) => preparation,
@@ -4511,6 +4573,7 @@ where
             creditless_user_hourly_limit: config.creditless_user_hourly_limit,
             timestamp,
             spontaneous: false,
+            link_context: None,
         };
         let (preparation, stream_finalize, ignored_edit_failures, thinking_status_failed) = {
             let Some(source) = self.ai_conversation_source.as_mut() else {
@@ -4720,12 +4783,14 @@ where
         {
             return Ok(outcome);
         }
-        if !content.text.starts_with('/')
-            && has_replaceable_link(&content.text)
-            && let Some(outcome) =
-                self.dispatch_link_replacement(message, &config, locale, timestamp)?
-        {
-            return Ok(outcome);
+        self.prefetched_link_context = None;
+        if !content.text.starts_with('/') && has_replaceable_link(&content.text) {
+            let addressed = self.is_addressed_to_bot(message, &content.text);
+            if let Some(outcome) =
+                self.dispatch_link_replacement(message, &config, locale, timestamp, addressed)?
+            {
+                return Ok(outcome);
+            }
         }
         if message.has_reply && self.ai_conversation_source.is_none() {
             return Err(DispatchError::MissingService("AI conversation"));
@@ -5635,6 +5700,7 @@ mod tests {
 
     use crate::ai_dispatch::{
         AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, AiReplyMetadata,
+        AiStreamEvent,
     };
 
     use super::{
@@ -5848,6 +5914,9 @@ mod tests {
         deliveries: Rc<RefCell<Vec<AiDelivery>>>,
         delivery_error: Option<String>,
         ignored_error: Option<String>,
+        /// Whether the synthetic turn passes its credit check (and so emits
+        /// `Admitted`) before preparing, mirroring the native conversation.
+        admit: bool,
     }
 
     impl AiConversationSource for AiSource {
@@ -5881,6 +5950,19 @@ mod tests {
             self.preparation
                 .take()
                 .unwrap_or_else(|| Ok(AiPreparation::silent()))
+        }
+
+        fn prepare_streaming_events(
+            &mut self,
+            input: AiConversationInput,
+            on_event: &mut dyn FnMut(AiStreamEvent) -> Result<(), String>,
+        ) -> Result<AiPreparation, String> {
+            if self.admit && !input.spontaneous {
+                on_event(AiStreamEvent::Admitted)?;
+            }
+            self.prepare_streaming(input, &mut |token| {
+                on_event(AiStreamEvent::FinalText(token.to_owned()))
+            })
         }
 
         fn prepare_media_command(
@@ -5943,6 +6025,7 @@ mod tests {
                 deliveries: Rc::clone(&deliveries),
                 delivery_error: None,
                 ignored_error: None,
+                admit: true,
             },
             (prepared, ignored, deliveries),
         )
@@ -6004,6 +6087,7 @@ mod tests {
         oversized_video: Option<Vec<u8>>,
         diagnostics: Vec<String>,
         calls: Vec<(String, i64)>,
+        preview: Option<String>,
     }
 
     impl LinkReplacementSource for Links {
@@ -6015,6 +6099,12 @@ mod tests {
                 oversized_video: self.oversized_video.clone(),
                 diagnostics: self.diagnostics.clone(),
             }
+        }
+
+        fn preview_context(&mut self, text: &str) -> Option<String> {
+            self.preview
+                .as_ref()
+                .map(|preview| format!("{preview} for {text}"))
         }
     }
 
@@ -6039,6 +6129,7 @@ mod tests {
             oversized_video: None,
             diagnostics: Vec::new(),
             calls: Vec::new(),
+            preview: Some("PREVIEW".to_owned()),
         }
     }
 
@@ -17998,6 +18089,204 @@ mod tests {
             Ok(DispatchOutcome::Handled)
         );
         assert_eq!(prepared.borrow().len(), 1);
+    }
+
+    fn group_link_update(text: &str) -> IncomingUpdate {
+        let mut incoming = update(text, None);
+        if let IncomingEvent::Message(message) = &mut incoming.event {
+            message.chat_type = Some("group".to_owned());
+        }
+        incoming
+    }
+
+    #[test]
+    fn addressed_link_messages_get_fixed_links_and_an_ai_answer_with_preview_context() {
+        for link_mode in ["reply", "delete"] {
+            let (source, (prepared, _ignored, deliveries)) =
+                ai_source(Ok(AiPreparation::reply("respuesta", Some("c1".to_owned()))));
+            let mut dispatcher = NativeDispatcher::new(
+                Config {
+                    value: Ok(ChatConfig {
+                        link_mode: link_mode.to_owned(),
+                        ..ChatConfig::default()
+                    }),
+                    chat_ids: Vec::new(),
+                },
+                Actions::default(),
+                State::default(),
+                values(),
+                random(),
+                authorization(),
+                "@mybot",
+            )
+            .with_link_replacement_source(Box::new(links(true)))
+            .with_ai_conversation_source(Box::new(source));
+            assert_eq!(
+                dispatcher.dispatch(group_link_update(
+                    "@mybot qué onda esto https://x.com/a/status/1"
+                )),
+                Ok(DispatchOutcome::Handled)
+            );
+            let actions = &dispatcher.actions.0;
+            assert!(matches!(
+                actions.first(),
+                Some(TelegramAction::SendMessage(fixed)) if fixed.text.contains("fixupx.com")
+            ));
+            // The original stays so the AI answer can reply to it.
+            assert!(!actions.iter().any(|action| matches!(
+                action,
+                TelegramAction::DeleteMessage { message_id, .. } if *message_id == MessageId(7)
+            )));
+            assert!(actions.iter().any(|action| matches!(
+                action,
+                TelegramAction::SendMessage(reply) if reply.text == "Pensando."
+            )));
+            assert_eq!(prepared.borrow().len(), 1);
+            // The replacement's preview is reused instead of fetching again.
+            assert_eq!(
+                prepared.borrow()[0].link_context.as_deref(),
+                Some("LINKS DEL MENSAJE:\n1. https://fixupx.com/a/status/1\ntitulo: example")
+            );
+            assert_eq!(deliveries.borrow().len(), 1);
+            assert_eq!(dispatcher.state.outgoing.len(), 1);
+        }
+    }
+
+    #[test]
+    fn unreplaced_links_addressed_to_the_bot_fall_through_to_the_ai() {
+        let (source, (prepared, _ignored, _deliveries)) = ai_source(Ok(AiPreparation::silent()));
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_link_replacement_source(Box::new(links(false)))
+        .with_ai_conversation_source(Box::new(source));
+        let mut reply = group_link_update("https://x.com/a/status/1");
+        if let IncomingEvent::Message(message) = &mut reply.event {
+            message.has_reply = true;
+            message.replied_message_id = Some(MessageId(3));
+            message.replied_sender_username = Some("mybot".to_owned());
+            message.replied_text = Some("hola".to_owned());
+        }
+        assert_eq!(dispatcher.dispatch(reply), Ok(DispatchOutcome::Handled));
+        assert_eq!(prepared.borrow().len(), 1);
+        // Replacement already inspected the link and found nothing to add.
+        assert_eq!(prepared.borrow()[0].link_context, None);
+        assert!(dispatcher.state.incoming.is_empty());
+
+        // Links the replacement does not own are previewed for the AI turn.
+        assert_eq!(
+            dispatcher.dispatch(group_link_update("@mybot leé https://example.com/nota")),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            prepared.borrow()[1].link_context.as_deref(),
+            Some("PREVIEW for @mybot leé https://example.com/nota")
+        );
+        // Messages without links never ask for previews.
+        assert_eq!(
+            dispatcher.dispatch(group_link_update("@mybot hola")),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(prepared.borrow()[2].link_context, None);
+    }
+
+    #[test]
+    fn addressing_requires_a_mention_a_reply_to_the_bot_or_private_commentary() {
+        let message = |text: &str, chat_type: &str| {
+            let mut incoming = update(text, None);
+            if let IncomingEvent::Message(message) = &mut incoming.event {
+                message.chat_type = Some(chat_type.to_owned());
+                message.replied_sender_username =
+                    text.starts_with("reply").then(|| "MyBot".to_owned());
+            }
+            match incoming.event {
+                IncomingEvent::Message(message) => Some(*message),
+                _ => None,
+            }
+        };
+        let (
+            Some(group_link),
+            Some(private_link),
+            Some(private_text),
+            Some(group_mention),
+            Some(group_reply),
+            Some(group_text),
+        ) = (
+            message("https://x.com/a/status/1", "group"),
+            message("https://x.com/a/status/1", "private"),
+            message("mirá https://x.com/a/status/1", "private"),
+            message("@mybot https://x.com/a/status/1", "group"),
+            message("reply https://x.com/a/status/1", "group"),
+            message("mirá https://x.com/a/status/1", "group"),
+        )
+        else {
+            return;
+        };
+        let addressed = |bot_name: &str, message: &IncomingMessage| {
+            let dispatcher = NativeDispatcher::new(
+                Config {
+                    value: Ok(ChatConfig::default()),
+                    chat_ids: Vec::new(),
+                },
+                Actions::default(),
+                State::default(),
+                values(),
+                random(),
+                authorization(),
+                bot_name,
+            );
+            let text = message
+                .content
+                .as_ref()
+                .map(|content| content.text.clone())
+                .unwrap_or_default();
+            dispatcher.is_addressed_to_bot(message, &text)
+        };
+        assert!(!addressed("@MyBot", &group_link));
+        assert!(!addressed("@MyBot", &private_link));
+        assert!(addressed("@MyBot", &private_text));
+        assert!(addressed("@MyBot", &group_mention));
+        assert!(addressed("@MyBot", &group_reply));
+        assert!(!addressed("@MyBot", &group_text));
+        assert!(!addressed(" ", &private_link));
+        assert!(addressed(" ", &private_text));
+        assert!(!addressed(" ", &group_mention));
+    }
+
+    #[test]
+    fn thinking_status_waits_for_the_source_to_admit_the_turn() {
+        let (source, (prepared, _ignored, _deliveries)) = ai_source(Ok(AiPreparation::silent()));
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_ai_conversation_source(Box::new(AiSource {
+            admit: false,
+            ..source
+        }));
+        assert_eq!(
+            dispatcher.dispatch(update("synthetic question", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(prepared.borrow().len(), 1);
+        assert!(dispatcher.actions.0.is_empty());
     }
 
     #[test]

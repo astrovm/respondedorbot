@@ -4,7 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bot_adapters::bcra::{
     BcraTransport, ReqwestBcraTransport, TransportFailureKind as BcraTransportFailureKind,
@@ -19,10 +19,10 @@ use bot_adapters::coinmarketcap::{
     load_market_assets,
 };
 use bot_adapters::criptoya::{
-    CriptoYaTransport, DollarQuotesOutcome, ExchangeQuotesOutcome, ExchangeSide,
-    ReqwestCriptoYaTransport, RuloMarketOutcome,
-    TransportFailureKind as CriptoYaTransportFailureKind, fetch_dollar_quotes,
-    fetch_exchange_quotes, fetch_rulo_market,
+    CriptoYaRequest, CriptoYaTransport, DollarQuotesOutcome, ExchangeQuotesOutcome, ExchangeSide,
+    HttpResponse as CriptoYaHttpResponse, ReqwestCriptoYaTransport, RuloMarketOutcome,
+    TransportFailureKind as CriptoYaTransportFailureKind, cached_get_all, exchange_request,
+    parse_dollar_quotes, parse_exchange_quotes, parse_rulo_market,
 };
 use bot_adapters::dollar::{
     DollarCache, DollarTransport, ReqwestDollarTransport,
@@ -38,8 +38,8 @@ use bot_adapters::giphy::{
 use bot_adapters::giphy_pool::{GiphyPoolCache, load_giphy_pool};
 use bot_adapters::hacker_news::ReqwestHackerNewsTransport;
 use bot_adapters::link_preview::{
-    LinkPreviewTransport, ReqwestLinkPreviewTransport, download_oversized_video,
-    inspect_with as inspect_link_preview,
+    LinkPreviewTransport, PreviewFailure, PreviewInspection, PreviewRequest, PreviewResponse,
+    ReqwestLinkPreviewTransport, download_oversized_video, inspect_with as inspect_link_preview,
 };
 use bot_adapters::openrouter_chat::{
     DEFAULT_OPENROUTER_BASE_URL, OpenRouterChatError, OpenRouterPricingCache,
@@ -312,6 +312,54 @@ struct NativeMarketPriceSource<T, C, Y, F, S> {
 
 struct NativeLinkReplacementSource<T> {
     transport: T,
+    /// Short-timeout transport for optional AI link context.
+    context_transport: T,
+}
+
+/// Links whose previews may feed one AI turn, and the wall-clock budget for
+/// fetching them all.
+const AI_LINK_CONTEXT_MAX_LINKS: usize = 3;
+const AI_LINK_CONTEXT_DEADLINE: Duration = Duration::from_secs(4);
+const AI_LINK_CONTEXT_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Fails requests once a shared deadline passes, so several optional
+/// previews cannot stack their individual timeouts.
+struct DeadlineLinkPreviewTransport<'a, T> {
+    inner: &'a T,
+    deadline: Instant,
+}
+
+impl<T: LinkPreviewTransport> LinkPreviewTransport for DeadlineLinkPreviewTransport<'_, T> {
+    fn request(&self, request: &PreviewRequest) -> Result<PreviewResponse, PreviewFailure> {
+        if Instant::now() >= self.deadline {
+            return Err(PreviewFailure::Timeout);
+        }
+        self.inner.request(request)
+    }
+}
+
+fn is_youtube_link(url: &str) -> bool {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| {
+            let host = host.trim_start_matches("www.").trim_start_matches("m.");
+            host == "youtu.be" || host == "youtube.com" || host.ends_with(".youtube.com")
+        })
+}
+
+fn format_link_context(previews: &[PreviewInspection]) -> Option<String> {
+    let mut lines = vec!["LINKS DEL MENSAJE:".to_owned()];
+    for (index, preview) in previews.iter().enumerate() {
+        lines.push(format!("{}. {}", index + 1, preview.final_url));
+        if let Some(title) = bounded_link_text(preview.metadata.title.as_deref(), 160) {
+            lines.push(format!("titulo: {title}"));
+        }
+        if let Some(description) = bounded_link_text(preview.metadata.description.as_deref(), 280) {
+            lines.push(format!("descripcion: {description}"));
+        }
+    }
+    (!previews.is_empty()).then(|| lines.join("\n"))
 }
 
 fn bounded_link_text(value: Option<&str>, limit: usize) -> Option<String> {
@@ -342,21 +390,7 @@ impl<T: LinkPreviewTransport> LinkReplacementSource for NativeLinkReplacementSou
                 false
             }
         });
-        let context = (!previews.is_empty()).then(|| {
-            let mut lines = vec!["LINKS DEL MENSAJE:".to_owned()];
-            for (index, preview) in previews.iter().enumerate() {
-                lines.push(format!("{}. {}", index + 1, preview.final_url));
-                if let Some(title) = bounded_link_text(preview.metadata.title.as_deref(), 160) {
-                    lines.push(format!("titulo: {title}"));
-                }
-                if let Some(description) =
-                    bounded_link_text(preview.metadata.description.as_deref(), 280)
-                {
-                    lines.push(format!("descripcion: {description}"));
-                }
-            }
-            lines.join("\n")
-        });
+        let context = format_link_context(&previews);
         let oversized_video = previews
             .iter()
             .find_map(|preview| download_oversized_video(&self.transport, preview));
@@ -366,6 +400,29 @@ impl<T: LinkPreviewTransport> LinkReplacementSource for NativeLinkReplacementSou
             oversized_video,
             diagnostics: Vec::new(),
         }
+    }
+
+    fn preview_context(&mut self, text: &str) -> Option<String> {
+        let pattern = bot_core::regex_cache::cached_regex(r"https?://[^\s<>]+")?;
+        let mut urls = Vec::<&str>::new();
+        for url in pattern.find_iter(text).map(|found| found.as_str()) {
+            if !is_youtube_link(url) && !urls.contains(&url) {
+                urls.push(url);
+            }
+        }
+        let transport = DeadlineLinkPreviewTransport {
+            inner: &self.context_transport,
+            deadline: Instant::now() + AI_LINK_CONTEXT_DEADLINE,
+        };
+        let previews = urls
+            .into_iter()
+            .take(AI_LINK_CONTEXT_MAX_LINKS)
+            .map(|url| inspect_link_preview(&transport, url))
+            .filter(|preview| {
+                preview.metadata.title.is_some() || preview.metadata.description.is_some()
+            })
+            .collect::<Vec<_>>();
+        format_link_context(&previews)
     }
 }
 
@@ -524,8 +581,9 @@ where
     }
 }
 
-struct CriptoYaDollarQuotesSource<T> {
+struct CriptoYaDollarQuotesSource<T, C> {
     transport: T,
+    cache: C,
 }
 
 struct CriptoYaDollarMarketSource<T, B, C> {
@@ -574,9 +632,21 @@ impl<T: DollarTransport, B: BcraTransport, C: DollarCache> DollarMarketSource
     }
 }
 
-impl<T: CriptoYaTransport> DollarQuotesSource for CriptoYaDollarQuotesSource<T> {
+impl<T: CriptoYaTransport + Sync, C: RequestCache> DollarQuotesSource
+    for CriptoYaDollarQuotesSource<T, C>
+{
     fn devo_quotes(&mut self) -> Result<Option<bot_core::devo::DevoQuotes>, String> {
-        match fetch_dollar_quotes(&self.transport) {
+        let outcome = cached_get_all(
+            &self.transport,
+            &mut self.cache,
+            &[CriptoYaRequest::Dollar],
+            current_unix_timestamp(),
+        )
+        .results
+        .pop()
+        .unwrap_or(Err(CriptoYaTransportFailureKind::Request))
+        .map_or_else(DollarQuotesOutcome::TransportError, parse_dollar_quotes);
+        match outcome {
             DollarQuotesOutcome::Quotes(quotes) => Ok(Some(quotes)),
             DollarQuotesOutcome::Missing => Ok(None),
             DollarQuotesOutcome::HttpError { status_code } => {
@@ -590,8 +660,9 @@ impl<T: CriptoYaTransport> DollarQuotesSource for CriptoYaDollarQuotesSource<T> 
     }
 }
 
-struct CriptoYaRuloSource<T> {
+struct CriptoYaRuloSource<T, C> {
     transport: T,
+    cache: C,
 }
 
 fn exchange_failure(label: &str, outcome: ExchangeQuotesOutcome) -> String {
@@ -607,9 +678,36 @@ fn exchange_failure(label: &str, outcome: ExchangeQuotesOutcome) -> String {
     }
 }
 
-impl<T: CriptoYaTransport> RuloSource for CriptoYaRuloSource<T> {
+impl<T: CriptoYaTransport + Sync, C: RequestCache> RuloSource for CriptoYaRuloSource<T, C> {
     fn rulo_input(&mut self) -> Result<RuloInputLoad, String> {
-        let mut input = match fetch_rulo_market(&self.transport) {
+        // The dollar market and both USDT books are independent: serve fresh
+        // ones from cache and fetch the rest concurrently.
+        let load = cached_get_all(
+            &self.transport,
+            &mut self.cache,
+            &[
+                CriptoYaRequest::Dollar,
+                exchange_request("USD"),
+                exchange_request("ARS"),
+            ],
+            current_unix_timestamp(),
+        );
+        let mut results = load.results.into_iter();
+        let mut next = || -> Result<CriptoYaHttpResponse, CriptoYaTransportFailureKind> {
+            results
+                .next()
+                .unwrap_or(Err(CriptoYaTransportFailureKind::Request))
+        };
+        let market = next().map_or_else(RuloMarketOutcome::TransportError, parse_rulo_market);
+        let exchange = |result: Result<CriptoYaHttpResponse, CriptoYaTransportFailureKind>,
+                        side| {
+            result.map_or_else(ExchangeQuotesOutcome::TransportError, |response| {
+                parse_exchange_quotes(response, side)
+            })
+        };
+        let usd_to_usdt = exchange(next(), ExchangeSide::Ask);
+        let usdt_to_ars = exchange(next(), ExchangeSide::Bid);
+        let mut input = match market {
             RuloMarketOutcome::Input(input) => input,
             RuloMarketOutcome::InvalidJson => {
                 return Err("CriptoYa dollar market returned invalid JSON".to_owned());
@@ -623,12 +721,12 @@ impl<T: CriptoYaTransport> RuloSource for CriptoYaRuloSource<T> {
                 return Err(format!("CriptoYa dollar market transport failed: {kind:?}"));
             }
         };
-        let mut diagnostics = Vec::new();
-        match fetch_exchange_quotes(&self.transport, "USD", ExchangeSide::Ask) {
+        let mut diagnostics = load.diagnostics;
+        match usd_to_usdt {
             ExchangeQuotesOutcome::Quotes(quotes) => input.usd_to_usdt = quotes,
             failure => diagnostics.push(exchange_failure("USDT/USD", failure)),
         }
-        match fetch_exchange_quotes(&self.transport, "ARS", ExchangeSide::Bid) {
+        match usdt_to_ars {
             ExchangeQuotesOutcome::Quotes(quotes) => input.usdt_to_ars = quotes,
             failure => diagnostics.push(exchange_failure("USDT/ARS", failure)),
         }
@@ -1365,6 +1463,10 @@ pub struct SystemRuntimeValues {
 const TELEGRAM_STREAM_MIN_DELIVERY_INTERVAL: Duration = Duration::from_secs(1);
 const TELEGRAM_STREAM_MAX_RATE_LIMIT_PAUSE: Duration = Duration::from_secs(300);
 const TELEGRAM_STREAM_THINKING_DOT_FRAMES: [&str; 3] = [".", "..", "..."];
+// Each chat always maps to the same delivery thread, which keeps its edits in
+// order, while a slow or rate-limited chat only shares its thread with the
+// chats hashed next to it instead of every chat of the bot.
+const TELEGRAM_STREAM_DELIVERY_SHARDS: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct TelegramStreamKey {
@@ -1384,6 +1486,12 @@ struct TelegramStreamThinkingAnimation {
     next_frame_at: std::time::Instant,
 }
 
+struct TelegramStreamFinalRetry {
+    attempts: usize,
+    retry_at: std::time::Instant,
+}
+
+#[derive(Default)]
 struct TelegramStreamDeliveryState {
     pending: HashMap<TelegramStreamKey, PendingTelegramStreamEdit>,
     order: VecDeque<TelegramStreamKey>,
@@ -1392,6 +1500,9 @@ struct TelegramStreamDeliveryState {
     // intermediate snapshots pause until it passes instead of retrying into it.
     rate_limited_until: HashMap<i64, std::time::Instant>,
     thinking: HashMap<TelegramStreamKey, TelegramStreamThinkingAnimation>,
+    // Final answers rejected with retry_after wait here instead of sleeping on
+    // the delivery thread, so the other chats of the shard keep flowing.
+    final_retries: HashMap<TelegramStreamKey, TelegramStreamFinalRetry>,
 }
 
 enum TelegramStreamDeliveryDecision {
@@ -1403,25 +1514,33 @@ enum TelegramStreamDeliveryDecision {
 impl TelegramStreamDeliveryState {
     fn take_next(&mut self) -> TelegramStreamDeliveryDecision {
         self.enqueue_due_thinking_edits();
-        let final_key = self.order.iter().copied().find(|key| {
-            self.pending
-                .get(key)
-                .is_some_and(|pending| pending.final_response.is_some())
-        });
+        let now = std::time::Instant::now();
+        let final_key = self
+            .order
+            .iter()
+            .copied()
+            .find(|key| self.has_final(*key) && self.final_retry_wait(*key, now).is_zero());
         if let Some(key) = final_key
             && let Some(pending) = self.pending.remove(&key)
         {
             return TelegramStreamDeliveryDecision::Ready(pending);
         }
 
-        let now = std::time::Instant::now();
         let mut next_wait = self.next_thinking_wait(now);
+        if let Some(wait) = self.next_final_retry_wait(now) {
+            next_wait = Some(next_wait.map_or(wait, |current: Duration| current.min(wait)));
+        }
         let order_length = self.order.len();
         for _ in 0..order_length {
             let Some(key) = self.order.pop_front() else {
                 break;
             };
             if !self.pending.contains_key(&key) {
+                continue;
+            }
+            if self.has_final(key) {
+                // A final waiting out its retry_after keeps its place.
+                self.order.push_back(key);
                 continue;
             }
             let wait = self.intermediate_edit_wait(key.chat_id, now);
@@ -1493,6 +1612,55 @@ impl TelegramStreamDeliveryState {
         }
     }
 
+    fn has_final(&self, key: TelegramStreamKey) -> bool {
+        self.pending
+            .get(&key)
+            .is_some_and(|pending| pending.final_response.is_some())
+    }
+
+    fn final_retry_wait(&self, key: TelegramStreamKey, now: std::time::Instant) -> Duration {
+        self.final_retries
+            .get(&key)
+            .map_or(Duration::ZERO, |retry| {
+                retry.retry_at.saturating_duration_since(now)
+            })
+    }
+
+    fn next_final_retry_wait(&self, now: std::time::Instant) -> Option<Duration> {
+        self.final_retries
+            .iter()
+            .filter(|(key, _)| self.has_final(**key))
+            .map(|(_, retry)| retry.retry_at.saturating_duration_since(now))
+            .min()
+    }
+
+    fn retry_final(
+        &mut self,
+        pending: PendingTelegramStreamEdit,
+        attempts: usize,
+        delay: Duration,
+    ) {
+        let key = pending.key;
+        if self.has_final(key) {
+            // A newer final answer arrived while this one was in flight.
+            if let Some(response) = pending.final_response {
+                let _ = response.send(Ok(false));
+            }
+            return;
+        }
+        if !self.pending.contains_key(&key) {
+            self.order.push_back(key);
+        }
+        self.final_retries.insert(
+            key,
+            TelegramStreamFinalRetry {
+                attempts,
+                retry_at: std::time::Instant::now() + delay,
+            },
+        );
+        self.pending.insert(key, pending);
+    }
+
     fn next_thinking_wait(&self, now: std::time::Instant) -> Option<Duration> {
         self.thinking
             .values()
@@ -1544,43 +1712,98 @@ impl TelegramStreamDeliveryState {
 
 /// Asynchronous, latest-snapshot Telegram delivery for AI streams.
 ///
-/// The provider callback only updates this queue. A dedicated worker performs
-/// Telegram I/O, coalesces stale intermediate snapshots, and prioritizes the
-/// final answer so provider streaming cannot be held behind Telegram edits.
+/// The provider callback only updates these queues. Dedicated workers perform
+/// Telegram I/O, coalesce stale intermediate snapshots, and prioritize final
+/// answers so provider streaming cannot be held behind Telegram edits. Chats
+/// are sharded across the workers by id, so edits within a chat stay ordered
+/// while one slow chat cannot hold back every other chat's answer.
 #[derive(Clone)]
 pub struct TelegramStreamDelivery {
+    shards: Arc<[TelegramStreamDeliveryShard]>,
+}
+
+impl TelegramStreamDelivery {
+    fn new<Transport>(
+        transports: Vec<Transport>,
+        token: &str,
+        delivery: &TelegramDeliveryCoordinator,
+    ) -> Self
+    where
+        Transport: TelegramTransport + Send + 'static,
+    {
+        let shards = transports
+            .into_iter()
+            .map(|transport| {
+                let state = Arc::new(Mutex::new(TelegramStreamDeliveryState::default()));
+                let (wake, receiver) = mpsc::sync_channel(1);
+                let worker_state = Arc::clone(&state);
+                let worker_token = token.to_owned();
+                let worker_delivery = delivery.clone();
+                thread::spawn(move || {
+                    run_telegram_stream_delivery_worker(
+                        transport,
+                        worker_token,
+                        worker_delivery,
+                        receiver,
+                        worker_state,
+                    );
+                });
+                TelegramStreamDeliveryShard { state, wake }
+            })
+            .collect::<Vec<_>>();
+        Self {
+            shards: Arc::from(shards),
+        }
+    }
+
+    fn shard(&self, chat_id: i64) -> Option<&TelegramStreamDeliveryShard> {
+        let count = i64::try_from(self.shards.len()).ok()?;
+        let index = usize::try_from(chat_id.checked_rem_euclid(count)?).ok()?;
+        self.shards.get(index)
+    }
+
+    fn enqueue(&self, action: TelegramAction) -> bool {
+        telegram_stream_key(&action)
+            .and_then(|key| self.shard(key.chat_id))
+            .is_some_and(|shard| shard.enqueue(action))
+    }
+
+    fn start_thinking(&self, chat_id: ChatId, message_id: MessageId, text: &str) {
+        if let Some(shard) = self.shard(chat_id.0) {
+            shard.start_thinking(chat_id, message_id, text);
+        }
+    }
+
+    fn stop_thinking(&self, chat_id: ChatId, message_id: MessageId) {
+        if let Some(shard) = self.shard(chat_id.0) {
+            shard.stop_thinking(chat_id, message_id);
+        }
+    }
+
+    fn finalize(&self, action: TelegramAction) -> Result<bool, TelegramActionSinkError> {
+        let Some(key) = telegram_stream_key(&action) else {
+            return Err(TelegramActionSinkError::Adapter(ActionError::InvalidAction));
+        };
+        self.shard(key.chat_id)
+            .ok_or_else(telegram_stream_delivery_unavailable)
+            .and_then(|shard| shard.finalize(action))
+    }
+
+    fn cancel(&self, chat_id: ChatId, message_id: MessageId) {
+        if let Some(shard) = self.shard(chat_id.0) {
+            shard.cancel(chat_id, message_id);
+        }
+    }
+}
+
+/// One delivery worker's queue: every edit of the chats it owns.
+#[derive(Clone)]
+struct TelegramStreamDeliveryShard {
     state: Arc<Mutex<TelegramStreamDeliveryState>>,
     wake: SyncSender<()>,
 }
 
-impl TelegramStreamDelivery {
-    fn new(
-        transport: ReqwestTelegramTransport,
-        token: &str,
-        delivery: TelegramDeliveryCoordinator,
-    ) -> Self {
-        let state = Arc::new(Mutex::new(TelegramStreamDeliveryState {
-            pending: HashMap::new(),
-            order: VecDeque::new(),
-            last_intermediate_edit: HashMap::new(),
-            rate_limited_until: HashMap::new(),
-            thinking: HashMap::new(),
-        }));
-        let (wake, receiver) = mpsc::sync_channel(1);
-        let worker_state = Arc::clone(&state);
-        let worker_token = token.to_owned();
-        thread::spawn(move || {
-            run_telegram_stream_delivery_worker(
-                transport,
-                worker_token,
-                delivery,
-                receiver,
-                worker_state,
-            );
-        });
-        Self { state, wake }
-    }
-
+impl TelegramStreamDeliveryShard {
     fn enqueue(&self, action: TelegramAction) -> bool {
         let Some(key) = telegram_stream_key(&action) else {
             return false;
@@ -1654,6 +1877,7 @@ impl TelegramStreamDelivery {
         let (response_sender, response_receiver) = mpsc::channel();
         let superseded_response = {
             let mut state = lock_unpoisoned(&self.state);
+            state.final_retries.remove(&key);
             if !state.pending.contains_key(&key) {
                 state.order.push_back(key);
             }
@@ -1693,6 +1917,7 @@ impl TelegramStreamDelivery {
                 .remove(&key)
                 .and_then(|pending| pending.final_response);
             state.thinking.remove(&key);
+            state.final_retries.remove(&key);
             state.prune_inactive_intermediate_edit(key.chat_id);
             response
         };
@@ -1715,6 +1940,7 @@ impl TelegramStreamDelivery {
     fn remove_pending(&self, key: TelegramStreamKey) {
         let mut state = lock_unpoisoned(&self.state);
         let _ = state.pending.remove(&key);
+        state.final_retries.remove(&key);
         state.prune_inactive_intermediate_edit(key.chat_id);
     }
 }
@@ -1749,6 +1975,7 @@ fn fail_pending_telegram_stream_edits(state: &Arc<Mutex<TelegramStreamDeliverySt
         state.thinking.clear();
         state.last_intermediate_edit.clear();
         state.rate_limited_until.clear();
+        state.final_retries.clear();
         state
             .pending
             .drain()
@@ -1769,7 +1996,7 @@ fn run_telegram_stream_delivery_worker<Transport>(
 ) where
     Transport: TelegramTransport + Send + 'static,
 {
-    let mut sink = TelegramActionSink::new(transport, &token).with_delivery_coordinator(delivery);
+    let sink = TelegramActionSink::new(transport, &token).with_delivery_coordinator(delivery);
     loop {
         if receiver.recv().is_err() {
             fail_pending_telegram_stream_edits(&state);
@@ -1788,54 +2015,88 @@ fn run_telegram_stream_delivery_worker<Transport>(
                 },
                 TelegramStreamDeliveryDecision::Ready(pending) => {
                     let key = pending.key;
-                    let is_final = pending.final_response.is_some();
-                    if !is_final {
-                        lock_unpoisoned(&state).mark_intermediate_edit_started(key.chat_id);
-                    }
-                    let started = std::time::Instant::now();
-                    let result = if is_final {
-                        sink.try_edit(pending.action)
+                    if pending.final_response.is_some() {
+                        deliver_telegram_stream_final(&sink, &state, pending);
                     } else {
-                        match sink.execute_once(pending.action) {
-                            Ok(ActionOutcome::Completed { .. }) => Ok(true),
-                            Ok(ActionOutcome::RateLimited {
-                                retry_after_seconds,
-                            }) => {
-                                let seconds = retry_after_seconds
-                                    .unwrap_or(TELEGRAM_ACTION_DEFAULT_RETRY_SECONDS)
-                                    .clamp(1, TELEGRAM_STREAM_MAX_RATE_LIMIT_PAUSE.as_secs());
-                                lock_unpoisoned(&state).pause_intermediate_edits(
-                                    key.chat_id,
-                                    Duration::from_secs(seconds),
-                                );
-                                eprintln!(
-                                    "Telegram intermediate AI edits paused for {seconds}s after a rate limit: chat_id={}",
-                                    key.chat_id,
-                                );
-                                Ok(false)
-                            }
-                            Ok(outcome) => {
-                                eprintln!(
-                                    "Telegram intermediate AI edit was not delivered: elapsed_ms={} outcome={outcome:?}",
-                                    started.elapsed().as_millis(),
-                                );
-                                Ok(false)
-                            }
-                            Err(error) => {
-                                eprintln!(
-                                    "Telegram intermediate AI edit failed: elapsed_ms={} error={error}",
-                                    started.elapsed().as_millis(),
-                                );
-                                Err(TelegramActionSinkError::from(error))
-                            }
-                        }
-                    };
-                    if let Some(response) = pending.final_response {
-                        let _ = response.send(result);
+                        deliver_telegram_stream_intermediate(&sink, &state, pending);
                     }
                     lock_unpoisoned(&state).prune_inactive_intermediate_edit(key.chat_id);
                 }
             }
+        }
+    }
+}
+
+fn telegram_stream_rate_limit_delay(retry_after_seconds: Option<u64>) -> Duration {
+    Duration::from_secs(
+        retry_after_seconds
+            .unwrap_or(TELEGRAM_ACTION_DEFAULT_RETRY_SECONDS)
+            .clamp(1, TELEGRAM_STREAM_MAX_RATE_LIMIT_PAUSE.as_secs()),
+    )
+}
+
+/// Delivers a final answer once; a rate limit parks it in the shard queue
+/// until retry_after passes rather than sleeping on the delivery thread.
+fn deliver_telegram_stream_final<Transport: TelegramTransport>(
+    sink: &TelegramActionSink<Transport>,
+    state: &Mutex<TelegramStreamDeliveryState>,
+    pending: PendingTelegramStreamEdit,
+) {
+    let key = pending.key;
+    let attempts = lock_unpoisoned(state)
+        .final_retries
+        .remove(&key)
+        .map_or(1, |retry| retry.attempts + 1);
+    let result = match sink.execute_once(pending.action.clone()) {
+        Ok(ActionOutcome::Completed { .. }) => Ok(true),
+        Ok(ActionOutcome::RateLimited {
+            retry_after_seconds,
+        }) if attempts < TELEGRAM_ACTION_MAX_ATTEMPTS => {
+            let delay = telegram_stream_rate_limit_delay(retry_after_seconds);
+            let mut state = lock_unpoisoned(state);
+            state.pause_intermediate_edits(key.chat_id, delay);
+            state.retry_final(pending, attempts, delay);
+            return;
+        }
+        Ok(_) => Ok(false),
+        Err(error) => Err(TelegramActionSinkError::from(error)),
+    };
+    if let Some(response) = pending.final_response {
+        let _ = response.send(result);
+    }
+}
+
+fn deliver_telegram_stream_intermediate<Transport: TelegramTransport>(
+    sink: &TelegramActionSink<Transport>,
+    state: &Mutex<TelegramStreamDeliveryState>,
+    pending: PendingTelegramStreamEdit,
+) {
+    let chat_id = pending.key.chat_id;
+    lock_unpoisoned(state).mark_intermediate_edit_started(chat_id);
+    let started = std::time::Instant::now();
+    match sink.execute_once(pending.action) {
+        Ok(ActionOutcome::Completed { .. }) => {}
+        Ok(ActionOutcome::RateLimited {
+            retry_after_seconds,
+        }) => {
+            let delay = telegram_stream_rate_limit_delay(retry_after_seconds);
+            lock_unpoisoned(state).pause_intermediate_edits(chat_id, delay);
+            eprintln!(
+                "Telegram intermediate AI edits paused for {}s after a rate limit: chat_id={chat_id}",
+                delay.as_secs(),
+            );
+        }
+        Ok(outcome) => {
+            eprintln!(
+                "Telegram intermediate AI edit was not delivered: elapsed_ms={} outcome={outcome:?}",
+                started.elapsed().as_millis(),
+            );
+        }
+        Err(error) => {
+            eprintln!(
+                "Telegram intermediate AI edit failed: elapsed_ms={} error={error}",
+                started.elapsed().as_millis(),
+            );
         }
     }
 }
@@ -2711,6 +2972,8 @@ fn build_native_dispatcher_with_stream_delivery(
         ReqwestTelegramTransport::new().map_err(CompositionError::AdminTransport)?;
     let criptoya_transport =
         ReqwestCriptoYaTransport::new().map_err(CompositionError::CriptoYaTransport)?;
+    let criptoya_cache =
+        RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::DollarCache)?;
     let dollar_transport =
         ReqwestDollarTransport::new().map_err(CompositionError::DollarTransport)?;
     let dollar_bcra_transport =
@@ -2722,11 +2985,16 @@ fn build_native_dispatcher_with_stream_delivery(
         RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::BcraCache)?;
     let rulo_transport =
         ReqwestCriptoYaTransport::new().map_err(CompositionError::CriptoYaTransport)?;
+    let rulo_cache =
+        RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::DollarCache)?;
     let giphy_transport = ReqwestGiphyTransport::new().map_err(CompositionError::GiphyTransport)?;
     let giphy_cache =
         RedisJsonCache::new(options.redis_endpoint).map_err(CompositionError::GiphyCache)?;
     let link_preview_transport =
         ReqwestLinkPreviewTransport::new().map_err(CompositionError::LinkPreviewTransport)?;
+    let link_context_transport =
+        ReqwestLinkPreviewTransport::with_timeout(AI_LINK_CONTEXT_REQUEST_TIMEOUT)
+            .map_err(CompositionError::LinkPreviewTransport)?;
     let weather_transport =
         ReqwestWeatherTransport::new().map_err(CompositionError::WeatherTransport)?;
     let weather_cache =
@@ -2781,6 +3049,7 @@ fn build_native_dispatcher_with_stream_delivery(
     .with_admin_creditlog_source(Box::new(BillingRepository::new(options.database_url)))
     .with_dollar_quotes_source(Box::new(CriptoYaDollarQuotesSource {
         transport: criptoya_transport,
+        cache: criptoya_cache,
     }))
     .with_dollar_market_source(Box::new(CriptoYaDollarMarketSource {
         transport: dollar_transport,
@@ -2793,6 +3062,7 @@ fn build_native_dispatcher_with_stream_delivery(
     }))
     .with_rulo_source(Box::new(CriptoYaRuloSource {
         transport: rulo_transport,
+        cache: rulo_cache,
     }))
     .with_greeting_pool_source(Box::new(GiphyGreetingPoolSource {
         transport: giphy_transport,
@@ -2818,6 +3088,7 @@ fn build_native_dispatcher_with_stream_delivery(
     }))
     .with_link_replacement_source(Box::new(NativeLinkReplacementSource {
         transport: link_preview_transport,
+        context_transport: link_context_transport,
     }))
     .with_scheduled_task_source(Box::new(task_source))
     .with_token_signal_source(Box::new(TokenSignalAdapter::new(
@@ -2971,10 +3242,14 @@ pub fn build_native_runtime(
             .as_deref()
             .is_some_and(|prompt| !prompt.is_empty())
     {
+        let transports = (0..TELEGRAM_STREAM_DELIVERY_SHARDS)
+            .map(|_| ReqwestTelegramTransport::new())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(CompositionError::ActionTransport)?;
         Some(TelegramStreamDelivery::new(
-            ReqwestTelegramTransport::new().map_err(CompositionError::ActionTransport)?,
+            transports,
             &options.token,
-            options.telegram_delivery.clone(),
+            &options.telegram_delivery,
         ))
     } else {
         None
@@ -3139,9 +3414,11 @@ mod tests {
         completed: mpsc::Sender<()>,
     }
 
+    /// Answers by request (dollar market, USDT/USD, then USDT/ARS) so the
+    /// concurrent CriptoYa fetches stay deterministic.
     struct CriptoTransport {
-        results: RefCell<Vec<Result<CriptoYaHttpResponse, CriptoYaFailure>>>,
-        requests: RefCell<Vec<CriptoYaRequest>>,
+        results: Mutex<Vec<Result<CriptoYaHttpResponse, CriptoYaFailure>>>,
+        requests: Mutex<Vec<CriptoYaRequest>>,
     }
 
     struct DollarTransportStub;
@@ -3405,11 +3682,19 @@ mod tests {
 
     impl CriptoYaTransport for CriptoTransport {
         fn get(&self, request: &CriptoYaRequest) -> Result<CriptoYaHttpResponse, CriptoYaFailure> {
-            self.requests.borrow_mut().push(request.clone());
-            if self.results.borrow().is_empty() {
-                return Err(CriptoYaFailure::Request);
+            if let Ok(mut requests) = self.requests.lock() {
+                requests.push(request.clone());
             }
-            self.results.borrow_mut().remove(0)
+            let index = match request {
+                CriptoYaRequest::Dollar => 0,
+                CriptoYaRequest::Exchange { fiat, .. } if fiat == "USD" => 1,
+                CriptoYaRequest::Exchange { .. } => 2,
+            };
+            self.results
+                .lock()
+                .ok()
+                .and_then(|results| results.get(index).cloned())
+                .unwrap_or(Err(CriptoYaFailure::Request))
         }
     }
 
@@ -3705,12 +3990,15 @@ mod tests {
             order: std::collections::VecDeque::new(),
             last_intermediate_edit: std::collections::HashMap::new(),
             rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         }));
         let (wake, receiver) = mpsc::sync_channel(1);
         let delivery = super::TelegramStreamDelivery {
-            state: Arc::clone(&state),
-            wake,
+            shards: Arc::from(vec![super::TelegramStreamDeliveryShard {
+                state: Arc::clone(&state),
+                wake,
+            }]),
         };
         (delivery, state, receiver)
     }
@@ -3722,12 +4010,15 @@ mod tests {
             order: std::collections::VecDeque::new(),
             last_intermediate_edit: std::collections::HashMap::new(),
             rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         }));
         let (wake, _receiver) = mpsc::sync_channel(1);
         let delivery = super::TelegramStreamDelivery {
-            state: Arc::clone(&state),
-            wake,
+            shards: Arc::from(vec![super::TelegramStreamDeliveryShard {
+                state: Arc::clone(&state),
+                wake,
+            }]),
         };
 
         assert!(delivery.enqueue(stream_edit(7, 80, "first")));
@@ -3764,6 +4055,7 @@ mod tests {
             order: std::collections::VecDeque::new(),
             last_intermediate_edit: std::collections::HashMap::new(),
             rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::from([(
                 key,
                 super::TelegramStreamThinkingAnimation {
@@ -3880,6 +4172,7 @@ mod tests {
             order: std::collections::VecDeque::from([intermediate_key, final_key]),
             last_intermediate_edit: std::collections::HashMap::new(),
             rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::from([(
                 final_key,
                 super::TelegramStreamThinkingAnimation {
@@ -3942,6 +4235,7 @@ mod tests {
             order: std::collections::VecDeque::from([limited_key, ready_key]),
             last_intermediate_edit: std::collections::HashMap::from([(7, Instant::now())]),
             rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         };
         state.pending.insert(
@@ -3994,6 +4288,7 @@ mod tests {
             order: std::collections::VecDeque::from([key]),
             last_intermediate_edit: std::collections::HashMap::new(),
             rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         };
         state.pause_intermediate_edits(7, Duration::from_secs(20));
@@ -4049,6 +4344,7 @@ mod tests {
             order: std::collections::VecDeque::from([key]),
             last_intermediate_edit: std::collections::HashMap::from([(7, Instant::now())]),
             rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         };
 
@@ -4215,6 +4511,7 @@ mod tests {
             order: std::collections::VecDeque::from([key]),
             last_intermediate_edit: std::collections::HashMap::from([(7, Instant::now())]),
             rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         };
         let decision = state.take_next();
@@ -4280,6 +4577,7 @@ mod tests {
             order: std::collections::VecDeque::from([intermediate_key, final_key]),
             last_intermediate_edit: std::collections::HashMap::new(),
             rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         }));
         let (wake, receiver) = mpsc::channel();
@@ -4350,6 +4648,7 @@ mod tests {
             order: std::collections::VecDeque::new(),
             last_intermediate_edit: std::collections::HashMap::new(),
             rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::from([(
                 key,
                 super::TelegramStreamThinkingAnimation {
@@ -4446,6 +4745,7 @@ mod tests {
             order: std::collections::VecDeque::from([limited_key, rejected_key]),
             last_intermediate_edit: std::collections::HashMap::new(),
             rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         }));
         let (wake, receiver) = mpsc::channel();
@@ -4531,6 +4831,7 @@ mod tests {
             order: std::collections::VecDeque::from([final_key]),
             last_intermediate_edit: std::collections::HashMap::new(),
             rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         }));
         let (wake, receiver) = mpsc::channel();
@@ -4553,6 +4854,322 @@ mod tests {
             )))
         );
         assert!(worker.join().is_ok());
+    }
+
+    struct ShardTransport {
+        gate: Option<Mutex<mpsc::Receiver<()>>>,
+        texts: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl TelegramTransport for ShardTransport {
+        fn send(&self, request: &TelegramRequest) -> Result<HttpResponse, TransportFailureKind> {
+            if let Some(gate) = &self.gate
+                && let Ok(gate) = gate.lock()
+            {
+                let _ = gate.recv_timeout(Duration::from_secs(5));
+            }
+            if let Some(text) = request
+                .json_payload
+                .as_ref()
+                .and_then(|payload| payload.get("text"))
+                .and_then(serde_json::Value::as_str)
+            {
+                super::lock_unpoisoned(&self.texts).push(text.to_owned());
+            }
+            telegram_response(200, r#"{"ok":true,"result":true}"#)
+        }
+    }
+
+    fn final_edit(chat_id: i64, message_id: i64, text: &str) -> TelegramAction {
+        TelegramAction::EditMessage {
+            chat_id: ChatId(chat_id),
+            message_id: MessageId(message_id),
+            text: text.to_owned(),
+            reply_markup: None,
+        }
+    }
+
+    #[test]
+    fn telegram_stream_delivery_shards_chats_so_a_blocked_chat_does_not_delay_others() {
+        let (release, gate) = mpsc::channel();
+        let blocked_texts = Arc::new(Mutex::new(Vec::new()));
+        let free_texts = Arc::new(Mutex::new(Vec::new()));
+        let delivery = super::TelegramStreamDelivery::new(
+            vec![
+                ShardTransport {
+                    gate: Some(Mutex::new(gate)),
+                    texts: Arc::clone(&blocked_texts),
+                },
+                ShardTransport {
+                    gate: None,
+                    texts: Arc::clone(&free_texts),
+                },
+            ],
+            "synthetic-token",
+            &TelegramDeliveryCoordinator::default(),
+        );
+        // A chat always lands on the same worker, which keeps its edits in order.
+        let first = delivery.shard(2).map(std::ptr::from_ref);
+        assert_eq!(first, delivery.shard(2).map(std::ptr::from_ref));
+        assert_eq!(first, delivery.shard(-4).map(std::ptr::from_ref));
+        assert_eq!(
+            delivery.shard(-1).map(std::ptr::from_ref),
+            delivery.shard(3).map(std::ptr::from_ref)
+        );
+        assert_ne!(first, delivery.shard(3).map(std::ptr::from_ref));
+
+        let blocked_delivery = delivery.clone();
+        let blocked = thread::spawn(move || blocked_delivery.finalize(final_edit(2, 20, "slow")));
+        thread::sleep(Duration::from_millis(50));
+
+        let started = Instant::now();
+        delivery.start_thinking(ChatId(3), MessageId(30), "Pensando");
+        delivery.stop_thinking(ChatId(3), MessageId(30));
+        assert_eq!(delivery.finalize(final_edit(3, 30, "fast")), Ok(true));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(*super::lock_unpoisoned(&free_texts), ["fast"]);
+        assert!(super::lock_unpoisoned(&blocked_texts).is_empty());
+
+        assert!(delivery.enqueue(stream_edit(3, 31, "draft")));
+        delivery.cancel(ChatId(3), MessageId(31));
+        assert!(release.send(()).is_ok());
+        assert_eq!(blocked.join().ok(), Some(Ok(true)));
+        assert_eq!(*super::lock_unpoisoned(&blocked_texts), ["slow"]);
+
+        let empty = super::TelegramStreamDelivery::new(
+            Vec::<ShardTransport>::new(),
+            "synthetic-token",
+            &TelegramDeliveryCoordinator::default(),
+        );
+        assert!(!empty.enqueue(stream_edit(3, 30, "draft")));
+        assert_eq!(
+            empty.finalize(final_edit(3, 30, "final")),
+            Err(TelegramActionSinkError::Transport(
+                TransportFailureKind::Request
+            ))
+        );
+        empty.start_thinking(ChatId(3), MessageId(30), "Pensando");
+        empty.stop_thinking(ChatId(3), MessageId(30));
+        empty.cancel(ChatId(3), MessageId(30));
+    }
+
+    #[test]
+    fn telegram_stream_delivery_worker_retries_rate_limited_finals_without_blocking_the_shard() {
+        let (completed, _completed_receiver) = mpsc::channel();
+        // Responses pop from the end: chat 7 is rate limited, chat 8 goes
+        // through, then chat 7's retry succeeds once retry_after has passed.
+        let transport = StreamDeliveryTransport {
+            responses: Arc::new(Mutex::new(vec![
+                telegram_response(200, r#"{"ok":true,"result":true}"#),
+                telegram_response(200, r#"{"ok":true,"result":true}"#),
+                telegram_response(
+                    429,
+                    r#"{"ok":false,"error_code":429,"description":"Too Many Requests","parameters":{"retry_after":1}}"#,
+                ),
+            ])),
+            requests: Arc::new(Mutex::new(Vec::new())),
+            completed,
+        };
+        let requests = Arc::clone(&transport.requests);
+        let limited_key = super::TelegramStreamKey {
+            chat_id: 7,
+            message_id: 80,
+        };
+        let free_key = super::TelegramStreamKey {
+            chat_id: 8,
+            message_id: 81,
+        };
+        let (limited_sender, limited_receiver) = mpsc::channel();
+        let (free_sender, free_receiver) = mpsc::channel();
+        let state = Arc::new(Mutex::new(super::TelegramStreamDeliveryState {
+            pending: std::collections::HashMap::from([
+                (
+                    limited_key,
+                    super::PendingTelegramStreamEdit {
+                        key: limited_key,
+                        action: final_edit(7, 80, "limited"),
+                        final_response: Some(limited_sender),
+                    },
+                ),
+                (
+                    free_key,
+                    super::PendingTelegramStreamEdit {
+                        key: free_key,
+                        action: final_edit(8, 81, "free"),
+                        final_response: Some(free_sender),
+                    },
+                ),
+            ]),
+            order: std::collections::VecDeque::from([limited_key, free_key]),
+            ..super::TelegramStreamDeliveryState::default()
+        }));
+        let (wake, receiver) = mpsc::channel();
+        let worker_state = Arc::clone(&state);
+        let worker = thread::spawn(move || {
+            super::run_telegram_stream_delivery_worker(
+                transport,
+                "synthetic-token".to_owned(),
+                TelegramDeliveryCoordinator::default(),
+                receiver,
+                worker_state,
+            );
+        });
+
+        let started = Instant::now();
+        assert!(wake.send(()).is_ok());
+        assert_eq!(
+            free_receiver.recv_timeout(Duration::from_secs(1)),
+            Ok(Ok(true))
+        );
+        assert!(started.elapsed() < Duration::from_millis(900));
+        assert_eq!(
+            limited_receiver.recv_timeout(Duration::from_secs(3)),
+            Ok(Ok(true))
+        );
+        assert!(started.elapsed() >= Duration::from_millis(900));
+        let texts = super::lock_unpoisoned(&requests)
+            .iter()
+            .filter_map(|request| {
+                request
+                    .json_payload
+                    .as_ref()
+                    .and_then(|payload| payload.get("text"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(texts, ["limited", "free", "limited"]);
+        assert!(super::lock_unpoisoned(&state).final_retries.is_empty());
+
+        drop(wake);
+        assert!(worker.join().is_ok());
+    }
+
+    #[test]
+    fn telegram_stream_delivery_gives_up_on_a_final_after_the_last_rate_limited_attempt() {
+        let (completed, _completed_receiver) = mpsc::channel();
+        let transport = StreamDeliveryTransport {
+            responses: Arc::new(Mutex::new(vec![telegram_response(
+                429,
+                r#"{"ok":false,"error_code":429,"description":"Too Many Requests"}"#,
+            )])),
+            requests: Arc::new(Mutex::new(Vec::new())),
+            completed,
+        };
+        let key = super::TelegramStreamKey {
+            chat_id: 7,
+            message_id: 80,
+        };
+        let (final_sender, final_receiver) = mpsc::channel();
+        let state = Mutex::new(super::TelegramStreamDeliveryState {
+            final_retries: std::collections::HashMap::from([(
+                key,
+                super::TelegramStreamFinalRetry {
+                    attempts: super::TELEGRAM_ACTION_MAX_ATTEMPTS - 1,
+                    retry_at: Instant::now(),
+                },
+            )]),
+            ..super::TelegramStreamDeliveryState::default()
+        });
+        let sink = TelegramActionSink::new(transport, "synthetic-token");
+        super::deliver_telegram_stream_final(
+            &sink,
+            &state,
+            super::PendingTelegramStreamEdit {
+                key,
+                action: final_edit(7, 80, "final"),
+                final_response: Some(final_sender),
+            },
+        );
+        assert_eq!(
+            final_receiver.recv_timeout(Duration::from_secs(1)),
+            Ok(Ok(false))
+        );
+        let state = super::lock_unpoisoned(&state);
+        assert!(state.final_retries.is_empty() && state.pending.is_empty());
+    }
+
+    #[test]
+    fn telegram_stream_delivery_parks_retried_finals_and_lets_newer_ones_win() {
+        let key = super::TelegramStreamKey {
+            chat_id: 7,
+            message_id: 80,
+        };
+        let other_key = super::TelegramStreamKey {
+            chat_id: 8,
+            message_id: 81,
+        };
+        let mut state = super::TelegramStreamDeliveryState::default();
+        state.order.push_back(key);
+        state.pending.insert(
+            key,
+            super::PendingTelegramStreamEdit {
+                key,
+                action: stream_edit(7, 80, "late draft"),
+                final_response: None,
+            },
+        );
+        let (retried_sender, retried_receiver) = mpsc::channel();
+        state.retry_final(
+            super::PendingTelegramStreamEdit {
+                key,
+                action: final_edit(7, 80, "retried"),
+                final_response: Some(retried_sender),
+            },
+            1,
+            Duration::from_secs(20),
+        );
+        // The parked final replaced the stale draft and keeps a single slot.
+        assert_eq!(state.order.len(), 1);
+        assert!(state.has_final(key));
+        state.order.push_back(other_key);
+        state.pending.insert(
+            other_key,
+            super::PendingTelegramStreamEdit {
+                key: other_key,
+                action: stream_edit(8, 81, "other chat"),
+                final_response: None,
+            },
+        );
+        assert!(matches!(
+            state.take_next(),
+            super::TelegramStreamDeliveryDecision::Ready(pending) if pending.key == other_key
+        ));
+        assert!(matches!(
+            state.take_next(),
+            super::TelegramStreamDeliveryDecision::Wait(wait)
+                if wait > Duration::from_secs(19) && wait <= Duration::from_secs(20)
+        ));
+        assert!(state.pending.contains_key(&key));
+
+        let (older_sender, older_receiver) = mpsc::channel();
+        state.retry_final(
+            super::PendingTelegramStreamEdit {
+                key,
+                action: final_edit(7, 80, "older"),
+                final_response: Some(older_sender),
+            },
+            1,
+            Duration::from_secs(1),
+        );
+        assert_eq!(
+            older_receiver.recv_timeout(Duration::from_secs(1)),
+            Ok(Ok(false))
+        );
+        assert!(matches!(
+            state.pending.get(&key).map(|pending| &pending.action),
+            Some(TelegramAction::EditMessage { text, .. }) if text == "retried"
+        ));
+
+        let (delivery, shared, _receiver) = stream_delivery_fixture();
+        *super::lock_unpoisoned(&shared) = state;
+        delivery.cancel(ChatId(7), MessageId(80));
+        assert_eq!(
+            retried_receiver.recv_timeout(Duration::from_secs(1)),
+            Ok(Ok(false))
+        );
+        let shared = super::lock_unpoisoned(&shared);
+        assert!(shared.final_retries.is_empty() && shared.pending.is_empty());
     }
 
     #[test]
@@ -5221,7 +5838,7 @@ mod tests {
     #[test]
     fn rulo_source_keeps_exchange_failures_nonfatal_and_primary_failures_explicit() {
         let transport = CriptoTransport {
-            results: RefCell::new(vec![
+            results: Mutex::new(vec![
                 Ok(CriptoYaHttpResponse {
                     status_code: 200,
                     body: r#"{"oficial":{"price":1440},"blue":{"bid":1430}}"#.to_owned(),
@@ -5235,25 +5852,39 @@ mod tests {
                     body: r#"{"buenbit":{"totalBid":1458.44}}"#.to_owned(),
                 }),
             ]),
-            requests: RefCell::new(Vec::new()),
+            requests: Mutex::new(Vec::new()),
         };
-        let mut source = CriptoYaRuloSource { transport };
+        let mut source = CriptoYaRuloSource {
+            transport,
+            cache: WeatherCacheStub,
+        };
         let load = source.rulo_input().unwrap_or_else(|_| unreachable!());
         assert_eq!(load.input.official, Some(1440.0));
         assert!(load.input.usd_to_usdt.is_empty());
         assert_eq!(load.input.usdt_to_ars[0].exchange, "buenbit");
         assert_eq!(load.diagnostics.len(), 1);
         assert!(load.diagnostics[0].contains("USDT/USD"));
-        assert_eq!(source.transport.requests.borrow().len(), 3);
+        assert_eq!(
+            source
+                .transport
+                .requests
+                .lock()
+                .map(|requests| requests.len())
+                .ok(),
+            Some(3)
+        );
 
         let transport = CriptoTransport {
-            results: RefCell::new(vec![Ok(CriptoYaHttpResponse {
+            results: Mutex::new(vec![Ok(CriptoYaHttpResponse {
                 status_code: 503,
                 body: String::new(),
             })]),
-            requests: RefCell::new(Vec::new()),
+            requests: Mutex::new(Vec::new()),
         };
-        let mut source = CriptoYaRuloSource { transport };
+        let mut source = CriptoYaRuloSource {
+            transport,
+            cache: WeatherCacheStub,
+        };
         assert!(
             source
                 .rulo_input()
@@ -5411,6 +6042,7 @@ mod tests {
             creditless_user_hourly_limit: 10,
             timestamp: 1_700_000_000,
             spontaneous: false,
+            link_context: None,
         };
         assert!(factory.create(&input).is_ok());
 
@@ -5422,6 +6054,7 @@ mod tests {
     fn link_replacement_includes_bounded_preview_context_and_large_video() {
         let mut source = super::NativeLinkReplacementSource {
             transport: LinkPreviewTransportStub,
+            context_transport: LinkPreviewTransportStub,
         };
         let load = crate::dispatcher::LinkReplacementSource::load(
             &mut source,
@@ -5446,6 +6079,60 @@ mod tests {
         assert_eq!(
             super::bounded_link_text(Some("abcdefgh"), 6),
             Some("abc...".to_owned())
+        );
+    }
+
+    #[test]
+    fn ai_link_context_previews_unique_non_youtube_links_under_a_deadline() {
+        let mut source = super::NativeLinkReplacementSource {
+            transport: LinkPreviewTransportStub,
+            context_transport: LinkPreviewTransportStub,
+        };
+        let context = crate::dispatcher::LinkReplacementSource::preview_context(
+            &mut source,
+            "mirá https://example.com/nota https://example.com/nota https://youtu.be/abc",
+        );
+        assert!(context.as_deref().is_some_and(|context| {
+            context.starts_with("LINKS DEL MENSAJE:\n1. https://example.com/nota\ntitulo: ")
+                && context.contains("descripcion: ")
+                && !context.contains("2. ")
+        }));
+        assert_eq!(
+            crate::dispatcher::LinkReplacementSource::preview_context(
+                &mut source,
+                "solo https://www.youtube.com/watch?v=abc y https://m.youtube.com/x"
+            ),
+            None
+        );
+        assert!(super::is_youtube_link(
+            "https://music.youtube.com/watch?v=abc"
+        ));
+        assert!(!super::is_youtube_link("https://notyoutube.com/watch"));
+        assert!(!super::is_youtube_link("not a url"));
+
+        let expired = super::DeadlineLinkPreviewTransport {
+            inner: &LinkPreviewTransportStub,
+            deadline: std::time::Instant::now(),
+        };
+        assert_eq!(
+            expired.request(&PreviewRequest {
+                url: "https://example.com".to_owned(),
+                method: bot_adapters::link_preview::PreviewMethod::Get,
+                follow_redirects: true,
+            }),
+            Err(PreviewFailure::Timeout)
+        );
+        let open = super::DeadlineLinkPreviewTransport {
+            inner: &LinkPreviewTransportStub,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+        };
+        assert!(
+            open.request(&PreviewRequest {
+                url: "https://example.com".to_owned(),
+                method: bot_adapters::link_preview::PreviewMethod::Get,
+                follow_redirects: true,
+            })
+            .is_ok()
         );
     }
 
@@ -5485,7 +6172,7 @@ mod tests {
 
         let mut dollar = super::CriptoYaDollarQuotesSource {
             transport: CriptoTransport {
-                results: RefCell::new(vec![Ok(CriptoYaHttpResponse {
+                results: Mutex::new(vec![Ok(CriptoYaHttpResponse {
                     status_code: 200,
                     body: serde_json::json!({
                         "oficial":{"price":100},
@@ -5494,8 +6181,9 @@ mod tests {
                     })
                     .to_string(),
                 })]),
-                requests: RefCell::new(Vec::new()),
+                requests: Mutex::new(Vec::new()),
             },
+            cache: WeatherCacheStub,
         };
         assert!(dollar.devo_quotes().is_ok_and(|quotes| quotes.is_some()));
 
@@ -5567,9 +6255,10 @@ mod tests {
         ] {
             let mut source = super::CriptoYaDollarQuotesSource {
                 transport: CriptoTransport {
-                    results: RefCell::new(vec![result]),
-                    requests: RefCell::new(Vec::new()),
+                    results: Mutex::new(vec![result]),
+                    requests: Mutex::new(Vec::new()),
                 },
+                cache: WeatherCacheStub,
             };
             assert_eq!(source.devo_quotes(), expected);
         }
@@ -5582,13 +6271,14 @@ mod tests {
         };
         let mut rulo = CriptoYaRuloSource {
             transport: CriptoTransport {
-                results: RefCell::new(vec![
+                results: Mutex::new(vec![
                     exchange(r#"{"oficial":{"price":100},"blue":{"bid":110}}"#),
                     exchange(r#"{"synthetic_exchange":{"totalAsk":1.1}}"#),
                     exchange(r#"{"synthetic_exchange":{"totalBid":120}}"#),
                 ]),
-                requests: RefCell::new(Vec::new()),
+                requests: Mutex::new(Vec::new()),
             },
+            cache: WeatherCacheStub,
         };
         let input = rulo.rulo_input().unwrap_or_else(|_| unreachable!());
         assert_eq!(input.input.official, Some(100.0));
@@ -5618,16 +6308,17 @@ mod tests {
         ] {
             let mut source = CriptoYaRuloSource {
                 transport: CriptoTransport {
-                    results: RefCell::new(vec![result]),
-                    requests: RefCell::new(Vec::new()),
+                    results: Mutex::new(vec![result]),
+                    requests: Mutex::new(Vec::new()),
                 },
+                cache: WeatherCacheStub,
             };
             assert_eq!(source.rulo_input(), Err(expected.to_owned()));
         }
 
         let mut partial_rulo = CriptoYaRuloSource {
             transport: CriptoTransport {
-                results: RefCell::new(vec![
+                results: Mutex::new(vec![
                     exchange("{}"),
                     Err(CriptoYaFailure::Timeout),
                     Ok(CriptoYaHttpResponse {
@@ -5635,8 +6326,9 @@ mod tests {
                         body: String::new(),
                     }),
                 ]),
-                requests: RefCell::new(Vec::new()),
+                requests: Mutex::new(Vec::new()),
             },
+            cache: WeatherCacheStub,
         };
         let input = partial_rulo.rulo_input().unwrap_or_else(|_| unreachable!());
         assert_eq!(input.diagnostics.len(), 2);

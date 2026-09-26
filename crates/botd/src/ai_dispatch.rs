@@ -5,6 +5,9 @@ use bot_core::telegram_input::{ChatId, MessageId, UserId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AiStreamEvent {
+    /// The turn passed its credit and eligibility checks and a reply will be
+    /// produced, so a transient thinking status may now be shown.
+    Admitted,
     Thought(String),
     ResetToTrace,
     ToolCall {
@@ -57,6 +60,8 @@ pub struct AiConversationInput {
     pub creditless_user_hourly_limit: i64,
     pub timestamp: i64,
     pub spontaneous: bool,
+    /// Bounded preview metadata (title/description) for links in the message.
+    pub link_context: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,6 +242,7 @@ mod tests {
             creditless_user_hourly_limit: 0,
             timestamp: 1_700_000_000,
             spontaneous: false,
+            link_context: None,
         }
     }
 

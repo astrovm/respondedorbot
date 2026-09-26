@@ -372,7 +372,7 @@ impl<'a, Actions: ActionSink> TelegramAiStream<'a, Actions> {
             // Keep reasoning internal to the model; Telegram only receives a
             // localized status message while the provider is thinking.
             AiStreamEvent::Thought(_) if !self.final_started => Ok(()),
-            AiStreamEvent::ResetToTrace => self.show_thinking(),
+            AiStreamEvent::Admitted | AiStreamEvent::ResetToTrace => self.show_thinking(),
             AiStreamEvent::ToolCall {
                 name, arguments, ..
             } if !self.final_started => {
@@ -757,7 +757,9 @@ mod tests {
         let mut stream =
             TelegramAiStream::with_policy(&mut actions, ChatId(7), MessageId(4), 0.0, 1)
                 .with_thinking_text("Pensando");
-        stream.show_thinking().unwrap_or_else(|_| unreachable!());
+        stream
+            .feed(AiStreamEvent::Admitted)
+            .unwrap_or_else(|_| unreachable!());
         stream
             .feed(AiStreamEvent::Thought("checking the match".to_owned()))
             .unwrap_or_else(|_| unreachable!());

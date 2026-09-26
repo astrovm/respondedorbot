@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
+use std::sync::LazyLock;
 use std::thread;
 use std::time::Duration;
 
@@ -12,7 +13,18 @@ use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION, USER_AGENT};
 use reqwest::redirect::Policy;
 
 const TELEGRAM_PREVIEW_USER_AGENT: &str = "TelegramBot (like TwitterBot)";
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+// Probes run while the user waits for the link fix, so fail fast.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Only the page head is parsed for meta tags; never download the whole page.
+const MAX_BODY_BYTES: u64 = 64 * 1024;
+const META_SCAN_BYTES: usize = 20_000;
+
+static META_TAG: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r"(?is)<meta\s+[^>]*>").ok());
+static META_ATTRIBUTE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(r#"(?is)([a-zA-Z_:][-a-zA-Z0-9_:]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"#).ok()
+});
 const RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(250), Duration::from_millis(500)];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,12 +72,20 @@ pub struct ReqwestLinkPreviewTransport {
 
 impl ReqwestLinkPreviewTransport {
     pub fn new() -> Result<Self, PreviewFailure> {
+        Self::with_timeout(REQUEST_TIMEOUT)
+    }
+
+    /// Builds a transport whose every request, body included, ends within
+    /// `timeout`; used where a preview is optional context, not the product.
+    pub fn with_timeout(timeout: Duration) -> Result<Self, PreviewFailure> {
         let following = Client::builder()
-            .timeout(REQUEST_TIMEOUT)
+            .timeout(timeout)
+            .connect_timeout(CONNECT_TIMEOUT.min(timeout))
             .build()
             .map_err(classify_error)?;
         let no_redirect = Client::builder()
-            .timeout(REQUEST_TIMEOUT)
+            .timeout(timeout)
+            .connect_timeout(CONNECT_TIMEOUT.min(timeout))
             .redirect(Policy::none())
             .build()
             .map_err(classify_error)?;
@@ -97,7 +117,7 @@ impl LinkPreviewTransport for ReqwestLinkPreviewTransport {
             PreviewMethod::Get => Method::GET,
             PreviewMethod::Head => Method::HEAD,
         };
-        let response = client
+        let mut response = client
             .request(method, &request.url)
             .header(USER_AGENT, TELEGRAM_PREVIEW_USER_AGENT)
             .send()
@@ -121,7 +141,13 @@ impl LinkPreviewTransport for ReqwestLinkPreviewTransport {
             .and_then(|value| value.to_str().ok())
             .map(ToOwned::to_owned);
         let body = if request.method == PreviewMethod::Get {
-            response.text().map_err(classify_error)?
+            let mut bytes = Vec::new();
+            response
+                .by_ref()
+                .take(MAX_BODY_BYTES)
+                .read_to_end(&mut bytes)
+                .map_err(|_| PreviewFailure::Request)?;
+            String::from_utf8_lossy(&bytes).into_owned()
         } else {
             String::new()
         };
@@ -281,17 +307,23 @@ fn request_retry<T: LinkPreviewTransport>(
     Err(last_failure)
 }
 
+/// The first `META_SCAN_BYTES` of `html`, cut on a character boundary so
+/// multi-byte text (accents, emoji) near the cut cannot cause a panic.
+fn scan_prefix(html: &str) -> &str {
+    let mut end = html.len().min(META_SCAN_BYTES);
+    while !html.is_char_boundary(end) {
+        end -= 1;
+    }
+    &html[..end]
+}
+
 fn meta_tags(html: &str) -> HashMap<String, String> {
-    let Ok(tag_pattern) = Regex::new(r"(?is)<meta\s+[^>]*>") else {
-        return HashMap::new();
-    };
-    let Ok(attribute_pattern) =
-        Regex::new(r#"(?is)([a-zA-Z_:][-a-zA-Z0-9_:]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"#)
+    let (Some(tag_pattern), Some(attribute_pattern)) = (META_TAG.as_ref(), META_ATTRIBUTE.as_ref())
     else {
         return HashMap::new();
     };
     let mut tags = HashMap::new();
-    for tag in tag_pattern.find_iter(&html[..html.len().min(20_000)]) {
+    for tag in tag_pattern.find_iter(scan_prefix(html)) {
         let attributes = attribute_pattern
             .captures_iter(tag.as_str())
             .filter_map(|captures| {
@@ -504,8 +536,17 @@ mod tests {
     use super::{
         LinkPreviewTransport, PreviewFailure, PreviewInspection, PreviewMetadata, PreviewMethod,
         PreviewRequest, PreviewResponse, ReqwestLinkPreviewTransport, download_oversized_video,
-        inspect_with,
+        inspect_with, meta_tags, scan_prefix,
     };
+
+    #[test]
+    fn meta_scan_cuts_multibyte_text_on_a_character_boundary() {
+        let html = format!("{}ñandú", "a".repeat(19_999));
+        let prefix = scan_prefix(&html);
+        assert_eq!(prefix.len(), 19_999);
+        assert!(meta_tags(&html).is_empty());
+        assert_eq!(scan_prefix("<meta>"), "<meta>");
+    }
 
     #[test]
     fn reqwest_preview_transport_handles_redirect_policy_head_get_and_video_bounds() {

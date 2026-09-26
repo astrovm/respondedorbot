@@ -1,6 +1,6 @@
 //! Hacker News feed normalization and deterministic list formatting.
 
-use regex::Regex;
+use crate::regex_cache::cached_regex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -28,11 +28,8 @@ pub enum FeedItemError {
     IntegerRange,
 }
 
-fn extract_integer(pattern: &str, text: &str) -> Result<Option<i64>, FeedItemError> {
-    let Some(captures) = Regex::new(pattern)
-        .ok()
-        .and_then(|regex| regex.captures(text))
-    else {
+fn extract_integer(pattern: &'static str, text: &str) -> Result<Option<i64>, FeedItemError> {
+    let Some(captures) = cached_regex(pattern).and_then(|regex| regex.captures(text)) else {
         return Ok(None);
     };
     let Some(value) = captures.get(1) else {
@@ -45,9 +42,8 @@ fn extract_integer(pattern: &str, text: &str) -> Result<Option<i64>, FeedItemErr
         .map_err(|_| FeedItemError::IntegerRange)
 }
 
-fn extract_text(pattern: &str, text: &str) -> String {
-    Regex::new(pattern)
-        .ok()
+fn extract_text(pattern: &'static str, text: &str) -> String {
+    cached_regex(pattern)
         .and_then(|regex| regex.captures(text))
         .and_then(|captures| {
             captures

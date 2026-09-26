@@ -227,6 +227,21 @@ impl BillingRepository {
         user_id: i64,
         credits: i32,
     ) -> Result<OnboardingGrantResult, BillingError> {
+        // Almost every call comes from a user who already has a grant; answer
+        // that with one plain read instead of the globally locked transaction.
+        let existing = self.connect()?.query_opt(
+            "SELECT COALESCE(( \
+                SELECT balance FROM credit_accounts \
+                WHERE scope_type = 'user' AND scope_id = $1 \
+             ), 0) FROM onboarding_grants WHERE user_id = $1",
+            &[&user_id],
+        )?;
+        if let Some(row) = existing {
+            return Ok(OnboardingGrantResult {
+                granted: false,
+                balance: row.get::<_, i32>(0).into(),
+            });
+        }
         self.run_transaction(|transaction| {
             Self::apply_onboarding_grant(transaction, user_id, credits)
         })

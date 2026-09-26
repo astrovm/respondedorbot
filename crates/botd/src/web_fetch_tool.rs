@@ -3,24 +3,26 @@
 use bot_adapters::web_fetch::{
     AiFetchOutcome, HostResolver, PublicFetchError, WebFetchTransport, fetch_ai_url,
 };
+use std::sync::Arc;
+
 use bot_core::locale::Locale;
 
-use crate::chat_tool_loop::ToolExecutionResult;
+use crate::chat_tool_loop::{ConcurrentToolCall, ToolExecutionResult};
 use crate::tool_output;
 use crate::tool_requests::{ExternalToolExecutor, ExternalToolRequest};
 
 pub struct WebFetchTool<Transport, Resolver> {
-    transport: Transport,
-    resolver: Resolver,
+    transport: Arc<Transport>,
+    resolver: Arc<Resolver>,
     locale: Locale,
 }
 
 impl<Transport, Resolver> WebFetchTool<Transport, Resolver> {
     #[must_use]
-    pub const fn new(transport: Transport, resolver: Resolver, locale: Locale) -> Self {
+    pub fn new(transport: Transport, resolver: Resolver, locale: Locale) -> Self {
         Self {
-            transport,
-            resolver,
+            transport: Arc::new(transport),
+            resolver: Arc::new(resolver),
             locale,
         }
     }
@@ -28,77 +30,96 @@ impl<Transport, Resolver> WebFetchTool<Transport, Resolver> {
 
 impl<Transport, Resolver> ExternalToolExecutor for WebFetchTool<Transport, Resolver>
 where
-    Transport: WebFetchTransport,
-    Resolver: HostResolver,
+    Transport: WebFetchTransport + Send + Sync + 'static,
+    Resolver: HostResolver + Send + Sync + 'static,
 {
     fn execute(
         &mut self,
         request: ExternalToolRequest,
         _tool_call_id: &str,
     ) -> ToolExecutionResult {
-        let ExternalToolRequest::WebFetch { url } = request else {
-            return ToolExecutionResult::output(tool_output::incompatible(
-                self.locale,
-                "web_fetch",
-            ));
-        };
-        match fetch_ai_url(&self.transport, &self.resolver, &url) {
-            Ok(AiFetchOutcome::Tweet(tweet)) => {
-                let mut parts = Vec::new();
-                if !tweet.author.is_empty() || !tweet.date.is_empty() {
-                    let mut heading = match (self.locale, tweet.author.is_empty()) {
-                        (_, true) => "Tweet".to_owned(),
-                        (Locale::Es, false) => format!("Tweet de {}", tweet.author),
-                        (Locale::En, false) => format!("Tweet by {}", tweet.author),
-                    };
-                    if !tweet.date.is_empty() {
-                        heading.push_str(", ");
-                        heading.push_str(&tweet.date);
-                    }
-                    parts.push(heading);
+        fetch(&*self.transport, &*self.resolver, self.locale, request)
+    }
+
+    /// Fetching a page is read-only, so several fetches in one model round
+    /// run at the same time instead of adding up their timeouts.
+    fn concurrent(
+        &mut self,
+        request: ExternalToolRequest,
+        _tool_call_id: &str,
+    ) -> Option<ConcurrentToolCall> {
+        let transport = Arc::clone(&self.transport);
+        let resolver = Arc::clone(&self.resolver);
+        let locale = self.locale;
+        Some(Box::new(move || {
+            fetch(&*transport, &*resolver, locale, request)
+        }))
+    }
+}
+
+fn fetch<Transport: WebFetchTransport, Resolver: HostResolver>(
+    transport: &Transport,
+    resolver: &Resolver,
+    locale: Locale,
+    request: ExternalToolRequest,
+) -> ToolExecutionResult {
+    let ExternalToolRequest::WebFetch { url } = request else {
+        return ToolExecutionResult::output(tool_output::incompatible(locale, "web_fetch"));
+    };
+    match fetch_ai_url(transport, resolver, &url) {
+        Ok(AiFetchOutcome::Tweet(tweet)) => {
+            let mut parts = Vec::new();
+            if !tweet.author.is_empty() || !tweet.date.is_empty() {
+                let mut heading = match (locale, tweet.author.is_empty()) {
+                    (_, true) => "Tweet".to_owned(),
+                    (Locale::Es, false) => format!("Tweet de {}", tweet.author),
+                    (Locale::En, false) => format!("Tweet by {}", tweet.author),
+                };
+                if !tweet.date.is_empty() {
+                    heading.push_str(", ");
+                    heading.push_str(&tweet.date);
                 }
-                if !tweet.text.is_empty() {
-                    parts.push(tweet.text);
-                }
-                ToolExecutionResult::output(if parts.is_empty() {
-                    localized(
-                        self.locale,
-                        "tweet sin texto legible",
-                        "tweet has no readable text",
-                    )
-                } else {
-                    parts.join("\n")
-                })
+                parts.push(heading);
             }
-            Ok(AiFetchOutcome::TweetError { url }) => ToolExecutionResult::with_diagnostics(
+            if !tweet.text.is_empty() {
+                parts.push(tweet.text);
+            }
+            ToolExecutionResult::output(if parts.is_empty() {
                 localized(
-                    self.locale,
-                    "no se pudo leer el tweet",
-                    "could not read the tweet",
-                ),
-                vec![format!("Twitter oEmbed failed for {url}")],
-            ),
-            Ok(AiFetchOutcome::Page(page)) => {
-                if page.content.contains("Something went wrong")
-                    && page.content.contains("Try again")
-                {
-                    return ToolExecutionResult::output(localized(
-                        self.locale,
-                        "error obteniendo la página: X devolvió una página de error",
-                        "error fetching the page: X returned an error page",
-                    ));
-                }
-                let output = page.title.map_or(page.content.clone(), |title| {
-                    format!("{}\n{}", title_label(self.locale, &title), page.content)
-                });
-                let mut diagnostics = Vec::new();
-                if page.truncated {
-                    diagnostics.push(format!("web_fetch truncated response from {}", page.url));
-                }
-                ToolExecutionResult::with_diagnostics(output, diagnostics)
-            }
-            Err(error) => error_result(&url, error, self.locale),
+                    locale,
+                    "tweet sin texto legible",
+                    "tweet has no readable text",
+                )
+            } else {
+                parts.join("\n")
+            })
         }
+        Ok(AiFetchOutcome::TweetError { url }) => ToolExecutionResult::with_diagnostics(
+            localized(
+                locale,
+                "no se pudo leer el tweet",
+                "could not read the tweet",
+            ),
+            vec![format!("Twitter oEmbed failed for {url}")],
+        ),
+        Ok(AiFetchOutcome::Page(page)) => {
+            if page.content.contains("Something went wrong") && page.content.contains("Try again") {
+                return ToolExecutionResult::output(localized(
+                    locale,
+                    "error obteniendo la página: X devolvió una página de error",
+                    "error fetching the page: X returned an error page",
+                ));
+            }
+            let output = page.title.map_or(page.content.clone(), |title| {
+                format!("{}\n{}", title_label(locale, &title), page.content)
+            });
+            let mut diagnostics = Vec::new();
+            if page.truncated {
+                diagnostics.push(format!("web_fetch truncated response from {}", page.url));
+            }
+            ToolExecutionResult::with_diagnostics(output, diagnostics)
+        }
+        Err(error) => error_result(&url, error, locale),
     }
 }
 
@@ -132,8 +153,8 @@ fn localized(locale: Locale, spanish: &str, english: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Mutex;
 
     use bot_adapters::web_fetch::{WebFetchResponse, WebFetchTransportError};
 
@@ -147,11 +168,14 @@ mod tests {
         }
     }
 
-    struct Transport(RefCell<Vec<Result<WebFetchResponse, WebFetchTransportError>>>);
+    struct Transport(Mutex<Vec<Result<WebFetchResponse, WebFetchTransportError>>>);
 
     impl WebFetchTransport for Transport {
         fn get(&self, _url: &str) -> Result<WebFetchResponse, WebFetchTransportError> {
-            self.0.borrow_mut().remove(0)
+            self.0
+                .lock()
+                .map_err(|_| WebFetchTransportError::Other("poisoned".to_owned()))?
+                .remove(0)
         }
     }
 
@@ -160,7 +184,7 @@ mod tests {
         locale: Locale,
     ) -> WebFetchTool<Transport, Resolver> {
         WebFetchTool::new(
-            Transport(RefCell::new(responses)),
+            Transport(Mutex::new(responses)),
             Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
             locale,
         )
@@ -290,5 +314,22 @@ mod tests {
             tool.execute(ExternalToolRequest::TaskList, "call").output,
             "la herramienta 'web_fetch' recibió una solicitud incompatible"
         );
+    }
+    #[test]
+    fn concurrent_fetch_owns_its_transport_and_matches_sequential_output() {
+        let page = response(
+            "text/html",
+            "<html><head><title>Example</title></head><body>Hello</body></html>",
+        );
+        let mut tool = make_tool(vec![Ok(page.clone()), Ok(page)], Locale::En);
+        let run = tool
+            .concurrent(request("https://example.com"), "call")
+            .unwrap_or_else(|| unreachable!());
+        let concurrent = std::thread::spawn(run)
+            .join()
+            .unwrap_or_else(|_| unreachable!());
+        let sequential = tool.execute(request("https://example.com"), "call");
+        assert_eq!(concurrent, sequential);
+        assert_eq!(concurrent.output, "Title: Example\nHello");
     }
 }

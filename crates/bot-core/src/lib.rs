@@ -54,6 +54,7 @@ pub mod provider_usage;
 pub mod provider_web_search;
 pub mod random_reply;
 pub mod random_selection;
+pub mod regex_cache;
 pub mod routing;
 pub mod rulo;
 pub mod satoshi;

@@ -13,7 +13,7 @@ use crate::request_cache::{
 
 const EVENTS_URL: &str = "https://gamma-api.polymarket.com/events";
 const MIDPOINTS_URL: &str = "https://clob.polymarket.com/midpoints";
-const CACHE_TTL_SECONDS: i64 = 5;
+const CACHE_TTL_SECONDS: i64 = 60;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]

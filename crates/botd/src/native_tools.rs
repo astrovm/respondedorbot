@@ -6,7 +6,7 @@ use bot_core::ai_calculator::calculate_expression;
 use bot_core::ai_capabilities::render_ai_capabilities;
 use bot_core::locale::Locale;
 
-use crate::chat_tool_loop::{NativeToolRuntime, ToolExecutionResult};
+use crate::chat_tool_loop::{ConcurrentToolCall, NativeToolRuntime, ToolExecutionResult};
 use crate::tool_output;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -85,6 +85,16 @@ pub trait NativeToolBackend {
         arguments: &Value,
         tool_call_id: &str,
     ) -> ToolExecutionResult;
+
+    /// See [`NativeToolRuntime::concurrent_call`].
+    fn concurrent_call(
+        &mut self,
+        _tool: NativeTool,
+        _arguments: &Value,
+        _tool_call_id: &str,
+    ) -> Option<ConcurrentToolCall> {
+        None
+    }
 }
 
 pub trait NativeToolPorts {
@@ -96,6 +106,16 @@ pub trait NativeToolPorts {
         arguments: &Value,
         tool_call_id: &str,
     ) -> ToolExecutionResult;
+
+    /// See [`NativeToolRuntime::concurrent_call`].
+    fn concurrent_external(
+        &mut self,
+        _tool: NativeTool,
+        _arguments: &Value,
+        _tool_call_id: &str,
+    ) -> Option<ConcurrentToolCall> {
+        None
+    }
 }
 
 pub struct StandardNativeToolBackend<Ports> {
@@ -138,6 +158,16 @@ impl<Ports: NativeToolPorts> NativeToolBackend for StandardNativeToolBackend<Por
             return ToolExecutionResult::output(render_ai_capabilities(self.locale));
         }
         self.ports.execute_external(tool, arguments, tool_call_id)
+    }
+
+    fn concurrent_call(
+        &mut self,
+        tool: NativeTool,
+        arguments: &Value,
+        tool_call_id: &str,
+    ) -> Option<ConcurrentToolCall> {
+        self.ports
+            .concurrent_external(tool, arguments, tool_call_id)
     }
 }
 
@@ -185,6 +215,16 @@ impl<Backend: NativeToolBackend> NativeToolRuntime for NativeToolRegistry<Backen
             || ToolExecutionResult::output(tool_output::unknown(self.locale, name)),
             |tool| self.backend.execute(tool, arguments, tool_call_id),
         )
+    }
+
+    fn concurrent_call(
+        &mut self,
+        name: &str,
+        arguments: &Value,
+        tool_call_id: &str,
+    ) -> Option<ConcurrentToolCall> {
+        let tool = NativeTool::from_name(name)?;
+        self.backend.concurrent_call(tool, arguments, tool_call_id)
     }
 }
 
@@ -470,5 +510,19 @@ mod tests {
             "external"
         );
         assert_eq!(registry.backend().ports().calls, [NativeTool::Weather]);
+    }
+    #[test]
+    fn backends_run_every_call_sequentially_unless_they_opt_in() {
+        let mut registry = registry(None);
+        assert!(
+            registry
+                .concurrent_call("weather", &json!({}), "call")
+                .is_none()
+        );
+        assert!(
+            registry
+                .concurrent_call("unknown", &json!({}), "call")
+                .is_none()
+        );
     }
 }

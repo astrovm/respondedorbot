@@ -58,6 +58,10 @@ impl ToolExecutionResult {
     }
 }
 
+/// A prepared tool call that owns everything it needs, so it can run on its
+/// own thread while the round's other calls run.
+pub type ConcurrentToolCall = Box<dyn FnOnce() -> ToolExecutionResult + Send>;
+
 pub trait NativeToolRuntime {
     fn schemas(&self, task_mode: bool) -> Vec<Value>;
 
@@ -65,6 +69,18 @@ pub trait NativeToolRuntime {
 
     fn execute(&mut self, name: &str, arguments: &Value, tool_call_id: &str)
     -> ToolExecutionResult;
+
+    /// Prepare a read-only call to run concurrently with the other calls of
+    /// its round. Tools with side effects (billing, tasks, configuration)
+    /// keep the default `None` and run sequentially through `execute`.
+    fn concurrent_call(
+        &mut self,
+        _name: &str,
+        _arguments: &Value,
+        _tool_call_id: &str,
+    ) -> Option<ConcurrentToolCall> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -347,51 +363,92 @@ where
                 (!round.reasoning.is_empty()).then_some(round.reasoning.clone()),
                 round.reasoning_details.clone(),
             ));
-        for call in known_calls {
-            emit_event(
-                &mut on_event,
-                &result,
-                &round,
-                ChatToolLoopEvent::ToolCall {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
-                    arguments: call.arguments.clone(),
-                },
-            )?;
-            let arguments = parse_arguments(&call.arguments);
-            trace(
-                operation_id,
-                result.provider_rounds,
-                "tool_start",
-                tool_trace(&call, &arguments, None),
-            );
-            let started = std::time::Instant::now();
-            let tool_result = tools.execute(&call.name, &arguments, &call.id);
-            let mut details = tool_trace(&call, &arguments, Some(&tool_result));
-            details["elapsed_ms"] = json!(started.elapsed().as_millis());
-            trace(operation_id, result.provider_rounds, "tool_result", details);
-            result.tool_calls_executed += 1;
-            if let Some(segment) = tool_result.billing_segment {
-                result.billing_segments.push(segment);
+        let arguments = known_calls
+            .iter()
+            .map(|call| parse_arguments(&call.arguments))
+            .collect::<Vec<_>>();
+        let concurrent = prepare_concurrent_calls(tools, &known_calls, &arguments);
+        // Read-only calls start on their own threads right away; results are
+        // still consumed in the provider's call order, so events, billing and
+        // the tool messages sent back to the model keep that order.
+        std::thread::scope(|scope| -> Result<(), ChatToolLoopError> {
+            let mut running = concurrent
+                .into_iter()
+                .zip(&known_calls)
+                .map(|(prepared, call)| {
+                    prepared.map(|run| {
+                        let name = call.name.clone();
+                        scope.spawn(move || {
+                            let started = std::time::Instant::now();
+                            // A panicking tool must not take the reply down
+                            // with it; report it like any failed tool.
+                            let tool_result =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(run))
+                                    .unwrap_or_else(|_| {
+                                        ToolExecutionResult::with_diagnostics(
+                                            format!("{name} failed"),
+                                            vec![format!("concurrent tool {name} panicked")],
+                                        )
+                                    });
+                            (tool_result, started.elapsed())
+                        })
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter();
+            for (call, arguments) in known_calls.iter().zip(&arguments) {
+                let handle = running.next().flatten();
+                emit_event(
+                    &mut on_event,
+                    &result,
+                    &round,
+                    ChatToolLoopEvent::ToolCall {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        arguments: call.arguments.clone(),
+                    },
+                )?;
+                trace(
+                    operation_id,
+                    result.provider_rounds,
+                    "tool_start",
+                    tool_trace(call, arguments, None),
+                );
+                let joined = handle.and_then(|handle| handle.join().ok());
+                let (tool_result, elapsed) = if let Some(joined) = joined {
+                    joined
+                } else {
+                    let started = std::time::Instant::now();
+                    let tool_result = tools.execute(&call.name, arguments, &call.id);
+                    (tool_result, started.elapsed())
+                };
+                let mut details = tool_trace(call, arguments, Some(&tool_result));
+                details["elapsed_ms"] = json!(elapsed.as_millis());
+                trace(operation_id, result.provider_rounds, "tool_result", details);
+                result.tool_calls_executed += 1;
+                if let Some(segment) = tool_result.billing_segment {
+                    result.billing_segments.push(segment);
+                }
+                result.diagnostics.extend(tool_result.diagnostics);
+                if let Some(fallback) = tool_result.failure_fallback {
+                    result.failure_fallbacks.push(fallback);
+                }
+                emit_event(
+                    &mut on_event,
+                    &result,
+                    &round,
+                    ChatToolLoopEvent::ToolResult {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        output: tool_result.output.clone(),
+                    },
+                )?;
+                result
+                    .messages
+                    .push(PromptMessage::tool_result(&call.id, tool_result.output));
             }
-            result.diagnostics.extend(tool_result.diagnostics);
-            if let Some(fallback) = tool_result.failure_fallback {
-                result.failure_fallbacks.push(fallback);
-            }
-            emit_event(
-                &mut on_event,
-                &result,
-                &round,
-                ChatToolLoopEvent::ToolResult {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
-                    output: tool_result.output.clone(),
-                },
-            )?;
-            result
-                .messages
-                .push(PromptMessage::tool_result(&call.id, tool_result.output));
-        }
+            Ok(())
+        })?;
     }
 
     result.stopped_at_limit = true;
@@ -405,6 +462,28 @@ where
         }),
     );
     Ok(result)
+}
+
+/// Prepared concurrent calls, aligned with `calls`. Concurrency only pays off
+/// with at least two read-only calls in the round; otherwise every call runs
+/// sequentially through `execute`.
+fn prepare_concurrent_calls<Tools: NativeToolRuntime>(
+    tools: &mut Tools,
+    calls: &[StreamToolCall],
+    arguments: &[Value],
+) -> Vec<Option<ConcurrentToolCall>> {
+    if calls.len() < 2 {
+        return Vec::new();
+    }
+    let prepared = calls
+        .iter()
+        .zip(arguments)
+        .map(|(call, arguments)| tools.concurrent_call(&call.name, arguments, &call.id))
+        .collect::<Vec<_>>();
+    if prepared.iter().filter(|call| call.is_some()).count() < 2 {
+        return Vec::new();
+    }
+    prepared
 }
 
 fn emit_event(
@@ -1239,5 +1318,205 @@ mod tests {
         assert!(!retryable_provider_error(&OpenRouterChatError::Stream(
             "synthetic delivery failure".to_owned()
         )));
+    }
+    /// `fetch` calls are read-only and run concurrently; `record` calls have
+    /// side effects and run sequentially.
+    struct ConcurrentTools {
+        barrier: std::sync::Arc<std::sync::Barrier>,
+        sequential: Vec<String>,
+    }
+
+    impl NativeToolRuntime for ConcurrentTools {
+        fn schemas(&self, _task_mode: bool) -> Vec<Value> {
+            Vec::new()
+        }
+
+        fn contains(&self, name: &str, _task_mode: bool) -> bool {
+            matches!(name, "fetch" | "record" | "explode")
+        }
+
+        fn execute(
+            &mut self,
+            name: &str,
+            _arguments: &Value,
+            tool_call_id: &str,
+        ) -> ToolExecutionResult {
+            self.sequential.push(tool_call_id.to_owned());
+            ToolExecutionResult::output(format!("{name} {tool_call_id}"))
+        }
+
+        fn concurrent_call(
+            &mut self,
+            name: &str,
+            arguments: &Value,
+            _tool_call_id: &str,
+        ) -> Option<ConcurrentToolCall> {
+            let barrier = std::sync::Arc::clone(&self.barrier);
+            let url = arguments["url"].as_str().unwrap_or_default().to_owned();
+            match name {
+                // Every concurrent call waits for the others: a sequential
+                // loop would deadlock here.
+                "fetch" => Some(Box::new(move || {
+                    barrier.wait();
+                    ToolExecutionResult {
+                        output: format!("page {url}"),
+                        failure_fallback: None,
+                        billing_segment: Some(json!({"url": url})),
+                        diagnostics: Vec::new(),
+                    }
+                })),
+                "explode" => Some(Box::new(move || {
+                    barrier.wait();
+                    std::panic::resume_unwind(Box::new("synthetic tool panic"))
+                })),
+                _ => None,
+            }
+        }
+    }
+
+    fn numbered_call(index: i64, name: &str, url: &str) -> StreamToolCall {
+        StreamToolCall {
+            index,
+            id: format!("call-{index}"),
+            call_type: "function".to_owned(),
+            name: name.to_owned(),
+            arguments: json!({"url": url}).to_string(),
+        }
+    }
+
+    #[test]
+    fn runs_read_only_calls_concurrently_and_keeps_results_in_call_order() {
+        let provider = Provider {
+            rounds: RefCell::new(vec![
+                Ok(round(
+                    "",
+                    vec![
+                        numbered_call(0, "fetch", "https://a.example"),
+                        numbered_call(1, "record", ""),
+                        numbered_call(2, "fetch", "https://b.example"),
+                        numbered_call(3, "explode", ""),
+                        numbered_call(4, "fetch", "https://c.example"),
+                    ],
+                    json!({"round": 1}),
+                )),
+                Ok(round("done", Vec::new(), json!({"round": 2}))),
+            ]),
+            observed: RefCell::new(Vec::new()),
+        };
+        let mut tools = ConcurrentTools {
+            barrier: std::sync::Arc::new(std::sync::Barrier::new(4)),
+            sequential: Vec::new(),
+        };
+        let mut results = Vec::new();
+        let result = run_chat_tool_loop_events(
+            "test-operation",
+            &provider,
+            &mut tools,
+            &[],
+            false,
+            DEFAULT_MAX_TOOL_ROUNDS,
+            |event| {
+                if let ChatToolLoopEvent::ToolResult { id, output, .. } = event {
+                    results.push((id, output));
+                }
+                Ok(())
+            },
+        )
+        .unwrap_or_else(|error| *error.partial);
+
+        assert_eq!(result.text, "done");
+        assert_eq!(result.tool_calls_executed, 5);
+        assert_eq!(tools.sequential, ["call-1"]);
+        assert_eq!(
+            results,
+            [
+                ("call-0".to_owned(), "page https://a.example".to_owned()),
+                ("call-1".to_owned(), "record call-1".to_owned()),
+                ("call-2".to_owned(), "page https://b.example".to_owned()),
+                ("call-3".to_owned(), "explode failed".to_owned()),
+                ("call-4".to_owned(), "page https://c.example".to_owned()),
+            ]
+        );
+        assert!(
+            result
+                .diagnostics
+                .contains(&"concurrent tool explode panicked".to_owned())
+        );
+        assert_eq!(result.billing_segments[1]["url"], "https://a.example");
+        assert_eq!(result.billing_segments[3]["url"], "https://c.example");
+        let observed = provider.observed.borrow();
+        let tool_ids = observed[1]
+            .iter()
+            .filter_map(|message| message.tool_call_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(tool_ids, ["call-0", "call-1", "call-2", "call-3", "call-4"]);
+    }
+
+    #[test]
+    fn a_single_read_only_call_runs_inline_and_event_failures_stop_the_round() {
+        let provider = Provider {
+            rounds: RefCell::new(vec![Ok(round(
+                "",
+                vec![
+                    numbered_call(0, "fetch", "https://a.example"),
+                    numbered_call(1, "record", ""),
+                ],
+                json!({"round": 1}),
+            ))]),
+            observed: RefCell::new(Vec::new()),
+        };
+        // A one-party barrier never blocks, yet the lone fetch still goes
+        // through `execute` because concurrency needs two read-only calls.
+        let mut tools = ConcurrentTools {
+            barrier: std::sync::Arc::new(std::sync::Barrier::new(1)),
+            sequential: Vec::new(),
+        };
+        let result = run_chat_tool_loop(
+            "test-operation",
+            &provider,
+            &mut tools,
+            &[],
+            false,
+            1,
+            |_| Ok(()),
+        )
+        .unwrap_or_else(|error| *error.partial);
+        assert_eq!(tools.sequential, ["call-0", "call-1"]);
+        assert!(result.stopped_at_limit);
+
+        let provider = Provider {
+            rounds: RefCell::new(vec![Ok(round(
+                "",
+                vec![
+                    numbered_call(0, "fetch", "https://a.example"),
+                    numbered_call(1, "fetch", "https://b.example"),
+                ],
+                json!({"round": 1}),
+            ))]),
+            observed: RefCell::new(Vec::new()),
+        };
+        let mut tools = ConcurrentTools {
+            barrier: std::sync::Arc::new(std::sync::Barrier::new(2)),
+            sequential: Vec::new(),
+        };
+        let error = run_chat_tool_loop_events(
+            "test-operation",
+            &provider,
+            &mut tools,
+            &[],
+            false,
+            1,
+            |event| match event {
+                ChatToolLoopEvent::ToolResult { .. } => Err(OpenRouterChatError::Stream(
+                    "synthetic delivery failure".to_owned(),
+                )),
+                _ => Ok(()),
+            },
+        )
+        .err()
+        .unwrap_or_else(|| unreachable!());
+        // The running fetches are joined before the error is returned.
+        assert_eq!(error.partial.tool_calls_executed, 1);
+        assert!(tools.sequential.is_empty());
     }
 }

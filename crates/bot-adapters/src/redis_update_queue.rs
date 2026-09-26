@@ -90,12 +90,20 @@ impl RedisUpdateQueue {
     }
 
     pub fn delete_update(&self, update_id: i64) -> Result<bool, RedisUpdateQueueError> {
+        self.delete_updates(&[update_id]).map(|deleted| deleted > 0)
+    }
+
+    /// Removes every listed update with one HDEL round trip.
+    pub fn delete_updates(&self, update_ids: &[i64]) -> Result<usize, RedisUpdateQueueError> {
+        if update_ids.is_empty() {
+            return Ok(0);
+        }
         let mut connection = self.client.get_connection()?;
         let deleted: usize = redis::cmd("HDEL")
             .arg(UPDATES_KEY)
-            .arg(update_id)
+            .arg(update_ids)
             .query(&mut connection)?;
-        Ok(deleted > 0)
+        Ok(deleted)
     }
 
     pub fn quarantine_update(
@@ -138,13 +146,17 @@ mod tests {
                 ),
                 ("HSET", b":1\r\n".as_slice()),
                 ("HDEL", b":1\r\n".as_slice()),
+                ("HDEL", b":2\r\n".as_slice()),
                 ("EVAL", b":1\r\n".as_slice()),
             ];
             let (mut stream, _) = listener.accept()?;
             stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-            for (expected, response) in exchanges {
+            for (index, (expected, response)) in exchanges.into_iter().enumerate() {
                 let command = read_command(&mut stream)?;
                 assert_eq!(command.first().map(String::as_str), Some(expected));
+                if index == 4 {
+                    assert_eq!(command[1..], ["telegram:updates:pending", "10", "11"]);
+                }
                 stream.write_all(response)?;
             }
             Ok(())
@@ -171,6 +183,8 @@ mod tests {
         );
         queue.replace_update(10, "replacement")?;
         assert!(queue.delete_update(10)?);
+        assert_eq!(queue.delete_updates(&[])?, 0);
+        assert_eq!(queue.delete_updates(&[10, 11])?, 2);
         queue.quarantine_update(11, "failed")?;
 
         match server.join() {

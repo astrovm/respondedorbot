@@ -1,6 +1,7 @@
 //! DexScreener/GeckoTerminal token-card adapter and PNG renderer.
 
 use std::io::Cursor;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use ab_glyph::FontArc;
@@ -1149,7 +1150,19 @@ fn filter_chart_candles(candles: Vec<Vec<f64>>, reference_price: Option<f64>) ->
         .collect()
 }
 
+/// Fonts are read and parsed once per process; `FontArc` clones are cheap.
+static CHART_FONT_REGULAR: LazyLock<Option<FontArc>> = LazyLock::new(|| load_chart_font(false));
+static CHART_FONT_BOLD: LazyLock<Option<FontArc>> = LazyLock::new(|| load_chart_font(true));
+
 fn chart_font(bold: bool) -> Option<FontArc> {
+    if bold {
+        CHART_FONT_BOLD.clone()
+    } else {
+        CHART_FONT_REGULAR.clone()
+    }
+}
+
+fn load_chart_font(bold: bool) -> Option<FontArc> {
     let paths = if bold {
         [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",

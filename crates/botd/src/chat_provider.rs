@@ -95,9 +95,32 @@ impl<Transport> OpenRouterChatStreamer<Transport> {
         }
         request.tools = tools.to_vec();
         request.max_tokens = u64::try_from(chat_output_token_limit(&self.model)).ok();
-        request.reasoning = Some(ReasoningConfig { enabled: true });
+        request.reasoning = Some(reasoning_config(messages));
         request.stream = true;
         Ok(request)
+    }
+}
+
+/// Reasoning policy, tuned for reply latency.
+///
+/// The first round of a turn keeps the provider's default reasoning depth:
+/// that is where the model decides what the user wants and which tools to
+/// call. Once a tool result follows the latest user message, the remaining
+/// rounds mostly phrase an answer from data already fetched, so they ask for
+/// `low` effort instead of re-deriving the plan at full depth. Reasoning stays
+/// enabled in every round so tool-call reasoning details keep round-tripping.
+/// Message length is deliberately not used as a signal: a short message can
+/// still be a hard question, and the final user turn also carries the prompt
+/// context block, so its size says little about the request.
+fn reasoning_config(messages: &[PromptMessage]) -> ReasoningConfig {
+    let after_tool_result = messages
+        .iter()
+        .rev()
+        .take_while(|message| message.role != PromptRole::User)
+        .any(|message| message.role == PromptRole::Tool);
+    ReasoningConfig {
+        enabled: true,
+        effort: after_tool_result.then(|| "low".to_owned()),
     }
 }
 
@@ -394,7 +417,7 @@ mod tests {
     use bot_core::provider_stream_policy::ProviderStreamEvent;
     use serde_json::{Value, json};
 
-    use super::OpenRouterChatStreamer;
+    use super::{OpenRouterChatStreamer, reasoning_config};
 
     struct Transport {
         chunks: Vec<Vec<u8>>,
@@ -493,6 +516,39 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_effort_drops_to_low_only_after_a_tool_result() {
+        let mut conversation = messages();
+        assert_eq!(reasoning_config(&conversation).effort, None);
+        conversation.push(PromptMessage {
+            role: PromptRole::Assistant,
+            content: PromptContent::Text(String::new()),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+            reasoning: None,
+            reasoning_details: Vec::new(),
+        });
+        assert_eq!(reasoning_config(&conversation).effort, None);
+        conversation.push(PromptMessage {
+            role: PromptRole::Tool,
+            content: PromptContent::Text("result".to_owned()),
+            tool_call_id: Some("call-1".to_owned()),
+            tool_calls: Vec::new(),
+            reasoning: None,
+            reasoning_details: Vec::new(),
+        });
+        let config = reasoning_config(&conversation);
+        assert!(config.enabled);
+        assert_eq!(config.effort.as_deref(), Some("low"));
+        let Ok(body) = serde_json::to_value(&config) else {
+            return;
+        };
+        assert_eq!(body, json!({"enabled": true, "effort": "low"}));
+
+        conversation.push(PromptMessage::text(PromptRole::User, "follow-up"));
+        assert_eq!(reasoning_config(&conversation).effort, None);
+    }
+
+    #[test]
     fn stream_round_accumulates_text_tools_and_billable_usage() {
         let transport = Transport {
             chunks: stream_body(true),
@@ -540,6 +596,7 @@ mod tests {
             .unwrap_or(Value::Null);
         assert_eq!(body["stream"], true);
         assert_eq!(body["reasoning"]["enabled"], true);
+        assert!(body["reasoning"].get("effort").is_none());
         assert_eq!(body["messages"][1]["content"][0]["type"], "text");
         assert_eq!(body["tools"][0]["type"], "function");
     }

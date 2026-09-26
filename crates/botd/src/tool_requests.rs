@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use bot_core::locale::Locale;
 use serde_json::Value;
 
-use crate::chat_tool_loop::ToolExecutionResult;
+use crate::chat_tool_loop::{ConcurrentToolCall, ToolExecutionResult};
 use crate::native_tools::{NativeTool, NativeToolPorts};
 use crate::tool_output;
 
@@ -74,10 +74,29 @@ pub trait ExternalToolServices {
     fn is_available(&self, tool: NativeTool) -> bool;
 
     fn execute(&mut self, request: ExternalToolRequest, tool_call_id: &str) -> ToolExecutionResult;
+
+    /// See [`crate::chat_tool_loop::NativeToolRuntime::concurrent_call`].
+    fn concurrent(
+        &mut self,
+        _request: ExternalToolRequest,
+        _tool_call_id: &str,
+    ) -> Option<ConcurrentToolCall> {
+        None
+    }
 }
 
 pub trait ExternalToolExecutor {
     fn execute(&mut self, request: ExternalToolRequest, tool_call_id: &str) -> ToolExecutionResult;
+
+    /// Only read-only executors override this; anything with side effects
+    /// keeps running sequentially through `execute`.
+    fn concurrent(
+        &mut self,
+        _request: ExternalToolRequest,
+        _tool_call_id: &str,
+    ) -> Option<ConcurrentToolCall> {
+        None
+    }
 }
 
 pub struct ExternalToolbox {
@@ -117,6 +136,16 @@ impl ExternalToolServices for ExternalToolbox {
             |executor| executor.execute(request, tool_call_id),
         )
     }
+
+    fn concurrent(
+        &mut self,
+        request: ExternalToolRequest,
+        tool_call_id: &str,
+    ) -> Option<ConcurrentToolCall> {
+        self.executors
+            .get_mut(&request.tool())?
+            .concurrent(request, tool_call_id)
+    }
 }
 
 pub struct ValidatedNativeToolPorts<Services> {
@@ -151,6 +180,16 @@ impl<Services: ExternalToolServices> NativeToolPorts for ValidatedNativeToolPort
             Ok(request) => self.services.execute(request, tool_call_id),
             Err(output) => ToolExecutionResult::output(output),
         }
+    }
+
+    fn concurrent_external(
+        &mut self,
+        tool: NativeTool,
+        arguments: &Value,
+        tool_call_id: &str,
+    ) -> Option<ConcurrentToolCall> {
+        let request = validate_request(tool, arguments, self.locale).ok()?;
+        self.services.concurrent(request, tool_call_id)
     }
 }
 
@@ -603,5 +642,79 @@ mod tests {
                 .output,
             "tool 'weather' is unavailable"
         );
+    }
+    struct ReadOnlyExecutor;
+
+    impl ExternalToolExecutor for ReadOnlyExecutor {
+        fn execute(
+            &mut self,
+            request: ExternalToolRequest,
+            tool_call_id: &str,
+        ) -> ToolExecutionResult {
+            ToolExecutionResult::output(format!("{}:{tool_call_id}", request.tool().name()))
+        }
+
+        fn concurrent(
+            &mut self,
+            request: ExternalToolRequest,
+            tool_call_id: &str,
+        ) -> Option<ConcurrentToolCall> {
+            let output = format!("concurrent {}:{tool_call_id}", request.tool().name());
+            Some(Box::new(move || ToolExecutionResult::output(output)))
+        }
+    }
+
+    #[test]
+    fn only_validated_read_only_executors_prepare_concurrent_calls() {
+        use crate::chat_tool_loop::NativeToolRuntime;
+
+        let toolbox = ExternalToolbox::new(Locale::En)
+            .with_executor(NativeTool::WebFetch, Box::new(ReadOnlyExecutor))
+            .with_executor(NativeTool::TaskList, Box::new(Executor));
+        let mut registry = NativeToolRegistry::new(
+            StandardNativeToolBackend::new(
+                ValidatedNativeToolPorts::new(toolbox, Locale::En),
+                Locale::En,
+            ),
+            Locale::En,
+        );
+        let run = registry
+            .concurrent_call(
+                "web_fetch",
+                &json!({"url": "https://example.com"}),
+                "call-1",
+            )
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(run().output, "concurrent web_fetch:call-1");
+        // Invalid arguments, side-effecting executors, missing executors and
+        // unknown names all fall back to sequential execution.
+        assert!(
+            registry
+                .concurrent_call("web_fetch", &json!({}), "call-2")
+                .is_none()
+        );
+        assert!(
+            registry
+                .concurrent_call("task_list", &json!({}), "call-3")
+                .is_none()
+        );
+        assert!(
+            registry
+                .concurrent_call("weather", &json!({"location": "x"}), "call-4")
+                .is_none()
+        );
+        assert!(
+            registry
+                .concurrent_call("unknown", &json!({}), "call-5")
+                .is_none()
+        );
+
+        let mut ports = ports(Locale::En);
+        assert!(
+            ports
+                .concurrent_external(NativeTool::WebSearch, &json!({"query": "x"}), "call-6")
+                .is_none()
+        );
+        assert!(ports.services().calls.is_empty());
     }
 }
