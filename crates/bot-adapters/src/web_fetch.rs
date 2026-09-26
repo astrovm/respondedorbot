@@ -472,6 +472,13 @@ pub fn normalize_http_url(raw_url: &str) -> Option<Url> {
     Some(url)
 }
 
+/// Whether `raw_url` is an http(s) URL whose host is a public address, the
+/// same check [`fetch_public_url`] applies before every hop.
+#[must_use]
+pub fn is_public_http_url<R: HostResolver>(raw_url: &str, resolver: &R) -> bool {
+    normalize_http_url(raw_url).is_some_and(|url| ensure_public(&url, resolver).is_ok())
+}
+
 fn ensure_public<R: HostResolver>(url: &Url, resolver: &R) -> Result<(), PublicFetchError> {
     let hostname = url.host_str().unwrap_or_default();
     let blocked_name = hostname.eq_ignore_ascii_case("localhost")

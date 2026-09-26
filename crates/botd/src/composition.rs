@@ -72,7 +72,10 @@ use bot_adapters::weather::{
     ReqwestWeatherTransport, TransportFailureKind as WeatherTransportFailureKind, WeatherTransport,
     load_weather,
 };
-use bot_adapters::web_fetch::{ReqwestWebFetchTransport, SystemHostResolver};
+use bot_adapters::web_fetch::{
+    FETCH_MAX_REDIRECTS, HostResolver, ReqwestWebFetchTransport, SystemHostResolver,
+    is_public_http_url,
+};
 use bot_adapters::yahoo_finance::{
     ReqwestYahooFinanceTransport, TransportFailureKind as YahooTransportFailureKind,
     YahooFinanceTransport, load_quote as load_yahoo_quote, load_symbol as load_yahoo_symbol,
@@ -310,10 +313,12 @@ struct NativeMarketPriceSource<T, C, Y, F, S> {
     stocks: YahooStockPriceSource<Y, F, S>,
 }
 
-struct NativeLinkReplacementSource<T> {
+struct NativeLinkReplacementSource<T, R> {
     transport: T,
     /// Short-timeout transport for optional AI link context.
     context_transport: T,
+    /// Keeps AI link context off private and loopback addresses.
+    context_resolver: R,
 }
 
 /// Links whose previews may feed one AI turn, and the wall-clock budget for
@@ -335,6 +340,40 @@ impl<T: LinkPreviewTransport> LinkPreviewTransport for DeadlineLinkPreviewTransp
             return Err(PreviewFailure::Timeout);
         }
         self.inner.request(request)
+    }
+}
+
+/// Requests only public hosts and follows redirects one hop at a time so every
+/// hop is checked, since AI link context fetches any link a user sends.
+struct PublicLinkPreviewTransport<'a, T, R> {
+    inner: &'a T,
+    resolver: &'a R,
+}
+
+impl<T: LinkPreviewTransport, R: HostResolver> LinkPreviewTransport
+    for PublicLinkPreviewTransport<'_, T, R>
+{
+    fn request(&self, request: &PreviewRequest) -> Result<PreviewResponse, PreviewFailure> {
+        let mut url = request.url.clone();
+        for _ in 0..=FETCH_MAX_REDIRECTS {
+            if !is_public_http_url(&url, self.resolver) {
+                return Err(PreviewFailure::Request);
+            }
+            let response = self.inner.request(&PreviewRequest {
+                url: url.clone(),
+                method: request.method,
+                follow_redirects: false,
+            })?;
+            let redirect = request.follow_redirects && (300..400).contains(&response.status_code);
+            let Some(location) = response.location.as_deref().filter(|_| redirect) else {
+                return Ok(response);
+            };
+            url = url::Url::parse(&url)
+                .and_then(|base| base.join(location))
+                .map_err(|_| PreviewFailure::Request)?
+                .to_string();
+        }
+        Err(PreviewFailure::Request)
     }
 }
 
@@ -378,7 +417,9 @@ fn bounded_link_text(value: Option<&str>, limit: usize) -> Option<String> {
     Some(truncated)
 }
 
-impl<T: LinkPreviewTransport> LinkReplacementSource for NativeLinkReplacementSource<T> {
+impl<T: LinkPreviewTransport, R: HostResolver> LinkReplacementSource
+    for NativeLinkReplacementSource<T, R>
+{
     fn load(&mut self, text: &str, now_unix: i64) -> LinkReplacementLoad {
         let mut previews = Vec::new();
         let replacement = replace_social_links(text, now_unix, |candidate| {
@@ -410,9 +451,13 @@ impl<T: LinkPreviewTransport> LinkReplacementSource for NativeLinkReplacementSou
                 urls.push(url);
             }
         }
-        let transport = DeadlineLinkPreviewTransport {
+        let deadline = DeadlineLinkPreviewTransport {
             inner: &self.context_transport,
             deadline: Instant::now() + AI_LINK_CONTEXT_DEADLINE,
+        };
+        let transport = PublicLinkPreviewTransport {
+            inner: &deadline,
+            resolver: &self.context_resolver,
         };
         let previews = urls
             .into_iter()
@@ -3089,6 +3134,7 @@ fn build_native_dispatcher_with_stream_delivery(
     .with_link_replacement_source(Box::new(NativeLinkReplacementSource {
         transport: link_preview_transport,
         context_transport: link_context_transport,
+        context_resolver: SystemHostResolver,
     }))
     .with_scheduled_task_source(Box::new(task_source))
     .with_token_signal_source(Box::new(TokenSignalAdapter::new(
@@ -3533,6 +3579,42 @@ mod tests {
     }
 
     struct LinkPreviewTransportStub;
+
+    struct PublicResolverStub;
+
+    impl bot_adapters::web_fetch::HostResolver for PublicResolverStub {
+        fn addresses(&self, hostname: &str, _: u16) -> Result<Vec<std::net::IpAddr>, String> {
+            let address = if hostname.starts_with("internal.") {
+                [10, 0, 0, 1]
+            } else {
+                [93, 184, 216, 34]
+            };
+            Ok(vec![std::net::IpAddr::from(address)])
+        }
+    }
+
+    /// Redirects `/hop/<target>` to `<target>` and records every request.
+    struct RedirectingPreviewTransport {
+        requests: std::cell::RefCell<Vec<PreviewRequest>>,
+    }
+
+    impl LinkPreviewTransport for RedirectingPreviewTransport {
+        fn request(&self, request: &PreviewRequest) -> Result<PreviewResponse, PreviewFailure> {
+            self.requests.borrow_mut().push(request.clone());
+            let location = request
+                .url
+                .split_once("/hop/")
+                .map(|(_, target)| target.to_owned());
+            Ok(PreviewResponse {
+                status_code: if location.is_some() { 302 } else { 200 },
+                final_url: request.url.clone(),
+                content_type: "text/html".to_owned(),
+                content_length: None,
+                location,
+                body: "<meta property='og:title' content='public title'>".to_owned(),
+            })
+        }
+    }
 
     impl LinkPreviewTransport for LinkPreviewTransportStub {
         fn request(&self, request: &PreviewRequest) -> Result<PreviewResponse, PreviewFailure> {
@@ -6055,6 +6137,7 @@ mod tests {
         let mut source = super::NativeLinkReplacementSource {
             transport: LinkPreviewTransportStub,
             context_transport: LinkPreviewTransportStub,
+            context_resolver: PublicResolverStub,
         };
         let load = crate::dispatcher::LinkReplacementSource::load(
             &mut source,
@@ -6087,6 +6170,7 @@ mod tests {
         let mut source = super::NativeLinkReplacementSource {
             transport: LinkPreviewTransportStub,
             context_transport: LinkPreviewTransportStub,
+            context_resolver: PublicResolverStub,
         };
         let context = crate::dispatcher::LinkReplacementSource::preview_context(
             &mut source,
@@ -6133,6 +6217,80 @@ mod tests {
                 follow_redirects: true,
             })
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn ai_link_context_only_reaches_public_hosts_on_every_redirect_hop() {
+        let inner = RedirectingPreviewTransport {
+            requests: std::cell::RefCell::new(Vec::new()),
+        };
+        let public = super::PublicLinkPreviewTransport {
+            inner: &inner,
+            resolver: &PublicResolverStub,
+        };
+        let get = |url: &str, follow_redirects| PreviewRequest {
+            url: url.to_owned(),
+            method: bot_adapters::link_preview::PreviewMethod::Get,
+            follow_redirects,
+        };
+        for blocked in [
+            "https://127.0.0.1:8080/admin",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://localhost/",
+            "https://internal.example.com/",
+            "https://example.com/hop/https://10.0.0.5/secret",
+        ] {
+            assert_eq!(
+                public.request(&get(blocked, true)),
+                Err(PreviewFailure::Request),
+                "{blocked}"
+            );
+        }
+        assert!(
+            inner
+                .requests
+                .borrow()
+                .iter()
+                .all(|request| request.url.starts_with("https://example.com/")
+                    && !request.follow_redirects)
+        );
+
+        inner.requests.borrow_mut().clear();
+        let followed = public.request(&get(
+            "https://example.com/hop/https://example.org/final",
+            true,
+        ));
+        assert!(followed.is_ok_and(|response| response.status_code == 200
+            && response.final_url == "https://example.org/final"));
+        assert_eq!(inner.requests.borrow().len(), 2);
+
+        let unfollowed = public.request(&get(
+            "https://example.com/hop/https://example.org/final",
+            false,
+        ));
+        assert!(unfollowed.is_ok_and(|response| response.status_code == 302));
+
+        let endless = format!(
+            "https://example.com{}",
+            "/hop/https://example.com".repeat(8)
+        );
+        assert_eq!(
+            public.request(&get(&endless, true)),
+            Err(PreviewFailure::Request)
+        );
+
+        let mut source = super::NativeLinkReplacementSource {
+            transport: LinkPreviewTransportStub,
+            context_transport: LinkPreviewTransportStub,
+            context_resolver: PublicResolverStub,
+        };
+        assert_eq!(
+            crate::dispatcher::LinkReplacementSource::preview_context(
+                &mut source,
+                "qué dice https://169.254.169.254/latest/meta-data/ y https://127.0.0.1:6379/"
+            ),
+            None
         );
     }
 
