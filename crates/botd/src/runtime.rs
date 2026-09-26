@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::marker::PhantomData;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 
 use bot_adapters::redis_update_queue::{QueuedUpdate, RedisUpdateQueue};
@@ -272,7 +272,7 @@ pub trait DurableUpdateQueue: Clone + Send + 'static {
     fn insert_update(&self, update_id: i64, payload: &str) -> Result<bool, Self::Error>;
     fn list_updates(&self) -> Result<Vec<QueuedUpdate>, Self::Error>;
     fn replace_update(&self, update_id: i64, payload: &str) -> Result<(), Self::Error>;
-    fn delete_update(&self, update_id: i64) -> Result<bool, Self::Error>;
+    fn delete_updates(&self, update_ids: &[i64]) -> Result<usize, Self::Error>;
     fn quarantine_update(&self, update_id: i64, payload: &str) -> Result<(), Self::Error>;
 }
 
@@ -291,8 +291,8 @@ impl DurableUpdateQueue for RedisUpdateQueue {
         Self::replace_update(self, update_id, payload)
     }
 
-    fn delete_update(&self, update_id: i64) -> Result<bool, Self::Error> {
-        Self::delete_update(self, update_id)
+    fn delete_updates(&self, update_ids: &[i64]) -> Result<usize, Self::Error> {
+        Self::delete_updates(self, update_ids)
     }
 
     fn quarantine_update(&self, update_id: i64, payload: &str) -> Result<(), Self::Error> {
@@ -320,6 +320,36 @@ struct DeadUpdateRecord<'a> {
 struct DurableUpdateCompletion {
     record: DurableUpdateRecord,
     error: Option<String>,
+    // The worker already put the retry back on the update queue, so the
+    // polling thread only persists the attempt instead of resubmitting it.
+    resubmitted: bool,
+}
+
+type SharedUpdateSender = Arc<Mutex<Option<SyncSender<DurableUpdateRecord>>>>;
+
+/// Reports a worker's result and, for a retryable failure, resubmits the
+/// update right away instead of waiting for the next long poll to return.
+///
+/// Every report is sent while holding the shared sender lock, so a failure's
+/// report always reaches the polling thread before the report of its retry.
+fn report_durable_completion(
+    updates: &Mutex<Option<SyncSender<DurableUpdateRecord>>>,
+    completions: &Sender<DurableUpdateCompletion>,
+    mut completion: DurableUpdateCompletion,
+) {
+    let sender = updates.lock().unwrap_or_else(PoisonError::into_inner);
+    let next_attempts = completion.record.attempts.saturating_add(1);
+    if completion.error.is_some()
+        && next_attempts < MAX_UPDATE_ATTEMPTS
+        && let Some(sender) = sender.as_ref()
+    {
+        let mut retry = completion.record.clone();
+        retry.attempts = next_attempts;
+        // Never block a worker on a full queue: the polling thread resubmits
+        // whatever could not be queued here.
+        completion.resubmitted = sender.try_send(retry).is_ok();
+    }
+    let _ = completions.send(completion);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -333,7 +363,7 @@ pub enum DurableParallelHandlerError {
 }
 
 pub struct DurableParallelUpdateHandler<Handler, Queue> {
-    updates: Option<SyncSender<DurableUpdateRecord>>,
+    updates: SharedUpdateSender,
     workers: Vec<JoinHandle<()>>,
     completions: Receiver<DurableUpdateCompletion>,
     queue: Queue,
@@ -370,6 +400,7 @@ where
         let (update_sender, update_receiver) =
             mpsc::sync_channel::<DurableUpdateRecord>(queue_capacity);
         let update_receiver = Arc::new(Mutex::new(update_receiver));
+        let updates: SharedUpdateSender = Arc::new(Mutex::new(Some(update_sender)));
         let (startup_sender, startup_receiver) = mpsc::channel();
         let (completion_sender, completion_receiver) = mpsc::channel();
         let factory = Arc::new(factory);
@@ -379,6 +410,7 @@ where
             let update_receiver = update_receiver.clone();
             let startup_sender = startup_sender.clone();
             let completion_sender = completion_sender.clone();
+            let updates = Arc::clone(&updates);
             let factory = factory.clone();
             workers.push(thread::spawn(move || {
                 let mut handler = match panic::catch_unwind(AssertUnwindSafe(|| factory())) {
@@ -409,7 +441,15 @@ where
                         Ok(result) => (result.err().map(|error| error.to_string()), false),
                         Err(_) => (Some("update handler panicked".to_owned()), true),
                     };
-                    let _ = completion_sender.send(DurableUpdateCompletion { record, error });
+                    report_durable_completion(
+                        &updates,
+                        &completion_sender,
+                        DurableUpdateCompletion {
+                            record,
+                            error,
+                            resubmitted: false,
+                        },
+                    );
                     if panicked {
                         return;
                     }
@@ -423,12 +463,12 @@ where
             match startup_receiver.recv() {
                 Ok((_worker, None)) => {}
                 Ok((worker, Some(error))) => {
-                    drop(update_sender);
+                    close_update_sender(&updates);
                     join_workers(&mut workers);
                     return Err(ParallelHandlerBuildError::WorkerStartup { worker, error });
                 }
                 Err(_) => {
-                    drop(update_sender);
+                    close_update_sender(&updates);
                     join_workers(&mut workers);
                     return Err(ParallelHandlerBuildError::WorkerStartup {
                         worker: workers.len(),
@@ -439,7 +479,7 @@ where
         }
 
         Ok(Self {
-            updates: Some(update_sender),
+            updates,
             workers,
             completions: completion_receiver,
             queue,
@@ -449,6 +489,13 @@ where
             recovered: false,
             handler: PhantomData,
         })
+    }
+
+    fn update_sender(&self) -> Option<SyncSender<DurableUpdateRecord>> {
+        self.updates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     fn drain_completions(&mut self, retry: bool) {
@@ -489,8 +536,7 @@ where
                 self.completed.insert(update_id);
                 continue;
             }
-            self.updates
-                .as_ref()
+            self.update_sender()
                 .ok_or(DurableParallelHandlerError::QueueUnavailable)?
                 .send(record)
                 .map_err(|_| DurableParallelHandlerError::QueueUnavailable)?;
@@ -521,7 +567,15 @@ where
             return;
         };
 
-        self.active.remove(&update_id);
+        if self.failures.fatal.is_some() {
+            // The runtime is already stopping for recovery. Workers may have
+            // resubmitted this update meanwhile, so leave its durable record
+            // as last persisted and let the restart retry it.
+            return;
+        }
+        if !completion.resubmitted {
+            self.active.remove(&update_id);
+        }
         record.attempts = record.attempts.saturating_add(1);
         if record.attempts >= MAX_UPDATE_ATTEMPTS {
             let payload = serde_json::to_string(&DeadUpdateRecord {
@@ -554,7 +608,10 @@ where
                     self.failures
                         .retrying
                         .push(UpdateFailure { update_id, error });
-                    if retry && let Some(sender) = &self.updates {
+                    if completion.resubmitted {
+                        return;
+                    }
+                    if retry && let Some(sender) = self.update_sender() {
                         match sender.send(record) {
                             Ok(()) => {
                                 self.active.insert(update_id);
@@ -582,7 +639,7 @@ where
     }
 
     fn stop(&mut self) {
-        self.updates.take();
+        close_update_sender(&self.updates);
         join_workers(&mut self.workers);
         self.drain_completions(false);
     }
@@ -617,8 +674,7 @@ where
         self.queue
             .insert_update(update_id, &payload)
             .map_err(|error| DurableParallelHandlerError::DurableQueue(error.to_string()))?;
-        self.updates
-            .as_ref()
+        self.update_sender()
             .ok_or(DurableParallelHandlerError::QueueUnavailable)?
             .send(record)
             .map_err(|_| DurableParallelHandlerError::QueueUnavailable)?;
@@ -631,7 +687,7 @@ where
     }
 
     fn confirm_updates(&mut self, confirmation: UpdateConfirmation) -> Result<(), Self::Error> {
-        let confirmed = self
+        let mut confirmed = self
             .completed
             .iter()
             .copied()
@@ -640,10 +696,15 @@ where
                 UpdateConfirmation::All => true,
             })
             .collect::<Vec<_>>();
+        if confirmed.is_empty() {
+            return Ok(());
+        }
+        confirmed.sort_unstable();
+        // One round trip for the whole confirmed batch.
+        self.queue
+            .delete_updates(&confirmed)
+            .map_err(|error| DurableParallelHandlerError::DurableQueue(error.to_string()))?;
         for update_id in confirmed {
-            self.queue
-                .delete_update(update_id)
-                .map_err(|error| DurableParallelHandlerError::DurableQueue(error.to_string()))?;
             self.completed.remove(&update_id);
             self.active.remove(&update_id);
         }
@@ -662,9 +723,16 @@ where
 
 impl<Handler, Queue> Drop for DurableParallelUpdateHandler<Handler, Queue> {
     fn drop(&mut self) {
-        self.updates.take();
+        close_update_sender(&self.updates);
         join_workers(&mut self.workers);
     }
+}
+
+fn close_update_sender(updates: &Mutex<Option<SyncSender<DurableUpdateRecord>>>) {
+    updates
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
 }
 
 fn decode_queued_update(queued: &QueuedUpdate) -> Result<DurableUpdateRecord, String> {
@@ -772,10 +840,10 @@ where
                     },
                     UpdateConfirmation::Before,
                 );
-                self.handler
-                    .confirm_updates(confirmation)
-                    .map_err(|error| RuntimeError::Handler(error.to_string()))?;
                 if updates.is_empty() {
+                    self.handler
+                        .confirm_updates(confirmation)
+                        .map_err(|error| RuntimeError::Handler(error.to_string()))?;
                     return Ok(StepOutcome::Idle);
                 }
                 if let Some(next) = next_offset(&updates, self.offset) {
@@ -809,6 +877,11 @@ where
                     }
                 }
                 failures.extend(self.handler.finish_batch());
+                // Clean up the previous batch only once the new one is on its
+                // way, so durable-queue bookkeeping never delays fresh updates.
+                self.handler
+                    .confirm_updates(confirmation)
+                    .map_err(|error| RuntimeError::Handler(error.to_string()))?;
                 let failed_ids = failures
                     .iter()
                     .map(|failure| failure.update_id)
@@ -888,6 +961,7 @@ mod tests {
         insert_failures: Arc<AtomicUsize>,
         replace_failures: Arc<AtomicUsize>,
         delete_failures: Arc<AtomicUsize>,
+        delete_calls: Arc<AtomicUsize>,
     }
 
     impl DurableUpdateQueue for MemoryDurableQueue {
@@ -939,7 +1013,7 @@ mod tests {
             Ok(())
         }
 
-        fn delete_update(&self, update_id: i64) -> Result<bool, Self::Error> {
+        fn delete_updates(&self, update_ids: &[i64]) -> Result<usize, Self::Error> {
             if self
                 .delete_failures
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
@@ -949,12 +1023,12 @@ mod tests {
             {
                 return Err("synthetic delete failure");
             }
-            Ok(self
-                .updates
-                .lock()
-                .map_err(|_| "queue lock poisoned")?
-                .remove(&update_id)
-                .is_some())
+            self.delete_calls.fetch_add(1, Ordering::SeqCst);
+            let mut updates = self.updates.lock().map_err(|_| "queue lock poisoned")?;
+            Ok(update_ids
+                .iter()
+                .filter(|update_id| updates.remove(update_id).is_some())
+                .count())
         }
 
         fn quarantine_update(&self, update_id: i64, payload: &str) -> Result<(), Self::Error> {
@@ -1003,6 +1077,7 @@ mod tests {
                     completed: false,
                 },
                 error: Some("synthetic retry".to_owned()),
+                resubmitted: false,
             },
             false,
         );
@@ -1023,6 +1098,7 @@ mod tests {
                     completed: false,
                 },
                 error: Some("synthetic terminal failure".to_owned()),
+                resubmitted: false,
             },
             false,
         );
@@ -1039,6 +1115,7 @@ mod tests {
                     completed: false,
                 },
                 error: Some("synthetic persistence failure".to_owned()),
+                resubmitted: false,
             },
             false,
         );
@@ -1972,6 +2049,158 @@ mod tests {
     }
 
     #[test]
+    fn failed_durable_update_is_retried_without_waiting_for_the_next_poll() {
+        struct FlakyHandler {
+            attempts: Arc<AtomicUsize>,
+            processed: mpsc::Sender<i64>,
+        }
+        impl UpdateHandler for FlakyHandler {
+            type Error = &'static str;
+
+            fn handle(&mut self, update: IncomingUpdate) -> Result<(), Self::Error> {
+                let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+                let _ = self.processed.send(update.update_id);
+                if attempt == 0 {
+                    Err("synthetic transient failure")
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        let queue = MemoryDurableQueue::default();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let (processed_sender, processed_receiver) = mpsc::channel();
+        let worker_attempts = Arc::clone(&attempts);
+        let mut handler = DurableParallelUpdateHandler::start(2, 4, queue.clone(), move || {
+            Ok::<_, Infallible>(FlakyHandler {
+                attempts: Arc::clone(&worker_attempts),
+                processed: processed_sender.clone(),
+            })
+        })
+        .unwrap_or_else(|_| unreachable!());
+
+        let started = Instant::now();
+        assert_eq!(handler.handle(update(501)), Ok(()));
+        // Nothing drains completions here, standing in for a polling thread
+        // blocked in a long poll: the worker must resubmit on its own.
+        for _ in 0..2 {
+            assert_eq!(
+                processed_receiver.recv_timeout(Duration::from_secs(1)),
+                Ok(501)
+            );
+        }
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let mut retrying = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !handler.completed.contains(&501) && Instant::now() < deadline {
+            let failures = handler.take_background_failures();
+            assert!(failures.quarantined.is_empty() && failures.fatal.is_none());
+            retrying.extend(failures.retrying);
+            thread::yield_now();
+        }
+        assert_eq!(retrying.len(), 1);
+        assert!(handler.completed.contains(&501) && handler.active.contains(&501));
+        let record = queue
+            .updates
+            .lock()
+            .ok()
+            .and_then(|updates| updates.get(&501).cloned())
+            .and_then(|payload| serde_json::from_str::<DurableUpdateRecord>(&payload).ok());
+        assert!(matches!(record, Some(record) if record.completed && record.attempts == 1));
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        handler.stop();
+    }
+
+    #[test]
+    fn durable_confirmation_deletes_the_whole_batch_in_one_call() {
+        struct Handler;
+        impl UpdateHandler for Handler {
+            type Error = Infallible;
+
+            fn handle(&mut self, _update: IncomingUpdate) -> Result<(), Self::Error> {
+                Ok(())
+            }
+        }
+        assert_eq!(Handler.handle(update(600)), Ok(()));
+
+        let queue = MemoryDurableQueue::default();
+        let mut handler = DurableParallelUpdateHandler::start(1, 1, queue.clone(), || {
+            Ok::<_, Infallible>(Handler)
+        })
+        .unwrap_or_else(|_| unreachable!());
+        assert_eq!(handler.confirm_updates(UpdateConfirmation::All), Ok(()));
+        assert_eq!(queue.delete_calls.load(Ordering::SeqCst), 0);
+
+        for update_id in [601, 602, 603] {
+            assert_eq!(queue.insert_update(update_id, "synthetic"), Ok(true));
+            handler.completed.insert(update_id);
+            handler.active.insert(update_id);
+        }
+        assert_eq!(
+            handler.confirm_updates(UpdateConfirmation::Before(603)),
+            Ok(())
+        );
+        assert_eq!(queue.delete_calls.load(Ordering::SeqCst), 1);
+        assert!(queue.updates.lock().is_ok_and(|updates| {
+            !updates.contains_key(&601) && !updates.contains_key(&602) && updates.contains_key(&603)
+        }));
+        assert_eq!(handler.completed.iter().copied().collect::<Vec<_>>(), [603]);
+        handler.stop();
+    }
+
+    #[test]
+    fn new_updates_are_dispatched_before_the_previous_batch_is_confirmed() {
+        #[derive(Default)]
+        struct OrderingHandler {
+            events: Vec<String>,
+        }
+        impl UpdateHandler for OrderingHandler {
+            type Error = Infallible;
+
+            fn handle(&mut self, update: IncomingUpdate) -> Result<(), Self::Error> {
+                self.events.push(format!("handle {}", update.update_id));
+                Ok(())
+            }
+
+            fn confirm_updates(
+                &mut self,
+                confirmation: UpdateConfirmation,
+            ) -> Result<(), Self::Error> {
+                self.events.push(format!("confirm {confirmation:?}"));
+                Ok(())
+            }
+        }
+
+        let source = Source {
+            outcomes: VecDeque::from([
+                Ok(bot_adapters::telegram_polling::PollOutcome::Updates(vec![
+                    update(10),
+                ])),
+                Ok(bot_adapters::telegram_polling::PollOutcome::Updates(vec![
+                    update(11),
+                ])),
+            ]),
+            offsets: Vec::new(),
+        };
+        let mut runtime = PollingRuntime::new(source, OrderingHandler::default());
+        assert_eq!(runtime.step(), Ok(StepOutcome::Dispatched { count: 1 }));
+        assert_eq!(runtime.step(), Ok(StepOutcome::Dispatched { count: 1 }));
+        assert_eq!(runtime.step(), Ok(StepOutcome::Idle));
+        assert_eq!(
+            runtime.handler.events,
+            [
+                "handle 10",
+                "confirm Before(10)",
+                "handle 11",
+                "confirm Before(11)",
+                "confirm Before(12)",
+            ]
+        );
+    }
+
+    #[test]
     fn redis_durable_queue_implements_the_runtime_port() -> Result<(), String> {
         let Some(port) = std::env::var("TEST_REDIS_PORT")
             .ok()
@@ -2010,9 +2239,10 @@ mod tests {
             .map_err(|error| error.to_string())?;
         DurableUpdateQueue::quarantine_update(&queue, update_id, "synthetic dead update")
             .map_err(|error| error.to_string())?;
-        assert!(
-            !DurableUpdateQueue::delete_update(&queue, update_id)
-                .map_err(|error| error.to_string())?
+        assert_eq!(
+            DurableUpdateQueue::delete_updates(&queue, &[update_id])
+                .map_err(|error| error.to_string())?,
+            0
         );
         Ok(())
     }

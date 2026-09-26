@@ -1463,6 +1463,10 @@ pub struct SystemRuntimeValues {
 const TELEGRAM_STREAM_MIN_DELIVERY_INTERVAL: Duration = Duration::from_secs(1);
 const TELEGRAM_STREAM_MAX_RATE_LIMIT_PAUSE: Duration = Duration::from_secs(300);
 const TELEGRAM_STREAM_THINKING_DOT_FRAMES: [&str; 3] = [".", "..", "..."];
+// Each chat always maps to the same delivery thread, which keeps its edits in
+// order, while a slow or rate-limited chat only shares its thread with the
+// chats hashed next to it instead of every chat of the bot.
+const TELEGRAM_STREAM_DELIVERY_SHARDS: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct TelegramStreamKey {
@@ -1482,6 +1486,12 @@ struct TelegramStreamThinkingAnimation {
     next_frame_at: std::time::Instant,
 }
 
+struct TelegramStreamFinalRetry {
+    attempts: usize,
+    retry_at: std::time::Instant,
+}
+
+#[derive(Default)]
 struct TelegramStreamDeliveryState {
     pending: HashMap<TelegramStreamKey, PendingTelegramStreamEdit>,
     order: VecDeque<TelegramStreamKey>,
@@ -1490,6 +1500,9 @@ struct TelegramStreamDeliveryState {
     // intermediate snapshots pause until it passes instead of retrying into it.
     rate_limited_until: HashMap<i64, std::time::Instant>,
     thinking: HashMap<TelegramStreamKey, TelegramStreamThinkingAnimation>,
+    // Final answers rejected with retry_after wait here instead of sleeping on
+    // the delivery thread, so the other chats of the shard keep flowing.
+    final_retries: HashMap<TelegramStreamKey, TelegramStreamFinalRetry>,
 }
 
 enum TelegramStreamDeliveryDecision {
@@ -1501,25 +1514,33 @@ enum TelegramStreamDeliveryDecision {
 impl TelegramStreamDeliveryState {
     fn take_next(&mut self) -> TelegramStreamDeliveryDecision {
         self.enqueue_due_thinking_edits();
-        let final_key = self.order.iter().copied().find(|key| {
-            self.pending
-                .get(key)
-                .is_some_and(|pending| pending.final_response.is_some())
-        });
+        let now = std::time::Instant::now();
+        let final_key = self
+            .order
+            .iter()
+            .copied()
+            .find(|key| self.has_final(*key) && self.final_retry_wait(*key, now).is_zero());
         if let Some(key) = final_key
             && let Some(pending) = self.pending.remove(&key)
         {
             return TelegramStreamDeliveryDecision::Ready(pending);
         }
 
-        let now = std::time::Instant::now();
         let mut next_wait = self.next_thinking_wait(now);
+        if let Some(wait) = self.next_final_retry_wait(now) {
+            next_wait = Some(next_wait.map_or(wait, |current: Duration| current.min(wait)));
+        }
         let order_length = self.order.len();
         for _ in 0..order_length {
             let Some(key) = self.order.pop_front() else {
                 break;
             };
             if !self.pending.contains_key(&key) {
+                continue;
+            }
+            if self.has_final(key) {
+                // A final waiting out its retry_after keeps its place.
+                self.order.push_back(key);
                 continue;
             }
             let wait = self.intermediate_edit_wait(key.chat_id, now);
@@ -1591,6 +1612,55 @@ impl TelegramStreamDeliveryState {
         }
     }
 
+    fn has_final(&self, key: TelegramStreamKey) -> bool {
+        self.pending
+            .get(&key)
+            .is_some_and(|pending| pending.final_response.is_some())
+    }
+
+    fn final_retry_wait(&self, key: TelegramStreamKey, now: std::time::Instant) -> Duration {
+        self.final_retries
+            .get(&key)
+            .map_or(Duration::ZERO, |retry| {
+                retry.retry_at.saturating_duration_since(now)
+            })
+    }
+
+    fn next_final_retry_wait(&self, now: std::time::Instant) -> Option<Duration> {
+        self.final_retries
+            .iter()
+            .filter(|(key, _)| self.has_final(**key))
+            .map(|(_, retry)| retry.retry_at.saturating_duration_since(now))
+            .min()
+    }
+
+    fn retry_final(
+        &mut self,
+        pending: PendingTelegramStreamEdit,
+        attempts: usize,
+        delay: Duration,
+    ) {
+        let key = pending.key;
+        if self.has_final(key) {
+            // A newer final answer arrived while this one was in flight.
+            if let Some(response) = pending.final_response {
+                let _ = response.send(Ok(false));
+            }
+            return;
+        }
+        if !self.pending.contains_key(&key) {
+            self.order.push_back(key);
+        }
+        self.final_retries.insert(
+            key,
+            TelegramStreamFinalRetry {
+                attempts,
+                retry_at: std::time::Instant::now() + delay,
+            },
+        );
+        self.pending.insert(key, pending);
+    }
+
     fn next_thinking_wait(&self, now: std::time::Instant) -> Option<Duration> {
         self.thinking
             .values()
@@ -1642,43 +1712,98 @@ impl TelegramStreamDeliveryState {
 
 /// Asynchronous, latest-snapshot Telegram delivery for AI streams.
 ///
-/// The provider callback only updates this queue. A dedicated worker performs
-/// Telegram I/O, coalesces stale intermediate snapshots, and prioritizes the
-/// final answer so provider streaming cannot be held behind Telegram edits.
+/// The provider callback only updates these queues. Dedicated workers perform
+/// Telegram I/O, coalesce stale intermediate snapshots, and prioritize final
+/// answers so provider streaming cannot be held behind Telegram edits. Chats
+/// are sharded across the workers by id, so edits within a chat stay ordered
+/// while one slow chat cannot hold back every other chat's answer.
 #[derive(Clone)]
 pub struct TelegramStreamDelivery {
+    shards: Arc<[TelegramStreamDeliveryShard]>,
+}
+
+impl TelegramStreamDelivery {
+    fn new<Transport>(
+        transports: Vec<Transport>,
+        token: &str,
+        delivery: &TelegramDeliveryCoordinator,
+    ) -> Self
+    where
+        Transport: TelegramTransport + Send + 'static,
+    {
+        let shards = transports
+            .into_iter()
+            .map(|transport| {
+                let state = Arc::new(Mutex::new(TelegramStreamDeliveryState::default()));
+                let (wake, receiver) = mpsc::sync_channel(1);
+                let worker_state = Arc::clone(&state);
+                let worker_token = token.to_owned();
+                let worker_delivery = delivery.clone();
+                thread::spawn(move || {
+                    run_telegram_stream_delivery_worker(
+                        transport,
+                        worker_token,
+                        worker_delivery,
+                        receiver,
+                        worker_state,
+                    );
+                });
+                TelegramStreamDeliveryShard { state, wake }
+            })
+            .collect::<Vec<_>>();
+        Self {
+            shards: Arc::from(shards),
+        }
+    }
+
+    fn shard(&self, chat_id: i64) -> Option<&TelegramStreamDeliveryShard> {
+        let count = i64::try_from(self.shards.len()).ok()?;
+        let index = usize::try_from(chat_id.checked_rem_euclid(count)?).ok()?;
+        self.shards.get(index)
+    }
+
+    fn enqueue(&self, action: TelegramAction) -> bool {
+        telegram_stream_key(&action)
+            .and_then(|key| self.shard(key.chat_id))
+            .is_some_and(|shard| shard.enqueue(action))
+    }
+
+    fn start_thinking(&self, chat_id: ChatId, message_id: MessageId, text: &str) {
+        if let Some(shard) = self.shard(chat_id.0) {
+            shard.start_thinking(chat_id, message_id, text);
+        }
+    }
+
+    fn stop_thinking(&self, chat_id: ChatId, message_id: MessageId) {
+        if let Some(shard) = self.shard(chat_id.0) {
+            shard.stop_thinking(chat_id, message_id);
+        }
+    }
+
+    fn finalize(&self, action: TelegramAction) -> Result<bool, TelegramActionSinkError> {
+        let Some(key) = telegram_stream_key(&action) else {
+            return Err(TelegramActionSinkError::Adapter(ActionError::InvalidAction));
+        };
+        self.shard(key.chat_id)
+            .ok_or_else(telegram_stream_delivery_unavailable)
+            .and_then(|shard| shard.finalize(action))
+    }
+
+    fn cancel(&self, chat_id: ChatId, message_id: MessageId) {
+        if let Some(shard) = self.shard(chat_id.0) {
+            shard.cancel(chat_id, message_id);
+        }
+    }
+}
+
+/// One delivery worker's queue: every edit of the chats it owns.
+#[derive(Clone)]
+struct TelegramStreamDeliveryShard {
     state: Arc<Mutex<TelegramStreamDeliveryState>>,
     wake: SyncSender<()>,
 }
 
-impl TelegramStreamDelivery {
-    fn new(
-        transport: ReqwestTelegramTransport,
-        token: &str,
-        delivery: TelegramDeliveryCoordinator,
-    ) -> Self {
-        let state = Arc::new(Mutex::new(TelegramStreamDeliveryState {
-            pending: HashMap::new(),
-            order: VecDeque::new(),
-            last_intermediate_edit: HashMap::new(),
-            rate_limited_until: HashMap::new(),
-            thinking: HashMap::new(),
-        }));
-        let (wake, receiver) = mpsc::sync_channel(1);
-        let worker_state = Arc::clone(&state);
-        let worker_token = token.to_owned();
-        thread::spawn(move || {
-            run_telegram_stream_delivery_worker(
-                transport,
-                worker_token,
-                delivery,
-                receiver,
-                worker_state,
-            );
-        });
-        Self { state, wake }
-    }
-
+impl TelegramStreamDeliveryShard {
     fn enqueue(&self, action: TelegramAction) -> bool {
         let Some(key) = telegram_stream_key(&action) else {
             return false;
@@ -1752,6 +1877,7 @@ impl TelegramStreamDelivery {
         let (response_sender, response_receiver) = mpsc::channel();
         let superseded_response = {
             let mut state = lock_unpoisoned(&self.state);
+            state.final_retries.remove(&key);
             if !state.pending.contains_key(&key) {
                 state.order.push_back(key);
             }
@@ -1791,6 +1917,7 @@ impl TelegramStreamDelivery {
                 .remove(&key)
                 .and_then(|pending| pending.final_response);
             state.thinking.remove(&key);
+            state.final_retries.remove(&key);
             state.prune_inactive_intermediate_edit(key.chat_id);
             response
         };
@@ -1813,6 +1940,7 @@ impl TelegramStreamDelivery {
     fn remove_pending(&self, key: TelegramStreamKey) {
         let mut state = lock_unpoisoned(&self.state);
         let _ = state.pending.remove(&key);
+        state.final_retries.remove(&key);
         state.prune_inactive_intermediate_edit(key.chat_id);
     }
 }
@@ -1847,6 +1975,7 @@ fn fail_pending_telegram_stream_edits(state: &Arc<Mutex<TelegramStreamDeliverySt
         state.thinking.clear();
         state.last_intermediate_edit.clear();
         state.rate_limited_until.clear();
+        state.final_retries.clear();
         state
             .pending
             .drain()
@@ -1867,7 +1996,7 @@ fn run_telegram_stream_delivery_worker<Transport>(
 ) where
     Transport: TelegramTransport + Send + 'static,
 {
-    let mut sink = TelegramActionSink::new(transport, &token).with_delivery_coordinator(delivery);
+    let sink = TelegramActionSink::new(transport, &token).with_delivery_coordinator(delivery);
     loop {
         if receiver.recv().is_err() {
             fail_pending_telegram_stream_edits(&state);
@@ -1886,54 +2015,88 @@ fn run_telegram_stream_delivery_worker<Transport>(
                 },
                 TelegramStreamDeliveryDecision::Ready(pending) => {
                     let key = pending.key;
-                    let is_final = pending.final_response.is_some();
-                    if !is_final {
-                        lock_unpoisoned(&state).mark_intermediate_edit_started(key.chat_id);
-                    }
-                    let started = std::time::Instant::now();
-                    let result = if is_final {
-                        sink.try_edit(pending.action)
+                    if pending.final_response.is_some() {
+                        deliver_telegram_stream_final(&sink, &state, pending);
                     } else {
-                        match sink.execute_once(pending.action) {
-                            Ok(ActionOutcome::Completed { .. }) => Ok(true),
-                            Ok(ActionOutcome::RateLimited {
-                                retry_after_seconds,
-                            }) => {
-                                let seconds = retry_after_seconds
-                                    .unwrap_or(TELEGRAM_ACTION_DEFAULT_RETRY_SECONDS)
-                                    .clamp(1, TELEGRAM_STREAM_MAX_RATE_LIMIT_PAUSE.as_secs());
-                                lock_unpoisoned(&state).pause_intermediate_edits(
-                                    key.chat_id,
-                                    Duration::from_secs(seconds),
-                                );
-                                eprintln!(
-                                    "Telegram intermediate AI edits paused for {seconds}s after a rate limit: chat_id={}",
-                                    key.chat_id,
-                                );
-                                Ok(false)
-                            }
-                            Ok(outcome) => {
-                                eprintln!(
-                                    "Telegram intermediate AI edit was not delivered: elapsed_ms={} outcome={outcome:?}",
-                                    started.elapsed().as_millis(),
-                                );
-                                Ok(false)
-                            }
-                            Err(error) => {
-                                eprintln!(
-                                    "Telegram intermediate AI edit failed: elapsed_ms={} error={error}",
-                                    started.elapsed().as_millis(),
-                                );
-                                Err(TelegramActionSinkError::from(error))
-                            }
-                        }
-                    };
-                    if let Some(response) = pending.final_response {
-                        let _ = response.send(result);
+                        deliver_telegram_stream_intermediate(&sink, &state, pending);
                     }
                     lock_unpoisoned(&state).prune_inactive_intermediate_edit(key.chat_id);
                 }
             }
+        }
+    }
+}
+
+fn telegram_stream_rate_limit_delay(retry_after_seconds: Option<u64>) -> Duration {
+    Duration::from_secs(
+        retry_after_seconds
+            .unwrap_or(TELEGRAM_ACTION_DEFAULT_RETRY_SECONDS)
+            .clamp(1, TELEGRAM_STREAM_MAX_RATE_LIMIT_PAUSE.as_secs()),
+    )
+}
+
+/// Delivers a final answer once; a rate limit parks it in the shard queue
+/// until retry_after passes rather than sleeping on the delivery thread.
+fn deliver_telegram_stream_final<Transport: TelegramTransport>(
+    sink: &TelegramActionSink<Transport>,
+    state: &Mutex<TelegramStreamDeliveryState>,
+    pending: PendingTelegramStreamEdit,
+) {
+    let key = pending.key;
+    let attempts = lock_unpoisoned(state)
+        .final_retries
+        .remove(&key)
+        .map_or(1, |retry| retry.attempts + 1);
+    let result = match sink.execute_once(pending.action.clone()) {
+        Ok(ActionOutcome::Completed { .. }) => Ok(true),
+        Ok(ActionOutcome::RateLimited {
+            retry_after_seconds,
+        }) if attempts < TELEGRAM_ACTION_MAX_ATTEMPTS => {
+            let delay = telegram_stream_rate_limit_delay(retry_after_seconds);
+            let mut state = lock_unpoisoned(state);
+            state.pause_intermediate_edits(key.chat_id, delay);
+            state.retry_final(pending, attempts, delay);
+            return;
+        }
+        Ok(_) => Ok(false),
+        Err(error) => Err(TelegramActionSinkError::from(error)),
+    };
+    if let Some(response) = pending.final_response {
+        let _ = response.send(result);
+    }
+}
+
+fn deliver_telegram_stream_intermediate<Transport: TelegramTransport>(
+    sink: &TelegramActionSink<Transport>,
+    state: &Mutex<TelegramStreamDeliveryState>,
+    pending: PendingTelegramStreamEdit,
+) {
+    let chat_id = pending.key.chat_id;
+    lock_unpoisoned(state).mark_intermediate_edit_started(chat_id);
+    let started = std::time::Instant::now();
+    match sink.execute_once(pending.action) {
+        Ok(ActionOutcome::Completed { .. }) => {}
+        Ok(ActionOutcome::RateLimited {
+            retry_after_seconds,
+        }) => {
+            let delay = telegram_stream_rate_limit_delay(retry_after_seconds);
+            lock_unpoisoned(state).pause_intermediate_edits(chat_id, delay);
+            eprintln!(
+                "Telegram intermediate AI edits paused for {}s after a rate limit: chat_id={chat_id}",
+                delay.as_secs(),
+            );
+        }
+        Ok(outcome) => {
+            eprintln!(
+                "Telegram intermediate AI edit was not delivered: elapsed_ms={} outcome={outcome:?}",
+                started.elapsed().as_millis(),
+            );
+        }
+        Err(error) => {
+            eprintln!(
+                "Telegram intermediate AI edit failed: elapsed_ms={} error={error}",
+                started.elapsed().as_millis(),
+            );
         }
     }
 }
@@ -3079,10 +3242,14 @@ pub fn build_native_runtime(
             .as_deref()
             .is_some_and(|prompt| !prompt.is_empty())
     {
+        let transports = (0..TELEGRAM_STREAM_DELIVERY_SHARDS)
+            .map(|_| ReqwestTelegramTransport::new())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(CompositionError::ActionTransport)?;
         Some(TelegramStreamDelivery::new(
-            ReqwestTelegramTransport::new().map_err(CompositionError::ActionTransport)?,
+            transports,
             &options.token,
-            options.telegram_delivery.clone(),
+            &options.telegram_delivery,
         ))
     } else {
         None
@@ -3823,12 +3990,15 @@ mod tests {
             order: std::collections::VecDeque::new(),
             last_intermediate_edit: std::collections::HashMap::new(),
             rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         }));
         let (wake, receiver) = mpsc::sync_channel(1);
         let delivery = super::TelegramStreamDelivery {
-            state: Arc::clone(&state),
-            wake,
+            shards: Arc::from(vec![super::TelegramStreamDeliveryShard {
+                state: Arc::clone(&state),
+                wake,
+            }]),
         };
         (delivery, state, receiver)
     }
@@ -3840,12 +4010,15 @@ mod tests {
             order: std::collections::VecDeque::new(),
             last_intermediate_edit: std::collections::HashMap::new(),
             rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         }));
         let (wake, _receiver) = mpsc::sync_channel(1);
         let delivery = super::TelegramStreamDelivery {
-            state: Arc::clone(&state),
-            wake,
+            shards: Arc::from(vec![super::TelegramStreamDeliveryShard {
+                state: Arc::clone(&state),
+                wake,
+            }]),
         };
 
         assert!(delivery.enqueue(stream_edit(7, 80, "first")));
@@ -3882,6 +4055,7 @@ mod tests {
             order: std::collections::VecDeque::new(),
             last_intermediate_edit: std::collections::HashMap::new(),
             rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::from([(
                 key,
                 super::TelegramStreamThinkingAnimation {
@@ -3998,6 +4172,7 @@ mod tests {
             order: std::collections::VecDeque::from([intermediate_key, final_key]),
             last_intermediate_edit: std::collections::HashMap::new(),
             rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::from([(
                 final_key,
                 super::TelegramStreamThinkingAnimation {
@@ -4060,6 +4235,7 @@ mod tests {
             order: std::collections::VecDeque::from([limited_key, ready_key]),
             last_intermediate_edit: std::collections::HashMap::from([(7, Instant::now())]),
             rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         };
         state.pending.insert(
@@ -4112,6 +4288,7 @@ mod tests {
             order: std::collections::VecDeque::from([key]),
             last_intermediate_edit: std::collections::HashMap::new(),
             rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         };
         state.pause_intermediate_edits(7, Duration::from_secs(20));
@@ -4167,6 +4344,7 @@ mod tests {
             order: std::collections::VecDeque::from([key]),
             last_intermediate_edit: std::collections::HashMap::from([(7, Instant::now())]),
             rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         };
 
@@ -4333,6 +4511,7 @@ mod tests {
             order: std::collections::VecDeque::from([key]),
             last_intermediate_edit: std::collections::HashMap::from([(7, Instant::now())]),
             rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         };
         let decision = state.take_next();
@@ -4398,6 +4577,7 @@ mod tests {
             order: std::collections::VecDeque::from([intermediate_key, final_key]),
             last_intermediate_edit: std::collections::HashMap::new(),
             rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         }));
         let (wake, receiver) = mpsc::channel();
@@ -4468,6 +4648,7 @@ mod tests {
             order: std::collections::VecDeque::new(),
             last_intermediate_edit: std::collections::HashMap::new(),
             rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::from([(
                 key,
                 super::TelegramStreamThinkingAnimation {
@@ -4564,6 +4745,7 @@ mod tests {
             order: std::collections::VecDeque::from([limited_key, rejected_key]),
             last_intermediate_edit: std::collections::HashMap::new(),
             rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         }));
         let (wake, receiver) = mpsc::channel();
@@ -4649,6 +4831,7 @@ mod tests {
             order: std::collections::VecDeque::from([final_key]),
             last_intermediate_edit: std::collections::HashMap::new(),
             rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         }));
         let (wake, receiver) = mpsc::channel();
@@ -4671,6 +4854,322 @@ mod tests {
             )))
         );
         assert!(worker.join().is_ok());
+    }
+
+    struct ShardTransport {
+        gate: Option<Mutex<mpsc::Receiver<()>>>,
+        texts: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl TelegramTransport for ShardTransport {
+        fn send(&self, request: &TelegramRequest) -> Result<HttpResponse, TransportFailureKind> {
+            if let Some(gate) = &self.gate
+                && let Ok(gate) = gate.lock()
+            {
+                let _ = gate.recv_timeout(Duration::from_secs(5));
+            }
+            if let Some(text) = request
+                .json_payload
+                .as_ref()
+                .and_then(|payload| payload.get("text"))
+                .and_then(serde_json::Value::as_str)
+            {
+                super::lock_unpoisoned(&self.texts).push(text.to_owned());
+            }
+            telegram_response(200, r#"{"ok":true,"result":true}"#)
+        }
+    }
+
+    fn final_edit(chat_id: i64, message_id: i64, text: &str) -> TelegramAction {
+        TelegramAction::EditMessage {
+            chat_id: ChatId(chat_id),
+            message_id: MessageId(message_id),
+            text: text.to_owned(),
+            reply_markup: None,
+        }
+    }
+
+    #[test]
+    fn telegram_stream_delivery_shards_chats_so_a_blocked_chat_does_not_delay_others() {
+        let (release, gate) = mpsc::channel();
+        let blocked_texts = Arc::new(Mutex::new(Vec::new()));
+        let free_texts = Arc::new(Mutex::new(Vec::new()));
+        let delivery = super::TelegramStreamDelivery::new(
+            vec![
+                ShardTransport {
+                    gate: Some(Mutex::new(gate)),
+                    texts: Arc::clone(&blocked_texts),
+                },
+                ShardTransport {
+                    gate: None,
+                    texts: Arc::clone(&free_texts),
+                },
+            ],
+            "synthetic-token",
+            &TelegramDeliveryCoordinator::default(),
+        );
+        // A chat always lands on the same worker, which keeps its edits in order.
+        let first = delivery.shard(2).map(std::ptr::from_ref);
+        assert_eq!(first, delivery.shard(2).map(std::ptr::from_ref));
+        assert_eq!(first, delivery.shard(-4).map(std::ptr::from_ref));
+        assert_eq!(
+            delivery.shard(-1).map(std::ptr::from_ref),
+            delivery.shard(3).map(std::ptr::from_ref)
+        );
+        assert_ne!(first, delivery.shard(3).map(std::ptr::from_ref));
+
+        let blocked_delivery = delivery.clone();
+        let blocked = thread::spawn(move || blocked_delivery.finalize(final_edit(2, 20, "slow")));
+        thread::sleep(Duration::from_millis(50));
+
+        let started = Instant::now();
+        delivery.start_thinking(ChatId(3), MessageId(30), "Pensando");
+        delivery.stop_thinking(ChatId(3), MessageId(30));
+        assert_eq!(delivery.finalize(final_edit(3, 30, "fast")), Ok(true));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(*super::lock_unpoisoned(&free_texts), ["fast"]);
+        assert!(super::lock_unpoisoned(&blocked_texts).is_empty());
+
+        assert!(delivery.enqueue(stream_edit(3, 31, "draft")));
+        delivery.cancel(ChatId(3), MessageId(31));
+        assert!(release.send(()).is_ok());
+        assert_eq!(blocked.join().ok(), Some(Ok(true)));
+        assert_eq!(*super::lock_unpoisoned(&blocked_texts), ["slow"]);
+
+        let empty = super::TelegramStreamDelivery::new(
+            Vec::<ShardTransport>::new(),
+            "synthetic-token",
+            &TelegramDeliveryCoordinator::default(),
+        );
+        assert!(!empty.enqueue(stream_edit(3, 30, "draft")));
+        assert_eq!(
+            empty.finalize(final_edit(3, 30, "final")),
+            Err(TelegramActionSinkError::Transport(
+                TransportFailureKind::Request
+            ))
+        );
+        empty.start_thinking(ChatId(3), MessageId(30), "Pensando");
+        empty.stop_thinking(ChatId(3), MessageId(30));
+        empty.cancel(ChatId(3), MessageId(30));
+    }
+
+    #[test]
+    fn telegram_stream_delivery_worker_retries_rate_limited_finals_without_blocking_the_shard() {
+        let (completed, _completed_receiver) = mpsc::channel();
+        // Responses pop from the end: chat 7 is rate limited, chat 8 goes
+        // through, then chat 7's retry succeeds once retry_after has passed.
+        let transport = StreamDeliveryTransport {
+            responses: Arc::new(Mutex::new(vec![
+                telegram_response(200, r#"{"ok":true,"result":true}"#),
+                telegram_response(200, r#"{"ok":true,"result":true}"#),
+                telegram_response(
+                    429,
+                    r#"{"ok":false,"error_code":429,"description":"Too Many Requests","parameters":{"retry_after":1}}"#,
+                ),
+            ])),
+            requests: Arc::new(Mutex::new(Vec::new())),
+            completed,
+        };
+        let requests = Arc::clone(&transport.requests);
+        let limited_key = super::TelegramStreamKey {
+            chat_id: 7,
+            message_id: 80,
+        };
+        let free_key = super::TelegramStreamKey {
+            chat_id: 8,
+            message_id: 81,
+        };
+        let (limited_sender, limited_receiver) = mpsc::channel();
+        let (free_sender, free_receiver) = mpsc::channel();
+        let state = Arc::new(Mutex::new(super::TelegramStreamDeliveryState {
+            pending: std::collections::HashMap::from([
+                (
+                    limited_key,
+                    super::PendingTelegramStreamEdit {
+                        key: limited_key,
+                        action: final_edit(7, 80, "limited"),
+                        final_response: Some(limited_sender),
+                    },
+                ),
+                (
+                    free_key,
+                    super::PendingTelegramStreamEdit {
+                        key: free_key,
+                        action: final_edit(8, 81, "free"),
+                        final_response: Some(free_sender),
+                    },
+                ),
+            ]),
+            order: std::collections::VecDeque::from([limited_key, free_key]),
+            ..super::TelegramStreamDeliveryState::default()
+        }));
+        let (wake, receiver) = mpsc::channel();
+        let worker_state = Arc::clone(&state);
+        let worker = thread::spawn(move || {
+            super::run_telegram_stream_delivery_worker(
+                transport,
+                "synthetic-token".to_owned(),
+                TelegramDeliveryCoordinator::default(),
+                receiver,
+                worker_state,
+            );
+        });
+
+        let started = Instant::now();
+        assert!(wake.send(()).is_ok());
+        assert_eq!(
+            free_receiver.recv_timeout(Duration::from_secs(1)),
+            Ok(Ok(true))
+        );
+        assert!(started.elapsed() < Duration::from_millis(900));
+        assert_eq!(
+            limited_receiver.recv_timeout(Duration::from_secs(3)),
+            Ok(Ok(true))
+        );
+        assert!(started.elapsed() >= Duration::from_millis(900));
+        let texts = super::lock_unpoisoned(&requests)
+            .iter()
+            .filter_map(|request| {
+                request
+                    .json_payload
+                    .as_ref()
+                    .and_then(|payload| payload.get("text"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(texts, ["limited", "free", "limited"]);
+        assert!(super::lock_unpoisoned(&state).final_retries.is_empty());
+
+        drop(wake);
+        assert!(worker.join().is_ok());
+    }
+
+    #[test]
+    fn telegram_stream_delivery_gives_up_on_a_final_after_the_last_rate_limited_attempt() {
+        let (completed, _completed_receiver) = mpsc::channel();
+        let transport = StreamDeliveryTransport {
+            responses: Arc::new(Mutex::new(vec![telegram_response(
+                429,
+                r#"{"ok":false,"error_code":429,"description":"Too Many Requests"}"#,
+            )])),
+            requests: Arc::new(Mutex::new(Vec::new())),
+            completed,
+        };
+        let key = super::TelegramStreamKey {
+            chat_id: 7,
+            message_id: 80,
+        };
+        let (final_sender, final_receiver) = mpsc::channel();
+        let state = Mutex::new(super::TelegramStreamDeliveryState {
+            final_retries: std::collections::HashMap::from([(
+                key,
+                super::TelegramStreamFinalRetry {
+                    attempts: super::TELEGRAM_ACTION_MAX_ATTEMPTS - 1,
+                    retry_at: Instant::now(),
+                },
+            )]),
+            ..super::TelegramStreamDeliveryState::default()
+        });
+        let sink = TelegramActionSink::new(transport, "synthetic-token");
+        super::deliver_telegram_stream_final(
+            &sink,
+            &state,
+            super::PendingTelegramStreamEdit {
+                key,
+                action: final_edit(7, 80, "final"),
+                final_response: Some(final_sender),
+            },
+        );
+        assert_eq!(
+            final_receiver.recv_timeout(Duration::from_secs(1)),
+            Ok(Ok(false))
+        );
+        let state = super::lock_unpoisoned(&state);
+        assert!(state.final_retries.is_empty() && state.pending.is_empty());
+    }
+
+    #[test]
+    fn telegram_stream_delivery_parks_retried_finals_and_lets_newer_ones_win() {
+        let key = super::TelegramStreamKey {
+            chat_id: 7,
+            message_id: 80,
+        };
+        let other_key = super::TelegramStreamKey {
+            chat_id: 8,
+            message_id: 81,
+        };
+        let mut state = super::TelegramStreamDeliveryState::default();
+        state.order.push_back(key);
+        state.pending.insert(
+            key,
+            super::PendingTelegramStreamEdit {
+                key,
+                action: stream_edit(7, 80, "late draft"),
+                final_response: None,
+            },
+        );
+        let (retried_sender, retried_receiver) = mpsc::channel();
+        state.retry_final(
+            super::PendingTelegramStreamEdit {
+                key,
+                action: final_edit(7, 80, "retried"),
+                final_response: Some(retried_sender),
+            },
+            1,
+            Duration::from_secs(20),
+        );
+        // The parked final replaced the stale draft and keeps a single slot.
+        assert_eq!(state.order.len(), 1);
+        assert!(state.has_final(key));
+        state.order.push_back(other_key);
+        state.pending.insert(
+            other_key,
+            super::PendingTelegramStreamEdit {
+                key: other_key,
+                action: stream_edit(8, 81, "other chat"),
+                final_response: None,
+            },
+        );
+        assert!(matches!(
+            state.take_next(),
+            super::TelegramStreamDeliveryDecision::Ready(pending) if pending.key == other_key
+        ));
+        assert!(matches!(
+            state.take_next(),
+            super::TelegramStreamDeliveryDecision::Wait(wait)
+                if wait > Duration::from_secs(19) && wait <= Duration::from_secs(20)
+        ));
+        assert!(state.pending.contains_key(&key));
+
+        let (older_sender, older_receiver) = mpsc::channel();
+        state.retry_final(
+            super::PendingTelegramStreamEdit {
+                key,
+                action: final_edit(7, 80, "older"),
+                final_response: Some(older_sender),
+            },
+            1,
+            Duration::from_secs(1),
+        );
+        assert_eq!(
+            older_receiver.recv_timeout(Duration::from_secs(1)),
+            Ok(Ok(false))
+        );
+        assert!(matches!(
+            state.pending.get(&key).map(|pending| &pending.action),
+            Some(TelegramAction::EditMessage { text, .. }) if text == "retried"
+        ));
+
+        let (delivery, shared, _receiver) = stream_delivery_fixture();
+        *super::lock_unpoisoned(&shared) = state;
+        delivery.cancel(ChatId(7), MessageId(80));
+        assert_eq!(
+            retried_receiver.recv_timeout(Duration::from_secs(1)),
+            Ok(Ok(false))
+        );
+        let shared = super::lock_unpoisoned(&shared);
+        assert!(shared.final_retries.is_empty() && shared.pending.is_empty());
     }
 
     #[test]

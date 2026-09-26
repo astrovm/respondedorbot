@@ -777,13 +777,13 @@ impl DurableUpdateQueue for DurableQueue {
         Ok(())
     }
 
-    fn delete_update(&self, update_id: i64) -> Result<bool, Self::Error> {
+    fn delete_updates(&self, update_ids: &[i64]) -> Result<usize, Self::Error> {
         let mut state = self.state.lock().map_err(|_| "synthetic lock failure")?;
         if state.fail == Some("delete") {
             return Err("synthetic delete failure");
         }
-        state.deleted.push(update_id);
-        Ok(true)
+        state.deleted.extend_from_slice(update_ids);
+        Ok(update_ids.len())
     }
 
     fn quarantine_update(&self, update_id: i64, _payload: &str) -> Result<(), Self::Error> {

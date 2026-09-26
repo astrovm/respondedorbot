@@ -3,7 +3,8 @@
 use std::fmt::Display;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
+use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use bot_adapters::billing_schema::BillingSchemaRepository;
@@ -159,6 +160,59 @@ fn report_best_effort(reporter: &dyn OperationalReporter, report: &OperationalRe
     }
 }
 
+const OPERATIONAL_REPORT_QUEUE_CAPACITY: usize = 32;
+
+/// Delivers operational reports from a dedicated thread, so a slow or
+/// rate-limited admin chat never stalls the polling loop. Reports beyond the
+/// bounded queue are dropped (and logged) rather than applying backpressure.
+struct BackgroundReports {
+    sender: Option<SyncSender<OperationalReport>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl BackgroundReports {
+    fn start(reporter: Arc<dyn OperationalReporter>, capacity: usize) -> Self {
+        let (sender, receiver) = mpsc::sync_channel::<OperationalReport>(capacity);
+        let worker = thread::spawn(move || {
+            for report in receiver {
+                report_best_effort(reporter.as_ref(), &report);
+            }
+        });
+        Self {
+            sender: Some(sender),
+            worker: Some(worker),
+        }
+    }
+
+    fn report(&self, report: OperationalReport) {
+        let Some(sender) = &self.sender else {
+            return;
+        };
+        if let Err(TrySendError::Full(report) | TrySendError::Disconnected(report)) =
+            sender.try_send(report)
+        {
+            eprintln!(
+                "dropped operational report, the report queue is unavailable: {}",
+                report.english()
+            );
+        }
+    }
+
+    /// Delivers every queued report before returning.
+    fn shutdown(&mut self) {
+        self.sender.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for BackgroundReports {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
     BillingSchemaRepository::new(config.database_url())
         .ensure_schema()
@@ -215,6 +269,7 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
     })?;
     let mut supervisor =
         BackgroundSupervisor::start(specs, reporter.clone()).map_err(|error| error.to_string())?;
+    let mut reports = BackgroundReports::start(reporter, OPERATIONAL_REPORT_QUEUE_CAPACITY);
 
     let command_transport = ReqwestTelegramTransport::new()
         .map_err(|error| format!("could not construct command publication transport: {error:?}"))?;
@@ -223,7 +278,7 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
             .with_delivery_coordinator(telegram_delivery);
     for diagnostic in publish_commands(&mut command_sink) {
         eprintln!("{}", diagnostic.english());
-        report_best_effort(reporter.as_ref(), &diagnostic);
+        reports.report(diagnostic);
     }
 
     let stopping = Arc::new(AtomicBool::new(false));
@@ -240,7 +295,7 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
                 format!("Telegram polling retry: {failure:?}"),
             );
             eprintln!("{}", report.english());
-            report_best_effort(reporter.as_ref(), &report);
+            reports.report(report);
         },
         |update_id, error| {
             let report = OperationalReport::new(
@@ -248,7 +303,7 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
                 format!("Telegram update {update_id} failed: {error}"),
             );
             eprintln!("{}", report.english());
-            report_best_effort(reporter.as_ref(), &report);
+            reports.report(report);
         },
     );
     if let Err(error) = &polling_result {
@@ -256,10 +311,11 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
             format!("falló el proceso de sondeo de Telegram: {error}"),
             format!("Telegram polling runtime failed: {error}"),
         );
-        report_best_effort(reporter.as_ref(), &report);
+        reports.report(report);
     }
     runtime.shutdown();
     let shutdown_result = supervisor.stop().map_err(|error| error.to_string());
+    reports.shutdown();
     polling_result.and(shutdown_result)
 }
 
@@ -279,8 +335,8 @@ mod tests {
     use bot_core::telegram_actions::TelegramAction;
 
     use super::{
-        build_operational_reporter, interruptible_wait, publish_commands, report_best_effort,
-        retry_delay, run_polling_until,
+        BackgroundReports, build_operational_reporter, interruptible_wait, publish_commands,
+        report_best_effort, retry_delay, run_polling_until,
     };
     use crate::config::ProductionConfig;
     use crate::dispatcher::{ActionReceipt, ActionSink};
@@ -560,6 +616,63 @@ mod tests {
         interruptible_wait(&stopping, Duration::from_secs(1));
         stopping.store(false, Ordering::Release);
         interruptible_wait(&stopping, Duration::ZERO);
+    }
+
+    #[test]
+    fn background_reports_do_not_block_the_caller_and_drop_on_overflow() {
+        struct GatedReporter {
+            entered: std::sync::Mutex<std::sync::mpsc::Sender<std::thread::ThreadId>>,
+            release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+            delivered: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        }
+        impl OperationalReporter for GatedReporter {
+            fn report(&self, report: &OperationalReport) -> Result<(), String> {
+                if let Ok(entered) = self.entered.lock() {
+                    let _ = entered.send(std::thread::current().id());
+                }
+                if let Ok(release) = self.release.lock() {
+                    let _ = release.recv_timeout(Duration::from_secs(5));
+                }
+                if let Ok(mut delivered) = self.delivered.lock() {
+                    delivered.push(report.english().to_owned());
+                }
+                Ok(())
+            }
+        }
+
+        let (entered, entered_receiver) = std::sync::mpsc::channel();
+        let (release, release_receiver) = std::sync::mpsc::channel();
+        let delivered = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut reports = BackgroundReports::start(
+            std::sync::Arc::new(GatedReporter {
+                entered: std::sync::Mutex::new(entered),
+                release: std::sync::Mutex::new(release_receiver),
+                delivered: std::sync::Arc::clone(&delivered),
+            }),
+            1,
+        );
+        let report = |text: &str| OperationalReport::new(text, text);
+
+        let started = std::time::Instant::now();
+        reports.report(report("first"));
+        let reporter_thread = entered_receiver.recv_timeout(Duration::from_secs(1));
+        assert!(matches!(reporter_thread, Ok(id) if id != std::thread::current().id()));
+        // The reporter is blocked on Telegram: one report queues, the next drops.
+        reports.report(report("queued"));
+        reports.report(report("overflow"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        for _ in 0..2 {
+            assert!(release.send(()).is_ok());
+        }
+        reports.shutdown();
+        assert!(
+            delivered
+                .lock()
+                .is_ok_and(|delivered| *delivered == ["first", "queued"])
+        );
+        reports.report(report("after shutdown"));
+        assert!(delivered.lock().is_ok_and(|delivered| delivered.len() == 2));
     }
 
     #[test]
