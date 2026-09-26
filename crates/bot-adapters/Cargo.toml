@@ -13,6 +13,7 @@ base64.workspace = true
 bot-core.workspace = true
 calamine.workspace = true
 chrono.workspace = true
+encoding_rs.workspace = true
 image.workspace = true
 imageproc.workspace = true
 native-tls.workspace = true

@@ -68,15 +68,22 @@ const LINK_REPLACEMENT_DOMAINS: [&str; 7] = [
     "rxddit.com",
 ];
 
+/// Whether `text` is one of the bot's link-fix messages, which followups to
+/// are ignored when `ignore_link_fix_followups` is on.
+#[must_use]
+pub fn is_link_fix_text(text: &str) -> bool {
+    LINK_REPLACEMENT_DOMAINS
+        .iter()
+        .any(|domain| text.contains(domain))
+}
+
 /// Evaluate response routing while preserving explicit config and RNG effects.
 #[must_use]
 pub fn evaluate_response_routing(input: &ResponseRoutingInput) -> ResponseRoutingEvaluation {
     if !input.known_command
         && input.is_reply
         && input.ignore_link_fix_followups
-        && LINK_REPLACEMENT_DOMAINS
-            .iter()
-            .any(|domain| input.reply_text.contains(domain))
+        && is_link_fix_text(&input.reply_text)
     {
         return ResponseRoutingEvaluation::Ignore;
     }
