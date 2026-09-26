@@ -1,9 +1,9 @@
 //! BCRA market-variable normalization and deterministic command formatting.
 
-use regex::Regex;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::locale::Locale;
+use crate::regex_cache::cached_regex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BcraVariable {
@@ -56,8 +56,8 @@ fn normalized(value: &str) -> String {
         .to_lowercase()
 }
 
-fn matches(value: &str, pattern: &str) -> bool {
-    Regex::new(pattern).is_ok_and(|regex| regex.is_match(&normalized(value)))
+fn matches(value: &str, pattern: &'static str) -> bool {
+    cached_regex(pattern).is_some_and(|regex| regex.is_match(&normalized(value)))
 }
 
 fn trimmed(value: f64, decimals: usize) -> String {

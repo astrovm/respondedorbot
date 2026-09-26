@@ -1,5 +1,7 @@
 //! PostgreSQL chat configuration repository.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use bot_core::chat_config::{ChatConfig, ChatConfigError};
 use postgres::Client;
 use serde_json::{Map, Value};
@@ -33,6 +35,9 @@ pub enum ChatConfigRepositoryError {
 
 pub struct ChatConfigRepository {
     pool: PostgresPool,
+    /// Set once the table is known to exist, so hot-path reads and writes skip
+    /// the schema transaction and its global advisory lock.
+    schema_ready: AtomicBool,
 }
 
 impl ChatConfigRepository {
@@ -40,17 +45,28 @@ impl ChatConfigRepository {
     pub fn new(database_url: &str) -> Self {
         Self {
             pool: PostgresPool::shared(database_url),
+            schema_ready: AtomicBool::new(false),
         }
     }
 
     pub fn ensure_schema(&self) -> Result<(), ChatConfigRepositoryError> {
         let mut client = self.connect()?;
-        ensure_schema(&mut client)
+        ensure_schema(&mut client)?;
+        self.schema_ready.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    fn connect_with_schema(&self) -> Result<PooledPostgresClient, ChatConfigRepositoryError> {
+        let mut client = self.connect()?;
+        if !self.schema_ready.load(Ordering::Acquire) {
+            ensure_schema(&mut client)?;
+            self.schema_ready.store(true, Ordering::Release);
+        }
+        Ok(client)
     }
 
     pub fn get(&self, chat_id: &str) -> Result<Option<ChatConfig>, ChatConfigRepositoryError> {
-        let mut client = self.connect()?;
-        ensure_schema(&mut client)?;
+        let mut client = self.connect_with_schema()?;
         let Some(row) = client.query_opt(
             "SELECT config FROM chat_configs WHERE chat_id = $1",
             &[&chat_id],
@@ -86,8 +102,7 @@ impl ChatConfigRepository {
     }
 
     fn merge_value(&self, chat_id: &str, value: &Value) -> Result<(), ChatConfigRepositoryError> {
-        let mut client = self.connect()?;
-        ensure_schema(&mut client)?;
+        let mut client = self.connect_with_schema()?;
         client.execute(
             "INSERT INTO chat_configs (chat_id, config) VALUES ($1, $2) \
              ON CONFLICT (chat_id) DO UPDATE SET \

@@ -1165,7 +1165,7 @@ where
             return Ok(None);
         }
         if message.has_reply {
-            let without_links = regex::Regex::new(r"https?://[^\s]+").ok().map_or_else(
+            let without_links = bot_core::links::HTTP_URL.as_ref().map_or_else(
                 || text.to_owned(),
                 |pattern| pattern.replace_all(text, "").into_owned(),
             );

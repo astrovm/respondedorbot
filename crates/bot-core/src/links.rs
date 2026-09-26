@@ -1,6 +1,7 @@
 //! Pure Telegram link parsing, social-front-end rewriting, and action planning.
 
 use std::collections::HashSet;
+use std::sync::LazyLock;
 
 use regex::Regex;
 use url::Url;
@@ -10,6 +11,15 @@ use crate::telegram_actions::{
     InlineKeyboardButton, InlineKeyboardMarkup, SendMessage, TelegramAction,
 };
 use crate::telegram_input::{ChatId, MessageId};
+
+pub static HTTP_URL: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r"https?://[^\s]+").ok());
+static HTTP_URL_CASELESS: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r"(?i)https?://[^\s]+").ok());
+static X_STATUS_PATH: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r"(?i)^/i/(?:web/)?status/").ok());
+static INSTAGRAM_BUCKET_QUERY: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r"^tg=\d+$").ok());
 
 const REPLACEABLE_HOSTS: [&str; 6] = [
     "twitter.com",
@@ -99,7 +109,7 @@ pub fn is_social_frontend(host: &str) -> bool {
 
 #[must_use]
 pub fn has_replaceable_link(text: &str) -> bool {
-    let Ok(pattern) = Regex::new(r#"https?://[^\s]+"#) else {
+    let Some(pattern) = HTTP_URL.as_ref() else {
         return false;
     };
     pattern.find_iter(text).any(|matched| {
@@ -187,8 +197,8 @@ fn candidate_urls(url: &Url) -> Vec<Url> {
             );
             candidate.set_host(Some(&candidate_host)).ok()?;
             if matches!(host.as_str(), "x.com" | "xcancel.com" | "twitter.com") {
-                let normalized = Regex::new(r"(?i)^/i/(?:web/)?status/")
-                    .ok()?
+                let normalized = X_STATUS_PATH
+                    .as_ref()?
                     .replace(candidate.path(), "/status/")
                     .into_owned();
                 candidate.set_path(&normalized);
@@ -208,7 +218,7 @@ pub fn replace_social_links(
     unix_timestamp: i64,
     mut can_embed: impl FnMut(&str) -> bool,
 ) -> LinkReplacement {
-    let Ok(pattern) = Regex::new(r"(?i)https?://[^\s]+") else {
+    let Some(pattern) = HTTP_URL_CASELESS.as_ref() else {
         return LinkReplacement {
             text: text.to_owned(),
             changed: false,
@@ -260,9 +270,11 @@ fn clean_social_tracking(raw: &str) -> String {
     let keep_instagram_bucket = matches!(
         normalized_host(&url).as_str(),
         "eeinstagram.com" | "vxinstagram.com" | "kkinstagram.com"
-    ) && url
-        .query()
-        .is_some_and(|query| Regex::new(r"^tg=\d+$").is_ok_and(|pattern| pattern.is_match(query)));
+    ) && url.query().is_some_and(|query| {
+        INSTAGRAM_BUCKET_QUERY
+            .as_ref()
+            .is_some_and(|pattern| pattern.is_match(query))
+    });
     if !keep_instagram_bucket {
         url.set_query(None);
     }

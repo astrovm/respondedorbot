@@ -2,7 +2,7 @@
 
 use std::io::Cursor;
 use std::io::Read;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use reqwest::Method;
@@ -12,6 +12,8 @@ use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
 use url::Url;
+
+use crate::http_client::shared_client;
 
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 const MAX_RESPONSE_BYTES: u64 = 1_048_576;
@@ -136,13 +138,20 @@ pub struct ReqwestTelegramTransport {
 
 impl ReqwestTelegramTransport {
     pub fn new() -> Result<Self, TransportFailureKind> {
-        Client::builder()
-            .build()
-            .map(|client| Self {
-                client,
-                api_base: TELEGRAM_API_BASE.to_owned(),
-            })
-            .map_err(|_| TransportFailureKind::Request)
+        // Every worker shares one connection pool, so a reply reuses a warm
+        // TLS connection to Telegram instead of opening a new one per worker.
+        static CLIENT: OnceLock<Client> = OnceLock::new();
+        shared_client(&CLIENT, || {
+            Client::builder()
+                .connect_timeout(Duration::from_secs(5))
+                .tcp_keepalive(Duration::from_secs(30))
+                .build()
+        })
+        .map(|client| Self {
+            client,
+            api_base: TELEGRAM_API_BASE.to_owned(),
+        })
+        .map_err(|_| TransportFailureKind::Request)
     }
 
     #[cfg(test)]

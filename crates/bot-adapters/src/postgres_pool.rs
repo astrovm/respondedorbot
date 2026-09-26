@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::Duration;
 
-use postgres::Client;
+use postgres::{Client, Config};
 use thiserror::Error;
 
 use crate::postgres_connection::postgres_tls_connector;
@@ -28,6 +29,8 @@ struct PostgresPoolInner {
 pub struct PostgresPool {
     inner: Arc<PostgresPoolInner>,
 }
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct PooledPostgresClient {
     client: Option<Client>,
@@ -67,10 +70,13 @@ impl PostgresPool {
             .and_then(|mut idle| idle.pop())
             .map_or_else(
                 || -> Result<Client, PostgresPoolError> {
-                    Ok(Client::connect(
-                        &self.inner.database_url,
-                        postgres_tls_connector(&self.inner.database_url)?,
-                    )?)
+                    let mut config = self.inner.database_url.parse::<Config>()?;
+                    // Fail fast when the database is unreachable instead of
+                    // blocking a worker for the operating system's TCP timeout.
+                    if config.get_connect_timeout().is_none() {
+                        config.connect_timeout(CONNECT_TIMEOUT);
+                    }
+                    Ok(config.connect(postgres_tls_connector(&self.inner.database_url)?)?)
                 },
                 Ok,
             )?;

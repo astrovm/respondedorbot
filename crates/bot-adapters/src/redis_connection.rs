@@ -3,10 +3,15 @@
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::Duration;
 
 use redis::{Commands, ConnectionLike, IntoConnectionInfo, RedisConnectionInfo};
 
 const MAX_IDLE_CONNECTIONS: usize = 16;
+/// Bound how long a worker can hang on an unreachable or stalled Redis
+/// instead of waiting for the operating system's TCP timeout.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct RedisPoolInner {
     client: redis::Client,
@@ -32,7 +37,7 @@ impl RedisPool {
             .lock()
             .ok()
             .and_then(|mut idle| idle.pop())
-            .map_or_else(|| self.inner.client.get_connection(), Ok)?;
+            .map_or_else(|| open_connection(&self.inner.client), Ok)?;
         Ok(RedisPooledConnection {
             connection: Some(connection),
             pool: self.inner.clone(),
@@ -136,6 +141,13 @@ pub(crate) fn pool(endpoint: &RedisEndpoint) -> redis::RedisResult<RedisPool> {
             max_idle_connections: MAX_IDLE_CONNECTIONS,
         }),
     })
+}
+
+fn open_connection(client: &redis::Client) -> redis::RedisResult<redis::Connection> {
+    let connection = client.get_connection_with_timeout(CONNECT_TIMEOUT)?;
+    connection.set_read_timeout(Some(IO_TIMEOUT))?;
+    connection.set_write_timeout(Some(IO_TIMEOUT))?;
+    Ok(connection)
 }
 
 pub(crate) fn client(endpoint: &RedisEndpoint) -> redis::RedisResult<redis::Client> {
