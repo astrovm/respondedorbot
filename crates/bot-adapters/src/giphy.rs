@@ -1,5 +1,6 @@
 //! Blocking Giphy search adapter for greeting GIF pools.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use reqwest::blocking::Client;
@@ -51,14 +52,15 @@ pub struct ReqwestGiphyTransport {
 
 impl ReqwestGiphyTransport {
     pub fn new() -> Result<Self, TransportFailureKind> {
-        Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .map(|client| Self {
-                client,
-                search_url: GIPHY_SEARCH_URL.to_owned(),
-            })
-            .map_err(|_| TransportFailureKind::Request)
+        static CLIENT: OnceLock<Client> = OnceLock::new();
+        crate::http_client::shared_client(&CLIENT, || {
+            Client::builder().timeout(REQUEST_TIMEOUT).build()
+        })
+        .map(|client| Self {
+            client,
+            search_url: GIPHY_SEARCH_URL.to_owned(),
+        })
+        .map_err(|_| TransportFailureKind::Request)
     }
 
     #[cfg(test)]

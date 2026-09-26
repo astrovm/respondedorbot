@@ -721,12 +721,12 @@ mod tests {
             )
         );
 
-        let Some(database_url) = std::env::var("TEST_POSTGRES_URL").ok() else {
+        let Some(database_url) = std::env::var("TEST_DATABASE_URL").ok() else {
             return;
         };
         let separator = if database_url.contains('?') { '&' } else { '?' };
         let missing_schema =
-            format!("{database_url}{separator}options=-csearch_path%3Dcoverage95_missing");
+            format!("{database_url}{separator}options=-csearch_path%3Dmissing_billing_schema");
         let mut repository = BillingRepository::new(&missing_schema);
         assert!(ReconciliationStore::list_unsettled(&mut repository, 1).is_err());
         assert!(

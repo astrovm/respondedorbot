@@ -9,7 +9,13 @@ cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
 ```
 
-CI supplies PostgreSQL and Redis Stack and sets `TEST_POSTGRES_URL`, `TEST_DATABASE_URL`, and `TEST_REDIS_URL`. Tests use synthetic identities, fixed clocks, injected randomness, fake HTTP transports, and reserved database ranges.
+CI supplies PostgreSQL and Redis Stack and sets `TEST_DATABASE_URL`, `TEST_REDIS_HOST`, and `TEST_REDIS_PORT`. Tests that need a service return early when its variable is missing, so set all three locally to run them (plus `TEST_REDIS_PASSWORD` if your Redis needs one); in CI a guard test fails if any is missing. Tests use synthetic identities, fixed clocks, injected randomness, fake HTTP transports, and reserved database ranges.
+
+With the services configured, run tests serially against a fresh database, as CI does, because the billing schema test reruns migrations that rescale every credit row:
+
+```bash
+cargo test --locked --workspace --all-features -- --test-threads=1
+```
 
 ## Coverage gates
 

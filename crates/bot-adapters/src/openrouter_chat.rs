@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use bot_core::provider_pricing::{OPENROUTER_TRANSCRIPTION_MODEL, TokenPricing};
@@ -649,12 +649,15 @@ pub struct ReqwestOpenRouterTransport {
 
 impl ReqwestOpenRouterTransport {
     pub fn new() -> Result<Self, OpenRouterChatError> {
-        Client::builder()
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(90))
-            .build()
-            .map(|client| Self { client })
-            .map_err(|error| OpenRouterChatError::Transport(error.to_string()))
+        static CLIENT: OnceLock<Client> = OnceLock::new();
+        crate::http_client::shared_client(&CLIENT, || {
+            Client::builder()
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(90))
+                .build()
+        })
+        .map(|client| Self { client })
+        .map_err(|error| OpenRouterChatError::Transport(error.to_string()))
     }
 }
 

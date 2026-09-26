@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
@@ -77,7 +77,19 @@ impl ReqwestLinkPreviewTransport {
 
     /// Builds a transport whose every request, body included, ends within
     /// `timeout`; used where a preview is optional context, not the product.
+    /// Clients are shared per timeout, since every dispatcher builds its own
+    /// transport and each TLS client loads the system certificate store.
     pub fn with_timeout(timeout: Duration) -> Result<Self, PreviewFailure> {
+        static CLIENTS: Mutex<Vec<(Duration, Client, Client)>> = Mutex::new(Vec::new());
+        let mut clients = CLIENTS.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((_, following, no_redirect)) =
+            clients.iter().find(|(shared, _, _)| *shared == timeout)
+        {
+            return Ok(Self {
+                following: following.clone(),
+                no_redirect: no_redirect.clone(),
+            });
+        }
         let following = Client::builder()
             .timeout(timeout)
             .connect_timeout(CONNECT_TIMEOUT.min(timeout))
@@ -89,6 +101,7 @@ impl ReqwestLinkPreviewTransport {
             .redirect(Policy::none())
             .build()
             .map_err(classify_error)?;
+        clients.push((timeout, following.clone(), no_redirect.clone()));
         Ok(Self {
             following,
             no_redirect,

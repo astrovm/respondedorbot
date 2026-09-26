@@ -1,5 +1,6 @@
 //! Typed CriptoYa dollar-quote adapter.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use bot_core::devo::DevoQuotes;
@@ -83,14 +84,15 @@ pub struct ReqwestCriptoYaTransport {
 
 impl ReqwestCriptoYaTransport {
     pub fn new() -> Result<Self, TransportFailureKind> {
-        Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .map(|client| Self {
-                client,
-                api_base: DOLLAR_URL.trim_end_matches("/dolar").to_owned(),
-            })
-            .map_err(|_| TransportFailureKind::Request)
+        static CLIENT: OnceLock<Client> = OnceLock::new();
+        crate::http_client::shared_client(&CLIENT, || {
+            Client::builder().timeout(REQUEST_TIMEOUT).build()
+        })
+        .map(|client| Self {
+            client,
+            api_base: DOLLAR_URL.trim_end_matches("/dolar").to_owned(),
+        })
+        .map_err(|_| TransportFailureKind::Request)
     }
 
     #[cfg(test)]

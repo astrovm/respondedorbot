@@ -44,6 +44,18 @@ use serde_json::json;
 use std::time::Duration;
 
 #[test]
+fn ci_configures_the_services_that_integration_tests_skip_without() {
+    // PostgreSQL and Redis tests return early when their variables are
+    // missing, so a renamed variable in CI would silently drop them.
+    if std::env::var_os("CI").is_none() {
+        return;
+    }
+    for name in ["TEST_DATABASE_URL", "TEST_REDIS_HOST", "TEST_REDIS_PORT"] {
+        assert!(std::env::var_os(name).is_some(), "{name} must be set in CI");
+    }
+}
+
+#[test]
 fn production_http_transports_construct_without_contacting_providers() {
     assert!(ReqwestBcraTransport::new().is_ok());
     assert!(ReqwestCriptoYaTransport::new().is_ok());
@@ -80,19 +92,19 @@ fn shared_redis_cache_implements_every_provider_cache_port() {
     };
     let mut cache = RedisJsonCache::new(&endpoint).unwrap_or_else(|_| unreachable!());
 
-    assert!(JsonRequestCache::set(&mut cache, "coverage95:request", "1", 60).is_ok());
+    assert!(JsonRequestCache::set(&mut cache, "adapter-integration:request", "1", 60).is_ok());
     assert!(matches!(
-        JsonRequestCache::get(&mut cache, "coverage95:request"),
+        JsonRequestCache::get(&mut cache, "adapter-integration:request"),
         Ok(Some(value)) if value == "1"
     ));
-    assert!(GiphyPoolCache::set(&mut cache, "coverage95:giphy", "[]", 60).is_ok());
+    assert!(GiphyPoolCache::set(&mut cache, "adapter-integration:giphy", "[]", 60).is_ok());
     assert!(matches!(
-        GiphyPoolCache::get(&mut cache, "coverage95:giphy"),
+        GiphyPoolCache::get(&mut cache, "adapter-integration:giphy"),
         Ok(Some(value)) if value == "[]"
     ));
-    assert!(StockPoolCache::set(&mut cache, "coverage95:stocks", "[]", 60).is_ok());
+    assert!(StockPoolCache::set(&mut cache, "adapter-integration:stocks", "[]", 60).is_ok());
     assert!(matches!(
-        StockPoolCache::get(&mut cache, "coverage95:stocks"),
+        StockPoolCache::get(&mut cache, "adapter-integration:stocks"),
         Ok(Some(value)) if value == "[]"
     ));
 }
@@ -114,7 +126,7 @@ fn message_state_write_refreshes_every_canonical_ttl() {
     };
     let state = RedisMessageState::new(&endpoint).unwrap_or_else(|_| unreachable!());
     let plan = prepare_message_write(
-        "coverage95-ttl",
+        "adapter-integration-ttl",
         "1",
         "synthetic message",
         1,
@@ -154,12 +166,12 @@ fn message_state_write_refreshes_every_canonical_ttl() {
 
 #[test]
 fn billing_operations_report_a_missing_schema_at_each_public_boundary() {
-    let Some(database_url) = std::env::var("TEST_POSTGRES_URL").ok() else {
+    let Some(database_url) = std::env::var("TEST_DATABASE_URL").ok() else {
         return;
     };
     let separator = if database_url.contains('?') { '&' } else { '?' };
     let database_url =
-        format!("{database_url}{separator}options=-csearch_path%3Dcoverage95_missing");
+        format!("{database_url}{separator}options=-csearch_path%3Dmissing_billing_schema");
     let repository = BillingRepository::new(&database_url);
     let metadata = serde_json::Map::new();
 

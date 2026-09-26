@@ -31,6 +31,9 @@ jobs:
       - name: Set up Rust toolchain
         run: rustup show
 
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
 
@@ -66,9 +69,7 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     env:
-      TEST_POSTGRES_URL: postgresql://postgres:synthetic-password@127.0.0.1:5432/respondedorbot_test?sslmode=disable
       TEST_DATABASE_URL: postgresql://postgres:synthetic-password@127.0.0.1:5432/respondedorbot_test?sslmode=disable
-      TEST_REDIS_URL: redis://127.0.0.1:6379/
       TEST_REDIS_HOST: 127.0.0.1
       TEST_REDIS_PORT: 6379
 
@@ -79,8 +80,11 @@ jobs:
       - name: Set up Rust toolchain
         run: rustup show
 
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           tool: cargo-llvm-cov@0.9.1
 
@@ -93,6 +97,7 @@ jobs:
         run: |
           rustup component add llvm-tools-preview
           cargo llvm-cov clean --workspace
+          # Serial: the billing schema test reruns migrations that rescale every credit row.
           cargo llvm-cov --locked --workspace --all-features --no-report -- --test-threads=1
           cargo llvm-cov report -p bot-core --fail-under-lines 95
           cargo llvm-cov report -p bot-adapters --fail-under-lines 95
