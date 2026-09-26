@@ -317,18 +317,31 @@ pub fn poll_once_with<T: TelegramTransport>(
     if let Some(offset) = offset {
         params["offset"] = json!(offset);
     }
-    match request_with(
-        transport,
-        token,
-        "getUpdates",
-        "POST",
-        None,
-        Some(params),
-        request_timeout,
-    )? {
-        TelegramHttpOutcome::Response { status_code, body } => parse_response(status_code, &body),
-        TelegramHttpOutcome::TransportError { kind } => {
-            Ok(PollOutcome::Retry(PollFailure::Transport { failure: kind }))
+    let mut batch_limit = POLL_BATCH_LIMIT;
+    loop {
+        params["limit"] = json!(batch_limit);
+        match request_with(
+            transport,
+            token,
+            "getUpdates",
+            "POST",
+            None,
+            Some(params.clone()),
+            request_timeout,
+        )? {
+            TelegramHttpOutcome::Response { status_code, body } => {
+                return parse_response(status_code, &body);
+            }
+            TelegramHttpOutcome::TransportError {
+                kind: TransportFailureKind::ResponseTooLarge,
+            } if batch_limit > 1 => {
+                // Keep the same offset: acknowledge nothing until a smaller batch is parsed.
+                // This avoids replaying an oversized head forever without weakening the cap.
+                batch_limit = (batch_limit / 2).max(1);
+            }
+            TelegramHttpOutcome::TransportError { kind } => {
+                return Ok(PollOutcome::Retry(PollFailure::Transport { failure: kind }));
+            }
         }
     }
 }
@@ -396,6 +409,112 @@ mod tests {
                 "allowed_updates": ["message", "callback_query", "pre_checkout_query"]
             }))
         );
+    }
+
+    #[test]
+    fn oversized_multibyte_batches_shrink_without_acknowledging_updates()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct LargeBatchTransport(RefCell<Vec<TelegramRequest>>);
+        impl TelegramTransport for LargeBatchTransport {
+            fn send(
+                &self,
+                request: &TelegramRequest,
+            ) -> Result<HttpResponse, TransportFailureKind> {
+                self.0.borrow_mut().push(request.clone());
+                let params = request
+                    .json_payload
+                    .as_ref()
+                    .ok_or(TransportFailureKind::Request)?;
+                let limit = params["limit"]
+                    .as_u64()
+                    .ok_or(TransportFailureKind::Request)?;
+                let offset = params["offset"]
+                    .as_i64()
+                    .ok_or(TransportFailureKind::Request)?;
+                let updates = (0..limit)
+                    .map(|index| {
+                        json!({
+                            "update_id": offset + index as i64,
+                            "message": {"message_id": index, "text": "🦀".repeat(4096),
+                                "chat": {"id": 1, "type": "private"}}
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let body = json!({"ok": true, "result": updates}).to_string();
+                if body.len() > 1_048_576 {
+                    return Err(TransportFailureKind::ResponseTooLarge);
+                }
+                Ok(HttpResponse {
+                    status_code: 200,
+                    body,
+                })
+            }
+        }
+        let transport = LargeBatchTransport(RefCell::new(Vec::new()));
+        let PollOutcome::Updates(updates) = poll_once_with(&transport, "token", Some(42), 30)?
+        else {
+            return Err("the smaller batch should be readable".into());
+        };
+        assert_eq!(updates.len(), 50);
+        assert_eq!(updates.first().ok_or("nonempty batch")?.update_id, 42);
+        assert_eq!(next_offset(&updates, Some(42)), Some(92));
+        let requests = transport.0.borrow();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0]
+                .json_payload
+                .as_ref()
+                .ok_or("polling JSON payload")?["limit"],
+            100
+        );
+        assert_eq!(
+            requests[1]
+                .json_payload
+                .as_ref()
+                .ok_or("polling JSON payload")?["limit"],
+            50
+        );
+        for request in requests.iter() {
+            assert_eq!(
+                request
+                    .json_payload
+                    .as_ref()
+                    .ok_or("polling JSON payload")?["offset"],
+                42
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn an_oversized_single_update_stops_the_bounded_retry() {
+        struct OversizedTransport(RefCell<Vec<u64>>);
+        impl TelegramTransport for OversizedTransport {
+            fn send(
+                &self,
+                request: &TelegramRequest,
+            ) -> Result<HttpResponse, TransportFailureKind> {
+                let params = request
+                    .json_payload
+                    .as_ref()
+                    .ok_or(TransportFailureKind::Request)?;
+                assert_eq!(params["offset"], 42);
+                self.0.borrow_mut().push(
+                    params["limit"]
+                        .as_u64()
+                        .ok_or(TransportFailureKind::Request)?,
+                );
+                Err(TransportFailureKind::ResponseTooLarge)
+            }
+        }
+        let transport = OversizedTransport(RefCell::new(Vec::new()));
+        assert_eq!(
+            poll_once_with(&transport, "token", Some(42), 30),
+            Ok(PollOutcome::Retry(PollFailure::Transport {
+                failure: TransportFailureKind::ResponseTooLarge
+            }))
+        );
+        assert_eq!(*transport.0.borrow(), vec![100, 50, 25, 12, 6, 3, 1]);
     }
 
     #[test]
