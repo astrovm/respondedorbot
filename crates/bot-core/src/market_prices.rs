@@ -2458,6 +2458,23 @@ mod tests {
     }
 
     #[test]
+    fn converts_grouped_amounts_using_multiword_coin_names() {
+        let mut bitcoin_cash = coin("BCH", 250.0);
+        bitcoin_cash.name = "Bitcoin Cash".to_owned();
+        let result = execute_market_price_command(
+            "1.000 bitcoin cash in usd",
+            MarketPriceCommand::Unified,
+            Locale::Es,
+            &mut Crypto {
+                listings: vec![vec![bitcoin_cash]],
+                quotes: vec![],
+            },
+            &mut Stocks::default(),
+        );
+        assert_eq!(result.text, "1000 BITCOINCASH = 250000 USD");
+    }
+
+    #[test]
     fn converts_direct_and_reverse_amounts() {
         let mut direct = coin("USDT", 7.8);
         let Some(quote) = direct.quotes.remove("USD") else {

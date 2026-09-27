@@ -128,21 +128,13 @@ where
             Ok(cached) => Some(cached),
             Err(error) => {
                 diagnostics.push(format!("invalid request cache key {key}: {error}"));
-                return CachedJsonLoad {
-                    data: None,
-                    diagnostics,
-                    refreshed: false,
-                };
+                None
             }
         },
         Ok(None) => None,
         Err(error) => {
             diagnostics.push(format!("could not read request cache key {key}: {error}"));
-            return CachedJsonLoad {
-                data: None,
-                diagnostics,
-                refreshed: false,
-            };
+            None
         }
     };
     if let Some(cached) = &cached
@@ -167,32 +159,25 @@ where
         match fetched {
             Ok(data) => {
                 let value = json!({"timestamp": now_unix, "data": data});
-                let encoded = match serde_json::to_string(&value) {
-                    Ok(encoded) => encoded,
-                    Err(error) => {
-                        diagnostics.push(format!(
-                            "could not encode {request_label} cache value: {error}"
-                        ));
-                        return CachedJsonLoad {
-                            data: cached.map(|cached| cached.data),
-                            diagnostics,
-                            refreshed: false,
-                        };
-                    }
-                };
-                match cache.set(key, &encoded, request_cache_ttl(ttl_seconds)) {
-                    Ok(()) => {
-                        return CachedJsonLoad {
-                            data: value.get("data").cloned(),
-                            diagnostics,
-                            refreshed: true,
-                        };
+                match serde_json::to_string(&value) {
+                    Ok(encoded) => {
+                        if let Err(error) = cache.set(key, &encoded, request_cache_ttl(ttl_seconds))
+                        {
+                            diagnostics
+                                .push(format!("could not write request cache key {key}: {error}"));
+                        }
                     }
                     Err(error) => diagnostics.push(format!(
-                        "could not write request cache key {key} on attempt {}: {error}",
-                        attempt + 1
+                        "could not encode {request_label} cache value: {error}"
                     )),
                 }
+                // The cache is an optimization: a successful response remains usable
+                // even when Redis is unavailable. Only retry upstream failures.
+                return CachedJsonLoad {
+                    data: Some(data),
+                    diagnostics,
+                    refreshed: true,
+                };
             }
             Err(error) => diagnostics.push(format!(
                 "{request_label} attempt {} failed: {error}",
@@ -369,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_json_and_failed_cache_writes_retry_then_fail_closed() {
+    fn invalid_json_retries_but_cache_write_failure_keeps_fresh_response() {
         let mut cache = Cache {
             sets: VecDeque::from([Err("write one"), Err("write two")]),
             ..Cache::default()
@@ -394,9 +379,14 @@ mod tests {
             || responses.pop_front().unwrap_or(Err("missing".to_owned())),
             || {},
         );
-        assert!(load.data.is_none());
+        assert_eq!(load.data, Some(serde_json::json!({"ok":true})));
+        assert!(load.refreshed);
         assert_eq!(load.diagnostics.len(), 2);
+        assert_eq!(cache.writes.len(), 1);
+    }
 
+    #[test]
+    fn cache_read_failure_does_not_prevent_fetching() {
         let mut cache = Cache {
             gets: VecDeque::from([Err("read failed")]),
             ..Cache::default()
@@ -407,15 +397,21 @@ mod tests {
             300,
             100,
             "synthetic request",
-            || Err("must not fetch".to_owned()),
+            || {
+                Ok(JsonHttpResponse {
+                    status_code: 200,
+                    body: r#"{"fresh":true}"#.to_owned(),
+                })
+            },
             || {},
         );
-        assert!(load.data.is_none());
+        assert_eq!(load.data, Some(serde_json::json!({"fresh":true})));
+        assert!(load.refreshed);
         assert!(load.diagnostics[0].contains("read failed"));
     }
 
     #[test]
-    fn malformed_cached_envelope_fails_closed_without_fetching() {
+    fn malformed_cached_envelope_is_replaced_by_fresh_response() {
         let mut cache = Cache {
             gets: VecDeque::from([Ok(Some(r#"{"timestamp":"bad"}"#.to_owned()))]),
             ..Cache::default()
@@ -426,10 +422,16 @@ mod tests {
             300,
             100,
             "synthetic request",
-            || Err("must not fetch".to_owned()),
+            || {
+                Ok(JsonHttpResponse {
+                    status_code: 200,
+                    body: r#"{"fresh":true}"#.to_owned(),
+                })
+            },
             || {},
         );
-        assert!(load.data.is_none());
+        assert_eq!(load.data, Some(serde_json::json!({"fresh":true})));
+        assert!(load.refreshed);
         assert!(load.diagnostics[0].contains("invalid request cache"));
     }
 

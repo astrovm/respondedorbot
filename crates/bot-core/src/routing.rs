@@ -58,7 +58,7 @@ pub enum ResponseRoutingEvaluation {
     NeedsRandomSample,
 }
 
-const LINK_REPLACEMENT_DOMAINS: [&str; 7] = [
+const LINK_REPLACEMENT_DOMAINS: [&str; 8] = [
     "fxtwitter.com",
     "fixupx.com",
     "fxbsky.app",
@@ -66,15 +66,28 @@ const LINK_REPLACEMENT_DOMAINS: [&str; 7] = [
     "vxinstagram.com",
     "kkinstagram.com",
     "rxddit.com",
+    "vxtiktok.com", // Still present in messages sent before TikTok rewrites were disabled.
 ];
 
 /// Whether `text` is one of the bot's link-fix messages, which followups to
 /// are ignored when `ignore_link_fix_followups` is on.
 #[must_use]
 pub fn is_link_fix_text(text: &str) -> bool {
-    LINK_REPLACEMENT_DOMAINS
-        .iter()
-        .any(|domain| text.contains(domain))
+    crate::links::HTTP_URL.as_ref().is_some_and(|regex| {
+        regex.find_iter(text).any(|found| {
+            url::Url::parse(&crate::links::trim_detected_url(found.as_str()))
+                .ok()
+                .and_then(|url| url.host_str().map(str::to_owned))
+                .is_some_and(|host| {
+                    LINK_REPLACEMENT_DOMAINS.iter().any(|domain| {
+                        host == *domain
+                            || host
+                                .strip_suffix(domain)
+                                .is_some_and(|prefix| prefix.ends_with('.'))
+                    })
+                })
+        })
+    })
 }
 
 /// Evaluate response routing while preserving explicit config and RNG effects.
@@ -151,6 +164,35 @@ mod tests {
             random_replies_enabled: true,
             trigger_words: None,
             random_sample: None,
+        }
+    }
+
+    #[test]
+    fn identifies_legacy_link_replies_by_url_host_not_substrings() {
+        for (text, ignored) in [
+            ("https://vxtiktok.com/video/123", true),
+            ("https://www.fxtwitter.com/a/status/1", true),
+            ("https://en.fxtwitter.com/a/status/1", true),
+            ("https://FXTWITTER.COM/a/status/1", true),
+            ("about fxtwitter.com in prose", false),
+            ("https://fxtwitter.com.evil.test/a", false),
+            ("https://notfxtwitter.com/a", false),
+            ("https://example.test/fxtwitter.com", false),
+            ("https://fxtwitter.com@example.test/a", false),
+        ] {
+            let mut value = response_input();
+            value.is_reply = true;
+            value.reply_text = text.to_owned();
+            value.trigger_words = Some(Vec::new());
+            assert_eq!(
+                evaluate_response_routing(&value),
+                if ignored {
+                    ResponseRoutingEvaluation::Ignore
+                } else {
+                    ResponseRoutingEvaluation::Respond
+                },
+                "{text}"
+            );
         }
     }
 

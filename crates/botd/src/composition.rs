@@ -26,7 +26,7 @@ use bot_adapters::criptoya::{
 };
 use bot_adapters::dollar::{
     DollarCache, DollarTransport, ReqwestDollarTransport,
-    TransportFailureKind as DollarTransportFailureKind, load_dollar_market,
+    TransportFailureKind as DollarTransportFailureKind, load_dollar_market_with_references,
 };
 use bot_adapters::finviz::{
     FinvizTransport, ReqwestFinvizTransport, TransportFailureKind as FinvizTransportFailureKind,
@@ -662,12 +662,13 @@ impl<T: DollarTransport, B: BcraTransport, C: DollarCache> DollarMarketSource
         now_unix: i64,
     ) -> DollarMarketLoad {
         let references = load_dollar_references(&self.bcra_transport, &mut self.cache, now_unix);
-        let mut load = load_dollar_market(
+        let mut load = load_dollar_market_with_references(
             &self.transport,
             &mut self.cache,
             hours_ago,
             locale,
             now_unix,
+            Some(&references),
         );
         load.diagnostics.extend(references.diagnostics);
         DollarMarketLoad {

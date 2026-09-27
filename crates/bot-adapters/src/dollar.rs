@@ -314,13 +314,16 @@ fn unwrap_data(value: &Value) -> &Value {
 
 fn tcrm<C: DollarCache>(
     cache: &mut C,
+    fresh: Option<f64>,
     hours_ago: i64,
     now_unix: i64,
     diagnostics: &mut Vec<String>,
 ) -> Option<DollarRate> {
-    let current = cached_value(cache, "tcrm_100", diagnostics)
-        .as_ref()
-        .and_then(|value| number(value.get("data")))?;
+    let current = fresh.or_else(|| {
+        cached_value(cache, "tcrm_100", diagnostics)
+            .as_ref()
+            .and_then(|value| number(value.get("data")))
+    })?;
     let history_key = request_cache_history_key(
         &hour_key(now_unix.saturating_sub(hours_ago.saturating_mul(3_600))),
         "tcrm_100",
@@ -339,10 +342,14 @@ fn tcrm<C: DollarCache>(
 
 fn currency_bands<C: DollarCache>(
     cache: &mut C,
+    now_unix: i64,
     diagnostics: &mut Vec<String>,
 ) -> Option<CurrencyBands> {
     let cached = cached_value(cache, "bcra_currency_band_limits", diagnostics)?;
     let data = unwrap_data(&cached);
+    if !crate::bcra::current_band_date(data, now_unix) {
+        return None;
+    }
     Some(CurrencyBands {
         lower: number(data.get("lower"))?,
         upper: number(data.get("upper"))?,
@@ -416,6 +423,19 @@ pub fn load_dollar_market<T: DollarTransport, C: DollarCache>(
     locale: Locale,
     now_unix: i64,
 ) -> DollarMarketLoad {
+    load_dollar_market_with_references(transport, cache, hours_ago, locale, now_unix, None)
+}
+
+/// Render fresh BCRA references directly so cache outages cannot discard them.
+#[must_use]
+pub fn load_dollar_market_with_references<T: DollarTransport, C: DollarCache>(
+    transport: &T,
+    cache: &mut C,
+    hours_ago: i64,
+    locale: Locale,
+    now_unix: i64,
+    references: Option<&crate::bcra::DollarReferencesLoad>,
+) -> DollarMarketLoad {
     let mut diagnostics = Vec::new();
     if let Some(text) = formatted_snapshot(cache, hours_ago, now_unix, locale, &mut diagnostics) {
         return DollarMarketLoad {
@@ -467,10 +487,24 @@ pub fn load_dollar_market<T: DollarTransport, C: DollarCache>(
         }
     }
     let mut rates = parse_rates(&current, history.as_ref().map(unwrap_data), hours_ago);
-    if let Some(tcrm) = tcrm(cache, hours_ago, now_unix, &mut diagnostics) {
+    if let Some(tcrm) = tcrm(
+        cache,
+        references.and_then(|value| value.tcrm_100),
+        hours_ago,
+        now_unix,
+        &mut diagnostics,
+    ) {
         rates.push(tcrm);
     }
-    let bands = currency_bands(cache, &mut diagnostics);
+    let bands = references
+        .and_then(|value| value.bands.as_ref())
+        .map(|bands| CurrencyBands {
+            lower: bands.lower,
+            upper: bands.upper,
+            lower_change: bands.lower_change,
+            upper_change: bands.upper_change,
+        })
+        .or_else(|| currency_bands(cache, now_unix, &mut diagnostics));
     let text = render_dollar_rates(&rates, bands.as_ref(), hours_ago, locale);
     if let Some(text) = &text {
         store_formatted(cache, hours_ago, now_unix, text, locale, &mut diagnostics);
@@ -488,8 +522,8 @@ mod tests {
 
     use super::{
         DollarCache, DollarTransport, HISTORY_TTL_SECONDS, HttpResponse, ReqwestDollarTransport,
-        TransportFailureKind, hour_key, load_dollar_market, refresh_dollar_snapshot, request_hash,
-        request_key,
+        TransportFailureKind, currency_bands, hour_key, load_dollar_market,
+        refresh_dollar_snapshot, request_hash, request_key,
     };
     use crate::request_cache::RequestCache;
     use bot_core::locale::Locale;
@@ -546,6 +580,70 @@ mod tests {
             } else {
                 self.values.insert(key.to_owned(), value.to_owned());
                 Ok(true)
+            }
+        }
+    }
+
+    #[test]
+    fn fresh_bcra_references_survive_cache_read_and_write_failures() {
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::from([Ok(HttpResponse {
+                status_code: 200,
+                body: body(),
+            })])),
+            calls: RefCell::new(0),
+        };
+        let mut cache = Cache {
+            fail_get: true,
+            fail_set: true,
+            fail_set_if_absent: true,
+            ..Cache::default()
+        };
+        let references = crate::bcra::DollarReferencesLoad {
+            tcrm_100: Some(1410.0),
+            itcrm: None,
+            diagnostics: Vec::new(),
+            bands: Some(bot_core::bcra::BcraBands {
+                lower: 950.0,
+                upper: 1550.0,
+                date: "30/08/24".to_owned(),
+                lower_change: None,
+                upper_change: None,
+            }),
+        };
+        let load = super::load_dollar_market_with_references(
+            &transport,
+            &mut cache,
+            24,
+            Locale::En,
+            1_725_000_000,
+            Some(&references),
+        );
+        let text = load.text.unwrap_or_default();
+        assert!(text.contains("TCRM 100: 1,410"), "{text}");
+        assert!(text.contains("Lower band: 950"), "{text}");
+        assert!(text.contains("Upper band: 1,550"), "{text}");
+        assert!(!load.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn dollar_bands_reject_future_cached_values_in_flat_and_wrapped_payloads() {
+        for date in ["2024-08-30", "2024-08-31"] {
+            for wrapped in [false, true] {
+                let mut cache = Cache::default();
+                let data = serde_json::json!({"date_iso":date,"lower":900,"upper":1500});
+                let payload = if wrapped {
+                    serde_json::json!({"data":data})
+                } else {
+                    data
+                };
+                cache
+                    .values
+                    .insert("bcra_currency_band_limits".to_owned(), payload.to_string());
+                assert_eq!(
+                    currency_bands(&mut cache, 1_725_000_000, &mut Vec::new()).is_some(),
+                    date == "2024-08-30"
+                );
             }
         }
     }
@@ -635,7 +733,7 @@ mod tests {
         );
         cache.values.insert(
             "bcra_currency_band_limits".to_owned(),
-            r#"{"data":{"lower":950,"upper":1550,"lower_change_pct":0.1,"upper_change_pct":0.2}}"#
+            r#"{"data":{"date_iso":"2024-08-30","lower":950,"upper":1550,"lower_change_pct":0.1,"upper_change_pct":0.2}}"#
                 .to_owned(),
         );
         let load = load_dollar_market(&transport, &mut cache, 24, Locale::Es, 1_725_000_000);
