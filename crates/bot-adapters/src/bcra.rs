@@ -21,6 +21,7 @@ const BCRA_URL: &str = "https://api.bcra.gob.ar/estadisticas/v4.0";
 const RISK_URL: &str = "https://bondterminal.com/api/riesgo-pais";
 const ITCRM_URL: &str = "https://www.bcra.gob.ar/Pdfs/PublicacionesEstadisticas/ITCRMSerie.xlsx";
 const TTL: i64 = 300;
+const ITCRM_CACHE_TTL_SECONDS: i64 = 1_800;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BcraRequest {
@@ -141,6 +142,7 @@ pub struct BcraLoad {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DollarReferencesLoad {
+    pub tcrm_100: Option<f64>,
     pub bands: Option<BcraBands>,
     pub itcrm: Option<ItcrmDetails>,
     pub diagnostics: Vec<String>,
@@ -433,6 +435,15 @@ fn series(value: &Value) -> BTreeMap<i64, f64> {
     out
 }
 
+pub(crate) fn current_band_date(value: &Value, now: i64) -> bool {
+    value
+        .get("date_iso")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("date").and_then(Value::as_str))
+        .and_then(parse_date)
+        .is_some_and(|day| day <= ba_day(now))
+}
+
 fn bands<T: BcraTransport, C: RequestCache>(
     transport: &T,
     cache: &mut C,
@@ -440,7 +451,9 @@ fn bands<T: BcraTransport, C: RequestCache>(
     now: i64,
     d: &mut Vec<String>,
 ) -> Option<BcraBands> {
-    if let Some(v) = read(cache, "bcra_currency_band_limits", d) {
+    if let Some(v) = read(cache, "bcra_currency_band_limits", d)
+        && current_band_date(&v, now)
+    {
         return Some(BcraBands {
             lower: number(v.get("lower"))?,
             upper: number(v.get("upper"))?,
@@ -542,6 +555,7 @@ pub fn load_dollar_references<T: BcraTransport, C: RequestCache>(
     let itcrm = itcrm(transport, cache, &mut diagnostics);
     persist_market(cache, &variables, itcrm.as_ref(), now, &mut diagnostics);
     DollarReferencesLoad {
+        tcrm_100: calculate_tcrm(&variables, itcrm.as_ref()),
         bands,
         itcrm,
         diagnostics,
@@ -658,13 +672,26 @@ fn itcrm<T: BcraTransport, C: RequestCache>(
     if let Err(error) = cache.set(
         "latest_itcrm_details",
         &json!({"value":result.value,"date":result.date}).to_string(),
-        1_800,
+        ITCRM_CACHE_TTL_SECONDS,
     ) {
         d.push(format!(
             "could not write BCRA cache latest_itcrm_details: {error}"
         ));
     }
     Some(result)
+}
+
+fn calculate_tcrm(variables: &[BcraVariable], itcrm: Option<&ItcrmDetails>) -> Option<f64> {
+    let wholesale = variables
+        .iter()
+        .find(|value| norm(&value.description).contains("tipo de cambio mayorista"))
+        .and_then(|value| number(Some(&Value::String(value.value.clone()))))?;
+    let index = itcrm?.value;
+    if index <= 0.0 {
+        return None;
+    }
+    let result = wholesale * 100.0 / index;
+    result.is_finite().then_some(result)
 }
 
 fn persist_market<C: RequestCache>(
@@ -689,14 +716,10 @@ fn persist_market<C: RequestCache>(
             d.push(format!("could not write {key}: {e}"));
         }
     }
-    let Some((wholesale, itcrm)) = wholesale
-        .and_then(|v| number(Some(&Value::String(v.value.clone()))))
-        .zip(itcrm)
-        .filter(|(_, i)| i.value != 0.0)
-    else {
+    let Some(tcrm) = calculate_tcrm(variables, itcrm) else {
         return;
     };
-    let payload = json!({"timestamp":now,"data":wholesale*100.0/itcrm.value}).to_string();
+    let payload = json!({"timestamp":now,"data":tcrm}).to_string();
     for key in [
         "tcrm_100".to_owned(),
         request_cache_history_key(&hour_key(now), "tcrm_100"),
@@ -783,11 +806,16 @@ mod tests {
     struct Cache {
         values: HashMap<String, String>,
         fail_sets: bool,
+        fail_gets: bool,
     }
     impl RequestCache for Cache {
         type Error = &'static str;
         fn get(&mut self, k: &str) -> Result<Option<String>, Self::Error> {
-            Ok(self.values.get(k).cloned())
+            if self.fail_gets {
+                Err("synthetic cache read failure")
+            } else {
+                Ok(self.values.get(k).cloned())
+            }
         }
         fn set(&mut self, k: &str, v: &str, _: i64) -> Result<(), Self::Error> {
             if self.fail_sets {
@@ -866,28 +894,38 @@ mod tests {
             Some(1250.75)
         );
 
-        let transport = Transport {
-            responses: RefCell::new(VecDeque::from([
-                response(json!({"results":[{
-                    "categoria":"Principales Variables",
-                    "idVariable":5,
-                    "descripcion":"Tipo de cambio mayorista",
-                    "ultFechaInformada":"2026-09-02",
-                    "ultValorInformado":1450.0
-                }]})),
-                Ok(HttpResponse {
-                    status_code: 200,
-                    body: bytes,
-                }),
-            ])),
-        };
-        let mut cache = Cache::default();
-        let load = load_dollar_references(&transport, &mut cache, 1_788_321_600);
-        assert_eq!(
-            load.itcrm.as_ref().map(|details| details.value),
-            Some(1250.75)
-        );
-        assert!(cache.values.contains_key("latest_itcrm_details"));
+        let mut latest_itcrm = None;
+        for offline in [false, true] {
+            let transport = Transport {
+                responses: RefCell::new(VecDeque::from([
+                    response(json!({"results":[{
+                        "categoria":"Principales Variables",
+                        "idVariable":5,
+                        "descripcion":"Tipo de cambio mayorista",
+                        "ultFechaInformada":"2026-09-02",
+                        "ultValorInformado":1450.0
+                    }]})),
+                    Ok(HttpResponse {
+                        status_code: 200,
+                        body: bytes.clone(),
+                    }),
+                ])),
+            };
+            let mut cache = Cache {
+                fail_gets: offline,
+                fail_sets: offline,
+                ..Cache::default()
+            };
+            let load = load_dollar_references(&transport, &mut cache, 1_788_321_600);
+            assert_eq!(
+                load.itcrm.as_ref().map(|details| details.value),
+                Some(1250.75)
+            );
+            assert_eq!(cache.values.contains_key("latest_itcrm_details"), !offline);
+            assert_eq!(load.tcrm_100, Some(1450.0 * 100.0 / 1250.75));
+            assert_eq!(load.diagnostics.is_empty(), !offline);
+            latest_itcrm = load.itcrm;
+        }
 
         let mut failing_cache = Cache {
             fail_sets: true,
@@ -901,7 +939,7 @@ mod tests {
                 value: "1450.0".to_owned(),
                 date: "2026-09-02".to_owned(),
             }],
-            load.itcrm.as_ref(),
+            latest_itcrm.as_ref(),
             1_788_321_600,
             &mut diagnostics,
         );
@@ -1054,6 +1092,32 @@ mod tests {
     }
 
     #[test]
+    fn rejects_future_or_undated_band_cache_entries() {
+        let now = 1_758_297_600;
+        for (date, expected) in [
+            (Some("20/09/25"), false),
+            (Some("19/09/25"), true),
+            (Some("18/09/25"), true),
+            (Some("invalid"), false),
+            (None, false),
+        ] {
+            let transport = Transport {
+                responses: RefCell::new(VecDeque::new()),
+            };
+            let mut cache = Cache::default();
+            cache.values.insert(
+                "bcra_currency_band_limits".to_owned(),
+                json!({"date":date,"lower":900,"upper":1500}).to_string(),
+            );
+            assert_eq!(
+                bands(&transport, &mut cache, &[], now, &mut Vec::new()).is_some(),
+                expected,
+                "date={date:?}"
+            );
+        }
+    }
+
+    #[test]
     fn dollar_references_load_without_running_the_full_bcra_command() {
         let variables = json!({"results":[{"categoria":"Principales Variables","idVariable":1187,"descripcion":"Régimen de bandas cambiarias. Límite inferior","ultFechaInformada":"2025-09-19","ultValorInformado":944.32},{"categoria":"Principales Variables","idVariable":1188,"descripcion":"Régimen de bandas cambiarias. Límite superior","ultFechaInformada":"2025-09-19","ultValorInformado":1481.7},{"categoria":"Principales Variables","idVariable":5,"descripcion":"Tipo de cambio mayorista","ultFechaInformada":"2025-09-19","ultValorInformado":1450.0}]});
         let lower = json!({"results":[{"detalle":[{"fecha":"2025-09-18","valor":930},{"fecha":"2025-09-19","valor":944.32}]}]});
@@ -1071,11 +1135,17 @@ mod tests {
             json!({"value":100.0,"date":"19/09/25"}).to_string(),
         );
 
+        cache.values.insert(
+            "bcra_currency_band_limits".to_owned(),
+            json!({"date":"20/09/25","date_iso":"2025-09-20","lower":9999,"upper":99999})
+                .to_string(),
+        );
         let load = load_dollar_references(&transport, &mut cache, 1_758_297_600);
 
         assert_eq!(load.bands.as_ref().map(|bands| bands.lower), Some(944.32));
         assert_eq!(load.bands.as_ref().map(|bands| bands.upper), Some(1481.7));
         assert_eq!(load.itcrm.as_ref().map(|itcrm| itcrm.value), Some(100.0));
+        assert_eq!(load.tcrm_100, Some(1450.0));
         assert!(cache.values.contains_key("bcra_currency_band_limits"));
         assert!(cache.values.contains_key("tcrm_100"));
     }

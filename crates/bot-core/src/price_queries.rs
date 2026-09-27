@@ -3,8 +3,7 @@
 use regex::{Regex, RegexBuilder};
 use std::sync::OnceLock;
 
-const AMOUNT_CONVERSION_PATTERN: &str =
-    r"^\s*([0-9]+(?:[\.,][0-9]+)?)\s+(\$?[a-zA-Z0-9]+)\s+(?:in|to|a|en)\s+(\$?[a-zA-Z0-9]+)\s*$";
+const AMOUNT_CONVERSION_PATTERN: &str = r"^\s*([0-9][0-9.,]*)\s+(\$?[a-zA-Z0-9]+(?:\s+[a-zA-Z0-9]+)*?)\s+(?:in|to|a|en)\s+(\$?[a-zA-Z0-9]+)\s*$";
 const CONVERSION_ONLY_PATTERN: &str = r"^\s*(?:in|to|a|en)\s+(\$?[a-zA-Z0-9]+)\s*$";
 const CONVERSION_SPLIT_PATTERN: &str = r"\s+(?:in|to|a|en)\s+";
 const PROVIDER_SCOPE_PATTERN: &str = r"^\s*(crypto|stock)\s*:\s*(.*?)\s*$";
@@ -113,15 +112,63 @@ fn cached_regex(
 fn parse_amount_conversion(text: &str) -> Option<AmountConversion> {
     let regex = cached_regex(&AMOUNT_CONVERSION_REGEX, AMOUNT_CONVERSION_PATTERN)?;
     let captures = regex.captures(text)?;
-    let amount_text = captures.get(1)?.as_str().replace(',', ".");
+    let amount = parse_conversion_amount(captures.get(1)?.as_str())?;
     let source_symbol = normalize_price_symbol(captures.get(2)?.as_str());
     let target_symbol = normalize_price_symbol(captures.get(3)?.as_str());
     Some(AmountConversion {
-        amount: amount_text.parse().ok()?,
+        amount,
         source_symbol,
         target_parameter: price_query_parameter(&target_symbol),
         target_symbol,
     })
+}
+
+// Accept comma/dot decimals and conventional three-digit grouping. A lone
+// separator followed by three digits means grouping unless the integer part is
+// zero or longer than three digits; e.g. 1.000 = 1000 and 0.001 = 0.001.
+fn parse_conversion_amount(raw: &str) -> Option<f64> {
+    let grouped = |value: &str, separator: char| {
+        let mut parts = value.split(separator);
+        let first = parts.next().unwrap_or_default();
+        !first.is_empty()
+            && first.len() <= 3
+            && !first.starts_with('0')
+            && first.bytes().all(|byte| byte.is_ascii_digit())
+            && parts.clone().next().is_some()
+            && parts.all(|part| part.len() == 3 && part.bytes().all(|byte| byte.is_ascii_digit()))
+    };
+    let normalized = match (raw.rfind('.'), raw.rfind(',')) {
+        (Some(dot), Some(comma)) => {
+            let (decimal, separator) = if dot > comma { ('.', ',') } else { (',', '.') };
+            let (integer, fraction) = raw.rsplit_once(decimal)?;
+            if !grouped(integer, separator)
+                || fraction.is_empty()
+                || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                return None;
+            }
+            format!("{}.{}", integer.replace(separator, ""), fraction)
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            let separator = if raw.contains('.') { '.' } else { ',' };
+            if grouped(raw, separator) {
+                raw.replace(separator, "")
+            } else {
+                let (integer, fraction) = raw.split_once(separator)?;
+                if integer.is_empty()
+                    || fraction.is_empty()
+                    || !integer.bytes().all(|byte| byte.is_ascii_digit())
+                    || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    return None;
+                }
+                format!("{integer}.{fraction}")
+            }
+        }
+        (None, None) => raw.to_owned(),
+    };
+    let amount = normalized.parse::<f64>().ok()?;
+    amount.is_finite().then_some(amount)
 }
 
 fn parse_conversion_only(text: &str) -> (String, String, String) {
@@ -264,6 +311,35 @@ mod tests {
                     target_parameter: "BTC".to_owned(),
                 })
             );
+        }
+    }
+
+    #[test]
+    fn parses_grouped_amounts_and_multiword_asset_names() {
+        for (raw, amount) in [
+            ("1.000", 1000.0),
+            ("1,000", 1000.0),
+            ("1.234.567,89", 1234567.89),
+            ("1,234,567.89", 1234567.89),
+            ("0.001", 0.001),
+            ("0,125", 0.125),
+            ("1234.567", 1234.567),
+        ] {
+            assert_eq!(
+                parse_price_query(&format!("{raw} bitcoin cash in usd"), &timeframes()),
+                PriceQuery::AmountConversion(AmountConversion {
+                    amount,
+                    source_symbol: "BITCOINCASH".to_owned(),
+                    target_symbol: "USD".to_owned(),
+                    target_parameter: "USD".to_owned()
+                })
+            );
+        }
+        for raw in ["1,,000", "1.23.456", "1,234.5.6", "1.234,", "1..2"] {
+            assert!(matches!(
+                parse_price_query(&format!("{raw} BTC in USD"), &timeframes()),
+                PriceQuery::Assets { .. }
+            ));
         }
     }
 
