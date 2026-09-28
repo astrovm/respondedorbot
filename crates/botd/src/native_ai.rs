@@ -23,7 +23,7 @@ use bot_core::provider_pricing::{DEEPSEEK_MODEL, TokenPricing};
 use bot_core::scheduled_tasks::ScheduledTask;
 use bot_core::telegram_actions::{SendMessage, TelegramAction};
 use bot_core::telegram_input::ChatId;
-use chrono::{DateTime, FixedOffset, Utc};
+use chrono::{DateTime, FixedOffset, Offset, Utc};
 use serde_json::{Map, Value, json};
 use thiserror::Error;
 
@@ -334,11 +334,8 @@ fn formatted_date(timezone_offset_hours: i64, locale: Locale) -> String {
     let utc =
         DateTime::<Utc>::from_timestamp(unix_seconds, 0).unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
     let seconds = timezone_offset_hours.clamp(-23, 23).saturating_mul(3_600) as i32;
-    let date = FixedOffset::east_opt(seconds).map_or_else(
-        || utc.date_naive(),
-        |offset| utc.with_timezone(&offset).date_naive(),
-    );
-    format_date(date, locale)
+    let offset = FixedOffset::east_opt(seconds).unwrap_or(Utc.fix());
+    format_date(utc.with_timezone(&offset).date_naive(), locale)
 }
 
 pub trait TaskCreditStore {
@@ -423,6 +420,16 @@ pub enum NativeTaskBillingError {
     MissingUser,
 }
 
+impl NativeTaskBillingError {
+    fn store(error: impl std::fmt::Display) -> Self {
+        Self::Store(error.to_string())
+    }
+
+    fn estimate(error: ReserveEstimateError) -> Self {
+        Self::Estimate(error.to_string())
+    }
+}
+
 pub struct PostgresTaskBilling<Store> {
     store: Store,
     model: String,
@@ -480,7 +487,7 @@ impl<Store> PostgresTaskBilling<Store> {
         }
         self.store
             .settle_once(user_id, &operation_id, amount, &settlement)
-            .map_err(|error| NativeTaskBillingError::Store(error.to_string()))?;
+            .map_err(NativeTaskBillingError::store)?;
         Ok(())
     }
 
@@ -506,12 +513,12 @@ impl<Store> PostgresTaskBilling<Store> {
             });
             self.store
                 .record_segment(user_id, &metadata)
-                .map_err(|error| NativeTaskBillingError::Store(error.to_string()))?;
+                .map_err(NativeTaskBillingError::store)?;
         }
         let durable_segments = self
             .store
             .list_segments(user_id, &operation_id)
-            .map_err(|error| NativeTaskBillingError::Store(error.to_string()))?;
+            .map_err(NativeTaskBillingError::store)?;
         if durable_segments.is_empty() {
             return self.settle_amount(task, execution_id, &[], reason, 0, None);
         }
@@ -523,7 +530,9 @@ impl<Store> PostgresTaskBilling<Store> {
         let amount = pricing
             .get("charged_credit_units")
             .and_then(Value::as_i64)
-            .ok_or_else(|| NativeTaskBillingError::Pricing("missing charge total".to_owned()))?;
+            .ok_or(NativeTaskBillingError::Pricing(String::from(
+                "missing charge total",
+            )))?;
         self.settle_amount(
             task,
             execution_id,
@@ -579,10 +588,9 @@ impl<Store: TaskCreditStore> TaskBilling for PostgresTaskBilling<Store> {
             &self.model,
             &pricing,
         )
-        .map_err(|error| NativeTaskBillingError::Estimate(error.to_string()))?;
+        .map_err(NativeTaskBillingError::estimate)?;
         let amount = if self.web_search_enabled {
-            add_task_web_search_reserve(chat_amount)
-                .map_err(|error| NativeTaskBillingError::Estimate(error.to_string()))?
+            add_task_web_search_reserve(chat_amount).map_err(NativeTaskBillingError::estimate)?
         } else {
             chat_amount
         };
@@ -609,7 +617,7 @@ impl<Store: TaskCreditStore> TaskBilling for PostgresTaskBilling<Store> {
                 &idempotency_key,
                 &operation_id,
             )
-            .map_err(|error| NativeTaskBillingError::Store(error.to_string()))?;
+            .map_err(NativeTaskBillingError::store)?;
         if result.ok {
             return Ok(TaskReserveOutcome::Authorized);
         }
@@ -708,9 +716,9 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     use super::{
-        ActionTaskMessenger, OpenRouterTaskProvider, PostgresTaskBilling, TaskAiProvider,
-        TaskBilling, TaskCreditStore, TaskMessenger, TaskPromptMessage, TaskReserveOutcome,
-        reservation_pricing_for_model,
+        ActionTaskMessenger, NativeTaskBillingError, NativeTool, OpenRouterTaskProvider,
+        PostgresTaskBilling, TaskAiProvider, TaskBilling, TaskCreditStore, TaskMessenger,
+        TaskPromptMessage, TaskReserveOutcome, reservation_pricing_for_model, validate_request,
     };
     use crate::chat_tool_loop::ToolExecutionResult;
     use crate::dispatcher::{ActionReceipt, ActionSink};
@@ -755,13 +763,17 @@ mod tests {
             self.responses
                 .borrow_mut()
                 .pop_front()
-                .ok_or_else(|| OpenRouterChatError::Transport("missing response".to_owned()))
+                .ok_or(OpenRouterChatError::Transport(
+                    "missing response".to_owned(),
+                ))
         }
     }
 
     fn task(locale: &str) -> ScheduledTask {
+        let id = TaskId::new("task123");
+        let Ok(id) = id else { panic!() };
         ScheduledTask {
-            id: TaskId::new("task123").unwrap_or_else(|error| panic!("task id: {error}")),
+            id,
             chat_id: "-100123".to_owned(),
             text: "synthetic task".to_owned(),
             user_name: "synthetic-user".to_owned(),
@@ -807,16 +819,15 @@ mod tests {
             "synthetic persona",
         )
         .with_web_search(Box::new(Search));
-        let reply = provider
-            .complete(
-                &[TaskPromptMessage {
-                    role: "user",
-                    content: "do it".to_owned(),
-                }],
-                &task("en"),
-                "task123:1000",
-            )
-            .unwrap_or_else(|error| panic!("provider response: {error}"));
+        let reply = provider.complete(
+            &[TaskPromptMessage {
+                role: "user",
+                content: "do it".to_owned(),
+            }],
+            &task("en"),
+            "task123:1000",
+        );
+        let Ok(reply) = reply else { panic!() };
         assert_eq!(reply.text, "synthetic answer");
         assert!(!reply.fallback);
         assert_eq!(reply.billing_segments[0]["model"], "resolved/model");
@@ -830,8 +841,8 @@ mod tests {
         );
         let request = &provider.transport.requests.borrow()[0];
         assert_eq!(request.bearer_token, "synthetic-key");
-        let body: Value = serde_json::from_str(&request.body)
-            .unwrap_or_else(|error| panic!("request json: {error}"));
+        let body = serde_json::from_str::<Value>(&request.body);
+        let Ok(body) = body else { panic!() };
         assert_eq!(body["max_tokens"], 8_192);
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["function"]["name"], "web_search");
@@ -850,8 +861,8 @@ mod tests {
 
     #[test]
     fn reservation_pricing_reports_catalog_lookup_failures() {
-        let pricing = OpenRouterPricingCache::new("synthetic-key", "not-a-url")
-            .unwrap_or_else(|_| unreachable!("pricing cache construction"));
+        let pricing = OpenRouterPricingCache::new("synthetic-key", "not-a-url");
+        let Ok(pricing) = pricing else { panic!() };
         let result = reservation_pricing_for_model("synthetic/model", Some(&pricing));
         assert!(result.is_err());
     }
@@ -862,10 +873,9 @@ mod tests {
             requests: RefCell::new(Vec::new()),
             responses: RefCell::new(VecDeque::new()),
         };
-        let pricing = Arc::new(
-            OpenRouterPricingCache::new("synthetic-key", "not-a-url")
-                .unwrap_or_else(|_| unreachable!("pricing cache construction")),
-        );
+        let pricing = OpenRouterPricingCache::new("synthetic-key", "not-a-url");
+        let Ok(pricing) = pricing else { panic!() };
+        let pricing = Arc::new(pricing);
         let mut provider = OpenRouterTaskProvider::new(
             transport,
             "synthetic-key",
@@ -884,8 +894,8 @@ mod tests {
                 &task("en"),
                 "task123:1000",
             )
-            .err()
-            .unwrap_or_else(|| unreachable!());
+            .err();
+        let Some(failure) = failure else { panic!() };
         assert_eq!(failure.source, OpenRouterChatError::InvalidBaseUrl);
         assert!(failure.billing_segments.is_empty());
         assert!(provider.transport.requests.borrow().is_empty());
@@ -945,16 +955,15 @@ mod tests {
         )
         .with_web_search(Box::new(Search));
 
-        let reply = provider
-            .complete(
-                &[TaskPromptMessage {
-                    role: "user",
-                    content: "search".to_owned(),
-                }],
-                &task("en"),
-                "task123:1000",
-            )
-            .unwrap_or_else(|error| panic!("provider response: {error}"));
+        let reply = provider.complete(
+            &[TaskPromptMessage {
+                role: "user",
+                content: "search".to_owned(),
+            }],
+            &task("en"),
+            "task123:1000",
+        );
+        let Ok(reply) = reply else { panic!() };
 
         assert_eq!(reply.text, "final answer");
         assert_eq!(reply.billing_segments.len(), 3);
@@ -965,8 +974,8 @@ mod tests {
         );
         let requests = provider.transport.requests.borrow();
         assert_eq!(requests.len(), 2);
-        let followup: Value = serde_json::from_str(&requests[1].body)
-            .unwrap_or_else(|error| panic!("followup json: {error}"));
+        let followup = serde_json::from_str::<Value>(&requests[1].body);
+        let Ok(followup) = followup else { panic!() };
         assert_eq!(followup["messages"][2]["tool_calls"][0]["id"], "call-1");
         assert_eq!(followup["messages"][3]["tool_call_id"], "call-1");
     }
@@ -1016,17 +1025,17 @@ mod tests {
         )
         .with_web_search(Box::new(Search));
 
-        let failure = match provider.complete(
-            &[TaskPromptMessage {
-                role: "user",
-                content: "search".to_owned(),
-            }],
-            &task("en"),
-            "task123:1000",
-        ) {
-            Ok(reply) => panic!("the second provider round must fail: {reply:?}"),
-            Err(failure) => failure,
-        };
+        let failure = provider
+            .complete(
+                &[TaskPromptMessage {
+                    role: "user",
+                    content: "search".to_owned(),
+                }],
+                &task("en"),
+                "task123:1000",
+            )
+            .err();
+        let Some(failure) = failure else { panic!() };
 
         assert_eq!(failure.billing_segments.len(), 2);
         assert_eq!(failure.billing_segments[0]["source"], "openrouter");
@@ -1038,6 +1047,8 @@ mod tests {
 
     #[derive(Default)]
     struct Store {
+        /// Name of the store operation that fails, if any.
+        fail_on: Option<&'static str>,
         charge_result: RefCell<Option<AiChargeResult>>,
         charges: RefCell<Vec<CapturedCharge>>,
         segments: RefCell<Vec<Value>>,
@@ -1055,6 +1066,9 @@ mod tests {
             idempotency_key: &str,
             operation_id: &str,
         ) -> Result<AiChargeResult, Self::Error> {
+            if self.fail_on == Some("charge") {
+                return Err("synthetic charge failure");
+            }
             self.charges.borrow_mut().push((
                 user_id,
                 amount,
@@ -1078,6 +1092,9 @@ mod tests {
         }
 
         fn record_segment(&self, _user_id: i64, metadata: &Value) -> Result<bool, Self::Error> {
+            if self.fail_on == Some("record") {
+                return Err("synthetic record failure");
+            }
             self.segments.borrow_mut().push(metadata.clone());
             Ok(true)
         }
@@ -1087,6 +1104,9 @@ mod tests {
             _user_id: i64,
             operation_id: &str,
         ) -> Result<Vec<Value>, Self::Error> {
+            if self.fail_on == Some("list") {
+                return Err("synthetic list failure");
+            }
             Ok(self
                 .segments
                 .borrow()
@@ -1103,6 +1123,9 @@ mod tests {
             actual_credit_units: i64,
             metadata: &Map<String, Value>,
         ) -> Result<bool, Self::Error> {
+            if self.fail_on == Some("settle") {
+                return Err("synthetic settle failure");
+            }
             self.settlements.borrow_mut().push((
                 user_id,
                 operation_id.to_owned(),
@@ -1146,9 +1169,8 @@ mod tests {
                 "provider_generation_id": "generation-1"
             }
         });
-        billing
-            .settle(&task("es"), "task123:1000", &[segment], "task_success")
-            .unwrap_or_else(|error| panic!("settlement: {error}"));
+        let settled = billing.settle(&task("es"), "task123:1000", &[segment], "task_success");
+        assert_eq!(settled, Ok(()));
         assert_eq!(
             billing.store.segments.borrow()[0]["segment_id"],
             "openrouter:generation-1"
@@ -1194,14 +1216,13 @@ mod tests {
         };
         let mut billing = PostgresTaskBilling::new(store, "deepseek/deepseek-v4.1-flash");
 
-        billing
-            .settle(
-                &task("en"),
-                "task123:1000",
-                &[current_segment],
-                "task_success",
-            )
-            .unwrap_or_else(|error| panic!("settlement: {error}"));
+        let settled = billing.settle(
+            &task("en"),
+            "task123:1000",
+            &[current_segment],
+            "task_success",
+        );
+        assert_eq!(settled, Ok(()));
 
         let settlements = billing.store.settlements.borrow();
         let settlement = &settlements[0];
@@ -1234,9 +1255,8 @@ mod tests {
         };
         let mut billing = PostgresTaskBilling::new(store, "deepseek/deepseek-v4.1-flash");
 
-        billing
-            .refund(&task("en"), "task123:1000", "task_error")
-            .unwrap_or_else(|error| panic!("finalization: {error}"));
+        let refunded = billing.refund(&task("en"), "task123:1000", "task_error");
+        assert_eq!(refunded, Ok(()));
 
         let settlements = billing.store.settlements.borrow();
         let settlement = &settlements[0];
@@ -1264,9 +1284,8 @@ mod tests {
         let mut billing =
             PostgresTaskBilling::new(Store::default(), "deepseek/deepseek-v4.1-flash");
 
-        billing
-            .settle(&task("en"), "task123:1000", &[segment], "task_success")
-            .unwrap_or_else(|error| panic!("pending settlement: {error}"));
+        let settled = billing.settle(&task("en"), "task123:1000", &[segment], "task_success");
+        assert_eq!(settled, Ok(()));
 
         assert_eq!(billing.store.segments.borrow().len(), 1);
         assert!(billing.store.settlements.borrow().is_empty());
@@ -1280,17 +1299,15 @@ mod tests {
         }];
         let mut without_search =
             PostgresTaskBilling::new(Store::default(), "deepseek/deepseek-v4.1-flash");
-        without_search
-            .reserve(&task("en"), "without-search", &prompt)
-            .unwrap_or_else(|error| panic!("reserve without search: {error}"));
+        let reserved = without_search.reserve(&task("en"), "without-search", &prompt);
+        assert_eq!(reserved, Ok(TaskReserveOutcome::Authorized));
         let without_search_amount = without_search.store.charges.borrow()[0].1;
 
         let mut with_search =
             PostgresTaskBilling::new(Store::default(), "deepseek/deepseek-v4.1-flash")
                 .with_web_search(true);
-        with_search
-            .reserve(&task("en"), "with-search", &prompt)
-            .unwrap_or_else(|error| panic!("reserve with search: {error}"));
+        let reserved = with_search.reserve(&task("en"), "with-search", &prompt);
+        assert_eq!(reserved, Ok(TaskReserveOutcome::Authorized));
         let with_search_amount = with_search.store.charges.borrow()[0].1;
 
         assert!(with_search_amount > without_search_amount);
@@ -1311,9 +1328,8 @@ mod tests {
             ..Store::default()
         };
         let mut denied = PostgresTaskBilling::new(denied_store, "deepseek/deepseek-v4.1-flash");
-        let outcome = denied
-            .reserve(&task("en"), "task123:1000", &[])
-            .unwrap_or_else(|error| panic!("reserve: {error}"));
+        let outcome = denied.reserve(&task("en"), "task123:1000", &[]);
+        let Ok(outcome) = outcome else { panic!() };
         assert!(
             matches!(outcome, TaskReserveOutcome::Denied { message } if message.contains("Balance: 1.23"))
         );
@@ -1341,21 +1357,24 @@ mod tests {
     fn refund_is_an_exactly_once_zero_cost_settlement() {
         let mut billing =
             PostgresTaskBilling::new(Store::default(), "deepseek/deepseek-v4.1-flash");
-        billing
-            .refund(&task("es"), "task123:1000", "task_error")
-            .unwrap_or_else(|error| panic!("refund: {error}"));
+        let refunded = billing.refund(&task("es"), "task123:1000", "task_error");
+        assert_eq!(refunded, Ok(()));
         let settlement = &billing.store.settlements.borrow()[0];
         assert_eq!(settlement.2, 0);
         assert_eq!(settlement.3["reason"], "task_error");
     }
 
+    /// Records actions; the flag makes every delivery fail.
     #[derive(Default)]
-    struct Sink(Vec<TelegramAction>);
+    struct Sink(Vec<TelegramAction>, bool);
 
     impl ActionSink for Sink {
         type Error = &'static str;
 
         fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
+            if self.1 {
+                return Err("synthetic delivery failure");
+            }
             self.0.push(action);
             Ok(ActionReceipt { message_id: None })
         }
@@ -1372,5 +1391,295 @@ mod tests {
         ));
         assert!(messenger.send("not-a-chat", "ignored").is_err());
         assert_eq!(messenger.sink.0.len(), 1);
+    }
+
+    #[test]
+    fn reservation_pricing_without_a_catalog_rejects_unknown_models() {
+        assert_eq!(
+            reservation_pricing_for_model("synthetic/unpriced", None),
+            Err("OpenRouter pricing is unavailable for synthetic/unpriced".to_owned())
+        );
+    }
+
+    #[test]
+    fn spanish_task_tool_calls_are_validated_limited_and_answered_without_search() {
+        let call = |id: &str, name: &str, arguments: Value| {
+            json!({
+                "id": id,
+                "type": "function",
+                "function": {"name": name, "arguments": arguments.to_string()}
+            })
+        };
+        let transport = Transport {
+            requests: RefCell::new(Vec::new()),
+            responses: RefCell::new(VecDeque::from([
+                HttpResponse {
+                    status_code: 200,
+                    body: json!({
+                        "id": "generation-tools",
+                        "model": "resolved/model",
+                        "choices": [{
+                            "message": {
+                                "content": null,
+                                "tool_calls": [
+                                    call("call-invalid", "web_search", json!("not an object")),
+                                    call("call-1", "web_search", json!({"query": "uno"})),
+                                    call("call-2", "web_search", json!({"query": "dos"})),
+                                    call("call-3", "web_search", json!({"query": "tres"})),
+                                    call("call-other", "synthetic_tool", json!({})),
+                                ]
+                            },
+                            "finish_reason": "tool_calls"
+                        }],
+                        "usage": {"cost": 0.0001}
+                    })
+                    .to_string(),
+                    headers: BTreeMap::new(),
+                },
+                HttpResponse {
+                    status_code: 200,
+                    body: json!({
+                        "id": "generation-final",
+                        "model": "resolved/model",
+                        "choices": [{
+                            "message": {"content": "respuesta final"},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"cost": 0.0002}
+                    })
+                    .to_string(),
+                    headers: BTreeMap::new(),
+                },
+            ])),
+        };
+        let mut provider = OpenRouterTaskProvider::new(
+            transport,
+            "synthetic-key",
+            "https://synthetic.invalid/api/v1",
+            "deepseek/deepseek-v4.1-flash",
+            "synthetic persona",
+        );
+
+        let reply = provider.complete(
+            &[TaskPromptMessage {
+                role: "user",
+                content: "buscá".to_owned(),
+            }],
+            &task("es"),
+            "task123:1000",
+        );
+        let Ok(reply) = reply else { panic!() };
+
+        assert_eq!(reply.text, "respuesta final");
+        // Only the two model rounds are billable: no search ever ran.
+        assert_eq!(reply.billing_segments.len(), 2);
+        let requests = provider.transport.requests.borrow();
+        assert_eq!(requests.len(), 2);
+        let followup = serde_json::from_str::<Value>(&requests[1].body);
+        let Ok(followup) = followup else { panic!() };
+        assert!(
+            followup["messages"][0]["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("EJECUTANDO TAREA PROGRAMADA:"))
+        );
+        let assistant_calls = followup["messages"][2]["tool_calls"]
+            .as_array()
+            .map(|calls| {
+                calls
+                    .iter()
+                    .map(|call| call["id"].as_str().unwrap_or_default().to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            assistant_calls,
+            ["call-invalid", "call-1", "call-2", "call-3"]
+        );
+        let validation = validate_request(NativeTool::WebSearch, &json!({}), Locale::Es)
+            .err()
+            .unwrap_or_default();
+        assert!(!validation.is_empty());
+        let tool_results = (3..7)
+            .map(|index| {
+                (
+                    followup["messages"][index]["tool_call_id"]
+                        .as_str()
+                        .unwrap_or_default(),
+                    followup["messages"][index]["content"]
+                        .as_str()
+                        .unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tool_results,
+            [
+                ("call-invalid", validation.as_str()),
+                ("call-1", "web_search is unavailable"),
+                ("call-2", "web_search is unavailable"),
+                ("call-3", "web_search usage limit reached"),
+            ]
+        );
+        assert!(followup["messages"].get(7).is_none());
+    }
+
+    #[test]
+    fn spanish_credit_denials_use_the_localized_top_up_message() {
+        let store = Store {
+            charge_result: RefCell::new(Some(AiChargeResult {
+                ok: false,
+                applied: false,
+                reason: None,
+                source: None,
+                amount: 0,
+                user_balance: 123,
+                chat_balance: 0,
+            })),
+            ..Store::default()
+        };
+        let mut billing = PostgresTaskBilling::new(store, "deepseek/deepseek-v4.1-flash");
+        assert_eq!(
+            billing.reserve(&task("es"), "task123:1000", &[]),
+            Ok(TaskReserveOutcome::Denied {
+                message: "Te quedaste seco de créditos de IA, boludo. Saldo: 1.23\n\
+                          Metele /topup si querés que siga laburando"
+                    .to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn task_messenger_reports_sink_delivery_failures() {
+        let mut messenger = ActionTaskMessenger::new(Sink(Vec::new(), true));
+        assert_eq!(
+            messenger.send("-100123", "synthetic message"),
+            Err("synthetic delivery failure".to_owned())
+        );
+        assert!(messenger.sink.0.is_empty());
+    }
+
+    #[test]
+    fn task_billing_surfaces_store_and_pricing_failures() {
+        let billing_for = |fail_on| {
+            PostgresTaskBilling::new(
+                Store {
+                    fail_on: Some(fail_on),
+                    ..Store::default()
+                },
+                "deepseek/deepseek-v4.1-flash",
+            )
+        };
+        let segment = json!({
+            "kind": "chat",
+            "model": "deepseek/deepseek-v4.1-flash",
+            "usage": {"cost": "0.001"},
+            "source": "openrouter",
+            "metadata": {"provider": "openrouter", "provider_generation_id": "generation-1"}
+        });
+        assert_eq!(
+            billing_for("charge").reserve(&task("en"), "task123:1000", &[]),
+            Err(NativeTaskBillingError::Store(
+                "synthetic charge failure".to_owned()
+            ))
+        );
+        assert_eq!(
+            billing_for("record").settle(
+                &task("en"),
+                "task123:1000",
+                std::slice::from_ref(&segment),
+                "task_success"
+            ),
+            Err(NativeTaskBillingError::Store(
+                "synthetic record failure".to_owned()
+            ))
+        );
+        assert_eq!(
+            billing_for("list").refund(&task("en"), "task123:1000", "task_error"),
+            Err(NativeTaskBillingError::Store(
+                "synthetic list failure".to_owned()
+            ))
+        );
+        let mut settle_failure = billing_for("settle");
+        assert_eq!(
+            settle_failure.refund(&task("en"), "task123:1000", "task_error"),
+            Err(NativeTaskBillingError::Store(
+                "synthetic settle failure".to_owned()
+            ))
+        );
+        assert!(settle_failure.store.settlements.borrow().is_empty());
+
+        // A persisted segment that cannot be priced blocks the settlement.
+        let unpriceable = Store {
+            segments: RefCell::new(vec![json!({
+                "operation_id": "task:task123:1000",
+                "segment": "not a billing segment",
+            })]),
+            ..Store::default()
+        };
+        let mut billing = PostgresTaskBilling::new(unpriceable, "deepseek/deepseek-v4.1-flash");
+        assert!(matches!(
+            billing.refund(&task("en"), "task123:1000", "task_error"),
+            Err(NativeTaskBillingError::Pricing(_))
+        ));
+        assert!(billing.store.settlements.borrow().is_empty());
+    }
+
+    type CatalogServer = std::thread::JoinHandle<std::io::Result<()>>;
+
+    /// Serves one catalog response to the pricing cache's first refresh.
+    fn catalog_pricing(
+        catalog: Value,
+    ) -> std::io::Result<(Arc<OpenRouterPricingCache>, CatalogServer)> {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = std::thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let mut request = [0_u8; 8_192];
+            let _ = stream.read(&mut request);
+            let body = catalog.to_string();
+            stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+        });
+        let cache = OpenRouterPricingCache::new("synthetic-key", &format!("http://{address}"));
+        let Ok(cache) = cache else { panic!() };
+        Ok((Arc::new(cache), server))
+    }
+
+    #[test]
+    fn catalog_pricing_rejects_absent_models_and_unrepresentable_prices()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let served = catalog_pricing(json!({
+            "data": [{
+                "id": super::PRIMARY_CHAT_MODEL,
+                "pricing": {"prompt": "1e20", "completion": "1e20"}
+            }]
+        }));
+        let (pricing, server) = served?;
+
+        assert_eq!(
+            reservation_pricing_for_model("synthetic/absent", Some(&pricing)),
+            Err("OpenRouter catalog has no pricing for synthetic/absent".to_owned())
+        );
+        let estimate = super::estimate_task_reserve_credit_units("synthetic", "en", Some(&pricing));
+        assert!(
+            matches!(&estimate, Err(error) if !error.is_empty()),
+            "{estimate:?}"
+        );
+        let mut billing = PostgresTaskBilling::new(Store::default(), super::PRIMARY_CHAT_MODEL)
+            .with_openrouter_pricing(Arc::clone(&pricing));
+        assert!(matches!(
+            billing.reserve(&task("en"), "task123:1000", &[]),
+            Err(NativeTaskBillingError::Estimate(_))
+        ));
+        assert!(billing.store.charges.borrow().is_empty());
+        assert!(matches!(server.join(), Ok(Ok(()))));
+        Ok(())
     }
 }
