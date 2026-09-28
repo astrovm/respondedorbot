@@ -357,10 +357,9 @@ fn observation(data: &Value, location: &Location, now_unix: i64) -> Option<Weath
         .and_then(|time| time.get(..13));
     let index = select_forecast_hour(&hours, provider_hour, &buenos_aires_hour(now_unix))?;
     let at = |key: &str| hourly.get(key)?.as_array()?.get(index);
-    let visibility_meters = at("visibility")?.as_f64()?;
-    if !visibility_meters.is_finite() {
-        return None;
-    }
+    let visibility_meters = at("visibility")?
+        .as_f64()
+        .filter(|meters| meters.is_finite())?;
     Some(WeatherObservation {
         location: location_label(location),
         apparent_temperature: number_text(at("apparent_temperature")?)?,
@@ -410,6 +409,8 @@ pub fn load_weather<T: WeatherTransport, C: RequestCache>(
 
 #[cfg(test)]
 mod tests {
+    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::convert::Infallible;
@@ -646,10 +647,10 @@ mod tests {
     }
 
     #[test]
-    fn reqwest_transport_preserves_geocoding_and_forecast_contracts() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
-        let server = thread::spawn(move || {
+    fn reqwest_transport_preserves_geocoding_and_forecast_contracts() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
             for (path, parameters) in [
                 (
                     "/geocode",
@@ -671,7 +672,7 @@ mod tests {
                     ],
                 ),
             ] {
-                let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+                let (mut stream, _) = listener.accept()?;
                 let mut request = [0_u8; 4_096];
                 let bytes = stream.read(&mut request).unwrap_or_default();
                 let request = String::from_utf8_lossy(&request[..bytes]);
@@ -680,20 +681,22 @@ mod tests {
                     assert!(request.contains(parameter), "{request}");
                 }
                 let body = r#"{"synthetic":true}"#;
-                write!(
+                let written = write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
-                )
-                .unwrap_or_else(|_| unreachable!());
+                );
+                written?;
             }
+            Ok(())
         });
         let base = format!("http://{address}");
         let transport = ReqwestWeatherTransport::with_urls(
             &format!("{base}/geocode"),
             &format!("{base}/forecast"),
         )
-        .unwrap_or_else(|_| unreachable!());
+        .ok()
+        .ok_or("unexpected error")?;
         assert!(
             transport
                 .get(&WeatherRequest::Geocode {
@@ -710,18 +713,37 @@ mod tests {
                 .is_ok()
         );
         transport.before_retry();
-        assert!(server.join().is_ok());
+        assert!(matches!(server.join(), Ok(Ok(()))));
         let unavailable = ReqwestWeatherTransport::with_urls(
             "http://127.0.0.1:1/geocode",
             "http://127.0.0.1:1/forecast",
         )
-        .unwrap_or_else(|_| unreachable!());
+        .ok()
+        .ok_or("unexpected error")?;
         assert!(
             unavailable
                 .get(&WeatherRequest::Geocode {
                     name: "Synthetic Place".to_owned(),
                 })
                 .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reqwest_failures_are_classified_by_cause() {
+        use crate::web_fetch::reqwest_error_fixtures as fixtures;
+        assert_eq!(
+            fixtures::timeout().map(super::classify_error),
+            Some(super::TransportFailureKind::Timeout)
+        );
+        assert_eq!(
+            fixtures::connection().map(super::classify_error),
+            Some(super::TransportFailureKind::Connection)
+        );
+        assert_eq!(
+            fixtures::request().map(super::classify_error),
+            Some(super::TransportFailureKind::Request)
         );
     }
 }

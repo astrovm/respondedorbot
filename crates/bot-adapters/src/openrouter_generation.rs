@@ -64,7 +64,7 @@ impl ReqwestGenerationTransport {
                 client,
                 generation_url,
             })
-            .map_err(|error| GenerationError::Transport(error.to_string()))
+            .map_err(transport_error)
     }
 
     #[cfg(test)]
@@ -74,6 +74,10 @@ impl ReqwestGenerationTransport {
             transport
         })
     }
+}
+
+fn transport_error(error: reqwest::Error) -> GenerationError {
+    GenerationError::Transport(error.to_string())
 }
 
 fn generation_url(base_url: &str) -> Result<String, GenerationError> {
@@ -93,12 +97,12 @@ impl GenerationTransport for ReqwestGenerationTransport {
             .query(&[("id", &request.generation_id)])
             .bearer_auth(&request.api_key)
             .send()
-            .map_err(|error| GenerationError::Transport(error.to_string()))?;
+            .map_err(transport_error)?;
         let status_code = response.status().as_u16();
         response
             .text()
             .map(|body| HttpResponse { status_code, body })
-            .map_err(|error| GenerationError::Transport(error.to_string()))
+            .map_err(transport_error)
     }
 }
 
@@ -136,12 +140,10 @@ pub fn fetch_with<T: GenerationTransport>(
     parse_response(transport.get(&request)?)
 }
 
-pub fn fetch(api_key: &str, generation_id: &str) -> Result<GenerationOutcome, GenerationError> {
-    fetch_with(&ReqwestGenerationTransport::new()?, api_key, generation_id)
-}
-
 #[cfg(test)]
 mod tests {
+    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
     use std::cell::RefCell;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -165,7 +167,9 @@ mod tests {
             self.response
                 .borrow_mut()
                 .take()
-                .unwrap_or_else(|| Err(GenerationError::Transport("missing response".to_owned())))
+                .unwrap_or(Err(GenerationError::Transport(
+                    "missing response".to_owned(),
+                )))
         }
     }
 
@@ -281,40 +285,37 @@ mod tests {
     }
 
     #[test]
-    fn reqwest_transport_sends_generation_identity_and_credentials() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+    fn reqwest_transport_sends_generation_identity_and_credentials() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
+            let (mut stream, _) = listener.accept()?;
             let mut request = [0_u8; 2_048];
             let bytes = stream.read(&mut request).unwrap_or_default();
             let request = String::from_utf8_lossy(&request[..bytes]);
             assert!(request.starts_with("GET /generation?id=synthetic-id HTTP/1.1"));
             assert!(request.contains("authorization: Bearer synthetic-key"));
             let body = r#"{"data":{"id":"synthetic-id"}}"#;
-            write!(
+            let written = write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
-            )
-            .unwrap_or_else(|_| unreachable!());
+            );
+            written?;
+            Ok(())
         });
         let transport = ReqwestGenerationTransport::with_generation_url(&format!(
             "http://{address}/generation"
-        ))
-        .unwrap_or_else(|_| unreachable!());
-        let response = transport
-            .get(&GenerationRequest {
-                generation_id: "synthetic-id".to_owned(),
-                api_key: "synthetic-key".to_owned(),
-            })
-            .unwrap_or_else(|_| unreachable!());
+        ))?;
+        let response = transport.get(&GenerationRequest {
+            generation_id: "synthetic-id".to_owned(),
+            api_key: "synthetic-key".to_owned(),
+        })?;
         assert_eq!(response.status_code, 200);
         assert_eq!(response.body, r#"{"data":{"id":"synthetic-id"}}"#);
-        assert!(server.join().is_ok());
+        assert!(matches!(server.join(), Ok(Ok(()))));
         let unavailable =
-            ReqwestGenerationTransport::with_generation_url("http://127.0.0.1:1/generation")
-                .unwrap_or_else(|_| unreachable!());
+            ReqwestGenerationTransport::with_generation_url("http://127.0.0.1:1/generation")?;
         assert!(
             unavailable
                 .get(&GenerationRequest {
@@ -323,5 +324,6 @@ mod tests {
                 })
                 .is_err()
         );
+        Ok(())
     }
 }

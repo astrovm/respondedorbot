@@ -86,7 +86,7 @@ impl ReqwestFirecrawlTransport {
             client,
             search_url: SEARCH_URL.to_owned(),
         })
-        .map_err(|error| TransportError::Other(error.to_string()))
+        .map_err(classify_reqwest_error)
     }
 
     #[cfg(test)]
@@ -272,6 +272,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
     use std::cell::RefCell;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -293,6 +295,18 @@ mod tests {
             self.requests.borrow_mut().push(request.clone());
             self.responses.borrow_mut().remove(0)
         }
+    }
+
+    /// Every scenario shares one `search_with` instantiation; retry delays
+    /// are recorded instead of slept.
+    fn search(
+        transport: &FakeTransport,
+        api_key: &str,
+        delays: &RefCell<Vec<u64>>,
+    ) -> Result<SearchOutcome, TransportError> {
+        let record: &dyn Fn(std::time::Duration) =
+            &|delay| delays.borrow_mut().push(delay.as_secs());
+        search_with(transport, api_key, "query", record)
     }
 
     fn response(status_code: u16, body: Value) -> Result<HttpResponse, TransportError> {
@@ -319,24 +333,20 @@ mod tests {
             )]),
             requests: RefCell::new(Vec::new()),
         };
-        let outcome = search_with(&transport, "synthetic-key", "query", |_| {});
-        assert!(outcome.is_ok());
-        let Ok(outcome) = outcome else {
-            return;
-        };
-        assert!(matches!(outcome, SearchOutcome::Success { .. }));
-        if let SearchOutcome::Success {
-            results,
-            credits_used,
-            request_id,
-            ..
-        } = outcome
-        {
-            assert_eq!(results.len(), 1);
-            assert_eq!(results[0].title, "Example Title");
-            assert_eq!(credits_used, json!(2));
-            assert_eq!(request_id, json!("request-1"));
-        }
+        let outcome = search(&transport, "synthetic-key", &RefCell::default());
+        assert_eq!(
+            outcome,
+            Ok(SearchOutcome::Success {
+                query: "query".to_owned(),
+                results: vec![super::SearchResult {
+                    title: "Example Title".to_owned(),
+                    url: "https://example.com".to_owned(),
+                    description: "summary".to_owned(),
+                }],
+                credits_used: json!(2),
+                request_id: json!("request-1"),
+            })
+        );
         assert_eq!(transport.requests.borrow()[0].api_key, "synthetic-key");
     }
 
@@ -351,15 +361,10 @@ mod tests {
             requests: RefCell::new(Vec::new()),
         };
         let delays = RefCell::new(Vec::new());
-        let outcome = search_with(&transport, "key", "query", |delay| {
-            delays.borrow_mut().push(delay.as_secs());
-        });
-        assert!(outcome.is_ok());
-        let Ok(outcome) = outcome else {
-            return;
-        };
-        assert!(matches!(outcome, SearchOutcome::Success { .. }));
+        let outcome = search(&transport, "key", &delays);
+        assert!(matches!(outcome, Ok(SearchOutcome::Success { .. })));
         assert_eq!(*delays.borrow(), vec![1, 2]);
+        assert_eq!(transport.requests.borrow().len(), 3);
     }
 
     #[test]
@@ -373,7 +378,7 @@ mod tests {
                 requests: RefCell::new(Vec::new()),
             };
             assert_eq!(
-                search_with(&transport, "key", "query", |_| {}).ok(),
+                search(&transport, "key", &RefCell::default()).ok(),
                 Some(expected),
             );
         }
@@ -382,12 +387,23 @@ mod tests {
             requests: RefCell::new(Vec::new()),
         };
         assert_eq!(
-            search_with(&http, "key", "query", |_| {}).ok(),
+            search(&http, "key", &RefCell::default()).ok(),
             Some(SearchOutcome::HttpError {
                 status_code: 400,
                 detail: "bad request".to_owned(),
             }),
         );
+        let unexpected = FakeTransport {
+            responses: RefCell::new(vec![Err(TransportError::Other("tls".to_owned()))]),
+            requests: RefCell::new(Vec::new()),
+        };
+        let delays = RefCell::new(Vec::new());
+        assert_eq!(
+            search(&unexpected, "key", &delays),
+            Err(TransportError::Other("tls".to_owned()))
+        );
+        assert!(delays.borrow().is_empty());
+        assert_eq!(unexpected.requests.borrow().len(), 1);
     }
 
     #[test]
@@ -400,7 +416,7 @@ mod tests {
             requests: RefCell::new(Vec::new()),
         };
         assert_eq!(
-            search_with(&invalid, "key", "query", |_| {}).ok(),
+            search(&invalid, "key", &RefCell::default()).ok(),
             Some(SearchOutcome::InvalidJson),
         );
         let rejected = FakeTransport {
@@ -411,7 +427,7 @@ mod tests {
             requests: RefCell::new(Vec::new()),
         };
         assert_eq!(
-            search_with(&rejected, "key", "query", |_| {}).ok(),
+            search(&rejected, "key", &RefCell::default()).ok(),
             Some(SearchOutcome::ApiError {
                 detail: "denied".to_owned(),
             }),
@@ -437,11 +453,11 @@ mod tests {
     }
 
     #[test]
-    fn reqwest_transport_sends_authenticated_bounded_search_payload() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+    fn reqwest_transport_sends_authenticated_bounded_search_payload() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
+            let (mut stream, _) = listener.accept()?;
             let mut request = [0_u8; 8_192];
             let bytes = stream.read(&mut request).unwrap_or_default();
             let request = String::from_utf8_lossy(&request[..bytes]);
@@ -451,27 +467,24 @@ mod tests {
                 r#"{"limit":5,"query":"synthetic query","sources":["web"],"timeout":60000}"#
             ));
             let body = r#"{"success":true,"data":[]}"#;
-            write!(
+            let written = write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
-            )
-            .unwrap_or_else(|_| unreachable!());
+            );
+            written?;
+            Ok(())
         });
         let transport =
-            ReqwestFirecrawlTransport::with_search_url(&format!("http://{address}/search"))
-                .unwrap_or_else(|_| unreachable!());
-        let response = transport
-            .post(&SearchRequest {
-                query: "synthetic query".to_owned(),
-                api_key: "synthetic-key".to_owned(),
-            })
-            .unwrap_or_else(|_| unreachable!());
+            ReqwestFirecrawlTransport::with_search_url(&format!("http://{address}/search"))?;
+        let response = transport.post(&SearchRequest {
+            query: "synthetic query".to_owned(),
+            api_key: "synthetic-key".to_owned(),
+        })?;
         assert_eq!(response.status_code, 200);
         assert_eq!(response.body, r#"{"success":true,"data":[]}"#);
-        assert!(server.join().is_ok());
-        let unavailable = ReqwestFirecrawlTransport::with_search_url("http://127.0.0.1:1/search")
-            .unwrap_or_else(|_| unreachable!());
+        assert!(matches!(server.join(), Ok(Ok(()))));
+        let unavailable = ReqwestFirecrawlTransport::with_search_url("http://127.0.0.1:1/search")?;
         assert!(
             unavailable
                 .post(&SearchRequest {
@@ -480,14 +493,31 @@ mod tests {
                 })
                 .is_err()
         );
-        let malformed = ReqwestFirecrawlTransport::with_search_url("://invalid")
-            .unwrap_or_else(|_| unreachable!());
+        let malformed = ReqwestFirecrawlTransport::with_search_url("://invalid")?;
         assert!(matches!(
             malformed.post(&SearchRequest {
                 query: "synthetic query".to_owned(),
                 api_key: "synthetic-key".to_owned(),
             }),
             Err(TransportError::Other(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn reqwest_failures_are_classified_by_cause() {
+        use crate::web_fetch::reqwest_error_fixtures as fixtures;
+        assert_eq!(
+            fixtures::timeout().map(super::classify_reqwest_error),
+            Some(super::TransportError::Timeout)
+        );
+        assert_eq!(
+            fixtures::connection().map(super::classify_reqwest_error),
+            Some(super::TransportError::Connection)
+        );
+        assert!(matches!(
+            fixtures::request().map(super::classify_reqwest_error),
+            Some(super::TransportError::Other(detail)) if detail.contains("builder error")
         ));
     }
 }

@@ -582,6 +582,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
     use std::cell::RefCell;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -814,12 +816,12 @@ mod tests {
     }
 
     #[test]
-    fn reqwest_transport_builds_dollar_and_exchange_paths() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
-        let server = thread::spawn(move || {
+    fn reqwest_transport_builds_dollar_and_exchange_paths() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
             for path in ["/api/dolar", "/api/USDT/ARS/1000"] {
-                let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+                let (mut stream, _) = listener.accept()?;
                 let mut request = [0_u8; 1_024];
                 let bytes = stream.read(&mut request).unwrap_or_default();
                 assert!(
@@ -827,16 +829,18 @@ mod tests {
                         .starts_with(&format!("GET {path} HTTP/1.1"))
                 );
                 let body = r#"{"synthetic":true}"#;
-                write!(
+                let written = write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
-                )
-                .unwrap_or_else(|_| unreachable!());
+                );
+                written?;
             }
+            Ok(())
         });
         let transport = ReqwestCriptoYaTransport::with_api_base(&format!("http://{address}/api/"))
-            .unwrap_or_else(|_| unreachable!());
+            .ok()
+            .ok_or("unexpected error")?;
         assert!(transport.get(&CriptoYaRequest::Dollar).is_ok());
         assert!(
             transport
@@ -847,10 +851,12 @@ mod tests {
                 })
                 .is_ok()
         );
-        assert!(server.join().is_ok());
+        assert!(matches!(server.join(), Ok(Ok(()))));
         let unavailable = ReqwestCriptoYaTransport::with_api_base("http://127.0.0.1:1/api/")
-            .unwrap_or_else(|_| unreachable!());
+            .ok()
+            .ok_or("unexpected error")?;
         assert!(unavailable.get(&CriptoYaRequest::Dollar).is_err());
+        Ok(())
     }
 
     struct KeyedTransport {
@@ -860,9 +866,10 @@ mod tests {
 
     impl CriptoYaTransport for KeyedTransport {
         fn get(&self, request: &CriptoYaRequest) -> Result<HttpResponse, TransportFailureKind> {
-            if let Ok(mut requests) = self.requests.lock() {
-                requests.push(request.clone());
-            }
+            self.requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(request.clone());
             // Only concurrent calls get past the barrier; a sequential
             // implementation would deadlock here.
             if let Some(barrier) = &self.barrier {
@@ -1014,5 +1021,113 @@ mod tests {
         );
         assert!(load.results[0].is_ok());
         assert!(load.diagnostics[0].contains("invalid CriptoYa cache key"));
+    }
+
+    #[test]
+    fn memory_cache_take_and_claim_follow_the_request_cache_contract() {
+        use crate::request_cache::RequestCache;
+        let mut cache = MemoryCache::default();
+        assert_eq!(cache.set("synthetic", "value", 60), Ok(()));
+        assert_eq!(cache.take("synthetic"), Ok(Some("value".to_owned())));
+        assert_eq!(cache.take("synthetic"), Ok(None));
+        assert_eq!(cache.claim("synthetic", "owner", 60), Ok(true));
+    }
+
+    #[test]
+    fn fetchers_parse_successful_responses_and_surface_exhausted_transports() {
+        let transport = Transport {
+            results: RefCell::new(vec![
+                Ok(HttpResponse {
+                    status_code: 200,
+                    body: r#"{"oficial":{"price":100},"tarjeta":{"price":150},"cripto":{"usdt":{"ask":200,"bid":190}}}"#.to_owned(),
+                }),
+                Ok(HttpResponse {
+                    status_code: 200,
+                    body: r#"{"buenbit":{"totalBid":1458.44}}"#.to_owned(),
+                }),
+            ]),
+            requests: RefCell::new(Vec::new()),
+        };
+        assert_eq!(
+            fetch_dollar_quotes(&transport),
+            DollarQuotesOutcome::Quotes(DevoQuotes {
+                official: 100.0,
+                card: 150.0,
+                usdt_ask: 200.0,
+                usdt_bid: 190.0,
+            })
+        );
+        assert_eq!(
+            fetch_exchange_quotes(&transport, "ARS", ExchangeSide::Bid),
+            ExchangeQuotesOutcome::Quotes(vec![ExchangeQuote {
+                exchange: "buenbit".to_owned(),
+                price: Some(1458.44),
+            }])
+        );
+        assert_eq!(
+            fetch_rulo_market(&transport),
+            RuloMarketOutcome::TransportError(TransportFailureKind::Request)
+        );
+        assert_eq!(transport.requests.borrow().len(), 3);
+    }
+
+    #[test]
+    fn rulo_json_and_exchange_http_failures_are_typed() {
+        assert_eq!(
+            parse_rulo_market(HttpResponse {
+                status_code: 200,
+                body: "not-json".to_owned(),
+            }),
+            RuloMarketOutcome::InvalidJson
+        );
+        assert_eq!(
+            parse_exchange_quotes(
+                HttpResponse {
+                    status_code: 503,
+                    body: String::new(),
+                },
+                ExchangeSide::Ask,
+            ),
+            ExchangeQuotesOutcome::HttpError { status_code: 503 }
+        );
+    }
+
+    #[test]
+    fn exchange_books_must_be_json_objects() {
+        let error = serde_json::from_str::<super::ExchangeBook>("[]")
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        assert!(
+            error.contains("expected an exchange quote object"),
+            "{error}"
+        );
+        assert_eq!(
+            parse_exchange_quotes(
+                HttpResponse {
+                    status_code: 200,
+                    body: r#"["buenbit"]"#.to_owned(),
+                },
+                ExchangeSide::Ask,
+            ),
+            ExchangeQuotesOutcome::InvalidJson
+        );
+    }
+
+    #[test]
+    fn reqwest_failures_are_classified_by_cause() {
+        use crate::web_fetch::reqwest_error_fixtures as fixtures;
+        assert_eq!(
+            fixtures::timeout().map(super::classify_error),
+            Some(super::TransportFailureKind::Timeout)
+        );
+        assert_eq!(
+            fixtures::connection().map(super::classify_error),
+            Some(super::TransportFailureKind::Connection)
+        );
+        assert_eq!(
+            fixtures::request().map(super::classify_error),
+            Some(super::TransportFailureKind::Request)
+        );
     }
 }

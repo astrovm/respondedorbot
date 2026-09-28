@@ -71,7 +71,7 @@ impl ReqwestWebFetchTransport {
                 .build()
         })
         .map(|client| Self { client })
-        .map_err(|error| WebFetchTransportError::Other(error.to_string()))
+        .map_err(classify_error)
     }
 }
 
@@ -169,7 +169,8 @@ pub fn fetch_public_url<T: WebFetchTransport, R: HostResolver>(
     let mut url = normalize_http_url(raw_url).ok_or_else(|| PublicFetchError::Blocked {
         url: raw_url.trim().to_owned(),
     })?;
-    for redirect_count in 0..=FETCH_MAX_REDIRECTS {
+    let mut redirect_count = 0;
+    loop {
         ensure_public(&url, resolver)?;
         let response = transport
             .get(url.as_str())
@@ -197,6 +198,7 @@ pub fn fetch_public_url<T: WebFetchTransport, R: HostResolver>(
                 .ok_or_else(|| PublicFetchError::Blocked {
                     url: location.to_owned(),
                 })?;
+            redirect_count += 1;
             continue;
         }
         if !(200..300).contains(&response.status_code) {
@@ -242,10 +244,6 @@ pub fn fetch_public_url<T: WebFetchTransport, R: HostResolver>(
             truncated: response.truncated || text_truncated,
         });
     }
-    Err(PublicFetchError::Request {
-        url: url.to_string(),
-        detail: "too many redirects".to_owned(),
-    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -674,8 +672,8 @@ fn collapse_whitespace(value: &str) -> String {
 fn decode_html_entities(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
     let mut cursor = 0;
-    while cursor < value.len() {
-        if value.as_bytes()[cursor] == b'&'
+    while let Some(character) = value[cursor..].chars().next() {
+        if character == '&'
             && let Some(relative_end) = value[cursor + 1..].find(';')
             && relative_end <= 12
         {
@@ -687,9 +685,6 @@ fn decode_html_entities(value: &str) -> String {
                 continue;
             }
         }
-        let Some(character) = value[cursor..].chars().next() else {
-            break;
-        };
         output.push(character);
         cursor += character.len_utf8();
     }
@@ -721,6 +716,8 @@ fn truncate_chars(value: &str, limit: usize) -> (String, bool) {
 
 #[cfg(test)]
 mod tests {
+    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
     use std::cell::RefCell;
     use std::io::{Read, Write};
     use std::net::{Ipv4Addr, Ipv6Addr, TcpListener};
@@ -795,35 +792,31 @@ mod tests {
     }
 
     #[test]
-    fn reqwest_transport_preserves_http_metadata_and_bounds_the_body() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+    fn reqwest_transport_preserves_http_metadata_and_bounds_the_body() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
         let body = "x".repeat(FETCH_MAX_BYTES + 32);
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+        let server = thread::spawn(move || -> TestResult {
+            let (mut stream, _) = listener.accept()?;
             let mut request = [0_u8; 4_096];
             let _ = stream.read(&mut request);
             let headers = format!(
                 "HTTP/1.1 302 Found\r\nContent-Type: text/plain\r\nLocation: /next\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
-            stream
-                .write_all(headers.as_bytes())
-                .unwrap_or_else(|_| unreachable!());
-            stream
-                .write_all(body.as_bytes())
-                .unwrap_or_else(|_| unreachable!());
+            stream.write_all(headers.as_bytes())?;
+            stream.write_all(body.as_bytes())?;
+            Ok(())
         });
-        let transport = ReqwestWebFetchTransport::new().unwrap_or_else(|_| unreachable!());
-        let response = transport
-            .get(&format!("http://{address}/start"))
-            .unwrap_or_else(|_| unreachable!());
+        let transport = ReqwestWebFetchTransport::new()?;
+        let response = transport.get(&format!("http://{address}/start"))?;
         assert_eq!(response.status_code, 302);
         assert_eq!(response.content_type, "text/plain");
         assert_eq!(response.location.as_deref(), Some("/next"));
         assert_eq!(response.body.len(), FETCH_MAX_BYTES);
         assert!(response.truncated);
-        assert!(server.join().is_ok());
+        assert!(matches!(server.join(), Ok(Ok(()))));
+        Ok(())
     }
 
     #[test]
@@ -888,7 +881,7 @@ mod tests {
     }
 
     #[test]
-    fn bounds_unicode_text_and_preserves_transport_diagnostics_in_errors() {
+    fn bounds_unicode_text_and_preserves_transport_diagnostics_in_errors() -> TestResult {
         let body = format!(
             "<html><body><p>{}</p></body></html>",
             "á".repeat(FETCH_MAX_CHARS + 10)
@@ -920,19 +913,17 @@ mod tests {
             &Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
             "https://example.com",
         );
-        if let Err(error) = result {
-            assert_eq!(
-                error.public_message(Locale::Es),
-                "no se pudo obtener la URL"
-            );
-            assert_eq!(error.public_message(Locale::En), "could not fetch the URL");
-            assert!(error.to_string().contains("no se pudo"));
-            assert!(
-                matches!(error, PublicFetchError::Request { detail, .. } if detail.contains("timed out"))
-            );
-        } else {
-            assert!(result.is_err(), "synthetic timeout unexpectedly succeeded");
-        }
+        let error = result.err().ok_or("unexpected missing value")?;
+        assert_eq!(
+            error.public_message(Locale::Es),
+            "no se pudo obtener la URL"
+        );
+        assert_eq!(error.public_message(Locale::En), "could not fetch the URL");
+        assert!(error.to_string().contains("no se pudo"));
+        assert!(
+            matches!(error, PublicFetchError::Request { detail, .. } if detail.contains("timed out"))
+        );
+        Ok(())
     }
 
     #[test]
@@ -950,7 +941,7 @@ mod tests {
     }
 
     #[test]
-    fn redirect_http_and_plain_text_boundaries_return_typed_results() {
+    fn redirect_http_and_plain_text_boundaries_return_typed_results() -> TestResult {
         let public = Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]);
 
         let transport = Transport {
@@ -959,7 +950,7 @@ mod tests {
         };
         let error = fetch_public_url(&transport, &public, "https://example.com")
             .err()
-            .unwrap_or_else(|| unreachable!());
+            .ok_or("unexpected missing value")?;
         assert!(error.to_string().contains("no se pudo"));
 
         let mut invalid_redirect = response(302, "");
@@ -985,7 +976,7 @@ mod tests {
         };
         let error = fetch_public_url(&transport, &public, "https://example.com")
             .err()
-            .unwrap_or_else(|| unreachable!());
+            .ok_or("unexpected missing value")?;
         assert_eq!(error.url(), "https://example.com/next-4");
 
         let transport = Transport {
@@ -994,7 +985,7 @@ mod tests {
         };
         let error = fetch_public_url(&transport, &public, "https://example.com")
             .err()
-            .unwrap_or_else(|| unreachable!());
+            .ok_or("unexpected missing value")?;
         assert!(matches!(error, PublicFetchError::Request { detail, .. } if detail == "HTTP 418"));
 
         let mut plain = response(200, "one&nbsp; two");
@@ -1003,10 +994,10 @@ mod tests {
             responses: RefCell::new(vec![Ok(plain)]),
             urls: RefCell::new(Vec::new()),
         };
-        let page = fetch_public_url(&transport, &public, "https://example.com")
-            .unwrap_or_else(|_| unreachable!());
+        let page = fetch_public_url(&transport, &public, "https://example.com")?;
         assert_eq!(page.content, "one two");
         assert_eq!(page.title, None);
+        Ok(())
     }
 
     #[test]
@@ -1108,7 +1099,7 @@ mod tests {
     }
 
     #[test]
-    fn redirect_and_http_failures_preserve_the_effective_url() {
+    fn redirect_and_http_failures_preserve_the_effective_url() -> TestResult {
         let public = Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]);
         let missing_location = Transport {
             responses: RefCell::new(vec![Ok(response(302, ""))]),
@@ -1116,7 +1107,7 @@ mod tests {
         };
         let error = fetch_public_url(&missing_location, &public, "https://example.com/synthetic")
             .err()
-            .unwrap_or_else(|| unreachable!());
+            .ok_or("unexpected missing value")?;
         assert_eq!(error.url(), "https://example.com/synthetic");
         assert!(error.to_string().contains("no se pudo"));
 
@@ -1150,6 +1141,7 @@ mod tests {
         assert_eq!(blocked.url(), "http://localhost/synthetic");
         assert_eq!(blocked.public_message(Locale::Es), "URL no permitida");
         assert_eq!(blocked.public_message(Locale::En), "URL is not allowed");
+        Ok(())
     }
 
     #[test]
@@ -1179,5 +1171,170 @@ mod tests {
         assert_eq!(decode_entity("synthetic"), None);
         assert_eq!(decode_entity("#x110000"), None);
         assert_eq!(normalize_http_url(""), None);
+    }
+
+    #[test]
+    fn reqwest_failures_are_classified_by_cause() {
+        use crate::web_fetch::reqwest_error_fixtures as fixtures;
+        assert_eq!(
+            fixtures::timeout().map(classify_error),
+            Some(WebFetchTransportError::Timeout)
+        );
+        assert_eq!(
+            fixtures::connection().map(classify_error),
+            Some(WebFetchTransportError::Connection)
+        );
+        assert!(matches!(
+            fixtures::request().map(classify_error),
+            Some(WebFetchTransportError::Other(detail)) if detail.contains("builder error")
+        ));
+    }
+
+    #[test]
+    fn public_literal_ips_are_fetched_without_dns_and_unrelated_meta_tags_are_skipped() -> TestResult
+    {
+        let transport = Transport {
+            responses: RefCell::new(vec![Ok(response(
+                200,
+                concat!(
+                    "<html><head><meta name=\"description\" content=\"ignored\">",
+                    "<meta property=\"og:url\" content=\"/canonical\"></head>",
+                    "<body>synthetic</body></html>"
+                ),
+            ))]),
+            urls: RefCell::new(Vec::new()),
+        };
+        let page = fetch_public_url(
+            &transport,
+            &Resolver(Vec::new()),
+            "http://93.184.216.34/page",
+        );
+        let page = page?;
+        assert_eq!(
+            page.canonical_url.as_deref(),
+            Some("http://93.184.216.34/canonical")
+        );
+        assert_eq!(page.content, "synthetic");
+        assert_eq!(*transport.urls.borrow(), ["http://93.184.216.34/page"]);
+        assert!(is_public_http_url(
+            "http://93.184.216.34/",
+            &Resolver(Vec::new())
+        ));
+        assert!(!is_public_http_url(
+            "http://10.0.0.1/",
+            &Resolver(Vec::new())
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn direct_tweets_whose_oembed_fails_report_the_canonical_url() {
+        let transport = Transport {
+            responses: RefCell::new(vec![Ok(response(404, "missing"))]),
+            urls: RefCell::new(Vec::new()),
+        };
+        assert_eq!(
+            fetch_ai_url(
+                &transport,
+                &Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
+                "https://twitter.com/example_user/status/789?s=20",
+            ),
+            Ok(AiFetchOutcome::TweetError {
+                url: "https://x.com/example_user/status/789".to_owned(),
+            })
+        );
+        assert!(transport.urls.borrow()[0].starts_with("https://publish.twitter.com/oembed?"));
+        assert_eq!(
+            extract_first_element_text("<div>no paragraph</div>", "p"),
+            ""
+        );
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_addresses_follow_the_ipv4_policy() {
+        assert!(!is_public_ip(IpAddr::V6(
+            Ipv4Addr::new(10, 0, 0, 1).to_ipv6_mapped()
+        )));
+        assert!(is_public_ip(IpAddr::V6(
+            Ipv4Addr::new(93, 184, 216, 34).to_ipv6_mapped()
+        )));
+    }
+
+    #[test]
+    fn system_resolver_and_truncated_bodies_surface_errors() -> TestResult {
+        assert!(SystemHostResolver.addresses("", 443).is_err());
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
+            let (mut stream, _) = listener.accept()?;
+            let mut request = [0_u8; 4_096];
+            let _ = stream.read(&mut request)?;
+            let truncated = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 100\r\nConnection: close\r\n\r\n<html>";
+            stream.write_all(truncated)?;
+            Ok(())
+        });
+        let transport = ReqwestWebFetchTransport::new()?;
+        assert!(matches!(
+            transport.get(&format!("http://{address}/partial")),
+            Err(WebFetchTransportError::Other(detail)) if !detail.is_empty()
+        ));
+        assert!(matches!(server.join(), Ok(Ok(()))));
+        Ok(())
+    }
+
+    #[test]
+    fn tweet_urls_with_invalid_usernames_or_ids_are_regular_pages() {
+        assert_eq!(
+            canonical_tweet_url("https://x.com/bad-name/status/123"),
+            None
+        );
+        assert_eq!(canonical_tweet_url("https://x.com/user/status/12a"), None);
+        assert_eq!(canonical_tweet_url("https://x.com/user/likes"), None);
+        assert_eq!(
+            canonical_tweet_url("https://twitter.com/good_name/status/123?s=20"),
+            Some("https://x.com/good_name/status/123".to_owned())
+        );
+    }
+}
+
+/// Real `reqwest` errors for exercising adapter error classification without
+/// external network access.
+#[cfg(test)]
+pub(crate) mod reqwest_error_fixtures {
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    use reqwest::blocking::Client;
+
+    fn client(timeout: Duration) -> Option<Client> {
+        Client::builder().no_proxy().timeout(timeout).build().ok()
+    }
+
+    /// A request to a listener that accepts the TCP handshake but never answers.
+    pub(crate) fn timeout() -> Option<reqwest::Error> {
+        let listener = TcpListener::bind("127.0.0.1:0").ok()?;
+        let address = listener.local_addr().ok()?;
+        let error = client(Duration::from_millis(100))?
+            .get(format!("http://{address}/silent"))
+            .send()
+            .err();
+        drop(listener);
+        error
+    }
+
+    /// A request to a local port with no listener.
+    pub(crate) fn connection() -> Option<reqwest::Error> {
+        let address = TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .ok()?;
+        client(Duration::from_secs(5))?
+            .get(format!("http://{address}/closed"))
+            .send()
+            .err()
+    }
+
+    /// A request that fails while building because the URL is invalid.
+    pub(crate) fn request() -> Option<reqwest::Error> {
+        client(Duration::from_secs(5))?.get("http://").send().err()
     }
 }

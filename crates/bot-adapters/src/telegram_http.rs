@@ -311,9 +311,18 @@ pub fn request_with<T: TelegramTransport>(
         json_payload: validate_payload(json_payload)?,
         timeout: Duration::from_secs(timeout_seconds),
     };
-    match transport.send(&request) {
-        Ok(response) => Ok(response_outcome(response.status_code, response.body)),
-        Err(kind) => Ok(TelegramHttpOutcome::TransportError { kind }),
+    Ok(send_with(transport, &request))
+}
+
+/// Send a request whose method, object payloads, and non-zero timeout are
+/// fixed by the caller, so no validation can fail.
+pub fn send_with<T: TelegramTransport>(
+    transport: &T,
+    request: &TelegramRequest,
+) -> TelegramHttpOutcome {
+    match transport.send(request) {
+        Ok(response) => response_outcome(response.status_code, response.body),
+        Err(kind) => TelegramHttpOutcome::TransportError { kind },
     }
 }
 
@@ -432,8 +441,10 @@ pub fn download_file(
 
 #[cfg(test)]
 mod tests {
+    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
     use std::cell::RefCell;
-    use std::io::{Read, Write};
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::Arc;
     use std::thread;
@@ -450,34 +461,27 @@ mod tests {
         download_file_with, multipart_request_with, read_limited, request_with, response_outcome,
     };
 
+    /// Read one HTTP/1.1 request: header lines up to the blank line, then
+    /// exactly `Content-Length` body bytes.
     fn read_complete_http_request(stream: &mut TcpStream) -> Vec<u8> {
+        let mut reader = BufReader::new(stream);
         let mut request = Vec::new();
-        let mut buffer = [0_u8; 4_096];
-        loop {
-            let bytes = stream.read(&mut buffer).unwrap_or_default();
-            if bytes == 0 {
-                break;
+        let mut content_length = 0;
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap_or_default() > 2 {
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                content_length = value.trim().parse().unwrap_or_default();
             }
-            request.extend_from_slice(&buffer[..bytes]);
-
-            let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") else {
-                continue;
-            };
-            let header_end = header_end + 4;
-            let headers = String::from_utf8_lossy(&request[..header_end]);
-            let content_length = headers
-                .lines()
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().ok())
-                        .flatten()
-                })
-                .unwrap_or(0);
-            if request.len() >= header_end + content_length {
-                break;
-            }
+            request.extend_from_slice(line.as_bytes());
+            line.clear();
         }
+        request.extend_from_slice(line.as_bytes());
+        let mut body = vec![0_u8; content_length];
+        let read = reader.read_exact(&mut body);
+        assert!(read.is_ok(), "incomplete synthetic request body");
+        request.extend(body);
         request
     }
 
@@ -840,30 +844,32 @@ mod tests {
     }
 
     #[test]
-    fn document_action_uploads_complete_transcript_through_http() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+    fn document_action_uploads_complete_transcript_through_http() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
         let transcript = "synthetic transcript 🦀\n".repeat(300);
         let expected = transcript.clone();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+        let server = thread::spawn(move || -> TestResult {
+            let (mut stream, _) = listener.accept()?;
             let request = read_complete_http_request(&mut stream);
-            let request = String::from_utf8(request).unwrap_or_else(|_| unreachable!());
+            let request = String::from_utf8(request)?;
             assert!(request.starts_with("POST /botsynthetic-token/sendDocument HTTP/1.1"));
             assert!(request.contains("name=\"document\"; filename=\"transcript.txt\""));
             assert!(request.contains("text/plain; charset=utf-8"));
             assert!(request.contains(&expected));
             assert!(request.contains("name=\"reply_to_message_id\"\r\n\r\n7"));
             let body = r#"{"ok":true,"result":{"message_id":45}}"#;
-            write!(
+            let written = write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
-            )
-            .unwrap_or_else(|_| unreachable!());
+            );
+            written?;
+            Ok(())
         });
         let transport = ReqwestTelegramTransport::with_api_base(&format!("http://{address}"))
-            .unwrap_or_else(|_| unreachable!());
+            .ok()
+            .ok_or("unexpected error")?;
         let outcome = crate::telegram_actions::execute_with(
             &transport,
             "synthetic-token",
@@ -875,20 +881,21 @@ mod tests {
                 caption: "synthetic transcript".to_owned(),
             },
         );
-        assert!(server.join().is_ok());
+        assert!(matches!(server.join(), Ok(Ok(()))));
         assert_eq!(
             outcome,
             Ok(crate::telegram_actions::ActionOutcome::Completed {
                 message_id: Some(45)
             })
         );
+        Ok(())
     }
 
     #[test]
-    fn reqwest_transport_covers_json_multipart_and_binary_http_boundaries() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
-        let server = thread::spawn(move || {
+    fn reqwest_transport_covers_json_multipart_and_binary_http_boundaries() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
             for (expected_line, body) in [
                 (
                     "POST /bot-token/sendMessage?query=value HTTP/1.1",
@@ -903,7 +910,7 @@ mod tests {
                     &[0_u8, 127, 255],
                 ),
             ] {
-                let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+                let (mut stream, _) = listener.accept()?;
                 let request = read_complete_http_request(&mut stream);
                 let request = String::from_utf8_lossy(&request);
                 assert!(request.starts_with(expected_line), "{request}");
@@ -914,18 +921,20 @@ mod tests {
                     assert!(request.contains("name=\"chat_id\""));
                     assert!(request.contains("synthetic-photo"));
                 }
-                write!(
+                let written = write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
-                )
-                .unwrap_or_else(|_| unreachable!());
-                stream.write_all(body).unwrap_or_else(|_| unreachable!());
+                );
+                written?;
+                stream.write_all(body)?;
             }
+            Ok(())
         });
         let reqwest_transport =
             ReqwestTelegramTransport::with_api_base(&format!("http://{address}"))
-                .unwrap_or_else(|_| unreachable!());
+                .ok()
+                .ok_or("unexpected error")?;
         let response = reqwest_transport
             .send(&TelegramRequest {
                 token: "-token".to_owned(),
@@ -935,7 +944,8 @@ mod tests {
                 json_payload: Some(json!({"text":"synthetic"})),
                 timeout: Duration::from_secs(5),
             })
-            .unwrap_or_else(|_| unreachable!());
+            .ok()
+            .ok_or("unexpected error")?;
         assert_eq!(response.body, "json");
         let response = TelegramMultipartTransport::send_multipart(
             &reqwest_transport,
@@ -950,7 +960,8 @@ mod tests {
                 timeout: Duration::from_secs(5),
             },
         )
-        .unwrap_or_else(|_| unreachable!());
+        .ok()
+        .ok_or("unexpected error")?;
         assert_eq!(response.body, "multipart");
         let response = reqwest_transport
             .download(&TelegramFileRequest {
@@ -959,9 +970,10 @@ mod tests {
                 timeout: Duration::from_secs(5),
                 max_bytes: 3,
             })
-            .unwrap_or_else(|_| unreachable!());
+            .ok()
+            .ok_or("unexpected error")?;
         assert_eq!(response.body, [0, 127, 255]);
-        assert!(server.join().is_ok());
+        assert!(matches!(server.join(), Ok(Ok(()))));
 
         let fake = transport(Ok(HttpResponse {
             status_code: 200,
@@ -979,6 +991,24 @@ mod tests {
                 timeout: Duration::from_secs(1),
             }),
             Err(TransportFailureKind::Request)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reqwest_failures_are_classified_by_cause() {
+        use crate::web_fetch::reqwest_error_fixtures as fixtures;
+        assert_eq!(
+            fixtures::timeout().map(super::classify_error),
+            Some(super::TransportFailureKind::Timeout)
+        );
+        assert_eq!(
+            fixtures::connection().map(super::classify_error),
+            Some(super::TransportFailureKind::Connection)
+        );
+        assert_eq!(
+            fixtures::request().map(super::classify_error),
+            Some(super::TransportFailureKind::Request)
         );
     }
 }

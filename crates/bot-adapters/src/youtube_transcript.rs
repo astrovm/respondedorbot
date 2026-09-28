@@ -84,7 +84,7 @@ impl ReqwestYoutubeTranscriptTransport {
             supadata_url: SUPADATA_URL.to_owned(),
             apify_url: APIFY_URL.to_owned(),
         })
-        .map_err(|error| TranscriptTransportError::Other(error.to_string()))
+        .map_err(classify_reqwest_error)
     }
 
     #[cfg(test)]
@@ -383,6 +383,8 @@ fn response_detail(payload: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
     use std::cell::RefCell;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -507,13 +509,36 @@ mod tests {
         jobs: RefCell<Vec<Result<HttpResponse, TranscriptTransportError>>>,
     }
 
-    impl YoutubeTranscriptTransport for PollTransport {
-        fn supadata(&self, _: &str, _: &str) -> Result<HttpResponse, TranscriptTransportError> {
+    /// Every scenario shares one `fetch_supadata_with` instantiation; poll
+    /// delays are recorded instead of slept.
+    fn fetch_recording(
+        transport: &PollTransport,
+        delays: &RefCell<Vec<std::time::Duration>>,
+    ) -> Result<TranscriptOutcome, TranscriptTransportError> {
+        let mut record = |delay| delays.borrow_mut().push(delay);
+        let sleep: &mut dyn FnMut(std::time::Duration) = &mut record;
+        fetch_supadata_with(
+            transport,
+            "synthetic-key",
+            "https://youtu.be/synthetic",
+            sleep,
+        )
+    }
+
+    impl PollTransport {
+        /// Both providers' initial requests share one scripted response.
+        fn start_request(&self) -> Result<HttpResponse, TranscriptTransportError> {
             self.start.borrow_mut().take().unwrap_or_else(|| {
                 Err(TranscriptTransportError::Other(
                     "unexpected start request".to_owned(),
                 ))
             })
+        }
+    }
+
+    impl YoutubeTranscriptTransport for PollTransport {
+        fn supadata(&self, _: &str, _: &str) -> Result<HttpResponse, TranscriptTransportError> {
+            self.start_request()
         }
 
         fn supadata_job(&self, _: &str, _: &str) -> Result<HttpResponse, TranscriptTransportError> {
@@ -521,10 +546,75 @@ mod tests {
         }
 
         fn apify(&self, _: &str, _: &str) -> Result<HttpResponse, TranscriptTransportError> {
-            Err(TranscriptTransportError::Other(
-                "unexpected Apify request".to_owned(),
-            ))
+            self.start_request()
         }
+    }
+
+    #[test]
+    fn start_request_transport_failures_stop_before_polling() {
+        let transport = PollTransport {
+            start: RefCell::new(None),
+            jobs: RefCell::new(Vec::new()),
+        };
+        let delays = RefCell::new(Vec::new());
+        assert_eq!(
+            fetch_recording(&transport, &delays),
+            Err(TranscriptTransportError::Other(
+                "unexpected start request".to_owned()
+            ))
+        );
+        assert!(delays.borrow().is_empty());
+
+        let apify = PollTransport {
+            start: RefCell::new(Some(json_response(
+                200,
+                json!([{"transcript": "synthetic apify text", "language": "es"}]),
+            ))),
+            jobs: RefCell::new(Vec::new()),
+        };
+        assert_eq!(
+            apify
+                .apify("synthetic-key", "synthetic-video")
+                .map(|response| response.status_code),
+            Ok(200)
+        );
+        assert_eq!(
+            apify.apify("synthetic-key", "synthetic-video"),
+            Err(TranscriptTransportError::Other(
+                "unexpected start request".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn provider_errors_without_a_message_use_a_generic_detail() {
+        assert_eq!(response_detail(&json!({})), "transcript unavailable");
+        assert_eq!(
+            response_detail(&json!({"error": {"message": "  quota\n exceeded "}})),
+            "quota exceeded"
+        );
+    }
+
+    #[test]
+    fn supadata_job_urls_must_accept_a_job_path_segment() -> TestResult {
+        let transport = ReqwestYoutubeTranscriptTransport::with_urls(
+            "mailto:synthetic@example.test",
+            "http://127.0.0.1:1/apify",
+        );
+        let transport = transport?;
+        assert_eq!(
+            transport.supadata_job("synthetic-key", "synthetic-job"),
+            Err(TranscriptTransportError::Other(
+                "Supadata transcript URL cannot contain a job path".to_owned()
+            ))
+        );
+        let transport =
+            ReqwestYoutubeTranscriptTransport::with_urls("not a url", "http://127.0.0.1:1/apify")?;
+        assert!(matches!(
+            transport.supadata_job("synthetic-key", "synthetic-job"),
+            Err(TranscriptTransportError::Other(detail)) if detail.contains("relative URL")
+        ));
+        Ok(())
     }
 
     fn json_response(
@@ -551,12 +641,7 @@ mod tests {
             ]),
         };
         let delays = RefCell::new(Vec::new());
-        let outcome = fetch_supadata_with(
-            &transport,
-            "synthetic-key",
-            "https://youtu.be/synthetic",
-            |delay| delays.borrow_mut().push(delay),
-        );
+        let outcome = fetch_recording(&transport, &delays);
         assert_eq!(
             outcome,
             Ok(TranscriptOutcome::Success {
@@ -578,12 +663,7 @@ mod tests {
             ),
         };
         assert!(matches!(
-            fetch_supadata_with(
-                &transport,
-                "synthetic-key",
-                "https://youtu.be/synthetic",
-                |_| {}
-            ),
+            fetch_recording(&transport, &RefCell::default()),
             Ok(TranscriptOutcome::Unavailable { detail }) if detail.contains("within 30 seconds")
         ));
     }
@@ -602,20 +682,15 @@ mod tests {
             start: RefCell::new(Some(json_response(202, json!({"jobId": "synthetic-job"})))),
             jobs: RefCell::new(jobs),
         };
-        let mut polls = 0;
+        let delays = RefCell::new(Vec::new());
         assert_eq!(
-            fetch_supadata_with(
-                &transport,
-                "synthetic-key",
-                "https://youtu.be/synthetic",
-                |_| polls += 1
-            ),
+            fetch_recording(&transport, &delays),
             Ok(TranscriptOutcome::Success {
                 text: "complete synthetic captions".to_owned(),
                 language: "en".to_owned(),
             })
         );
-        assert_eq!(polls, SUPADATA_JOB_POLL_ATTEMPTS);
+        assert_eq!(delays.borrow().len(), SUPADATA_JOB_POLL_ATTEMPTS);
         assert!(transport.jobs.borrow().is_empty());
     }
 
@@ -648,17 +723,12 @@ mod tests {
                 start: RefCell::new(Some(json_response(202, json!({"jobId": "synthetic-job"})))),
                 jobs: RefCell::new(vec![Ok(response)]),
             };
-            let mut polls = 0;
-            let result = fetch_supadata_with(
-                &transport,
-                "synthetic-key",
-                "https://youtu.be/synthetic",
-                |_| polls += 1,
-            );
+            let delays = RefCell::new(Vec::new());
+            let result = fetch_recording(&transport, &delays);
             assert!(
                 matches!(result, Ok(TranscriptOutcome::Unavailable { detail: actual }) if actual.contains(detail))
             );
-            assert_eq!(polls, 1);
+            assert_eq!(delays.borrow().len(), 1);
             assert!(transport.jobs.borrow().is_empty());
         }
     }
@@ -716,16 +786,16 @@ mod tests {
     }
 
     #[test]
-    fn transports_send_provider_specific_auth_and_native_only_requests() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
-        let server = thread::spawn(move || {
+    fn transports_send_provider_specific_auth_and_native_only_requests() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
             for expected in [
                 "GET /supadata?",
                 "GET /supadata/synthetic-job HTTP/1.1",
                 "POST /apify?",
             ] {
-                let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+                let (mut stream, _) = listener.accept()?;
                 let mut request = [0_u8; 8_192];
                 let bytes = stream.read(&mut request).unwrap_or_default();
                 let request = String::from_utf8_lossy(&request[..bytes]);
@@ -741,19 +811,20 @@ mod tests {
                     assert!(request.contains(r#"{"metadata":true,"videoId":"video123"}"#));
                 }
                 let body = "{}";
-                write!(
+                let written = write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
-                )
-                .unwrap_or_else(|_| unreachable!());
+                );
+                written?;
             }
+            Ok(())
         });
         let transport = ReqwestYoutubeTranscriptTransport::with_urls(
             &format!("http://{address}/supadata"),
             &format!("http://{address}/apify"),
-        )
-        .unwrap_or_else(|_| unreachable!());
+        );
+        let transport = transport?;
         assert!(
             transport
                 .supadata("synthetic-supadata", "https://youtu.be/video123")
@@ -765,19 +836,18 @@ mod tests {
                 .is_ok()
         );
         assert!(transport.apify("synthetic-apify", "video123").is_ok());
-        assert!(server.join().is_ok());
+        assert!(matches!(server.join(), Ok(Ok(()))));
 
         let unavailable = ReqwestYoutubeTranscriptTransport::with_urls(
             "http://127.0.0.1:1/supadata",
             "http://127.0.0.1:1/apify",
-        )
-        .unwrap_or_else(|_| unreachable!());
+        );
+        let unavailable = unavailable?;
         assert!(matches!(
             unavailable.supadata("synthetic", "https://youtu.be/video123"),
             Err(TranscriptTransportError::Connection)
         ));
-        let malformed = ReqwestYoutubeTranscriptTransport::with_urls("://invalid", "://invalid")
-            .unwrap_or_else(|_| unreachable!());
+        let malformed = ReqwestYoutubeTranscriptTransport::with_urls("://invalid", "://invalid")?;
         assert!(matches!(
             malformed.apify("synthetic", "video123"),
             Err(TranscriptTransportError::Other(_))
@@ -786,10 +856,11 @@ mod tests {
             malformed.supadata_job("synthetic", "synthetic-job"),
             Err(TranscriptTransportError::Other(_))
         ));
+        Ok(())
     }
 
     #[test]
-    fn transport_rejects_oversized_and_non_utf8_responses() {
+    fn transport_rejects_oversized_and_non_utf8_responses() -> TestResult {
         for (content_length, body, expected) in [
             (Some(RESPONSE_MAX_BYTES + 1), Vec::new(), "size limit"),
             (Some(1), vec![0xff], "invalid UTF-8"),
@@ -799,74 +870,80 @@ mod tests {
                 "size limit",
             ),
         ] {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-            let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
-            let server = thread::spawn(move || {
-                let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let address = listener.local_addr()?;
+            let server = thread::spawn(move || -> TestResult {
+                let (mut stream, _) = listener.accept()?;
                 let mut request = [0_u8; 1_024];
                 let _bytes = stream.read(&mut request).unwrap_or_default();
                 let length = content_length
                     .map(|length| format!("Content-Length: {length}\r\n"))
                     .unwrap_or_default();
-                write!(
+                let written = write!(
                     stream,
                     "HTTP/1.1 200 OK\r\n{length}Connection: close\r\n\r\n"
-                )
-                .unwrap_or_else(|_| unreachable!());
-                stream.write_all(&body).unwrap_or_else(|_| unreachable!());
+                );
+                written?;
+                stream.write_all(&body)?;
+                Ok(())
             });
             let transport = ReqwestYoutubeTranscriptTransport::with_urls(
                 &format!("http://{address}/transcript"),
                 &format!("http://{address}/transcript"),
-            )
-            .unwrap_or_else(|_| unreachable!());
+            );
+            let transport = transport?;
             let result = transport.supadata("synthetic", "https://youtu.be/video123");
             assert!(matches!(
                 result,
                 Err(TranscriptTransportError::Other(detail)) if detail.contains(expected)
             ));
-            assert!(server.join().is_ok());
+            assert!(matches!(server.join(), Ok(Ok(()))));
         }
+        Ok(())
     }
 
     #[test]
-    fn transport_rejects_truncated_response_bodies() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+    fn transport_rejects_truncated_response_bodies() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
+            let (mut stream, _) = listener.accept()?;
             let mut request = [0_u8; 1_024];
             assert!(stream.read(&mut request).is_ok_and(|size| size > 0));
-            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{\"content\":")
-                .unwrap_or_else(|_| unreachable!());
+            let written = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{\"content\":",
+            );
+            written?;
+            Ok(())
         });
         let transport = ReqwestYoutubeTranscriptTransport::with_urls(
             &format!("http://{address}/transcript"),
             &format!("http://{address}/transcript"),
-        )
-        .unwrap_or_else(|_| unreachable!());
+        );
+        let transport = transport?;
         assert!(matches!(
             transport.supadata("synthetic-key", "https://youtu.be/synthetic"),
             Err(TranscriptTransportError::Other(_))
         ));
-        assert!(server.join().is_ok());
+        assert!(matches!(server.join(), Ok(Ok(()))));
+        Ok(())
     }
 
     #[test]
-    fn transport_classifies_request_timeouts() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+    fn transport_classifies_request_timeouts() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
+            let (mut stream, _) = listener.accept()?;
             let mut request = [0_u8; 1_024];
             let _bytes = stream.read(&mut request).unwrap_or_default();
             thread::sleep(Duration::from_millis(100));
+            Ok(())
         });
         let transport = ReqwestYoutubeTranscriptTransport {
             client: Client::builder()
                 .timeout(Duration::from_millis(10))
-                .build()
-                .unwrap_or_else(|_| unreachable!()),
+                .build()?,
             supadata_url: format!("http://{address}/transcript"),
             apify_url: format!("http://{address}/transcript"),
         };
@@ -874,6 +951,7 @@ mod tests {
             transport.supadata("synthetic", "https://youtu.be/video123"),
             Err(TranscriptTransportError::Timeout)
         ));
-        assert!(server.join().is_ok());
+        assert!(matches!(server.join(), Ok(Ok(()))));
+        Ok(())
     }
 }

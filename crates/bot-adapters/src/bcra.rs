@@ -793,6 +793,8 @@ pub fn load_bcra<T: BcraTransport, C: RequestCache>(
 
 #[cfg(test)]
 mod tests {
+    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
     use super::*;
     use base64::Engine as _;
     use std::{
@@ -882,12 +884,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_the_official_workbook_shape_and_exposes_latest_itcrm() {
+    fn parses_the_official_workbook_shape_and_exposes_latest_itcrm() -> TestResult {
         const WORKBOOK: &str = "UEsDBBQAAAAIAPuUIl1bma6u5QAAAAsCAAATAAAAW0NvbnRlbnRfVHlwZXNdLnhtbK2RvVLDMBCEX0WjNhOdk4KCsZ0i0AYKXuCQz7HG+hudEszbIzuBggnQUN1Iu3vfalTvJmfFmRKb4Bu5UZXctfXLeyQWRfHcyCHneA/AeiCHrEIkX5Q+JIe5HNMRIuoRjwTbqroDHXwmn9d53iHb+oF6PNksHqdyfaEksizF/mKcWY3EGK3RmIsOZ999o6yvBFWSi4cHE3lVDBJuEmblZ8A191SenUxH4hlTPqArLpgsvIU0voYwqt+X3GgZ+t5o6oI+uRJRHBNhxwNRdlYtUzk0fvU3fzEzLGPzz0W+9n/2gOW72w9QSwMEFAAAAAgA+5QiXUuDozqWAAAABQEAAAsAAABfcmVscy8ucmVsc43PPQ7CMAwF4KtEPkDdMjCgpl1YuiIuEFL3R23iyAlQbk9GihgY/fz0Wa7bza3qQRJn9hqqooS2qS+0mpSDOM0hqtzwUcOUUjghRjuRM7HgQD5vBhZnUh5lxGDsYkbCQ1keUT4N2Juq6zVI11egrq9A/9g8DLOlM9u7I59+nPhqZNnISEnDtuKTZbkxL0VGAZsadw82b1BLAwQUAAAACAD7lCJdLWvSpKMAAAD4AAAADwAAAHhsL3dvcmtib29rLnhtbI2PORKDMAxFr+LRATCkSMEYUyQNRZpMLuCACB7wMpKzHD8eCH0qLX/0vr5qP24RLyS2wTdQFSW0Wr0DzfcQZpFFzw1MKcVaSu4ndIaLENFnZQzkTMojPSRHQjPwhJjcIg9leZTOWA8boaZ/GGEcbY/n0D8d+rRBCBeT8ms82cig1erAvyq8cdhAdztdLyDWVTfkECCotrmhbqhAaiX3K7kH019QSwMEFAAAAAgA+5QiXW026XSaAAAABgEAABoAAAB4bC9fcmVscy93b3JrYm9vay54bWwucmVsc43POw7CMAwG4KtEPkDdMjCgpl1YWBEXiFK3qdo8FJvX7YkYEJUYmCz/tj7Lbf/wq7pR5jkGDU1VQ9+1Z1qNlIDdnFiVjcAanEg6ILJ15A1XMVEokzFmb6S0ecJk7GImwl1d7zF/G7A11WnQkE9DA+ryTPSPHcdxtnSM9uopyI8TeI95YUckBTV5ItHwiRjfpamKCti1uPmwewFQSwMEFAAAAAgA+5QiXZR5P5S8AAAAYgEAABgAAAB4bC93b3Jrc2hlZXRzL3NoZWV0MS54bWyFkEEKwjAQRa9SstZMEq2ipBHFG3iCUKMNNklJhurxTUVKBcXdzP88HjNy93Bt0ZuYbPAV4ZSRnZL3EG+pMQaL3PpUkQax2wKkujFOJxo643NzCdFpzGu8Quqi0ecX5FoQjK3AaeuJkq/sqFErGcO9iNmS03oY9pwUWBHrW+vNCWPObVISlWBiNWebOeMSUEkYUqjf1OEXxalYLGflJwJZOprFaBb/zOKbeeB7xUXJ6Dp7+qkCJofC+EH1BFBLAQIUAxQAAAAIAPuUIl1bma6u5QAAAAsCAAATAAAAAAAAAAAAAACAAQAAAABbQ29udGVudF9UeXBlc10ueG1sUEsBAhQDFAAAAAgA+5QiXUuDozqWAAAABQEAAAsAAAAAAAAAAAAAAIABFgEAAF9yZWxzLy5yZWxzUEsBAhQDFAAAAAgA+5QiXS1r0qSjAAAA+AAAAA8AAAAAAAAAAAAAAIAB1QEAAHhsL3dvcmtib29rLnhtbFBLAQIUAxQAAAAIAPuUIl1tNul0mgAAAAYBAAAaAAAAAAAAAAAAAACAAaUCAAB4bC9fcmVscy93b3JrYm9vay54bWwucmVsc1BLAQIUAxQAAAAIAPuUIl2UeT+UvAAAAGIBAAAYAAAAAAAAAAAAAACAAXcDAAB4bC93b3Jrc2hlZXRzL3NoZWV0MS54bWxQSwUGAAAAAAUABQBFAQAAaQQAAAAA";
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(WORKBOOK)
-            .unwrap_or_else(|_| unreachable!());
-        let values = parse_workbook(&bytes).unwrap_or_else(|_| unreachable!());
+        let bytes = base64::engine::general_purpose::STANDARD.decode(WORKBOOK)?;
+        let values = parse_workbook(&bytes)?;
         assert_eq!(values.len(), 2);
         assert_eq!(
             values.last_key_value().map(|(_, value)| *value),
@@ -944,6 +944,7 @@ mod tests {
             &mut diagnostics,
         );
         assert!(diagnostics.iter().any(|entry| entry.contains("tcrm_100")));
+        Ok(())
     }
 
     #[test]
@@ -1167,10 +1168,10 @@ mod tests {
     }
 
     #[test]
-    fn reqwest_transport_preserves_all_bcra_request_shapes() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
-        let server = thread::spawn(move || {
+    fn reqwest_transport_preserves_all_bcra_request_shapes() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
             for expected in [
                 "/bcra/monetarias?limit=2000",
                 "/bcra/monetarias/7?limit=20",
@@ -1178,7 +1179,7 @@ mod tests {
                 "/risk",
                 "/itcrm",
             ] {
-                let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+                let (mut stream, _) = listener.accept()?;
                 let mut request = [0_u8; 2_048];
                 let bytes = stream.read(&mut request).unwrap_or_default();
                 assert!(
@@ -1186,14 +1187,15 @@ mod tests {
                         .starts_with(&format!("GET {expected} HTTP/1.1"))
                 );
                 let body = b"synthetic";
-                write!(
+                let written = write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
-                )
-                .unwrap_or_else(|_| unreachable!());
-                stream.write_all(body).unwrap_or_else(|_| unreachable!());
+                );
+                written?;
+                stream.write_all(body)?;
             }
+            Ok(())
         });
         let base = format!("http://{address}");
         let transport = ReqwestBcraTransport::with_urls(
@@ -1201,7 +1203,8 @@ mod tests {
             &format!("{base}/risk"),
             &format!("{base}/itcrm"),
         )
-        .unwrap_or_else(|_| unreachable!());
+        .ok()
+        .ok_or("unexpected error")?;
         for request in [
             BcraRequest::Variables,
             BcraRequest::Series { id: 7, limit: 20 },
@@ -1212,30 +1215,292 @@ mod tests {
             BcraRequest::CountryRisk,
             BcraRequest::Itcrm,
         ] {
-            let response = transport.get(&request).unwrap_or_else(|_| unreachable!());
+            let response = transport.get(&request).ok().ok_or("unexpected error")?;
             assert_eq!(response.status_code, 200);
             assert_eq!(response.body, b"synthetic");
         }
         transport.before_retry();
-        assert!(server.join().is_ok());
+        assert!(matches!(server.join(), Ok(Ok(()))));
         let unavailable = ReqwestBcraTransport::with_urls(
             "http://127.0.0.1:1/bcra",
             "http://127.0.0.1:1/risk",
             "http://127.0.0.1:1/itcrm",
         )
-        .unwrap_or_else(|_| unreachable!());
+        .ok()
+        .ok_or("unexpected error")?;
         assert!(unavailable.get(&BcraRequest::Variables).is_err());
+        Ok(())
     }
 
     #[test]
-    fn live_official_sources_parse_when_explicitly_enabled() {
-        if std::env::var("BCRA_LIVE_TEST").as_deref() != Ok("1") {
-            return;
+    fn numbers_accept_only_finite_numeric_json_and_locale_strings() {
+        assert_eq!(number(None), None);
+        assert_eq!(number(Some(&json!(true))), None);
+        assert_eq!(number(Some(&json!(null))), None);
+        assert_eq!(number(Some(&json!("not a number"))), None);
+        assert_eq!(number(Some(&json!("1.234,5"))), Some(1234.5));
+        assert_eq!(number(Some(&json!("NaN"))), None);
+        assert_eq!(number(Some(&json!(12))), Some(12.0));
+    }
+
+    fn band_variables() -> Value {
+        json!({"results":[
+            {"categoria":"Principales Variables","idVariable":1187,"descripcion":"Régimen de bandas cambiarias Límite inferior","ultFechaInformada":"2025-09-19","ultValorInformado":944.32},
+            {"categoria":"Principales Variables","idVariable":1188,"descripcion":"Régimen de bandas cambiarias Límite superior","ultFechaInformada":"2025-09-19","ultValorInformado":1481.7}
+        ]})
+    }
+
+    #[test]
+    fn bands_are_missing_when_either_limit_series_cannot_be_fetched() {
+        let variables = band_variables();
+        let vars = items(&variables);
+        let lower = json!({"results":[{"detalle":[{"fecha":"2025-09-19","valor":944.32}]}]});
+        for responses in [
+            vec![
+                Err(TransportFailureKind::Timeout),
+                Err(TransportFailureKind::Timeout),
+            ],
+            vec![
+                response(lower),
+                Err(TransportFailureKind::Connection),
+                Err(TransportFailureKind::Connection),
+            ],
+        ] {
+            let transport = Transport {
+                responses: RefCell::new(VecDeque::from(responses)),
+            };
+            let mut cache = Cache::default();
+            let mut diagnostics = Vec::new();
+            assert_eq!(
+                bands(
+                    &transport,
+                    &mut cache,
+                    &vars,
+                    1_758_297_600,
+                    &mut diagnostics
+                ),
+                None
+            );
+            assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
+            assert!(transport.responses.borrow().is_empty());
+            assert!(!cache.values.contains_key("bcra_currency_band_limits"));
         }
-        let transport = ReqwestBcraTransport::new();
-        assert!(transport.is_ok());
-        let Ok(transport) = transport else { return };
-        let load = load_bcra(&transport, &mut Cache::default(), Locale::Es, 1_788_043_200);
-        assert!(load.text.is_some(), "diagnostics={:?}", load.diagnostics);
+    }
+
+    #[test]
+    fn workbook_dates_and_unusable_workbooks_are_explicit() -> TestResult {
+        assert_eq!(
+            cell_date(&Data::DateTime(calamine::ExcelDateTime::new(
+                45_919.0,
+                calamine::ExcelDateTimeType::DateTime,
+                false,
+            ))),
+            parse_date("2025-09-19")
+        );
+        const HEADER_ONLY_WORKBOOK: &str = "UEsDBBQAAAAIAA1nPF1bma6u5QAAAAsCAAATAAAAW0NvbnRlbnRfVHlwZXNdLnhtbK2RvVLDMBCEX0WjNhOdk4KCsZ0i0AYKXuCQz7HG+hudEszbIzuBggnQUN1Iu3vfalTvJmfFmRKb4Bu5UZXctfXLeyQWRfHcyCHneA/AeiCHrEIkX5Q+JIe5HNMRIuoRjwTbqroDHXwmn9d53iHb+oF6PNksHqdyfaEksizF/mKcWY3EGK3RmIsOZ999o6yvBFWSi4cHE3lVDBJuEmblZ8A191SenUxH4hlTPqArLpgsvIU0voYwqt+X3GgZ+t5o6oI+uRJRHBNhxwNRdlYtUzk0fvU3fzEzLGPzz0W+9n/2gOW72w9QSwMEFAAAAAgADWc8XUuDozqWAAAABQEAAAsAAABfcmVscy8ucmVsc43PPQ7CMAwF4KtEPkDdMjCgpl1YuiIuEFL3R23iyAlQbk9GihgY/fz0Wa7bza3qQRJn9hqqooS2qS+0mpSDOM0hqtzwUcOUUjghRjuRM7HgQD5vBhZnUh5lxGDsYkbCQ1keUT4N2Juq6zVI11egrq9A/9g8DLOlM9u7I59+nPhqZNnISEnDtuKTZbkxL0VGAZsadw82b1BLAwQUAAAACAANZzxdLWvSpKMAAAD4AAAADwAAAHhsL3dvcmtib29rLnhtbI2PORKDMAxFr+LRATCkSMEYUyQNRZpMLuCACB7wMpKzHD8eCH0qLX/0vr5qP24RLyS2wTdQFSW0Wr0DzfcQZpFFzw1MKcVaSu4ndIaLENFnZQzkTMojPSRHQjPwhJjcIg9leZTOWA8boaZ/GGEcbY/n0D8d+rRBCBeT8ms82cig1erAvyq8cdhAdztdLyDWVTfkECCotrmhbqhAaiX3K7kH019QSwMEFAAAAAgADWc8XW026XSaAAAABgEAABoAAAB4bC9fcmVscy93b3JrYm9vay54bWwucmVsc43POw7CMAwG4KtEPkDdMjCgpl1YWBEXiFK3qdo8FJvX7YkYEJUYmCz/tj7Lbf/wq7pR5jkGDU1VQ9+1Z1qNlIDdnFiVjcAanEg6ILJ15A1XMVEokzFmb6S0ecJk7GImwl1d7zF/G7A11WnQkE9DA+ryTPSPHcdxtnSM9uopyI8TeI95YUckBTV5ItHwiRjfpamKCti1uPmwewFQSwMEFAAAAAgADWc8XZNurY6kAAAA+AAAABgAAAB4bC93b3Jrc2hlZXRzL3NoZWV0MS54bWx1j00KwjAQRq8ScgCndeFC0hR/EFy4US8Q4miCTVKSwXp8p0VEF26Gmffx+BjVPkMnHpiLT7GR9aySrVZDyvfiEElwGksjHVG/BCjWYTBllnqMnFxTDob4zDcofUZzmaTQwbyqFhCMj1KriW0NGa1yGkTmFqZ2XFa1FNRIHzsf8USZuS9akd6hdUYBaQUjAPsW1v+E/XlzPPwKwG08v+rh85d+AVBLAQIUAxQAAAAIAA1nPF1bma6u5QAAAAsCAAATAAAAAAAAAAAAAACAAQAAAABbQ29udGVudF9UeXBlc10ueG1sUEsBAhQDFAAAAAgADWc8XUuDozqWAAAABQEAAAsAAAAAAAAAAAAAAIABFgEAAF9yZWxzLy5yZWxzUEsBAhQDFAAAAAgADWc8XS1r0qSjAAAA+AAAAA8AAAAAAAAAAAAAAIAB1QEAAHhsL3dvcmtib29rLnhtbFBLAQIUAxQAAAAIAA1nPF1tNul0mgAAAAYBAAAaAAAAAAAAAAAAAACAAaUCAAB4bC9fcmVscy93b3JrYm9vay54bWwucmVsc1BLAQIUAxQAAAAIAA1nPF2Tbq2OpAAAAPgAAAAYAAAAAAAAAAAAAACAAXcDAAB4bC93b3Jrc2hlZXRzL3NoZWV0MS54bWxQSwUGAAAAAAUABQBFAQAAUQQAAAAA";
+        let bytes = base64::engine::general_purpose::STANDARD.decode(HEADER_ONLY_WORKBOOK)?;
+        assert_eq!(
+            parse_workbook(&bytes),
+            Err("ITCRM workbook has no usable rows".to_owned())
+        );
+        for body in [bytes, b"not a workbook".to_vec()] {
+            let transport = Transport {
+                responses: RefCell::new(VecDeque::from([Ok(HttpResponse {
+                    status_code: 200,
+                    body,
+                })])),
+            };
+            let mut cache = Cache::default();
+            let mut diagnostics = Vec::new();
+            assert_eq!(itcrm(&transport, &mut cache, &mut diagnostics), None);
+            assert_eq!(diagnostics.len(), 1);
+            assert!(!cache.values.contains_key("latest_itcrm_details"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn workbooks_without_a_readable_first_sheet_are_rejected() -> TestResult {
+        const SHEETLESS_WORKBOOK: &str = "UEsDBBQAAAAIALlrPF1bma6u5QAAAAsCAAATAAAAW0NvbnRlbnRfVHlwZXNdLnhtbK2RvVLDMBCEX0WjNhOdk4KCsZ0i0AYKXuCQz7HG+hudEszbIzuBggnQUN1Iu3vfalTvJmfFmRKb4Bu5UZXctfXLeyQWRfHcyCHneA/AeiCHrEIkX5Q+JIe5HNMRIuoRjwTbqroDHXwmn9d53iHb+oF6PNksHqdyfaEksizF/mKcWY3EGK3RmIsOZ999o6yvBFWSi4cHE3lVDBJuEmblZ8A191SenUxH4hlTPqArLpgsvIU0voYwqt+X3GgZ+t5o6oI+uRJRHBNhxwNRdlYtUzk0fvU3fzEzLGPzz0W+9n/2gOW72w9QSwMEFAAAAAgAuWs8XUuDozqWAAAABQEAAAsAAABfcmVscy8ucmVsc43PPQ7CMAwF4KtEPkDdMjCgpl1YuiIuEFL3R23iyAlQbk9GihgY/fz0Wa7bza3qQRJn9hqqooS2qS+0mpSDOM0hqtzwUcOUUjghRjuRM7HgQD5vBhZnUh5lxGDsYkbCQ1keUT4N2Juq6zVI11egrq9A/9g8DLOlM9u7I59+nPhqZNnISEnDtuKTZbkxL0VGAZsadw82b1BLAwQUAAAACAC5azxdHyUyI4EAAADDAAAADwAAAHhsL3dvcmtib29rLnhtbI2OQQ7CIBBFr9JwgA66cNFQuvEiWAchBYbMUPX4Ehv3Ln9e8v4zyzun4YkskcqsTqNWizUv4u1GtA0dFplVaK1OALIGzE5Gqlg68cTZtT75AVIZ3V0CYssJzlpfILtY1GGY+B8HeR9XvNK6ZyztkDAm13qahFhFWfN9ELAGfo32A1BLAwQUAAAACAC5azxdbTbpdJoAAAAGAQAAGgAAAHhsL19yZWxzL3dvcmtib29rLnhtbC5yZWxzjc87DsIwDAbgq0Q+QN0yMKCmXVhYEReIUrep2jwUm9ftiRgQlRiYLP+2Pstt//CrulHmOQYNTVVD37VnWo2UgN2cWJWNwBqcSDogsnXkDVcxUSiTMWZvpLR5wmTsYibCXV3vMX8bsDXVadCQT0MD6vJM9I8dx3G2dIz26inIjxN4j3lhRyQFNXki0fCJGN+lqYoK2LW4+bB7AVBLAQIUAxQAAAAIALlrPF1bma6u5QAAAAsCAAATAAAAAAAAAAAAAACAAQAAAABbQ29udGVudF9UeXBlc10ueG1sUEsBAhQDFAAAAAgAuWs8XUuDozqWAAAABQEAAAsAAAAAAAAAAAAAAIABFgEAAF9yZWxzLy5yZWxzUEsBAhQDFAAAAAgAuWs8XR8lMiOBAAAAwwAAAA8AAAAAAAAAAAAAAIAB1QEAAHhsL3dvcmtib29rLnhtbFBLAQIUAxQAAAAIALlrPF1tNul0mgAAAAYBAAAaAAAAAAAAAAAAAACAAYMCAAB4bC9fcmVscy93b3JrYm9vay54bWwucmVsc1BLBQYAAAAABAAEAP8AAABVAwAAAAA=";
+        const MALFORMED_SHEET_WORKBOOK: &str = "UEsDBBQAAAAIAMFrPF1bma6u5QAAAAsCAAATAAAAW0NvbnRlbnRfVHlwZXNdLnhtbK2RvVLDMBCEX0WjNhOdk4KCsZ0i0AYKXuCQz7HG+hudEszbIzuBggnQUN1Iu3vfalTvJmfFmRKb4Bu5UZXctfXLeyQWRfHcyCHneA/AeiCHrEIkX5Q+JIe5HNMRIuoRjwTbqroDHXwmn9d53iHb+oF6PNksHqdyfaEksizF/mKcWY3EGK3RmIsOZ999o6yvBFWSi4cHE3lVDBJuEmblZ8A191SenUxH4hlTPqArLpgsvIU0voYwqt+X3GgZ+t5o6oI+uRJRHBNhxwNRdlYtUzk0fvU3fzEzLGPzz0W+9n/2gOW72w9QSwMEFAAAAAgAwWs8XUuDozqWAAAABQEAAAsAAABfcmVscy8ucmVsc43PPQ7CMAwF4KtEPkDdMjCgpl1YuiIuEFL3R23iyAlQbk9GihgY/fz0Wa7bza3qQRJn9hqqooS2qS+0mpSDOM0hqtzwUcOUUjghRjuRM7HgQD5vBhZnUh5lxGDsYkbCQ1keUT4N2Juq6zVI11egrq9A/9g8DLOlM9u7I59+nPhqZNnISEnDtuKTZbkxL0VGAZsadw82b1BLAwQUAAAACADBazxdLWvSpKMAAAD4AAAADwAAAHhsL3dvcmtib29rLnhtbI2PORKDMAxFr+LRATCkSMEYUyQNRZpMLuCACB7wMpKzHD8eCH0qLX/0vr5qP24RLyS2wTdQFSW0Wr0DzfcQZpFFzw1MKcVaSu4ndIaLENFnZQzkTMojPSRHQjPwhJjcIg9leZTOWA8boaZ/GGEcbY/n0D8d+rRBCBeT8ms82cig1erAvyq8cdhAdztdLyDWVTfkECCotrmhbqhAaiX3K7kH019QSwMEFAAAAAgAwWs8XW026XSaAAAABgEAABoAAAB4bC9fcmVscy93b3JrYm9vay54bWwucmVsc43POw7CMAwG4KtEPkDdMjCgpl1YWBEXiFK3qdo8FJvX7YkYEJUYmCz/tj7Lbf/wq7pR5jkGDU1VQ9+1Z1qNlIDdnFiVjcAanEg6ILJ15A1XMVEokzFmb6S0ecJk7GImwl1d7zF/G7A11WnQkE9DA+ryTPSPHcdxtnSM9uopyI8TeI95YUckBTV5ItHwiRjfpamKCti1uPmwewFQSwMEFAAAAAgAwWs8XRXT2ueAAAAAqAAAABgAAAB4bC93b3Jrc2hlZXRzL3NoZWV0MS54bWxNjksOgzAMRK8S5QAYuuiiMkGVepGIug0q+ciOAsevYVF1Y43nzcjGaY+racSy5DTaoevt5HDL/JFAVI3SJKMNtZYbgMyBopcuF0pKXpmjr7ryG6Qw+edZiitc+v4K0S/JOjy9h6/eIefNsF5Rdz7E/VDNDQjNISjV+ReH3x/uC1BLAQIUAxQAAAAIAMFrPF1bma6u5QAAAAsCAAATAAAAAAAAAAAAAACAAQAAAABbQ29udGVudF9UeXBlc10ueG1sUEsBAhQDFAAAAAgAwWs8XUuDozqWAAAABQEAAAsAAAAAAAAAAAAAAIABFgEAAF9yZWxzLy5yZWxzUEsBAhQDFAAAAAgAwWs8XS1r0qSjAAAA+AAAAA8AAAAAAAAAAAAAAIAB1QEAAHhsL3dvcmtib29rLnhtbFBLAQIUAxQAAAAIAMFrPF1tNul0mgAAAAYBAAAaAAAAAAAAAAAAAACAAaUCAAB4bC9fcmVscy93b3JrYm9vay54bWwucmVsc1BLAQIUAxQAAAAIAMFrPF0V09rngAAAAKgAAAAYAAAAAAAAAAAAAACAAXcDAAB4bC93b3Jrc2hlZXRzL3NoZWV0MS54bWxQSwUGAAAAAAUABQBFAQAALQQAAAAA";
+        let sheetless = base64::engine::general_purpose::STANDARD.decode(SHEETLESS_WORKBOOK)?;
+        assert_eq!(
+            parse_workbook(&sheetless),
+            Err("ITCRM workbook has no sheet".to_owned())
+        );
+        let malformed =
+            base64::engine::general_purpose::STANDARD.decode(MALFORMED_SHEET_WORKBOOK)?;
+        let error = parse_workbook(&malformed).err().unwrap_or_default();
+        assert!(!error.is_empty());
+        assert_ne!(error, "ITCRM workbook has no usable rows");
+        Ok(())
+    }
+
+    #[test]
+    fn dates_rows_and_band_descriptions_tolerate_partial_provider_data() {
+        assert_eq!(parse_date("19/09/2025"), parse_date("19/09/25"));
+        assert_eq!(parse_date("2025-09-19"), parse_date("19/09/25"));
+        let rows = json!({"results":[{"detalle":[
+            {"fecha":"2025-09-18","valor":930},
+            {"fecha":"2025-09-19"},
+            {"valor":944.32}
+        ]}]});
+        assert_eq!(series(&rows).into_values().collect::<Vec<_>>(), vec![930.0]);
+        let variables = json!({"results":[
+            {"categoria":"Principales Variables","idVariable":1,"descripcion":"Reservas","ultFechaInformada":"sometime","ultValorInformado":25000},
+            {"categoria":"Principales Variables","idVariable":9,"descripcion":"Régimen de bandas cambiarias (referencia)","ultFechaInformada":"2025-09-19","ultValorInformado":1}
+        ]});
+        let items = items(&variables);
+        assert_eq!(latest(&items)[0].date, "sometime");
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::new()),
+        };
+        let mut diagnostics = Vec::new();
+        assert_eq!(
+            bands(
+                &transport,
+                &mut Cache::default(),
+                &items,
+                1_758_297_600,
+                &mut diagnostics
+            ),
+            None
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn provider_bodies_must_be_utf8_and_cache_writes_report_failures() {
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::from([
+                Ok(HttpResponse {
+                    status_code: 200,
+                    body: vec![0xff, 0xfe],
+                }),
+                Ok(HttpResponse {
+                    status_code: 200,
+                    body: vec![0xff],
+                }),
+            ])),
+        };
+        let mut diagnostics = Vec::new();
+        assert_eq!(
+            request_json(
+                &transport,
+                &mut Cache::default(),
+                &BcraRequest::CountryRisk,
+                1_758_297_600,
+                &mut diagnostics,
+            ),
+            None
+        );
+        assert_eq!(diagnostics.len(), 2);
+        assert!(
+            diagnostics
+                .iter()
+                .all(|entry| entry.contains("invalid UTF-8"))
+        );
+
+        let mut failing = Cache {
+            fail_sets: true,
+            ..Cache::default()
+        };
+        let mut diagnostics = Vec::new();
+        store(
+            &mut failing,
+            "bcra_variables",
+            &json!({}),
+            60,
+            60,
+            1_758_297_600,
+            &mut diagnostics,
+        );
+        assert_eq!(
+            diagnostics,
+            [
+                "could not write BCRA cache bcra_variables: synthetic cache write failure",
+                "could not write BCRA cache bcra_variables:last_success: synthetic cache write failure",
+            ]
+        );
+    }
+
+    #[test]
+    fn bcra_without_fresh_or_stale_variables_renders_nothing() {
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::new()),
+        };
+        let load = load_bcra(&transport, &mut Cache::default(), Locale::Es, 1_758_297_600);
+        assert_eq!(load.text, None);
+        assert!(!load.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn tcrm_requires_a_positive_itcrm_index() {
+        let variables = [BcraVariable {
+            description: "Tipo de cambio mayorista".to_owned(),
+            value: "1450.0".to_owned(),
+            date: "02/09/26".to_owned(),
+        }];
+        for value in [0.0, -1.0] {
+            let itcrm = ItcrmDetails {
+                value,
+                date: "02/09/26".to_owned(),
+            };
+            assert_eq!(calculate_tcrm(&variables, Some(&itcrm)), None);
+        }
+        let itcrm = ItcrmDetails {
+            value: 145.0,
+            date: "02/09/26".to_owned(),
+        };
+        assert_eq!(calculate_tcrm(&variables, Some(&itcrm)), Some(1000.0));
+        assert_eq!(calculate_tcrm(&variables, None), None);
+    }
+
+    #[test]
+    fn fresh_cached_variables_render_without_refetching_the_variable_list_first() {
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::new()),
+        };
+        let mut cache = Cache::default();
+        cache.values.insert(
+            "bcra_variables".to_owned(),
+            r#"{"data":{"Reservas internacionales":{"value":"25.000,00","date":"19/09/25"},"_meta":{"value":"ignored"}}}"#
+                .to_owned(),
+        );
+        let load = load_bcra(&transport, &mut cache, Locale::En, 1_758_297_600);
+        let text = load.text.unwrap_or_default();
+        assert!(text.contains("Reserves: USD 25,000 million"), "{text}");
+        assert!(!text.contains("There is no new BCRA update"), "{text}");
+        assert!(!text.contains("ignored"), "{text}");
+    }
+
+    #[test]
+    fn cache_claim_propagates_write_failures() {
+        let mut cache = Cache {
+            fail_sets: true,
+            ..Cache::default()
+        };
+        assert_eq!(
+            cache.claim("k", "v", 60),
+            Err("synthetic cache write failure")
+        );
+        assert!(cache.values.is_empty());
+    }
+
+    #[test]
+    fn reqwest_failures_are_classified_by_cause() {
+        use crate::web_fetch::reqwest_error_fixtures as fixtures;
+        assert_eq!(
+            fixtures::timeout().map(super::classify),
+            Some(super::TransportFailureKind::Timeout)
+        );
+        assert_eq!(
+            fixtures::connection().map(super::classify),
+            Some(super::TransportFailureKind::Connection)
+        );
+        assert_eq!(
+            fixtures::request().map(super::classify),
+            Some(super::TransportFailureKind::Request)
+        );
     }
 }

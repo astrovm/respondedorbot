@@ -422,10 +422,8 @@ pub fn refresh_market_snapshot<T: CoinMarketCapMarketTransport, C: RequestCache>
         || transport.before_retry(),
     );
     let mut diagnostics = load.diagnostics;
-    if !load.refreshed {
-        return diagnostics;
-    }
-    let Some(data) = load.data else {
+    // Only a provider fetch (never a cache hit) produces a new hourly snapshot.
+    let (true, Some(data)) = (load.refreshed, load.data) else {
         return diagnostics;
     };
     let Some(hour) = hour_key(now_unix) else {
@@ -506,6 +504,8 @@ pub fn fetch_bitcoin_price<T: CoinMarketCapTransport>(
 
 #[cfg(test)]
 mod tests {
+    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::io::{Read, Write};
@@ -660,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn market_requests_match_python_cache_identity_and_parse_typed_rows() {
+    fn market_requests_match_python_cache_identity_and_parse_typed_rows() -> TestResult {
         let request = MarketRequest {
             api_key: "synthetic-secret".to_owned(),
             currency: "USD".to_owned(),
@@ -682,9 +682,7 @@ mod tests {
         };
         let mut cache = Cache::default();
         let load = load_market_assets(&transport, &mut cache, &request, 100);
-        let Some(assets) = load.assets else {
-            return;
-        };
+        let assets = load.assets.ok_or("unexpected missing value")?;
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0].id, "1");
         assert_eq!(assets[0].quotes["USD"].price, 50_000.5);
@@ -694,6 +692,7 @@ mod tests {
         assert_eq!(transport.requests.borrow().as_slice(), &[request]);
         assert_eq!(cache.writes.len(), 1);
         assert_eq!(cache.writes[0].2, 300);
+        Ok(())
     }
 
     #[test]
@@ -718,10 +717,8 @@ mod tests {
             requests: RefCell::new(Vec::new()),
         };
         let load = load_market_assets(&transport, &mut Cache::default(), &request, 100);
-        let mut assets = load
-            .assets
-            .ok_or_else(|| "identity quote payload".to_owned())?;
-        let asset = assets.pop().ok_or_else(|| "identity asset".to_owned())?;
+        let mut assets = load.assets.ok_or("identity quote payload")?;
+        let asset = assets.pop().ok_or("identity asset")?;
         assert_eq!(asset.contracts[0].chain_id, "solana");
         assert_eq!(
             asset.contracts[0].address,
@@ -732,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn market_load_uses_stale_cache_after_provider_failures() {
+    fn market_load_uses_stale_cache_after_provider_failures() -> TestResult {
         let request = MarketRequest {
             api_key: "key".to_owned(),
             currency: "USD".to_owned(),
@@ -752,11 +749,10 @@ mod tests {
             ..Cache::default()
         };
         let load = load_market_assets(&transport, &mut cache, &request, 1_000);
-        let Some(assets) = load.assets else {
-            return;
-        };
+        let assets = load.assets.ok_or("unexpected missing value")?;
         assert_eq!(assets[0].symbol, "BTC");
         assert_eq!(load.diagnostics.len(), 2);
+        Ok(())
     }
 
     #[test]
@@ -885,17 +881,164 @@ mod tests {
     }
 
     #[test]
-    fn reqwest_transport_sends_listing_and_quote_contracts() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
-        let server = thread::spawn(move || {
+    fn refresh_skips_existing_history_and_reports_unrepresentable_hours() {
+        let response = || {
+            Ok(HttpResponse {
+                status_code: 200,
+                body: json!({"data": []}).to_string(),
+            })
+        };
+        let transport = MarketTransport {
+            responses: RefCell::new(VecDeque::from([response()])),
+            requests: RefCell::new(Vec::new()),
+        };
+        let mut cache = Cache {
+            reads: VecDeque::from([Ok(None), Ok(Some("existing snapshot".to_owned()))]),
+            ..Cache::default()
+        };
+        let diagnostics = refresh_market_snapshot(
+            &transport,
+            &mut cache,
+            "synthetic-key",
+            "USD",
+            1_725_000_000,
+        );
+        assert!(diagnostics.is_empty());
+        assert_eq!(cache.writes.len(), 1);
+        assert_eq!(cache.writes[0].2, 300);
+
+        let transport = MarketTransport {
+            responses: RefCell::new(VecDeque::from([response()])),
+            requests: RefCell::new(Vec::new()),
+        };
+        let mut cache = Cache::default();
+        let diagnostics =
+            refresh_market_snapshot(&transport, &mut cache, "synthetic-key", "USD", i64::MAX);
+        assert_eq!(
+            diagnostics,
+            ["CoinMarketCap refresh timestamp is outside the supported range"]
+        );
+        assert_eq!(cache.writes.len(), 1);
+    }
+
+    #[test]
+    fn quote_objects_and_bitcoin_prices_parse_from_successful_transports() {
+        let request = MarketRequest {
+            api_key: "synthetic-secret".to_owned(),
+            currency: "USD".to_owned(),
+            kind: MarketRequestKind::Quotes {
+                identifiers: vec!["BTC".to_owned()],
+                by_slug: false,
+            },
+        };
+        let transport = MarketTransport {
+            responses: RefCell::new(VecDeque::from([Ok(HttpResponse {
+                status_code: 200,
+                body: r#"{"data":{"BTC":{"id":1,"symbol":"BTC","name":"Bitcoin","slug":"bitcoin","quote":{"USD":{"price":42}}}}}"#.to_owned(),
+            })])),
+            requests: RefCell::new(Vec::new()),
+        };
+        let load = load_market_assets(&transport, &mut Cache::default(), &request, 100);
+        assert_eq!(
+            load.assets
+                .unwrap_or_default()
+                .iter()
+                .map(|asset| asset.symbol.as_str())
+                .collect::<Vec<_>>(),
+            ["BTC"]
+        );
+
+        let transport = Transport {
+            result: RefCell::new(Some(Ok(HttpResponse {
+                status_code: 200,
+                body: r#"{"data":[{"quote":{"ARS":{"price":"123.5"}}}]}"#.to_owned(),
+            }))),
+            requests: RefCell::new(Vec::new()),
+        };
+        assert_eq!(
+            fetch_bitcoin_price(&transport, "synthetic-secret", "ARS"),
+            BitcoinPriceOutcome::Price(123.5)
+        );
+    }
+
+    #[test]
+    fn refresh_retries_provider_failures_without_writing_snapshots() {
+        let transport = MarketTransport {
+            responses: RefCell::new(VecDeque::from([
+                Err(TransportFailureKind::Timeout),
+                Err(TransportFailureKind::Connection),
+            ])),
+            requests: RefCell::new(Vec::new()),
+        };
+        let mut cache = Cache::default();
+        let diagnostics = refresh_market_snapshot(
+            &transport,
+            &mut cache,
+            "synthetic-key",
+            "USD",
+            1_725_000_000,
+        );
+        assert_eq!(diagnostics.len(), 2);
+        assert!(diagnostics[0].contains("Timeout"));
+        assert!(diagnostics[1].contains("Connection"));
+        assert_eq!(transport.requests.borrow().len(), 2);
+        assert!(cache.writes.is_empty());
+    }
+
+    #[test]
+    fn contract_platforms_map_to_supported_chains_only() -> TestResult {
+        let contract = |platform: Value| {
+            let object = serde_json::Map::from_iter([("platform".to_owned(), platform)]);
+            super::parse_contracts(&object)
+                .into_iter()
+                .map(|token| (token.chain_id, token.network, token.tag, token.address))
+                .collect::<Vec<_>>()
+        };
+        for (name, chain, network, tag) in [
+            ("Solana", "solana", "solana", "SOL"),
+            ("ethereum", "ethereum", "eth", "ETH"),
+            ("eth", "ethereum", "eth", "ETH"),
+            ("binance-smart-chain", "bsc", "bsc", "BNB"),
+            ("bnb", "bsc", "bsc", "BNB"),
+            ("bsc", "bsc", "bsc", "BNB"),
+            ("polygon-pos", "polygon", "polygon", "MATIC"),
+            ("arbitrum-one", "arbitrum", "arbitrum", "ARB"),
+            ("base", "base", "base", "ETH"),
+            ("avalanche-c-chain", "avalanche", "avalanche", "AVAX"),
+        ] {
+            assert_eq!(
+                contract(json!({"name": name, "token_address": "0xsynthetic"})),
+                [(
+                    chain.to_owned(),
+                    network.to_owned(),
+                    tag.to_owned(),
+                    "0xsynthetic".to_owned()
+                )],
+                "{name}"
+            );
+        }
+        assert!(contract(json!({"slug": "tron", "token_address": "Tsynthetic"})).is_empty());
+        assert!(contract(json!({"slug": "ethereum", "token_address": "  "})).is_empty());
+        let object = serde_json::Map::from_iter([
+            ("platform".to_owned(), json!({"slug": "ethereum"})),
+            ("contract_address".to_owned(), json!("0xfallback")),
+        ]);
+        assert_eq!(super::parse_contracts(&object)[0].address, "0xfallback");
+        Ok(())
+    }
+
+    #[test]
+    fn reqwest_transport_sends_listing_and_quote_contracts() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
             for (path, query) in [
                 ("/listings", "start=1&limit=100&convert=USD"),
                 ("/listings", "start=1&limit=100&convert=ARS"),
                 ("/quotes", "slug=bitcoin%2Cethereum&convert=USD"),
                 ("/quotes", "id=123%2C456&convert=USD"),
             ] {
-                let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+                let (mut stream, _) = listener.accept()?;
                 let mut request = [0_u8; 4_096];
                 let bytes = stream.read(&mut request).unwrap_or_default();
                 let request = String::from_utf8_lossy(&request[..bytes]);
@@ -906,20 +1049,22 @@ mod tests {
                 assert!(request.contains("x-cmc_pro_api_key: synthetic-key"));
                 assert!(request.contains("accepts: application/json"));
                 let body = r#"{"data":[]}"#;
-                write!(
+                let written = write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
-                )
-                .unwrap_or_else(|_| unreachable!());
+                );
+                written?;
             }
+            Ok(())
         });
         let base = format!("http://{address}");
         let transport = ReqwestCoinMarketCapTransport::with_urls(
             &format!("{base}/listings"),
             &format!("{base}/quotes"),
         )
-        .unwrap_or_else(|_| unreachable!());
+        .ok()
+        .ok_or("unexpected error")?;
         assert_eq!(
             transport
                 .get(&BitcoinPriceRequest {
@@ -962,6 +1107,24 @@ mod tests {
                 .is_ok()
         );
         transport.before_retry();
-        assert!(server.join().is_ok());
+        assert!(matches!(server.join(), Ok(Ok(()))));
+        Ok(())
+    }
+
+    #[test]
+    fn reqwest_failures_are_classified_by_cause() {
+        use crate::web_fetch::reqwest_error_fixtures as fixtures;
+        assert_eq!(
+            fixtures::timeout().map(super::classify_error),
+            Some(super::TransportFailureKind::Timeout)
+        );
+        assert_eq!(
+            fixtures::connection().map(super::classify_error),
+            Some(super::TransportFailureKind::Connection)
+        );
+        assert_eq!(
+            fixtures::request().map(super::classify_error),
+            Some(super::TransportFailureKind::Request)
+        );
     }
 }
