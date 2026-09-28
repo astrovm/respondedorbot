@@ -1335,6 +1335,6 @@ pub(crate) mod reqwest_error_fixtures {
 
     /// A request that fails while building because the URL is invalid.
     pub(crate) fn request() -> Option<reqwest::Error> {
-        client(Duration::from_secs(5))?.get("http://").send().err()
+        client(Duration::from_secs(5))?.get("https://").send().err()
     }
 }
