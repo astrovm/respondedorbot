@@ -22,7 +22,7 @@ impl ChatMemberSource for RedisMessageState {
                     .map(|member| (member.user_id, member.payload))
                     .collect()
             })
-            .map_err(|error| error.to_string())
+            .map_err(crate::error_text)
     }
 }
 
@@ -105,7 +105,7 @@ mod tests {
                 r#"{"schema_version":1,"first_name":"Ana","username":"ana","last_seen":9400}"#
                     .to_owned(),
             )])),
-            || 10_000,
+            clock(|| 10_000),
             "-100",
             Locale::Es,
         );
@@ -118,7 +118,8 @@ mod tests {
 
     #[test]
     fn missing_context_source_failure_and_wrong_request_are_safe() {
-        let mut unavailable = ChatMembersTool::new(Source(Ok(Vec::new())), || 0, "", Locale::En);
+        let mut unavailable =
+            ChatMembersTool::new(Source(Ok(Vec::new())), clock(|| 0), "", Locale::En);
         assert_eq!(
             unavailable
                 .execute(ExternalToolRequest::GetChatMembers, "call")
@@ -128,7 +129,7 @@ mod tests {
 
         let mut failed = ChatMembersTool::new(
             Source(Err("synthetic Redis failure".to_owned())),
-            || 0,
+            clock(|| 0),
             "-100",
             Locale::En,
         );
@@ -143,28 +144,29 @@ mod tests {
 
     #[test]
     fn redis_member_source_reads_the_persistent_member_shape() -> Result<(), String> {
-        let Some(port) = std::env::var("TEST_REDIS_PORT")
-            .ok()
-            .and_then(|value| value.parse().ok())
-        else {
-            return Ok(());
-        };
-        let endpoint = RedisEndpoint {
-            host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
-            port,
-            password: std::env::var("TEST_REDIS_PASSWORD")
-                .ok()
-                .filter(|value| !value.is_empty()),
-        };
-        let mut state = RedisMessageState::new(&endpoint).map_err(|error| error.to_string())?;
+        test_redis_endpoint().map_or(Ok(()), |endpoint| assert_member_round_trip(&endpoint))
+    }
+
+    fn test_redis_endpoint() -> Option<RedisEndpoint> {
+        crate::test_env::redis_endpoint()
+    }
+
+    fn assert_member_round_trip(endpoint: &RedisEndpoint) -> Result<(), String> {
+        let mut state = RedisMessageState::new(endpoint).map_err(crate::error_text)?;
         let chat_id = format!("synthetic-members-{}", std::process::id());
         let payload = prepare_chat_member_payload("Synthetic", "synthetic_user", 1_700_000_000)
-            .map_err(|error| error.to_string())?;
+            .map_err(crate::error_text)?;
         state
             .save_chat_member(&chat_members_key(&chat_id), "42", &payload, 60)
-            .map_err(|error| error.to_string())?;
+            .map_err(crate::error_text)?;
         let members = ChatMemberSource::members(&mut state, &chat_id)?;
         assert_eq!(members, vec![("42".to_owned(), payload)]);
         Ok(())
+    }
+
+    /// Every test shares one clock type, so each tool is exercised through a
+    /// single generic instantiation.
+    fn clock(now: fn() -> i64) -> fn() -> i64 {
+        now
     }
 }

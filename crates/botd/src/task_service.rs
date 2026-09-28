@@ -34,17 +34,17 @@ impl TaskExecutionJournal for RedisTaskStore {
     fn load(&mut self, execution_id: &str) -> Result<Option<TaskExecutionState>, Self::Error> {
         let key = task_execution_key(execution_id);
         self.get(&key)
-            .map_err(|error| error.to_string())?
-            .map(|payload| serde_json::from_str(&payload).map_err(|error| error.to_string()))
+            .map_err(crate::error_text)?
+            .map(|payload| serde_json::from_str(&payload).map_err(crate::error_text))
             .transpose()
     }
 
     fn save(&mut self, execution_id: &str, state: &TaskExecutionState) -> Result<(), Self::Error> {
         let key = task_execution_key(execution_id);
-        let payload = serde_json::to_string(state).map_err(|error| error.to_string())?;
+        let payload = serde_json::to_string(state).map_err(crate::error_text)?;
         self.setex(&key, TASK_EXECUTION_TTL_SECONDS, &payload)
             .map(|_saved| ())
-            .map_err(|error| error.to_string())
+            .map_err(crate::error_text)
     }
 }
 
@@ -177,19 +177,21 @@ mod tests {
     use bot_core::scheduled_tasks::{ScheduledTask, TaskId, TaskSchedule};
 
     use super::{
-        TaskServiceOptions, VerificationExecutor, build_task_scheduler, build_task_verifier,
-        verify_tasks_once,
+        TaskServiceError, TaskServiceOptions, VerificationExecutor, build_task_scheduler,
+        build_task_verifier, verify_tasks_once,
     };
     use crate::composition::TelegramDeliveryCoordinator;
-    use crate::scheduler::{ScheduledTaskExecutor, SchedulerMode, TaskExecutionDisposition};
+    use crate::scheduler::{
+        ScheduledTaskExecutor, SchedulerError, SchedulerMode, TaskExecutionDisposition,
+    };
     use crate::task_executor::{TaskExecutionJournal, TaskExecutionState};
 
     #[test]
-    fn authoritative_composition_is_side_effect_free_until_the_scheduler_steps() {
-        let pricing = Arc::new(
-            OpenRouterPricingCache::new("synthetic-key", "https://synthetic.invalid/api/v1")
-                .unwrap_or_else(|_| unreachable!("pricing cache construction")),
-        );
+    fn authoritative_composition_is_side_effect_free_until_the_scheduler_steps()
+    -> crate::test_env::TestResult {
+        let pricing =
+            OpenRouterPricingCache::new("synthetic-key", "https://synthetic.invalid/api/v1");
+        let pricing = Arc::new(pricing?);
         for firecrawl_api_key in [None, Some(""), Some("synthetic-search-key")] {
             let result = build_task_scheduler(TaskServiceOptions {
                 redis_endpoint: &RedisEndpoint {
@@ -210,28 +212,25 @@ mod tests {
             });
             assert!(result.is_ok());
         }
+        Ok(())
     }
 
     #[test]
     fn verification_service_composes_and_steps_against_local_redis() -> Result<(), String> {
-        let Some(port) = std::env::var("TEST_REDIS_PORT")
-            .ok()
-            .and_then(|value| value.parse().ok())
-        else {
-            return Ok(());
-        };
-        let endpoint = RedisEndpoint {
-            host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
-            port,
-            password: std::env::var("TEST_REDIS_PASSWORD")
-                .ok()
-                .filter(|value| !value.is_empty()),
-        };
+        test_redis_endpoint().map_or(Ok(()), |endpoint| assert_verification_service(&endpoint))
+    }
+
+    fn test_redis_endpoint() -> Option<RedisEndpoint> {
+        crate::test_env::redis_endpoint()
+    }
+
+    fn assert_verification_service(endpoint: &RedisEndpoint) -> Result<(), String> {
+        let endpoint = endpoint.clone();
         assert!(build_task_verifier(&endpoint, "synthetic-verifier").is_ok());
         assert!(verify_tasks_once(&endpoint, "synthetic-verifier", 1_700_000_000).is_ok());
 
         let execution_id = format!("synthetic-journal-{}", std::process::id());
-        let mut journal = RedisTaskStore::new(&endpoint).map_err(|error| error.to_string())?;
+        let mut journal = RedisTaskStore::new(&endpoint).map_err(crate::error_text)?;
         assert!(TaskExecutionJournal::load(&mut journal, &execution_id)?.is_none());
         let state: TaskExecutionState = serde_json::from_value(serde_json::json!({
             "response": "synthetic response",
@@ -241,7 +240,7 @@ mod tests {
             "delivered": false,
             "delivery_attempts": 1
         }))
-        .map_err(|error| error.to_string())?;
+        .map_err(crate::error_text)?;
         TaskExecutionJournal::save(&mut journal, &execution_id, &state)?;
         assert_eq!(
             TaskExecutionJournal::load(&mut journal, &execution_id)?,
@@ -249,7 +248,7 @@ mod tests {
         );
 
         let task = ScheduledTask {
-            id: TaskId::new("synthetic-task").map_err(|error| error.to_string())?,
+            id: TaskId::new("synthetic-task").map_err(crate::error_text)?,
             chat_id: "synthetic-chat".to_owned(),
             text: "synthetic task".to_owned(),
             user_name: "synthetic-user".to_owned(),
@@ -265,6 +264,40 @@ mod tests {
             VerificationExecutor.execute(&task, &execution_id),
             Ok(TaskExecutionDisposition::Retry)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn empty_owner_tokens_are_rejected_by_both_service_builders() -> crate::test_env::TestResult {
+        let endpoint = RedisEndpoint {
+            host: "synthetic.invalid".to_owned(),
+            port: 6379,
+            password: None,
+        };
+        assert!(matches!(
+            build_task_verifier(&endpoint, ""),
+            Err(TaskServiceError::Scheduler(SchedulerError::EmptyOwnerToken))
+        ));
+        let pricing =
+            OpenRouterPricingCache::new("synthetic-key", "https://synthetic.invalid/api/v1");
+        let pricing = Arc::new(pricing?);
+        let result = build_task_scheduler(TaskServiceOptions {
+            redis_endpoint: &endpoint,
+            database_url: "postgresql://synthetic.invalid/database",
+            telegram_token: "synthetic-token",
+            openrouter_api_key: "synthetic-key",
+            openrouter_base_url: "https://synthetic.invalid/api/v1",
+            openrouter_pricing: pricing,
+            firecrawl_api_key: None,
+            system_prompt: "synthetic persona",
+            owner_token: "",
+            mode: SchedulerMode::Authoritative,
+            telegram_delivery: TelegramDeliveryCoordinator::default(),
+        });
+        assert!(matches!(
+            result,
+            Err(TaskServiceError::Scheduler(SchedulerError::EmptyOwnerToken))
+        ));
         Ok(())
     }
 }

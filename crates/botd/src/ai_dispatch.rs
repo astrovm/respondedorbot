@@ -192,8 +192,38 @@ mod tests {
 
     use super::{
         AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, AiReplyMetadata,
-        reply_context,
+        AiStreamEvent, reply_context,
     };
+
+    struct TokenStreamingSource;
+
+    impl AiConversationSource for TokenStreamingSource {
+        fn reply_metadata(
+            &mut self,
+            _chat_id: &str,
+            _message_id: &str,
+        ) -> Result<Option<AiReplyMetadata>, String> {
+            Ok(None)
+        }
+
+        fn prepare(&mut self, _input: AiConversationInput) -> Result<AiPreparation, String> {
+            Err("streaming source must not use the blocking path".to_owned())
+        }
+
+        fn prepare_streaming(
+            &mut self,
+            _input: AiConversationInput,
+            on_token: &mut dyn FnMut(&str) -> Result<(), String>,
+        ) -> Result<AiPreparation, String> {
+            on_token("hola ")?;
+            on_token("mundo")?;
+            Ok(AiPreparation::reply("hola mundo", Some("gen-1".to_owned())))
+        }
+
+        fn complete_delivery(&mut self, _delivery: AiDelivery) -> Result<(), String> {
+            Ok(())
+        }
+    }
 
     struct MinimalSource {
         prepared: usize,
@@ -304,29 +334,24 @@ mod tests {
         assert_eq!(reply_context(Some("Gordo"), None, Some("  ")), None);
     }
 
+    /// Rejects every streamed token, so a default that streams would fail.
+    fn reject_token(token: &str) -> Result<(), String> {
+        Err(format!("unexpected token {token}"))
+    }
+
     #[test]
-    #[allow(clippy::unit_arg)]
     fn optional_source_operations_have_safe_defaults() {
         let mut source = MinimalSource { prepared: 0 };
         assert_eq!(source.reply_metadata("1", "2"), Ok(None));
-        let mut tokens = Vec::new();
-        let prepared = source
-            .prepare_streaming(input(), &mut |token| Ok(tokens.push(token.to_owned())))
-            .unwrap_or_else(|_| unreachable!());
-        assert_eq!(prepared, AiPreparation::reply("synthetic reply", None));
-        assert_eq!(source.prepared, 1);
-        assert!(tokens.is_empty());
         assert_eq!(
-            source
-                .prepare_media_command(input())
-                .unwrap_or_else(|_| unreachable!()),
-            None
+            source.prepare_streaming(input(), &mut reject_token),
+            Ok(AiPreparation::reply("synthetic reply", None))
         );
+        assert_eq!(source.prepared, 1);
+        assert_eq!(source.prepare_media_command(input()), Ok(None));
         assert_eq!(
-            source
-                .prepare_summary_command_streaming(input(), &mut |_token| Ok(()))
-                .unwrap_or_else(|_| unreachable!()),
-            None
+            source.prepare_summary_command_streaming(input(), &mut reject_token),
+            Ok(None)
         );
         assert!(source.record_ignored(input()).is_ok());
         assert!(
@@ -343,6 +368,54 @@ mod tests {
             AiPreparation::Silent {
                 diagnostics: Vec::new()
             }
+        );
+    }
+
+    #[test]
+    fn default_event_stream_wraps_each_token_as_final_text() {
+        let mut source = TokenStreamingSource;
+        let mut events = Vec::new();
+        let prepared = source.prepare_streaming_events(input(), &mut |event| {
+            events.push(event);
+            Ok(())
+        });
+        assert_eq!(
+            prepared,
+            Ok(AiPreparation::reply("hola mundo", Some("gen-1".to_owned())))
+        );
+        assert_eq!(
+            events,
+            vec![
+                AiStreamEvent::FinalText("hola ".to_owned()),
+                AiStreamEvent::FinalText("mundo".to_owned()),
+            ]
+        );
+
+        assert_eq!(source.reply_metadata("1", "2"), Ok(None));
+        assert_eq!(
+            source.prepare(input()),
+            Err("streaming source must not use the blocking path".to_owned())
+        );
+        assert_eq!(
+            source.complete_delivery(AiDelivery {
+                completion_id: "gen-1".to_owned(),
+                delivered: true,
+                sent_message_id: Some(MessageId(5)),
+            }),
+            Ok(())
+        );
+
+        assert_eq!(
+            source.prepare_streaming(input(), &mut reject_token),
+            Err("unexpected token hola ".to_owned())
+        );
+
+        let stopped = source.prepare_streaming_events(input(), &mut |event| {
+            Err(format!("delivery rejected {event:?}"))
+        });
+        assert_eq!(
+            stopped,
+            Err("delivery rejected FinalText(\"hola \")".to_owned())
         );
     }
 }

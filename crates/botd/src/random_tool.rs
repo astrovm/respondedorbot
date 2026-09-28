@@ -182,5 +182,11 @@ mod tests {
         let result = tool.execute(request("a,b"), "call");
         assert_eq!(result.output, "tool 'random_choice' failed");
         assert!(result.diagnostics[0].contains("synthetic choice failure"));
+        let invalid = tool.execute(request("only-one-option"), "call");
+        assert_eq!(
+            invalid.output,
+            "Send options like 'pizza, steak, sushi' or a range like '1-10'"
+        );
+        assert!(invalid.diagnostics.is_empty());
     }
 }

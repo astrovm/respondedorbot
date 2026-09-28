@@ -53,10 +53,10 @@ pub fn production_compaction_worker(
         format!("{owner_prefix}:compaction:{sequence}")
     });
     Ok(CompactionWorker::new(
-        RedisCompactionQueue::new(endpoint).map_err(|error| error.to_string())?,
+        RedisCompactionQueue::new(endpoint).map_err(crate::error_text)?,
         RedisCompactionState::new(endpoint)?,
         OpenRouterCompactionProvider::new(
-            ReqwestOpenRouterTransport::new().map_err(|error| error.to_string())?,
+            ReqwestOpenRouterTransport::new().map_err(crate::error_text)?,
             openrouter_api_key,
             openrouter_base_url,
             COMPACTION_MODEL,
@@ -81,7 +81,7 @@ impl RedisCompactionState {
                 state,
                 ttl_seconds: CHAT_STATE_TTL_SECONDS,
             })
-            .map_err(|error| error.to_string())
+            .map_err(crate::error_text)
     }
 }
 
@@ -92,12 +92,12 @@ impl CompactionState for RedisCompactionState {
         let summary = self
             .state
             .get_value(&chat_summary_key(chat_id))
-            .map_err(|error| error.to_string())?
+            .map_err(crate::error_text)?
             .filter(|value| !value.is_empty());
         let marker = if summary.is_some() {
             self.state
                 .get_value(&chat_compacted_until_key(chat_id))
-                .map_err(|error| error.to_string())?
+                .map_err(crate::error_text)?
                 .filter(|value| !value.is_empty())
         } else {
             None
@@ -119,7 +119,7 @@ impl CompactionState for RedisCompactionState {
                 target_marker,
                 self.ttl_seconds,
             )
-            .map_err(|error| error.to_string())
+            .map_err(crate::error_text)
     }
 }
 
@@ -189,7 +189,7 @@ impl<Transport> OpenRouterCompactionProvider<Transport> {
         if let Some(pricing) = self.pricing.as_ref() {
             pricing
                 .apply_to_request(&mut request)
-                .map_err(|error| error.to_string())?;
+                .map_err(crate::error_text)?;
         }
         request.max_tokens = u64::try_from(chat_output_token_limit(&self.model)).ok();
         Ok(request)
@@ -213,9 +213,9 @@ impl<Transport: OpenRouterTransport> CompactionProvider
             &self.base_url,
             &self
                 .request(messages, prior_summary, locale)
-                .map_err(|error| error.to_string())?,
+                .map_err(crate::error_text)?,
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(crate::error_text)?;
         let cleaned = sanitize_summary_text(&completion.text);
         if cleaned.is_empty() {
             return Err("summary provider returned empty text".to_owned());
@@ -290,7 +290,7 @@ impl CompactionBilling for PostgresCompactionBilling {
         let usage_tag = reservation_nested_string(&job.reservation, "usage_tag");
         self.repository
             .compaction_reservation_settled(job.user_id, &operation_id, &usage_tag)
-            .map_err(|error| error.to_string())
+            .map_err(crate::error_text)
     }
 
     fn list_provider_segments(
@@ -300,7 +300,7 @@ impl CompactionBilling for PostgresCompactionBilling {
     ) -> Result<Vec<Value>, Self::Error> {
         self.repository
             .list_ai_provider_segments(user_id, operation_id)
-            .map_err(|error| error.to_string())
+            .map_err(crate::error_text)
     }
 
     fn record_provider_segment(
@@ -321,7 +321,7 @@ impl CompactionBilling for PostgresCompactionBilling {
                 &metadata,
             )
             .map(|_| ())
-            .map_err(|error| error.to_string())
+            .map_err(crate::error_text)
     }
 
     fn settle(&mut self, request: SettlementRequest<'_>) -> Result<(), Self::Error> {
@@ -338,7 +338,7 @@ impl CompactionBilling for PostgresCompactionBilling {
                 calculate_billing_for_segments(&Value::Array(request.billing_segments.to_vec()))
             })
             .transpose()
-            .map_err(|error| error.to_string())?;
+            .map_err(crate::error_text)?;
         let pricing_complete = pricing
             .as_ref()
             .is_none_or(|pricing| pricing["pricing_complete"] == json!(true));
@@ -402,7 +402,7 @@ impl CompactionBilling for PostgresCompactionBilling {
                     &metadata,
                 )
                 .map(|_| ())
-                .map_err(|error| error.to_string());
+                .map_err(crate::error_text);
         }
         self.repository
             .settle_ai_operation_once(
@@ -413,7 +413,7 @@ impl CompactionBilling for PostgresCompactionBilling {
                 &metadata,
             )
             .map(|_| ())
-            .map_err(|error| error.to_string())
+            .map_err(crate::error_text)
     }
 
     fn settle_incompatible(&mut self, chat_id: &str, decoded: &Value) -> Result<bool, Self::Error> {
@@ -467,7 +467,7 @@ impl CompactionBilling for PostgresCompactionBilling {
                 &metadata,
             )
             .map(|_| true)
-            .map_err(|error| error.to_string())
+            .map_err(crate::error_text)
     }
 }
 
@@ -579,32 +579,36 @@ mod tests {
         SettlementRequest as CompactionSettlementRequest,
     };
 
+    const SUMMARY: &str = "**fact**\n\n# pending";
+
     struct Transport {
         request: RefCell<Option<HttpRequest>>,
+        content: &'static str,
+    }
+
+    fn transport(content: &'static str) -> Transport {
+        Transport {
+            request: RefCell::new(None),
+            content,
+        }
     }
 
     fn integration_redis_endpoint() -> Option<RedisEndpoint> {
-        let port = std::env::var("TEST_REDIS_PORT").ok()?.parse().ok()?;
-        Some(RedisEndpoint {
-            host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
-            port,
-            password: std::env::var("TEST_REDIS_PASSWORD")
-                .ok()
-                .filter(|value| !value.is_empty()),
-        })
+        crate::test_env::redis_endpoint()
     }
 
     #[test]
     fn redis_compaction_state_round_trips_summary_and_marker_atomically() -> Result<(), String> {
-        let Some(endpoint) = integration_redis_endpoint() else {
-            return Ok(());
-        };
+        integration_redis_endpoint().map_or(Ok(()), |endpoint| assert_state_round_trip(&endpoint))
+    }
+
+    fn assert_state_round_trip(endpoint: &RedisEndpoint) -> Result<(), String> {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|error| error.to_string())?
+            .map_err(crate::error_text)?
             .as_nanos();
         let chat_id = format!("synthetic-compaction-{nonce}");
-        let mut state = RedisCompactionState::new(&endpoint)?;
+        let mut state = RedisCompactionState::new(endpoint)?;
         assert_eq!(state.load(&chat_id)?, (None, None));
         state.save(&chat_id, "synthetic summary", "message-7")?;
         assert_eq!(
@@ -619,24 +623,27 @@ mod tests {
 
     #[test]
     fn postgres_compaction_billing_records_provider_usage_and_settles_once() -> Result<(), String> {
-        let Some(database_url) = std::env::var("TEST_DATABASE_URL").ok() else {
-            return Ok(());
-        };
-        BillingSchemaRepository::new(&database_url)
+        crate::test_env::database_url().map_or(Ok(()), |database_url| {
+            assert_billing_settles_once(&database_url)
+        })
+    }
+
+    fn assert_billing_settles_once(database_url: &str) -> Result<(), String> {
+        BillingSchemaRepository::new(database_url)
             .ensure_schema()
-            .map_err(|error| error.to_string())?;
+            .map_err(crate::error_text)?;
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|error| error.to_string())?
+            .map_err(crate::error_text)?
             .as_nanos();
-        let suffix = i64::try_from(nonce % 100_000_000).map_err(|error| error.to_string())?;
+        let suffix = i64::try_from(nonce % 100_000_000).map_err(crate::error_text)?;
         let user_id = 7_200_000_000_000_i64 + suffix;
         let operation_id = format!("synthetic-compaction-billing-{nonce}");
         let usage_tag = format!("synthetic-usage-{nonce}");
-        let repository = BillingRepository::new(&database_url);
+        let repository = BillingRepository::new(database_url);
         repository
             .mint_user_credits(user_id, 100, None)
-            .map_err(|error| error.to_string())?;
+            .map_err(crate::error_text)?;
         let metadata = serde_json::Map::from_iter([
             ("operation_id".to_owned(), json!(&operation_id)),
             ("settlement_id".to_owned(), json!(&operation_id)),
@@ -654,7 +661,7 @@ mod tests {
                 Some(&operation_id),
                 &operation_id,
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(crate::error_text)?;
         assert!(reserve.ok);
         let job = CompactionJobRecord {
             schema_version: COMPACTION_JOB_SCHEMA_VERSION,
@@ -687,7 +694,7 @@ mod tests {
             "source":"openrouter",
             "metadata":{"provider_generation_id":format!("synthetic-generation-{nonce}")},
         });
-        let mut billing = PostgresCompactionBilling::new(&database_url);
+        let mut billing = PostgresCompactionBilling::new(database_url);
         assert!(!billing.is_settled(&job)?);
         billing.record_provider_segment(&job, &operation_id, &segment)?;
         let segments = billing.list_provider_segments(user_id, &operation_id)?;
@@ -705,7 +712,7 @@ mod tests {
         let legacy_settlement_id = format!("synthetic-legacy-settlement-{nonce}");
         repository
             .mint_user_credits(legacy_user_id, 100, None)
-            .map_err(|error| error.to_string())?;
+            .map_err(crate::error_text)?;
         let legacy_metadata = serde_json::Map::from_iter([
             ("settlement_id".to_owned(), json!(&legacy_settlement_id)),
             ("usage_tag".to_owned(), json!(&legacy_usage_tag)),
@@ -723,7 +730,7 @@ mod tests {
                     None,
                     &legacy_settlement_id,
                 )
-                .map_err(|error| error.to_string())?
+                .map_err(crate::error_text)?
                 .ok
         );
         let mut legacy_job = job.clone();
@@ -747,27 +754,32 @@ mod tests {
             !billing
                 .settle_incompatible("synthetic", &json!({"user_id":user_id,"reservation":{}}),)?
         );
-        assert!(billing.settle_incompatible(
-            &job.chat_id,
-            &json!({
-                "user_id": user_id,
-                "reservation": {
-                    "reserved_credit_units": 10,
-                    "source": "user",
-                    "usage_tag": usage_tag,
-                    "credit_scale": 100,
-                    "metadata": {
-                        "settlement_id": operation_id,
-                        "operation_id": operation_id,
-                    }
+        let incompatible = json!({
+            "user_id": user_id,
+            "reservation": {
+                "reserved_credit_units": 10,
+                "source": "user",
+                "usage_tag": usage_tag,
+                "credit_scale": 100,
+                "metadata": {
+                    "settlement_id": operation_id,
+                    "operation_id": operation_id,
                 }
-            }),
-        )?);
+            }
+        });
+        assert_eq!(
+            billing.settle_incompatible(&job.chat_id, &incompatible),
+            Ok(true)
+        );
         Ok(())
     }
 
     #[test]
-    fn production_worker_composition_is_side_effect_free() {
+    fn production_worker_composition_is_side_effect_free() -> Result<(), Box<dyn Error>> {
+        let pricing = OpenRouterPricingCache::new(
+            "synthetic-openrouter-key",
+            "https://openrouter.example.test/api/v1",
+        );
         let result = production_compaction_worker(
             &RedisEndpoint {
                 host: "synthetic.invalid".to_owned(),
@@ -777,23 +789,14 @@ mod tests {
             "postgresql://synthetic.invalid/database",
             "synthetic-openrouter-key",
             "https://openrouter.example.test/api/v1",
-            Arc::new(
-                OpenRouterPricingCache::new(
-                    "synthetic-openrouter-key",
-                    "https://openrouter.example.test/api/v1",
-                )
-                .unwrap_or_else(|_| unreachable!("pricing cache construction")),
-            ),
+            Arc::new(pricing?),
             "synthetic persona",
             "synthetic-owner",
         );
-        assert!(result.is_ok());
-        let Some(worker) = result.ok() else {
-            return;
-        };
-        let (_queue, _state, _provider, _billing, mut token) = worker.into_parts();
+        let (_queue, _state, _provider, _billing, mut token) = result?.into_parts();
         assert_eq!(token(), "synthetic-owner:compaction:0");
         assert_eq!(token(), "synthetic-owner:compaction:1");
+        Ok(())
     }
 
     impl OpenRouterTransport for Transport {
@@ -805,9 +808,10 @@ mod tests {
                     "id":"generation-1",
                     "model":"resolved/model",
                     "provider":"Synthetic",
-                    "choices":[{"message":{"content":"**fact**\n\n# pending"},"finish_reason":"stop"}],
+                    "choices":[{"message":{"content":self.content},"finish_reason":"stop"}],
                     "usage":{"prompt_tokens":10,"completion_tokens":5,"cost":"0.0012345"}
-                }).to_string(),
+                })
+                .to_string(),
                 headers: Default::default(),
             })
         }
@@ -816,9 +820,7 @@ mod tests {
     #[test]
     fn builds_legacy_compatible_summary_request_and_billing_segment() -> Result<(), Box<dyn Error>>
     {
-        let transport = Transport {
-            request: RefCell::new(None),
-        };
+        let transport = transport(SUMMARY);
         let mut provider = OpenRouterCompactionProvider::new(
             transport,
             "key",
@@ -826,11 +828,8 @@ mod tests {
             "requested/model",
             "persona",
         );
-        let result = provider.compact(
-            &[json!({"role":"user","text":"hello"})],
-            Some("old context"),
-            "en",
-        )?;
+        let messages = [json!({"role":"user","text":"hello"})];
+        let result = provider.compact(&messages, Some("old context"), "en")?;
         assert_eq!(result.summary, "[previous context: fact\n\npending]");
         let segment = result.billing_segment.unwrap_or(Value::Null);
         assert_eq!(segment["kind"], "summary");
@@ -844,15 +843,16 @@ mod tests {
             bot_core::ai_usage::stable_provider_segment_id(&segment),
             "openrouter:generation-1"
         );
-        let body: Value = serde_json::from_str(
-            &provider
+        let sent_body = |provider: &OpenRouterCompactionProvider<Transport>| {
+            provider
                 .transport
                 .request
                 .borrow()
                 .as_ref()
                 .map(|request| request.body.clone())
-                .unwrap_or_default(),
-        )?;
+                .unwrap_or_default()
+        };
+        let body: Value = serde_json::from_str(&sent_body(&provider))?;
         assert_eq!(body["messages"][0]["content"], "persona");
         assert_eq!(body["messages"][1]["content"], "old context");
         assert_eq!(body["messages"][2]["content"], "hello");
@@ -862,20 +862,25 @@ mod tests {
                 .unwrap_or_default()
                 .contains("NEVER use markdown")
         );
+
+        let spanish = provider.compact(&messages, None, "es-AR")?;
+        assert_eq!(spanish.summary, "[contexto anterior: fact\n\npending]");
+        let body: Value = serde_json::from_str(&sent_body(&provider))?;
+        assert_eq!(body["messages"][1]["content"], "hello");
+        assert!(
+            body["messages"][2]["content"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("NUNCA uses markdown")
+        );
         Ok(())
     }
 
     #[test]
-    fn pricing_lookup_failure_stops_compaction_before_transport_io() {
-        let transport = Transport {
-            request: RefCell::new(None),
-        };
-        let pricing = Arc::new(
-            OpenRouterPricingCache::new("synthetic-key", "not-a-url")
-                .unwrap_or_else(|_| unreachable!("pricing cache construction")),
-        );
+    fn pricing_lookup_failure_stops_compaction_before_transport_io() -> Result<(), Box<dyn Error>> {
+        let pricing = Arc::new(OpenRouterPricingCache::new("synthetic-key", "not-a-url")?);
         let mut provider = OpenRouterCompactionProvider::new(
-            transport,
+            transport(SUMMARY),
             "synthetic-key",
             "https://synthetic.invalid/api/v1",
             "requested/model",
@@ -889,26 +894,13 @@ mod tests {
                 .is_err()
         );
         assert!(provider.transport.request.borrow().is_none());
+        Ok(())
     }
 
     #[test]
     fn spanish_compaction_maps_roles_skips_empty_messages_and_rejects_empty_output() {
-        struct EmptyTransport;
-        impl OpenRouterTransport for EmptyTransport {
-            fn post(&self, _: &HttpRequest) -> Result<HttpResponse, OpenRouterChatError> {
-                Ok(HttpResponse {
-                    status_code: 200,
-                    body: json!({
-                        "model":"requested/model",
-                        "choices":[{"message":{"content":"  "}}]
-                    })
-                    .to_string(),
-                    headers: Default::default(),
-                })
-            }
-        }
         let mut provider = OpenRouterCompactionProvider::new(
-            EmptyTransport,
+            transport("  "),
             "synthetic-key",
             "https://provider.example.test/v1",
             "requested/model",
@@ -974,5 +966,24 @@ mod tests {
             super::reservation_nested_string(&reservation, "missing"),
             ""
         );
+    }
+
+    #[test]
+    fn incompatible_jobs_without_a_billable_reservation_are_left_untouched() {
+        let mut billing = PostgresCompactionBilling::new("postgresql://synthetic.invalid/database");
+        for decoded in [
+            json!({}),
+            json!({"user_id": "not-a-number", "reservation": {"usage_tag": "tag"}}),
+            json!({"user_id": 7}),
+            json!({"user_id": 7, "reservation": "legacy-string"}),
+            json!({"user_id": 7, "reservation": {"reserved_credit_units": 10}}),
+            json!({"user_id": 7, "reservation": {"usage_tag": ""}}),
+        ] {
+            assert_eq!(
+                billing.settle_incompatible("synthetic-chat", &decoded),
+                Ok(false),
+                "{decoded}"
+            );
+        }
     }
 }

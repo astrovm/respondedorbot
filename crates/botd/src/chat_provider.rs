@@ -149,6 +149,16 @@ impl<Transport: OpenRouterStreamTransport> OpenRouterChatStreamer<Transport> {
     where
         F: FnMut(ProviderStreamEvent) -> Result<(), OpenRouterChatError>,
     {
+        self.stream_round_dyn(messages, tools, &mut on_event)
+    }
+
+    /// One non-generic streaming implementation shared by every event consumer.
+    fn stream_round_dyn(
+        &self,
+        messages: &[PromptMessage],
+        tools: &[Value],
+        on_event: &mut dyn FnMut(ProviderStreamEvent) -> Result<(), OpenRouterChatError>,
+    ) -> Result<ChatRoundResult, ChatRoundError> {
         let mut result = ChatRoundResult::empty();
         let request = match self.request(messages, tools) {
             Ok(request) => request,
@@ -415,7 +425,7 @@ mod tests {
         PromptContent, PromptImage, PromptMessage, PromptRole, PromptToolCall,
     };
     use bot_core::provider_stream_policy::ProviderStreamEvent;
-    use serde_json::{Value, json};
+    use serde_json::{Map, Value, json};
 
     use super::{OpenRouterChatStreamer, reasoning_config};
 
@@ -539,9 +549,7 @@ mod tests {
         let config = reasoning_config(&conversation);
         assert!(config.enabled);
         assert_eq!(config.effort.as_deref(), Some("low"));
-        let Ok(body) = serde_json::to_value(&config) else {
-            return;
-        };
+        let body = serde_json::to_value(&config).unwrap_or_default();
         assert_eq!(body, json!({"enabled": true, "effort": "low"}));
 
         conversation.push(PromptMessage::text(PromptRole::User, "follow-up"));
@@ -549,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_round_accumulates_text_tools_and_billable_usage() {
+    fn stream_round_accumulates_text_tools_and_billable_usage() -> crate::test_env::TestResult {
         let transport = Transport {
             chunks: stream_body(true),
             failure: None,
@@ -566,10 +574,7 @@ mod tests {
             emitted.push(text.to_owned());
             Ok(())
         });
-        assert!(result.is_ok());
-        let Some(result) = result.ok() else {
-            return;
-        };
+        let result = result?;
         assert_eq!(result.text, "hello world");
         assert_eq!(result.reasoning, "checking ");
         assert_eq!(
@@ -599,19 +604,17 @@ mod tests {
         assert!(body["reasoning"].get("effort").is_none());
         assert_eq!(body["messages"][1]["content"][0]["type"], "text");
         assert_eq!(body["tools"][0]["type"], "function");
+        Ok(())
     }
 
     #[test]
-    fn pricing_lookup_failure_stops_streaming_before_transport_io() {
+    fn pricing_lookup_failure_stops_streaming_before_transport_io() -> crate::test_env::TestResult {
         let transport = Transport {
             chunks: Vec::new(),
             failure: None,
             requests: RefCell::new(Vec::new()),
         };
-        let pricing = Arc::new(
-            OpenRouterPricingCache::new("synthetic-key", "not-a-url")
-                .unwrap_or_else(|_| unreachable!("pricing cache construction")),
-        );
+        let pricing = Arc::new(OpenRouterPricingCache::new("synthetic-key", "not-a-url")?);
         let provider = OpenRouterChatStreamer::new(
             transport,
             "synthetic-key",
@@ -620,13 +623,12 @@ mod tests {
         )
         .with_openrouter_pricing(pricing);
 
-        let result = provider.stream_round(&messages(), &[], |_| Ok(()));
-        let Some(error) = result.err() else {
-            unreachable!();
-        };
+        let result = provider.stream_round(&messages(), &[], ignore_text);
+        let error = result.err().ok_or("invalid pricing URL fails")?;
         assert_eq!(error.source, OpenRouterChatError::InvalidBaseUrl);
         assert!(error.partial.text.is_empty());
         assert!(provider.transport.requests.borrow().is_empty());
+        Ok(())
     }
 
     #[test]
@@ -657,11 +659,7 @@ mod tests {
             reasoning_details: Vec::new(),
         }];
 
-        assert!(
-            provider
-                .stream_round(&messages, &[], |_text| Ok(()))
-                .is_ok()
-        );
+        assert!(provider.stream_round(&messages, &[], ignore_text).is_ok());
         let body = serde_json::from_str::<Value>(&provider.transport.requests.borrow()[0].body)
             .unwrap_or(Value::Null);
         assert_eq!(body["messages"][0]["content"][0]["type"], "text");
@@ -674,7 +672,8 @@ mod tests {
     }
 
     #[test]
-    fn stream_round_events_exposes_reasoning_before_text_and_keeps_tool_context() {
+    fn stream_round_events_exposes_reasoning_before_text_and_keeps_tool_context()
+    -> crate::test_env::TestResult {
         let transport = Transport {
             chunks: stream_body(true),
             failure: None,
@@ -687,12 +686,11 @@ mod tests {
             "requested/model",
         );
         let mut events = Vec::new();
-        let result = provider
-            .stream_round_events(&messages(), &[], |event| {
-                events.push(event);
-                Ok(())
-            })
-            .unwrap_or_else(|error| error.partial.as_ref().clone());
+        let result = provider.stream_round_events(&messages(), &[], |event| {
+            events.push(event);
+            Ok(())
+        });
+        let result = result?;
 
         assert_eq!(
             events[..3],
@@ -704,10 +702,12 @@ mod tests {
         );
         assert_eq!(result.reasoning, "checking ");
         assert_eq!(result.text, "hello world");
+        Ok(())
     }
 
     #[test]
-    fn interrupted_round_returns_partial_text_and_reconcilable_usage() {
+    fn interrupted_round_returns_partial_text_and_reconcilable_usage() -> crate::test_env::TestResult
+    {
         let transport = Transport {
             chunks: stream_body(false),
             failure: None,
@@ -719,20 +719,19 @@ mod tests {
             "https://synthetic.invalid",
             "requested/model",
         );
-        let result = provider.stream_round(&messages(), &[], |_text| Ok(()));
-        assert!(result.is_err());
-        let Some(error) = result.err() else {
-            return;
-        };
+        let result = provider.stream_round(&messages(), &[], ignore_text);
+        let error = result.err().ok_or("interrupted round fails")?;
         assert_eq!(error.source, OpenRouterChatError::IncompleteStream);
         assert_eq!(error.partial.text, "hello world");
         let segment = error.partial.billing_segment.unwrap_or(Value::Null);
         assert_eq!(segment["metadata"]["provider_usage_pending"], true);
         assert_eq!(segment["usage"]["completion_tokens"], 4);
+        Ok(())
     }
 
     #[test]
-    fn consumer_failure_preserves_the_completed_prefix_without_fake_usage() {
+    fn consumer_failure_preserves_the_completed_prefix_without_fake_usage()
+    -> crate::test_env::TestResult {
         let transport = Transport {
             chunks: stream_body(true),
             failure: None,
@@ -747,11 +746,14 @@ mod tests {
         let result = provider.stream_round(&messages(), &[], |_text| {
             Err(OpenRouterChatError::Stream("delivery stopped".to_owned()))
         });
-        let Some(error) = result.err() else {
-            return;
-        };
+        let error = result.err().ok_or("consumer failure stops round")?;
+        assert_eq!(
+            error.source,
+            OpenRouterChatError::Stream("delivery stopped".to_owned())
+        );
         assert_eq!(error.partial.text, "");
         assert!(error.partial.billing_segment.is_none());
+        Ok(())
     }
 
     #[test]
@@ -790,7 +792,7 @@ mod tests {
                 reasoning_details: Vec::new(),
             },
         ];
-        let result = provider.stream_round(&messages, &[], |_text| Ok(()));
+        let result = provider.stream_round(&messages, &[], ignore_text);
         assert!(result.is_ok_and(|result| result.text.is_empty()));
         let body = serde_json::from_str::<Value>(&provider.transport.requests.borrow()[0].body)
             .unwrap_or(Value::Null);
@@ -807,7 +809,8 @@ mod tests {
     }
 
     #[test]
-    fn stream_round_events_exposes_textual_reasoning_details_without_legacy_field() {
+    fn stream_round_events_exposes_textual_reasoning_details_without_legacy_field()
+    -> crate::test_env::TestResult {
         let transport = Transport {
             chunks: details_only_stream_body(),
             failure: None,
@@ -820,12 +823,11 @@ mod tests {
             "requested/model",
         );
         let mut events = Vec::new();
-        let result = provider
-            .stream_round_events(&messages(), &[], |event| {
-                events.push(event);
-                Ok(())
-            })
-            .unwrap_or_else(|error| error.partial.as_ref().clone());
+        let result = provider.stream_round_events(&messages(), &[], |event| {
+            events.push(event);
+            Ok(())
+        });
+        let result = result?;
 
         assert_eq!(
             events,
@@ -835,9 +837,11 @@ mod tests {
             ]
         );
         assert_eq!(result.reasoning, "checking details");
+        Ok(())
     }
     #[test]
-    fn streamed_reasoning_is_reassembled_for_the_tool_continuation() {
+    fn streamed_reasoning_is_reassembled_for_the_tool_continuation() -> crate::test_env::TestResult
+    {
         let fragments = vec![
             json!({"type":"reasoning.text","text":"check ","id":"text-1","index":0}),
             json!({"type":"reasoning.text","text":"the fixture","signature":"sig-","index":0}),
@@ -871,18 +875,14 @@ mod tests {
             "https://synthetic.invalid/api/v1",
             "synthetic/model",
         );
-        let round = provider
-            .stream_round_events(&messages(), &[], |_| Ok(()))
-            .unwrap_or_else(|error| *error.partial);
+        let round = provider.stream_round_events(&messages(), &[], ignore_event)?;
         let continuation = PromptMessage::assistant_tool_calls_with_reasoning(
             None,
             vec![],
             Some(round.reasoning),
             round.reasoning_details,
         );
-        provider
-            .stream_round(&[continuation], &[], |_| Ok(()))
-            .unwrap_or_else(|error| *error.partial);
+        provider.stream_round(&[continuation], &[], ignore_text)?;
         let requests = provider.transport.requests.borrow();
         let body: Value = serde_json::from_str(&requests[1].body).unwrap_or(Value::Null);
         assert_eq!(
@@ -897,5 +897,30 @@ mod tests {
             ])
         );
         assert!(body["messages"][0].get("reasoning").is_none());
+        Ok(())
+    }
+
+    fn ignore_text(_text: &str) -> Result<(), OpenRouterChatError> {
+        Ok(())
+    }
+
+    fn ignore_event(_event: ProviderStreamEvent) -> Result<(), OpenRouterChatError> {
+        Ok(())
+    }
+
+    #[test]
+    fn segments_without_a_resolved_model_are_billed_to_the_requested_model() {
+        let metadata = super::ProviderRoundMetadata {
+            generation_id: Some("generation-9".to_owned()),
+            ..super::ProviderRoundMetadata::default()
+        };
+        let segment = super::provider_segment("requested/model", metadata, Map::new(), true)
+            .unwrap_or(Value::Null);
+        assert_eq!(segment["model"], "requested/model");
+        assert!(segment["metadata"].get("requested_model").is_none());
+        assert_eq!(
+            segment["metadata"]["provider_generation_id"],
+            "generation-9"
+        );
     }
 }

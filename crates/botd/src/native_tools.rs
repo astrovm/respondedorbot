@@ -525,4 +525,16 @@ mod tests {
                 .is_none()
         );
     }
+
+    #[test]
+    fn standard_backend_ports_default_to_sequential_execution() {
+        let backend = StandardNativeToolBackend::new(Ports { calls: Vec::new() }, Locale::En);
+        let mut registry = NativeToolRegistry::new(backend, Locale::En);
+        assert!(
+            registry
+                .concurrent_call("weather", &json!({"location": "Synthetic City"}), "call")
+                .is_none()
+        );
+        assert!(registry.backend().ports().calls.is_empty());
+    }
 }
