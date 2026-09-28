@@ -106,10 +106,8 @@ pub trait MediaRuntime {
 
     fn prepare_image_for_prompt(
         &mut self,
-        _file_id: &str,
-    ) -> Result<Option<PreparedImagePrompt>, String> {
-        Ok(None)
-    }
+        file_id: &str,
+    ) -> Result<Option<PreparedImagePrompt>, String>;
 
     fn execute(&mut self, prepared: PreparedMedia, prompt: &str) -> Result<MediaExecution, String>;
 }

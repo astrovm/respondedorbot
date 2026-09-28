@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use bot_adapters::billing_schema::BillingSchemaRepository;
 use bot_adapters::openrouter_chat::{DEFAULT_OPENROUTER_BASE_URL, OpenRouterPricingCache};
-use bot_adapters::telegram_http::ReqwestTelegramTransport;
+use bot_adapters::telegram_http::{ReqwestTelegramTransport, TransportFailureKind};
 use bot_adapters::telegram_polling::PollFailure;
 use bot_core::locale::Locale;
 use bot_core::telegram_commands::command_publication_actions;
@@ -136,6 +136,35 @@ fn error_text(error: impl Display) -> String {
     error.to_string()
 }
 
+fn telegram_transport(
+    built: Result<ReqwestTelegramTransport, TransportFailureKind>,
+    purpose: &str,
+) -> Result<ReqwestTelegramTransport, String> {
+    match built {
+        Ok(transport) => Ok(transport),
+        Err(error) => Err(format!(
+            "could not construct {purpose} transport: {error:?}"
+        )),
+    }
+}
+
+type ShutdownHandler = Box<dyn FnMut() + Send>;
+type ShutdownInstaller = fn(ShutdownHandler) -> Result<(), ctrlc::Error>;
+
+fn install_shutdown_handler(
+    stopping: &Arc<AtomicBool>,
+    install: ShutdownInstaller,
+) -> Result<(), String> {
+    let signal_stopping = Arc::clone(stopping);
+    let handler: ShutdownHandler = Box::new(move || signal_stopping.store(true, Ordering::Release));
+    match install(handler) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(format!(
+            "could not install shutdown signal handler: {error}"
+        )),
+    }
+}
+
 fn interruptible_wait(stopping: &AtomicBool, duration: Duration) {
     let deadline = Instant::now() + duration;
     while !stopping.load(Ordering::Acquire) {
@@ -153,8 +182,7 @@ fn build_operational_reporter(
     let Some(admin_chat_id) = config.admin_user_id else {
         return Ok(Arc::new(NoopOperationalReporter));
     };
-    let transport = ReqwestTelegramTransport::new()
-        .map_err(|error| format!("could not construct admin reporting transport: {error:?}"))?;
+    let transport = telegram_transport(ReqwestTelegramTransport::new(), "admin reporting")?;
     let secrets = [
         Some(config.runtime.telegram_token()),
         Some(config.database_url()),
@@ -316,8 +344,8 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
         BackgroundSupervisor::start(specs, reporter.clone()).map_err(error_text)?;
     let mut reports = BackgroundReports::start(reporter, OPERATIONAL_REPORT_QUEUE_CAPACITY);
 
-    let command_transport = ReqwestTelegramTransport::new()
-        .map_err(|error| format!("could not construct command publication transport: {error:?}"))?;
+    let command_transport =
+        telegram_transport(ReqwestTelegramTransport::new(), "command publication")?;
     let mut command_sink =
         TelegramActionSink::new(command_transport, config.runtime.telegram_token())
             .with_delivery_coordinator(telegram_delivery);
@@ -326,9 +354,7 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
     }
 
     let stopping = Arc::new(AtomicBool::new(false));
-    let signal_stopping = stopping.clone();
-    ctrlc::set_handler(move || signal_stopping.store(true, Ordering::Release))
-        .map_err(|error| format!("could not install shutdown signal handler: {error}"))?;
+    install_shutdown_handler(&stopping, ctrlc::set_handler::<ShutdownHandler>)?;
     let polling_result = poll_until_stopped(
         &mut runtime,
         &stopping,
@@ -356,7 +382,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    use bot_adapters::telegram_http::TransportFailureKind;
+    use bot_adapters::telegram_http::{ReqwestTelegramTransport, TransportFailureKind};
     use bot_adapters::telegram_polling::{
         IncomingEvent, IncomingUpdate, PollFailure, PollOutcome, PollingError,
     };
@@ -364,9 +390,10 @@ mod tests {
     use bot_core::telegram_actions::TelegramAction;
 
     use super::{
-        BackgroundReports, build_operational_reporter, interruptible_wait, log_and_queue,
-        poll_retry_report, poll_until_stopped, publish_commands, report_best_effort, retry_delay,
-        run_polling_until, update_failure_report,
+        BackgroundReports, ShutdownHandler, build_operational_reporter, install_shutdown_handler,
+        interruptible_wait, log_and_queue, poll_retry_report, poll_until_stopped, publish_commands,
+        report_best_effort, retry_delay, run_polling_until, telegram_transport,
+        update_failure_report,
     };
     use crate::config::ProductionConfig;
     use crate::dispatcher::{ActionReceipt, ActionSink};
@@ -653,6 +680,12 @@ mod tests {
         }
 
         assert!(build_operational_reporter(&config(None)).is_ok());
+        assert!(telegram_transport(ReqwestTelegramTransport::new(), "admin reporting").is_ok());
+        let refused = telegram_transport(Err(TransportFailureKind::Request), "admin reporting");
+        assert_eq!(
+            refused.err().as_deref(),
+            Some("could not construct admin reporting transport: Request")
+        );
         assert!(build_operational_reporter(&config(Some("42"))).is_ok());
 
         struct FailingReporter;
@@ -864,5 +897,32 @@ mod tests {
                     "Telegram polling retry: Conflict",
                 ]
         }));
+    }
+
+    fn signal_now(mut handler: ShutdownHandler) -> Result<(), ctrlc::Error> {
+        handler();
+        Ok(())
+    }
+
+    fn already_registered(_handler: ShutdownHandler) -> Result<(), ctrlc::Error> {
+        Err(ctrlc::Error::MultipleHandlers)
+    }
+
+    #[test]
+    fn shutdown_signal_requests_a_stop_and_install_failures_are_reported() {
+        let stopping = std::sync::Arc::new(AtomicBool::new(false));
+        assert_eq!(install_shutdown_handler(&stopping, signal_now), Ok(()));
+        assert!(stopping.load(Ordering::Acquire));
+
+        let untouched = std::sync::Arc::new(AtomicBool::new(false));
+        let refused = install_shutdown_handler(&untouched, already_registered);
+        assert_eq!(
+            refused.err().as_deref(),
+            Some(
+                "could not install shutdown signal handler: \
+                 Ctrl-C error: Ctrl-C signal handler already registered"
+            )
+        );
+        assert!(!untouched.load(Ordering::Acquire));
     }
 }

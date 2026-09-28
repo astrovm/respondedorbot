@@ -1,6 +1,6 @@
 //! Production adapters for the native media pipeline.
 
-use std::io::{ErrorKind, Read, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
@@ -255,23 +255,25 @@ impl FfmpegMediaProcessor {
             .stderr(Stdio::null())
             .spawn()
             .map_err(error_text)?;
-        // Both pipes are requested above; this only guards the std API.
-        let (mut stdin, stdout) = child
-            .stdin
-            .take()
-            .zip(child.stdout.take())
-            .ok_or_else(|| Self::abandon(&mut child, MEDIA_PIPES_UNAVAILABLE.to_owned()))?;
+        // Both pipes are requested above, so a missing one is reported through
+        // the same write and read failures as a broken pipe.
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take();
         thread::scope(|scope| {
             let writer = scope.spawn(move || {
-                let result = stdin.write_all(input);
-                drop(stdin);
-                result
+                stdin
+                    .ok_or(io::Error::other(MEDIA_PIPES_UNAVAILABLE))
+                    .and_then(|mut stdin| stdin.write_all(input))
             });
             let reader = scope.spawn(move || {
                 let mut output = Vec::new();
                 stdout
-                    .take(max_output_bytes.saturating_add(1))
-                    .read_to_end(&mut output)
+                    .ok_or(io::Error::other(MEDIA_PIPES_UNAVAILABLE))
+                    .and_then(|stdout| {
+                        stdout
+                            .take(max_output_bytes.saturating_add(1))
+                            .read_to_end(&mut output)
+                    })
                     .map_err(error_text)?;
                 if output.len() as u64 > max_output_bytes {
                     return Err("media process output exceeds the size limit".to_owned());

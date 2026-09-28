@@ -412,10 +412,7 @@ where
                     job.result_summary = Some(summary);
                     job.result_billing_segment = Some(segment);
                     job.result_cost_usd_micros = raw_cost_usd_micros(&segments);
-                    let payload = encode_job(&job, "encode_recovered_job")?;
-                    self.queue
-                        .replace_job(&job.chat_id, &payload)
-                        .map_err(|error| job_failure(&job, "checkpoint_recovered_job", error))?;
+                    self.checkpoint(&job, "checkpoint_recovered_job")?;
                 }
             }
         }
@@ -455,10 +452,7 @@ where
                 job.result_billing_segment = result.billing_segment;
                 self.persist_provider_usage(&job)
                     .map_err(|error| job_failure(&job, "record_provider_usage", error))?;
-                let payload = encode_job(&job, "encode_provider_result")?;
-                self.queue
-                    .replace_job(&job.chat_id, &payload)
-                    .map_err(|error| job_failure(&job, "checkpoint_provider_result", error))?;
+                self.checkpoint(&job, "checkpoint_provider_result")?;
                 self.save_and_settle(job)
             }
             CompactionDisposition::SaveAndSettle => {
@@ -473,16 +467,30 @@ where
         &mut self,
         job: CompactionJobRecord,
     ) -> Result<(), Box<(CompactionJobRecord, &'static str, String)>> {
-        let summary = job
-            .result_summary
-            .clone()
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| job_failure(&job, "save_state", "compaction result is empty"))?;
+        // Both callers only get here with a non-empty summary: evaluate_compaction
+        // picks SaveAndSettle only for one, and a blank generated summary is
+        // rejected before it is stored on the job.
+        let summary = job.result_summary.clone().unwrap_or_default();
         self.state
             .save(&job.chat_id, &summary, &job.target_marker)
             .map_err(|error| job_failure(&job, "save_state", error))?;
         self.settle(&job, None, "memory_compaction_success")
             .map_err(|error| Box::new((job, "settle_success", error)))
+    }
+
+    fn checkpoint(
+        &mut self,
+        job: &CompactionJobRecord,
+        stage: &'static str,
+    ) -> Result<(), JobFailure> {
+        let stored = serde_json::to_string(job)
+            .map_err(error_text)
+            .and_then(|payload| {
+                self.queue
+                    .replace_job(&job.chat_id, &payload)
+                    .map_err(error_text)
+            });
+        stored.map_err(|error| job_failure(job, stage, error))
     }
 
     fn persist_provider_usage(&mut self, job: &CompactionJobRecord) -> Result<(), String> {
@@ -536,10 +544,6 @@ type JobFailure = Box<(CompactionJobRecord, &'static str, String)>;
 
 fn job_failure(job: &CompactionJobRecord, stage: &'static str, error: impl Display) -> JobFailure {
     Box::new((job.clone(), stage, error.to_string()))
-}
-
-fn encode_job(job: &CompactionJobRecord, stage: &'static str) -> Result<String, JobFailure> {
-    serde_json::to_string(job).map_err(|error| job_failure(job, stage, error))
 }
 
 fn failure(chat_id: &str, stage: &'static str, error: impl Display) -> CompactionFailure {
