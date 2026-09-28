@@ -204,6 +204,9 @@ mod tests {
         }
     }
 
+    /// Shared by every tool under test so retries never wait.
+    fn no_sleep(_delay: Duration) {}
+
     fn tool(
         responses: Vec<Result<HttpResponse, TransportError>>,
         locale: Locale,
@@ -212,7 +215,7 @@ mod tests {
             Transport {
                 responses: RefCell::new(responses),
             },
-            |_| {},
+            no_sleep,
             "synthetic-key",
             locale,
         )
@@ -397,7 +400,7 @@ mod tests {
             })]),
         };
         let mut search =
-            FirecrawlScheduledWebSearch::new(transport, |_| {}, "synthetic-scheduled-key");
+            FirecrawlScheduledWebSearch::new(transport, no_sleep, "synthetic-scheduled-key");
         let result = ScheduledWebSearch::execute(
             &mut search,
             ExternalToolRequest::WebSearch {
@@ -439,7 +442,7 @@ mod tests {
                 }),
             ]),
         };
-        let mut search = FirecrawlScheduledWebSearch::new(transport, |_| {}, "synthetic-key");
+        let mut search = FirecrawlScheduledWebSearch::new(transport, no_sleep, "synthetic-key");
         let request = || ExternalToolRequest::WebSearch {
             query: "synthetic scheduled query".to_owned(),
         };

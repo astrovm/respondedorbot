@@ -37,3 +37,49 @@ pub mod tool_output;
 pub mod tool_requests;
 pub mod web_fetch_tool;
 pub mod youtube;
+
+/// Renders an adapter or store error as the plain-text message the runtime
+/// ports report. Shared so every `map_err` site uses one formatting path.
+pub(crate) fn error_text(error: impl std::fmt::Display) -> String {
+    error.to_string()
+}
+
+/// Environment for tests that use the disposable local PostgreSQL and Redis
+/// services (`TEST_DATABASE_URL`, `TEST_REDIS_HOST`, `TEST_REDIS_PORT`,
+/// `TEST_REDIS_PASSWORD`); each test skips its storage checks when unset.
+#[cfg(test)]
+pub(crate) mod test_env {
+    use bot_adapters::redis_connection::RedisEndpoint;
+
+    pub(crate) type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn non_empty(value: String) -> Option<String> {
+        (!value.is_empty()).then_some(value)
+    }
+
+    pub(crate) fn database_url() -> Option<String> {
+        std::env::var("TEST_DATABASE_URL").ok().and_then(non_empty)
+    }
+
+    pub(crate) fn redis_endpoint() -> Option<RedisEndpoint> {
+        let port = std::env::var("TEST_REDIS_PORT").ok()?.parse().ok()?;
+        let host = std::env::var("TEST_REDIS_HOST").ok().and_then(non_empty);
+        Some(RedisEndpoint {
+            host: host.unwrap_or(String::from("127.0.0.1")),
+            port,
+            password: std::env::var("TEST_REDIS_PASSWORD")
+                .ok()
+                .and_then(non_empty),
+        })
+    }
+
+    #[test]
+    fn error_text_and_environment_helpers_normalize_values() {
+        assert_eq!(
+            super::error_text(std::fmt::Error),
+            "an error occurred when formatting an argument"
+        );
+        assert_eq!(non_empty(String::new()), None);
+        assert_eq!(non_empty("value".to_owned()), Some("value".to_owned()));
+    }
+}

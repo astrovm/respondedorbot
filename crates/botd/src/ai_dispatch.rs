@@ -334,29 +334,24 @@ mod tests {
         assert_eq!(reply_context(Some("Gordo"), None, Some("  ")), None);
     }
 
+    /// Rejects every streamed token, so a default that streams would fail.
+    fn reject_token(token: &str) -> Result<(), String> {
+        Err(format!("unexpected token {token}"))
+    }
+
     #[test]
-    #[allow(clippy::unit_arg)]
     fn optional_source_operations_have_safe_defaults() {
         let mut source = MinimalSource { prepared: 0 };
         assert_eq!(source.reply_metadata("1", "2"), Ok(None));
-        let mut tokens = Vec::new();
-        let prepared = source
-            .prepare_streaming(input(), &mut |token| Ok(tokens.push(token.to_owned())))
-            .unwrap_or_else(|_| unreachable!());
-        assert_eq!(prepared, AiPreparation::reply("synthetic reply", None));
-        assert_eq!(source.prepared, 1);
-        assert!(tokens.is_empty());
         assert_eq!(
-            source
-                .prepare_media_command(input())
-                .unwrap_or_else(|_| unreachable!()),
-            None
+            source.prepare_streaming(input(), &mut reject_token),
+            Ok(AiPreparation::reply("synthetic reply", None))
         );
+        assert_eq!(source.prepared, 1);
+        assert_eq!(source.prepare_media_command(input()), Ok(None));
         assert_eq!(
-            source
-                .prepare_summary_command_streaming(input(), &mut |_token| Ok(()))
-                .unwrap_or_else(|_| unreachable!()),
-            None
+            source.prepare_summary_command_streaming(input(), &mut reject_token),
+            Ok(None)
         );
         assert!(source.record_ignored(input()).is_ok());
         assert!(
@@ -408,6 +403,11 @@ mod tests {
                 sent_message_id: Some(MessageId(5)),
             }),
             Ok(())
+        );
+
+        assert_eq!(
+            source.prepare_streaming(input(), &mut reject_token),
+            Err("unexpected token hola ".to_owned())
         );
 
         let stopped = source.prepare_streaming_events(input(), &mut |event| {

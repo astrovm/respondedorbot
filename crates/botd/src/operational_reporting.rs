@@ -108,9 +108,7 @@ where
             Locale::En => format!("admin report from {}: {}", self.instance_name, message),
         };
         let action = TelegramAction::SendMessage(SendMessage::new(self.chat_id, &text));
-        match execute_with(&self.transport, &self.token, action)
-            .map_err(|error| error.to_string())?
-        {
+        match execute_with(&self.transport, &self.token, action).map_err(crate::error_text)? {
             ActionOutcome::Completed { .. } => Ok(()),
             ActionOutcome::RateLimited {
                 retry_after_seconds,
@@ -186,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn sends_redacted_plain_text_to_the_configured_admin() {
+    fn sends_redacted_plain_text_to_the_configured_admin() -> crate::test_env::TestResult {
         let reporter = TelegramOperationalReporter::new(
             transport(r#"{"ok":true,"result":{"message_id":9}}"#),
             "telegram-secret",
@@ -209,7 +207,7 @@ mod tests {
             .lock()
             .ok()
             .and_then(|requests| requests.first().cloned())
-            .unwrap_or_else(|| unreachable!("one admin report was sent"));
+            .ok_or("one admin report was sent")?;
         assert_eq!(request.endpoint, "sendMessage");
         let text = request
             .json_payload
@@ -224,6 +222,7 @@ mod tests {
         );
         assert!(!text.contains("database-secret"));
         assert!(!text.contains("provider-secret"));
+        Ok(())
     }
 
     #[test]

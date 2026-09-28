@@ -174,7 +174,8 @@ mod tests {
         fn get(&self, _url: &str) -> Result<WebFetchResponse, WebFetchTransportError> {
             self.0
                 .lock()
-                .map_err(|_| WebFetchTransportError::Other("poisoned".to_owned()))?
+                .map_err(crate::error_text)
+                .map_err(WebFetchTransportError::Other)?
                 .remove(0)
         }
     }
@@ -316,7 +317,8 @@ mod tests {
         );
     }
     #[test]
-    fn concurrent_fetch_owns_its_transport_and_matches_sequential_output() {
+    fn concurrent_fetch_owns_its_transport_and_matches_sequential_output()
+    -> crate::test_env::TestResult {
         let page = response(
             "text/html",
             "<html><head><title>Example</title></head><body>Hello</body></html>",
@@ -324,13 +326,15 @@ mod tests {
         let mut tool = make_tool(vec![Ok(page.clone()), Ok(page)], Locale::En);
         let run = tool
             .concurrent(request("https://example.com"), "call")
-            .unwrap_or_else(|| unreachable!());
+            .ok_or("web fetch runs concurrently")?;
         let concurrent = std::thread::spawn(run)
             .join()
-            .unwrap_or_else(|_| unreachable!());
+            .ok()
+            .ok_or("concurrent fetch panicked")?;
         let sequential = tool.execute(request("https://example.com"), "call");
         assert_eq!(concurrent, sequential);
         assert_eq!(concurrent.output, "Title: Example\nHello");
+        Ok(())
     }
 
     #[test]

@@ -320,13 +320,13 @@ where
         document: &TaskRecordDocument,
         now: i64,
     ) -> Result<(TaskObservation, Option<Occurrence>), String> {
-        match evaluate_due(&document.task, now).map_err(|error| error.to_string())? {
+        match evaluate_due(&document.task, now).map_err(crate::error_text)? {
             DueDecision::Wait => Ok((TaskObservation::Wait, None)),
             DueDecision::Skip { next_run_at, .. } => {
                 let scheduled_for = document
                     .task
                     .next_run_at
-                    .ok_or_else(|| "due task has no next-run timestamp".to_owned())?;
+                    .ok_or("due task has no next-run timestamp")?;
                 let execution_id = format!("{}:{scheduled_for}", document.task.id.as_str());
                 let occurrence = (execution_id.clone(), next_run_at);
                 Ok((TaskObservation::Skip { execution_id }, Some(occurrence)))
@@ -552,7 +552,7 @@ where
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
+#[allow(clippy::panic, clippy::expect_used)]
 mod tests {
     use std::collections::{HashMap, VecDeque};
 
@@ -754,7 +754,7 @@ mod tests {
     fn document(id: &str, schedule: TaskSchedule, next_run_at: i64) -> TaskRecordDocument {
         TaskRecordDocument {
             task: ScheduledTask {
-                id: TaskId::new(id).unwrap_or_else(|error| panic!("synthetic id: {error}")),
+                id: TaskId::new(id).expect("synthetic id is valid"),
                 chat_id: "-100123".to_owned(),
                 text: "synthetic task".to_owned(),
                 user_name: "synthetic-user".to_owned(),
@@ -783,7 +783,7 @@ mod tests {
             SchedulerSettings::default(),
             "owner-1",
         )
-        .unwrap_or_else(|error| panic!("synthetic scheduler: {error}"))
+        .expect("synthetic scheduler settings are valid")
     }
 
     #[test]
@@ -871,7 +871,7 @@ mod tests {
         let next = store.completed[0]
             .next
             .as_ref()
-            .unwrap_or_else(|| panic!("recurring task must advance"));
+            .expect("recurring task must advance");
         assert_eq!(next.task.next_run_at, Some(1_600));
         assert_eq!(next.task.last_execution_id.as_deref(), Some("repeat1:1000"));
     }

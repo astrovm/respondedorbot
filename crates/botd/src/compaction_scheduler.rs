@@ -161,7 +161,7 @@ impl<Queue, Billing, Token> NativeCompactionScheduler<Queue, Billing, Token> {
             &pricing,
         )
         .map(|units| units.max(1))
-        .map_err(|error| error.to_string())
+        .map_err(crate::error_text)
     }
 }
 
@@ -180,7 +180,7 @@ where
         if self
             .queue
             .job_exists(&plan.chat_id)
-            .map_err(|error| error.to_string())?
+            .map_err(crate::error_text)?
         {
             return Ok(false);
         }
@@ -200,7 +200,7 @@ where
                 &plan.target_marker,
                 plan.messages.len(),
             )
-            .map_err(|error| error.to_string())?
+            .map_err(crate::error_text)?
         else {
             return Ok(false);
         };
@@ -228,7 +228,7 @@ where
             result_cost_usd_micros: 0,
             result_billing_segment: None,
         };
-        let payload = serde_json::to_string(&job).map_err(|error| error.to_string())?;
+        let payload = serde_json::to_string(&job).map_err(crate::error_text)?;
         let stored = match self.queue.insert_job(&plan.chat_id, &payload) {
             Ok(stored) => stored,
             Err(error) => {
@@ -243,7 +243,7 @@ where
         if !stored {
             self.billing
                 .refund_enqueue_failure(context.user_id, &job.reservation)
-                .map_err(|error| error.to_string())?;
+                .map_err(crate::error_text)?;
         }
         Ok(stored)
     }
@@ -295,7 +295,7 @@ impl CompactionReservationStore for PostgresCompactionReservations {
             ("background".to_owned(), json!(true)),
         ]);
         let amount = i32::try_from(reserve_credit_units)
-            .map_err(|_| "compaction reservation exceeds the database range".to_owned())?;
+            .or(Err("compaction reservation exceeds the database range"))?;
         let result = self
             .repository
             .charge_ai_credits(
@@ -308,14 +308,14 @@ impl CompactionReservationStore for PostgresCompactionReservations {
                 Some(&settlement_id),
                 &operation_id,
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(crate::error_text)?;
         if !result.ok {
             return Ok(None);
         }
         Ok(Some(json!({
             "reserved_credit_units": result.amount,
             "chat_scope_id": context.group_chat_id,
-            "source": result.source.unwrap_or_else(|| "user".to_owned()),
+            "source": result.source.unwrap_or(String::from("user")),
             "usage_tag": usage_tag,
             "metadata": metadata,
             "credit_scale": CREDIT_SCALE,
@@ -366,7 +366,7 @@ impl CompactionReservationStore for PostgresCompactionReservations {
                 &settlement,
             )
             .map(|_| ())
-            .map_err(|error| error.to_string())
+            .map_err(crate::error_text)
     }
 }
 
@@ -427,7 +427,6 @@ fn random_token() -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::convert::Infallible;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use bot_adapters::billing_read::BillingRepository;
@@ -471,10 +470,12 @@ mod tests {
     struct Billing {
         reserves: usize,
         refunds: usize,
+        deny: bool,
+        refund_error: bool,
     }
 
     impl CompactionReservationStore for Billing {
-        type Error = Infallible;
+        type Error = &'static str;
 
         fn reserve(
             &mut self,
@@ -485,6 +486,9 @@ mod tests {
             _message_count: usize,
         ) -> Result<Option<Value>, Self::Error> {
             self.reserves += 1;
+            if self.deny {
+                return Ok(None);
+            }
             Ok(Some(json!({
                 "reserved_credit_units": reserve_credit_units,
                 "source":"user",
@@ -497,6 +501,9 @@ mod tests {
             _reservation: &Value,
         ) -> Result<(), Self::Error> {
             self.refunds += 1;
+            if self.refund_error {
+                return Err("synthetic refund failure");
+            }
             Ok(())
         }
     }
@@ -535,33 +542,22 @@ mod tests {
     }
 
     fn local_stores() -> Option<(String, RedisEndpoint)> {
-        let database_url = std::env::var("TEST_DATABASE_URL").ok()?;
-        let port = std::env::var("TEST_REDIS_PORT").ok()?.parse().ok()?;
-        Some((
-            database_url,
-            RedisEndpoint {
-                host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
-                port,
-                password: std::env::var("TEST_REDIS_PASSWORD")
-                    .ok()
-                    .filter(|value| !value.is_empty()),
-            },
-        ))
+        crate::test_env::database_url().zip(crate::test_env::redis_endpoint())
     }
 
     fn synthetic_user(database_url: &str, base: i64) -> Result<(u128, i64), String> {
         BillingSchemaRepository::new(database_url)
             .ensure_schema()
-            .map_err(|error| error.to_string())?;
+            .map_err(crate::error_text)?;
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|error| error.to_string())?
+            .map_err(crate::error_text)?
             .as_nanos();
-        let suffix = i64::try_from(nonce % 100_000_000).map_err(|error| error.to_string())?;
+        let suffix = i64::try_from(nonce % 100_000_000).map_err(crate::error_text)?;
         let user_id = base + suffix;
         BillingRepository::new(database_url)
             .mint_user_credits(user_id, 100, None)
-            .map_err(|error| error.to_string())?;
+            .map_err(crate::error_text)?;
         Ok((nonce, user_id))
     }
 
@@ -580,19 +576,19 @@ mod tests {
         let mut billing = PostgresCompactionReservations::new(database_url);
         let reservation = billing
             .reserve(context, &usage_tag, 10, "message-7", 3)?
-            .ok_or_else(|| "synthetic reservation was denied".to_owned())?;
+            .ok_or(String::from("synthetic reservation was denied"))?;
         assert_eq!(reservation["source"], "user");
         assert_eq!(
             repository
                 .get_balance("user", user_id)
-                .map_err(|error| error.to_string())?,
+                .map_err(crate::error_text)?,
             90
         );
         billing.refund_enqueue_failure(user_id, &reservation)?;
         assert_eq!(
             repository
                 .get_balance("user", user_id)
-                .map_err(|error| error.to_string())?,
+                .map_err(crate::error_text)?,
             100
         );
 
@@ -609,23 +605,21 @@ mod tests {
         assert_eq!(
             repository
                 .get_balance("user", user_id)
-                .map_err(|error| error.to_string())?,
+                .map_err(crate::error_text)?,
             100
         );
 
-        let mut queue = RedisCompactionQueue::new(endpoint).map_err(|error| error.to_string())?;
+        let mut queue = RedisCompactionQueue::new(endpoint).map_err(crate::error_text)?;
         let chat_id = format!("synthetic-scheduler-{nonce}");
         assert!(
-            !CompactionEnqueueStore::job_exists(&mut queue, &chat_id)
-                .map_err(|error| error.to_string())?
+            !CompactionEnqueueStore::job_exists(&mut queue, &chat_id).map_err(crate::error_text)?
         );
         assert!(
             CompactionEnqueueStore::insert_job(&mut queue, &chat_id, r#"{"value":1}"#)
-                .map_err(|error| error.to_string())?
+                .map_err(crate::error_text)?
         );
         assert!(
-            CompactionEnqueueStore::job_exists(&mut queue, &chat_id)
-                .map_err(|error| error.to_string())?
+            CompactionEnqueueStore::job_exists(&mut queue, &chat_id).map_err(crate::error_text)?
         );
         Ok(())
     }
@@ -735,7 +729,7 @@ mod tests {
         endpoint: &RedisEndpoint,
     ) -> Result<(), String> {
         let (nonce, user_id) = synthetic_user(database_url, 7_150_000_000_000)?;
-        let queue = RedisCompactionQueue::new(endpoint).map_err(|error| error.to_string())?;
+        let queue = RedisCompactionQueue::new(endpoint).map_err(crate::error_text)?;
         let mut scheduler =
             super::production_compaction_scheduler(queue, database_url, "persona", None);
         let chat_id = format!("synthetic-production-scheduler-{nonce}");
@@ -757,8 +751,7 @@ mod tests {
         assert_eq!(scheduler.schedule(production_plan, context), Ok(false));
         let (mut queue, _, mut next_token) = scheduler.into_parts();
         assert!(
-            CompactionEnqueueStore::job_exists(&mut queue, &chat_id)
-                .map_err(|error| error.to_string())?
+            CompactionEnqueueStore::job_exists(&mut queue, &chat_id).map_err(crate::error_text)?
         );
         let (first, second) = (next_token(), next_token());
         assert_eq!(first.len(), 32);
@@ -766,8 +759,75 @@ mod tests {
         assert_ne!(first, second);
         let balance = BillingRepository::new(database_url)
             .get_balance("user", user_id)
-            .map_err(|error| error.to_string())?;
+            .map_err(crate::error_text)?;
         assert!(balance < 100, "reservation was not charged: {balance}");
         Ok(())
+    }
+
+    #[test]
+    fn denied_reservations_and_failed_refunds_are_reported_without_enqueueing() {
+        let mut denied = NativeCompactionScheduler::new(
+            Queue {
+                insert: true,
+                ..Queue::default()
+            },
+            Billing {
+                deny: true,
+                ..Billing::default()
+            },
+            token,
+            COMPACTION_MODEL,
+            "persona",
+        );
+        assert_eq!(denied.schedule(plan(), context()), Ok(false));
+        let (queue, billing, _) = denied.into_parts();
+        assert!(queue.payloads.is_empty());
+        assert_eq!((billing.reserves, billing.refunds), (1, 0));
+
+        let mut lost_refund = NativeCompactionScheduler::new(
+            Queue {
+                insert_error: true,
+                ..Queue::default()
+            },
+            Billing {
+                refund_error: true,
+                ..Billing::default()
+            },
+            token,
+            COMPACTION_MODEL,
+            "persona",
+        );
+        assert_eq!(
+            lost_refund.schedule(plan(), context()),
+            Err(
+                "synthetic Redis failure; compaction reservation refund failed: synthetic refund failure"
+                    .to_owned()
+            )
+        );
+
+        let mut unstored_refund = NativeCompactionScheduler::new(
+            Queue::default(),
+            Billing {
+                refund_error: true,
+                ..Billing::default()
+            },
+            token,
+            COMPACTION_MODEL,
+            "persona",
+        );
+        assert_eq!(
+            unstored_refund.schedule(plan(), context()),
+            Err("synthetic refund failure".to_owned())
+        );
+        assert_eq!(unstored_refund.into_parts().1.refunds, 1);
+    }
+
+    #[test]
+    fn oversized_reservations_are_rejected_before_database_io() {
+        let mut billing = PostgresCompactionReservations::new("postgresql://synthetic.invalid/db");
+        assert_eq!(
+            billing.reserve(context(), "synthetic-tag", i64::from(i32::MAX) + 1, "1", 1),
+            Err("compaction reservation exceeds the database range".to_owned())
+        );
     }
 }

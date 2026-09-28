@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::application::run_production;
-use crate::config::{MaintenanceConfig, ProductionConfig, TaskVerificationConfig};
+use crate::config::{ConfigError, MaintenanceConfig, ProductionConfig, TaskVerificationConfig};
 use crate::maintenance::{MaintenanceOptions, run_maintenance};
 use crate::task_service::verify_tasks_once;
 
@@ -66,14 +66,23 @@ fn check_config() -> ExitCode {
 }
 
 fn native_runtime() -> ExitCode {
-    let config = match ProductionConfig::from_env() {
+    runtime_exit_code(ProductionConfig::from_env(), run_production)
+}
+
+/// Maps configuration loading and the runtime's result to the process exit
+/// code; the runtime is injected so shutdown outcomes are testable in-process.
+fn runtime_exit_code(
+    config: Result<ProductionConfig, ConfigError>,
+    run: fn(&ProductionConfig) -> Result<(), String>,
+) -> ExitCode {
+    let config = match config {
         Ok(config) => config,
         Err(error) => {
             eprintln!("FATAL: {error}");
             return ExitCode::FAILURE;
         }
     };
-    match run_production(&config) {
+    match run(&config) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("FATAL: native runtime failed: {error}");
@@ -98,10 +107,7 @@ fn maintenance() -> ExitCode {
         ai_ledger_retention_days: config.ai_ledger_retention_days,
     })
     .map_err(|error| format!("maintenance failed: {error}"))
-    .and_then(|report| {
-        serde_json::to_string(&report)
-            .map_err(|error| format!("maintenance report encoding failed: {error}"))
-    });
+    .and_then(|report| serde_json::to_string(&report).map_err(crate::error_text));
     match outcome {
         Ok(encoded) => {
             println!("{encoded}");
@@ -139,7 +145,50 @@ fn verify_tasks() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Mode, mode};
+    use std::process::ExitCode;
+
+    use super::{Mode, mode, runtime_exit_code};
+    use crate::config::{ConfigError, ProductionConfig};
+
+    fn production_config() -> Result<ProductionConfig, ConfigError> {
+        let lookup = |name: &str| {
+            match name {
+                "TELEGRAM_TOKEN" => Some("synthetic-telegram-token"),
+                "TELEGRAM_USERNAME" => Some("synthetic_test_bot"),
+                "SUPABASE_POSTGRES_URL" => {
+                    Some("postgresql://synthetic:synthetic@db.example.test/database")
+                }
+                "COINMARKETCAP_KEY" => Some("synthetic-market-key"),
+                "OPENROUTER_API_KEY" => Some("synthetic-ai-key"),
+                _ => None,
+            }
+            .map(str::to_owned)
+        };
+        ProductionConfig::from_lookup_and_prompt(lookup, || Ok(Some("synthetic prompt".to_owned())))
+    }
+
+    fn failing_runtime(_config: &ProductionConfig) -> Result<(), String> {
+        Err("synthetic polling failure".to_owned())
+    }
+
+    #[test]
+    fn runtime_exit_code_reflects_configuration_and_shutdown_outcome() {
+        assert_eq!(
+            runtime_exit_code(production_config(), |config| {
+                assert_eq!(config.bot_name, "synthetic_test_bot");
+                Ok(())
+            }),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(
+            runtime_exit_code(production_config(), failing_runtime),
+            ExitCode::FAILURE
+        );
+        assert_eq!(
+            runtime_exit_code(Err(ConfigError::MissingTelegramToken), failing_runtime),
+            ExitCode::FAILURE
+        );
+    }
 
     #[test]
     fn mode_selection_has_explicit_precedence_and_runtime_fallback() {

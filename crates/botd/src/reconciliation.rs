@@ -186,7 +186,7 @@ where
         let operations = self
             .store
             .list_unsettled(self.settings.batch_limit)
-            .map_err(|error| error.to_string())?;
+            .map_err(crate::error_text)?;
         let mut report = ReconciliationReport::default();
         for operation in operations {
             match self.reconcile_operation(&operation, now_epoch_seconds) {
@@ -229,7 +229,7 @@ where
         let mut entries = operation.segments.clone();
         let mut segments = entries
             .iter()
-            .map(|entry| entry.get("segment").cloned().unwrap_or_else(|| json!({})))
+            .map(|entry| entry.get("segment").cloned().unwrap_or(json!({})))
             .collect::<Vec<_>>();
         for (index, segment) in segments.clone().iter().enumerate() {
             if !segment_needs_reconciliation(segment) {
@@ -246,7 +246,7 @@ where
             let Some(generation) = self
                 .generations
                 .generation(generation_id)
-                .map_err(|error| error.to_string())?
+                .map_err(crate::error_text)?
             else {
                 continue;
             };
@@ -262,7 +262,7 @@ where
             }
             self.store
                 .update_provider_segment(&operation.operation_id, segment_id, &reconciled)
-                .map_err(|error| error.to_string())?;
+                .map_err(crate::error_text)?;
             entries[index]["segment"] = reconciled.clone();
             segments[index] = reconciled;
         }
@@ -274,7 +274,7 @@ where
         }
 
         let breakdown = calculate_billing_for_segments(&Value::Array(segments.clone()))
-            .map_err(|error| error.to_string())?;
+            .map_err(crate::error_text)?;
         let mut actual = breakdown
             .get("charged_credit_units")
             .and_then(Value::as_i64)
@@ -326,21 +326,21 @@ where
                 breakdown
                     .get("model_breakdown")
                     .cloned()
-                    .unwrap_or_else(|| json!([])),
+                    .unwrap_or(json!([])),
             ),
             (
                 "tool_breakdown".to_owned(),
                 breakdown
                     .get("tool_breakdown")
                     .cloned()
-                    .unwrap_or_else(|| json!([])),
+                    .unwrap_or(json!([])),
             ),
             (
                 "segment_breakdown".to_owned(),
                 breakdown
                     .get("segment_breakdown")
                     .cloned()
-                    .unwrap_or_else(|| json!([])),
+                    .unwrap_or(json!([])),
             ),
             (
                 "pricing_complete".to_owned(),
@@ -353,7 +353,7 @@ where
         ]));
         self.store
             .settle_operation(operation, actual, &metadata)
-            .map_err(|error| error.to_string())?;
+            .map_err(crate::error_text)?;
         Ok(if unresolved {
             OperationOutcome::Unresolved
         } else {
@@ -435,7 +435,7 @@ pub fn production_reconciler(
     settings: ReconciliationSettings,
 ) -> Result<ProductionAiBillingReconciler, String> {
     let transport = ReqwestGenerationTransport::new_with_base_url(openrouter_base_url)
-        .map_err(|error| error.to_string())?;
+        .map_err(crate::error_text)?;
     Ok(AiBillingReconciler::new(
         BillingRepository::new(database_url),
         OpenRouterGenerationSource::new(transport, openrouter_api_key),
@@ -642,15 +642,19 @@ mod tests {
     #[derive(Default)]
     struct Generations {
         values: HashMap<String, VecDeque<Option<Map<String, Value>>>>,
+        failure: Option<&'static str>,
     }
 
     impl GenerationSource for Generations {
-        type Error = Infallible;
+        type Error = &'static str;
 
         fn generation(
             &mut self,
             generation_id: &str,
         ) -> Result<Option<Map<String, Value>>, Self::Error> {
+            if let Some(failure) = self.failure {
+                return Err(failure);
+            }
             Ok(self
                 .values
                 .get_mut(generation_id)
@@ -876,6 +880,7 @@ mod tests {
                     .unwrap_or_default(),
                 )]),
             )]),
+            ..Generations::default()
         };
         let mut reconciler = AiBillingReconciler::new(
             store,
@@ -928,6 +933,7 @@ mod tests {
                     .unwrap_or_default(),
                 )]),
             )]),
+            ..Generations::default()
         };
         let mut reconciler = AiBillingReconciler::new(
             store,
@@ -1060,18 +1066,6 @@ mod tests {
 
     #[test]
     fn provider_errors_are_reported_through_direct_and_background_runs() {
-        struct FailingGenerations;
-        impl GenerationSource for FailingGenerations {
-            type Error = &'static str;
-
-            fn generation(
-                &mut self,
-                _generation_id: &str,
-            ) -> Result<Option<Map<String, Value>>, Self::Error> {
-                Err("synthetic generation failure")
-            }
-        }
-
         let make = || {
             AiBillingReconciler::new(
                 Store {
@@ -1082,7 +1076,10 @@ mod tests {
                     )],
                     ..Store::default()
                 },
-                FailingGenerations,
+                Generations {
+                    failure: Some("synthetic generation failure"),
+                    ..Generations::default()
+                },
                 ActiveOperationRegistry::default(),
                 ReconciliationSettings::default(),
             )
@@ -1091,7 +1088,13 @@ mod tests {
         assert!(!direct.active_operations().is_active("provider-failure"));
         let report = direct.run_once(1_788_138_000).unwrap_or_default();
         assert_eq!(report.pending, 1);
-        assert_eq!(report.failures.len(), 1);
+        assert_eq!(
+            report.failures,
+            [super::ReconciliationFailure {
+                operation_id: "provider-failure".to_owned(),
+                error: "synthetic generation failure".to_owned(),
+            }]
+        );
 
         let mut background = make();
         assert!(
@@ -1156,6 +1159,7 @@ mod tests {
                     VecDeque::from([generation(priced)]),
                 ),
             ]),
+            ..Generations::default()
         };
         let mut reconciler = AiBillingReconciler::new(
             Store {

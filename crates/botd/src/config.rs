@@ -494,6 +494,16 @@ mod tests {
         RuntimeConfig::from_lookup(|name| values.get(name).cloned())
     }
 
+    fn maintenance(values: &HashMap<String, String>) -> Result<MaintenanceConfig, ConfigError> {
+        MaintenanceConfig::from_lookup(|name| values.get(name).cloned())
+    }
+
+    fn verification(
+        values: &HashMap<String, String>,
+    ) -> Result<TaskVerificationConfig, ConfigError> {
+        TaskVerificationConfig::from_lookup(|name| values.get(name).cloned())
+    }
+
     fn production(
         values: &[(&str, &str)],
         workspace_prompt: Option<&str>,
@@ -557,38 +567,41 @@ mod tests {
     }
 
     #[test]
-    fn task_verification_configuration_is_independent_of_telegram_credentials() {
+    fn task_verification_configuration_is_independent_of_telegram_credentials()
+    -> crate::test_env::TestResult {
         let values = HashMap::from([
             ("REDIS_HOST".to_owned(), "redis.internal".to_owned()),
             ("REDIS_PORT".to_owned(), "6380".to_owned()),
             ("REDIS_PASSWORD".to_owned(), "synthetic-secret".to_owned()),
             ("BOT_INSTANCE_NAME".to_owned(), "worker-a".to_owned()),
         ]);
-        let config = TaskVerificationConfig::from_lookup(|name| values.get(name).cloned())
-            .map_err(|error| error.to_string());
-        let config = config.unwrap_or_else(|error| unreachable!("valid configuration: {error}"));
+        let config = verification(&values).map_err(crate::error_text);
+        let config = config?;
         assert_eq!(config.redis_endpoint.host, "redis.internal");
         assert_eq!(config.redis_endpoint.port, 6380);
         assert_eq!(config.owner_token, "worker-a:verify");
         let debug = format!("{config:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("synthetic-secret"));
+        Ok(())
     }
 
     #[test]
     fn task_verification_redis_port_is_bounded() {
         for invalid in ["", "0", "65536", "many"] {
             assert!(matches!(
-                TaskVerificationConfig::from_lookup(|name| {
-                    (name == "REDIS_PORT").then(|| invalid.to_owned())
-                }),
+                verification(&HashMap::from([(
+                    "REDIS_PORT".to_owned(),
+                    invalid.to_owned()
+                )])),
                 Err(ConfigError::InvalidRedisPort)
             ));
         }
     }
 
     #[test]
-    fn maintenance_configuration_is_token_independent_and_redacts_credentials() {
+    fn maintenance_configuration_is_token_independent_and_redacts_credentials()
+    -> crate::test_env::TestResult {
         let values = HashMap::from([
             ("REDIS_HOST".to_owned(), "redis.internal".to_owned()),
             ("REDIS_PORT".to_owned(), "6380".to_owned()),
@@ -604,8 +617,8 @@ mod tests {
             ),
             ("AI_LEDGER_RETENTION_DAYS".to_owned(), "45".to_owned()),
         ]);
-        let config = MaintenanceConfig::from_lookup(|name| values.get(name).cloned());
-        let config = config.unwrap_or_else(|error| unreachable!("valid configuration: {error}"));
+        let config = maintenance(&values);
+        let config = config?;
         assert_eq!(config.redis_endpoint.host, "redis.internal");
         assert_eq!(config.redis_endpoint.port, 6380);
         assert_eq!(config.database_url(), Some(SYNTHETIC_DATABASE_URL));
@@ -616,12 +629,13 @@ mod tests {
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("redis-secret"));
         assert!(!debug.contains("database-secret"));
+        Ok(())
     }
 
     #[test]
-    fn maintenance_defaults_and_retention_validation_match_python() {
-        let config = MaintenanceConfig::from_lookup(|_| None);
-        let config = config.unwrap_or_else(|error| unreachable!("valid configuration: {error}"));
+    fn maintenance_defaults_and_retention_validation_match_python() -> crate::test_env::TestResult {
+        let config = maintenance(&HashMap::new());
+        let config = config?;
         assert_eq!(config.redis_endpoint.host, "localhost");
         assert_eq!(config.redis_endpoint.port, 6379);
         assert_eq!(config.database_url(), None);
@@ -630,26 +644,30 @@ mod tests {
         assert_eq!(config.ai_ledger_retention_days, 30);
         for unsafe_policy in ["allkeys-lru", "allkeys-lfu", "allkeys-random", "unknown"] {
             assert_eq!(
-                MaintenanceConfig::from_lookup(|name| {
-                    (name == "REDIS_MAXMEMORY_POLICY").then(|| unsafe_policy.to_owned())
-                })
+                maintenance(&HashMap::from([(
+                    "REDIS_MAXMEMORY_POLICY".to_owned(),
+                    unsafe_policy.to_owned()
+                )]))
                 .map(|_| ()),
                 Err(ConfigError::UnsafeRedisMaxmemoryPolicy)
             );
         }
         for invalid in ["", "0", "-1", "many"] {
             assert_eq!(
-                MaintenanceConfig::from_lookup(|name| {
-                    (name == "AI_LEDGER_RETENTION_DAYS").then(|| invalid.to_owned())
-                })
+                maintenance(&HashMap::from([(
+                    "AI_LEDGER_RETENTION_DAYS".to_owned(),
+                    invalid.to_owned()
+                )]))
                 .map(|_| ()),
                 Err(ConfigError::InvalidLedgerRetention)
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn production_configuration_validates_required_boundaries_and_workspace_prompt() {
+    fn production_configuration_validates_required_boundaries_and_workspace_prompt()
+    -> crate::test_env::TestResult {
         let base = [
             ("TELEGRAM_TOKEN", "synthetic-telegram-secret"),
             ("TELEGRAM_USERNAME", " @test_bot "),
@@ -681,11 +699,12 @@ mod tests {
             Err(ConfigError::MissingSystemPrompt)
         );
         let config = production(&base, Some("soul\n\nrules"));
-        let config = config.unwrap_or_else(|error| unreachable!("valid configuration: {error}"));
+        let config = config?;
         assert_eq!(config.bot_name, "test_bot");
         assert_eq!(config.system_prompt, "soul\n\nrules");
         assert_eq!(config.trigger_words.len(), 6);
         assert_eq!(config.reconciliation_interval.as_secs(), 60);
+        Ok(())
     }
 
     #[test]
@@ -711,9 +730,10 @@ mod tests {
             ))
         );
 
-        let maintenance_result = MaintenanceConfig::from_lookup(|name| {
-            (name == "SUPABASE_POSTGRES_URL").then(|| invalid_url.clone())
-        });
+        let maintenance_result = maintenance(&HashMap::from([(
+            "SUPABASE_POSTGRES_URL".to_owned(),
+            invalid_url.clone(),
+        )]));
         let rendered = format!("{maintenance_result:?}");
         assert_eq!(
             maintenance_result.map(|_| ()),
@@ -724,9 +744,10 @@ mod tests {
         assert!(!rendered.contains(secret));
 
         let transaction_pooler = "postgres://postgres.synthetic-project:synthetic-password@aws-0-synthetic.pooler.supabase.com:6543/postgres?sslmode=require";
-        let result = MaintenanceConfig::from_lookup(|name| {
-            (name == "SUPABASE_POSTGRES_URL").then(|| transaction_pooler.to_owned())
-        });
+        let result = maintenance(&HashMap::from([(
+            "SUPABASE_POSTGRES_URL".to_owned(),
+            transaction_pooler.to_owned(),
+        )]));
         assert_eq!(
             result.map(|_| ()),
             Err(ConfigError::InvalidDatabaseUrl(
@@ -736,7 +757,8 @@ mod tests {
     }
 
     #[test]
-    fn production_configuration_parses_optional_services_and_redacts_all_secrets() {
+    fn production_configuration_parses_optional_services_and_redacts_all_secrets()
+    -> crate::test_env::TestResult {
         let config = production(
             &[
                 ("TELEGRAM_TOKEN", "telegram-secret"),
@@ -759,7 +781,7 @@ mod tests {
             ],
             Some("prompt-secret"),
         );
-        let config = config.unwrap_or_else(|error| unreachable!("valid configuration: {error}"));
+        let config = config?;
         assert_eq!(config.admin_user_id, Some(99));
         assert_eq!(config.trigger_words, ["gordo", "test", "bot"]);
         assert_eq!(config.owner_token(), "VPS");
@@ -782,6 +804,7 @@ mod tests {
         ] {
             assert!(!debug.contains(secret));
         }
+        Ok(())
     }
 
     #[test]

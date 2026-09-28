@@ -247,7 +247,7 @@ mod tests {
                 },
                 calls: Rc::clone(&calls),
             },
-            || 1_700_000_000,
+            clock(|| 1_700_000_000),
             Locale::En,
         );
         let result = tool.execute(
@@ -298,7 +298,7 @@ mod tests {
                 ]),
                 diagnostics: Vec::new(),
             }),
-            || 42,
+            clock(|| 42),
             Locale::En,
         );
         let request = ExternalToolRequest::StockPrices {
@@ -338,7 +338,7 @@ mod tests {
                     diagnostics: vec!["synthetic dollar failure".to_owned()],
                 },
             },
-            || 99,
+            clock(|| 99),
             Locale::Es,
         );
         let result = tool.execute(
@@ -389,7 +389,7 @@ mod tests {
                 }),
                 diagnostics: Vec::new(),
             }),
-            || 123,
+            clock(|| 123),
             Locale::En,
         );
         let request = ExternalToolRequest::Weather {
@@ -419,7 +419,7 @@ mod tests {
                 },
                 calls: Rc::new(RefCell::new(Vec::new())),
             },
-            || 0,
+            clock(|| 0),
             Locale::En,
         );
         assert_eq!(
@@ -455,7 +455,7 @@ mod tests {
             ),
             (Locale::En, "I could not get a quote. Try again later"),
         ] {
-            let mut tool = CryptoPricesTool::new(empty_market_source(None), || 0, locale);
+            let mut tool = CryptoPricesTool::new(empty_market_source(None), clock(|| 0), locale);
             let result = tool.execute(request(), "call");
             assert_eq!(result.output, expected);
             assert_eq!(result.diagnostics, ["synthetic quote miss"]);
@@ -486,7 +486,7 @@ mod tests {
         };
         let mut tool = CryptoPricesTool::new(
             empty_market_source(Some(selection.clone())),
-            || 0,
+            clock(|| 0),
             Locale::En,
         );
         let output = tool.execute(request(), "call").output;
@@ -505,7 +505,7 @@ mod tests {
                     diagnostics: Vec::new(),
                 },
             },
-            || 0,
+            clock(|| 0),
             Locale::En,
         );
         assert_eq!(
@@ -530,7 +530,7 @@ mod tests {
                 quotes: None,
                 diagnostics: Vec::new(),
             }),
-            || 42,
+            clock(|| 42),
             Locale::En,
         );
         assert_eq!(
@@ -543,7 +543,7 @@ mod tests {
                 observation: None,
                 diagnostics: Vec::new(),
             }),
-            || 123,
+            clock(|| 123),
             Locale::Es,
         );
         assert_eq!(
@@ -552,5 +552,11 @@ mod tests {
                 .output,
             "la herramienta 'weather' recibió una solicitud incompatible"
         );
+    }
+
+    /// Every test shares one clock type, so each tool is exercised through a
+    /// single generic instantiation.
+    fn clock(now: fn() -> i64) -> fn() -> i64 {
+        now
     }
 }

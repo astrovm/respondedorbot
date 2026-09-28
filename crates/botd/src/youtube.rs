@@ -86,7 +86,7 @@ where
         }
         estimate_youtube_transcript_reserve_credit_units()
             .map(Some)
-            .map_err(|error| error.to_string())
+            .map_err(crate::error_text)
     }
 
     fn prepare(

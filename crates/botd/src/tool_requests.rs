@@ -665,7 +665,8 @@ mod tests {
     }
 
     #[test]
-    fn only_validated_read_only_executors_prepare_concurrent_calls() {
+    fn only_validated_read_only_executors_prepare_concurrent_calls() -> crate::test_env::TestResult
+    {
         use crate::chat_tool_loop::NativeToolRuntime;
 
         let toolbox = ExternalToolbox::new(Locale::En)
@@ -684,7 +685,7 @@ mod tests {
                 &json!({"url": "https://example.com"}),
                 "call-1",
             )
-            .unwrap_or_else(|| unreachable!());
+            .ok_or("read-only fetch runs concurrently")?;
         assert_eq!(run().output, "concurrent web_fetch:call-1");
         assert_eq!(
             registry
@@ -726,6 +727,7 @@ mod tests {
                 .is_none()
         );
         assert!(ports.services().calls.is_empty());
+        Ok(())
     }
 
     #[test]

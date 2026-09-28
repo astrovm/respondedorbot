@@ -453,10 +453,8 @@ fn format_tool_arguments(raw: &str) -> String {
 }
 
 fn format_tool_value(value: &Value) -> String {
-    match value {
-        Value::String(value) => serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_owned()),
-        _ => serde_json::to_string(value).unwrap_or_else(|_| "null".to_owned()),
-    }
+    // `Value`'s Display is its compact JSON encoding, so strings stay quoted.
+    value.to_string()
 }
 
 #[cfg(test)]
@@ -755,36 +753,38 @@ mod tests {
         let mut stream =
             TelegramAiStream::with_policy(&mut actions, ChatId(7), MessageId(4), 0.0, 1)
                 .with_thinking_text("Pensando");
-        stream
-            .feed(AiStreamEvent::Admitted)
-            .unwrap_or_else(|_| unreachable!());
-        stream
-            .feed(AiStreamEvent::Thought("checking the match".to_owned()))
-            .unwrap_or_else(|_| unreachable!());
-        stream
-            .feed(AiStreamEvent::ResetToTrace)
-            .unwrap_or_else(|_| unreachable!());
-        stream
-            .feed(AiStreamEvent::ToolCall {
+        assert_eq!(stream.feed(AiStreamEvent::Admitted), Ok(()));
+        assert_eq!(
+            stream.feed(AiStreamEvent::Thought("checking the match".to_owned())),
+            Ok(())
+        );
+        assert_eq!(stream.feed(AiStreamEvent::ResetToTrace), Ok(()));
+        assert_eq!(
+            stream.feed(AiStreamEvent::ToolCall {
                 id: "call-1".to_owned(),
                 name: "web_search".to_owned(),
                 arguments: r#"{"query":"cuando juegan river y huracán"}"#.to_owned(),
-            })
-            .unwrap_or_else(|_| unreachable!());
-        stream
-            .feed(AiStreamEvent::ToolResult {
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            stream.feed(AiStreamEvent::ToolResult {
                 id: "call-1".to_owned(),
                 name: "web_search".to_owned(),
                 output: "fixture result".to_owned(),
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            stream.feed(AiStreamEvent::FinalText("River juega ".to_owned())),
+            Ok(())
+        );
+        assert_eq!(
+            stream.finalize("River juega el sábado"),
+            Ok(StreamDelivery {
+                message_id: MessageId(80)
             })
-            .unwrap_or_else(|_| unreachable!());
-        stream
-            .feed(AiStreamEvent::FinalText("River juega ".to_owned()))
-            .unwrap_or_else(|_| unreachable!());
-        let delivery = stream
-            .finalize("River juega el sábado")
-            .unwrap_or_else(|_| unreachable!());
-        assert_eq!(delivery.message_id, MessageId(80));
+        );
         drop(stream);
 
         assert!(matches!(
@@ -964,6 +964,45 @@ mod tests {
                 chat_id: ChatId(7),
                 message_id: MessageId(81),
             })
+        ));
+    }
+
+    #[test]
+    fn later_answer_tokens_edit_by_policy_and_finalize_sends_when_nothing_was_shown() {
+        let mut actions = Actions {
+            next_message_id: Some(MessageId(90)),
+            ..Actions::default()
+        };
+        let mut stream =
+            TelegramAiStream::with_policy(&mut actions, ChatId(7), MessageId(4), 0.0, 1);
+        assert_eq!(
+            stream.feed(AiStreamEvent::FinalText("first".to_owned())),
+            Ok(())
+        );
+        assert_eq!(
+            stream.feed(AiStreamEvent::FinalText(" second".to_owned())),
+            Ok(())
+        );
+        drop(stream);
+        assert_eq!(rendered_texts(&actions.actions), ["first", "first second"]);
+
+        let mut quiet = Actions {
+            next_message_id: Some(MessageId(91)),
+            ..Actions::default()
+        };
+        let mut silent_stream =
+            TelegramStream::with_policy(&mut quiet, ChatId(7), MessageId(5), 0.3, 5);
+        assert_eq!(
+            silent_stream.finalize("only answer"),
+            Ok(StreamDelivery {
+                message_id: MessageId(91)
+            })
+        );
+        drop(silent_stream);
+        assert!(matches!(
+            &quiet.actions[..],
+            [TelegramAction::SendMessage(message)]
+                if message.text == "only answer" && !message.disable_web_page_preview
         ));
     }
 }
