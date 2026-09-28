@@ -552,14 +552,6 @@ pub fn inspect_with<T: LinkPreviewTransport>(transport: &T, url: &str) -> Previe
     }
 }
 
-#[must_use]
-pub fn inspect(url: &str) -> PreviewInspection {
-    match ReqwestLinkPreviewTransport::new() {
-        Ok(transport) => inspect_with(&transport, url),
-        Err(failure) => failed_inspection(url, failure),
-    }
-}
-
 fn failed_inspection(url: &str, failure: PreviewFailure) -> PreviewInspection {
     PreviewInspection {
         embeddable: false,

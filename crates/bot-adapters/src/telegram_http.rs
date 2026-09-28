@@ -331,28 +331,6 @@ pub fn response_outcome(status_code: u16, body: String) -> TelegramHttpOutcome {
     TelegramHttpOutcome::Response { status_code, body }
 }
 
-pub fn request(
-    token: &str,
-    endpoint: &str,
-    method: &str,
-    params: Option<Value>,
-    json_payload: Option<Value>,
-    timeout_seconds: u64,
-) -> Result<TelegramHttpOutcome, TelegramHttpError> {
-    match ReqwestTelegramTransport::new() {
-        Ok(transport) => request_with(
-            &transport,
-            token,
-            endpoint,
-            method,
-            params,
-            json_payload,
-            timeout_seconds,
-        ),
-        Err(kind) => Ok(TelegramHttpOutcome::TransportError { kind }),
-    }
-}
-
 fn form_fields(payload: Value) -> Result<Vec<(String, String)>, TelegramHttpError> {
     let Value::Object(payload) = payload else {
         return Err(TelegramHttpError::InvalidPayload);
@@ -393,15 +371,6 @@ pub fn multipart_request_with<T: TelegramMultipartTransport>(
     }
 }
 
-pub fn multipart_request(
-    upload: MultipartUpload,
-) -> Result<TelegramHttpOutcome, TelegramHttpError> {
-    match ReqwestTelegramTransport::new() {
-        Ok(transport) => multipart_request_with(&transport, upload),
-        Err(kind) => Ok(TelegramHttpOutcome::TransportError { kind }),
-    }
-}
-
 pub fn download_file_with<T: TelegramFileTransport>(
     transport: &T,
     token: &str,
@@ -424,17 +393,6 @@ pub fn download_file_with<T: TelegramFileTransport>(
         Ok(response) => Ok(TelegramFileOutcome::HttpError {
             status_code: response.status_code,
         }),
-        Err(kind) => Ok(TelegramFileOutcome::TransportError { kind }),
-    }
-}
-
-pub fn download_file(
-    token: &str,
-    file_path: &str,
-    timeout_seconds: u64,
-) -> Result<TelegramFileOutcome, TelegramHttpError> {
-    match ReqwestTelegramTransport::new() {
-        Ok(transport) => download_file_with(&transport, token, file_path, timeout_seconds),
         Err(kind) => Ok(TelegramFileOutcome::TransportError { kind }),
     }
 }

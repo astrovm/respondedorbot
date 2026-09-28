@@ -3358,8 +3358,8 @@ mod tests {
     };
     use bot_adapters::telegram_polling::{PollFailure, PollOutcome};
     use bot_adapters::token_signal::{
-        BinaryResponse as TokenBinaryResponse, JsonResponse as TokenJsonResponse,
-        TokenSignalAdapter, TokenSignalCache, TokenSignalTransport,
+        JsonResponse as TokenJsonResponse, TokenSignalAdapter, TokenSignalCache,
+        TokenSignalTransport,
     };
     use bot_adapters::weather::{
         HttpResponse as WeatherHttpResponse, TransportFailureKind as WeatherFailure,
@@ -5476,10 +5476,6 @@ mod tests {
                 _body: &serde_json::Value,
             ) -> Result<TokenJsonResponse, String> {
                 Err("synthetic POST failure".to_owned())
-            }
-
-            fn get_binary(&self, _url: &str) -> Result<TokenBinaryResponse, String> {
-                Err("synthetic image failure".to_owned())
             }
         }
 

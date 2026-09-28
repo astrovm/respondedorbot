@@ -25,19 +25,10 @@ pub struct JsonResponse {
     pub body: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BinaryResponse {
-    pub status_code: u16,
-    pub content_type: String,
-    pub body: Vec<u8>,
-}
-
 pub trait TokenSignalTransport {
     fn get_json(&self, url: &str, query: &[(&str, String)]) -> Result<JsonResponse, String>;
 
     fn post_json(&self, url: &str, body: &Value) -> Result<JsonResponse, String>;
-
-    fn get_binary(&self, url: &str) -> Result<BinaryResponse, String>;
 }
 
 pub struct ReqwestTokenSignalTransport {
@@ -84,29 +75,6 @@ impl TokenSignalTransport for ReqwestTokenSignalTransport {
             .text()
             .map(|body| JsonResponse { status_code, body })
             .map_err(failure("token-signal response read failed"))
-    }
-
-    fn get_binary(&self, url: &str) -> Result<BinaryResponse, String> {
-        let response = self
-            .client
-            .get(url)
-            .send()
-            .map_err(failure("token image GET failed"))?;
-        let status_code = response.status().as_u16();
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        response
-            .bytes()
-            .map(|body| BinaryResponse {
-                status_code,
-                content_type,
-                body: body.to_vec(),
-            })
-            .map_err(failure("token image response read failed"))
     }
 }
 
@@ -1577,8 +1545,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        BinaryResponse, JsonResponse, PeriodHistory, ReqwestTokenSignalTransport,
-        TokenSignalAdapter, TokenSignalCache, TokenSignalTransport, render_signal_chart,
+        JsonResponse, PeriodHistory, ReqwestTokenSignalTransport, TokenSignalAdapter,
+        TokenSignalCache, TokenSignalTransport, render_signal_chart,
     };
 
     #[test]
@@ -1596,7 +1564,7 @@ mod tests {
                 JsonResponse { status_code:200, body:json!({"pairs":[pair(a,"primary",1000),pair(b,"other",500),pair(a,"alternate",100)]}).to_string() },
                 JsonResponse { status_code:200, body:json!({"data":{"attributes":{"ohlcv_list":[]}}}).to_string() },
                 JsonResponse { status_code:200, body:json!({"data":{"attributes":{"ohlcv_list":[[1,1,2,0.5,1.5]]}}}).to_string() },
-            ])), post: Default::default(), binary: Default::default(),
+            ])), post: Default::default(),
         };
         let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
         let signal = adapter
@@ -1616,14 +1584,13 @@ mod tests {
     }
 
     #[test]
-    fn reqwest_transport_supports_json_get_post_and_binary_downloads() -> TestResult {
+    fn reqwest_transport_supports_json_get_and_post() -> TestResult {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
         let server = thread::spawn(move || -> TestResult {
             for (content_type, body) in [
                 ("application/json", br#"{"method":"get"}"#.as_slice()),
                 ("application/json", br#"{"method":"post"}"#.as_slice()),
-                ("image/png", &[1_u8, 2, 3][..]),
             ] {
                 let (mut stream, _) = listener.accept()?;
                 let mut request = [0_u8; 8_192];
@@ -1643,9 +1610,6 @@ mod tests {
         assert!(get.body.contains("get"));
         let post = transport.post_json(&base_url, &json!({"value":"synthetic"}))?;
         assert!(post.body.contains("post"));
-        let binary = transport.get_binary(&base_url)?;
-        assert_eq!(binary.content_type, "image/png");
-        assert_eq!(binary.body, [1, 2, 3]);
         assert!(matches!(server.join(), Ok(Ok(()))));
         Ok(())
     }
@@ -1681,7 +1645,6 @@ mod tests {
     struct Transport {
         json: std::cell::RefCell<VecDeque<JsonResponse>>,
         post: std::cell::RefCell<VecDeque<JsonResponse>>,
-        binary: std::cell::RefCell<VecDeque<BinaryResponse>>,
     }
 
     impl TokenSignalTransport for Transport {
@@ -1698,17 +1661,9 @@ mod tests {
                 .pop_front()
                 .ok_or_else(|| "synthetic supply unavailable".to_owned())
         }
-
-        fn get_binary(&self, _url: &str) -> Result<BinaryResponse, String> {
-            self.binary
-                .borrow_mut()
-                .pop_front()
-                .ok_or_else(|| "synthetic image unavailable".to_owned())
-        }
     }
 
-    /// A transport whose JSON GETs are answered by a closure; POST and binary
-    /// downloads are not part of the scenarios that use it.
+    /// A transport whose JSON GETs are answered by a closure; POST is not part of the scenarios that use it.
     struct JsonOnly<F>(F);
 
     impl<F> TokenSignalTransport for JsonOnly<F>
@@ -1720,10 +1675,6 @@ mod tests {
         }
 
         fn post_json(&self, _: &str, _: &serde_json::Value) -> Result<JsonResponse, String> {
-            Err("unused".into())
-        }
-
-        fn get_binary(&self, _: &str) -> Result<BinaryResponse, String> {
             Err("unused".into())
         }
     }
@@ -1760,35 +1711,6 @@ mod tests {
                 .err()
                 .as_deref(),
             Some("unused")
-        );
-        assert_eq!(
-            json_only
-                .get_binary("https://example.test")
-                .err()
-                .as_deref(),
-            Some("unused")
-        );
-        let transport = Transport {
-            json: Default::default(),
-            post: Default::default(),
-            binary: std::cell::RefCell::new(VecDeque::from([BinaryResponse {
-                status_code: 200,
-                content_type: "image/png".to_owned(),
-                body: vec![1],
-            }])),
-        };
-        assert_eq!(
-            transport
-                .get_binary("https://example.test")
-                .map(|image| image.body),
-            Ok(vec![1])
-        );
-        assert_eq!(
-            transport
-                .get_binary("https://example.test")
-                .err()
-                .as_deref(),
-            Some("synthetic image unavailable")
         );
     }
 
@@ -2002,7 +1924,6 @@ mod tests {
                     },
                 ])),
                 post: std::cell::RefCell::new(VecDeque::new()),
-                binary: std::cell::RefCell::new(VecDeque::new()),
             };
             let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
             let query = bot_core::token_signals::detect_signal_query(query).ok_or("query")?;
@@ -2069,7 +1990,6 @@ mod tests {
                     },
                 ])),
                 post: std::cell::RefCell::new(VecDeque::new()),
-                binary: std::cell::RefCell::new(VecDeque::new()),
             };
             let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
             assert!(adapter.load_symbol("timba").signal.is_none());
@@ -2099,7 +2019,6 @@ mod tests {
                 },
             ])),
             post: std::cell::RefCell::new(VecDeque::new()),
-            binary: std::cell::RefCell::new(VecDeque::new()),
         };
         let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
         let query = bot_core::token_signals::detect_signal_query(address).ok_or("missing query")?;
@@ -2156,7 +2075,6 @@ mod tests {
                 },
             ])),
             post: Default::default(),
-            binary: Default::default(),
         };
         let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
         let signal = adapter
@@ -2189,7 +2107,6 @@ mod tests {
                     .to_string(),
             }])),
             post: Default::default(),
-            binary: Default::default(),
         };
         let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
         let candidates = adapter.load_candidates(&SignalQuery::Symbol("laptop".to_owned()));
@@ -2226,7 +2143,6 @@ mod tests {
                 },
             ])),
             post: Default::default(),
-            binary: Default::default(),
         };
         let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
         let load = adapter.load_query(&SignalQuery::Slug("hunter-biden-s-laptop".to_owned()));
@@ -2266,7 +2182,6 @@ mod tests {
                 .to_string(),
             }])),
             post: Default::default(),
-            binary: Default::default(),
         };
         let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
         let candidates =
@@ -2300,7 +2215,6 @@ mod tests {
                 },
             ])),
             post: Default::default(),
-            binary: Default::default(),
         };
         let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
         let token = TokenAddress {
@@ -2342,7 +2256,6 @@ mod tests {
                 },
             ])),
             post: Default::default(),
-            binary: Default::default(),
         };
         let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
         let candidates = adapter.load_candidates(&SignalQuery::Symbol("syn".to_owned()));
@@ -2377,7 +2290,6 @@ mod tests {
                 },
             ])),
             post: Default::default(),
-            binary: Default::default(),
         };
         let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
         let candidates = adapter.load_candidates(&SignalQuery::Symbol("syn".to_owned()));
@@ -2398,7 +2310,6 @@ mod tests {
                 }]}).to_string(),
             }])),
             post: Default::default(),
-            binary: Default::default(),
         };
         let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
         let load = adapter.load_slug("missing-token");
@@ -2466,7 +2377,6 @@ mod tests {
                 },
             ])),
             post: std::cell::RefCell::new(VecDeque::new()),
-            binary: std::cell::RefCell::new(VecDeque::new()),
         };
         let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
         let token = TokenAddress {
@@ -2518,7 +2428,6 @@ mod tests {
                 },
             ])),
             post: Default::default(),
-            binary: Default::default(),
         };
         let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
         let token = TokenAddress {
@@ -2571,7 +2480,6 @@ mod tests {
                 })
                 .to_string(),
             }])),
-            binary: std::cell::RefCell::new(VecDeque::new()),
         };
         let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
         let load = adapter.load_query(&SignalQuery::Symbol("syn".to_owned()));
@@ -2599,19 +2507,9 @@ mod tests {
 
     #[test]
     fn missing_history_does_not_substitute_a_token_image() {
-        let mut jpeg = std::io::Cursor::new(Vec::new());
-        let source = image::RgbImage::from_pixel(4, 4, image::Rgb([255, 0, 0]));
-        let encoded =
-            image::DynamicImage::ImageRgb8(source).write_to(&mut jpeg, image::ImageFormat::Jpeg);
-        assert!(encoded.is_ok());
         let transport = Transport {
             json: std::cell::RefCell::new(VecDeque::new()),
             post: std::cell::RefCell::new(VecDeque::new()),
-            binary: std::cell::RefCell::new(VecDeque::from([BinaryResponse {
-                status_code: 200,
-                content_type: "image/jpeg".to_owned(),
-                body: jpeg.into_inner(),
-            }])),
         };
         let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
         let signal = TokenSignal {
@@ -2630,7 +2528,6 @@ mod tests {
         };
         let photo = adapter.render_period_photo(&signal, "24h", 1_800_000_000);
         assert!(photo.is_err());
-        assert_eq!(adapter.transport.binary.borrow().len(), 1);
     }
 
     #[test]
@@ -2680,7 +2577,6 @@ mod tests {
         Transport {
             json: std::cell::RefCell::new(VecDeque::from(responses)),
             post: Default::default(),
-            binary: Default::default(),
         }
     }
 
@@ -2991,7 +2887,6 @@ mod tests {
             post: std::cell::RefCell::new(VecDeque::from([json(
                 json!({"result": {"value": {"uiAmount": 1000}}}),
             )])),
-            binary: Default::default(),
         };
         let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
         let signal = adapter.load_symbol("timba").signal.ok_or("pump signal")?;
@@ -3150,11 +3045,6 @@ mod tests {
             transport
                 .post_json(&url, &json!({}))
                 .is_err_and(|error| error.starts_with("token-signal POST failed: "))
-        );
-        assert!(
-            transport
-                .get_binary(&url)
-                .is_err_and(|error| error.starts_with("token image GET failed: "))
         );
         Ok(())
     }
