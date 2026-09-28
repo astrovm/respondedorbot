@@ -101,13 +101,14 @@ mod tests {
             get_cached_media_with(&mut commands, "audio_transcription", "file")?,
             Some("cached".to_owned())
         );
-        cache_media_with(
+        let outcome = cache_media_with(
             &mut commands,
             "image_description",
             "image",
             "description",
             3_600,
-        )?;
+        );
+        outcome?;
         assert_eq!(commands.gets, ["audio_transcription:file"]);
         assert_eq!(
             commands.sets,
@@ -159,10 +160,10 @@ mod tests {
         );
         cache_media(&endpoint, "media", "file", "fresh", 60)?;
 
-        match server.join() {
-            Ok(result) => result?,
-            Err(_) => return Err("synthetic Redis server panicked".into()),
-        }
+        server
+            .join()
+            .ok()
+            .ok_or("synthetic Redis server panicked")??;
         Ok(())
     }
 }

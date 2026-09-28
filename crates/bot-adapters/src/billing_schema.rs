@@ -356,3 +356,310 @@ fn set_balance(
     )?;
     Ok(())
 }
+
+/// Test-only PostgreSQL fault injection for billing repositories.
+///
+/// [`install`](fault_injection::install) wraps chosen tables in views gated by
+/// `billing_fault_gate()`, adds statement-level triggers that call the same
+/// gate, and shadows the `jsonb ->> text` operator for connections whose
+/// `search_path` lists the schema before `pg_catalog`. The gate raises while
+/// the running statement's SQL contains a fragment registered with
+/// [`inject`](fault_injection::inject), so a test can fail one specific
+/// statement in the middle of a real transaction.
+#[cfg(test)]
+pub(crate) mod fault_injection {
+    use std::error::Error;
+
+    use postgres::Client;
+
+    use crate::postgres_connection::postgres_tls_connector;
+
+    pub(crate) type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
+
+    const HARNESS_SQL: &str = "
+CREATE TABLE billing_faults (
+    fragment TEXT NOT NULL,
+    skip_hits BIGINT NOT NULL,
+    max_hits BIGINT,
+    sql_state TEXT NOT NULL
+);
+CREATE SEQUENCE billing_fault_hits;
+CREATE FUNCTION billing_fault_gate() RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$
+DECLARE
+    fault RECORD;
+    hit BIGINT;
+BEGIN
+    FOR fault IN SELECT * FROM billing_faults LOOP
+        IF strpos(current_query(), fault.fragment) > 0 THEN
+            hit := nextval('billing_fault_hits');
+            IF hit > fault.skip_hits
+               AND (fault.max_hits IS NULL OR hit <= fault.skip_hits + fault.max_hits) THEN
+                RAISE EXCEPTION USING ERRCODE = fault.sql_state,
+                    MESSAGE = 'injected billing fault: ' || fault.fragment;
+            END IF;
+        END IF;
+    END LOOP;
+    RETURN TRUE;
+END $$;
+CREATE FUNCTION billing_fault_trigger() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    PERFORM billing_fault_gate();
+    RETURN NULL;
+END $$;
+CREATE FUNCTION billing_fault_json_text(document JSONB, field TEXT)
+RETURNS TEXT LANGUAGE plpgsql IMMUTABLE AS $$
+BEGIN
+    PERFORM billing_fault_gate();
+    RETURN pg_catalog.jsonb_object_field_text(document, field);
+END $$;
+CREATE OPERATOR ->> (LEFTARG = JSONB, RIGHTARG = TEXT, FUNCTION = billing_fault_json_text);
+";
+
+    pub(crate) fn connect(database_url: &str) -> TestResult<Client> {
+        let connector = postgres_tls_connector(database_url)?;
+        Ok(Client::connect(database_url, connector)?)
+    }
+
+    /// Recreates `schema` and returns a URL whose unqualified names resolve
+    /// there first, followed by `pg_catalog` and any extra `-c` options.
+    pub(crate) fn isolated_schema_url(
+        database_url: &str,
+        schema: &str,
+        extra_options: &str,
+    ) -> TestResult<String> {
+        let reset = format!("DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}");
+        connect(database_url)?.batch_execute(&reset)?;
+        let separator = if database_url.contains('?') { '&' } else { '?' };
+        Ok(format!(
+            "{database_url}{separator}options=-csearch_path%3D{schema}%2Cpg_catalog{extra_options}"
+        ))
+    }
+
+    /// Installs the gate; `viewed` tables become gated views over
+    /// `<table>_data`, and `triggered` tables gate every write statement.
+    pub(crate) fn install(client: &mut Client, viewed: &[&str], triggered: &[&str]) -> TestResult {
+        client.batch_execute(HARNESS_SQL)?;
+        for table in viewed {
+            let wrap = format!(
+                "ALTER TABLE {table} RENAME TO {table}_data; \
+                 CREATE VIEW {table} AS SELECT * FROM {table}_data WHERE billing_fault_gate(); \
+                 CREATE TRIGGER billing_fault BEFORE INSERT ON {table}_data \
+                 FOR EACH STATEMENT EXECUTE FUNCTION billing_fault_trigger()"
+            );
+            client.batch_execute(&wrap)?;
+        }
+        for table in triggered {
+            let gate = format!(
+                "CREATE TRIGGER billing_fault BEFORE INSERT OR UPDATE OR DELETE ON {table} \
+                 FOR EACH STATEMENT EXECUTE FUNCTION billing_fault_trigger()"
+            );
+            client.batch_execute(&gate)?;
+        }
+        Ok(())
+    }
+
+    /// Replaces the active fault: statements containing `fragment` fail with
+    /// `sql_state` after `skip_hits` matches, at most `max_hits` times.
+    pub(crate) fn inject(
+        client: &mut Client,
+        fragment: &str,
+        skip_hits: i64,
+        max_hits: Option<i64>,
+        sql_state: &str,
+    ) -> TestResult {
+        clear(client)?;
+        let insert = "INSERT INTO billing_faults VALUES ($1, $2, $3, $4)";
+        client.execute(insert, &[&fragment, &skip_hits, &max_hits, &sql_state])?;
+        Ok(())
+    }
+
+    pub(crate) fn clear(client: &mut Client) -> TestResult {
+        let reset = "TRUNCATE billing_faults; SELECT setval('billing_fault_hits', 1, false)";
+        Ok(client.batch_execute(reset)?)
+    }
+
+    /// How many statements matched the active fault's fragment.
+    pub(crate) fn hits(client: &mut Client) -> TestResult<i64> {
+        let count = "SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM billing_fault_hits";
+        Ok(client.query_one(count, &[])?.get(0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use postgres::Client;
+    use postgres::error::SqlState;
+
+    use super::fault_injection::{self, TestResult};
+    use super::{BillingSchemaError, BillingSchemaRepository, BillingSchemaResult};
+
+    const TENTHS: &str = "credit_amounts_scaled_to_tenths_v1";
+    const HUNDREDTHS: &str = "credit_amounts_scaled_to_hundredths_v2";
+    const REPAIR: &str = "repair_duplicate_compaction_refunds_v1";
+
+    #[test]
+    fn unreachable_database_fails_before_migrating() {
+        let result = BillingSchemaRepository::new(
+            "postgresql://synthetic@127.0.0.1:1/synthetic?sslmode=disable&connect_timeout=2",
+        )
+        .ensure_schema();
+        assert!(matches!(&result, Err(BillingSchemaError::Postgres(_))));
+        assert!(result.is_err_and(|error| {
+            error
+                .to_string()
+                .starts_with("PostgreSQL billing schema migration failed")
+        }));
+    }
+
+    /// Migration names, total balance, and ledger size: everything a failed
+    /// migration must leave untouched.
+    fn snapshot(client: &mut Client) -> TestResult<(Option<String>, Option<i64>, i64)> {
+        let row = client.query_one(
+            "SELECT (SELECT string_agg(name, ',' ORDER BY name COLLATE \"C\") FROM credit_schema_migrations), \
+                (SELECT SUM(balance) FROM credit_accounts_data), \
+                (SELECT COUNT(*) FROM credit_ledger)",
+            &[],
+        );
+        let row = row?;
+        Ok((row.get(0), row.get(1), row.get(2)))
+    }
+
+    fn mark_applied(client: &mut Client, names: &[&str]) -> TestResult {
+        client.execute("DELETE FROM credit_schema_migrations", &[])?;
+        let insert = "INSERT INTO credit_schema_migrations (name) SELECT unnest($1::text[])";
+        client.execute(insert, &[&names])?;
+        Ok(())
+    }
+
+    /// Runs the migration with `fragment` failing and checks that the
+    /// transaction rolled back after exactly `skip_hits + 1` matches.
+    fn assert_migration_fault(
+        client: &mut Client,
+        repository: &BillingSchemaRepository,
+        applied: &[&str],
+        fragment: &str,
+        skip_hits: i64,
+    ) -> TestResult {
+        mark_applied(client, applied)?;
+        fault_injection::inject(client, fragment, skip_hits, None, "P0001")?;
+        let before = snapshot(client)?;
+        let outcome = repository.ensure_schema();
+        let expected = format!("injected billing fault: {fragment}");
+        assert!(
+            matches!(&outcome, Err(BillingSchemaError::Postgres(error))
+                if error.as_db_error().is_some_and(|db| db.message() == expected)),
+            "{fragment}: {outcome:?}"
+        );
+        assert_eq!(fault_injection::hits(client)?, skip_hits + 1, "{fragment}");
+        assert_eq!(snapshot(client)?, before, "{fragment} must roll back");
+        fault_injection::clear(client)?;
+        Ok(())
+    }
+
+    #[test]
+    fn every_migration_statement_failure_rolls_back_the_whole_migration() -> TestResult {
+        std::env::var("TEST_DATABASE_URL").map_or(Ok(()), |url| migration_faults(&url))
+    }
+
+    fn migration_faults(database_url: &str) -> TestResult {
+        let url = fault_injection::isolated_schema_url(database_url, "billing_schema_faults", "")?;
+        let repository = BillingSchemaRepository::new(&url);
+        assert_eq!(
+            repository.ensure_schema()?,
+            BillingSchemaResult {
+                migrated_to_tenths: true,
+                migrated_to_hundredths: true,
+                repaired_compaction_refunds: 0,
+            }
+        );
+        let mut client = fault_injection::connect(&url)?;
+        let triggered = [
+            "onboarding_grants",
+            "star_payments",
+            "credit_ledger",
+            "credit_schema_migrations",
+        ];
+        fault_injection::install(&mut client, &["credit_accounts"], &triggered)?;
+        let seed = "INSERT INTO credit_accounts (scope_type, scope_id, balance) \
+                VALUES ('user', 41, 900), ('chat', -42, 800); \
+             INSERT INTO credit_ledger \
+                (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
+             VALUES \
+                ('memory_compaction_settlement', 41, 41, -42, 0, \
+                    '{\"usage_tag\":\"memory_compaction:fault\"}'), \
+                ('ai_settlement_result', 41, 41, -42, 0, \
+                    '{\"operation_id\":\"fault-repair\",\"settled_credit_units\":0}'), \
+                ('ai_refund', 41, 41, -42, 25, \
+                    '{\"source\":\"chat\",\"operation_id\":\"fault-repair\",\
+                      \"usage_tag\":\"memory_compaction:fault\",\
+                      \"reason\":\"unused_stale_reservation\"}')";
+        client.batch_execute(seed)?;
+
+        for (fragment, skip_hits) in [
+            ("INSERT INTO credit_schema_migrations", 0),
+            ("INSERT INTO credit_schema_migrations", 1),
+            ("INSERT INTO credit_schema_migrations", 2),
+            ("UPDATE credit_accounts SET balance = balance", 0),
+            ("UPDATE onboarding_grants SET credits", 0),
+            ("UPDATE star_payments SET credits_awarded", 0),
+            ("UPDATE credit_ledger SET amount", 0),
+        ] {
+            assert_migration_fault(&mut client, &repository, &[], fragment, skip_hits)?;
+        }
+        for fragment in [
+            "UPDATE credit_accounts SET balance = balance",
+            "UPDATE onboarding_grants SET credits",
+            "UPDATE star_payments SET credits_awarded",
+            "UPDATE credit_ledger SET amount",
+            "UPDATE credit_ledger SET metadata",
+        ] {
+            assert_migration_fault(&mut client, &repository, &[TENTHS], fragment, 0)?;
+        }
+        let migrated = [TENTHS, HUNDREDTHS];
+        for fragment in [
+            "SELECT DISTINCT ON (refund.id)",
+            "VALUES ($1, $2, 0) ON CONFLICT",
+            "FOR UPDATE",
+            "UPDATE credit_accounts SET balance = $1",
+            "'ai_reconciliation_correction'",
+        ] {
+            assert_migration_fault(&mut client, &repository, &migrated, fragment, 0)?;
+        }
+
+        // A migration already holding the schema lock makes this one give up
+        // after the configured lock timeout instead of waiting forever.
+        let impatient = BillingSchemaRepository::new(&format!("{url}%20-clock_timeout%3D100"));
+        client.query_one("SELECT pg_advisory_lock(48610005)", &[])?;
+        let blocked = impatient.ensure_schema();
+        client.query_one("SELECT pg_advisory_unlock(48610005)", &[])?;
+        assert!(matches!(&blocked, Err(BillingSchemaError::Postgres(error))
+            if error.code() == Some(&SqlState::LOCK_NOT_AVAILABLE)));
+
+        // Without faults the repair reverses the duplicate chat refund once.
+        mark_applied(&mut client, &migrated)?;
+        assert_eq!(
+            repository.ensure_schema()?,
+            BillingSchemaResult {
+                migrated_to_tenths: false,
+                migrated_to_hundredths: false,
+                repaired_compaction_refunds: 1,
+            }
+        );
+        let repaired = client.query_one(
+            "SELECT \
+                (SELECT balance FROM credit_accounts WHERE scope_type = 'chat' AND scope_id = -42), \
+                (SELECT balance FROM credit_accounts WHERE scope_type = 'user' AND scope_id = 41), \
+                (SELECT amount FROM credit_ledger \
+                    WHERE event_type = 'ai_reconciliation_correction')",
+            &[],
+        );
+        let repaired = repaired?;
+        assert_eq!(repaired.get::<_, i32>(0), 775);
+        assert_eq!(repaired.get::<_, i32>(1), 900);
+        assert_eq!(repaired.get::<_, i32>(2), -25);
+        let applied = snapshot(&mut client)?.0;
+        let expected = [HUNDREDTHS, TENTHS, REPAIR].join(",");
+        assert_eq!(applied.as_deref(), Some(expected.as_str()));
+        Ok(())
+    }
+}

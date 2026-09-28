@@ -83,13 +83,10 @@ pub fn load_stock_pool<T: FinvizTransport, C: StockPoolCache>(
         }
     };
     if !symbols.is_empty() {
-        match serde_json::to_string(&symbols) {
-            Ok(encoded) => {
-                if let Err(error) = cache.set(CACHE_KEY, &encoded, CACHE_TTL_SECONDS) {
-                    diagnostics.push(format!("could not write Redis key {CACHE_KEY}: {error}"));
-                }
-            }
-            Err(error) => diagnostics.push(format!("could not encode Finviz pool: {error}")),
+        // A list of strings always encodes, so this cannot fail.
+        let encoded = serde_json::Value::from(symbols.clone()).to_string();
+        if let Err(error) = cache.set(CACHE_KEY, &encoded, CACHE_TTL_SECONDS) {
+            diagnostics.push(format!("could not write Redis key {CACHE_KEY}: {error}"));
         }
     }
     StockPoolLoad {

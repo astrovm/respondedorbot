@@ -109,6 +109,8 @@ mod tests {
             (r#"{"is_admin":false}"#, Some(false)),
             (r#"{"is_admin":"yes"}"#, None),
             ("invalid", None),
+            ("[true]", None),
+            ("1", None),
         ] {
             let mut commands = FakeCommands {
                 value: Some(value.to_owned()),
@@ -120,6 +122,9 @@ mod tests {
             );
             assert_eq!(commands.gets, ["chat_admin:chat:42"]);
         }
+        let mut missing = FakeCommands::default();
+        assert_eq!(get_cached_chat_admin_with(&mut missing, "chat", "7")?, None);
+        assert_eq!(missing.gets, ["chat_admin:chat:7"]);
         Ok(())
     }
 
@@ -185,10 +190,10 @@ mod tests {
         assert_eq!(get_cached_chat_admin(&endpoint, "chat", "42")?, Some(true));
         cache_chat_admin(&endpoint, "chat", "42", false, 300)?;
 
-        match server.join() {
-            Ok(result) => result?,
-            Err(_) => return Err("synthetic Redis server panicked".into()),
-        }
+        server
+            .join()
+            .ok()
+            .ok_or("synthetic Redis server panicked")??;
         Ok(())
     }
 }

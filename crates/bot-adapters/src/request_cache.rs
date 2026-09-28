@@ -158,18 +158,10 @@ where
         };
         match fetched {
             Ok(data) => {
-                let value = json!({"timestamp": now_unix, "data": data});
-                match serde_json::to_string(&value) {
-                    Ok(encoded) => {
-                        if let Err(error) = cache.set(key, &encoded, request_cache_ttl(ttl_seconds))
-                        {
-                            diagnostics
-                                .push(format!("could not write request cache key {key}: {error}"));
-                        }
-                    }
-                    Err(error) => diagnostics.push(format!(
-                        "could not encode {request_label} cache value: {error}"
-                    )),
+                // A JSON value always encodes, so this cannot fail.
+                let encoded = json!({"timestamp": now_unix, "data": data}).to_string();
+                if let Err(error) = cache.set(key, &encoded, request_cache_ttl(ttl_seconds)) {
+                    diagnostics.push(format!("could not write request cache key {key}: {error}"));
                 }
                 // The cache is an optimization: a successful response remains usable
                 // even when Redis is unavailable. Only retry upstream failures.
@@ -200,7 +192,7 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::{
-        JsonHttpResponse, RequestCache, load_cached_json, python_json_string,
+        CachedJsonLoad, JsonHttpResponse, RequestCache, load_cached_json, python_json_string,
         python_request_cache_key,
     };
 
@@ -272,6 +264,51 @@ mod tests {
         assert_eq!(cache.claim("request_cache:key", "1", 60), Ok(true));
     }
 
+    fn response(status_code: u16, body: &str) -> Result<JsonHttpResponse, String> {
+        Ok(JsonHttpResponse {
+            status_code,
+            body: body.to_owned(),
+        })
+    }
+
+    struct Loaded {
+        load: CachedJsonLoad,
+        fetches: usize,
+        retries: usize,
+    }
+
+    /// Drives `load_cached_json` with scripted responses. Every test goes
+    /// through these two closures, so they share one generic instantiation.
+    fn load(
+        cache: &mut Cache,
+        ttl_seconds: i64,
+        now_unix: i64,
+        responses: Vec<Result<JsonHttpResponse, String>>,
+    ) -> Loaded {
+        let mut responses = VecDeque::from(responses);
+        let mut fetches = 0;
+        let mut retries = 0;
+        let load = load_cached_json(
+            cache,
+            "request_cache:key",
+            ttl_seconds,
+            now_unix,
+            "synthetic request",
+            || {
+                fetches += 1;
+                responses
+                    .pop_front()
+                    .unwrap_or_else(|| Err("missing".to_owned()))
+            },
+            || retries += 1,
+        );
+        Loaded {
+            load,
+            fetches,
+            retries,
+        }
+    }
+
     #[test]
     fn fresh_cache_is_authoritative_and_future_timestamps_are_fresh() {
         for timestamp in [100, 200] {
@@ -281,38 +318,21 @@ mod tests {
                 )))]),
                 ..Cache::default()
             };
-            let load = load_cached_json(
-                &mut cache,
-                "request_cache:key",
-                60,
-                100,
-                "synthetic request",
-                || Err("unexpected fetch".to_owned()),
-                || {},
-            );
-            assert_eq!(load.data, Some(serde_json::json!({"value": 1})));
-            assert!(load.diagnostics.is_empty());
+            let loaded = load(&mut cache, 60, 100, Vec::new());
+            assert_eq!(loaded.load.data, Some(serde_json::json!({"value": 1})));
+            assert!(loaded.load.diagnostics.is_empty());
+            assert!(!loaded.load.refreshed);
+            assert_eq!(loaded.fetches, 0);
+            assert!(cache.writes.is_empty());
         }
     }
 
     #[test]
     fn missing_cache_fetches_writes_compatible_envelope_and_minimum_ttl() {
         let mut cache = Cache::default();
-        let load = load_cached_json(
-            &mut cache,
-            "request_cache:key",
-            10,
-            123,
-            "synthetic request",
-            || {
-                Ok(JsonHttpResponse {
-                    status_code: 200,
-                    body: r#"{"value":2}"#.to_owned(),
-                })
-            },
-            || {},
-        );
-        assert_eq!(load.data, Some(serde_json::json!({"value": 2})));
+        let loaded = load(&mut cache, 10, 123, vec![response(200, r#"{"value":2}"#)]);
+        assert_eq!(loaded.load.data, Some(serde_json::json!({"value": 2})));
+        assert_eq!(loaded.fetches, 1);
         assert_eq!(cache.writes[0].0, "request_cache:key");
         assert_eq!(cache.writes[0].2, 60);
         assert_eq!(
@@ -329,28 +349,29 @@ mod tests {
             ))]),
             ..Cache::default()
         };
-        let failures = VecDeque::from([
-            Ok(JsonHttpResponse {
-                status_code: 503,
-                body: String::new(),
-            }),
-            Err("timeout".to_owned()),
-        ]);
-        let mut failures = failures;
-        let mut retries = 0;
-        let load = load_cached_json(
-            &mut cache,
-            "request_cache:key",
-            60,
-            1_000,
-            "synthetic request",
-            || failures.pop_front().unwrap_or(Err("missing".to_owned())),
-            || retries += 1,
+        let failures = vec![response(503, ""), Err("timeout".to_owned())];
+        let loaded = load(&mut cache, 60, 1_000, failures);
+        assert_eq!(loaded.load.data, Some(serde_json::json!({"stale": true})));
+        assert!(!loaded.load.refreshed);
+        assert_eq!((loaded.fetches, loaded.retries), (2, 1));
+        assert!(loaded.load.diagnostics[0].contains("HTTP 503"));
+        assert!(loaded.load.diagnostics[1].contains("timeout"));
+        assert!(cache.writes.is_empty());
+    }
+
+    #[test]
+    fn missing_cache_and_failed_fetches_yield_no_data() {
+        let mut cache = Cache::default();
+        let loaded = load(&mut cache, 60, 1_000, Vec::new());
+        assert_eq!(loaded.load.data, None);
+        assert_eq!((loaded.fetches, loaded.retries), (2, 1));
+        assert_eq!(
+            loaded.load.diagnostics,
+            [
+                "synthetic request attempt 1 failed: missing",
+                "synthetic request attempt 2 failed: missing",
+            ]
         );
-        assert_eq!(load.data, Some(serde_json::json!({"stale": true})));
-        assert_eq!(retries, 1);
-        assert!(load.diagnostics[0].contains("HTTP 503"));
-        assert!(load.diagnostics[1].contains("timeout"));
     }
 
     #[test]
@@ -359,29 +380,13 @@ mod tests {
             sets: VecDeque::from([Err("write one"), Err("write two")]),
             ..Cache::default()
         };
-        let responses = VecDeque::from([
-            Ok(JsonHttpResponse {
-                status_code: 200,
-                body: "not-json".to_owned(),
-            }),
-            Ok(JsonHttpResponse {
-                status_code: 200,
-                body: r#"{"ok":true}"#.to_owned(),
-            }),
-        ]);
-        let mut responses = responses;
-        let load = load_cached_json(
-            &mut cache,
-            "request_cache:key",
-            300,
-            100,
-            "synthetic request",
-            || responses.pop_front().unwrap_or(Err("missing".to_owned())),
-            || {},
-        );
-        assert_eq!(load.data, Some(serde_json::json!({"ok":true})));
-        assert!(load.refreshed);
-        assert_eq!(load.diagnostics.len(), 2);
+        let responses = vec![response(200, "not-json"), response(200, r#"{"ok":true}"#)];
+        let loaded = load(&mut cache, 300, 100, responses);
+        assert_eq!(loaded.load.data, Some(serde_json::json!({"ok":true})));
+        assert!(loaded.load.refreshed);
+        assert_eq!(loaded.retries, 1);
+        assert_eq!(loaded.load.diagnostics.len(), 2);
+        assert!(loaded.load.diagnostics[1].contains("write one"));
         assert_eq!(cache.writes.len(), 1);
     }
 
@@ -391,23 +396,15 @@ mod tests {
             gets: VecDeque::from([Err("read failed")]),
             ..Cache::default()
         };
-        let load = load_cached_json(
+        let loaded = load(
             &mut cache,
-            "request_cache:key",
             300,
             100,
-            "synthetic request",
-            || {
-                Ok(JsonHttpResponse {
-                    status_code: 200,
-                    body: r#"{"fresh":true}"#.to_owned(),
-                })
-            },
-            || {},
+            vec![response(200, r#"{"fresh":true}"#)],
         );
-        assert_eq!(load.data, Some(serde_json::json!({"fresh":true})));
-        assert!(load.refreshed);
-        assert!(load.diagnostics[0].contains("read failed"));
+        assert_eq!(loaded.load.data, Some(serde_json::json!({"fresh":true})));
+        assert!(loaded.load.refreshed);
+        assert!(loaded.load.diagnostics[0].contains("read failed"));
     }
 
     #[test]
@@ -416,23 +413,15 @@ mod tests {
             gets: VecDeque::from([Ok(Some(r#"{"timestamp":"bad"}"#.to_owned()))]),
             ..Cache::default()
         };
-        let load = load_cached_json(
+        let loaded = load(
             &mut cache,
-            "request_cache:key",
             300,
             100,
-            "synthetic request",
-            || {
-                Ok(JsonHttpResponse {
-                    status_code: 200,
-                    body: r#"{"fresh":true}"#.to_owned(),
-                })
-            },
-            || {},
+            vec![response(200, r#"{"fresh":true}"#)],
         );
-        assert_eq!(load.data, Some(serde_json::json!({"fresh":true})));
-        assert!(load.refreshed);
-        assert!(load.diagnostics[0].contains("invalid request cache"));
+        assert_eq!(loaded.load.data, Some(serde_json::json!({"fresh":true})));
+        assert!(loaded.load.refreshed);
+        assert!(loaded.load.diagnostics[0].contains("invalid request cache"));
     }
 
     #[test]

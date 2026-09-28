@@ -102,7 +102,8 @@ mod tests {
     use crate::redis_connection::{RedisEndpoint, test_support::read_command};
 
     #[test]
-    fn configures_policy_and_repairs_ttls() -> Result<(), Box<dyn Error + Send + Sync>> {
+    fn configures_policy_and_repairs_ttls_across_scan_pages()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let port = listener.local_addr()?.port();
         let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -129,9 +130,18 @@ mod tests {
                 ),
                 (
                     vec!["SCAN", "0", "MATCH", "chat_history:*", "COUNT", "100"],
-                    "*2\r\n$1\r\n0\r\n*1\r\n$16\r\nchat_history:123\r\n".to_owned(),
+                    "*2\r\n$1\r\n7\r\n*1\r\n$16\r\nchat_history:123\r\n".to_owned(),
+                ),
+                (
+                    vec!["SCAN", "7", "MATCH", "chat_history:*", "COUNT", "100"],
+                    "*2\r\n$1\r\n0\r\n*1\r\n$16\r\nchat_history:456\r\n".to_owned(),
                 ),
                 (vec!["TTL", "chat_history:123"], ":100\r\n".to_owned()),
+                (vec!["TTL", "chat_history:456"], ":-1\r\n".to_owned()),
+                (
+                    vec!["EXPIRE", "chat_history:456", "2592000"],
+                    ":0\r\n".to_owned(),
+                ),
             ];
             for (expected, response) in exchanges {
                 assert_eq!(read_command(&mut stream)?, expected);
@@ -148,15 +158,16 @@ mod tests {
             },
             "256mb",
             "allkeys-lru",
-        )?;
+        );
+        let result = result?;
 
         assert_eq!(result.expired_keys, 1);
         assert_eq!(result.maxmemory.as_deref(), Some("268435456"));
         assert_eq!(result.maxmemory_policy.as_deref(), Some("allkeys-lru"));
-        match server.join() {
-            Ok(result) => result?,
-            Err(_) => return Err("synthetic Redis server panicked".into()),
-        }
+        server
+            .join()
+            .ok()
+            .ok_or("synthetic Redis server panicked")??;
         Ok(())
     }
 }

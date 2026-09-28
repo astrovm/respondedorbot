@@ -98,10 +98,8 @@ where
     }
 
     if !urls.is_empty() {
-        let Ok(encoded) = serde_json::to_string(&urls) else {
-            diagnostics.push("could not encode Giphy pool for Redis".to_owned());
-            return PoolLoad { urls, diagnostics };
-        };
+        // A list of strings always encodes, so this cannot fail.
+        let encoded = serde_json::Value::from(urls.clone()).to_string();
         for (key, ttl) in [
             (&fresh_key, FRESH_TTL_SECONDS),
             (&stale_key, STALE_TTL_SECONDS),
@@ -178,6 +176,13 @@ mod tests {
         }
     }
 
+    /// Scripted Giphy offsets. Every test passes this one closure type, so
+    /// the tests share a single instantiation of `load_giphy_pool`.
+    fn offsets(values: Vec<u16>) -> impl FnMut() -> u16 {
+        let mut values = values.into_iter();
+        move || values.next().unwrap_or(0)
+    }
+
     fn transport(responses: Vec<Result<HttpResponse, TransportFailureKind>>) -> Transport {
         Transport {
             responses: RefCell::new(responses.into()),
@@ -198,7 +203,7 @@ mod tests {
                 &mut cache,
                 Some("synthetic-key"),
                 GreetingCategory::Morning,
-                || unreachable!(),
+                offsets(Vec::new()),
             );
             assert_eq!(load.urls.is_empty(), raw == "[]");
             assert!(transport.requests.borrow().is_empty());
@@ -221,13 +226,12 @@ mod tests {
             success("https://example.test/4.gif"),
         ]);
         let mut cache = Cache::default();
-        let mut offsets = [3, 5, 8, 13].into_iter();
         let load = load_giphy_pool(
             &search_transport,
             &mut cache,
             Some("synthetic-key"),
             GreetingCategory::Morning,
-            || offsets.next().unwrap_or(0),
+            offsets(vec![3, 5, 8, 13]),
         );
         assert_eq!(load.urls.len(), 3);
         assert_eq!(load.diagnostics.len(), 1);
@@ -235,6 +239,11 @@ mod tests {
         assert_eq!(search_transport.requests.borrow()[3].offset, 13);
         assert_eq!(cache.sets[0].0, "giphy_pool:gm");
         assert_eq!(cache.sets[0].2, 86_400);
+        assert_eq!(
+            cache.sets[0].1,
+            r#"["https://example.test/1.gif","https://example.test/3.gif","https://example.test/4.gif"]"#
+        );
+        assert_eq!(cache.sets[1].1, cache.sets[0].1);
         assert_eq!(cache.sets[1].0, "giphy_pool_stale:gm");
         assert_eq!(cache.sets[1].2, 604_800);
     }
@@ -254,13 +263,12 @@ mod tests {
             ]),
             ..Cache::default()
         };
-        let mut offsets = [0; 4].into_iter();
         let load = load_giphy_pool(
             &failed_transport,
             &mut cache,
             Some("synthetic-key"),
             GreetingCategory::Night,
-            || offsets.next().unwrap_or(0),
+            offsets(vec![0; 4]),
         );
         assert_eq!(load.urls, vec!["https://example.test/stale.gif"]);
         assert_eq!(load.diagnostics.len(), 5);
@@ -275,10 +283,11 @@ mod tests {
             &mut cache,
             None,
             GreetingCategory::Night,
-            || unreachable!(),
+            offsets(Vec::new()),
         );
         assert!(load.urls.is_empty());
         assert_eq!(load.diagnostics.len(), 1);
+        assert!(empty_transport.requests.borrow().is_empty());
 
         for stale in [Ok(None), Err("stale unavailable")] {
             let mut cache = Cache {
@@ -290,7 +299,7 @@ mod tests {
                 &mut cache,
                 None,
                 GreetingCategory::Night,
-                || unreachable!(),
+                offsets(Vec::new()),
             );
             assert!(load.urls.is_empty());
         }
@@ -327,7 +336,7 @@ mod tests {
             &mut cache,
             Some("synthetic-key"),
             GreetingCategory::Morning,
-            || 0,
+            offsets(Vec::new()),
         );
         assert_eq!(load.urls, vec!["https://example.test/result.gif"]);
         assert_eq!(load.diagnostics.len(), 6);

@@ -208,10 +208,10 @@ mod tests {
         );
         assert!(cap.refund_once("creditless_cap:-42:7", "ai:42:7:first")?);
         assert_eq!(cap.count("creditless_cap:-42:7")?, Some(1));
-        match server.join() {
-            Ok(result) => result?,
-            Err(_) => return Err("synthetic Redis server panicked".into()),
-        }
+        server
+            .join()
+            .ok()
+            .ok_or("synthetic Redis server panicked")??;
         Ok(())
     }
 

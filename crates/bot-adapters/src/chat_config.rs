@@ -155,7 +155,10 @@ mod tests {
     use postgres_native_tls::MakeTlsConnector;
     use serde_json::json;
 
-    use super::{ChatConfigRepository, changed_fields};
+    use postgres::error::SqlState;
+
+    use super::{ChatConfigRepository, ChatConfigRepositoryError, changed_fields};
+    use crate::billing_schema::fault_injection;
 
     #[test]
     fn concurrent_config_updates_can_merge_only_the_fields_they_changed() {
@@ -171,9 +174,7 @@ mod tests {
 
     #[test]
     fn concurrent_database_updates_preserve_unrelated_fields() {
-        let Some(database_url) = test_database_url() else {
-            return;
-        };
+        let Some(database_url) = url() else { return };
         let chat_id = "-100900003";
         cleanup(&database_url, chat_id);
         let previous = ChatConfig::default();
@@ -206,7 +207,7 @@ mod tests {
         cleanup(&database_url, chat_id);
     }
 
-    fn test_database_url() -> Option<String> {
+    fn url() -> Option<String> {
         env::var("TEST_DATABASE_URL").ok()
     }
 
@@ -220,9 +221,7 @@ mod tests {
 
     #[test]
     fn reads_absent_and_native_rows_without_schema_changes() {
-        let Some(database_url) = test_database_url() else {
-            return;
-        };
+        let Some(database_url) = url() else { return };
         let chat_id = "-100900001";
         cleanup(&database_url, chat_id);
         let repository = ChatConfigRepository::new(&database_url);
@@ -253,9 +252,7 @@ mod tests {
 
     #[test]
     fn upsert_round_trip_is_idempotent_and_python_readable() {
-        let Some(database_url) = test_database_url() else {
-            return;
-        };
+        let Some(database_url) = url() else { return };
         let chat_id = "-100900002";
         let repository = ChatConfigRepository::new(&database_url);
         assert!(repository.ensure_schema().is_ok());
@@ -297,5 +294,27 @@ mod tests {
         assert_eq!(stored.get("ai_random_replies"), Some(&json!(false)));
         assert_eq!(stored.get("future_setting"), Some(&json!("preserved")));
         cleanup(&database_url, chat_id);
+    }
+
+    #[test]
+    fn schema_setup_gives_up_while_another_setup_holds_the_lock() {
+        let Some(url) = url() else { return };
+        let holder = fault_injection::connect(&url);
+        assert!(holder.is_ok());
+        let Ok(mut holder) = holder else { return };
+        let lock = "SELECT pg_advisory_lock(48610006)";
+        assert!(holder.query_one(lock, &[]).is_ok());
+        let separator = if url.contains('?') { '&' } else { '?' };
+        let impatient_url = format!("{url}{separator}options=-clock_timeout%3D100");
+        let impatient = ChatConfigRepository::new(&impatient_url);
+        let blocked = impatient.get("-100900004");
+        let unlock = "SELECT pg_advisory_unlock(48610006)";
+        assert!(holder.query_one(unlock, &[]).is_ok());
+        assert!(
+            matches!(blocked, Err(ChatConfigRepositoryError::Postgres(error))
+            if error.code() == Some(&SqlState::LOCK_NOT_AVAILABLE))
+        );
+        // The failed setup is not remembered, so the next call retries it.
+        assert_eq!(impatient.get("-100900004").ok(), Some(None));
     }
 }

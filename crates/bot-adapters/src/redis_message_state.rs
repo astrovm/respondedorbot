@@ -449,13 +449,14 @@ mod tests {
             Some("summary".to_owned())
         );
         state.set_value("chat_summary:1", "fresh", 300)?;
-        state.save_compaction_result(
+        let outcome = state.save_compaction_result(
             "chat_summary:1",
             "chat_compacted_until:1",
             "summary",
             "42",
             300,
-        )?;
+        );
+        outcome?;
         state.save_chat_member("chat_members:1", "7", "member-json", 300)?;
         assert_eq!(
             state.get_chat_members("chat_members:1")?,
@@ -471,10 +472,10 @@ mod tests {
             ]
         );
 
-        match server.join() {
-            Ok(result) => result?,
-            Err(_) => return Err("synthetic Redis server panicked".into()),
-        }
+        server
+            .join()
+            .ok()
+            .ok_or("synthetic Redis server panicked")??;
         Ok(())
     }
 
@@ -509,10 +510,10 @@ mod tests {
             state.get_history_with_summary("1", 2, "chat_summary:1", "chat_compacted_until:1")?,
             (vec!["one".to_owned()], Some("summary".to_owned()), None)
         );
-        match server.join() {
-            Ok(result) => result?,
-            Err(_) => return Err("synthetic Redis server panicked".into()),
-        }
+        server
+            .join()
+            .ok()
+            .ok_or("synthetic Redis server panicked")??;
         Ok(())
     }
 
@@ -585,7 +586,8 @@ mod tests {
             Some("user"),
             None,
             false,
-        )?;
+        );
+        let plan = plan?;
 
         assert!(state.save_message(&plan, 300, 400)?);
         assert_eq!(state.get_history_entries("1", 2)?, ["one", "two"]);
@@ -596,10 +598,55 @@ mod tests {
         let searched = state.search_messages("1", "wallet", 10)?;
         assert_eq!(searched, fetched);
 
-        match server.join() {
-            Ok(result) => result?,
-            Err(_) => return Err("synthetic Redis server panicked".into()),
-        }
+        server
+            .join()
+            .ok()
+            .ok_or("synthetic Redis server panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn search_surfaces_index_failures_and_skips_malformed_rows()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+            let mut command = |response: &[u8]| -> Result<String, Box<dyn Error + Send + Sync>> {
+                let received = read_command(&mut stream)?;
+                stream.write_all(response)?;
+                Ok(received.first().cloned().unwrap_or_default())
+            };
+            assert_eq!(
+                command(b"-ERR unknown command 'FT.CREATE'\r\n")?,
+                "FT.CREATE"
+            );
+            assert_eq!(command(b"+OK\r\n")?, "FT.CREATE");
+            assert_eq!(command(b":0\r\n")?, "FT.SEARCH");
+            let mixed_rows = b"*5\r\n:2\r\n$3\r\nbad\r\n$4\r\nnope\r\n\
+                $4\r\ngood\r\n*2\r\n$4\r\ntext\r\n$2\r\nhi\r\n";
+            assert_eq!(command(mixed_rows)?, "FT.SEARCH");
+            Ok(())
+        });
+        let state = RedisMessageState::new(&RedisEndpoint {
+            host: "127.0.0.1".to_owned(),
+            port,
+            password: None,
+        })?;
+
+        let unavailable = state.fetch_messages("1", 5);
+        assert!(matches!(unavailable, Err(RedisMessageStateError::Redis(_))));
+        assert!(state.fetch_messages("1", 5)?.is_empty());
+        let rows = state.search_messages("1", "hi", 5)?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].key, "good");
+        assert_eq!(rows[0].fields["text"], "hi");
+
+        server
+            .join()
+            .ok()
+            .ok_or("synthetic Redis server panicked")??;
         Ok(())
     }
 }

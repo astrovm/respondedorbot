@@ -443,6 +443,19 @@ mod tests {
             store.upsert_task("t1", "c1", "{}", f64::INFINITY, 60),
             Err(RedisTaskStoreError::InvalidScore)
         ));
+        let non_finite_next_run = TaskOccurrenceCompletion {
+            task_id: "t1",
+            chat_id: "c1",
+            execution_id: "t1:42",
+            claim_token: "claim",
+            next_payload: Some("{}"),
+            next_run_score: f64::NEG_INFINITY,
+            ttl_seconds: 60,
+        };
+        assert!(matches!(
+            store.complete_occurrence(&non_finite_next_run),
+            Err(RedisTaskStoreError::InvalidScore)
+        ));
         Ok(())
     }
 
@@ -497,10 +510,79 @@ mod tests {
             store.mget(&["task:data:t1".into(), "task:data:t2".into()])?,
             [Some("{}".into()), None]
         );
-        match server.join() {
-            Ok(result) => result?,
-            Err(_) => return Err("synthetic Redis server panicked".into()),
-        }
+        server
+            .join()
+            .ok()
+            .ok_or("synthetic Redis server panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn lists_chat_tasks_pruning_missing_payloads_and_paginating_scans()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let bulk = |text: &str| format!("${}\r\n{text}\r\n", text.len());
+        let own = r#"{"schema_version":1,"id":"abc12347","chat_id":"c2","text":"x","run_date":"2026-08-30T12:00:00Z"}"#;
+        let foreign = r#"{"schema_version":1,"id":"abc12348","chat_id":"c9","text":"y","run_date":"2026-08-30T12:00:00Z"}"#;
+        let exchanges = [
+            (
+                vec!["SCAN", "0", "MATCH", "task:data:*", "COUNT", "100"],
+                format!("*2\r\n$1\r\n3\r\n*1\r\n{}", bulk("task:data:a")),
+            ),
+            (
+                vec!["SCAN", "3", "MATCH", "task:data:*", "COUNT", "100"],
+                format!("*2\r\n$1\r\n0\r\n*1\r\n{}", bulk("task:data:b")),
+            ),
+            (
+                vec!["ZRANGE", "task:chat:c2", "0", "-1"],
+                format!("*3\r\n{}{}{}", bulk("t3"), bulk("t4"), bulk("t5")),
+            ),
+            (
+                vec!["MGET", "task:data:t3", "task:data:t4", "task:data:t5"],
+                format!("*3\r\n{}$-1\r\n{}", bulk(own), bulk(foreign)),
+            ),
+            (vec!["ZREM", "task:chat:c2", "t4"], ":1\r\n".to_owned()),
+            (
+                vec!["ZRANGE", "task:chat:empty", "0", "-1"],
+                "*0\r\n".to_owned(),
+            ),
+            (
+                vec!["ZRANGE", "task:chat:down", "0", "-1"],
+                format!("*1\r\n{}", bulk("t6")),
+            ),
+            (
+                vec!["MGET", "task:data:t6"],
+                "-LOADING dataset in memory\r\n".to_owned(),
+            ),
+        ];
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+            for (expected, response) in exchanges {
+                assert_eq!(read_command(&mut stream)?, expected);
+                stream.write_all(response.as_bytes())?;
+            }
+            Ok(())
+        });
+        let store = RedisTaskStore::new(&RedisEndpoint {
+            host: "127.0.0.1".to_owned(),
+            port,
+            password: None,
+        })?;
+
+        assert_eq!(store.scan("task:data:*")?, ["task:data:a", "task:data:b"]);
+        let tasks = store.list_chat_tasks("c2")?;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].task.id.as_str(), "abc12347");
+        assert!(store.list_chat_tasks("empty")?.is_empty());
+        let unavailable = store.list_chat_tasks("down");
+        assert!(matches!(unavailable, Err(RedisTaskStoreError::Redis(_))));
+        assert_eq!(store.mget(&[])?, Vec::<Option<String>>::new());
+        server
+            .join()
+            .ok()
+            .ok_or("synthetic Redis server panicked")??;
         Ok(())
     }
 
@@ -648,10 +730,10 @@ mod tests {
         assert!(store.release_occurrence("t1", "t1:42", "claim")?);
         assert!(store.remove_due_task_id("stale")?);
         assert!(store.cancel_task("t1", "c1")?);
-        match server.join() {
-            Ok(result) => result?,
-            Err(_) => return Err("synthetic Redis server panicked".into()),
-        }
+        server
+            .join()
+            .ok()
+            .ok_or("synthetic Redis server panicked")??;
         Ok(())
     }
 }
