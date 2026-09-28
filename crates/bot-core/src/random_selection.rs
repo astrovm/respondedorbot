@@ -95,4 +95,10 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn rejects_non_ascii_ranges_and_non_numeric_bounds() {
+        assert!(parse_random_selection("١-٥").is_err());
+        assert_eq!(parse_random_selection("a-b"), Ok(RandomSelection::Invalid));
+    }
 }

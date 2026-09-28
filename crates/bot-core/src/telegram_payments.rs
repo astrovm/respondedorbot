@@ -689,6 +689,20 @@ mod tests {
     use crate::telegram_actions::{LabeledPrice, TelegramAction};
     use crate::telegram_input::{ChatId, MessageId};
 
+    fn sent(action: Option<TelegramAction>) -> Option<crate::telegram_actions::SendMessage> {
+        match action {
+            Some(TelegramAction::SendMessage(message)) => Some(message),
+            _ => None,
+        }
+    }
+
+    fn balance_message(plan: BalanceCommandPlan) -> Option<crate::telegram_actions::SendMessage> {
+        match plan {
+            BalanceCommandPlan::Reply(action) => sent(Some(action)),
+            _ => None,
+        }
+    }
+
     fn pack() -> BillingPackTerms {
         BillingPackTerms {
             id: "p50".to_owned(),
@@ -715,7 +729,8 @@ mod tests {
     }
 
     #[test]
-    fn topup_command_plans_private_catalog_group_redirect_and_unavailable_reply() {
+    fn topup_command_plans_private_catalog_group_redirect_and_unavailable_reply()
+    -> Result<(), String> {
         let private = plan_topup_command(
             ChatId(42),
             MessageId(7),
@@ -725,9 +740,7 @@ mod tests {
             "private",
             true,
         );
-        let Some(TelegramAction::SendMessage(private)) = private else {
-            return;
-        };
+        let private = sent(private).ok_or("private topup message")?;
         assert!(private.text.starts_with("Add credits\n\n"));
         assert_eq!(private.reply_to_message_id, Some(MessageId(7)));
         let keyboard =
@@ -766,7 +779,7 @@ mod tests {
                 "AI credits are unavailable right now. Try again later or tell the admin",
             ),
         ] {
-            let Some(TelegramAction::SendMessage(message)) = plan_topup_command(
+            let message = sent(plan_topup_command(
                 ChatId(42),
                 MessageId(7),
                 "/topup",
@@ -774,9 +787,8 @@ mod tests {
                 locale,
                 chat_type,
                 available,
-            ) else {
-                return;
-            };
+            ))
+            .ok_or("topup message")?;
             assert_eq!(message.text, expected);
             let url = message
                 .reply_markup
@@ -798,10 +810,11 @@ mod tests {
             ),
             None
         );
+        Ok(())
     }
 
     #[test]
-    fn balance_command_plans_external_loads_and_early_replies() {
+    fn balance_command_plans_external_loads_and_early_replies() -> Result<(), String> {
         assert_eq!(
             plan_balance_command(
                 "/balance@mybot",
@@ -850,25 +863,23 @@ mod tests {
                 "No pude identificar tu usuario para ver los saldos",
             ),
         ] {
-            let BalanceCommandPlan::Reply(TelegramAction::SendMessage(message)) =
-                plan_balance_command(
-                    "/balance",
-                    "@mybot",
-                    BalanceCommandContext {
-                        chat_id: ChatId(42),
-                        message_id: MessageId(7),
-                        user_id,
-                        locale,
-                        is_group: false,
-                        billing_available: available,
-                    },
-                )
-            else {
-                return;
-            };
+            let plan = plan_balance_command(
+                "/balance",
+                "@mybot",
+                BalanceCommandContext {
+                    chat_id: ChatId(42),
+                    message_id: MessageId(7),
+                    user_id,
+                    locale,
+                    is_group: false,
+                    billing_available: available,
+                },
+            );
+            let message = balance_message(plan).ok_or("balance reply")?;
             assert_eq!(message.text, expected);
             assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
         }
+        Ok(())
     }
 
     #[test]
@@ -1305,5 +1316,197 @@ mod tests {
             ),
             Err(PaymentValidationError::InvalidPaymentMessage)
         );
+    }
+
+    #[test]
+    fn spanish_and_english_topup_variants_are_complete() -> Result<(), String> {
+        let private = sent(plan_topup_command(
+            ChatId(42),
+            MessageId(7),
+            "/topup",
+            "@mybot",
+            Locale::Es,
+            "private",
+            true,
+        ))
+        .ok_or("spanish catalog")?;
+        assert!(
+            private
+                .text
+                .starts_with("Cargar créditos\n\nElegí un pack.")
+        );
+        let first = private
+            .reply_markup
+            .and_then(|markup| markup.inline_keyboard.into_iter().next())
+            .and_then(|row| row.into_iter().next())
+            .map(|button| button.text);
+        assert_eq!(first.as_deref(), Some("50 créditos por 25 ⭐"));
+
+        let group = sent(plan_topup_command(
+            ChatId(-42),
+            MessageId(7),
+            "/topup",
+            "@mybot",
+            Locale::En,
+            "supergroup",
+            true,
+        ))
+        .ok_or("english redirect")?;
+        assert_eq!(group.text, "Top-ups happen in private: open @mybot");
+        let button = group
+            .reply_markup
+            .and_then(|markup| markup.inline_keyboard.into_iter().flatten().next())
+            .map(|button| (button.text, button.url));
+        assert_eq!(
+            button,
+            Some((
+                "Open private chat".to_owned(),
+                Some("https://t.me/mybot".to_owned())
+            ))
+        );
+
+        let anonymous = sent(plan_topup_command(
+            ChatId(-42),
+            MessageId(7),
+            "/topup",
+            " @ ",
+            Locale::Es,
+            "group",
+            true,
+        ))
+        .ok_or("spanish redirect")?;
+        assert_eq!(
+            anonymous.text,
+            "La recarga va por privado: escribime por mensaje directo"
+        );
+        assert!(anonymous.reply_markup.is_none());
+        assert_eq!(
+            sent(Some(TelegramAction::DeleteMessage {
+                chat_id: ChatId(1),
+                message_id: MessageId(1),
+            })),
+            None
+        );
+
+        let balance = plan_balance_command(
+            "/balance",
+            "@mybot",
+            BalanceCommandContext {
+                chat_id: ChatId(42),
+                message_id: MessageId(7),
+                user_id: None,
+                locale: Locale::En,
+                is_group: true,
+                billing_available: true,
+            },
+        );
+        assert_eq!(
+            balance_message(balance)
+                .map(|message| message.text)
+                .as_deref(),
+            Some("I could not identify the user or chat to load the balances")
+        );
+        assert_eq!(balance_message(BalanceCommandPlan::NotHandled), None);
+        Ok(())
+    }
+
+    #[test]
+    fn spanish_invoices_and_guard_answers_are_localized() {
+        let plan = plan_topup_callback(
+            Some("cb"),
+            "topup:p100",
+            ChatId(42),
+            "private",
+            Some(42),
+            true,
+            Locale::Es,
+        );
+        assert_eq!(
+            plan,
+            TopupCallbackPlan::Invoice(Box::new(super::TopupInvoicePlan {
+                invoice: TelegramAction::SendInvoice {
+                    chat_id: ChatId(42),
+                    title: "100 créditos de IA".to_owned(),
+                    description: "Recarga de 100 créditos para mensajes de IA".to_owned(),
+                    payload: "topup:p100:42:es".to_owned(),
+                    currency: "XTR".to_owned(),
+                    prices: vec![LabeledPrice {
+                        label: "100 créditos de IA".to_owned(),
+                        amount: 50,
+                    }],
+                },
+                success_answer: Some(TelegramAction::AnswerCallback {
+                    callback_id: "cb".to_owned(),
+                    text: Some("Listo, te dejé la factura".to_owned()),
+                    show_alert: false,
+                }),
+                failure_answer: Some(TelegramAction::AnswerCallback {
+                    callback_id: "cb".to_owned(),
+                    text: Some("No pude armar la factura. Probá de nuevo".to_owned()),
+                    show_alert: true,
+                }),
+            }))
+        );
+        for (data, chat_type, locale, expected) in [
+            (
+                "topup:p50",
+                "group",
+                Locale::Es,
+                "Cargá por privado, maestro",
+            ),
+            (
+                "other:p50",
+                "private",
+                Locale::En,
+                "That credit pack is invalid, choose another one",
+            ),
+        ] {
+            assert_eq!(
+                plan_topup_callback(
+                    Some("cb"),
+                    data,
+                    ChatId(42),
+                    chat_type,
+                    Some(42),
+                    true,
+                    locale
+                ),
+                TopupCallbackPlan::Answer(Some(TelegramAction::AnswerCallback {
+                    callback_id: "cb".to_owned(),
+                    text: Some(expected.to_owned()),
+                    show_alert: true,
+                }))
+            );
+        }
+    }
+
+    #[test]
+    fn pre_checkout_rejections_are_localized() {
+        assert_eq!(
+            plan_pre_checkout(
+                &json!({"id": "q1", "from": {"id": "not-a-number"}, "invoice_payload": "topup:p50:42:es"}),
+                true,
+                Locale::Es,
+            ),
+            Ok(Some(TelegramAction::AnswerPreCheckout {
+                query_id: "q1".to_owned(),
+                ok: false,
+                error_message: Some("No pude identificar tu usuario para cobrarte".to_owned()),
+            }))
+        );
+        assert_eq!(
+            plan_pre_checkout(
+                &json!({"id": "q2", "from": {"id": 42}, "invoice_payload": "topup:p50:42:en", "currency": "USD", "total_amount": 25}),
+                true,
+                Locale::En,
+            ),
+            Ok(Some(TelegramAction::AnswerPreCheckout {
+                query_id: "q2".to_owned(),
+                ok: false,
+                error_message: Some("I could not validate this payment".to_owned()),
+            }))
+        );
+        assert_eq!(super::whole_credits(150), "1.50");
+        assert_eq!(super::whole_credits(5_000), "50");
     }
 }

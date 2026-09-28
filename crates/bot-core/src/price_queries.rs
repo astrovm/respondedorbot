@@ -181,32 +181,34 @@ fn parse_conversion_only(text: &str) -> (String, String, String) {
         return (String::new(), target, parameter);
     }
 
-    if let Some(regex) = cached_regex(&CONVERSION_SPLIT_REGEX, CONVERSION_SPLIT_PATTERN) {
-        let mut parts = regex.splitn(text, 2);
-        if let (Some(query), Some(target)) = (parts.next(), parts.next()) {
-            let target = normalize_price_symbol(target.trim());
-            let parameter = price_query_parameter(&target);
-            return (query.trim().to_owned(), target, parameter);
-        }
+    if let Some((query, target)) = cached_regex(&CONVERSION_SPLIT_REGEX, CONVERSION_SPLIT_PATTERN)
+        .and_then(|regex| {
+            let mut parts = regex.splitn(text, 2);
+            Some((parts.next()?, parts.next()?))
+        })
+    {
+        let target = normalize_price_symbol(target.trim());
+        let parameter = price_query_parameter(&target);
+        return (query.trim().to_owned(), target, parameter);
     }
 
     (text.to_owned(), "USD".to_owned(), "USD".to_owned())
 }
 
 fn parse_provider_scope(text: &str) -> (Option<ProviderScope>, String) {
-    let Some(regex) = cached_regex(&PROVIDER_SCOPE_REGEX, PROVIDER_SCOPE_PATTERN) else {
+    let Some(captures) = cached_regex(&PROVIDER_SCOPE_REGEX, PROVIDER_SCOPE_PATTERN)
+        .and_then(|regex| regex.captures(text))
+    else {
         return (None, text.to_owned());
     };
-    let Some(captures) = regex.captures(text) else {
-        return (None, text.to_owned());
-    };
-    let scope = match captures
+    // The pattern's first group is mandatory and is either `crypto` or `stock`.
+    let scope = if captures
         .get(1)
-        .map(|value| value.as_str().to_ascii_lowercase())
+        .is_some_and(|value| value.as_str().eq_ignore_ascii_case("crypto"))
     {
-        Some(value) if value == "crypto" => ProviderScope::Crypto,
-        Some(_) => ProviderScope::Stock,
-        None => return (None, text.to_owned()),
+        ProviderScope::Crypto
+    } else {
+        ProviderScope::Stock
     };
     let query = captures
         .get(2)

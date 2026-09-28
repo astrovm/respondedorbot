@@ -1285,20 +1285,17 @@ fn stock_fallback_query(raw: &str, selection: &Selection, unresolved: &[String])
     if !raw.contains(',') {
         return unresolved.join(",");
     }
+    // Every unresolved token comes from splitting this same raw query, so at
+    // least one comma-separated segment always contains it.
     let unresolved = unresolved.iter().cloned().collect::<HashSet<_>>();
-    let segments = raw
-        .split(',')
+    raw.split(',')
         .map(str::trim)
         .filter(|segment| {
             let tokens = expand_tokens(&segment.split_whitespace().collect::<Vec<_>>());
             tokens.iter().any(|token| unresolved.contains(token))
         })
-        .collect::<Vec<_>>();
-    if segments.is_empty() {
-        unresolved.into_iter().collect::<Vec<_>>().join(",")
-    } else {
-        segments.join(",")
-    }
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn convert_amount<C: CryptoMarketProvider>(
@@ -1334,7 +1331,6 @@ fn convert_amount<C: CryptoMarketProvider>(
             false,
             &request.target_symbol,
             &request.target_parameter,
-            locale,
             selection_result,
         );
     }
@@ -1366,7 +1362,6 @@ fn convert_amount<C: CryptoMarketProvider>(
             true,
             &request.source_symbol,
             &source_parameter,
-            locale,
             selection_result,
         )
     }
@@ -1437,51 +1432,46 @@ fn format_or_select_conversion(
     reverse: bool,
     display_currency: &str,
     quote_parameter: &str,
-    locale: Locale,
     selection_result: &mut Option<MarketSelection>,
 ) -> String {
-    if candidates.len() > 1 {
-        let mut market_candidates = candidates
-            .iter()
-            .map(|asset| market_candidate(asset, display_currency, quote_parameter, None))
-            .collect::<Vec<_>>();
-        market_candidates.sort_by(|left, right| {
-            left.name
-                .to_ascii_lowercase()
-                .cmp(&right.name.to_ascii_lowercase())
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        market_candidates.truncate(10);
-        *selection_result = Some(MarketSelection {
-            query: format!(
-                "{} {} {}",
-                request.amount, request.source_symbol, request.target_symbol
-            ),
-            timeframe: None,
+    // Callers only pass non-empty candidate lists.
+    if let [asset] = candidates {
+        let conversion = MarketConversion {
+            amount: trimmed(request.amount, 8),
+            source_symbol: request.source_symbol.clone(),
             target_symbol: request.target_symbol.clone(),
-            target_parameter: quote_parameter.to_owned(),
-            conversion: Some(MarketConversion {
-                amount: trimmed(request.amount, 8),
-                source_symbol: request.source_symbol.clone(),
-                target_symbol: request.target_symbol.clone(),
-                reverse,
-            }),
-            candidates: market_candidates,
-        });
-        return String::new();
+            reverse,
+        };
+        return format_selected_conversion(asset, quote_parameter, &conversion);
     }
-    candidates.first().map_or_else(
-        || unsupported_pair(locale),
-        |asset| {
-            let conversion = MarketConversion {
-                amount: trimmed(request.amount, 8),
-                source_symbol: request.source_symbol.clone(),
-                target_symbol: request.target_symbol.clone(),
-                reverse,
-            };
-            format_selected_conversion(asset, quote_parameter, &conversion)
-        },
-    )
+    let mut market_candidates = candidates
+        .iter()
+        .map(|asset| market_candidate(asset, display_currency, quote_parameter, None))
+        .collect::<Vec<_>>();
+    market_candidates.sort_by(|left, right| {
+        left.name
+            .to_ascii_lowercase()
+            .cmp(&right.name.to_ascii_lowercase())
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    market_candidates.truncate(10);
+    *selection_result = Some(MarketSelection {
+        query: format!(
+            "{} {} {}",
+            request.amount, request.source_symbol, request.target_symbol
+        ),
+        timeframe: None,
+        target_symbol: request.target_symbol.clone(),
+        target_parameter: quote_parameter.to_owned(),
+        conversion: Some(MarketConversion {
+            amount: trimmed(request.amount, 8),
+            source_symbol: request.source_symbol.clone(),
+            target_symbol: request.target_symbol.clone(),
+            reverse,
+        }),
+        candidates: market_candidates,
+    });
+    String::new()
 }
 
 fn quote_change_for_timeframe<'a>(
@@ -1948,34 +1938,6 @@ fn stock_conversion_error(value: &str, locale: Locale) -> String {
 mod tests {
     use super::*;
 
-    #[derive(Default)]
-    struct Crypto {
-        listings: Vec<Vec<CryptoAsset>>,
-        quotes: Vec<Vec<CryptoAsset>>,
-    }
-    impl CryptoMarketProvider for Crypto {
-        fn listings(&mut self, _: &str) -> Result<Vec<CryptoAsset>, String> {
-            Ok(if self.listings.is_empty() {
-                Vec::new()
-            } else {
-                self.listings.remove(0)
-            })
-        }
-        fn quotes(&mut self, _: &[String], _: &str, _: bool) -> Result<Vec<CryptoAsset>, String> {
-            Ok(if self.quotes.is_empty() {
-                Vec::new()
-            } else {
-                self.quotes.remove(0)
-            })
-        }
-    }
-    #[derive(Default, Clone)]
-    struct Stocks(Vec<(String, Option<StockQuote>)>);
-    impl UnifiedStockProvider for Stocks {
-        fn lookup(&mut self, _: &str) -> Result<Option<Vec<(String, Option<StockQuote>)>>, String> {
-            Ok(Some(self.0.clone()))
-        }
-    }
     fn coin(symbol: &str, price: f64) -> CryptoAsset {
         let id = match symbol {
             "BTC" => "1",
@@ -2010,6 +1972,16 @@ mod tests {
         }
     }
 
+    /// Moves the synthetic USD quote to another quote currency.
+    fn rekey(mut asset: CryptoAsset, currency: &str) -> CryptoAsset {
+        let quotes = std::mem::take(&mut asset.quotes);
+        asset.quotes = quotes
+            .into_values()
+            .map(|quote| (currency.to_owned(), quote))
+            .collect();
+        asset
+    }
+
     fn stock(symbol: &str) -> StockQuote {
         StockQuote {
             symbol: symbol.to_owned(),
@@ -2040,10 +2012,7 @@ mod tests {
             "bitcoin",
             MarketPriceCommand::CryptoOnly,
             Locale::En,
-            &mut Crypto {
-                listings: vec![vec![bitcoin, coin("BITCOIN", 0.001)]],
-                quotes: vec![],
-            },
+            &mut Scripted::ok(vec![vec![bitcoin, coin("BITCOIN", 0.001)]], vec![]),
             &mut Stocks::default(),
         );
         assert!(result.text.starts_with("BTC:"));
@@ -2061,11 +2030,8 @@ mod tests {
             "apple",
             MarketPriceCommand::Unified,
             Locale::En,
-            &mut Crypto {
-                listings: vec![vec![]],
-                quotes: vec![vec![coin("APPLE", 0.00008273)]],
-            },
-            &mut Stocks(vec![("apple".to_owned(), Some(apple))]),
+            &mut Scripted::ok(vec![vec![]], vec![vec![coin("APPLE", 0.00008273)]]),
+            &mut stocks(vec![("apple".to_owned(), Some(apple))]),
         );
         assert!(result.text.starts_with("AAPL:"));
         assert!(!result.text.contains("APPLE:"));
@@ -2084,10 +2050,10 @@ mod tests {
             "",
             MarketPriceCommand::CryptoOnly,
             Locale::En,
-            &mut Crypto {
-                listings: vec![vec![coin("BTC", 50_000.0), coin("ETH", 2_500.0)]],
-                quotes: Vec::new(),
-            },
+            &mut Scripted::ok(
+                vec![vec![coin("BTC", 50_000.0), coin("ETH", 2_500.0)]],
+                Vec::new(),
+            ),
             &mut Stocks::default(),
         );
         assert!(result.text.contains("BTC: 50000 USD"));
@@ -2103,10 +2069,7 @@ mod tests {
                 &format!("btc {period}"),
                 MarketPriceCommand::CryptoOnly,
                 Locale::En,
-                &mut Crypto {
-                    listings: vec![vec![coin("BTC", 50_000.0)]],
-                    quotes: Vec::new(),
-                },
+                &mut Scripted::ok(vec![vec![coin("BTC", 50_000.0)]], Vec::new()),
                 &mut Stocks::default(),
             );
             let expected = match period {
@@ -2139,17 +2102,12 @@ mod tests {
             "$libra 1h",
             MarketPriceCommand::CryptoOnly,
             Locale::En,
-            &mut Crypto {
-                listings: vec![vec![first, second]],
-                quotes: vec![],
-            },
+            &mut Scripted::ok(vec![vec![first, second]], vec![]),
             &mut Stocks::default(),
         );
         assert!(result.text.is_empty());
         assert!(!result.no_assets_found);
-        let selection = result
-            .selection
-            .ok_or_else(|| "ambiguous ticker selection".to_owned())?;
+        let selection = result.selection.ok_or("ambiguous ticker selection")?;
         assert_eq!(selection.timeframe.as_deref(), Some("1h"));
         assert_eq!(
             selection
@@ -2165,10 +2123,7 @@ mod tests {
     #[test]
     fn ambiguous_tickers_prioritize_market_cap_then_volume() -> Result<(), String> {
         let set_metrics = |asset: &mut CryptoAsset, market_cap, volume_24h| {
-            let quote = asset
-                .quotes
-                .get_mut("USD")
-                .ok_or_else(|| "missing USD quote".to_owned())?;
+            let quote = asset.quotes.get_mut("USD").ok_or("missing USD quote")?;
             quote.market_cap = market_cap;
             quote.volume_24h = volume_24h;
             Ok::<_, String>(())
@@ -2197,21 +2152,19 @@ mod tests {
             "$trump",
             MarketPriceCommand::CryptoOnly,
             Locale::En,
-            &mut Crypto {
-                listings: vec![vec![
+            &mut Scripted::ok(
+                vec![vec![
                     cap_winner,
                     volume_tiebreaker,
                     lower_cap,
                     volume_only,
                     no_metrics,
                 ]],
-                quotes: vec![],
-            },
+                vec![],
+            ),
             &mut Stocks::default(),
         );
-        let selection = result
-            .selection
-            .ok_or_else(|| "ambiguous ticker selection".to_owned())?;
+        let selection = result.selection.ok_or("ambiguous ticker selection")?;
         assert_eq!(
             selection
                 .candidates
@@ -2235,15 +2188,12 @@ mod tests {
             "libra",
             MarketPriceCommand::CryptoOnly,
             Locale::En,
-            &mut Crypto {
-                listings: vec![vec![listed]],
-                quotes: vec![vec![namesake]],
-            },
+            &mut Scripted::ok(vec![vec![listed]], vec![vec![namesake]]),
             &mut Stocks::default(),
         );
         let selection = result
             .selection
-            .ok_or_else(|| "single top-list ticker was not disambiguated".to_owned())?;
+            .ok_or("single top-list ticker was not disambiguated")?;
         assert_eq!(
             selection
                 .candidates
@@ -2266,10 +2216,7 @@ mod tests {
             "libra finance",
             MarketPriceCommand::CryptoOnly,
             Locale::En,
-            &mut Crypto {
-                listings: vec![vec![named]],
-                quotes: Vec::new(),
-            },
+            &mut Scripted::ok(vec![vec![named]], Vec::new()),
             &mut Stocks::default(),
         );
         assert_eq!(named_result.text, "LIBRA: 0.007 USD (+2.5% 24h)");
@@ -2282,10 +2229,7 @@ mod tests {
             "mysterious-token",
             MarketPriceCommand::CryptoOnly,
             Locale::En,
-            &mut Crypto {
-                listings: vec![Vec::new()],
-                quotes: vec![Vec::new(), vec![fetched]],
-            },
+            &mut Scripted::ok(vec![Vec::new()], vec![Vec::new(), vec![fetched]]),
             &mut Stocks::default(),
         );
         assert_eq!(slug_result.text, "MYST: 0.25 USD (+2.5% 24h)");
@@ -2305,10 +2249,7 @@ mod tests {
             "magaiba",
             MarketPriceCommand::CryptoOnly,
             Locale::Es,
-            &mut Crypto {
-                listings: vec![vec![coin("MAGAIBA", 0.0)]],
-                quotes: vec![],
-            },
+            &mut Scripted::ok(vec![vec![coin("MAGAIBA", 0.0)]], vec![]),
             &mut Stocks::default(),
         );
         assert!(result.no_assets_found);
@@ -2320,19 +2261,13 @@ mod tests {
     fn missing_timeframe_change_stays_explicit_without_a_spurious_percent_sign()
     -> Result<(), String> {
         let mut asset = coin("BTC", 50_000.0);
-        let quote = asset
-            .quotes
-            .get_mut("USD")
-            .ok_or_else(|| "synthetic USD quote".to_owned())?;
+        let quote = asset.quotes.get_mut("USD").ok_or("synthetic USD quote")?;
         quote.percent_change_24h = None;
         let result = execute_market_price_command(
             "btc",
             MarketPriceCommand::CryptoOnly,
             Locale::En,
-            &mut Crypto {
-                listings: vec![vec![asset]],
-                quotes: vec![],
-            },
+            &mut Scripted::ok(vec![vec![asset]], vec![]),
             &mut Stocks::default(),
         );
         assert_eq!(result.text, "BTC: 50000 USD (N/A 24h)");
@@ -2347,10 +2282,7 @@ mod tests {
             "trump",
             MarketPriceCommand::CryptoOnly,
             Locale::En,
-            &mut Crypto {
-                listings: vec![vec![asset]],
-                quotes: vec![],
-            },
+            &mut Scripted::ok(vec![vec![asset]], vec![]),
             &mut Stocks::default(),
         );
         assert_eq!(
@@ -2364,25 +2296,11 @@ mod tests {
 
     #[test]
     fn failed_market_provider_keeps_token_fallback_available() {
-        struct Failed;
-        impl CryptoMarketProvider for Failed {
-            fn listings(&mut self, _: &str) -> Result<Vec<CryptoAsset>, String> {
-                Err("outage".to_owned())
-            }
-            fn quotes(
-                &mut self,
-                _: &[String],
-                _: &str,
-                _: bool,
-            ) -> Result<Vec<CryptoAsset>, String> {
-                Ok(vec![])
-            }
-        }
         let result = execute_market_price_command(
             "timba",
             MarketPriceCommand::Unified,
             Locale::En,
-            &mut Failed,
+            &mut Scripted::failing(),
             &mut Stocks::default(),
         );
         assert!(result.no_assets_found);
@@ -2410,11 +2328,11 @@ mod tests {
 
     #[test]
     fn formats_timeframes_stables_missing_and_stock_fallback() {
-        let mut crypto = Crypto {
-            listings: vec![vec![coin("BTC", 50_000.0), coin("USDT", 1.0)]],
-            quotes: vec![Vec::new(), Vec::new()],
-        };
-        let mut stocks = Stocks(vec![(
+        let mut crypto = Scripted::ok(
+            vec![vec![coin("BTC", 50_000.0), coin("USDT", 1.0)]],
+            vec![Vec::new(), Vec::new()],
+        );
+        let mut stocks = stocks(vec![(
             "NVDA".to_owned(),
             Some(StockQuote {
                 symbol: "NVDA".to_owned(),
@@ -2441,10 +2359,7 @@ mod tests {
             "btc 2h",
             MarketPriceCommand::CryptoOnly,
             Locale::En,
-            &mut Crypto {
-                listings: vec![vec![coin("BTC", 50_000.0)]],
-                quotes: Vec::new(),
-            },
+            &mut Scripted::ok(vec![vec![coin("BTC", 50_000.0)]], Vec::new()),
             &mut Stocks::default(),
         );
         assert_eq!(result.text, "BTC: 50000 USD (N/A 2h)");
@@ -2465,10 +2380,7 @@ mod tests {
             "1.000 bitcoin cash in usd",
             MarketPriceCommand::Unified,
             Locale::Es,
-            &mut Crypto {
-                listings: vec![vec![bitcoin_cash]],
-                quotes: vec![],
-            },
+            &mut Scripted::ok(vec![vec![bitcoin_cash]], vec![]),
             &mut Stocks::default(),
         );
         assert_eq!(result.text, "1000 BITCOINCASH = 250000 USD");
@@ -2476,35 +2388,21 @@ mod tests {
 
     #[test]
     fn converts_direct_and_reverse_amounts() {
-        let mut direct = coin("USDT", 7.8);
-        let Some(quote) = direct.quotes.remove("USD") else {
-            return;
-        };
-        direct.quotes.insert("HKD".to_owned(), quote);
+        let direct = rekey(coin("USDT", 7.8), "HKD");
         let result = execute_market_price_command(
             "2000 usdt in hkd",
             MarketPriceCommand::Unified,
             Locale::Es,
-            &mut Crypto {
-                listings: vec![vec![direct]],
-                quotes: vec![],
-            },
+            &mut Scripted::ok(vec![vec![direct]], vec![]),
             &mut Stocks::default(),
         );
         assert_eq!(result.text, "2000 USDT = 15600 HKD");
-        let mut target = coin("USDT", 7.8);
-        let Some(quote) = target.quotes.remove("USD") else {
-            return;
-        };
-        target.quotes.insert("HKD".to_owned(), quote);
+        let target = rekey(coin("USDT", 7.8), "HKD");
         let result = execute_market_price_command(
             "2000 hkd in usdt",
             MarketPriceCommand::Unified,
             Locale::Es,
-            &mut Crypto {
-                listings: vec![Vec::new(), vec![target]],
-                quotes: vec![],
-            },
+            &mut Scripted::ok(vec![Vec::new(), vec![target]], vec![]),
             &mut Stocks::default(),
         );
         assert_eq!(result.text, "2000 HKD = 256.41025641 USDT");
@@ -2516,10 +2414,7 @@ mod tests {
             "1 sats in usd",
             MarketPriceCommand::CryptoOnly,
             Locale::En,
-            &mut Crypto {
-                listings: vec![vec![coin("BTC", 50_000.0)]],
-                quotes: Vec::new(),
-            },
+            &mut Scripted::ok(vec![vec![coin("BTC", 50_000.0)]], Vec::new()),
             &mut Stocks::default(),
         );
         assert_eq!(result.text, "1 SATS = 0.0005 USD");
@@ -2528,10 +2423,7 @@ mod tests {
             "1 usd in sats",
             MarketPriceCommand::CryptoOnly,
             Locale::En,
-            &mut Crypto {
-                listings: vec![Vec::new(), vec![coin("BTC", 50_000.0)]],
-                quotes: Vec::new(),
-            },
+            &mut Scripted::ok(vec![Vec::new(), vec![coin("BTC", 50_000.0)]], Vec::new()),
             &mut Stocks::default(),
         );
         assert_eq!(result.text, "1 USD = 2000 SATS");
@@ -2548,10 +2440,7 @@ mod tests {
             "stables",
             MarketPriceCommand::CryptoOnly,
             Locale::Es,
-            &mut Crypto {
-                listings: vec![listed.clone()],
-                quotes: Vec::new(),
-            },
+            &mut Scripted::ok(vec![listed.clone()], Vec::new()),
             &mut Stocks::default(),
         );
         assert!(!result.text.contains("BTC:"));
@@ -2562,10 +2451,7 @@ mod tests {
             "2",
             MarketPriceCommand::CryptoOnly,
             Locale::Es,
-            &mut Crypto {
-                listings: vec![listed.clone()],
-                quotes: Vec::new(),
-            },
+            &mut Scripted::ok(vec![listed.clone()], Vec::new()),
             &mut Stocks::default(),
         );
         assert!(result.text.contains("BTC:"));
@@ -2576,10 +2462,7 @@ mod tests {
             "btc,usdc",
             MarketPriceCommand::CryptoOnly,
             Locale::Es,
-            &mut Crypto {
-                listings: vec![listed],
-                quotes: Vec::new(),
-            },
+            &mut Scripted::ok(vec![listed], Vec::new()),
             &mut Stocks::default(),
         );
         assert!(result.text.contains("BTC:"));
@@ -2599,10 +2482,7 @@ mod tests {
                     query,
                     MarketPriceCommand::Unified,
                     locale,
-                    &mut Crypto {
-                        listings: vec![listed.clone()],
-                        quotes: Vec::new(),
-                    },
+                    &mut Scripted::ok(vec![listed.clone()], Vec::new()),
                     &mut Stocks::default(),
                 );
                 assert_eq!(result.no_assets_found, missing);
@@ -2616,10 +2496,10 @@ mod tests {
             "btc zzz yyy",
             MarketPriceCommand::CryptoOnly,
             Locale::Es,
-            &mut Crypto {
-                listings: vec![vec![coin("BTC", 50_000.0)]],
-                quotes: vec![vec![coin("ZZZ", 2.0)], Vec::new()],
-            },
+            &mut Scripted::ok(
+                vec![vec![coin("BTC", 50_000.0)]],
+                vec![vec![coin("ZZZ", 2.0)], Vec::new()],
+            ),
             &mut Stocks::default(),
         );
         assert!(result.text.contains("BTC:"));
@@ -2636,10 +2516,10 @@ mod tests {
             "btc usd 24h",
             MarketPriceCommand::CryptoOnly,
             Locale::Es,
-            &mut Crypto {
-                listings: vec![vec![coin("BTC", 50_000.0), misleading_usd.clone()]],
-                quotes: vec![vec![misleading_usd], Vec::new()],
-            },
+            &mut Scripted::ok(
+                vec![vec![coin("BTC", 50_000.0), misleading_usd.clone()]],
+                vec![vec![misleading_usd], Vec::new()],
+            ),
             &mut Stocks::default(),
         );
 
@@ -2659,10 +2539,7 @@ mod tests {
             "bitcoin",
             MarketPriceCommand::CryptoOnly,
             Locale::Es,
-            &mut Crypto {
-                listings: vec![vec![bitcoin]],
-                quotes: Vec::new(),
-            },
+            &mut Scripted::ok(vec![vec![bitcoin]], Vec::new()),
             &mut Stocks::default(),
         );
 
@@ -2675,11 +2552,11 @@ mod tests {
             "btc, Mercado Libre",
             MarketPriceCommand::Unified,
             Locale::Es,
-            &mut Crypto {
-                listings: vec![vec![coin("BTC", 50_000.0)]],
-                quotes: vec![Vec::new(), Vec::new()],
-            },
-            &mut Stocks(vec![("Mercado Libre".to_owned(), Some(stock("MELI")))]),
+            &mut Scripted::ok(
+                vec![vec![coin("BTC", 50_000.0)]],
+                vec![Vec::new(), Vec::new()],
+            ),
+            &mut stocks(vec![("Mercado Libre".to_owned(), Some(stock("MELI")))]),
         );
         assert_eq!(
             result.text,
@@ -2693,8 +2570,8 @@ mod tests {
             "stock:META",
             MarketPriceCommand::Unified,
             Locale::En,
-            &mut Crypto::default(),
-            &mut Stocks(vec![("META".to_owned(), Some(stock("META")))]),
+            &mut Scripted::default(),
+            &mut stocks(vec![("META".to_owned(), Some(stock("META")))]),
         );
         assert_eq!(result.text, "META: 123.45 USD (+1.25% 24h)");
 
@@ -2702,7 +2579,7 @@ mod tests {
             "stock:NVDA in EUR",
             MarketPriceCommand::Unified,
             Locale::En,
-            &mut Crypto::default(),
+            &mut Scripted::default(),
             &mut Stocks::default(),
         );
         assert_eq!(
@@ -2714,11 +2591,8 @@ mod tests {
             "crypto:META",
             MarketPriceCommand::Unified,
             Locale::En,
-            &mut Crypto {
-                listings: vec![Vec::new()],
-                quotes: vec![Vec::new(), Vec::new()],
-            },
-            &mut Stocks(vec![("META".to_owned(), Some(stock("META")))]),
+            &mut Scripted::ok(vec![Vec::new()], vec![Vec::new(), Vec::new()]),
+            &mut stocks(vec![("META".to_owned(), Some(stock("META")))]),
         );
         assert_eq!(
             result.text,
@@ -2727,22 +2601,19 @@ mod tests {
     }
 
     #[test]
-    fn unified_lookup_offers_a_menu_for_crypto_and_stock_collisions() {
+    fn unified_lookup_offers_a_menu_for_crypto_and_stock_collisions() -> Result<(), String> {
         let result = execute_market_price_command(
             "rkh 1m",
             MarketPriceCommand::Unified,
             Locale::En,
-            &mut Crypto {
-                listings: vec![vec![coin("RKH", 1.0)]],
-                quotes: Vec::new(),
-            },
-            &mut Stocks(vec![("RKH".to_owned(), Some(stock("RKHNF")))]),
+            &mut Scripted::ok(vec![vec![coin("RKH", 1.0)]], Vec::new()),
+            &mut stocks(vec![("RKH".to_owned(), Some(stock("RKHNF")))]),
         );
         assert!(result.text.is_empty());
         let selection = result
             .selection
             .as_ref()
-            .unwrap_or_else(|| unreachable!("collision should produce a selection"));
+            .ok_or("collision should produce a selection")?;
         assert_eq!(selection.timeframe.as_deref(), Some("1m"));
         assert_eq!(selection.candidates.len(), 2);
         assert_eq!(selection.candidates[0].id, "RKH");
@@ -2753,7 +2624,7 @@ mod tests {
             &selection.candidates[1],
             Some("1m"),
             Locale::En,
-            &mut Stocks(vec![("RKHNF".to_owned(), Some(stock("RKHNF")))]),
+            &mut stocks(vec![("RKHNF".to_owned(), Some(stock("RKHNF")))]),
         );
         assert_eq!(selected.text, "RKHNF: 123.45 USD (+1.25% 1m)");
         assert_eq!(
@@ -2779,7 +2650,7 @@ mod tests {
             },
             Some("1m"),
             Locale::En,
-            &mut Stocks(vec![("RKH".to_owned(), Some(stock("RKHNF")))]),
+            &mut stocks(vec![("RKH".to_owned(), Some(stock("RKHNF")))]),
         );
         assert!(selected_bare.no_assets_found);
         assert!(selected_bare.chart.is_none());
@@ -2794,22 +2665,20 @@ mod tests {
             "meta",
             MarketPriceCommand::Unified,
             Locale::En,
-            &mut Crypto {
-                listings: vec![vec![coin("META", 2.0)]],
-                quotes: Vec::new(),
-            },
-            &mut Stocks(vec![("META".to_owned(), Some(stock("META")))]),
+            &mut Scripted::ok(vec![vec![coin("META", 2.0)]], Vec::new()),
+            &mut stocks(vec![("META".to_owned(), Some(stock("META")))]),
         );
         assert!(exact_collision.selection.is_some());
+        Ok(())
     }
 
     #[test]
-    fn stock_discovery_keeps_rkh_listings_ranked_and_scoped() {
+    fn stock_discovery_keeps_rkh_listings_ranked_and_scoped() -> Result<(), String> {
         let rockhaven = listed_stock("RKHNF", "Rockhaven Resources Ltd.", "OTC Markets", "USD");
         let rockhopper = listed_stock("RKH.L", "Rockhopper Exploration plc", "London", "GBp");
         let rockhopper_cxe = listed_stock("RKHL.XC", "Rockhopper Exploration plc", "CXE", "EUR");
         let duplicate_rockhopper = rockhopper.clone();
-        let stocks = Stocks(vec![
+        let rkh_stocks = stocks(vec![
             ("rkh".to_owned(), Some(rockhaven)),
             ("rkh".to_owned(), Some(rockhopper)),
             ("rkh".to_owned(), Some(rockhopper_cxe)),
@@ -2819,19 +2688,12 @@ mod tests {
             "rkh 1m",
             MarketPriceCommand::Unified,
             Locale::En,
-            &mut Crypto {
-                listings: vec![vec![coin("RKH", 1.0)]],
-                quotes: Vec::new(),
-            },
-            &mut stocks.clone(),
+            &mut Scripted::ok(vec![vec![coin("RKH", 1.0)]], Vec::new()),
+            &mut rkh_stocks.clone(),
         );
-        assert!(
-            result.selection.is_some(),
-            "mixed RKH lookup should be selectable"
-        );
-        let Some(selection) = result.selection else {
-            return;
-        };
+        let selection = result
+            .selection
+            .ok_or("mixed RKH lookup should be selectable")?;
         let stock_candidates = selection
             .candidates
             .iter()
@@ -2849,18 +2711,18 @@ mod tests {
         assert!(menu.contains("Equity"));
         assert!(menu.contains("GBp"));
 
-        let mut stock_only = stocks.clone();
+        let mut stock_only = rkh_stocks.clone();
         let scoped = execute_market_price_command(
             "stock:rkh 1m",
             MarketPriceCommand::Unified,
             Locale::En,
-            &mut Crypto::default(),
+            &mut Scripted::default(),
             &mut stock_only,
         );
         assert!(scoped.selection.is_some());
         assert!(scoped.text.is_empty());
 
-        let mut exact_stocks = Stocks(vec![(
+        let mut exact_stocks = stocks(vec![(
             "RKH.L".to_owned(),
             Some(listed_stock(
                 "RKH.L",
@@ -2873,7 +2735,7 @@ mod tests {
             "stock:RKH.L 1m",
             MarketPriceCommand::Unified,
             Locale::En,
-            &mut Crypto::default(),
+            &mut Scripted::default(),
             &mut exact_stocks,
         );
         assert_eq!(exact.text, "RKH.L: 123.45 GBp (+1.25% 1m)");
@@ -2885,24 +2747,22 @@ mod tests {
             Some("RKH.L")
         );
 
-        let mut crypto_only_stocks = stocks;
+        let mut crypto_only_stocks = rkh_stocks;
         let crypto_only = execute_market_price_command(
             "rkh 1m",
             MarketPriceCommand::CryptoOnly,
             Locale::En,
-            &mut Crypto {
-                listings: vec![vec![coin("RKH", 1.0)]],
-                quotes: Vec::new(),
-            },
+            &mut Scripted::ok(vec![vec![coin("RKH", 1.0)]], Vec::new()),
             &mut crypto_only_stocks,
         );
         assert!(!crypto_only.text.contains("RKH.L"));
         assert!(crypto_only.selection.is_none());
+        Ok(())
     }
 
     #[test]
-    fn company_name_search_keeps_distinct_stock_exchanges_selectable() {
-        let mut stocks = Stocks(vec![
+    fn company_name_search_keeps_distinct_stock_exchanges_selectable() -> Result<(), String> {
+        let mut stocks = stocks(vec![
             (
                 "Rockhopper Exploration".to_owned(),
                 Some(listed_stock(
@@ -2926,29 +2786,16 @@ mod tests {
             "Rockhopper Exploration 1m",
             MarketPriceCommand::Unified,
             Locale::En,
-            &mut Crypto::default(),
+            &mut Scripted::default(),
             &mut stocks,
         );
-        assert!(
-            result.selection.is_some(),
-            "company-name search should show listings"
-        );
-        let Some(selection) = result.selection else {
-            return;
-        };
+        let selection = result
+            .selection
+            .ok_or("company-name search should show listings")?;
         assert_eq!(selection.candidates.len(), 2);
         assert_eq!(selection.candidates[0].symbol, "R4Y.F");
         assert_eq!(selection.candidates[1].symbol, "RKH.L");
-    }
-
-    struct FailedCrypto;
-    impl CryptoMarketProvider for FailedCrypto {
-        fn listings(&mut self, _: &str) -> Result<Vec<CryptoAsset>, String> {
-            Err("synthetic failure".to_owned())
-        }
-        fn quotes(&mut self, _: &[String], _: &str, _: bool) -> Result<Vec<CryptoAsset>, String> {
-            Err("synthetic failure".to_owned())
-        }
+        Ok(())
     }
 
     #[test]
@@ -2983,16 +2830,13 @@ mod tests {
             "USD",
             None,
             Locale::En,
-            &mut Crypto {
-                listings: Vec::new(),
-                quotes: vec![vec![asset.clone()]],
-            },
+            &mut Scripted::ok(Vec::new(), vec![vec![asset.clone()]]),
         );
         assert_eq!(result.text, "LIBRA: 1.5 USD (+7% 7d)");
         let chart = result
             .chart
             .as_ref()
-            .ok_or_else(|| "candidate quote did not retain chart identity".to_owned())?;
+            .ok_or("candidate quote did not retain chart identity")?;
         assert_eq!(chart.timeframe.as_deref(), Some("7d"));
         assert_eq!(chart.token.as_ref(), Some(&contract));
 
@@ -3009,10 +2853,7 @@ mod tests {
             "USD",
             Some(&conversion),
             Locale::En,
-            &mut Crypto {
-                listings: Vec::new(),
-                quotes: vec![vec![asset]],
-            },
+            &mut Scripted::ok(Vec::new(), vec![vec![asset]]),
         );
         assert_eq!(converted.text, "2 LIBRA = 3 USD");
         assert!(converted.chart.is_none());
@@ -3042,10 +2883,7 @@ mod tests {
             "USD",
             None,
             Locale::En,
-            &mut Crypto {
-                listings: Vec::new(),
-                quotes: vec![vec![wrong_id]],
-            },
+            &mut Scripted::ok(Vec::new(), vec![vec![wrong_id]]),
         );
         assert!(wrong.no_assets_found);
         assert!(wrong.text.contains("get a quote"));
@@ -3059,10 +2897,7 @@ mod tests {
             "USD",
             None,
             Locale::En,
-            &mut Crypto {
-                listings: Vec::new(),
-                quotes: vec![vec![unusable_asset]],
-            },
+            &mut Scripted::ok(Vec::new(), vec![vec![unusable_asset]]),
         );
         assert!(unusable.no_assets_found);
         assert!(unusable.text.contains("LIBRA"));
@@ -3074,7 +2909,7 @@ mod tests {
             "USD",
             None,
             Locale::En,
-            &mut FailedCrypto,
+            &mut Scripted::failing(),
         );
         assert!(failed.no_assets_found);
         assert_eq!(
@@ -3140,8 +2975,8 @@ mod tests {
             "nvda",
             MarketPriceCommand::Unified,
             Locale::En,
-            &mut FailedCrypto,
-            &mut Stocks(vec![("nvda".to_owned(), Some(stock("NVDA")))]),
+            &mut Scripted::failing(),
+            &mut stocks(vec![("nvda".to_owned(), Some(stock("NVDA")))]),
         );
         assert_eq!(result.text, "NVDA: 123.45 USD (+1.25% 24h)");
         assert_eq!(
@@ -3153,7 +2988,7 @@ mod tests {
             "btc",
             MarketPriceCommand::CryptoOnly,
             Locale::En,
-            &mut FailedCrypto,
+            &mut Scripted::failing(),
             &mut Stocks::default(),
         );
         assert_eq!(result.text, "I could not load crypto prices. Try again");
@@ -3162,31 +2997,1033 @@ mod tests {
             "btc",
             MarketPriceCommand::Unified,
             Locale::En,
-            &mut FailedCrypto,
-            &mut Stocks(vec![("btc".to_owned(), Some(stock("BTC")))]),
+            &mut Scripted::failing(),
+            &mut stocks(vec![("btc".to_owned(), Some(stock("BTC")))]),
         );
         assert_eq!(result.text, "I could not load crypto prices. Try again");
     }
 
     #[test]
     fn supports_satoshi_display_without_mutating_provider_data() {
-        let mut btc = coin("BTC", 1.0);
-        let Some(quote) = btc.quotes.remove("USD") else {
-            return;
-        };
-        btc.quotes.insert("BTC".to_owned(), quote);
+        let btc = rekey(coin("BTC", 1.0), "BTC");
         let original = btc.clone();
         let result = execute_market_price_command(
             "btc in sats",
             MarketPriceCommand::CryptoOnly,
             Locale::Es,
-            &mut Crypto {
-                listings: vec![vec![btc]],
-                quotes: Vec::new(),
-            },
+            &mut Scripted::ok(vec![vec![btc]], Vec::new()),
             &mut Stocks::default(),
         );
         assert_eq!(result.text, "BTC: 100000000 SATS (+2.5% 24h)");
         assert_eq!(original.quotes["BTC"].price, 1.0);
+    }
+
+    /// The only crypto fake, so every generic market function has a single
+    /// instantiation: each call consumes the next queued result and is logged.
+    #[derive(Default)]
+    struct Scripted {
+        listings: std::collections::VecDeque<Result<Vec<CryptoAsset>, String>>,
+        quotes: std::collections::VecDeque<Result<Vec<CryptoAsset>, String>>,
+        fail_all: bool,
+        calls: Vec<String>,
+    }
+    impl Scripted {
+        fn new(
+            listings: Vec<Result<Vec<CryptoAsset>, String>>,
+            quotes: Vec<Result<Vec<CryptoAsset>, String>>,
+        ) -> Self {
+            Self {
+                listings: listings.into(),
+                quotes: quotes.into(),
+                fail_all: false,
+                calls: Vec::new(),
+            }
+        }
+        fn ok(listings: Vec<Vec<CryptoAsset>>, quotes: Vec<Vec<CryptoAsset>>) -> Self {
+            Self::new(
+                listings.into_iter().map(Ok).collect(),
+                quotes.into_iter().map(Ok).collect(),
+            )
+        }
+        fn failing() -> Self {
+            Self {
+                fail_all: true,
+                ..Self::default()
+            }
+        }
+        fn next(&mut self, listing: bool, call: String) -> Result<Vec<CryptoAsset>, String> {
+            self.calls.push(call);
+            if self.fail_all {
+                return Err("synthetic failure".to_owned());
+            }
+            let queue = if listing {
+                &mut self.listings
+            } else {
+                &mut self.quotes
+            };
+            queue.pop_front().unwrap_or(Ok(Vec::new()))
+        }
+    }
+    impl CryptoMarketProvider for Scripted {
+        fn listings(&mut self, currency: &str) -> Result<Vec<CryptoAsset>, String> {
+            self.next(true, format!("listings {currency}"))
+        }
+        fn quotes(
+            &mut self,
+            identifiers: &[String],
+            currency: &str,
+            by_slug: bool,
+        ) -> Result<Vec<CryptoAsset>, String> {
+            self.next(
+                false,
+                format!("quotes {} {currency} {by_slug}", identifiers.join(",")),
+            )
+        }
+    }
+
+    /// The only stock fake: a fixed lookup result plus the queries it received.
+    #[derive(Clone)]
+    struct Stocks {
+        result: Result<Option<StockLookupRows>, String>,
+        queries: Vec<String>,
+    }
+    impl Default for Stocks {
+        fn default() -> Self {
+            stocks(Vec::new())
+        }
+    }
+    impl Stocks {
+        fn with(result: Result<Option<StockLookupRows>, String>) -> Self {
+            Self {
+                result,
+                queries: Vec::new(),
+            }
+        }
+    }
+    fn stocks(rows: StockLookupRows) -> Stocks {
+        Stocks::with(Ok(Some(rows)))
+    }
+    impl UnifiedStockProvider for Stocks {
+        fn lookup(&mut self, query: &str) -> Result<Option<StockLookupRows>, String> {
+            self.queries.push(query.to_owned());
+            self.result.clone()
+        }
+    }
+
+    fn contract(address: &str) -> TokenAddress {
+        TokenAddress {
+            chain_id: "solana".to_owned(),
+            network: "solana".to_owned(),
+            tag: "SOL".to_owned(),
+            address: address.to_owned(),
+        }
+    }
+
+    fn candidate(id: &str, symbol: &str, name: &str) -> MarketCandidate {
+        MarketCandidate {
+            id: id.to_owned(),
+            symbol: symbol.to_owned(),
+            name: name.to_owned(),
+            slug: symbol.to_ascii_lowercase(),
+            price: "1".to_owned(),
+            change: "+1% 24h".to_owned(),
+            currency: String::new(),
+            exchange: String::new(),
+            asset_type: String::new(),
+            contracts: Vec::new(),
+        }
+    }
+
+    fn run(
+        text: &str,
+        command: MarketPriceCommand,
+        locale: Locale,
+        crypto: &mut impl CryptoMarketProvider,
+        stocks: &mut impl UnifiedStockProvider,
+    ) -> MarketPriceExecution {
+        execute_market_price_command(text, command, locale, crypto, stocks)
+    }
+
+    #[test]
+    fn selection_menus_localize_headings_conversions_and_token_identities() {
+        let mut stock_candidate = candidate("stock:MELI", "MELI", "MercadoLibre");
+        stock_candidate.currency = "USD".to_owned();
+        let long_name = "N".repeat(120);
+        let mut token = candidate("token:abc", "PUMP", &long_name);
+        token.contracts = vec![contract("ShortAddr")];
+        let bare_token = candidate("token:def", "DEF", "");
+        let selection = MarketSelection {
+            query: "2 meli usd".to_owned(),
+            timeframe: None,
+            target_symbol: String::new(),
+            target_parameter: "USD".to_owned(),
+            conversion: Some(MarketConversion {
+                amount: "2".to_owned(),
+                source_symbol: "PUMP".to_owned(),
+                target_symbol: "USD".to_owned(),
+                reverse: false,
+            }),
+            candidates: vec![stock_candidate, token, bare_token],
+        };
+        let text = format_market_selection(&selection, Locale::Es);
+        let lines = text.lines().collect::<Vec<_>>();
+        assert_eq!(lines[0], "Encontré varios activos con ese ticker:");
+        assert_eq!(lines[1], "2 PUMP in USD:");
+        assert_eq!(
+            lines[2],
+            "1. MercadoLibre (MELI): 1 USD (+1% 24h; Yahoo MELI)"
+        );
+        // Long names are cut to 100 characters and an empty target falls back to USD.
+        assert_eq!(
+            lines[3],
+            format!(
+                "2. {}... (PUMP): 1 USD (+1% 24h; solana:SOL ShortAddr)",
+                "N".repeat(97)
+            )
+        );
+        assert_eq!(lines[4], "3. def (DEF): 1 USD (+1% 24h; DEX token)");
+
+        let reverse = MarketSelection {
+            conversion: Some(MarketConversion {
+                amount: "5".to_owned(),
+                source_symbol: "HKD".to_owned(),
+                target_symbol: "LIBRA".to_owned(),
+                reverse: true,
+            }),
+            target_symbol: "LIBRA".to_owned(),
+            candidates: vec![candidate("42", "LIBRA", "Libra")],
+            ..selection
+        };
+        let text = format_market_selection(&reverse, Locale::Es);
+        assert_eq!(
+            text,
+            "Encontré varias monedas con ese ticker:\n5 HKD in LIBRA:\n1. Libra (LIBRA): 1 HKD (+1% 24h; CMC #42)"
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_aliases_periods_and_currencies_in_both_languages() {
+        assert_eq!(classify_market_price_command("/pricez"), None);
+        let mut crypto = Scripted::default();
+        let mut stocks = Stocks::default();
+        let cases = [
+            (
+                "btc 0h",
+                Locale::Es,
+                "No conozco el período '0h'. Usá 1h, 24h, 7d, 30d o N[h/d/w/m/mo/y]",
+            ),
+            (
+                "btc 0h",
+                Locale::En,
+                "Unknown period '0h'. Use 1h, 24h, 7d, 30d or N[h/d/w/m/mo/y]",
+            ),
+            (
+                "btc in xyz",
+                Locale::Es,
+                "No manejo la moneda XYZ. Probá con USD, ARS o EUR",
+            ),
+            (
+                "btc in xyz",
+                Locale::En,
+                "Unsupported currency: XYZ. Try USD, ARS or EUR",
+            ),
+            (
+                "2 btc in xyz",
+                Locale::En,
+                "Unsupported currency: XYZ. Try USD, ARS or EUR",
+            ),
+        ];
+        for (text, locale, expected) in cases {
+            let result = run(
+                text,
+                MarketPriceCommand::Unified,
+                locale,
+                &mut crypto,
+                &mut stocks,
+            );
+            assert_eq!(result.text, expected, "{text}");
+            assert!(!result.no_assets_found);
+        }
+        // Rejections happen before any provider is contacted.
+        assert!(crypto.calls.is_empty());
+    }
+
+    #[test]
+    fn candidate_resolution_deduplicates_contracts_and_rejects_bad_amounts() -> Result<(), String> {
+        let known = contract("F3A1baCgv4TF79TSjdMTvpMDtNv8DJvHZwNc9DG8pump");
+        let mut selected = candidate("42", "LIBRA", "Libra");
+        selected.contracts = vec![
+            contract("f3a1bacgv4tf79tsjdmtvpmdtnv8djvhzwnc9dg8pump"),
+            contract("SecondAddress"),
+        ];
+        let mut asset = coin("LIBRA", 2.0);
+        asset.id = "42".to_owned();
+        asset.contracts = vec![known.clone()];
+        let result = execute_market_price_candidate(
+            &selected,
+            None,
+            "USD",
+            "USD",
+            None,
+            Locale::En,
+            &mut Scripted::new(Vec::new(), vec![Ok(vec![asset.clone()])]),
+        );
+        let chart = result.chart.ok_or("chart")?;
+        assert_eq!(chart.token, Some(known.clone()));
+        let merged = chart.candidate.ok_or("candidate")?.contracts;
+        assert_eq!(merged, vec![known, contract("SecondAddress")]);
+
+        for amount in ["abc", "-1", "1e308"] {
+            let mut huge = asset.clone();
+            for quote in huge.quotes.values_mut() {
+                quote.price = 1e10;
+            }
+            let conversion = MarketConversion {
+                amount: amount.to_owned(),
+                source_symbol: "LIBRA".to_owned(),
+                target_symbol: "USD".to_owned(),
+                reverse: false,
+            };
+            let converted = execute_market_price_candidate(
+                &selected,
+                None,
+                "USD",
+                "USD",
+                Some(&conversion),
+                Locale::En,
+                &mut Scripted::new(Vec::new(), vec![Ok(vec![huge])]),
+            );
+            assert_eq!(converted.text, "", "{amount}");
+            assert!(converted.chart.is_none());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn stock_candidates_report_missing_and_failed_lookups() {
+        let selected = candidate("stock:RKH", "RKH", "Rockhopper");
+        let missing =
+            execute_stock_candidate(&selected, None, Locale::En, &mut Stocks::with(Ok(None)));
+        assert!(missing.no_assets_found);
+        assert_eq!(missing.text, "I could not get a quote for RKH");
+        assert_eq!(
+            missing.diagnostics,
+            vec!["stock candidate identity unavailable: RKH"]
+        );
+
+        let mut stocks = Stocks::with(Err("yahoo down".to_owned()));
+        let failed = execute_stock_candidate(&selected, Some("7d"), Locale::Es, &mut stocks);
+        assert_eq!(failed.text, "No pude conseguir una cotización para RKH");
+        assert_eq!(
+            failed.diagnostics,
+            vec![
+                "stock candidate lookup: yahoo down",
+                "stock candidate identity unavailable: RKH"
+            ]
+        );
+        assert_eq!(stocks.queries, vec!["RKH"]);
+    }
+
+    #[test]
+    fn provider_outage_rejects_stock_conversions_and_empty_queries() {
+        for (locale, expected) in [
+            (
+                Locale::En,
+                "NVDA: stocks are only quoted in their own currency",
+            ),
+            (
+                Locale::Es,
+                "NVDA: las acciones solo se cotizan en su moneda original",
+            ),
+        ] {
+            let result = run(
+                "nvda in eur",
+                MarketPriceCommand::Unified,
+                locale,
+                &mut Scripted::failing(),
+                &mut stocks(vec![("nvda".to_owned(), Some(stock("NVDA")))]),
+            );
+            assert_eq!(result.text, expected);
+            assert!(result.chart.is_none());
+        }
+
+        let mut stocks = Stocks::with(Ok(None));
+        let result = run(
+            "",
+            MarketPriceCommand::Unified,
+            Locale::Es,
+            &mut Scripted::failing(),
+            &mut stocks,
+        );
+        assert_eq!(
+            result.text,
+            "No pude cargar los precios de crypto. Probá de nuevo"
+        );
+        assert!(result.no_assets_found);
+        // An empty query never reaches the stock provider.
+        assert!(stocks.queries.is_empty());
+    }
+
+    #[test]
+    fn canonical_identities_are_fetched_by_id_when_missing_from_listings() {
+        let mut ether = coin("ETH2", 2_500.0);
+        ether.id = "1027".to_owned();
+        ether.name = "Ether".to_owned();
+        let mut unrelated = coin("ETH3", 1.0);
+        unrelated.id = "999".to_owned();
+        let mut crypto = Scripted::new(vec![Ok(Vec::new())], vec![Ok(vec![ether, unrelated])]);
+        let result = run(
+            "eth",
+            MarketPriceCommand::CryptoOnly,
+            Locale::En,
+            &mut crypto,
+            &mut Stocks::default(),
+        );
+        assert_eq!(result.text, "ETH2: 2500 USD (+2.5% 24h)");
+        assert!(!result.no_assets_found);
+        assert_eq!(crypto.calls, vec!["listings USD", "quotes 1027 USD false"]);
+
+        let mut crypto = Scripted::new(vec![Ok(Vec::new())], vec![Err("rate limited".to_owned())]);
+        let result = run(
+            "eth",
+            MarketPriceCommand::CryptoOnly,
+            Locale::En,
+            &mut crypto,
+            &mut Stocks::default(),
+        );
+        assert!(result.no_assets_found);
+        assert!(
+            result
+                .text
+                .starts_with("I could not find these assets: ETH.")
+        );
+        assert_eq!(
+            result.diagnostics,
+            vec!["CoinMarketCap canonical identity quotes: rate limited"]
+        );
+    }
+
+    #[test]
+    fn symbol_and_slug_quote_failures_are_diagnosed() {
+        let mut crypto = Scripted::new(
+            vec![Ok(Vec::new())],
+            vec![Err("symbols down".to_owned()), Err("slugs down".to_owned())],
+        );
+        let result = run(
+            "zzzz",
+            MarketPriceCommand::CryptoOnly,
+            Locale::En,
+            &mut crypto,
+            &mut Stocks::default(),
+        );
+        assert!(result.no_assets_found);
+        assert_eq!(
+            result.diagnostics,
+            vec![
+                "CoinMarketCap symbol quotes: symbols down",
+                "CoinMarketCap slug quotes: slugs down"
+            ]
+        );
+        assert_eq!(
+            crypto.calls,
+            vec![
+                "listings USD",
+                "quotes ZZZZ USD false",
+                "quotes zzzz USD true"
+            ]
+        );
+    }
+
+    #[test]
+    fn stock_fallback_absence_and_failure_leave_assets_unresolved() {
+        for (result, diagnostics) in [
+            (Ok(None), Vec::<String>::new()),
+            (
+                Err("yahoo down".to_owned()),
+                vec!["stock fallback: yahoo down".to_owned()],
+            ),
+        ] {
+            let mut stocks = Stocks::with(result);
+            let outcome = run(
+                "zzz",
+                MarketPriceCommand::Unified,
+                Locale::En,
+                &mut Scripted::default(),
+                &mut stocks,
+            );
+            assert!(outcome.no_assets_found);
+            assert!(
+                outcome
+                    .text
+                    .starts_with("I could not find these assets: ZZZ.")
+            );
+            assert_eq!(outcome.diagnostics, diagnostics);
+            assert_eq!(stocks.queries, vec!["ZZZ"]);
+        }
+    }
+
+    #[test]
+    fn company_name_matches_still_reject_currency_conversion() {
+        let mut apple = stock("AAPL");
+        apple.name = "Apple Inc.".to_owned();
+        let result = run(
+            "apple in eur",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut Scripted::new(
+                vec![Ok(Vec::new())],
+                vec![Ok(vec![rekey(coin("APPLE", 0.0001), "EUR")])],
+            ),
+            &mut stocks(vec![("apple".to_owned(), Some(apple))]),
+        );
+        assert_eq!(
+            result.text,
+            "APPLE: stocks are only quoted in their own currency"
+        );
+        assert!(result.chart.is_none());
+    }
+
+    #[test]
+    fn a_single_stock_fallback_carries_its_chart() {
+        let mut stocks = Stocks::with(Ok(Some(vec![("nvda".to_owned(), Some(stock("NVDA")))])));
+        let result = run(
+            "nvda",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut Scripted::default(),
+            &mut stocks,
+        );
+        assert_eq!(result.text, "NVDA: 123.45 USD (+1.25% 24h)");
+        let chart = result.chart.map(|chart| chart.yahoo_symbol);
+        assert_eq!(chart.as_deref(), Some("NVDA"));
+        assert_eq!(stocks.queries, vec!["NVDA"]);
+    }
+
+    #[test]
+    fn stock_results_in_a_conversion_are_rejected_next_to_crypto_quotes() {
+        let result = run(
+            "btc, nvda in eur",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut Scripted::new(
+                vec![Ok(vec![rekey(coin("BTC", 50_000.0), "EUR")])],
+                Vec::new(),
+            ),
+            &mut stocks(vec![("nvda".to_owned(), Some(stock("NVDA")))]),
+        );
+        assert_eq!(
+            result.text,
+            "BTC: 50000 EUR (+2.5% 24h)\nNVDA: stocks are only quoted in their own currency"
+        );
+        assert!(result.chart.is_none());
+
+        let result = run(
+            "nvda in eur",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut Scripted::default(),
+            &mut stocks(vec![("nvda".to_owned(), Some(stock("NVDA")))]),
+        );
+        assert_eq!(
+            result.text,
+            "NVDA: stocks are only quoted in their own currency"
+        );
+    }
+
+    #[test]
+    fn empty_top_lists_and_id_less_rows_render_deterministically() {
+        let result = run(
+            "",
+            MarketPriceCommand::CryptoOnly,
+            Locale::En,
+            &mut Scripted::default(),
+            &mut Stocks::default(),
+        );
+        assert_eq!(result.text, "");
+        assert!(!result.no_assets_found);
+
+        let mut id_less = coin("FOO", 3.0);
+        id_less.id.clear();
+        let mut duplicate = id_less.clone();
+        duplicate.name = "Foo duplicate".to_owned();
+        let result = run(
+            "btc,foo",
+            MarketPriceCommand::CryptoOnly,
+            Locale::En,
+            &mut Scripted::new(
+                vec![Ok(vec![coin("BTC", 50_000.0), id_less, duplicate])],
+                Vec::new(),
+            ),
+            &mut Stocks::default(),
+        );
+        assert_eq!(
+            result.text,
+            "BTC: 50000 USD (+2.5% 24h)\nFOO: 3 USD (+2.5% 24h)"
+        );
+
+        let mut crypto = Scripted::new(vec![Ok(vec![coin("BTC", 50_000.0)])], Vec::new());
+        let result = run(
+            "stables",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut crypto,
+            &mut Stocks::default(),
+        );
+        assert_eq!(result.text, "");
+        assert!(!result.no_assets_found);
+    }
+
+    #[test]
+    fn conversion_provider_failures_and_unsupported_pairs() {
+        let mut crypto = Scripted::new(vec![Err("down".to_owned())], Vec::new());
+        let result = run(
+            "2 btc in usd",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut crypto,
+            &mut Stocks::default(),
+        );
+        assert_eq!(result.text, "I could not load crypto prices. Try again");
+        assert!(result.no_assets_found);
+        assert_eq!(
+            result.diagnostics,
+            vec!["CoinMarketCap conversion listings: down"]
+        );
+
+        let mut crypto = Scripted::new(
+            vec![Ok(Vec::new()), Err("reverse down".to_owned())],
+            vec![Ok(Vec::new())],
+        );
+        let result = run(
+            "2 foo in usd",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut crypto,
+            &mut Stocks::default(),
+        );
+        assert_eq!(result.text, "I could not load crypto prices. Try again");
+        assert!(result.no_assets_found);
+        assert_eq!(
+            result.diagnostics,
+            vec!["CoinMarketCap reverse conversion listings: reverse down"]
+        );
+        assert_eq!(
+            crypto.calls,
+            vec!["listings USD", "quotes FOO USD false", "listings FOO"]
+        );
+
+        for (locale, expected) in [
+            (Locale::Es, "No laburo con esos ponzis, boludo"),
+            (Locale::En, "I do not support that asset pair"),
+        ] {
+            let mut crypto = Scripted::new(
+                Vec::new(),
+                vec![Err("ids down".to_owned()), Err("symbols down".to_owned())],
+            );
+            let result = run(
+                "2 btc in usd",
+                MarketPriceCommand::Unified,
+                locale,
+                &mut crypto,
+                &mut Stocks::default(),
+            );
+            assert_eq!(result.text, expected);
+            assert!(result.no_assets_found);
+            assert_eq!(
+                result.diagnostics,
+                vec![
+                    "CoinMarketCap conversion identity quotes: ids down",
+                    "CoinMarketCap conversion symbol quotes: symbols down"
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn ambiguous_conversions_merge_provider_rows_before_offering_a_menu() -> Result<(), String> {
+        let mut partial = coin("FOO", 0.0);
+        partial.id = "500".to_owned();
+        partial.name.clear();
+        partial.slug.clear();
+        partial.contracts = vec![contract("FirstContractAddress123")];
+        let mut duplicate_listing = coin("FOO", 2.0);
+        duplicate_listing.id = "500".to_owned();
+        duplicate_listing.name = "Ignored".to_owned();
+        // A later duplicate without a change figure must not erase a known one.
+        for quote in duplicate_listing.quotes.values_mut() {
+            quote.percent_change_24h = None;
+        }
+        let mut other = coin("FOO", 1.0);
+        other.id = "600".to_owned();
+        other.name = "Another Foo".to_owned();
+        let mut fetched = coin("FOO", 2.0);
+        fetched.id = "500".to_owned();
+        fetched.name = "Foo".to_owned();
+        fetched.slug = "foo".to_owned();
+        for quote in fetched.quotes.values_mut() {
+            quote.market_cap = Some(10.0);
+            quote.volume_24h = Some(5.0);
+            quote.percent_change_24h = Some(3.0);
+        }
+        fetched.quotes.extend(rekey(coin("FOO", 1.8), "EUR").quotes);
+        fetched.contracts = vec![
+            contract("FIRSTCONTRACTADDRESS123"),
+            contract("SecondContractAddress456"),
+        ];
+        let mut crypto = Scripted::new(
+            vec![Ok(vec![partial, other, duplicate_listing])],
+            vec![Ok(vec![fetched])],
+        );
+        let result = run(
+            "3 foo in usd",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut crypto,
+            &mut Stocks::default(),
+        );
+        assert_eq!(result.text, "");
+        let selection = result.selection.ok_or("conversion menu")?;
+        assert_eq!(selection.query, "3 FOO USD");
+        assert_eq!(
+            selection.conversion,
+            Some(MarketConversion {
+                amount: "3".to_owned(),
+                source_symbol: "FOO".to_owned(),
+                target_symbol: "USD".to_owned(),
+                reverse: false,
+            })
+        );
+        let summary = selection
+            .candidates
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.id.as_str(),
+                    candidate.name.as_str(),
+                    candidate.price.as_str(),
+                    candidate.change.as_str(),
+                    candidate.contracts.len(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            summary,
+            vec![
+                ("600", "Another Foo", "1", "+2.5% 24h", 0),
+                ("500", "Foo", "2", "+3% 24h", 2),
+            ]
+        );
+
+        // Two id-less rows for the same symbol and slug collapse into one conversion.
+        let mut first = coin("BAR", 4.0);
+        first.id.clear();
+        let second = first.clone();
+        let third = first.clone();
+        let result = run(
+            "2 bar in usd",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut Scripted::new(vec![Ok(vec![first, second])], vec![Ok(vec![third])]),
+            &mut Stocks::default(),
+        );
+        assert_eq!(result.text, "2 BAR = 8 USD");
+        assert!(result.selection.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn ranking_helpers_order_by_market_signals_and_stock_relevance() {
+        assert_eq!(compare_market_metric(Some(2.0), Some(1.0)), Ordering::Less);
+        assert_eq!(compare_market_metric(Some(1.0), None), Ordering::Less);
+        assert_eq!(compare_market_metric(None, Some(1.0)), Ordering::Greater);
+        assert_eq!(
+            compare_market_metric(Some(f64::NAN), Some(0.0)),
+            Ordering::Equal
+        );
+
+        let quote = |symbol: &str, name: &str| listed_stock(symbol, name, "X", "USD");
+        let mut quotes = [
+            quote("QQQ", "Unrelated"),
+            quote("ABC", "The rock collective"),
+            quote("XYZ", "Rockets Unlimited"),
+            quote("ROCKY", "Rocky Mountain"),
+            quote("ZZZ", "Rock Inc"),
+            quote("ROCK.L", "Rock London"),
+            quote("ROCK", "Rock Holdings"),
+        ];
+        quotes.sort_by(|left, right| compare_stock_quotes("rock", left, right));
+        assert_eq!(
+            quotes
+                .iter()
+                .map(|quote| quote.symbol.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ROCK", "ROCK.L", "ZZZ", "ROCKY", "XYZ", "ABC", "QQQ"]
+        );
+    }
+
+    #[test]
+    fn candidates_render_satoshis_and_missing_quotes_explicitly() {
+        let btc = rekey(coin("BTC", 0.5), "BTC");
+        let sats = market_candidate(&btc, "SATS", "BTC", Some("7d"));
+        assert_eq!(sats.price, "50000000");
+        assert_eq!(sats.change, "+7% 7d");
+
+        let unusable = coin("DEAD", 0.0);
+        let missing = market_candidate(&unusable, "USD", "USD", None);
+        assert_eq!(
+            (missing.price.as_str(), missing.change.as_str()),
+            ("N/A", "N/A 24h")
+        );
+        let missing = market_candidate(&unusable, "USD", "USD", Some("7d"));
+        assert_eq!(missing.change, "N/A 7d");
+
+        let conversion = MarketConversion {
+            amount: "1".to_owned(),
+            source_symbol: "DEAD".to_owned(),
+            target_symbol: "USD".to_owned(),
+            reverse: false,
+        };
+        assert_eq!(
+            format_selected_conversion(&unusable, "USD", &conversion),
+            ""
+        );
+
+        let mut odd = stock("ODD");
+        odd.variation = f64::NAN;
+        assert_eq!(market_stock_candidate(&odd, None).change, "N/A 24h");
+    }
+
+    #[test]
+    fn stock_scope_reports_empty_absent_and_failed_lookups() {
+        let result = run(
+            "stock:",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut Scripted::default(),
+            &mut Stocks::default(),
+        );
+        assert!(result.text.starts_with("I could not find these assets: . "));
+
+        for (lookup, missing, diagnostics) in [
+            (Ok(None), "ACME", Vec::<String>::new()),
+            (Ok(Some(Vec::new())), "ACME", Vec::new()),
+            (
+                Err("down".to_owned()),
+                "ACME",
+                vec!["stock lookup: down".to_owned()],
+            ),
+            (
+                Ok(Some(vec![("acme co".to_owned(), None)])),
+                "ACME CO",
+                Vec::new(),
+            ),
+        ] {
+            let mut stocks = Stocks::with(lookup);
+            let result = run(
+                "stock:acme",
+                MarketPriceCommand::Unified,
+                Locale::En,
+                &mut Scripted::default(),
+                &mut stocks,
+            );
+            assert_eq!(
+                result.text,
+                format!(
+                    "I could not find these assets: {missing}. Try the full name, an exchange-qualified ticker or the contract"
+                )
+            );
+            assert_eq!(result.diagnostics, diagnostics);
+            assert_eq!(stocks.queries, vec!["acme"]);
+        }
+
+        let mut odd = listed_stock("ODD.L", "Odd plc", "London", "GBp");
+        odd.variation = f64::NAN;
+        let result = run(
+            "stock:odd",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut Scripted::default(),
+            &mut stocks(vec![
+                ("odd".to_owned(), Some(odd)),
+                (
+                    "odd".to_owned(),
+                    Some(listed_stock("ODD", "Odd Inc", "NASDAQ", "USD")),
+                ),
+            ]),
+        );
+        let changes = result
+            .selection
+            .map(|selection| {
+                selection
+                    .candidates
+                    .into_iter()
+                    .map(|candidate| candidate.change)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        assert_eq!(changes, vec!["+1.25% 24h", "N/A 24h"]);
+    }
+
+    #[test]
+    fn canonical_matches_count_even_when_the_provider_renames_the_symbol() {
+        let mut renamed = coin("XBT", 60_000.0);
+        renamed.id = "1".to_owned();
+        renamed.name = "Bitcoin Core".to_owned();
+        renamed.slug = "bitcoin-core".to_owned();
+        let mut crypto = Scripted::new(vec![Ok(Vec::new())], vec![Ok(vec![renamed])]);
+        let result = run(
+            "btc",
+            MarketPriceCommand::CryptoOnly,
+            Locale::En,
+            &mut crypto,
+            &mut Stocks::default(),
+        );
+        assert_eq!(result.text, "XBT: 60000 USD (+2.5% 24h)");
+        assert!(!result.no_assets_found);
+        // No symbol or slug lookup is needed once the canonical id resolved.
+        assert_eq!(crypto.calls, vec!["listings USD", "quotes 1 USD false"]);
+    }
+
+    #[test]
+    fn explicit_symbol_quotes_fill_identity_gaps_in_listed_rows() {
+        let mut unnamed = coin("FOO", 5.0);
+        unnamed.id = "700".to_owned();
+        unnamed.symbol.clear();
+        let mut fetched = coin("FOO", 5.0);
+        fetched.id = "700".to_owned();
+        let mut crypto = Scripted::new(vec![Ok(vec![unnamed])], vec![Ok(vec![fetched])]);
+        let result = run(
+            "$foo",
+            MarketPriceCommand::CryptoOnly,
+            Locale::En,
+            &mut crypto,
+            &mut Stocks::default(),
+        );
+        assert_eq!(result.text, "FOO: 5 USD (+2.5% 24h)");
+        assert_eq!(crypto.calls, vec!["listings USD", "quotes FOO USD false"]);
+    }
+
+    #[test]
+    fn ties_fall_back_to_ids_exchanges_types_and_names() {
+        let mut first = coin("TWIN", 1.0);
+        first.id = "902".to_owned();
+        first.name = "Twin".to_owned();
+        let mut second = first.clone();
+        second.id = "901".to_owned();
+        assert_eq!(
+            compare_market_assets(&first, &second, "USD"),
+            Ordering::Greater
+        );
+
+        let quote = |exchange: &str, asset_type: &str, name: &str| {
+            let mut quote = listed_stock("ROCK", name, exchange, "USD");
+            quote.asset_type = asset_type.to_owned();
+            quote
+        };
+        let mut quotes = [
+            quote("NYSE", "Equity", "Rock B"),
+            quote("NYSE", "Equity", "Rock A"),
+            quote("LSE", "Equity", "Rock C"),
+            quote("NYSE", "ETF", "Rock D"),
+        ];
+        quotes.sort_by(|left, right| compare_stock_quotes("rock", left, right));
+        assert_eq!(
+            quotes
+                .iter()
+                .map(|quote| quote.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Rock C", "Rock D", "Rock A", "Rock B"]
+        );
+    }
+
+    #[test]
+    fn conversion_menus_order_same_named_assets_by_id() -> Result<(), String> {
+        let mut later = coin("DUP", 1.0);
+        later.id = "20".to_owned();
+        later.name = "Dup".to_owned();
+        let mut earlier = later.clone();
+        earlier.id = "10".to_owned();
+        let result = run(
+            "1 dup in usd",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut Scripted::ok(vec![vec![later, earlier]], Vec::new()),
+            &mut Stocks::default(),
+        );
+        let selection = result.selection.ok_or("conversion menu")?;
+        assert_eq!(
+            selection
+                .candidates
+                .iter()
+                .map(|candidate| candidate.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["10", "20"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn listed_slugs_are_requested_by_slug_when_the_ticker_differs() {
+        let mut listed = coin("LIBRA", 0.0);
+        listed.id = "31".to_owned();
+        listed.name = "Libra Finance".to_owned();
+        listed.slug = "libra-finance".to_owned();
+        let mut fetched = coin("LIBRA", 0.5);
+        fetched.id = "31".to_owned();
+        fetched.slug = "libra-finance".to_owned();
+        let mut crypto = Scripted::ok(vec![vec![listed]], vec![Vec::new(), vec![fetched]]);
+        let result = run(
+            "libra-finance",
+            MarketPriceCommand::CryptoOnly,
+            Locale::En,
+            &mut crypto,
+            &mut Stocks::default(),
+        );
+        assert_eq!(result.text, "LIBRA: 0.5 USD (+2.5% 24h)");
+        // The listing had no usable quote: the symbol lookup finds nothing, so the
+        // exact listed slug is fetched by slug.
+        assert_eq!(
+            crypto.calls,
+            vec![
+                "listings USD",
+                "quotes LIBRA-FINANCE USD false",
+                "quotes libra-finance USD true"
+            ]
+        );
+    }
+
+    #[test]
+    fn partially_resolved_stock_fallbacks_report_the_missing_queries() {
+        let result = run(
+            "zzz, yyy",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut Scripted::default(),
+            &mut stocks(vec![
+                ("zzz".to_owned(), Some(stock("ZZZ"))),
+                ("yyy".to_owned(), None),
+            ]),
+        );
+        assert_eq!(
+            result.text,
+            "ZZZ: 123.45 USD (+1.25% 24h)\nI could not find these assets: YYY. Try the full name, an exchange-qualified ticker or the contract"
+        );
+        assert!(!result.no_assets_found);
+    }
+
+    #[test]
+    fn canonical_conversions_keep_only_the_canonical_identity() {
+        let mut impostor = coin("BTC", 1.0);
+        impostor.id = "999".to_owned();
+        let mut crypto = Scripted::ok(Vec::new(), vec![vec![impostor, coin("BTC", 50_000.0)]]);
+        let result = run(
+            "2 btc in usd",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut crypto,
+            &mut Stocks::default(),
+        );
+        assert_eq!(result.text, "2 BTC = 100000 USD");
+        assert_eq!(crypto.calls, vec!["listings USD", "quotes 1 USD false"]);
     }
 }

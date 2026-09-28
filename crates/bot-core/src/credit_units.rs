@@ -291,4 +291,12 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn rejects_bare_signs_empty_or_repeated_exponents_and_non_digits() {
+        for value in ["-", "+", "1e", "1e2e3", "1a", "1.a", "1.2.3", "."] {
+            assert_eq!(parse_credit_units(value), None, "{value}");
+        }
+        assert_eq!(parse_credit_units("+1e-2"), Some(CreditUnits::new(1)));
+    }
 }

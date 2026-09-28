@@ -110,11 +110,8 @@ fn spread_route(
     details: Vec<RuloDetail>,
 ) -> RuloRoute {
     let difference = sell_price - official;
-    let percentage = if official == 0.0 {
-        0.0
-    } else {
-        (difference / official) * 100.0
-    };
+    // Callers only build routes after rejecting a non-positive official rate.
+    let percentage = (difference / official) * 100.0;
     RuloRoute {
         label,
         sell_price: format_local_currency(sell_price, 2),
@@ -314,18 +311,27 @@ mod tests {
 
     #[test]
     fn evaluates_all_routes_with_legacy_number_formatting() {
-        let RuloEvaluation::Routes(plan) = evaluate_rulo(&complete_input()) else {
-            return;
-        };
-        assert_eq!(plan.official, "1,440");
-        assert_eq!(plan.base_ars, "1,440,000");
-        assert_eq!(plan.routes.len(), 3);
-        assert_eq!(plan.routes[0].difference, "+19.73");
+        let evaluation = evaluate_rulo(&complete_input());
+        let routes = routes_of(&evaluation);
+        assert_eq!(routes.len(), 3);
+        assert_eq!(routes[0].difference, "+19.73");
         assert_eq!(
-            plan.routes[0].details[1],
+            routes[0].details[1],
             super::RuloDetail::Profit("+19,730".to_owned())
         );
-        assert_eq!(plan.routes[2].label, "USDT");
+        assert_eq!(routes[2].label, "USDT");
+        assert!(matches!(
+            evaluation,
+            RuloEvaluation::Routes(plan) if plan.official == "1,440" && plan.base_ars == "1,440,000"
+        ));
+        assert!(routes_of(&RuloEvaluation::OfficialError).is_empty());
+    }
+
+    fn routes_of(evaluation: &RuloEvaluation) -> &[super::RuloRoute] {
+        match evaluation {
+            RuloEvaluation::Routes(plan) => &plan.routes,
+            RuloEvaluation::OfficialError => &[],
+        }
     }
 
     #[test]
@@ -377,5 +383,53 @@ mod tests {
             render_rulo(&evaluate_rulo(&input), Locale::En),
             "There is no viable arbitrage route right now"
         );
+    }
+
+    #[test]
+    fn usdt_route_picks_the_cheapest_ask_and_the_best_bid() {
+        let quote = |exchange: &str, price| ExchangeQuote {
+            exchange: exchange.to_owned(),
+            price,
+        };
+        let mut input = complete_input();
+        input.mep = None;
+        input.blue = None;
+        input.usd_to_usdt = vec![
+            quote("pricey", Some(1.2)),
+            quote("broken", Some(0.0)),
+            quote("cheap", Some(1.0)),
+            quote("pricier", Some(1.5)),
+        ];
+        input.usdt_to_ars = vec![
+            quote("low", Some(1400.0)),
+            quote("missing", None),
+            quote("high", Some(1512.0)),
+            quote("lower", Some(1300.0)),
+        ];
+        let text = render_rulo(&evaluate_rulo(&input), Locale::En);
+        assert_eq!(
+            text,
+            "Arbitrage from the official rate\nOfficial: 1,440 ARS\nInvesting 1,000 USD = 1,440,000 ARS\n\nUSDT: +5%\nSell at 1,512 ARS (+72 vs official)\nRoute: USD→USDT CHEAP, USDT→ARS HIGH\n1,000 USD → 1,000 USDT → 1,512,000 ARS\nProfit: +72,000 ARS"
+        );
+    }
+
+    #[test]
+    fn guard_messages_and_number_helpers_cover_both_languages() {
+        assert_eq!(
+            render_rulo(&RuloEvaluation::OfficialError, Locale::En),
+            "I could not load the official rate for the arbitrage routes. Try again later"
+        );
+        let mut input = complete_input();
+        input.mep = None;
+        input.blue = None;
+        input.usd_to_usdt.clear();
+        assert_eq!(
+            render_rulo(&evaluate_rulo(&input), Locale::Es),
+            "Ahora no hay ningún rulo que cierre"
+        );
+        assert_eq!(super::group_integer_digits("-1234567"), "-1,234,567");
+        assert_eq!(super::format_signed_percentage(1.5), "+1.5");
+        assert_eq!(super::format_signed_percentage(-2.0), "-2");
+        assert_eq!(super::format_signed_percentage(0.25), "+0.25");
     }
 }

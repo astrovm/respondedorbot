@@ -87,4 +87,28 @@ mod tests {
             "Good night"
         );
     }
+
+    #[test]
+    fn night_greetings_have_their_own_cache_terms_and_fallbacks() {
+        let night = GreetingCategory::Night;
+        assert_eq!(night.cache_name(), "gn");
+        assert_eq!(
+            night.search_terms(),
+            ["Good night", "buenas noches", "sweet dreams", "go to sleep"]
+        );
+        assert_eq!(
+            greeting_fallback(night, Locale::Es),
+            "Buenas noches, boludo"
+        );
+        assert_eq!(greeting_fallback(night, Locale::En), "Good night");
+    }
+
+    #[test]
+    fn morning_greetings_have_their_own_cache_terms_and_fallbacks() {
+        let morning = GreetingCategory::Morning;
+        assert_eq!(morning.cache_name(), "gm");
+        assert_eq!(morning.search_terms()[0], "good morning");
+        assert_eq!(greeting_fallback(morning, Locale::Es), "Buen día, boludo");
+        assert_eq!(greeting_fallback(morning, Locale::En), "Good morning");
+    }
 }

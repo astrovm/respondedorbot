@@ -397,6 +397,8 @@ mod tests {
     use crate::locale::Locale;
     use crate::scheduled_tasks::{ScheduledTask, TaskId, TaskSchedule, TaskStateError};
 
+    const NEXT: i64 = 1_777_523_400;
+
     fn task(
         id: &str,
         schedule: TaskSchedule,
@@ -419,16 +421,13 @@ mod tests {
 
     #[test]
     fn renders_one_shot_and_recurring_summaries_without_mentions() -> Result<(), TaskStateError> {
-        let one_shot = task("once0001", TaskSchedule::Once, 1_777_523_400)?;
+        let one_shot = task("once0001", TaskSchedule::Once, NEXT)?;
         assert_eq!(
             format_task_summary(&one_shot, Locale::Es),
             "[once0001] avisar a @\u{200b}user (@\u{200b}owner) - 30/04 01:30"
         );
-        let interval = task(
-            "repeat01",
-            TaskSchedule::IntervalSeconds { seconds: 3_600 },
-            1_777_523_400,
-        )?;
+        let interval_schedule = TaskSchedule::IntervalSeconds { seconds: 3_600 };
+        let interval = task("repeat01", interval_schedule, NEXT)?;
         assert_eq!(
             format_task_summary(&interval, Locale::En),
             "[repeat01] avisar a @\u{200b}user (@\u{200b}owner) - every hour, next: 30/04 01:30"
@@ -438,54 +437,43 @@ mod tests {
 
     #[test]
     fn renders_daily_weekly_monthly_and_day_intervals() -> Result<(), TaskStateError> {
-        let timestamp = 1_777_523_400;
-        let weekly = task(
-            "weekly01",
-            TaskSchedule::Cron {
-                hour: 9,
-                minute: 5,
-                weekdays: vec![Weekday::Mon, Weekday::Wed],
-                day: None,
-            },
-            timestamp,
-        )?;
+        let weekly_schedule = TaskSchedule::Cron {
+            hour: 9,
+            minute: 5,
+            weekdays: vec![Weekday::Mon, Weekday::Wed],
+            day: None,
+        };
+
+        let weekly = task("weekly01", weekly_schedule, NEXT)?;
         assert!(format_task_summary(&weekly, Locale::Es).contains("los lun, mié a las 09:05"));
-        let monthly = task(
-            "monthly1",
-            TaskSchedule::Cron {
-                hour: 7,
-                minute: 0,
-                weekdays: Vec::new(),
-                day: Some(12),
-            },
-            timestamp,
-        )?;
+        let monthly_schedule = TaskSchedule::Cron {
+            hour: 7,
+            minute: 0,
+            weekdays: Vec::new(),
+            day: Some(12),
+        };
+
+        let monthly = task("monthly1", monthly_schedule, NEXT)?;
         assert!(
             format_task_summary(&monthly, Locale::En).contains("on day 12 of every month at 07:00")
         );
-        let daily = task(
-            "daily001",
-            TaskSchedule::Cron {
-                hour: 20,
-                minute: 30,
-                weekdays: Vec::new(),
-                day: None,
-            },
-            timestamp,
-        )?;
+        let daily_schedule = TaskSchedule::Cron {
+            hour: 20,
+            minute: 30,
+            weekdays: Vec::new(),
+            day: None,
+        };
+
+        let daily = task("daily001", daily_schedule, NEXT)?;
         assert!(format_task_summary(&daily, Locale::Es).contains("todos los días a las 20:30"));
-        let days = task(
-            "days0001",
-            TaskSchedule::IntervalDays { days: 2 },
-            timestamp,
-        )?;
+        let days = task("days0001", TaskSchedule::IntervalDays { days: 2 }, NEXT)?;
         assert!(format_task_summary(&days, Locale::En).contains("every 2 days"));
         Ok(())
     }
 
     #[test]
     fn task_labels_distinguish_times_and_truncated_duplicates() -> Result<(), TaskStateError> {
-        let mut first = task("task0001", TaskSchedule::Once, 1_777_523_400)?;
+        let mut first = task("task0001", TaskSchedule::Once, NEXT)?;
         first.text = "A long reminder with the same opening and first ending".into();
         let mut second = first.clone();
         second.id = TaskId::new("task0002")?;
@@ -510,7 +498,7 @@ mod tests {
     fn task_pages_keep_ids_in_callbacks_and_require_explicit_cancel() -> Result<(), TaskStateError>
     {
         let tasks = (0..7)
-            .map(|i| task(&format!("task{i:04}"), TaskSchedule::Once, 1_777_523_400))
+            .map(|i| task(&format!("task{i:04}"), TaskSchedule::Once, NEXT))
             .collect::<Result<Vec<_>, _>>()?;
         let page = super::render_task_page(&tasks, Locale::En, 1);
         let rows = page.keyboard.map_or(Vec::new(), |k| k.inline_keyboard);
@@ -553,7 +541,7 @@ mod tests {
 
     #[test]
     fn renders_list_keyboard_and_empty_state() -> Result<(), TaskStateError> {
-        let item = task("once0001", TaskSchedule::Once, 1_777_523_400)?;
+        let item = task("once0001", TaskSchedule::Once, NEXT)?;
         let list = render_task_list(&[item], Locale::Es);
         assert!(list.text.starts_with("Tareas (1)"));
         assert!(!list.text.contains("once0001"));
@@ -619,29 +607,17 @@ mod tests {
             TaskCallbackParse::Guard
         );
 
-        let minute = task(
-            "minute01",
-            TaskSchedule::IntervalSeconds { seconds: 300 },
-            1_777_523_400,
-        )?;
+        let minute_schedule = TaskSchedule::IntervalSeconds { seconds: 300 };
+
+        let minute = task("minute01", minute_schedule, NEXT)?;
         assert!(format_task_summary(&minute, Locale::Es).contains("cada 5 minutos"));
-        let day = task(
-            "day00001",
-            TaskSchedule::IntervalSeconds { seconds: 86_400 },
-            1_777_523_400,
-        )?;
+        let day_schedule = TaskSchedule::IntervalSeconds { seconds: 86_400 };
+        let day = task("day00001", day_schedule, NEXT)?;
         assert!(format_task_summary(&day, Locale::En).contains("every day"));
-        let days = task(
-            "days0002",
-            TaskSchedule::IntervalSeconds { seconds: 172_800 },
-            1_777_523_400,
-        )?;
+        let days_schedule = TaskSchedule::IntervalSeconds { seconds: 172_800 };
+        let days = task("days0002", days_schedule, NEXT)?;
         assert!(format_task_summary(&days, Locale::Es).contains("cada 2 días"));
-        let interval_days = task(
-            "days0003",
-            TaskSchedule::IntervalDays { days: 1 },
-            1_777_523_400,
-        )?;
+        let interval_days = task("days0003", TaskSchedule::IntervalDays { days: 1 }, NEXT)?;
         assert!(format_task_summary(&interval_days, Locale::Es).contains("todos los días"));
 
         let all_weekdays = vec![
@@ -653,16 +629,14 @@ mod tests {
             Weekday::Sat,
             Weekday::Sun,
         ];
-        let weekly = task(
-            "weekly02",
-            TaskSchedule::Cron {
-                hour: 8,
-                minute: 0,
-                weekdays: all_weekdays,
-                day: None,
-            },
-            1_777_523_400,
-        )?;
+        let weekly_schedule = TaskSchedule::Cron {
+            hour: 8,
+            minute: 0,
+            weekdays: all_weekdays,
+            day: None,
+        };
+
+        let weekly = task("weekly02", weekly_schedule, NEXT)?;
         assert!(
             format_task_summary(&weekly, Locale::Es).contains("lun, mar, mié, jue, vie, sáb, dom")
         );
@@ -670,7 +644,7 @@ mod tests {
             format_task_summary(&weekly, Locale::En).contains("mon, tue, wed, thu, fri, sat, sun")
         );
 
-        let mut unknown = task("unknown1", TaskSchedule::Once, 1_777_523_400)?;
+        let mut unknown = task("unknown1", TaskSchedule::Once, NEXT)?;
         unknown.user_name.clear();
         unknown.next_run_at = None;
         assert_eq!(
@@ -702,6 +676,85 @@ mod tests {
         );
         let id = TaskId::new("once0001")?;
         assert_eq!(task_deleted(&id, Locale::Es), "Tarea once0001 cancelada");
+        Ok(())
+    }
+
+    #[test]
+    fn localizes_singular_and_plural_intervals_in_both_languages() -> Result<(), TaskStateError> {
+        for (seconds, locale, expected) in [
+            (3_600, Locale::Es, "cada hora"),
+            (60, Locale::Es, "cada minuto"),
+            (300, Locale::En, "every 5 minutes"),
+            (7_200, Locale::En, "every 2 hours"),
+        ] {
+            let summary = format_task_summary(
+                &task("interval", TaskSchedule::IntervalSeconds { seconds }, NEXT)?,
+                locale,
+            );
+            assert!(summary.contains(&format!(" - {expected}, ")), "{summary}");
+        }
+        let every_three_days = task("days0009", TaskSchedule::IntervalDays { days: 3 }, NEXT)?;
+        assert!(format_task_summary(&every_three_days, Locale::Es).contains("cada 3 días, próx:"));
+        let monthly = TaskSchedule::Cron {
+            hour: 7,
+            minute: 0,
+            weekdays: Vec::new(),
+            day: Some(12),
+        };
+        assert!(
+            format_task_summary(&task("monthly2", monthly, NEXT)?, Locale::Es)
+                .contains("el día 12 de cada mes a las 07:00")
+        );
+        let daily = TaskSchedule::Cron {
+            hour: 20,
+            minute: 30,
+            weekdays: Vec::new(),
+            day: None,
+        };
+        assert!(
+            format_task_summary(&task("daily002", daily, NEXT)?, Locale::En)
+                .contains("every day at 20:30")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn first_page_links_forward_and_details_describe_recurrence() -> Result<(), TaskStateError> {
+        let tasks = (0..6)
+            .map(|i| task(&format!("page{i:04}"), TaskSchedule::Once, NEXT))
+            .collect::<Result<Vec<_>, _>>()?;
+        let rows = render_task_list(&tasks, Locale::Es)
+            .keyboard
+            .map_or(Vec::new(), |keyboard| keyboard.inline_keyboard);
+        let navigation = rows[5]
+            .iter()
+            .map(|button| (button.text.as_str(), button.callback_data.as_deref()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            navigation,
+            vec![("1 / 2", Some("task:page:0")), ("›", Some("task:page:1"))]
+        );
+
+        let mut recurring = task("repeat02", TaskSchedule::IntervalDays { days: 1 }, NEXT)?;
+        recurring.user_name.clear();
+        let detail = super::render_task_detail(&recurring, Locale::En, false);
+        assert_eq!(
+            detail.text,
+            "avisar a @\u{200b}user\n\nRepeats every day\nNext: 30/04 01:30"
+        );
+        let detail = super::render_task_detail(&recurring, Locale::Es, true);
+        assert_eq!(
+            detail.text,
+            "¿Seguro que querés cancelar esta tarea?\n\navisar a @\u{200b}user\n\nSe repite todos los días\nPróxima: 30/04 01:30"
+        );
+        assert_eq!(
+            task_load_failed(Locale::En),
+            "I could not load the tasks. Try again"
+        );
+        assert_eq!(
+            task_delete_failed(Locale::Es),
+            "No pude cancelar la tarea. Probá de nuevo"
+        );
         Ok(())
     }
 }

@@ -553,4 +553,15 @@ mod tests {
             assert!(!format!("{evaluation:?}").is_empty());
         }
     }
+
+    #[test]
+    fn non_render_outcomes_never_match_a_rendered_config() {
+        let config = ChatConfig::default();
+        assert!(!render_matches(
+            (ConfigCallbackOutcome::Guard, config.clone()),
+            &config,
+            false,
+            None
+        ));
+    }
 }

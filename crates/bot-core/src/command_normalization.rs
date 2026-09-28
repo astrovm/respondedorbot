@@ -354,4 +354,13 @@ mod tests {
             "Spanish names contain unsupported emoji: {unsupported_non_components:?}"
         );
     }
+
+    #[test]
+    fn detects_every_japanese_block_and_keeps_unromanizable_characters() {
+        for text in ["ひ", "ㇰ", "ｦ", "㐀", "漢", "豈", "𠀀"] {
+            assert!(super::contains_japanese(text), "{text}");
+        }
+        assert!(!super::contains_japanese("hola ñandú"));
+        assert_eq!(super::romanize_japanese("テスト!"), "tesuto!");
+    }
 }

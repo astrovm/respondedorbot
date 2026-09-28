@@ -107,16 +107,18 @@ pub fn prepare_incoming_command_state(
         Some(username),
         None,
         input.text.contains('@') || input.text.starts_with('/'),
-    )?;
+    );
+    let message = message?;
     let member = if input.is_group {
+        let payload = prepare_chat_member_payload(
+            input.first_name.unwrap_or_default(),
+            username,
+            input.timestamp,
+        );
         Some(ChatMemberWritePlan {
             key: chat_members_key(&chat_id),
             user_id,
-            payload: prepare_chat_member_payload(
-                input.first_name.unwrap_or_default(),
-                username,
-                input.timestamp,
-            )?,
+            payload: payload?,
         })
     } else {
         None
@@ -142,7 +144,8 @@ pub fn prepare_outgoing_command_state(
         None,
         None,
         false,
-    )?;
+    );
+    let message = message?;
     let metadata = input.sent_message_id.map(|message_id| {
         let message_id = message_id.0.to_string();
         serde_json::to_string(&CommandMetadata {
@@ -199,7 +202,8 @@ mod tests {
     }
 
     #[test]
-    fn outgoing_plan_uses_delivery_id_and_command_metadata() {
+    fn outgoing_plan_uses_delivery_id_and_command_metadata()
+    -> Result<(), Box<dyn std::error::Error>> {
         let plan = prepare_outgoing_command_state(OutgoingCommandState {
             chat_id: ChatId(-42),
             incoming_message_id: MessageId(7),
@@ -208,13 +212,10 @@ mod tests {
             command: "/time",
             timestamp: 1_672_531_200,
         });
-        assert!(plan.is_ok());
-        let Ok(plan) = plan else { return };
+        let plan = plan?;
         assert_eq!(plan.message.message_id, "bot_99");
         assert_eq!(plan.message.role, "assistant");
-        let Some(metadata) = plan.metadata else {
-            return;
-        };
+        let metadata = plan.metadata.ok_or("missing command metadata")?;
         assert_eq!(metadata.key, "bot_message_meta:-42:99");
         assert_eq!(
             serde_json::from_str::<Value>(&metadata.payload).ok(),
@@ -225,6 +226,7 @@ mod tests {
                 "uses_ai":false
             }))
         );
+        Ok(())
     }
 
     #[test]

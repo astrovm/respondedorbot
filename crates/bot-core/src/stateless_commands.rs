@@ -394,13 +394,10 @@ mod tests {
         );
         assert!(matches!(
             &plan,
-            StatelessCommandPlan::Action(TelegramAction::SendMessage(_))
+            StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+                if message.chat_id == ChatId(-10042)
+                    && message.reply_to_message_id == Some(MessageId(77))
         ));
-        let StatelessCommandPlan::Action(TelegramAction::SendMessage(message)) = plan else {
-            return;
-        };
-        assert_eq!(message.chat_id, ChatId(-10042));
-        assert_eq!(message.reply_to_message_id, Some(MessageId(77)));
     }
 
     #[test]
@@ -464,6 +461,84 @@ mod tests {
                 },
             ),
             StatelessCommandPlan::NotHandled
+        );
+    }
+
+    #[test]
+    fn spanish_validation_replies_and_unsupported_digits() {
+        let plan = |text: &str, locale| {
+            message_text(plan_stateless_command(
+                ChatId(1),
+                MessageId(2),
+                text,
+                "@bot",
+                locale,
+            ))
+        };
+        for (input, expected) in [
+            (
+                "bad",
+                "Capo, mandate algo como /convertbase 101, 2, 10 y te paso de binario a decimal",
+            ),
+            ("10!,2,10", "El número tiene que ser alfanumérico, boludo"),
+            (
+                "10,1,10",
+                "La base de origen '1' tiene que estar entre 2 y 36, gordo",
+            ),
+            (
+                "10,2,40",
+                "La base de destino '40' tiene que estar entre 2 y 36, boludo",
+            ),
+            (
+                "10,no,2",
+                "Mandate números posta, gordo, no me hagas perder el tiempo",
+            ),
+        ] {
+            assert_eq!(
+                plan(&format!("/convertbase {input}"), Locale::Es).as_deref(),
+                Some(expected)
+            );
+        }
+        // Digits outside ASCII after normalization are left to other handlers.
+        assert_eq!(
+            plan_stateless_command(
+                ChatId(1),
+                MessageId(2),
+                "/convertbase é,2,10",
+                "@bot",
+                Locale::Es
+            ),
+            StatelessCommandPlan::NotHandled
+        );
+        assert_eq!(message_text(StatelessCommandPlan::NotHandled), None);
+        assert_eq!(
+            plan("/comando --", Locale::Es).as_deref(),
+            Some("No me mandes giladas, boludo: tiene que tener letras o números")
+        );
+    }
+
+    #[test]
+    fn instance_names_are_localized_when_present_or_missing() {
+        let instance = |locale, instance_name| {
+            message_text(plan_runtime_stateless_command(
+                ChatId(1),
+                MessageId(2),
+                "/instance",
+                "@bot",
+                locale,
+                StatelessRuntimeContext {
+                    unix_timestamp: 0,
+                    instance_name,
+                },
+            ))
+        };
+        assert_eq!(
+            instance(Locale::Es, Some("sintética")).as_deref(),
+            Some("Estoy corriendo en sintética, boludo")
+        );
+        assert_eq!(
+            instance(Locale::En, None).as_deref(),
+            Some("This instance has no name configured")
         );
     }
 }

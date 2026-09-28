@@ -260,8 +260,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        MessageContent, UserId, extract_message_content, extract_user_id, format_user_identity,
-        is_group_chat_type, normalize_numeric_id,
+        MessageContent, TelegramInputError, UserId, extract_message_content, extract_user_id,
+        format_user_identity, is_group_chat_type, normalize_numeric_id,
     };
 
     #[test]
@@ -342,5 +342,119 @@ mod tests {
         assert!(is_group_chat_type(Some("group")));
         assert!(is_group_chat_type(Some("supergroup")));
         assert!(!is_group_chat_type(Some("private")));
+    }
+
+    #[test]
+    fn polls_follow_python_truthiness_for_questions_and_options() {
+        assert_eq!(
+            extract_message_content(&json!({
+                "text": false,
+                "caption": 0,
+                "poll": {"question": null}
+            })),
+            Ok(MessageContent {
+                text: "None".to_owned(),
+                photo_file_id: None,
+                audio_file_id: None,
+            })
+        );
+        assert_eq!(
+            extract_message_content(&json!({
+                "poll": {"question": "", "options": ["raw", {"text": ""}, {"text": null}, {"text": false}, {"text": 5}]}
+            }))
+            .map(|content| content.text),
+            Ok("Opciones:\n- 5".to_owned())
+        );
+        assert_eq!(
+            extract_message_content(&json!({"poll": {"question": " ", "options": []}}))
+                .map(|content| content.text),
+            Ok(String::new())
+        );
+    }
+
+    #[test]
+    fn stickers_fall_back_from_empty_thumbnails_to_their_own_file() {
+        for (sticker, expected) in [
+            (
+                json!({"is_video": 1, "thumb": {"file_id": ""}, "file_id": "video-sticker"}),
+                Some("video-sticker"),
+            ),
+            (json!({"file_id": "plain-sticker"}), Some("plain-sticker")),
+            (json!({"is_animated": true, "thumbnail": "none"}), None),
+        ] {
+            assert_eq!(
+                extract_message_content(&json!({ "sticker": sticker }))
+                    .map(|content| content.photo_file_id),
+                Ok(expected.map(str::to_owned))
+            );
+        }
+        assert_eq!(
+            extract_message_content(&json!({"sticker": ["not", "an", "object"]})),
+            Err(TelegramInputError::InvalidMedia)
+        );
+    }
+
+    #[test]
+    fn replied_media_is_used_only_when_the_message_has_none() {
+        let content = |message| extract_message_content(&message);
+        assert_eq!(
+            content(json!({"reply_to_message": {"photo": [{"file_id": "a"}, {"file_id": "b"}]}}))
+                .map(|content| content.photo_file_id),
+            Ok(Some("b".to_owned()))
+        );
+        assert_eq!(
+            content(json!({"reply_to_message": {"sticker": {"file_id": "replied-sticker"}}}))
+                .map(|content| content.photo_file_id),
+            Ok(Some("replied-sticker".to_owned()))
+        );
+        assert_eq!(
+            content(json!({"text": "hola", "reply_to_message": {"text": "chau"}})),
+            Ok(MessageContent {
+                text: "hola".to_owned(),
+                photo_file_id: None,
+                audio_file_id: None,
+            })
+        );
+        assert_eq!(
+            content(json!({"reply_to_message": ""})).map(|content| content.photo_file_id),
+            Ok(None)
+        );
+        assert_eq!(
+            content(json!({"reply_to_message": {"photo": [1]}})),
+            Err(TelegramInputError::InvalidMedia)
+        );
+        // A truthy non-object reply is malformed for both visual and audio lookup.
+        assert_eq!(
+            content(json!({"reply_to_message": "junk"})),
+            Err(TelegramInputError::InvalidMedia)
+        );
+        assert_eq!(
+            content(json!({"photo": [{"file_id": "p"}], "reply_to_message": "junk"})),
+            Err(TelegramInputError::InvalidMedia)
+        );
+        assert_eq!(
+            content(json!({"voice": {"no_file_id": true}})),
+            Err(TelegramInputError::InvalidMedia)
+        );
+    }
+
+    #[test]
+    fn identities_and_ids_coerce_like_the_legacy_python_bot() {
+        assert_eq!(normalize_numeric_id(&json!(true)), Some(1));
+        assert_eq!(normalize_numeric_id(&json!(false)), Some(0));
+        for value in [json!(null), json!([1]), json!({"id": 1}), json!("x")] {
+            assert_eq!(normalize_numeric_id(&value), None, "{value}");
+        }
+        assert_eq!(extract_user_id(&json!({"from": "someone"})), None);
+        assert_eq!(format_user_identity(&json!("Ana")), "");
+        assert_eq!(format_user_identity(&json!({"first_name": false})), "False");
+        assert_eq!(
+            format_user_identity(&json!({"first_name": ["Ana"], "username": {"u": 1}})),
+            "[\"Ana\"] ({\"u\":1})"
+        );
+        assert_eq!(
+            format_user_identity(&json!({"first_name": null, "username": null})),
+            ""
+        );
     }
 }

@@ -278,11 +278,10 @@ pub fn select_yahoo_candidates(response: &Value) -> Vec<StockSearchCandidate> {
                         && candidate.asset_type.eq_ignore_ascii_case(asset_type)
                 })
         {
+            // Duplicates share the exchange (case-insensitively), so only a
+            // missing display name can be filled from a later row.
             if existing.name.is_empty() && !name.is_empty() {
                 existing.name.clone_from(&name);
-            }
-            if existing.exchange.is_empty() && !exchange.is_empty() {
-                existing.exchange.clone_from(&exchange);
             }
             continue;
         }
@@ -481,10 +480,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        StockQuery, StockQueryPlan, StockSearchCandidate, classify_oil_command,
-        classify_stock_command, parse_yahoo_quote, plan_stock_query, rank_yahoo_candidates,
-        render_oil_quotes, render_stock_quotes, select_yahoo_candidates, select_yahoo_symbol,
-        yahoo_candidate_name_matches_query,
+        StockQuery, StockQueryPlan, StockQuote, StockSearchCandidate, classify_oil_command,
+        classify_stock_command, parse_yahoo_quote, plan_stock_query, rank_stock_quotes,
+        rank_yahoo_candidates, render_oil_quotes, render_stock_quotes, select_yahoo_candidates,
+        select_yahoo_symbol, yahoo_candidate_name_matches_query,
     };
     use crate::locale::Locale;
 
@@ -730,6 +729,180 @@ mod tests {
         assert_eq!(
             render_stock_quotes(Some(&[]), Locale::En),
             "I could not load any quote. Try again later"
+        );
+    }
+
+    fn chart(result: serde_json::Value) -> serde_json::Value {
+        json!({"data": {"chart": {"result": [result]}}})
+    }
+
+    #[test]
+    fn quote_parser_handles_malformed_and_partial_chart_sections() {
+        // Non-object indicators, quote lists and close series are malformed payloads.
+        for malformed in [
+            json!({"meta": {"regularMarketPrice": 12, "chartPreviousClose": 10}, "indicators": []}),
+            json!({"meta": {"regularMarketPrice": 12, "chartPreviousClose": 10}, "indicators": {"quote": {}}}),
+            json!({"meta": {"regularMarketPrice": 12, "chartPreviousClose": 10}, "indicators": {"quote": [{"close": 5}]}}),
+        ] {
+            assert_eq!(parse_yahoo_quote(&chart(malformed), "EXM"), None);
+        }
+        // Metadata alone is enough when the close series is absent.
+        let quote = parse_yahoo_quote(
+            &chart(json!({
+                "meta": {"regularMarketPrice": 12, "chartPreviousClose": 10, "longName": "Example Long"},
+                "indicators": {"quote": [{}]}
+            })),
+            "exm",
+        );
+        assert_eq!(
+            quote.map(|quote| (quote.symbol, quote.name, quote.variation)),
+            Some(("EXM".to_owned(), "Example Long".to_owned(), 20.0))
+        );
+        // Without metadata, or with non-numeric prices, the closes are used.
+        for result in [
+            json!({"indicators": {"quote": [{"close": [8, 10]}]}}),
+            json!({"meta": {"regularMarketPrice": true}, "indicators": {"quote": [{"close": [8, 10]}]}}),
+        ] {
+            let quote = parse_yahoo_quote(&chart(result), "exm");
+            assert_eq!(
+                quote.map(|quote| (quote.price, quote.variation, quote.currency)),
+                Some((10.0, 25.0, "USD".to_owned()))
+            );
+        }
+    }
+
+    #[test]
+    fn yahoo_search_skips_non_objects_and_merges_duplicate_listings() {
+        let response = json!({"data":{"quotes":[
+            "not an object",
+            {"quoteType":"EQUITY","symbol":"EXM","exchDisp":"NYSE"},
+            {"quoteType":"EQUITY","symbol":"exm","longname":"Example Corp","exchange":"nyse"},
+            {"quoteType":"EQUITY","symbol":"EXM","longname":"Ignored Later Name","exchDisp":"NYSE"}
+        ]}});
+        assert_eq!(
+            select_yahoo_candidates(&response),
+            vec![StockSearchCandidate {
+                symbol: "EXM".to_owned(),
+                name: "Example Corp".to_owned(),
+                exchange: "NYSE".to_owned(),
+                asset_type: "Equity".to_owned(),
+            }]
+        );
+    }
+
+    fn listing(symbol: &str, name: &str, exchange: &str) -> StockSearchCandidate {
+        StockSearchCandidate {
+            symbol: symbol.to_owned(),
+            name: name.to_owned(),
+            exchange: exchange.to_owned(),
+            asset_type: "Equity".to_owned(),
+        }
+    }
+
+    #[test]
+    fn ranking_orders_every_relevance_tier_then_exchange_and_name() {
+        let mut candidates = vec![
+            listing("QQQ", "Unrelated", "X"),
+            listing("ABC", "The Rock Collective", "X"),
+            listing("XYZ", "Rockets Unlimited", "X"),
+            listing("ROCKY", "Rocky Mountain", "X"),
+            listing("ZZZ", "Rock Inc", "X"),
+            listing("ROCK.L", "Rock London", "X"),
+            listing("ROCK", "Rock Holdings", "nyse"),
+            listing("ROCK", "Rock Holdings", "LSE"),
+            listing("ROCK", "B Rock", "LSE"),
+        ];
+        rank_yahoo_candidates("rock", &mut candidates);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| format!(
+                    "{}@{}:{}",
+                    candidate.symbol, candidate.exchange, candidate.name
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                "ROCK@LSE:B Rock",
+                "ROCK@LSE:Rock Holdings",
+                "ROCK@nyse:Rock Holdings",
+                "ROCK.L@X:Rock London",
+                "ZZZ@X:Rock Inc",
+                "ROCKY@X:Rocky Mountain",
+                "XYZ@X:Rockets Unlimited",
+                "ABC@X:The Rock Collective",
+                "QQQ@X:Unrelated",
+            ]
+        );
+
+        let quote = |symbol: &str, name: &str, exchange: &str, asset_type: &str| StockQuote {
+            symbol: symbol.to_owned(),
+            name: name.to_owned(),
+            price: 1.0,
+            currency: "USD".to_owned(),
+            exchange: exchange.to_owned(),
+            asset_type: asset_type.to_owned(),
+            variation: 0.0,
+        };
+        let mut quotes = vec![
+            quote("ROCKY", "Rocky Mountain", "X", "Equity"),
+            quote("ROCK", "Rock B", "nyse", "Equity"),
+            quote("ROCK", "Rock A", "NYSE", "Equity"),
+            quote("ROCK", "Rock Fund", "LSE", "ETF"),
+            quote("ROCK", "Rock Equity", "LSE", "Equity"),
+        ];
+        rank_stock_quotes("$rock", &mut quotes);
+        assert_eq!(
+            quotes
+                .iter()
+                .map(|quote| format!("{}@{}:{}", quote.symbol, quote.exchange, quote.name))
+                .collect::<Vec<_>>(),
+            vec![
+                "ROCK@LSE:Rock Fund",
+                "ROCK@LSE:Rock Equity",
+                "ROCK@NYSE:Rock A",
+                "ROCK@nyse:Rock B",
+                "ROCKY@X:Rocky Mountain",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_quote_list_is_a_localized_failure() {
+        assert_eq!(
+            render_stock_quotes(Some(&[]), Locale::Es),
+            "No pude conseguir ninguna cotización. Probá más tarde"
+        );
+    }
+
+    #[test]
+    fn quotes_without_any_previous_close_are_rejected() {
+        assert_eq!(
+            parse_yahoo_quote(
+                &chart(
+                    json!({"meta": {"regularMarketPrice": 10}, "indicators": {"quote": [{"close": [10]}]}})
+                ),
+                "EXM",
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn same_named_listings_on_one_exchange_order_by_asset_type() {
+        let mut candidates = vec![
+            StockSearchCandidate {
+                asset_type: "ETF".to_owned(),
+                ..listing("ROCK", "Rock", "NYSE")
+            },
+            listing("ROCK", "Rock", "nyse"),
+        ];
+        rank_yahoo_candidates("rock", &mut candidates);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.asset_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ETF", "Equity"]
         );
     }
 }

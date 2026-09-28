@@ -66,12 +66,8 @@ impl ExactDecimal {
         {
             return None;
         }
-        let digits = format!("{whole}{fractional}");
-        let mut coefficient = if digits.is_empty() {
-            0
-        } else {
-            digits.parse::<i128>().ok()?
-        };
+        // At least one side is non-empty, so `digits` always has a digit.
+        let mut coefficient = format!("{whole}{fractional}").parse::<i128>().ok()?;
         if negative {
             coefficient = coefficient.checked_neg()?;
         }
@@ -91,14 +87,11 @@ impl ExactDecimal {
         }
     }
 
-    fn from_ratio(numerator: i128, denominator_scale: u32) -> Self {
-        let mut coefficient = numerator;
-        let mut scale = denominator_scale;
-        while scale > 0 && coefficient % 10 == 0 {
-            coefficient /= 10;
-            scale -= 1;
+    const fn from_integer(value: i64) -> Self {
+        Self {
+            coefficient: value as i128,
+            scale: 0,
         }
-        Self { coefficient, scale }
     }
 
     fn multiply_integer(self, multiplier: i128) -> Result<Self, AiPricingError> {
@@ -460,7 +453,7 @@ pub fn calculate_billing_for_segments(segments: &Value) -> Result<Value, AiPrici
         if kind == "youtube_transcript" {
             let usd_micros = i64::try_from(YOUTUBE_TRANSCRIPT_USD_MICROS_PER_SUCCESS)
                 .map_err(|_| AiPricingError::Overflow)?;
-            total = total.add(ExactDecimal::from_ratio(i128::from(usd_micros), 0))?;
+            total = total.add(ExactDecimal::from_integer(usd_micros))?;
             tool_breakdown.push(json!({
                 "tool": "youtube_transcript",
                 "provider": provider,
@@ -483,7 +476,7 @@ pub fn calculate_billing_for_segments(segments: &Value) -> Result<Value, AiPrici
             && let Some(tool_cost) = tool_cost
         {
             tool_breakdown.push(tool_cost);
-            total = total.add(ExactDecimal::from_ratio(i128::from(search_cost), 0))?;
+            total = total.add(ExactDecimal::from_integer(search_cost))?;
             segment_breakdown.push(json!({
                 "segment_index": segment_index,
                 "kind": kind,
@@ -511,7 +504,7 @@ pub fn calculate_billing_for_segments(segments: &Value) -> Result<Value, AiPrici
         {
             let usd_micros =
                 transcription_cost(audio_seconds, minimum_seconds, usd_micros_per_hour)?;
-            total = total.add(ExactDecimal::from_ratio(i128::from(usd_micros), 0))?;
+            total = total.add(ExactDecimal::from_integer(usd_micros))?;
             model_breakdown.push(json!({
                 "kind": kind,
                 "model": model,
@@ -548,7 +541,7 @@ pub fn calculate_billing_for_segments(segments: &Value) -> Result<Value, AiPrici
         model_item.insert("kind".to_owned(), json!(kind));
         model_breakdown.push(Value::Object(model_item));
 
-        total = total.add(ExactDecimal::from_ratio(i128::from(search_cost), 0))?;
+        total = total.add(ExactDecimal::from_integer(search_cost))?;
         if let Some(tool_cost) = tool_cost {
             tool_breakdown.push(tool_cost);
         }
@@ -605,10 +598,9 @@ mod tests {
     fn prices_external_provider_payload_fixtures() -> Result<(), Box<dyn std::error::Error>> {
         let contract: Value =
             serde_json::from_str(include_str!("../tests/fixtures/ai_pricing.json"))?;
-        let cases = contract["cases"]
-            .as_array()
-            .ok_or_else(|| std::io::Error::other("pricing contract cases must be an array"))?;
+        let cases = contract["cases"].as_array().ok_or("pricing cases array")?;
         for case in cases {
+            let name = &case["name"];
             let output = calculate_billing_for_segments(&case["segments"])?;
             let expected = &case["expected"];
             for key in [
@@ -617,27 +609,24 @@ mod tests {
                 "charged_credit_units",
                 "pricing_complete",
             ] {
-                assert_eq!(output[key], expected[key], "{}: {key}", case["name"]);
+                assert_eq!(output[key], expected[key], "{name}: {key}");
             }
             if let Some(expected_basis) = expected.get("pricing_basis") {
                 assert_eq!(
                     output["segment_breakdown"][0]["pricing_basis"], *expected_basis,
-                    "{}: pricing_basis",
-                    case["name"]
+                    "{name}: pricing_basis"
                 );
             }
             if let Some(expected_model_cost) = expected.get("model_usd_micros") {
                 assert_eq!(
                     output["model_breakdown"][0]["usd_micros"], *expected_model_cost,
-                    "{}: model_usd_micros",
-                    case["name"]
+                    "{name}: model_usd_micros"
                 );
             }
             if let Some(expected_tool_cost) = expected.get("tool_usd_micros") {
                 assert_eq!(
                     output["tool_breakdown"][0]["usd_micros"], *expected_tool_cost,
-                    "{}: tool_usd_micros",
-                    case["name"]
+                    "{name}: tool_usd_micros"
                 );
             }
         }
@@ -881,6 +870,141 @@ mod tests {
             reconciled["segment_breakdown"][0]["pricing_basis"],
             "provider_reported"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn decimal_parser_rejects_empty_and_non_numeric_values() {
+        for value in [
+            json!(""),
+            json!("  "),
+            json!("."),
+            json!("e5"),
+            json!(true),
+            json!([1]),
+        ] {
+            assert_eq!(ExactDecimal::parse(&value), None, "{value}");
+        }
+        assert_eq!(
+            ExactDecimal::parse(&json!(".5")),
+            Some(ExactDecimal {
+                coefficient: 5,
+                scale: 1
+            })
+        );
+        assert_eq!(
+            ExactDecimal::parse(&json!(12)),
+            Some(ExactDecimal {
+                coefficient: 12,
+                scale: 0
+            })
+        );
+    }
+
+    #[test]
+    fn python_style_coercion_accepts_strings_booleans_and_numbers() -> Result<(), AiPricingError> {
+        let output = calculate_billing_for_segments(&json!([{
+            "kind": true,
+            "model": 42,
+            "audio_seconds": "2.5",
+            "usage": {
+                "input_tokens": " 12 ",
+                "input_cached_tokens": true,
+                "output_tokens": 3.9,
+                "cost": "0.000001"
+            },
+            "metadata": {"provider": "openrouter", "firecrawl_credits_used": 1, "web_search_requests": "2"}
+        }]))?;
+        assert_eq!(output["model_breakdown"][0]["kind"], "True");
+        assert_eq!(output["model_breakdown"][0]["model"], "42");
+        assert_eq!(output["model_breakdown"][0]["input_tokens"], 12);
+        assert_eq!(output["model_breakdown"][0]["input_cached_tokens"], 1);
+        assert_eq!(output["model_breakdown"][0]["input_non_cached_tokens"], 11);
+        assert_eq!(output["model_breakdown"][0]["output_tokens"], 3);
+        // A non-search segment that still used Firecrawl keeps the tool cost.
+        assert_eq!(
+            output["tool_breakdown"],
+            json!([{"tool": "web_search", "count": 2, "usd_micros": 830}])
+        );
+        assert_eq!(output["raw_usd_micros_exact"], "831.000000");
+        assert_eq!(
+            output["segment_breakdown"][0]["tool_pricing_basis"],
+            "firecrawl_standard"
+        );
+
+        let boolean_audio = calculate_billing_for_segments(&json!([{
+            "kind": "transcribe",
+            "model": "whisper-large-v3",
+            "audio_seconds": true,
+            "metadata": {"provider": {"name": "x"}}
+        }]));
+        // Object or list providers cannot be coerced into a provider name.
+        assert_eq!(boolean_audio, Err(AiPricingError::InvalidValue));
+        assert_eq!(
+            calculate_billing_for_segments(
+                &json!([{"kind": "chat", "metadata": {"provider": ["listed"]}}])
+            ),
+            Err(AiPricingError::InvalidValue)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_numeric_fields_reject_the_whole_calculation() {
+        for segment in [
+            json!({"kind": "chat", "usage": {"input_tokens": "many"}}),
+            json!({"kind": "chat", "usage": {"input_tokens": 5, "input_cached_tokens": "x"}}),
+            json!({"kind": "chat", "usage": {"output_tokens": [1]}}),
+            json!({"kind": "chat", "audio_seconds": "loud"}),
+            json!({"kind": "chat", "audio_seconds": {"seconds": 1}}),
+            json!({"kind": "chat", "audio_seconds": "inf"}),
+        ] {
+            assert_eq!(
+                calculate_billing_for_segments(&json!([segment])),
+                Err(AiPricingError::InvalidValue),
+                "{segment}"
+            );
+        }
+        assert_eq!(
+            calculate_billing_for_segments(&json!([{
+                "kind": "transcribe",
+                "model": "whisper-large-v3",
+                "audio_seconds": 1e300
+            }])),
+            Err(AiPricingError::Overflow)
+        );
+    }
+
+    #[test]
+    fn legacy_transcriptions_name_the_explicit_provider_when_usage_is_missing()
+    -> Result<(), AiPricingError> {
+        let output = calculate_billing_for_segments(&json!([{
+            "kind": "transcribe",
+            "model": "groq/whisper-large-v3",
+            "source": "archive",
+            "audio_seconds": true
+        }, {
+            "kind": "transcribe",
+            "model": "groq/whisper-large-v3",
+            "source": "archive"
+        }]))?;
+        // A boolean `true` duration counts as one second, billed at the minimum.
+        assert_eq!(output["model_breakdown"][0]["usd_micros"], 309);
+        assert_eq!(output["segment_breakdown"][0]["provider"], "archive");
+        assert_eq!(
+            output["unsupported_notes"],
+            json!(["missing_usage_or_cost:segment=1:provider=archive:model=groq/whisper-large-v3"])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn token_counts_beyond_i64_saturate() -> Result<(), AiPricingError> {
+        let output = calculate_billing_for_segments(&json!([{
+            "kind": "chat",
+            "usage": {"input_tokens": u64::MAX, "cost": "0.000001"}
+        }]))?;
+        assert_eq!(output["model_breakdown"][0]["input_tokens"], i64::MAX);
         Ok(())
     }
 }

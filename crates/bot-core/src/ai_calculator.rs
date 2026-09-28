@@ -180,19 +180,16 @@ fn tokenize(expression: &str) -> Result<Vec<Token>, CalculationError> {
     Ok(tokens)
 }
 
+/// Every unary operator and primary consumes a token, so recursion is bounded
+/// by the tokenizer's `MAX_SYNTAX_NODES` limit.
 struct Parser<'a> {
     tokens: &'a [Token],
     index: usize,
-    nodes: usize,
 }
 
 impl<'a> Parser<'a> {
     const fn new(tokens: &'a [Token]) -> Self {
-        Self {
-            tokens,
-            index: 0,
-            nodes: 0,
-        }
+        Self { tokens, index: 0 }
     }
 
     fn parse(mut self) -> Result<Number, CalculationError> {
@@ -231,12 +228,10 @@ impl<'a> Parser<'a> {
         match self.operator() {
             Some(Operator::Add) => {
                 self.index += 1;
-                self.bump_node()?;
                 self.parse_unary()
             }
             Some(Operator::Subtract) => {
                 self.index += 1;
-                self.bump_node()?;
                 negate(self.parse_unary()?)
             }
             _ => self.parse_power(),
@@ -253,7 +248,6 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_primary(&mut self) -> Result<Number, CalculationError> {
-        self.bump_node()?;
         match self.tokens.get(self.index) {
             Some(Token::Number(raw)) => {
                 self.index += 1;
@@ -276,15 +270,6 @@ impl<'a> Parser<'a> {
         match self.tokens.get(self.index) {
             Some(Token::Operator(operator)) => Some(*operator),
             _ => None,
-        }
-    }
-
-    fn bump_node(&mut self) -> Result<(), CalculationError> {
-        self.nodes += 1;
-        if self.nodes > MAX_SYNTAX_NODES {
-            Err(CalculationError::TooLong)
-        } else {
-            Ok(())
         }
     }
 }
@@ -495,5 +480,12 @@ mod tests {
             calculate_expression("2 ** 100001", Locale::En),
             "expression is too long"
         );
+    }
+
+    #[test]
+    fn integer_subtraction_and_overflowing_floats_render_exactly() {
+        assert_eq!(calculate_expression("10 - 3", Locale::En), "7");
+        assert_eq!(calculate_expression("1e308 * 10", Locale::En), "inf");
+        assert_eq!(calculate_expression("0 - 1e308 * 10", Locale::En), "-inf");
     }
 }

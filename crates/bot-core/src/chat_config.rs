@@ -171,4 +171,58 @@ mod tests {
             Err(ChatConfigError::InvalidObject)
         );
     }
+
+    #[test]
+    fn coerces_python_style_scalars_and_rejects_structured_integers() {
+        let config = ChatConfig::from_json(&json!({
+            "language": null,
+            "link_mode": true,
+            "ai_command_followups": false,
+            "ignore_link_fix_followups": " Disabled ",
+            "ai_random_replies": "maybe",
+            "timezone_offset": true,
+            "creditless_user_hourly_limit": 3.7
+        }));
+        let defaults = ChatConfig::default();
+        assert_eq!(
+            config,
+            Ok(ChatConfig {
+                language: "None".to_owned(),
+                link_mode: "True".to_owned(),
+                ai_command_followups: false,
+                ignore_link_fix_followups: false,
+                timezone_offset: 1,
+                ai_random_replies: defaults.ai_random_replies,
+                creditless_user_hourly_limit: 3,
+            })
+        );
+        let mixed = ChatConfig::from_json(&json!({
+            "language": false,
+            "link_mode": 5,
+            "timezone_offset": false,
+            "ai_random_replies": [1]
+        }));
+        assert_eq!(
+            mixed.as_ref().map(|config| (
+                config.language.as_str(),
+                config.link_mode.as_str(),
+                config.timezone_offset,
+                config.ai_random_replies
+            )),
+            Ok(("False", "5", 0, defaults.ai_random_replies))
+        );
+        let structured = ChatConfig::from_json(&json!({"language": ["es"], "link_mode": {"a": 1}}));
+        assert_eq!(
+            structured
+                .as_ref()
+                .map(|config| (config.language.as_str(), config.link_mode.as_str())),
+            Ok(("[\"es\"]", "{\"a\":1}"))
+        );
+        for field in ["timezone_offset", "creditless_user_hourly_limit"] {
+            assert_eq!(
+                ChatConfig::from_json(&json!({ field: null })),
+                Err(ChatConfigError::InvalidInteger { field })
+            );
+        }
+    }
 }

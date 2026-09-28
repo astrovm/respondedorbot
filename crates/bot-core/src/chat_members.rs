@@ -157,4 +157,12 @@ mod tests {
             "Known members:\n- A (@a), seen a few seconds ago\n- B, seen 10 min ago\n- C, seen 2 h ago\n- D, seen 1 d ago"
         );
     }
+
+    #[test]
+    fn empty_member_lists_are_localized_in_english() {
+        assert_eq!(
+            render_chat_members(&[], 0, Locale::En),
+            "I do not know anyone in this chat yet"
+        );
+    }
 }

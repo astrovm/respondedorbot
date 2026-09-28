@@ -29,10 +29,11 @@ pub enum FeedItemError {
 }
 
 fn extract_integer(pattern: &'static str, text: &str) -> Result<Option<i64>, FeedItemError> {
-    let Some(captures) = cached_regex(pattern).and_then(|regex| regex.captures(text)) else {
-        return Ok(None);
-    };
-    let Some(value) = captures.get(1) else {
+    // Every caller's pattern has a mandatory capture group.
+    let Some(value) = cached_regex(pattern)
+        .and_then(|regex| regex.captures(text))
+        .and_then(|captures| captures.get(1))
+    else {
         return Ok(None);
     };
     value
@@ -167,5 +168,34 @@ mod tests {
             "- Synthetic story (99 pts, 12 comments) → https://example.test/story"
         );
         assert_eq!(format_items(&[], true, "no data", "comments"), "- no data");
+    }
+
+    #[test]
+    fn items_without_metadata_render_without_stats() {
+        assert_eq!(
+            normalize_feed_item("Plain", "https://plain.test", "no metadata here"),
+            Ok(Some(HackerNewsItem {
+                title: "Plain".to_owned(),
+                url: "https://plain.test".to_owned(),
+                points: None,
+                comments: None,
+                comments_url: String::new(),
+            }))
+        );
+    }
+
+    #[test]
+    fn items_without_counts_render_just_title_and_link() {
+        let items = [HackerNewsRenderItem {
+            title: "Plain".to_owned(),
+            url: "https://plain.test".to_owned(),
+            points: None,
+            comments: None,
+            comments_url: String::new(),
+        }];
+        assert_eq!(
+            format_items(&items, true, "no data", "comments"),
+            "- Plain → https://plain.test"
+        );
     }
 }

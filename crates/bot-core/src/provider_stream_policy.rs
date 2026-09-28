@@ -323,4 +323,13 @@ mod tests {
         assert_eq!(actual[1].index, 2);
         assert_eq!(actual[1].name, "other");
     }
+
+    #[test]
+    fn fragment_indexes_accept_python_style_scalars() {
+        assert_eq!(super::stream_fragment_index(&json!(null)), None);
+        assert_eq!(super::stream_fragment_index(&json!(true)), Some(1));
+        assert_eq!(super::stream_fragment_index(&json!(false)), Some(0));
+        assert_eq!(super::stream_fragment_index(&json!(u64::MAX)), None);
+        assert_eq!(super::stream_fragment_index(&json!(2.0)), Some(2));
+    }
 }

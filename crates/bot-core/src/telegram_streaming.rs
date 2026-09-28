@@ -194,4 +194,11 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn stream_actions_have_stable_names() {
+        assert_eq!(StreamAction::None.as_str(), "none");
+        assert_eq!(StreamAction::Send.as_str(), "send");
+        assert_eq!(StreamAction::Edit.as_str(), "edit");
+    }
 }

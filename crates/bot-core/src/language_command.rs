@@ -108,6 +108,21 @@ mod tests {
         )
     }
 
+    fn sent_message(
+        planned: LanguageCommandPlan,
+    ) -> (crate::telegram_actions::SendMessage, Option<ChatConfig>) {
+        match planned {
+            LanguageCommandPlan::Action {
+                action: TelegramAction::SendMessage(message),
+                updated_config,
+            } => (message, updated_config),
+            _ => (
+                crate::telegram_actions::SendMessage::new(ChatId(0), ""),
+                None,
+            ),
+        }
+    }
+
     #[test]
     fn plans_current_usage_and_persisted_language_changes() {
         let cases = [
@@ -128,14 +143,7 @@ mod tests {
         ];
         for (input, locale, expected_text, expected_update) in cases {
             let planned = plan(input, locale, false);
-            assert!(matches!(planned, LanguageCommandPlan::Action { .. }));
-            let LanguageCommandPlan::Action {
-                action: TelegramAction::SendMessage(message),
-                updated_config,
-            } = planned
-            else {
-                return;
-            };
+            let (message, updated_config) = sent_message(planned);
             assert_eq!(message.text, expected_text);
             assert_eq!(
                 updated_config
@@ -164,5 +172,19 @@ mod tests {
             plan("/other", Locale::Es, false),
             LanguageCommandPlan::NotHandled
         );
+    }
+
+    #[test]
+    fn english_current_language_and_spanish_usage_are_localized() {
+        let text = |planned: LanguageCommandPlan| sent_message(planned).0.text;
+        assert_eq!(
+            text(plan("/language", Locale::En, false)),
+            "Current language: English"
+        );
+        assert_eq!(
+            text(plan("/idioma xx", Locale::Es, false)),
+            "Mandalo así: /idioma [es|en]"
+        );
+        assert_eq!(text(plan("/other", Locale::Es, false)), "");
     }
 }
