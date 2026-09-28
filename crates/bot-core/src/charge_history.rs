@@ -441,11 +441,10 @@ fn allocate_components(total_units: i64, components: Vec<(String, i64)>) -> Vec<
         .collect()
 }
 
-fn activity(metadata: &Map<String, Value>, event_type: &str, locale: Locale) -> &'static str {
+/// Memory compaction is labelled by `entry_components` before this fallback runs.
+fn activity(metadata: &Map<String, Value>, locale: Locale) -> &'static str {
     let usage_tag = text(metadata, "usage_tag");
-    if event_type == "memory_compaction_settlement" || usage_tag.contains("memory_compaction") {
-        label(locale, "memory")
-    } else if usage_tag.contains("youtube_transcript") {
+    if usage_tag.contains("youtube_transcript") {
         label(locale, "transcript")
     } else if usage_tag.contains("transcribe") || usage_tag.contains("audio") {
         label(locale, "audio")
@@ -476,7 +475,7 @@ fn entry_components(entry: &ChargeHistoryEntry, locale: Locale) -> Vec<Component
     let allocated = allocate_components(units, raw_components(&metadata, locale));
     if allocated.is_empty() {
         return vec![Component {
-            label: activity(&metadata, &entry.event_type, locale).to_owned(),
+            label: activity(&metadata, locale).to_owned(),
             units,
             pending,
         }];
@@ -590,13 +589,13 @@ const fn is_leap_year(year: i64) -> bool {
     year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
+/// Callers validate `month` to 1..=12 first.
 const fn days_in_month(year: i64, month: i64) -> i64 {
     match month {
         2 if is_leap_year(year) => 29,
         2 => 28,
         4 | 6 | 9 | 11 => 30,
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        _ => 0,
+        _ => 31,
     }
 }
 
@@ -766,8 +765,8 @@ mod tests {
 
     use super::{
         ChargeHistoryCallbackPlan, ChargeHistoryDirection, ChargeHistoryEntry, ChargeHistoryGroup,
-        ChargeHistoryPage, ChargesCommandContext, ChargesCommandPlan, plan_charge_history_callback,
-        plan_charges_command, render_charge_history_page,
+        ChargeHistoryPage, ChargesCommandContext, ChargesCommandPlan, charge_callback_answer,
+        label, plan_charge_history_callback, plan_charges_command, render_charge_history_page,
     };
     use crate::locale::Locale;
     use crate::telegram_actions::TelegramAction;
@@ -781,6 +780,27 @@ mod tests {
             locale,
             timezone_offset_hours: -3,
             billing_available: true,
+        }
+    }
+
+    fn reply_text(plan: ChargesCommandPlan) -> Option<String> {
+        match plan {
+            ChargesCommandPlan::Reply(TelegramAction::SendMessage(message)) => {
+                assert_eq!(message.reply_to_message_id, Some(MessageId(11)));
+                Some(message.text)
+            }
+            _ => None,
+        }
+    }
+
+    fn callback_alert(plan: ChargeHistoryCallbackPlan) -> Option<(String, bool)> {
+        match plan {
+            ChargeHistoryCallbackPlan::Answer(Some(TelegramAction::AnswerCallback {
+                text,
+                show_alert,
+                ..
+            })) => Some((text.unwrap_or_default(), show_alert)),
+            _ => None,
         }
     }
 
@@ -806,16 +826,19 @@ mod tests {
             ),
             ChargesCommandPlan::Load { limit: 20, .. }
         ));
-        let ChargesCommandPlan::Reply(TelegramAction::SendMessage(message)) =
-            plan_charges_command("/charges 1 2", "", context(Locale::En))
-        else {
-            return;
-        };
-        assert_eq!(message.text, "Usage: /charges [count]");
+        assert_eq!(
+            reply_text(plan_charges_command(
+                "/charges 1 2",
+                "",
+                context(Locale::En)
+            ))
+            .as_deref(),
+            Some("Usage: /charges [count]")
+        );
     }
 
     #[test]
-    fn renders_itemized_history_timezone_payer_and_next_page() {
+    fn renders_itemized_history_timezone_payer_and_next_page() -> Result<(), String> {
         let page = ChargeHistoryPage {
             groups: vec![
                 ChargeHistoryGroup {
@@ -859,14 +882,13 @@ mod tests {
             text,
             "Gastos de IA\n\n26/08 14:32 | 0.08 cr\n  respuesta 0.03 cr\n  web (2x) 0.05 cr\n\n26/08 13:00 | audio: 0.07 cr (grupo)"
         );
-        let Some(keyboard) = keyboard else {
-            return;
-        };
+        let keyboard = keyboard.ok_or("history keyboard")?;
         assert_eq!(keyboard.inline_keyboard[0][0].text, "Más antiguos ›");
         assert_eq!(
             keyboard.inline_keyboard[0][0].callback_data.as_deref(),
             Some("chg:55:2:o:29:-180")
         );
+        Ok(())
     }
 
     #[test]
@@ -988,20 +1010,262 @@ mod tests {
             ("chg:55:2:x:29:-180", Some(55), "This button expired"),
             ("chg:55:2:o:29:-180", Some(99), "This history is not yours"),
         ] {
-            let ChargeHistoryCallbackPlan::Answer(Some(TelegramAction::AnswerCallback {
-                text,
-                show_alert,
-                ..
-            })) = plan_charge_history_callback(Some("cb"), data, requester, Locale::En)
-            else {
-                return;
-            };
-            assert_eq!(text.as_deref(), Some(expected));
-            assert!(show_alert);
+            assert_eq!(
+                callback_alert(plan_charge_history_callback(
+                    Some("cb"),
+                    data,
+                    requester,
+                    Locale::En
+                )),
+                Some((expected.to_owned(), true))
+            );
         }
         assert_eq!(
             plan_charge_history_callback(None, "broken", None, Locale::Es),
             ChargeHistoryCallbackPlan::Answer(None)
         );
+    }
+
+    #[test]
+    fn command_plan_rejects_other_commands_missing_billing_users_and_bad_counts() {
+        assert_eq!(
+            plan_charges_command("/start", "", context(Locale::En)),
+            ChargesCommandPlan::NotHandled
+        );
+        let unavailable = ChargesCommandContext {
+            billing_available: false,
+            ..context(Locale::En)
+        };
+        assert_eq!(
+            reply_text(plan_charges_command("/charges", "", unavailable)).as_deref(),
+            Some("AI credits are unavailable right now. Try again later or tell the admin")
+        );
+        for (locale, expected) in [
+            (
+                Locale::Es,
+                "No pude identificar tu usuario para ver tus gastos",
+            ),
+            (
+                Locale::En,
+                "I could not identify your user to load your spending",
+            ),
+        ] {
+            let anonymous = ChargesCommandContext {
+                user_id: None,
+                ..context(locale)
+            };
+            assert_eq!(
+                reply_text(plan_charges_command("/charges", "", anonymous)).as_deref(),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            reply_text(plan_charges_command("/charges 0", "", context(Locale::En))).as_deref(),
+            Some("Usage: /charges [count]")
+        );
+        assert_eq!(
+            reply_text(plan_charges_command(
+                "/gastos muchos",
+                "",
+                context(Locale::Es)
+            ))
+            .as_deref(),
+            Some("Mandalo así: /gastos [cantidad]")
+        );
+        // A load plan is not a reply.
+        assert_eq!(
+            reply_text(plan_charges_command("/charges", "", context(Locale::En))),
+            None
+        );
+    }
+
+    #[test]
+    fn callback_helpers_localize_ownership_and_build_answers() {
+        assert_eq!(ChargeHistoryDirection::Older.as_str(), "older");
+        assert_eq!(ChargeHistoryDirection::Newer.as_str(), "newer");
+        assert_eq!(
+            callback_alert(plan_charge_history_callback(
+                Some("cb"),
+                "chg:55:2:o:29:-180",
+                Some(1),
+                Locale::Es
+            )),
+            Some(("Este historial no es tuyo".to_owned(), true))
+        );
+        assert_eq!(
+            callback_alert(plan_charge_history_callback(
+                Some("cb"),
+                "chg:55:2:o:29:-180",
+                Some(55),
+                Locale::Es
+            )),
+            None
+        );
+        assert_eq!(
+            charge_callback_answer(Some("cb-9"), Some("Listo"), false),
+            Some(TelegramAction::AnswerCallback {
+                callback_id: "cb-9".to_owned(),
+                text: Some("Listo".to_owned()),
+                show_alert: false,
+            })
+        );
+        assert_eq!(charge_callback_answer(None, Some("Listo"), true), None);
+        assert_eq!(label(Locale::En, "unknown"), "");
+    }
+
+    fn single_entry_group(
+        cursor_id: i64,
+        created_at: &str,
+        event_type: &str,
+        metadata: serde_json::Value,
+    ) -> ChargeHistoryGroup {
+        ChargeHistoryGroup {
+            cursor_id,
+            created_at: created_at.to_owned(),
+            entries: vec![ChargeHistoryEntry {
+                id: cursor_id,
+                event_type: event_type.to_owned(),
+                metadata,
+            }],
+        }
+    }
+
+    #[test]
+    fn derives_charged_units_from_reserves_settlements_and_legacy_fields() {
+        let page = ChargeHistoryPage {
+            groups: vec![
+                single_entry_group(
+                    5,
+                    "2026-08-26T17:00:00Z",
+                    "ai_reserve",
+                    json!({"reserved_credits": "25"}),
+                ),
+                single_entry_group(
+                    4,
+                    "2026-08-26T17:00:00-03:00",
+                    "ai_settlement_result",
+                    json!({
+                        "usage_tag": "youtube_transcript:1",
+                        "reserved_credit_units_total": 100,
+                        "refunded_credit_units": 30,
+                        "extra_charged_credits": 5,
+                        "debt_applied_credit_units": 2
+                    }),
+                ),
+                single_entry_group(
+                    3,
+                    "2026-08-26T17:00:00+05:30",
+                    "ai_settlement_result",
+                    json!({"usage_tag": "image_generation", "settled_credits": 12}),
+                ),
+                single_entry_group(
+                    2,
+                    "2026-08-26T17:00",
+                    "ai_settlement_result",
+                    json!({"reserved_credits": 10, "refunded_credits": 50}),
+                ),
+                single_entry_group(
+                    1,
+                    "2026-08-26T17:00",
+                    "memory_compaction_settlement",
+                    json!({"actual_credit_units": 3}),
+                ),
+            ],
+            has_newer: true,
+            has_older: false,
+            newer_cursor: Some(40),
+            older_cursor: None,
+        };
+        let (text, keyboard) = render_charge_history_page(&page, 55, 3, 0, Locale::En);
+        assert_eq!(
+            text,
+            "AI spending\n\n\
+             26/08 17:00 | response: 0.25 cr (pending)\n\n\
+             26/08 20:00 | transcript: 0.77 cr\n\n\
+             26/08 11:30 | image: 0.12 cr\n\n\
+             26/08 17:00 | response: 0.00 cr\n\n\
+             26/08 17:00 | memory: 0.03 cr"
+        );
+        let rows = keyboard.map(|keyboard| keyboard.inline_keyboard);
+        let first_row = rows.as_ref().and_then(|rows| rows.first());
+        assert_eq!(
+            first_row.map(|row| (row[0].text.as_str(), row[0].callback_data.as_deref())),
+            Some(("‹ Newer", Some("chg:55:3:n:40:0")))
+        );
+        assert_eq!(rows.map(|rows| rows.len()), Some(2));
+    }
+
+    #[test]
+    fn allocates_rounded_components_and_ranks_them() {
+        let metadata = json!({
+            "charged_credit_units_total": 10,
+            "model_breakdown": [
+                {"kind": "chat", "usd_micros": 10},
+                {"kind": "chat", "usd_micros": 10},
+                {"kind": "transcribe", "usd_micros": 10},
+                {"kind": "vision", "usd_micros": 10}
+            ],
+            "tool_breakdown": [
+                {"tool": "calculator", "count": 1, "usd_micros": 10},
+                {"tool": "web_search", "count": 1, "usd_micros": 10}
+            ]
+        });
+        let page = ChargeHistoryPage {
+            groups: vec![single_entry_group(
+                9,
+                "2026-08-26T17:00:00+00:00",
+                "ai_settlement_result",
+                metadata,
+            )],
+            has_newer: false,
+            has_older: false,
+            newer_cursor: None,
+            older_cursor: None,
+        };
+        // Largest remainders receive the leftover units in their original order.
+        assert_eq!(
+            render_charge_history_page(&page, 55, 10, 0, Locale::En).0,
+            "AI spending\n\n26/08 17:00 | 0.10 cr\n  response 0.03 cr\n  audio 0.02 cr\n  image 0.02 cr\n  web 0.01 cr\n  tool 0.02 cr"
+        );
+        assert_eq!(
+            render_charge_history_page(&page, 55, 10, 0, Locale::Es).0,
+            "Gastos de IA\n\n26/08 17:00 | 0.10 cr\n  respuesta 0.03 cr\n  audio 0.02 cr\n  imagen 0.02 cr\n  web 0.01 cr\n  herramienta 0.02 cr"
+        );
+    }
+
+    #[test]
+    fn invalid_or_missing_timestamps_render_without_a_date() {
+        for (created_at, expected) in [
+            ("short", None),
+            ("2026-xx-26T17:00", None),
+            ("2026-13-26T17:00", None),
+            ("2026-04-31T17:00", None),
+            ("2023-02-29T10:00", None),
+            ("2024-02-29T10:00", Some("29/02 10:00")),
+            ("2026-08-26T24:00", None),
+        ] {
+            for (locale, fallback) in [(Locale::Es, "sin fecha"), (Locale::En, "no date")] {
+                let page = ChargeHistoryPage {
+                    groups: vec![single_entry_group(
+                        1,
+                        created_at,
+                        "ai_settlement_result",
+                        json!({"settled_credit_units": 1}),
+                    )],
+                    has_newer: false,
+                    has_older: false,
+                    newer_cursor: None,
+                    older_cursor: None,
+                };
+                let text = render_charge_history_page(&page, 55, 10, 0, locale).0;
+                let stamp = text
+                    .lines()
+                    .nth(2)
+                    .and_then(|line| line.split(" | ").next())
+                    .unwrap_or_default()
+                    .to_owned();
+                assert_eq!(stamp, expected.unwrap_or(fallback), "{created_at}");
+            }
+        }
     }
 }

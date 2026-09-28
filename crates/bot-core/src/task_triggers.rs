@@ -381,4 +381,111 @@ mod tests {
             Err(TriggerError::UnsupportedType)
         );
     }
+
+    #[test]
+    fn delays_and_intervals_reject_every_out_of_range_shape() {
+        let delay = |delay_seconds| TaskTriggerInput {
+            delay_seconds,
+            ..input(TriggerConfigInput::Missing)
+        };
+        assert_eq!(
+            parse_task_trigger(delay(IntegerInput::Value(86_400 * 3_650 + 1))),
+            Err(TriggerError::DelayMaximum)
+        );
+        for below in [
+            IntegerInput::Value(0),
+            IntegerInput::BelowRange,
+            IntegerInput::Invalid,
+        ] {
+            assert_eq!(
+                parse_task_trigger(delay(below)),
+                Err(TriggerError::DelayPositive)
+            );
+        }
+        let interval = |interval_seconds| TaskTriggerInput {
+            interval_seconds,
+            ..input(TriggerConfigInput::Missing)
+        };
+        for above in [
+            IntegerInput::Value(86_400 * 7 + 1),
+            IntegerInput::AboveRange,
+        ] {
+            assert_eq!(
+                parse_task_trigger(interval(above)),
+                Err(TriggerError::IntervalMaximum)
+            );
+        }
+        assert_eq!(
+            parse_task_trigger(input(TriggerConfigInput::IntervalDays {
+                days: IntegerInput::AboveRange
+            })),
+            Err(TriggerError::DaysMaximum)
+        );
+        assert_eq!(
+            parse_task_trigger(input(TriggerConfigInput::IntervalDays {
+                days: IntegerInput::Value(90)
+            })),
+            Ok(TaskTrigger::IntervalDays { days: 90 })
+        );
+    }
+
+    #[test]
+    fn cron_fields_report_their_own_errors_and_accept_every_weekday_alias() {
+        let cron = |hour, minute, weekdays: Option<&str>, day| {
+            parse_task_trigger(input(TriggerConfigInput::Cron {
+                hour,
+                minute,
+                weekdays: weekdays.map(str::to_owned),
+                day,
+            }))
+        };
+        let ok = IntegerInput::Value(1);
+        assert_eq!(
+            cron(IntegerInput::Invalid, ok, None, IntegerInput::Missing),
+            Err(TriggerError::HourRange)
+        );
+        assert_eq!(
+            cron(ok, IntegerInput::Missing, None, IntegerInput::Missing),
+            Err(TriggerError::MinuteRequired)
+        );
+        assert_eq!(
+            cron(ok, IntegerInput::Value(60), None, IntegerInput::Missing),
+            Err(TriggerError::MinuteRange)
+        );
+        assert_eq!(
+            cron(ok, ok, Some("xyz"), IntegerInput::Missing),
+            Err(TriggerError::Weekday {
+                value: "xyz".to_owned()
+            })
+        );
+        assert_eq!(
+            cron(ok, ok, None, IntegerInput::Value(32)),
+            Err(TriggerError::DayRange)
+        );
+        assert_eq!(
+            cron(ok, ok, Some(""), IntegerInput::Missing),
+            Ok(TaskTrigger::Cron {
+                hour: 1,
+                minute: 1,
+                weekdays: Vec::new(),
+                day: None,
+            })
+        );
+        assert_eq!(
+            cron(
+                ok,
+                ok,
+                Some("lun,mar,mie,jue,vie,sab,dom,Sun"),
+                IntegerInput::Missing
+            ),
+            Ok(TaskTrigger::Cron {
+                hour: 1,
+                minute: 1,
+                weekdays: ["mon", "tue", "wed", "thu", "fri", "sat", "sun", "sun"]
+                    .map(str::to_owned)
+                    .to_vec(),
+                day: None,
+            })
+        );
+    }
 }

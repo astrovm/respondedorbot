@@ -322,11 +322,10 @@ mod tests {
                 usdt_ask: 200.0,
                 usdt_bid: 190.0,
             },
-        )
-        .unwrap_or_else(|_| unreachable!());
+        );
         assert_eq!(
-            render_devo_result(&summary, Locale::Es),
-            "Arbitraje tarjeta y crypto\nGanancia: 62.68% (comisión 0.5%)\n\nCotizaciones en ARS\nOficial: $100\nUSDT: $195\nTarjeta: $150"
+            summary.map(|summary| render_devo_result(&summary, Locale::Es)),
+            Ok("Arbitraje tarjeta y crypto\nGanancia: 62.68% (comisión 0.5%)\n\nCotizaciones en ARS\nOficial: $100\nUSDT: $195\nTarjeta: $150".to_owned())
         );
         let purchase = calculate_devo(
             0.005,
@@ -337,11 +336,55 @@ mod tests {
                 usdt_ask: 200.0,
                 usdt_bid: 190.0,
             },
-        )
-        .unwrap_or_else(|_| unreachable!());
+        );
         assert_eq!(
-            render_devo_result(&purchase, Locale::En),
-            "Card and crypto arbitrage\nProfit: 62.68% (fee 0.5%)\n\nRates in ARS\nOfficial: 100\nUSDT: 195\nCard: 150\n\n100 USD card purchase\n= 15,000 ARS = 76.92 USDT\nProfit: 9,402.5 ARS / 48.22 USDT\nTotal: 24,402.5 ARS / 125.14 USDT"
+            purchase.map(|purchase| render_devo_result(&purchase, Locale::En)),
+            Ok("Card and crypto arbitrage\nProfit: 62.68% (fee 0.5%)\n\nRates in ARS\nOfficial: 100\nUSDT: 195\nCard: 150\n\n100 USD card purchase\n= 15,000 ARS = 76.92 USDT\nProfit: 9,402.5 ARS / 48.22 USDT\nTotal: 24,402.5 ARS / 125.14 USDT".to_owned())
+        );
+    }
+
+    #[test]
+    fn remaining_replies_and_spanish_purchase_are_localized() {
+        assert_eq!(parse_devo_input("abc, 100"), Ok(DevoInput::Usage));
+        assert_eq!(
+            render_devo_reply(DevoReply::Usage, Locale::Es),
+            "Usá: /devo <comisión %>[, <monto de la compra en USD>]\nEjemplo: /devo 0.5, 100"
+        );
+        assert_eq!(
+            render_devo_reply(DevoReply::Usage, Locale::En),
+            "Usage: /devo <fee %>[, <purchase amount in USD>]\nExample: /devo 0.5, 100"
+        );
+        assert_eq!(
+            render_devo_reply(DevoReply::InputError, Locale::Es),
+            "Mandá bien los datos: comisión entre 0 y 100 y monto de compra positivo"
+        );
+        assert_eq!(
+            render_devo_reply(DevoReply::LoadError, Locale::En),
+            "I could not load dollar rates. Try again later"
+        );
+        let quotes = DevoQuotes {
+            official: 100.0,
+            card: 150.0,
+            usdt_ask: 200.0,
+            usdt_bid: 190.0,
+        };
+        let purchase = calculate_devo(0.005, 100.0, quotes);
+        assert_eq!(
+            purchase.map(|result| render_devo_result(&result, Locale::Es)),
+            Ok("Arbitraje tarjeta y crypto\nGanancia: 62.68% (comisión 0.5%)\n\nCotizaciones en ARS\nOficial: $100\nUSDT: $195\nTarjeta: $150\n\nCompra de 100 USD con tarjeta\n= $15,000 = 76.92 USDT\nGanancia: $9,402.5 / 48.22 USDT\nTotal: $24,402.5 / 125.14 USDT".to_owned())
+        );
+        // A missing official rate propagates as an explicit "nan" instead of a number.
+        let unknown = calculate_devo(
+            0.005,
+            0.0,
+            DevoQuotes {
+                official: f64::NAN,
+                ..quotes
+            },
+        );
+        assert_eq!(
+            unknown.map(|result| (result.profit, result.official)),
+            Ok(("nan".to_owned(), "nan".to_owned()))
         );
     }
 }

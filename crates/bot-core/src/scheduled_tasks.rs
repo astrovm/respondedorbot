@@ -136,58 +136,41 @@ fn interval_seconds(schedule: &TaskSchedule) -> Result<Option<i64>, TaskStateErr
 }
 
 fn cron_matches(
-    schedule: &TaskSchedule,
+    weekdays: &[Weekday],
+    day: Option<u32>,
     weekday: Weekday,
     day_of_month: u32,
-) -> Result<bool, TaskStateError> {
-    let TaskSchedule::Cron {
-        hour,
-        minute,
-        weekdays,
-        day,
-    } = schedule
-    else {
-        return Err(TaskStateError::InvalidCron);
-    };
-    if *hour > 23 || *minute > 59 || day.is_some_and(|value| !(1..=31).contains(&value)) {
-        return Err(TaskStateError::InvalidCron);
-    }
-    Ok((weekdays.is_empty() || weekdays.contains(&weekday))
-        && day.is_none_or(|expected| expected == day_of_month))
+) -> bool {
+    (weekdays.is_empty() || weekdays.contains(&weekday))
+        && day.is_none_or(|expected| expected == day_of_month)
 }
 
 fn next_cron_occurrence(
-    schedule: &TaskSchedule,
+    (hour, minute, weekdays, day): (u32, u32, &[Weekday], Option<u32>),
     timezone_offset: i32,
     after: i64,
 ) -> Result<i64, TaskStateError> {
-    let TaskSchedule::Cron { hour, minute, .. } = schedule else {
-        return Err(TaskStateError::InvalidCron);
-    };
-    if *hour > 23 || *minute > 59 {
+    if hour > 23 || minute > 59 || day.is_some_and(|value| !(1..=31).contains(&value)) {
         return Err(TaskStateError::InvalidCron);
     }
     let offset = fixed_offset(timezone_offset)?;
     let local_after = utc_timestamp(after)?.with_timezone(&offset);
-    let mut date = local_after.date_naive();
 
     // Ten years covers every supported monthly schedule while keeping malformed
-    // calendar combinations bounded.
-    for _ in 0..=3_660 {
-        let naive = date
-            .and_hms_opt(*hour, *minute, 0)
-            .ok_or(TaskStateError::InvalidCron)?;
-        let candidate = offset
-            .from_local_datetime(&naive)
-            .single()
-            .ok_or(TaskStateError::InvalidTimestamp)?;
-        if candidate > local_after && cron_matches(schedule, candidate.weekday(), candidate.day())?
-        {
-            return Ok(candidate.with_timezone(&Utc).timestamp());
-        }
-        date = date.succ_opt().ok_or(TaskStateError::CronSearchExhausted)?;
-    }
-    Err(TaskStateError::CronSearchExhausted)
+    // calendar combinations bounded. Validated fields always form a local time,
+    // and a fixed offset maps it to exactly one instant.
+    local_after
+        .date_naive()
+        .iter_days()
+        .take(3_661)
+        .filter_map(|date| date.and_hms_opt(hour, minute, 0))
+        .filter_map(|naive| offset.from_local_datetime(&naive).single())
+        .find(|candidate| {
+            *candidate > local_after
+                && cron_matches(weekdays, day, candidate.weekday(), candidate.day())
+        })
+        .map(|candidate| candidate.with_timezone(&Utc).timestamp())
+        .ok_or(TaskStateError::CronSearchExhausted)
 }
 
 /// Compute the first occurrence after task creation.
@@ -202,18 +185,26 @@ pub fn initial_next_run(
             .checked_add(interval)
             .ok_or(TaskStateError::InvalidTimestamp);
     }
+    // Valid intervals returned above and invalid ones failed, so only
+    // one-shot and cron schedules remain.
     match schedule {
-        TaskSchedule::Once => created_at
+        TaskSchedule::Cron {
+            hour,
+            minute,
+            weekdays,
+            day,
+        } => next_cron_occurrence(
+            (*hour, *minute, weekdays, *day),
+            timezone_offset,
+            created_at,
+        ),
+        _ => created_at
             .checked_add(
                 delay_seconds
                     .filter(|value| *value > 0)
                     .ok_or(TaskStateError::InvalidInterval)?,
             )
             .ok_or(TaskStateError::InvalidTimestamp),
-        TaskSchedule::Cron { .. } => next_cron_occurrence(schedule, timezone_offset, created_at),
-        TaskSchedule::IntervalSeconds { .. } | TaskSchedule::IntervalDays { .. } => {
-            Err(TaskStateError::InvalidInterval)
-        }
     }
 }
 
@@ -237,14 +228,17 @@ pub fn next_run_after(
             .map(Some)
             .ok_or(TaskStateError::InvalidTimestamp);
     }
+    // As above, only one-shot and cron schedules reach this point.
     match schedule {
-        TaskSchedule::Once => Ok(None),
-        TaskSchedule::Cron { .. } => {
-            next_cron_occurrence(schedule, timezone_offset, after).map(Some)
+        TaskSchedule::Cron {
+            hour,
+            minute,
+            weekdays,
+            day,
+        } => {
+            next_cron_occurrence((*hour, *minute, weekdays, *day), timezone_offset, after).map(Some)
         }
-        TaskSchedule::IntervalSeconds { .. } | TaskSchedule::IntervalDays { .. } => {
-            Err(TaskStateError::InvalidInterval)
-        }
+        _ => Ok(None),
     }
 }
 
@@ -492,5 +486,82 @@ mod tests {
             assert_eq!(weekday_name(weekday), name);
         }
         assert_eq!(parse_weekday("bad"), Err(TaskStateError::InvalidCron));
+    }
+
+    #[test]
+    fn rejects_bad_days_delays_timestamps_and_overflowing_intervals() {
+        let cron = |day| TaskSchedule::Cron {
+            hour: 9,
+            minute: 0,
+            weekdays: vec![Weekday::Mon],
+            day,
+        };
+        assert_eq!(
+            initial_next_run(&cron(Some(32)), 0, 1_000, None),
+            Err(TaskStateError::InvalidCron)
+        );
+        assert_eq!(
+            initial_next_run(&TaskSchedule::Once, 0, 1_000, None),
+            Err(TaskStateError::InvalidInterval)
+        );
+        assert_eq!(
+            initial_next_run(&TaskSchedule::Once, 0, 1_000, Some(0)),
+            Err(TaskStateError::InvalidInterval)
+        );
+        assert_eq!(
+            initial_next_run(&TaskSchedule::Once, 0, i64::MAX, Some(1)),
+            Err(TaskStateError::InvalidTimestamp)
+        );
+        assert_eq!(
+            initial_next_run(&cron(None), 0, i64::MAX, None),
+            Err(TaskStateError::InvalidTimestamp)
+        );
+        assert_eq!(
+            next_run_after(
+                &TaskSchedule::IntervalSeconds {
+                    seconds: i64::MAX / 2
+                },
+                0,
+                0,
+                i64::MAX
+            ),
+            Err(TaskStateError::InvalidTimestamp)
+        );
+        assert_eq!(
+            next_run_after(&TaskSchedule::Once, 0, 1_000, 2_000),
+            Ok(None)
+        );
+        // Monday 31 August 2026 09:00 UTC is the first Monday the 31st after 1 June 2026.
+        assert_eq!(
+            initial_next_run(&cron(Some(31)), 0, timestamp(2026, 6, 1, 0, 0), None),
+            Ok(timestamp(2026, 8, 31, 9, 0))
+        );
+        assert_eq!(
+            evaluate_due(&task(TaskSchedule::Once, None), 5_000),
+            Ok(DueDecision::Wait)
+        );
+    }
+
+    #[test]
+    fn cron_and_invalid_interval_schedules_advance_or_fail_explicitly() {
+        let cron = TaskSchedule::Cron {
+            hour: 9,
+            minute: 30,
+            weekdays: Vec::new(),
+            day: None,
+        };
+        assert_eq!(
+            next_run_after(
+                &cron,
+                0,
+                timestamp(2026, 6, 1, 9, 30),
+                timestamp(2026, 6, 1, 10, 0)
+            ),
+            Ok(Some(timestamp(2026, 6, 2, 9, 30)))
+        );
+        assert_eq!(
+            next_run_after(&TaskSchedule::IntervalDays { days: 0 }, 0, 0, 10),
+            Err(TaskStateError::InvalidInterval)
+        );
     }
 }

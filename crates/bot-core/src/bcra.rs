@@ -62,6 +62,10 @@ fn matches(value: &str, pattern: &'static str) -> bool {
 
 fn trimmed(value: f64, decimals: usize) -> String {
     let formatted = format!("{value:.decimals$}");
+    // Whole numbers have no fractional zeros to drop: 700 must stay 700.
+    if !formatted.contains('.') {
+        return formatted;
+    }
     formatted
         .trim_end_matches('0')
         .trim_end_matches('.')
@@ -605,5 +609,121 @@ mod tests {
         assert!(text.contains("Reserves: USD 25,000 million"));
         assert!(text.contains("Country risk: 55.5 bps"));
         assert!(!text.contains("yesterday"));
+    }
+
+    #[test]
+    fn renders_every_english_indicator_with_iso_dates_and_notes() {
+        let variables = [
+            ("Base monetaria", "5.000.000,50"),
+            ("Inflación mensual", "5,2"),
+            ("Inflación interanual", "150,5"),
+            ("Inflación esperada", "3,1"),
+            ("Tipo de cambio minorista promedio vendedor", "1.250,75"),
+            ("Tipo de cambio mayorista de referencia", "1.180,25"),
+        ]
+        .into_iter()
+        .map(|(description, value)| BcraVariable {
+            description: description.to_owned(),
+            value: value.to_owned(),
+            date: "2025-01-15".to_owned(),
+        })
+        .collect();
+        let snapshot = BcraSnapshot {
+            variables,
+            bands: Some(BcraBands {
+                lower: 950.0,
+                upper: 1_460.5,
+                date: String::new(),
+                lower_change: None,
+                upper_change: None,
+            }),
+            itcrm: Some(ItcrmDetails {
+                value: 99.5,
+                date: String::new(),
+            }),
+            country_risk: Some(CountryRisk {
+                value_bps: 700.0,
+                delta_one_day: Some(150.0),
+                valuation_label: None,
+            }),
+            stale: true,
+        };
+        let text = render_bcra(&snapshot, Locale::En, days_from_civil(2025, 1, 25));
+        assert_eq!(
+            text,
+            "BCRA indicators as of 2025-01-15\n\n\
+             Monetary base: $5,000 million pesos\n\
+             Monthly inflation: 5.20%\n\
+             Yearly inflation: 150.5%\n\
+             Expected inflation: 3.10%\n\
+             Retail dollar: $1,250.75\n\
+             Wholesale dollar: $1,180.25\n\
+             Country risk: 700 bps (+150 bps from yesterday)\n\
+             Exchange-rate bands: floor $950 / ceiling $1,460.5\n\
+             TCRM: 99.5\n\n\
+             There is no new BCRA update; showing the latest data\n\
+             BCRA data is 10 days old. Check again later"
+        );
+    }
+
+    #[test]
+    fn spanish_titles_without_a_shared_day_and_unparsable_values_stay_verbatim() {
+        let variable = |description: &str, value: &str, date: &str| BcraVariable {
+            description: description.to_owned(),
+            value: value.to_owned(),
+            date: date.to_owned(),
+        };
+        let snapshot = BcraSnapshot {
+            variables: vec![
+                variable("Base monetaria", "s/d", "sin fecha"),
+                variable("Tasa TAMAR", "n/a", "15/01/2025"),
+                variable("Reservas internacionales", "1.500", "2025-01"),
+            ],
+            bands: None,
+            itcrm: Some(ItcrmDetails {
+                value: 101.0,
+                date: "15/01/25".to_owned(),
+            }),
+            country_risk: None,
+            stale: false,
+        };
+        let text = render_bcra(&snapshot, Locale::Es, 0);
+        assert_eq!(
+            text,
+            "Indicadores del BCRA\n\n\
+             Base monetaria: $s/d mill. pesos (sin fecha)\n\
+             TAMAR: n/a% (15/01/25)\n\
+             Reservas: USD 1,500 millones (2025-01)\n\
+             TCRM: 101 (15/01/25)"
+        );
+        let empty = BcraSnapshot {
+            variables: Vec::new(),
+            ..snapshot
+        };
+        assert_eq!(
+            render_bcra(&empty, Locale::Es, 0),
+            "No pude conseguir las variables del BCRA. Probá más tarde"
+        );
+    }
+
+    #[test]
+    fn helpers_group_signed_decimals_and_ignore_unknown_series() {
+        assert_eq!(super::grouped(-1_234_567.25, 2), "-1,234,567.25");
+        assert_eq!(super::grouped(999.0, 0), "999");
+        assert_eq!(
+            super::variable_line(
+                &BcraVariable {
+                    description: "Serie desconocida".to_owned(),
+                    value: "1".to_owned(),
+                    date: String::new(),
+                },
+                Locale::En,
+                None,
+            ),
+            None
+        );
+        assert_eq!(super::parse_date("2025-01"), None);
+        assert_eq!(super::parse_date("2025-01-15 10:00"), Some((2025, 1, 15)));
+        assert_eq!(super::parse_date("15/01/25"), Some((2025, 1, 15)));
     }
 }

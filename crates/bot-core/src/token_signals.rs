@@ -1241,8 +1241,9 @@ mod tests {
         format_signal_caption, format_signal_caption_for_period,
         format_signal_caption_for_period_with_candles, format_signal_quote,
         format_signal_quote_with_candles, has_candle_change, has_usable_chart,
-        is_usable_chart_candle, normalize_token_name, pair_rank, signal_state_key,
-        span_period_label, stable_signal_id, token_from_pair, token_image_url, token_socials,
+        is_usable_chart_candle, normalize_token_name, pair_rank, signal_market_values,
+        signal_state_key, span_period_label, stable_signal_id, token_from_pair, token_image_url,
+        token_socials, trim_decimal,
     };
     use crate::locale::Locale;
 
@@ -1936,5 +1937,170 @@ mod tests {
             assert_eq!(callback_text(key, Locale::En), english);
         }
         assert_eq!(callback_text("unknown", Locale::Es), "This card expired");
+    }
+
+    #[test]
+    fn provider_urls_without_a_marker_or_with_invalid_slugs_are_ignored() {
+        for input in [
+            "https://coinmarketcap.com/exchanges/binance/",
+            "https://coinmarketcap.com/currencies/",
+            "https://coinmarketcap.com/currencies/bad.slug/",
+            "https://www.coingecko.com/en/coins/emoji%F0%9F%9A%80",
+        ] {
+            assert_eq!(detect_signal_query(input), None, "{input}");
+        }
+        assert_eq!(normalize_token_name("Biden-s Laptop"), "bidens laptop");
+        assert_eq!(normalize_token_name("s club"), "s club");
+    }
+
+    #[test]
+    fn market_values_render_price_and_change_or_explicit_gaps() {
+        let signal = signal();
+        assert_eq!(
+            signal_market_values(&signal, None),
+            ("0.0106".to_owned(), "+2.3% 24h".to_owned())
+        );
+        let mut missing = signal;
+        missing.pair.price_usd = json!("0");
+        missing.candles.clear();
+        assert_eq!(
+            signal_market_values(&missing, Some("7d")),
+            ("N/A".to_owned(), "N/A 7d".to_owned())
+        );
+        missing.pair.price_change.h24 = json!(0.01);
+        assert_eq!(signal_market_values(&missing, None).1, "+0% 24h");
+    }
+
+    #[test]
+    fn other_evm_chains_derive_upper_case_tags_and_reject_non_evm_addresses() {
+        let mut base = pair();
+        base.chain_id = "base".to_owned();
+        base.base_token.address = EVM.to_ascii_uppercase().replacen("0X", "0x", 1);
+        assert_eq!(
+            token_from_pair(&base),
+            Some(TokenAddress {
+                chain_id: "base".to_owned(),
+                network: "base".to_owned(),
+                tag: "BASE".to_owned(),
+                address: EVM.to_owned(),
+            })
+        );
+        base.base_token.address = SOL_MINT.to_owned();
+        assert_eq!(token_from_pair(&base), None);
+    }
+
+    #[test]
+    fn socials_fall_back_to_pair_websites_without_pump_metadata() {
+        let mut pair = pair();
+        pair.info.websites = vec![
+            PairWebsite {
+                label: String::new(),
+                url: String::new(),
+            },
+            PairWebsite {
+                label: "Home".to_owned(),
+                url: "https://home.test".to_owned(),
+            },
+            PairWebsite {
+                label: String::new(),
+                url: "https://unlabeled.test".to_owned(),
+            },
+            PairWebsite {
+                label: "Documentation site".to_owned(),
+                url: "https://docs.test".to_owned(),
+            },
+        ];
+        let socials = token_socials(&pair, None);
+        assert_eq!(
+            socials.into_iter().collect::<Vec<_>>(),
+            vec![
+                ("Documentatio".to_owned(), "https://docs.test".to_owned()),
+                ("Web".to_owned(), "https://home.test".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn supply_amounts_use_compact_bands_and_round_up_to_grouped_integers() {
+        assert_eq!(trim_decimal("100".to_owned()), "100");
+        for (supply, expected) in [
+            (2_500_000_000.0, "Supply <b>2.5B</b>"),
+            (1_500.0, "Supply <b>1.5K</b>"),
+            (999.6, "Supply <b>1,000</b>"),
+            (42.0, "Supply <b>42</b>"),
+        ] {
+            let mut signal = signal();
+            signal.supply = Some(supply);
+            let caption = format_signal_caption(&signal, 1_720_000_000);
+            assert!(caption.contains(expected), "{supply}: {caption}");
+        }
+    }
+
+    #[test]
+    fn other_chain_and_pump_fun_cards_use_matching_link_rows() {
+        let mut other = signal();
+        other.token = TokenAddress {
+            chain_id: "base".to_owned(),
+            network: "base".to_owned(),
+            tag: "BASE".to_owned(),
+            address: EVM.to_owned(),
+        };
+        let caption = format_signal_caption(&other, 1_720_000_000);
+        assert!(caption.ends_with(
+            "<a href=\"https://dexscreener.com/base/pair1\">Dexscreener</a> | <a href=\"https://x.com/search?f=live&amp;q=%28%24TRIPLET+OR+0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48%29&amp;src=typed_query\">Search X</a>\n"
+        ), "{caption}");
+        other.pair.pair_address.clear();
+        let caption = format_signal_caption(&other, 1_720_000_000);
+        assert!(caption.contains(&format!("https://dexscreener.com/base/{EVM}")));
+
+        let mut pump = signal();
+        pump.pair.pair_address.clear();
+        pump.pair.url = format!("https://pump.fun/coin/{SOL_MINT}");
+        let caption = format_signal_caption(&pump, 1_720_000_000);
+        assert!(caption.contains(&format!(
+            "<a href=\"https://pump.fun/coin/{SOL_MINT}\">Pump.fun</a> | <a href=\"https://solscan.io/token/{SOL_MINT}\">Explorer</a> | <a href=\"https://x.com/search?f=live&amp;q=%28%24TRIPLET+OR+{SOL_MINT}%29&amp;src=typed_query\">Search X</a>"
+        )), "{caption}");
+        assert!(!caption.contains("GeckoTerminal"));
+    }
+
+    #[test]
+    fn candle_validation_rejects_short_rows_and_reference_outliers() {
+        assert!(!is_usable_chart_candle(&[1.0, 1.0, 1.0, 1.0], None));
+        assert!(!is_usable_chart_candle(
+            &[f64::NAN, 1.0, 1.0, 1.0, 1.0],
+            None
+        ));
+        let candle = [1.0, 10.0, 10.0, 10.0, 10.0];
+        assert!(is_usable_chart_candle(&candle, Some(1.0)));
+        assert!(!is_usable_chart_candle(&candle, Some(0.000_001)));
+        assert!(!is_usable_chart_candle(&candle, Some(1e12)));
+    }
+
+    #[test]
+    fn published_ath_without_any_current_value_reports_a_flat_drawdown() {
+        let mut signal = signal();
+        signal.pair.price_usd = serde_json::Value::Null;
+        signal.pair.market_cap = serde_json::Value::Null;
+        signal.pair.fdv = serde_json::Value::Null;
+        signal.pump = Some(PumpMetadata {
+            ath_market_cap: json!(50_000),
+            complete: true,
+            ..PumpMetadata::default()
+        });
+        let caption = format_signal_caption(&signal, 1_720_000_000);
+        assert!(caption.contains("ATH <b>$50K (+0%)</b>"), "{caption}");
+    }
+
+    #[test]
+    fn negative_grouping_and_candle_ages_are_rendered() {
+        assert_eq!(super::grouped_integer(-1_234_567.4), "-1,234,567");
+        let mut signal = signal();
+        signal.pair.pair_created_at = serde_json::Value::Null;
+        signal.candles = vec![
+            vec![1_700_000_000.0, 1.0, 1.0, 1.0, 1.0],
+            vec![1_700_086_400.0, 1.0, 1.0, 1.0, 1.0],
+        ];
+        let caption = format_signal_caption(&signal, 1_700_000_000 + 3 * 86_400);
+        assert!(caption.contains("#SOL, 3d\n"), "{caption}");
     }
 }

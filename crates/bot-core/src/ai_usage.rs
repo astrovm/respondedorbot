@@ -186,19 +186,19 @@ mod tests {
         assert!(provider_reported_cost_is_positive(
             serde_json::json!({"cost": "0.001"})
                 .as_object()
-                .unwrap_or_else(|| unreachable!())
+                .unwrap_or(&serde_json::Map::new())
         ));
         assert!(provider_reported_cost_is_positive(
             serde_json::json!({
                 "cost_details": {"upstream_inference_cost": 0.002}
             })
             .as_object()
-            .unwrap_or_else(|| unreachable!())
+            .unwrap_or(&serde_json::Map::new())
         ));
         assert!(!provider_reported_cost_is_positive(
             serde_json::json!({"prompt_tokens": 10})
                 .as_object()
-                .unwrap_or_else(|| unreachable!())
+                .unwrap_or(&serde_json::Map::new())
         ));
     }
 

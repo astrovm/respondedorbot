@@ -12,10 +12,11 @@ static CACHE: LazyLock<Mutex<HashMap<&'static str, Option<Regex>>>> =
 /// Cloning a `Regex` shares its compiled program, so repeat calls are cheap.
 #[must_use]
 pub fn cached_regex(pattern: &'static str) -> Option<Regex> {
-    let Ok(mut cache) = CACHE.lock() else {
-        return Regex::new(pattern).ok();
-    };
-    cache
+    // A panic while holding the lock cannot leave a half-built entry behind,
+    // so a poisoned cache is still safe to use.
+    CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .entry(pattern)
         .or_insert_with(|| Regex::new(pattern).ok())
         .clone()

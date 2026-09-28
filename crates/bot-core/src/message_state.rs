@@ -287,7 +287,8 @@ mod tests {
     }
 
     #[test]
-    fn prepares_versioned_user_message_for_existing_redis_schema() {
+    fn prepares_versioned_user_message_for_existing_redis_schema() -> Result<(), serde_json::Error>
+    {
         let result = prepare_message_write(
             "-1001",
             "42",
@@ -299,10 +300,7 @@ mod tests {
             Some("41"),
             true,
         );
-        assert!(result.is_ok());
-        let Ok(plan) = result else {
-            return;
-        };
+        let plan = result?;
         assert_eq!(plan.keys.history, "chat_history:-1001");
         assert_eq!(plan.keys.order, "chat_message_order:-1001");
         assert_eq!(plan.keys.sequence, "chat_message_sequence:-1001");
@@ -324,16 +322,14 @@ mod tests {
             value.as_ref().and_then(|item| item["text"].as_str()),
             Some("hello")
         );
+        Ok(())
     }
 
     #[test]
-    fn defaults_bot_role_but_preserves_explicit_truthy_role() {
+    fn defaults_bot_role_but_preserves_explicit_truthy_role() -> Result<(), serde_json::Error> {
         let defaulted_result =
             prepare_message_write("1", "bot_2", "text", 10, Some(""), None, None, None, false);
-        assert!(defaulted_result.is_ok());
-        let Ok(defaulted) = defaulted_result else {
-            return;
-        };
+        let defaulted = defaulted_result?;
         assert_eq!(defaulted.role, "assistant");
         let explicit_result = prepare_message_write(
             "1",
@@ -346,12 +342,10 @@ mod tests {
             None,
             false,
         );
-        assert!(explicit_result.is_ok());
-        let Ok(explicit) = explicit_result else {
-            return;
-        };
+        let explicit = explicit_result?;
         assert_eq!(explicit.role, "tool");
         assert_eq!(explicit.mentions_bot, "0");
+        Ok(())
     }
 
     #[test]

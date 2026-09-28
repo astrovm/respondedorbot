@@ -75,9 +75,19 @@ pub fn render_market_model(
     market_price: f64,
     locale: Locale,
 ) -> String {
-    let (model, epoch) = match command {
-        BitcoinCommand::PowerLaw => (MarketModel::PowerLaw, POWER_LAW_EPOCH_SECONDS),
-        BitcoinCommand::Rainbow => (MarketModel::Rainbow, RAINBOW_EPOCH_SECONDS),
+    let (model, epoch, name_es, name_en) = match command {
+        BitcoinCommand::PowerLaw => (
+            MarketModel::PowerLaw,
+            POWER_LAW_EPOCH_SECONDS,
+            "power law",
+            "Power law",
+        ),
+        BitcoinCommand::Rainbow => (
+            MarketModel::Rainbow,
+            RAINBOW_EPOCH_SECONDS,
+            "el rainbow chart",
+            "The rainbow chart",
+        ),
         BitcoinCommand::Satoshi => {
             return bitcoin_price_error(command, "invalid", locale);
         }
@@ -94,20 +104,9 @@ pub fn render_market_model(
         (Valuation::Expensive, Locale::En) => format!("{percentage}% expensive"),
         (Valuation::Cheap, Locale::En) => format!("{percentage}% undervalued"),
     };
-    match (command, locale) {
-        (BitcoinCommand::PowerLaw, Locale::Es) => {
-            format!("Según power law, BTC debería estar en {value} USD ({valuation})")
-        }
-        (BitcoinCommand::PowerLaw, Locale::En) => {
-            format!("Power law estimates BTC at {value} USD ({valuation})")
-        }
-        (BitcoinCommand::Rainbow, Locale::Es) => {
-            format!("Según el rainbow chart, BTC debería estar en {value} USD ({valuation})")
-        }
-        (BitcoinCommand::Rainbow, Locale::En) => {
-            format!("The rainbow chart estimates BTC at {value} USD ({valuation})")
-        }
-        (BitcoinCommand::Satoshi, _) => bitcoin_price_error(command, "invalid", locale),
+    match locale {
+        Locale::Es => format!("Según {name_es}, BTC debería estar en {value} USD ({valuation})"),
+        Locale::En => format!("{name_en} estimates BTC at {value} USD ({valuation})"),
     }
 }
 
@@ -187,6 +186,64 @@ mod tests {
         assert_eq!(
             render_market_model(BitcoinCommand::Satoshi, 0, 1.0, Locale::Es),
             "No pude conseguir el precio de BTC, boludo. Probá más tarde"
+        );
+    }
+
+    #[test]
+    fn every_price_error_and_valuation_is_localized() {
+        for (command, currency, locale, expected) in [
+            (
+                BitcoinCommand::Satoshi,
+                "USD",
+                Locale::Es,
+                "No pude traer el precio de BTC en USD. Probá más tarde",
+            ),
+            (
+                BitcoinCommand::Satoshi,
+                "ARS",
+                Locale::Es,
+                "No pude traer el precio de BTC en ARS. Probá más tarde",
+            ),
+            (
+                BitcoinCommand::Satoshi,
+                "USD",
+                Locale::En,
+                "I could not load the BTC price in USD. Try again later",
+            ),
+            (
+                BitcoinCommand::PowerLaw,
+                "USD",
+                Locale::En,
+                "I could not load the BTC price for power law. Try again later",
+            ),
+            (
+                BitcoinCommand::Rainbow,
+                "USD",
+                Locale::En,
+                "I could not load the BTC price for the rainbow chart. Try again later",
+            ),
+        ] {
+            assert_eq!(bitcoin_price_error(command, currency, locale), expected);
+        }
+        let power_timestamp = 1_231_027_200 + 5_475 * 86_400;
+        assert_eq!(
+            render_market_model(
+                BitcoinCommand::PowerLaw,
+                power_timestamp,
+                100_000.0,
+                Locale::Es
+            ),
+            "Según power law, BTC debería estar en 57869.18 USD (72.80% caro, boludo)"
+        );
+        let rainbow_timestamp = 1_231_459_200 + 5_470 * 86_400;
+        assert_eq!(
+            render_market_model(
+                BitcoinCommand::Rainbow,
+                rainbow_timestamp,
+                200_000.0,
+                Locale::En
+            ),
+            "The rainbow chart estimates BTC at 97886.11 USD (104.32% expensive)"
         );
     }
 }

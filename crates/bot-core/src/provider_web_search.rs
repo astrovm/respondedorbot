@@ -301,4 +301,55 @@ mod tests {
         assert!(!outcome_is_grounded(0, 0, "answer"));
         assert!(!outcome_is_grounded(1, 1, "  "));
     }
+
+    #[test]
+    fn oversized_limits_and_citation_only_rounds_are_counted_safely() {
+        assert_eq!(nonnegative_limit(Some(&json!(u64::MAX))), 0);
+        assert_eq!(
+            round_metrics(None, &[], &["url_citation".to_owned()]),
+            WebSearchRoundMetrics {
+                metadata_request_count: Some(1),
+                citation_count: 1,
+                grounded: Some(true),
+                request_count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn source_urls_ignore_malformed_and_unrelated_messages() {
+        let messages = json!([
+            "not an object",
+            {"role": "user", "content": "hi"},
+            {"role": "assistant"},
+            {"role": "assistant", "tool_calls": [
+                "not an object",
+                {"id": "", "function": {"name": "web_search"}},
+                {"id": "other", "function": {"name": "calculate"}},
+                {"id": "search", "function": {"name": "web_search"}}
+            ]},
+            7,
+            {"role": "tool", "tool_call_id": "other", "content": "{\"results\": [{\"url\": \"https://ignored.test\"}]}"},
+            {"role": "tool", "tool_call_id": "search", "content": {"results": []}},
+            {"role": "tool", "tool_call_id": "search", "content": "not json"},
+            {"role": "tool", "tool_call_id": "search", "content": "{\"items\": []}"},
+            {"role": "tool", "tool_call_id": "search", "content": "{\"results\": [7, {\"title\": \"no url\"}, {\"url\": \"https://kept.test/a).\"}, {\"url\": \"https://kept.test/a\"}, {\"url\": \".\"}]}"}
+        ]);
+        assert_eq!(
+            source_urls(&messages),
+            Ok(vec!["https://kept.test/a".to_owned()])
+        );
+    }
+
+    #[test]
+    fn direct_calls_count_when_the_provider_reports_no_server_requests() {
+        let metrics = round_metrics(
+            None,
+            &["web_search".to_owned(), "web_search".to_owned()],
+            &[],
+        );
+        assert_eq!(metrics.request_count, 2);
+        assert_eq!(metrics.metadata_request_count, Some(2));
+        assert_eq!(metrics.grounded, Some(false));
+    }
 }

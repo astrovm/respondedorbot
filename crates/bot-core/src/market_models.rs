@@ -87,12 +87,9 @@ mod tests {
     }
 
     #[test]
-    fn classifies_above_equal_and_below_values() {
-        let reference = evaluate_market_model(MarketModel::PowerLaw, 5_475, 0.0)
-            .map(|result| result.model_value);
-        let Ok(reference) = reference else {
-            return;
-        };
+    fn classifies_above_equal_and_below_values() -> Result<(), super::InvalidElapsedDays> {
+        let reference = evaluate_market_model(MarketModel::PowerLaw, 5_475, 0.0);
+        let reference = reference?.model_value;
         assert_eq!(
             evaluate_market_model(MarketModel::PowerLaw, 5_475, reference * 2.0)
                 .map(|result| result.valuation),
@@ -107,5 +104,6 @@ mod tests {
             evaluate_market_model(MarketModel::PowerLaw, 0, reference),
             Err(super::InvalidElapsedDays)
         );
+        Ok(())
     }
 }

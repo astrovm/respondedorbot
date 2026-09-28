@@ -294,4 +294,38 @@ mod tests {
         }
         assert_eq!(parse_retry_window_seconds(Some("1m"), f64::NAN), None);
     }
+
+    #[test]
+    fn retry_windows_handle_offsets_legacy_years_and_out_of_range_values() {
+        let parse = parse_retry_window_seconds;
+        assert_eq!(
+            parse(Some("Sunday, 06-Nov-94 08:49:37 GMT"), 784_111_700.0),
+            Some(77)
+        );
+        assert_eq!(
+            parse(Some("Sunday, 06-Nov-24 08:49:37 GMT"), 1_730_882_900.0),
+            Some(77)
+        );
+        assert_eq!(
+            parse(Some("Sun, 06 Nov 1994 08:49:37 -0130"), 784_117_100.0),
+            Some(77)
+        );
+        assert_eq!(
+            parse(Some("Sun, 06 Nov 1994 08:49:37 +0130"), 784_106_300.0),
+            Some(77)
+        );
+        for invalid in [
+            "Sunday, 06-Nov 08:49:37 GMT",
+            "Sun, 06 Nov 1994 08:49:37 +2400",
+            "Sun, 06 Nov 1994 08:49:37 +0160",
+            "Sun, 06 Nov 1994 08:49:37 +01",
+            "Sun, 06 Nov 1994 08:49:37 CET",
+            "1a5s",
+            "99999999999999999999999h",
+        ] {
+            assert_eq!(parse(Some(invalid), 0.0), None, "{invalid}");
+        }
+        // A retry date far beyond the representable window is rejected.
+        assert_eq!(parse(Some("Sun, 06 Nov 1994 08:49:37 GMT"), -1e19), None);
+    }
 }

@@ -45,10 +45,14 @@ pub struct PrintCreditsContext {
     pub locale: Locale,
 }
 
-fn reply(chat_id: ChatId, message_id: MessageId, text: &str) -> PrintCreditsPlan {
+fn reply_action(chat_id: ChatId, message_id: MessageId, text: &str) -> TelegramAction {
     let mut message = SendMessage::new(chat_id, text);
     message.reply_to_message_id = Some(message_id);
-    PrintCreditsPlan::Reply(TelegramAction::SendMessage(message))
+    TelegramAction::SendMessage(message)
+}
+
+fn reply(chat_id: ChatId, message_id: MessageId, text: &str) -> PrintCreditsPlan {
+    PrintCreditsPlan::Reply(reply_action(chat_id, message_id, text))
 }
 
 #[must_use]
@@ -132,10 +136,8 @@ pub fn plan_creditlog_command(
     if parsed.command != "/creditlog" {
         return CreditLogPlan::NotHandled;
     }
-    let reply = |text: &str| match reply(context.chat_id, context.message_id, text) {
-        PrintCreditsPlan::Reply(action) => CreditLogPlan::Reply(action),
-        PrintCreditsPlan::NotHandled | PrintCreditsPlan::Mint { .. } => CreditLogPlan::NotHandled,
-    };
+    let reply =
+        |text: &str| CreditLogPlan::Reply(reply_action(context.chat_id, context.message_id, text));
     if context.admin_user_id != Some(context.user_id) {
         return reply(match context.locale {
             Locale::Es => "Este comando es solo para el admin",
@@ -150,14 +152,12 @@ pub fn plan_creditlog_command(
     }
     match parse_creditlog_limit(&parsed.message_text) {
         CreditLogLimit::Valid(limit) => CreditLogPlan::Load { limit },
-        CreditLogLimit::Invalid => reply(match context.locale {
-            Locale::Es => "Mandalo así: /creditlog [límite]",
-            Locale::En => "Usage: /creditlog [limit]",
-        }),
-        CreditLogLimit::UnsupportedNumericInput => reply(match context.locale {
-            Locale::Es => "Mandalo así: /creditlog [límite]",
-            Locale::En => "Usage: /creditlog [limit]",
-        }),
+        CreditLogLimit::Invalid | CreditLogLimit::UnsupportedNumericInput => {
+            reply(match context.locale {
+                Locale::Es => "Mandalo así: /creditlog [límite]",
+                Locale::En => "Usage: /creditlog [limit]",
+            })
+        }
     }
 }
 
@@ -693,6 +693,136 @@ mod tests {
                 Locale::En
             ),
             Some("cached_tokens=5".to_owned())
+        );
+    }
+
+    fn creditlog_text(plan: CreditLogPlan) -> Option<String> {
+        match plan {
+            CreditLogPlan::Reply(TelegramAction::SendMessage(message)) => {
+                assert_eq!(message.reply_to_message_id, Some(MessageId(12)));
+                Some(message.text)
+            }
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn guards_are_localized_in_both_languages_for_both_commands() {
+        let context = |admin_user_id, billing_available, locale| PrintCreditsContext {
+            chat_id: ChatId(202),
+            message_id: MessageId(12),
+            user_id: 99,
+            admin_user_id,
+            billing_available,
+            locale,
+        };
+        assert_eq!(
+            reply_text(plan("/printcredits 1", Some(1), true, Locale::En)).as_deref(),
+            Some("This command is only for the admin")
+        );
+        assert_eq!(
+            reply_text(plan("/printcredits 1", Some(99), false, Locale::Es)).as_deref(),
+            Some("Los créditos de IA no están disponibles en este momento")
+        );
+        assert_eq!(
+            reply_text(plan("/printcredits", Some(99), true, Locale::En)).as_deref(),
+            Some("Usage: /printcredits <amount>")
+        );
+        assert_eq!(
+            reply_text(plan("/printcredits 0", Some(99), true, Locale::Es)).as_deref(),
+            Some("El monto tiene que ser mayor a 0")
+        );
+        // A mint plan carries no reply text.
+        assert_eq!(
+            reply_text(plan("/printcredits 1", Some(99), true, Locale::Es)),
+            None
+        );
+
+        let creditlog = |text: &str, admin, billing, locale| {
+            creditlog_text(plan_creditlog_command(
+                text,
+                "@bot",
+                context(admin, billing, locale),
+            ))
+        };
+        assert_eq!(
+            creditlog("/creditlog", Some(1), true, Locale::En).as_deref(),
+            Some("This command is only for the admin")
+        );
+        assert_eq!(
+            creditlog("/creditlog", Some(99), false, Locale::Es).as_deref(),
+            Some("Los créditos de IA no están disponibles en este momento")
+        );
+        assert_eq!(
+            creditlog("/creditlog muchos", Some(99), true, Locale::Es).as_deref(),
+            Some("Mandalo así: /creditlog [límite]")
+        );
+        assert_eq!(
+            creditlog("/creditlog ٣", Some(99), true, Locale::En).as_deref(),
+            Some("Usage: /creditlog [limit]")
+        );
+        assert_eq!(creditlog("/creditlog 3", Some(99), true, Locale::En), None);
+    }
+
+    #[test]
+    fn spanish_entries_without_dates_or_commands_use_readable_placeholders() {
+        let tools = (0..6)
+            .map(|index| json!({"tool": format!("t{index}"), "usd_micros": 1, "count": 1}))
+            .collect::<Vec<_>>();
+        let entry = CreditLogEntry {
+            user_id: Some(5),
+            chat_id: Some(6),
+            created_at: String::new(),
+            metadata: json!({
+                "command": "",
+                "usage_tag": null,
+                "chat_id": -100,
+                "user_id": "user-7",
+                "model_breakdown": [
+                    {"model": 7, "usd_micros": 1, "input_cached_tokens": 0},
+                    {"model": "m", "usd_micros": 2, "input_cached_tokens": -3}
+                ],
+                "tool_breakdown": tools
+            }),
+        };
+        let text = format_creditlog_entry(&entry, Locale::Es);
+        assert!(
+            text.starts_with("sin fecha | cmd=sin comando | estado=ok\nchat=-100 user=user-7 "),
+            "{text}"
+        );
+        assert!(!text.contains("cacheados"), "{text}");
+        assert!(text.contains("\nmodelos: m=2, 7=1\n"), "{text}");
+        assert!(
+            text.ends_with("tools: t0=1 (1x), t1=1 (1x), t2=1 (1x), t3=1 (1x), t4=1 (1x), +1 más"),
+            "{text}"
+        );
+        assert_eq!(summarize_tools(None, Locale::Es), "sin tools");
+
+        let english = format_creditlog_entry(
+            &CreditLogEntry {
+                metadata: json!({}),
+                ..entry
+            },
+            Locale::En,
+        );
+        assert!(
+            english.starts_with("no date | cmd=no command | status=ok\nchat=6 user=5 "),
+            "{english}"
+        );
+    }
+
+    #[test]
+    fn oversized_numbers_saturate_and_equal_costs_sort_by_name() {
+        assert_eq!(value_i64(Some(&json!(u64::MAX))), i64::MAX);
+        assert_eq!(
+            summarize_models(
+                Some(&json!([
+                    {"model": "zeta", "usd_micros": 5},
+                    {"model": "alpha", "usd_micros": 5}
+                ])),
+                Locale::En
+            ),
+            "alpha=5, zeta=5"
         );
     }
 }

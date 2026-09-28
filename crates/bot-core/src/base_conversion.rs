@@ -3,6 +3,8 @@
 use num_bigint::{BigInt, BigUint};
 use unicode_normalization::UnicodeNormalization;
 
+const DIGITS: &[u8; 36] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
 /// A localized validation outcome or successful conversion.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BaseConversion {
@@ -52,37 +54,33 @@ pub fn convert_base(input: &str) -> Result<BaseConversion, UnsupportedNumericInp
     let Some(target_integer) = BigInt::parse_bytes(normalized_target.as_bytes(), 10) else {
         return Ok(BaseConversion::NumbersRequired);
     };
-    if !normalized_number
+    // `to_digit(36)` accepts exactly the ASCII alphanumerics.
+    let Some(number_digits) = normalized_number
         .chars()
-        .all(|character| character.is_ascii_alphanumeric())
-    {
+        .map(|character| character.to_digit(36))
+        .collect::<Option<Vec<_>>>()
+    else {
         return Ok(BaseConversion::AlphanumericRequired);
-    }
+    };
 
-    let minimum = BigInt::from(2_u8);
-    let maximum = BigInt::from(36_u8);
-    if source_integer < minimum || source_integer > maximum {
+    let base = |value: &BigInt| {
+        u32::try_from(value)
+            .ok()
+            .filter(|base| (2..=36).contains(base))
+    };
+    let Some(source) = base(&source_integer) else {
         return Ok(BaseConversion::SourceRange {
             input: source_input.to_owned(),
         });
-    }
-    if target_integer < minimum || target_integer > maximum {
+    };
+    let Some(target) = base(&target_integer) else {
         return Ok(BaseConversion::TargetRange {
             input: target_input.to_owned(),
         });
-    }
-    let Some(source) = source_integer.to_u32_digits().1.first().copied() else {
-        return Ok(BaseConversion::NumbersRequired);
-    };
-    let Some(target) = target_integer.to_u32_digits().1.first().copied() else {
-        return Ok(BaseConversion::NumbersRequired);
     };
 
     let mut value = BigUint::from(0_u8);
-    for character in normalized_number.chars() {
-        let Some(digit) = character.to_digit(36) else {
-            return Ok(BaseConversion::AlphanumericRequired);
-        };
+    for digit in number_digits {
         value *= source;
         value += digit;
     }
@@ -94,10 +92,8 @@ pub fn convert_base(input: &str) -> Result<BaseConversion, UnsupportedNumericInp
             .first()
             .copied()
             .unwrap_or(0);
-        let Some(character) = char::from_digit(remainder, 36) else {
-            return Ok(BaseConversion::NumbersRequired);
-        };
-        digits.push(character.to_ascii_uppercase());
+        // The remainder is below `target`, which is at most 36.
+        digits.push(char::from(DIGITS[remainder as usize]));
         value /= target;
     }
     digits.reverse();
@@ -187,6 +183,24 @@ mod tests {
                 source: 10,
                 result: "C".to_owned(),
                 target: 16,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_non_ascii_bases_and_non_numeric_targets() {
+        assert_eq!(
+            convert_base("10,２é,10"),
+            Err(super::UnsupportedNumericInput)
+        );
+        assert_eq!(convert_base("10,2,x"), Ok(BaseConversion::NumbersRequired));
+        assert_eq!(
+            convert_base("zz,36,36"),
+            Ok(BaseConversion::Success {
+                number: "zz".to_owned(),
+                source: 36,
+                result: "ZZ".to_owned(),
+                target: 36,
             })
         );
     }

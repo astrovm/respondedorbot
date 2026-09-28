@@ -216,6 +216,10 @@ fn event_flag(event: &ElectionEvent) -> String {
 
 fn trimmed(value: f64, decimals: usize) -> String {
     let formatted = format!("{value:.decimals$}");
+    // Whole numbers have no fractional zeros to drop: US$500 must stay 500.
+    if !formatted.contains('.') {
+        return formatted;
+    }
     formatted
         .trim_end_matches('0')
         .trim_end_matches('.')
@@ -471,5 +475,67 @@ mod tests {
             render_elections(&[], &HashMap::new(), Locale::En),
             "I could not load the elections from Polymarket. Try again later"
         );
+    }
+
+    #[test]
+    fn parser_falls_back_through_titles_and_skips_malformed_markets() {
+        assert!(parse_election_events(&json!({"events": []})).is_empty());
+        let events = parse_election_events(&json!([{
+            "title": true,
+            "slug": 7,
+            "liquidity": "n/a",
+            "markets": [
+                {"question": "Question title", "outcomes": ["Yes"], "outcomePrices": ["0.3"], "clobTokenIds": [123]},
+                {"slug": "slug-title", "outcomes": ["Yes"], "outcomePrices": [0.2], "clobTokenIds": [0]},
+                {"outcomes": ["Yes"], "outcomePrices": [0.1]},
+                {"groupItemTitle": "Bad price", "outcomes": ["Yes"], "outcomePrices": [true]},
+                {"groupItemTitle": "Inactive", "active": false, "outcomes": ["Yes"], "outcomePrices": [0.9]}
+            ]
+        }, {"title": "No markets", "slug": "none", "markets": "not a list"}]));
+        assert_eq!(events[0].title, "True");
+        assert_eq!(events[0].slug, "7");
+        assert_eq!(events[0].liquidity, 0.0);
+        assert_eq!(
+            events[0]
+                .quotes
+                .iter()
+                .map(|quote| (quote.title.as_str(), quote.token_id.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![("Question title", Some("123")), ("slug-title", None)]
+        );
+        assert!(events[1].quotes.is_empty());
+    }
+
+    #[test]
+    fn english_rendering_handles_small_markets_and_skips_untitled_events() {
+        let events = parse_election_events(&json!([
+            {"title": "Local vote", "slug": "local-vote", "liquidity": 500, "markets": [
+                {"groupItemTitle": "Long shot", "outcomes": ["Yes"], "outcomePrices": [0.055]}
+            ]},
+            {"title": "Quiet vote", "slug": "quiet", "liquidity": 1500, "markets": []},
+            {"title": "", "slug": "untitled", "liquidity": 9_000_000_000_i64, "markets": []}
+        ]));
+        assert_eq!(
+            render_elections(&events, &HashMap::new(), Locale::En),
+            concat!(
+                "Polymarket elections by liquidity\n\n",
+                "<a href=\"https://polymarket.com/event/quiet\">Quiet vote</a>\n",
+                "Liquidity US$1.5K\n\n",
+                "<a href=\"https://polymarket.com/event/local-vote\">Local vote</a>\n",
+                "Long shot 5.5%\n",
+                "Liquidity US$500"
+            )
+        );
+        let untitled = parse_election_events(&json!([
+            {"title": "", "slug": "untitled", "liquidity": 2_000_000_000_i64}
+        ]));
+        assert_eq!(
+            render_elections(&untitled, &HashMap::new(), Locale::Es),
+            "No pude traer las elecciones de Polymarket. Probá más tarde"
+        );
+        assert_eq!(super::usd_compact(2_000_000_000.0), "US$2B");
+        assert_eq!(super::country_flag("ABC"), "");
+        assert_eq!(super::country_flag("A1"), "");
+        assert_eq!(country_flag_from_name("atlantis"), "");
     }
 }

@@ -264,4 +264,30 @@ mod tests {
             assert!(!is_retryable_finish_response(facts));
         }
     }
+
+    #[test]
+    fn usage_counters_follow_python_truthiness_for_each_json_type() {
+        let billable = |usage: serde_json::Value| {
+            response_has_billable_usage(usage.as_object().unwrap_or(&Map::new()))
+        };
+        assert!(billable(json!({"prompt_tokens": "5"})));
+        assert!(!billable(
+            json!({"prompt_tokens": "0", "output_tokens": [1], "total_tokens": {"n": 1}})
+        ));
+        for (requests, expected) in [
+            (json!(true), true),
+            (json!(false), false),
+            (json!(2), true),
+            (json!(0), false),
+            (json!(1.5), true),
+            (json!(null), false),
+            (json!([1]), false),
+        ] {
+            assert_eq!(
+                billable(json!({"server_tool_use": {"web_search_requests": requests}})),
+                expected,
+                "{requests}"
+            );
+        }
+    }
 }
