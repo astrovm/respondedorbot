@@ -306,40 +306,45 @@ where
                 let transition =
                     retry_after_failure(job.attempts, now, job.result_billing_segment.is_some());
                 job.attempts = transition.attempts;
-                if transition.terminal {
-                    let settlement = self.settle(
-                        &job,
-                        transition.actual_credit_units,
-                        "memory_compaction_failed",
-                    );
-                    match settlement.and_then(|()| {
-                        self.queue
-                            .delete_job(&raw.chat_id)
-                            .map(|_| ())
-                            .map_err(|error| error.to_string())
-                    }) {
-                        Ok(()) => report.completed += 1,
-                        Err(settlement_error) => report.failures.push(failure(
-                            &raw.chat_id,
-                            "terminal_settlement",
-                            format!("{stage}: {error}; {settlement_error}"),
-                        )),
-                    }
-                } else if let Some(next_attempt_at) = transition.next_attempt_at {
-                    job.next_attempt_at = next_attempt_at;
-                    match serde_json::to_string(&job)
-                        .map_err(|error| error.to_string())
-                        .and_then(|payload| {
+                // A retry needs a next attempt time; anything else is settled
+                // as a terminal failure instead of being left unscheduled.
+                match transition.next_attempt_at.filter(|_| !transition.terminal) {
+                    None => {
+                        let settlement = self.settle(
+                            &job,
+                            transition.actual_credit_units,
+                            "memory_compaction_failed",
+                        );
+                        match settlement.and_then(|()| {
                             self.queue
-                                .replace_job(&raw.chat_id, &payload)
+                                .delete_job(&raw.chat_id)
+                                .map(|_| ())
                                 .map_err(|error| error.to_string())
                         }) {
-                        Ok(()) => report.retried += 1,
-                        Err(retry_error) => report.failures.push(failure(
-                            &raw.chat_id,
-                            "schedule_retry",
-                            format!("{stage}: {error}; {retry_error}"),
-                        )),
+                            Ok(()) => report.completed += 1,
+                            Err(settlement_error) => report.failures.push(failure(
+                                &raw.chat_id,
+                                "terminal_settlement",
+                                format!("{stage}: {error}; {settlement_error}"),
+                            )),
+                        }
+                    }
+                    Some(next_attempt_at) => {
+                        job.next_attempt_at = next_attempt_at;
+                        match serde_json::to_string(&job)
+                            .map_err(error_text)
+                            .and_then(|payload| {
+                                self.queue
+                                    .replace_job(&raw.chat_id, &payload)
+                                    .map_err(error_text)
+                            }) {
+                            Ok(()) => report.retried += 1,
+                            Err(retry_error) => report.failures.push(failure(
+                                &raw.chat_id,
+                                "schedule_retry",
+                                format!("{stage}: {error}; {retry_error}"),
+                            )),
+                        }
                     }
                 }
             }
@@ -388,35 +393,29 @@ where
         if self
             .billing
             .is_settled(&job)
-            .map_err(|error| Box::new((job.clone(), "check_settlement", error.to_string())))?
+            .map_err(|error| job_failure(&job, "check_settlement", error))?
         {
             return Ok(());
         }
         let (current_summary, current_marker) = self
             .state
             .load(&job.chat_id)
-            .map_err(|error| Box::new((job.clone(), "load_state", error.to_string())))?;
+            .map_err(|error| job_failure(&job, "load_state", error))?;
         if job.result_summary.as_deref().is_none_or(str::is_empty) {
             let operation_id = reservation_string(&job.reservation, "operation_id");
             if !operation_id.is_empty() {
                 let segments = self
                     .billing
                     .list_provider_segments(job.user_id, &operation_id)
-                    .map_err(|error| {
-                        Box::new((job.clone(), "restore_provider_usage", error.to_string()))
-                    })?;
+                    .map_err(|error| job_failure(&job, "restore_provider_usage", error))?;
                 if let Some((summary, segment)) = restored_summary(&segments) {
                     job.result_summary = Some(summary);
                     job.result_billing_segment = Some(segment);
                     job.result_cost_usd_micros = raw_cost_usd_micros(&segments);
-                    let payload = serde_json::to_string(&job).map_err(|error| {
-                        Box::new((job.clone(), "encode_recovered_job", error.to_string()))
-                    })?;
+                    let payload = encode_job(&job, "encode_recovered_job")?;
                     self.queue
                         .replace_job(&job.chat_id, &payload)
-                        .map_err(|error| {
-                            Box::new((job.clone(), "checkpoint_recovered_job", error.to_string()))
-                        })?;
+                        .map_err(|error| job_failure(&job, "checkpoint_recovered_job", error))?;
                 }
             }
         }
@@ -441,7 +440,7 @@ where
                 let result = self
                     .provider
                     .compact(&job.messages, job.prior_summary.as_deref(), &job.locale)
-                    .map_err(|error| Box::new((job.clone(), "provider", error.to_string())))?;
+                    .map_err(|error| job_failure(&job, "provider", error))?;
                 if result.summary.trim().is_empty()
                     || (result.cost_usd_micros <= 0 && result.billing_segment.is_none())
                 {
@@ -455,20 +454,16 @@ where
                 job.result_cost_usd_micros = result.cost_usd_micros;
                 job.result_billing_segment = result.billing_segment;
                 self.persist_provider_usage(&job)
-                    .map_err(|error| Box::new((job.clone(), "record_provider_usage", error)))?;
-                let payload = serde_json::to_string(&job).map_err(|error| {
-                    Box::new((job.clone(), "encode_provider_result", error.to_string()))
-                })?;
+                    .map_err(|error| job_failure(&job, "record_provider_usage", error))?;
+                let payload = encode_job(&job, "encode_provider_result")?;
                 self.queue
                     .replace_job(&job.chat_id, &payload)
-                    .map_err(|error| {
-                        Box::new((job.clone(), "checkpoint_provider_result", error.to_string()))
-                    })?;
+                    .map_err(|error| job_failure(&job, "checkpoint_provider_result", error))?;
                 self.save_and_settle(job)
             }
             CompactionDisposition::SaveAndSettle => {
                 self.persist_provider_usage(&job)
-                    .map_err(|error| Box::new((job.clone(), "record_provider_usage", error)))?;
+                    .map_err(|error| job_failure(&job, "record_provider_usage", error))?;
                 self.save_and_settle(job)
             }
         }
@@ -478,20 +473,14 @@ where
         &mut self,
         job: CompactionJobRecord,
     ) -> Result<(), Box<(CompactionJobRecord, &'static str, String)>> {
-        let Some(summary) = job
+        let summary = job
             .result_summary
-            .as_deref()
+            .clone()
             .filter(|value| !value.is_empty())
-        else {
-            return Err(Box::new((
-                job,
-                "save_state",
-                "compaction result is empty".to_owned(),
-            )));
-        };
+            .ok_or_else(|| job_failure(&job, "save_state", "compaction result is empty"))?;
         self.state
-            .save(&job.chat_id, summary, &job.target_marker)
-            .map_err(|error| Box::new((job.clone(), "save_state", error.to_string())))?;
+            .save(&job.chat_id, &summary, &job.target_marker)
+            .map_err(|error| job_failure(&job, "save_state", error))?;
         self.settle(&job, None, "memory_compaction_success")
             .map_err(|error| Box::new((job, "settle_success", error)))
     }
@@ -537,6 +526,20 @@ where
             })
             .map_err(|error| error.to_string())
     }
+}
+
+fn error_text(error: impl Display) -> String {
+    error.to_string()
+}
+
+type JobFailure = Box<(CompactionJobRecord, &'static str, String)>;
+
+fn job_failure(job: &CompactionJobRecord, stage: &'static str, error: impl Display) -> JobFailure {
+    Box::new((job.clone(), stage, error.to_string()))
+}
+
+fn encode_job(job: &CompactionJobRecord, stage: &'static str) -> Result<String, JobFailure> {
+    serde_json::to_string(job).map_err(|error| job_failure(job, stage, error))
 }
 
 fn failure(chat_id: &str, stage: &'static str, error: impl Display) -> CompactionFailure {
@@ -585,62 +588,47 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        CompactionBilling, CompactionProvider, CompactionProviderResult, CompactionQueue,
-        CompactionState, CompactionWorker, SettlementRequest,
+        CompactionBilling, CompactionFailure, CompactionProvider, CompactionProviderResult,
+        CompactionQueue, CompactionState, CompactionWorker, SettlementRequest,
     };
     use bot_adapters::compaction_job::CompactionJobRecord;
     use bot_adapters::redis_compaction_queue::{QueueJob, RedisCompactionQueue};
     use bot_adapters::redis_connection::RedisEndpoint;
 
     #[test]
-    fn redis_compaction_queue_supports_the_worker_port_contract() -> Result<(), String> {
-        let Some(port) = std::env::var("TEST_REDIS_PORT")
+    fn redis_compaction_queue_supports_the_worker_port_contract() -> TestResult {
+        std::env::var("TEST_REDIS_PORT")
             .ok()
             .and_then(|value| value.parse().ok())
-        else {
-            return Ok(());
-        };
+            .map_or(Ok(()), exercise_redis_compaction_queue)
+    }
+
+    fn exercise_redis_compaction_queue(port: u16) -> TestResult {
         let endpoint = RedisEndpoint {
-            host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+            host: std::env::var("TEST_REDIS_HOST").unwrap_or(String::from("127.0.0.1")),
             port,
-            password: std::env::var("TEST_REDIS_PASSWORD")
-                .ok()
-                .filter(|value| !value.is_empty()),
+            // Empty passwords are ignored by the Redis client.
+            password: std::env::var("TEST_REDIS_PASSWORD").ok(),
         };
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| error.to_string())?
-            .as_nanos();
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let chat_id = format!("synthetic-worker-{nonce}");
-        let mut queue = RedisCompactionQueue::new(&endpoint).map_err(|error| error.to_string())?;
-        CompactionQueue::replace_job(&mut queue, &chat_id, r#"{"synthetic":true}"#)
-            .map_err(|error| error.to_string())?;
+        let mut queue = RedisCompactionQueue::new(&endpoint)?;
+        CompactionQueue::replace_job(&mut queue, &chat_id, r#"{"synthetic":true}"#)?;
         assert!(
-            CompactionQueue::list_jobs(&mut queue)
-                .map_err(|error| error.to_string())?
+            CompactionQueue::list_jobs(&mut queue)?
                 .iter()
                 .any(|job| job.chat_id == chat_id)
         );
-        assert!(
-            CompactionQueue::acquire_lock(&mut queue, &chat_id, "synthetic-owner", 60)
-                .map_err(|error| error.to_string())?
-        );
-        assert!(
-            CompactionQueue::release_lock(&mut queue, &chat_id, "synthetic-owner")
-                .map_err(|error| error.to_string())?
-        );
-        assert!(
-            CompactionQueue::quarantine_job(
-                &mut queue,
-                &chat_id,
-                &format!("synthetic-dead-{nonce}"),
-                r#"{"reason":"synthetic"}"#,
-            )
-            .map_err(|error| error.to_string())?
-        );
-        assert!(
-            !CompactionQueue::delete_job(&mut queue, &chat_id).map_err(|error| error.to_string())?
-        );
+        let acquired = CompactionQueue::acquire_lock(&mut queue, &chat_id, "synthetic-owner", 60);
+        assert!(acquired?);
+        let released = CompactionQueue::release_lock(&mut queue, &chat_id, "synthetic-owner");
+        assert!(released?);
+        let dead_job_id = format!("synthetic-dead-{nonce}");
+        let dead_payload = r#"{"reason":"synthetic"}"#;
+        let quarantined =
+            CompactionQueue::quarantine_job(&mut queue, &chat_id, &dead_job_id, dead_payload);
+        assert!(quarantined?);
+        assert!(!CompactionQueue::delete_job(&mut queue, &chat_id)?);
         Ok(())
     }
 
@@ -652,10 +640,12 @@ mod tests {
         deleted: Vec<String>,
         quarantined: Vec<Value>,
         releases: usize,
+        replace_error: Option<&'static str>,
+        delete_error: Option<&'static str>,
     }
 
     impl CompactionQueue for Queue {
-        type Error = Infallible;
+        type Error = &'static str;
 
         fn list_jobs(&mut self) -> Result<Vec<QueueJob>, Self::Error> {
             Ok(self
@@ -668,6 +658,9 @@ mod tests {
                 .collect())
         }
         fn replace_job(&mut self, chat_id: &str, payload: &str) -> Result<(), Self::Error> {
+            if let Some(error) = self.replace_error {
+                return Err(error);
+            }
             self.jobs.insert(chat_id.to_owned(), payload.to_owned());
             if let Ok(job) = serde_json::from_str(payload) {
                 self.replaced.push(job);
@@ -675,6 +668,9 @@ mod tests {
             Ok(())
         }
         fn delete_job(&mut self, chat_id: &str) -> Result<bool, Self::Error> {
+            if let Some(error) = self.delete_error {
+                return Err(error);
+            }
             self.deleted.push(chat_id.to_owned());
             Ok(self.jobs.remove(chat_id).is_some())
         }
@@ -751,10 +747,22 @@ mod tests {
         recorded: Vec<Value>,
         settlements: Vec<(String, Option<i64>, Vec<Value>)>,
         incompatible: usize,
+        /// Name of the billing operation that fails, if any.
+        fail_on: Option<&'static str>,
+    }
+
+    impl Billing {
+        fn check(&self, operation: &'static str) -> Result<(), &'static str> {
+            if self.fail_on == Some(operation) {
+                Err(operation)
+            } else {
+                Ok(())
+            }
+        }
     }
 
     impl CompactionBilling for Billing {
-        type Error = Infallible;
+        type Error = &'static str;
 
         fn is_settled(&mut self, _job: &CompactionJobRecord) -> Result<bool, Self::Error> {
             Ok(self.settled)
@@ -764,6 +772,7 @@ mod tests {
             _user_id: i64,
             _operation_id: &str,
         ) -> Result<Vec<Value>, Self::Error> {
+            self.check("list")?;
             Ok(self.durable.clone())
         }
         fn record_provider_segment(
@@ -772,6 +781,7 @@ mod tests {
             _operation_id: &str,
             segment: &Value,
         ) -> Result<(), Self::Error> {
+            self.check("record")?;
             self.recorded.push(segment.clone());
             if !self.durable.contains(segment) {
                 self.durable.push(segment.clone());
@@ -779,6 +789,7 @@ mod tests {
             Ok(())
         }
         fn settle(&mut self, request: SettlementRequest<'_>) -> Result<(), Self::Error> {
+            self.check("settle")?;
             self.settlements.push((
                 request.reason.to_owned(),
                 request.actual_credit_units,
@@ -1058,5 +1069,213 @@ mod tests {
             .insert("old".to_owned(), json!({"schema_version":9}).to_string());
         assert_eq!(worker.run_once(3.0).unwrap_or_default().completed, 1);
         assert_eq!(worker.billing.incompatible, 1);
+    }
+
+    #[test]
+    fn failed_recovery_checkpoints_are_retried_without_calling_the_provider() {
+        let segment = json!({
+            "kind":"summary", "source":"openrouter", "model":"model",
+            "text":"recovered", "usage":{"cost":"0.002"},
+        });
+        let provider = Provider {
+            replies: VecDeque::new(),
+            calls: 0,
+        };
+        let mut worker = worker(
+            job(),
+            provider,
+            Billing {
+                durable: vec![segment],
+                ..Billing::default()
+            },
+        );
+        worker.queue.replace_error = Some("synthetic replace failure");
+        let report = worker.run_once(100.0).unwrap_or_default();
+        assert_eq!(report.completed, 0);
+        assert_eq!(report.retried, 0);
+        assert_eq!(
+            report.failures,
+            [CompactionFailure {
+                chat_id: "chat-1".to_owned(),
+                stage: "schedule_retry",
+                error: "checkpoint_recovered_job: synthetic replace failure; \
+                        synthetic replace failure"
+                    .to_owned(),
+            }]
+        );
+        let (queue, state, provider, billing, _) = worker.into_parts();
+        assert_eq!(provider.calls, 0);
+        assert!(state.saved.is_empty());
+        assert!(billing.settlements.is_empty());
+        assert!(queue.replaced.is_empty());
+        assert_eq!(queue.releases, 1);
+    }
+
+    #[test]
+    fn obsolete_jobs_without_an_operation_settle_with_their_own_segment() {
+        let segment = json!({"kind":"summary","text":"stale result"});
+        let mut unlinked = job();
+        unlinked.reservation = json!({"usage_tag":"memory_compaction:chat-1:m1:test"});
+        unlinked.result_summary = Some("stale result".to_owned());
+        unlinked.result_billing_segment = Some(segment.clone());
+        let provider = Provider {
+            replies: VecDeque::new(),
+            calls: 0,
+        };
+        let mut unlinked_worker = worker(
+            unlinked,
+            provider,
+            Billing {
+                durable: vec![json!({"kind":"summary","text":"must not be listed"})],
+                ..Billing::default()
+            },
+        );
+        unlinked_worker.state.current = (Some("newer".to_owned()), Some("m2".to_owned()));
+        assert_eq!(
+            unlinked_worker.run_once(1.0).unwrap_or_default().completed,
+            1
+        );
+        let (queue, _, _, billing, _) = unlinked_worker.into_parts();
+        // Without an operation there is no durable usage to record or list.
+        assert!(billing.recorded.is_empty());
+        assert_eq!(
+            billing.settlements,
+            [("memory_compaction_obsolete".to_owned(), None, vec![segment])]
+        );
+        assert_eq!(queue.deleted, ["chat-1"]);
+
+        let mut bare = job();
+        bare.reservation = json!({});
+        let provider = Provider {
+            replies: VecDeque::new(),
+            calls: 0,
+        };
+        let mut bare_worker = worker(bare, provider, Billing::default());
+        bare_worker.state.current = (Some("newer".to_owned()), Some("m2".to_owned()));
+        assert_eq!(bare_worker.run_once(1.0).unwrap_or_default().completed, 1);
+        assert_eq!(
+            bare_worker.billing.settlements,
+            [("memory_compaction_obsolete".to_owned(), Some(0), Vec::new())]
+        );
+    }
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn idle_provider() -> Provider {
+        Provider {
+            replies: VecDeque::new(),
+            calls: 0,
+        }
+    }
+
+    fn failing_billing(operation: &'static str) -> Billing {
+        Billing {
+            fail_on: Some(operation),
+            ..Billing::default()
+        }
+    }
+
+    #[test]
+    fn a_non_positive_lock_ttl_is_rejected_before_reading_the_queue() {
+        let mut worker =
+            worker(job(), idle_provider(), Billing::default()).with_lock_ttl_seconds(0);
+        assert_eq!(
+            worker.run_once(1.0),
+            Err(super::CompactionWorkerError::InvalidLockTtl)
+        );
+        assert_eq!(
+            crate::background::BackgroundWorker::run_once(&mut worker, 1),
+            Err("compaction lock TTL must be positive".to_owned())
+        );
+        assert_eq!(worker.queue.releases, 0);
+    }
+
+    #[test]
+    fn unbillable_provider_output_is_retried_without_saving() {
+        let provider = Provider {
+            replies: VecDeque::from([Ok(CompactionProviderResult {
+                summary: "   ".to_owned(),
+                cost_usd_micros: 1_000,
+                billing_segment: None,
+            })]),
+            calls: 0,
+        };
+        let mut worker = worker(job(), provider, Billing::default());
+        let report = worker.run_once(100.0).unwrap_or_default();
+        assert_eq!(report.retried, 1);
+        let (queue, state, provider, billing, _) = worker.into_parts();
+        assert_eq!(provider.calls, 1);
+        assert!(state.saved.is_empty());
+        assert!(billing.settlements.is_empty());
+        assert_eq!(queue.replaced.last().map(|job| job.attempts), Some(1));
+    }
+
+    fn saved_result_job() -> CompactionJobRecord {
+        let mut saved = job();
+        saved.result_summary = Some("stored summary".to_owned());
+        saved.result_billing_segment = Some(json!({"kind":"summary","text":"stored summary"}));
+        saved
+    }
+
+    #[test]
+    fn billing_failures_leave_the_job_for_a_retry() {
+        let cases = [
+            // A recorded result whose usage cannot be persisted.
+            (saved_result_job(), None, "record", "record_provider_usage"),
+            // A recorded result whose durable usage cannot be listed at settlement.
+            (saved_result_job(), None, "list", "settle_success"),
+            // A result already saved by an earlier attempt.
+            (
+                saved_result_job(),
+                Some(("stored summary", "m1")),
+                "settle",
+                "settle_recovered",
+            ),
+            // A job overtaken by a newer summary.
+            (job(), Some(("newer", "m2")), "settle", "settle_obsolete"),
+        ];
+        for (record, current, failing, stage) in cases {
+            let mut worker = worker(record, idle_provider(), failing_billing(failing));
+            if let Some((summary, marker)) = current {
+                worker.state.current = (Some(summary.to_owned()), Some(marker.to_owned()));
+            }
+            let report = worker.run_once(100.0).unwrap_or_default();
+            assert_eq!(report.retried, 1, "{stage}");
+            assert!(report.failures.is_empty(), "{stage}");
+            let (queue, _, provider, billing, _) = worker.into_parts();
+            assert_eq!(provider.calls, 0, "{stage}");
+            assert!(billing.settlements.is_empty(), "{stage}");
+            assert_eq!(
+                queue.replaced.last().map(|job| job.attempts),
+                Some(1),
+                "{stage}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_failures_report_a_queue_that_cannot_drop_the_job() {
+        let mut exhausted = job();
+        exhausted.attempts = 2;
+        let mut worker = worker(
+            exhausted,
+            Provider {
+                replies: VecDeque::from([Err("synthetic provider failure")]),
+                calls: 0,
+            },
+            Billing::default(),
+        );
+        worker.queue.delete_error = Some("synthetic delete failure");
+        // The background boundary reports every failed chat in one error.
+        assert_eq!(
+            crate::background::BackgroundWorker::run_once(&mut worker, 100),
+            Err("chat chat-1 failed at terminal_settlement: \
+                 provider: synthetic provider failure; synthetic delete failure"
+                .to_owned())
+        );
+        let (queue, _, _, billing, _) = worker.into_parts();
+        assert_eq!(billing.settlements.len(), 1);
+        assert_eq!(billing.settlements[0].0, "memory_compaction_failed");
+        assert_eq!(queue.releases, 1);
     }
 }
