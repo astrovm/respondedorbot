@@ -33,6 +33,8 @@ use crate::conversation::{
 use crate::reconciliation::ActiveOperationRegistry;
 
 const COMPACTION_THRESHOLD: usize = 40;
+// The configured history size is a small constant, far inside the Redis range.
+const CHAT_HISTORY_LIMIT: i64 = CHAT_HISTORY_MAX_MESSAGES as i64;
 const COMPACTION_KEEP: usize = 25;
 
 pub struct RedisConversationState {
@@ -43,7 +45,7 @@ impl RedisConversationState {
     pub fn new(endpoint: &RedisEndpoint) -> Result<Self, String> {
         RedisMessageState::new(endpoint)
             .map(|state| Self { state })
-            .map_err(|error| error.to_string())
+            .map_err(error_text)
     }
 }
 
@@ -67,11 +69,7 @@ impl ConversationState for RedisConversationState {
         message_id: &str,
     ) -> Result<Option<AiReplyMetadata>, String> {
         let key = bot_message_metadata_key(chat_id, message_id);
-        let Some(payload) = self
-            .state
-            .get_value(&key)
-            .map_err(|error| error.to_string())?
-        else {
+        let Some(payload) = self.state.get_value(&key).map_err(error_text)? else {
             return Ok(None);
         };
         let value: Value = match serde_json::from_str(&payload) {
@@ -107,17 +105,15 @@ impl ConversationState for RedisConversationState {
         current_message_id: Option<&str>,
         max_history_messages: usize,
     ) -> Result<ConversationMemory, String> {
-        let limit = i64::try_from(CHAT_HISTORY_MAX_MESSAGES)
-            .map_err(|_| "history limit exceeds the Redis range".to_owned())?;
         let (entries, summary, marker) = self
             .state
             .get_history_with_summary(
                 chat_id,
-                limit,
+                CHAT_HISTORY_LIMIT,
                 &chat_summary_key(chat_id),
                 &chat_compacted_until_key(chat_id),
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(error_text)?;
         let parsed = decode_history(entries);
         let summary = summary.filter(|value| !value.is_empty());
         // A marker without its summary is stale and must not trim history.
@@ -197,18 +193,18 @@ impl ConversationState for RedisConversationState {
                 .as_deref(),
             input.message_text.contains('@') || input.message_text.starts_with('/'),
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(error_text)?;
         let _stored = self
             .state
             .save_message(&plan, CHAT_STATE_TTL_SECONDS, CHAT_HISTORY_WRITE_LIMIT)
-            .map_err(|error| error.to_string())?;
+            .map_err(error_text)?;
         if matches!(input.chat_type.as_str(), "group" | "supergroup") {
             let payload = prepare_chat_member_payload(
                 &input.sender_first_name,
                 &input.sender_username,
                 input.timestamp,
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(error_text)?;
             self.state
                 .save_chat_member(
                     &chat_members_key(&chat_id),
@@ -216,7 +212,7 @@ impl ConversationState for RedisConversationState {
                     &payload,
                     CHAT_STATE_TTL_SECONDS,
                 )
-                .map_err(|error| error.to_string())?;
+                .map_err(error_text)?;
         }
         Ok(())
     }
@@ -236,7 +232,7 @@ impl ConversationState for RedisConversationState {
                 &chat_summary_key(chat_id),
                 &chat_compacted_until_key(chat_id),
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(error_text)?;
         let summary = summary.filter(|value| !value.is_empty());
         // A marker without its summary is stale and must not trim history.
         let marker = marker.filter(|value| summary.is_some() && !value.is_empty());
@@ -262,11 +258,11 @@ impl ConversationState for RedisConversationState {
             None,
             false,
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(error_text)?;
         let _stored = self
             .state
             .save_message(&plan, CHAT_STATE_TTL_SECONDS, CHAT_HISTORY_WRITE_LIMIT)
-            .map_err(|error| error.to_string())?;
+            .map_err(error_text)?;
         if let Some(sent_message_id) = sent_message_id {
             self.state
                 .set_value(
@@ -278,7 +274,7 @@ impl ConversationState for RedisConversationState {
                     .to_string(),
                     BOT_MESSAGE_METADATA_TTL_SECONDS,
                 )
-                .map_err(|error| error.to_string())?;
+                .map_err(error_text)?;
         }
         Ok(())
     }
@@ -431,7 +427,7 @@ impl PostgresConversationBilling {
         {
             creditless_cap
                 .refund_once(cap_key, operation_id)
-                .map_err(|error| error.to_string())?;
+                .map_err(error_text)?;
         }
         Ok(())
     }
@@ -469,7 +465,7 @@ impl ConversationBilling for PostgresConversationBilling {
                 Some(&request.reservation_id),
                 &request.operation_id,
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(error_text)?;
         let source = match result.source.as_deref() {
             Some("user") => Some(PayerSource::User),
             Some("chat") => Some(PayerSource::Chat),
@@ -494,7 +490,7 @@ impl ConversationBilling for PostgresConversationBilling {
                 .insert(request.operation_id.clone(), cap_key.clone());
             let count = creditless_cap
                 .admit_once(&cap_key, &request.operation_id, CREDITLESS_CAP_TTL_SECONDS)
-                .map_err(|error| error.to_string())?;
+                .map_err(error_text)?;
             if count > request.creditless_user_hourly_limit {
                 let mut refund_metadata = request.metadata.clone();
                 refund_metadata.insert("reason".to_owned(), json!("creditless_hourly_cap"));
@@ -512,7 +508,7 @@ impl ConversationBilling for PostgresConversationBilling {
                         Some(&refund_id),
                         &request.operation_id,
                     )
-                    .map_err(|error| error.to_string())?;
+                    .map_err(error_text)?;
                 self.release_operation_state(&request.operation_id);
                 return Ok(ReserveDecision {
                     authorized: false,
@@ -557,7 +553,7 @@ impl ConversationBilling for PostgresConversationBilling {
         self.repository
             .record_ai_provider_usage(request.user_id, request.chat_id, &metadata)
             .map(|_inserted| ())
-            .map_err(|error| error.to_string())
+            .map_err(error_text)
     }
 
     fn settle(&mut self, request: SettlementRequest) -> Result<(), String> {
@@ -572,7 +568,7 @@ impl ConversationBilling for PostgresConversationBilling {
             if !request.billing_segments.is_empty() {
                 let pricing =
                     calculate_billing_for_segments(&Value::Array(request.billing_segments.clone()))
-                        .map_err(|error| error.to_string())?;
+                        .map_err(error_text)?;
                 pricing_complete =
                     pricing.get("pricing_complete").and_then(Value::as_bool) == Some(true);
                 metadata.insert(
@@ -597,7 +593,7 @@ impl ConversationBilling for PostgresConversationBilling {
                         request.actual_credit_units,
                         &metadata,
                     )
-                    .map_err(|error| error.to_string())?;
+                    .map_err(error_text)?;
             }
             Ok(())
         })();
@@ -623,8 +619,12 @@ impl ConversationBilling for PostgresConversationBilling {
         self.repository
             .get_balance("user", user_id)
             .map(Some)
-            .map_err(|error| error.to_string())
+            .map_err(error_text)
     }
+}
+
+fn error_text(error: impl std::fmt::Display) -> String {
+    error.to_string()
 }
 
 fn copy_pricing_metadata(metadata: &mut Map<String, Value>, pricing: &Value) {
@@ -730,7 +730,9 @@ mod tests {
         user_identity,
     };
     use crate::ai_dispatch::AiConversationInput;
-    use crate::conversation::{ConversationBilling, ConversationState, SettlementRequest};
+    use crate::conversation::{
+        ConversationBilling, ConversationState, ReserveDenial, ReserveRequest, SettlementRequest,
+    };
     use crate::reconciliation::ActiveOperationRegistry;
 
     #[test]
@@ -769,11 +771,10 @@ mod tests {
     fn integration_redis_endpoint() -> Option<RedisEndpoint> {
         let port = std::env::var("TEST_REDIS_PORT").ok()?.parse().ok()?;
         Some(RedisEndpoint {
-            host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+            host: std::env::var("TEST_REDIS_HOST").unwrap_or(String::from("127.0.0.1")),
             port,
-            password: std::env::var("TEST_REDIS_PASSWORD")
-                .ok()
-                .filter(|value| !value.is_empty()),
+            // Empty passwords are ignored by the Redis client.
+            password: std::env::var("TEST_REDIS_PASSWORD").ok(),
         })
     }
 
@@ -806,15 +807,13 @@ mod tests {
     }
 
     #[test]
-    fn redis_conversation_state_round_trips_live_conversation_memory() -> Result<(), String> {
-        let Some(endpoint) = integration_redis_endpoint() else {
-            return Ok(());
-        };
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| error.to_string())?
-            .as_nanos();
-        let chat_id = -i64::try_from(nonce % 1_000_000_000).map_err(|error| error.to_string())?;
+    fn redis_conversation_state_round_trips_live_conversation_memory() -> TestResult {
+        integration_redis_endpoint().map_or(Ok(()), round_trip_live_conversation_memory)
+    }
+
+    fn round_trip_live_conversation_memory(endpoint: RedisEndpoint) -> TestResult {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let chat_id = -i64::try_from(nonce % 1_000_000_000)?;
         let mut state = RedisConversationState::new(&endpoint)?;
         let spanish = conversation_input(chat_id, 2, Locale::Es);
         state.record_incoming(&spanish)?;
@@ -846,10 +845,13 @@ mod tests {
 
         let malformed_key =
             bot_core::message_state::bot_message_metadata_key(&chat_id.to_string(), "malformed");
-        state
-            .state
-            .set_value(&malformed_key, "not json", 60)
-            .map_err(|error| error.to_string())?;
+        state.state.set_value(&malformed_key, "not json", 60)?;
+        assert!(
+            state
+                .reply_metadata(&chat_id.to_string(), "malformed")?
+                .is_none()
+        );
+        state.state.set_value(&malformed_key, "[]", 60)?;
         assert!(
             state
                 .reply_metadata(&chat_id.to_string(), "malformed")?
@@ -857,39 +859,19 @@ mod tests {
         );
         state
             .state
-            .set_value(&malformed_key, "[]", 60)
-            .map_err(|error| error.to_string())?;
-        assert!(
-            state
-                .reply_metadata(&chat_id.to_string(), "malformed")?
-                .is_none()
-        );
-        state
-            .state
-            .set_value(&malformed_key, r#"{"type":"ai"}"#, 60)
-            .map_err(|error| error.to_string())?;
+            .set_value(&malformed_key, r#"{"type":"ai"}"#, 60)?;
         assert!(
             state
                 .reply_metadata(&chat_id.to_string(), "malformed")?
                 .is_none()
         );
 
+        let summary_key = bot_core::message_state::chat_summary_key(&chat_id.to_string());
+        let marker_key = bot_core::message_state::chat_compacted_until_key(&chat_id.to_string());
         state
             .state
-            .set_value(
-                &bot_core::message_state::chat_summary_key(&chat_id.to_string()),
-                "synthetic summary",
-                60,
-            )
-            .map_err(|error| error.to_string())?;
-        state
-            .state
-            .set_value(
-                &bot_core::message_state::chat_compacted_until_key(&chat_id.to_string()),
-                "2",
-                60,
-            )
-            .map_err(|error| error.to_string())?;
+            .set_value(&summary_key, "synthetic summary", 60)?;
+        state.state.set_value(&marker_key, "2", 60)?;
         let compacted = state.load_memory(&chat_id.to_string(), "", None, None, 20)?;
         assert_eq!(compacted.summary.as_deref(), Some("synthetic summary"));
 
@@ -1030,9 +1012,7 @@ mod tests {
             .collect::<Vec<_>>();
         let (first_visible, first_plan) = build_compaction_view(&history, &None, &None, "chat");
         assert_eq!(first_visible.len(), 50);
-        let Some(first_plan) = first_plan else {
-            return Err("first compaction should be planned");
-        };
+        let first_plan = first_plan.ok_or("first compaction should be planned")?;
         assert_eq!(first_plan.messages.len(), 25);
         assert_eq!(first_plan.target_marker, "25");
         assert_eq!(first_plan.expected_marker, None);
@@ -1045,12 +1025,398 @@ mod tests {
         );
         assert_eq!(incremental_visible.len(), 25);
         assert_eq!(incremental_visible[0].id, "26");
-        let Some(incremental_plan) = incremental_plan else {
-            return Err("incremental compaction should be planned");
-        };
+        let incremental_plan =
+            incremental_plan.ok_or("incremental compaction should be planned")?;
         assert_eq!(incremental_plan.messages.len(), 20);
         assert_eq!(incremental_plan.target_marker, "25");
         assert_eq!(incremental_plan.expected_marker.as_deref(), Some("5"));
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_stored_roles_fall_back_by_message_id() {
+        assert_eq!(role("", "12"), PromptRole::User);
+        assert_eq!(role("synthetic", "bot_12"), PromptRole::Assistant);
+        assert_eq!(role("tool", "bot_12"), PromptRole::Tool);
+    }
+
+    #[test]
+    fn aborting_releases_guards_even_when_the_creditless_refund_fails() -> TestResult {
+        let operation_id = "ai:42:7:99";
+        let unreachable_cap =
+            bot_adapters::redis_creditless_cap::RedisCreditlessCap::new(&RedisEndpoint {
+                host: "127.0.0.1".to_owned(),
+                port: 1,
+                password: None,
+            })?;
+        let active = ActiveOperationRegistry::default();
+        active.mark_active(operation_id);
+        let mut billing = PostgresConversationBilling::new("postgresql://synthetic.invalid/db")
+            .with_creditless_cap(unreachable_cap)
+            .with_active_operations(active.clone());
+        billing
+            .payer_by_operation
+            .insert(operation_id.to_owned(), PayerSource::Chat);
+        billing
+            .active_marked_operations
+            .insert(operation_id.to_owned());
+        billing
+            .cap_key_by_operation
+            .insert(operation_id.to_owned(), "synthetic-cap-key".to_owned());
+
+        let result = billing.abort_operation(operation_id);
+
+        assert!(
+            matches!(&result, Err(error) if !error.is_empty()),
+            "{result:?}"
+        );
+        assert!(!active.is_active(operation_id));
+        assert!(!billing.payer_by_operation.contains_key(operation_id));
+        assert!(!billing.cap_key_by_operation.contains_key(operation_id));
+        // Without a cap key there is nothing to refund, so a retry succeeds.
+        assert_eq!(billing.abort_operation(operation_id), Ok(()));
+        Ok(())
+    }
+
+    fn user_reserve(
+        user_id: i64,
+        operation_id: &str,
+        reservation: &str,
+        amount: i64,
+    ) -> ReserveRequest {
+        ReserveRequest {
+            user_id,
+            chat_id: None,
+            operation_id: operation_id.to_owned(),
+            reservation_id: format!("{operation_id}:{reservation}"),
+            amount,
+            creditless_user_hourly_limit: 10,
+            metadata: serde_json::Map::from_iter([(
+                "operation_id".to_owned(),
+                json!(operation_id),
+            )]),
+        }
+    }
+
+    #[test]
+    fn postgres_reserves_keep_the_first_payer_and_leave_denials_unmarked() -> TestResult {
+        std::env::var("TEST_DATABASE_URL").map_or(Ok(()), reserve_against_postgres)
+    }
+
+    fn reserve_against_postgres(database_url: String) -> TestResult {
+        let database_url = database_url.as_str();
+        bot_adapters::billing_schema::BillingSchemaRepository::new(database_url).ensure_schema()?;
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let suffix = i64::try_from(nonce % 100_000_000)?;
+        let user_id = 6_310_000_000_000_i64 + suffix;
+        let denied_operation = format!("synthetic-denied:{nonce}");
+        let paid_operation = format!("synthetic-paid:{nonce}");
+        let active = ActiveOperationRegistry::default();
+        let mut billing =
+            PostgresConversationBilling::new(database_url).with_active_operations(active.clone());
+
+        bot_adapters::billing_read::BillingRepository::new(database_url)
+            .mint_user_credits(user_id, 1_000, None)?;
+
+        // More than the minted credits plus any onboarding grant.
+        let denied = billing.reserve(user_reserve(user_id, &denied_operation, "reserve", 5_000))?;
+        assert!(!denied.authorized);
+        assert_eq!(denied.source, None);
+        assert!(denied.denial.is_none());
+        assert!(denied.user_balance >= 1_000);
+        assert!(!active.is_active(&denied_operation));
+        assert!(!billing.payer_by_operation.contains_key(&denied_operation));
+
+        let first = billing.reserve(user_reserve(user_id, &paid_operation, "first", 100))?;
+        assert!(first.authorized);
+        assert_eq!(first.source, Some(PayerSource::User));
+        assert!(active.is_active(&paid_operation));
+
+        // Later reserves for the same operation request the recorded payer.
+        let second = billing.reserve(user_reserve(user_id, &paid_operation, "second", 50))?;
+        assert!(second.authorized);
+        assert_eq!(second.source, Some(PayerSource::User));
+        assert_eq!(second.user_balance, first.user_balance - 50);
+        assert_eq!(
+            billing.personal_balance(user_id)?,
+            Some(second.user_balance)
+        );
+
+        billing.release_operation(&paid_operation);
+        assert!(!active.is_active(&paid_operation));
+        assert!(!billing.payer_by_operation.contains_key(&paid_operation));
+        Ok(())
+    }
+
+    #[test]
+    fn unreachable_ledger_fails_settlement_but_still_releases_guards() {
+        let operation_id = "ai:42:7:77";
+        let active = ActiveOperationRegistry::default();
+        let mut billing = PostgresConversationBilling::new(
+            "postgresql://synthetic:synthetic@127.0.0.1:1/synthetic?sslmode=disable",
+        )
+        .with_active_operations(active.clone());
+        active.mark_active(operation_id);
+        billing
+            .payer_by_operation
+            .insert(operation_id.to_owned(), PayerSource::User);
+        billing
+            .active_marked_operations
+            .insert(operation_id.to_owned());
+
+        let result = billing.settle(SettlementRequest {
+            user_id: 88,
+            chat_id: None,
+            operation_id: operation_id.to_owned(),
+            actual_credit_units: 5,
+            delivered: true,
+            reason: "synthetic".to_owned(),
+            billing_segments: Vec::new(),
+        });
+
+        assert!(
+            matches!(&result, Err(error) if !error.is_empty()),
+            "{result:?}"
+        );
+        assert!(!active.is_active(operation_id));
+        assert!(!billing.payer_by_operation.contains_key(operation_id));
+        assert!(!billing.active_marked_operations.contains(operation_id));
+    }
+
+    #[test]
+    fn pending_provider_cost_leaves_the_operation_open_for_reconciliation() {
+        let operation_id = "ai:42:7:66";
+        let active = ActiveOperationRegistry::default();
+        // Any ledger access would fail against this address.
+        let mut billing = PostgresConversationBilling::new(
+            "postgresql://synthetic:synthetic@127.0.0.1:1/synthetic?sslmode=disable",
+        )
+        .with_active_operations(active.clone());
+        active.mark_active(operation_id);
+        billing
+            .active_marked_operations
+            .insert(operation_id.to_owned());
+
+        let result = billing.settle(SettlementRequest {
+            user_id: 88,
+            chat_id: None,
+            operation_id: operation_id.to_owned(),
+            actual_credit_units: 0,
+            delivered: true,
+            reason: "synthetic".to_owned(),
+            billing_segments: vec![json!({
+                "kind": "chat",
+                "model": "deepseek/deepseek-v4.1-flash",
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+                "source": "openrouter",
+                "metadata": {
+                    "provider": "openrouter",
+                    "provider_generation_id": "generation-pending",
+                    "provider_usage_pending": true
+                }
+            })],
+        });
+
+        assert_eq!(result, Ok(()));
+        assert!(!active.is_active(operation_id));
+        assert!(!billing.active_marked_operations.contains(operation_id));
+    }
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn unreachable_redis() -> RedisEndpoint {
+        RedisEndpoint {
+            host: "127.0.0.1".to_owned(),
+            port: 1,
+            password: None,
+        }
+    }
+
+    #[test]
+    fn unreachable_redis_fails_every_conversation_state_operation() -> TestResult {
+        let mut state = RedisConversationState::new(&unreachable_redis())?;
+        let input = conversation_input(-100, 2, Locale::En);
+        let failures = [
+            state.reply_metadata("-100", "1").err(),
+            state.load_memory("-100", "", None, None, 20).err(),
+            state.load_summary_memory("-100", 20).err(),
+            state.record_incoming(&input).err(),
+            state.record_outgoing(&input, Some(3), "reply").err(),
+        ];
+        for failure in failures {
+            assert!(
+                matches!(&failure, Some(error) if !error.is_empty()),
+                "{failure:?}"
+            );
+        }
+        // Oversized limits are rejected before Redis is contacted.
+        assert_eq!(
+            state.load_summary_memory("-100", usize::MAX).err(),
+            Some("summary history limit exceeds the Redis range".to_owned())
+        );
+        Ok(())
+    }
+
+    fn unreachable_billing() -> PostgresConversationBilling {
+        PostgresConversationBilling::new(
+            "postgresql://synthetic:synthetic@127.0.0.1:1/synthetic?sslmode=disable",
+        )
+    }
+
+    fn user_request(operation_id: &str, amount: i64) -> ReserveRequest {
+        ReserveRequest {
+            user_id: 88,
+            chat_id: None,
+            operation_id: operation_id.to_owned(),
+            reservation_id: format!("{operation_id}:reserve"),
+            amount,
+            creditless_user_hourly_limit: 10,
+            metadata: serde_json::Map::new(),
+        }
+    }
+
+    #[test]
+    fn reservations_reject_oversized_amounts_and_ledger_failures() {
+        let mut billing = unreachable_billing();
+        assert_eq!(
+            billing
+                .reserve(user_request("ai:88:1", i64::from(i32::MAX) + 1))
+                .err(),
+            Some("AI reservation exceeds the database range".to_owned())
+        );
+        let failed = billing.reserve(user_request("ai:88:2", 10));
+        assert!(
+            matches!(&failed, Err(error) if !error.is_empty()),
+            "{failed:?}"
+        );
+        assert!(billing.payer_by_operation.is_empty());
+        let balance = billing.personal_balance(88);
+        assert!(
+            matches!(&balance, Err(error) if !error.is_empty()),
+            "{balance:?}"
+        );
+        let recorded = billing.record_segment(crate::conversation::ProviderSegmentRequest {
+            user_id: 88,
+            chat_id: None,
+            operation_id: "ai:88:2".to_owned(),
+            segment_id: "ai:88:2:segment".to_owned(),
+            segment: json!({"kind": "chat"}),
+        });
+        assert!(
+            matches!(&recorded, Err(error) if !error.is_empty()),
+            "{recorded:?}"
+        );
+    }
+
+    #[test]
+    fn zero_cost_settlement_refunds_the_allowance_before_the_ledger() {
+        let operation_id = "ai:42:7:55";
+        let mut billing = unreachable_billing();
+        billing
+            .payer_by_operation
+            .insert(operation_id.to_owned(), PayerSource::User);
+        let result = billing.settle(SettlementRequest {
+            user_id: 88,
+            chat_id: None,
+            operation_id: operation_id.to_owned(),
+            actual_credit_units: 0,
+            delivered: false,
+            reason: "synthetic".to_owned(),
+            billing_segments: Vec::new(),
+        });
+        // Without a creditless admission the refund is a no-op, so the
+        // ledger write is attempted (and fails here).
+        assert!(
+            matches!(&result, Err(error) if !error.is_empty()),
+            "{result:?}"
+        );
+        assert!(billing.payer_by_operation.is_empty());
+    }
+
+    #[test]
+    fn postgres_chat_payer_is_capped_per_hour_and_kept_for_the_operation() -> TestResult {
+        std::env::var("TEST_DATABASE_URL")
+            .ok()
+            .zip(integration_redis_endpoint())
+            .map_or(Ok(()), chat_payer_scenario)
+    }
+
+    fn chat_payer_scenario((database_url, endpoint): (String, RedisEndpoint)) -> TestResult {
+        use bot_adapters::redis_creditless_cap::{RedisCreditlessCap, creditless_cap_key};
+
+        bot_adapters::billing_schema::BillingSchemaRepository::new(&database_url)
+            .ensure_schema()?;
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let suffix = i64::try_from(nonce % 100_000_000)?;
+        let user_id = 6_320_000_000_000_i64 + suffix;
+        let chat_id = -6_330_000_000_000_i64 - suffix;
+        let repository = bot_adapters::billing_read::BillingRepository::new(&database_url);
+        repository.mint_user_credits(user_id, 1_000, None)?;
+        assert!(
+            repository
+                .transfer_user_to_chat(user_id, chat_id, 1_000)?
+                .transferred
+        );
+        let request = |operation_id: &str, reservation: &str, amount: i64, limit: i64| {
+            ReserveRequest {
+                user_id,
+                chat_id: Some(chat_id),
+                operation_id: operation_id.to_owned(),
+                reservation_id: format!("{operation_id}:{reservation}"),
+                amount,
+                creditless_user_hourly_limit: limit,
+                // Without origin metadata the cap is keyed by the paying chat.
+                metadata: serde_json::Map::new(),
+            }
+        };
+        let cap_key = creditless_cap_key(&chat_id.to_string(), user_id);
+        let cap_reader = RedisCreditlessCap::new(&endpoint)?;
+        let active = ActiveOperationRegistry::default();
+        let mut billing = PostgresConversationBilling::new(&database_url)
+            .with_creditless_cap(RedisCreditlessCap::new(&endpoint)?)
+            .with_active_operations(active.clone());
+
+        // More than any onboarding grant, so the chat pays.
+        let paid = format!("synthetic-chat-paid:{nonce}");
+        let first = billing.reserve(request(&paid, "first", 400, 5))?;
+        assert!(first.authorized);
+        assert_eq!(first.source, Some(PayerSource::Chat));
+        assert_eq!(first.chat_balance, 600);
+        assert!(active.is_active(&paid));
+        assert_eq!(cap_reader.count(&cap_key)?, Some(1));
+
+        // The operation keeps its payer and its single hourly admission.
+        let second = billing.reserve(request(&paid, "second", 100, 5))?;
+        assert!(second.authorized);
+        assert_eq!(second.source, Some(PayerSource::Chat));
+        assert_eq!(second.chat_balance, 500);
+        assert_eq!(cap_reader.count(&cap_key)?, Some(1));
+
+        // A new operation past a zero hourly limit is refunded and denied.
+        let blocked = format!("synthetic-chat-blocked:{nonce}");
+        let denied = billing.reserve(request(&blocked, "first", 400, 0))?;
+        assert!(!denied.authorized);
+        assert_eq!(denied.source, Some(PayerSource::Chat));
+        assert_eq!(
+            denied.denial,
+            Some(ReserveDenial::CreditlessHourlyCap { limit: 0 })
+        );
+        assert_eq!(denied.chat_balance, 500);
+        assert!(!billing.payer_by_operation.contains_key(&blocked));
+
+        // A cap that cannot be reached fails the reservation.
+        let mut unreachable_cap = PostgresConversationBilling::new(&database_url)
+            .with_creditless_cap(RedisCreditlessCap::new(&unreachable_redis())?);
+        let failed = unreachable_cap.reserve(request(
+            &format!("synthetic-chat-unreachable:{nonce}"),
+            "first",
+            400,
+            5,
+        ));
+        assert!(
+            matches!(&failed, Err(error) if !error.is_empty()),
+            "{failed:?}"
+        );
         Ok(())
     }
 }

@@ -197,7 +197,7 @@ where
         task_mode,
         max_rounds,
         true,
-        |event| match event {
+        &mut |event| match event {
             ChatToolLoopEvent::FinalText(text) => on_text(&text),
             ChatToolLoopEvent::ReasoningDelta(_)
             | ChatToolLoopEvent::ResetToTrace
@@ -214,7 +214,7 @@ pub fn run_chat_tool_loop_events<Provider, Tools>(
     initial_messages: &[PromptMessage],
     task_mode: bool,
     max_rounds: usize,
-    on_event: impl FnMut(ChatToolLoopEvent) -> Result<(), OpenRouterChatError>,
+    mut on_event: impl FnMut(ChatToolLoopEvent) -> Result<(), OpenRouterChatError>,
 ) -> Result<ChatToolLoopResult, ChatToolLoopError>
 where
     Provider: ChatRoundStream,
@@ -228,9 +228,13 @@ where
         task_mode,
         max_rounds,
         false,
-        on_event,
+        &mut on_event,
     )
 }
+
+/// Event callbacks are passed as trait objects so both entry points share one
+/// instantiation of the loop per provider and tool runtime.
+type EventCallback<'a> = dyn FnMut(ChatToolLoopEvent) -> Result<(), OpenRouterChatError> + 'a;
 
 #[allow(clippy::too_many_arguments)]
 fn run_chat_tool_loop_events_with_policy<Provider, Tools>(
@@ -241,7 +245,7 @@ fn run_chat_tool_loop_events_with_policy<Provider, Tools>(
     task_mode: bool,
     max_rounds: usize,
     include_intermediate_text: bool,
-    mut on_event: impl FnMut(ChatToolLoopEvent) -> Result<(), OpenRouterChatError>,
+    on_event: &mut EventCallback<'_>,
 ) -> Result<ChatToolLoopResult, ChatToolLoopError>
 where
     Provider: ChatRoundStream,
@@ -349,7 +353,7 @@ where
             result.text.push_str(&round.text);
         } else {
             emit_event(
-                &mut on_event,
+                &mut *on_event,
                 &result,
                 &round,
                 ChatToolLoopEvent::ResetToTrace,
@@ -399,7 +403,7 @@ where
             for (call, arguments) in known_calls.iter().zip(&arguments) {
                 let handle = running.next().flatten();
                 emit_event(
-                    &mut on_event,
+                    &mut *on_event,
                     &result,
                     &round,
                     ChatToolLoopEvent::ToolCall {
@@ -434,7 +438,7 @@ where
                     result.failure_fallbacks.push(fallback);
                 }
                 emit_event(
-                    &mut on_event,
+                    &mut *on_event,
                     &result,
                     &round,
                     ChatToolLoopEvent::ToolResult {
@@ -487,7 +491,7 @@ fn prepare_concurrent_calls<Tools: NativeToolRuntime>(
 }
 
 fn emit_event(
-    on_event: &mut impl FnMut(ChatToolLoopEvent) -> Result<(), OpenRouterChatError>,
+    on_event: &mut EventCallback<'_>,
     result: &ChatToolLoopResult,
     round: &ChatRoundResult,
     event: ChatToolLoopEvent,
@@ -673,10 +677,8 @@ pub(crate) fn provider_error_kind(error: &OpenRouterChatError) -> String {
 }
 
 fn wait_before_retry(delay: Duration) {
-    #[cfg(not(test))]
-    std::thread::sleep(delay);
-    #[cfg(test)]
-    let _ = delay;
+    // Unit tests exercise the retry policy without sleeping through it.
+    std::thread::sleep(if cfg!(test) { Duration::ZERO } else { delay });
 }
 
 fn record_round(result: &mut ChatToolLoopResult, round: &ChatRoundResult) {
@@ -784,6 +786,10 @@ mod tests {
         );
     }
 
+    fn ignore_text(_text: &str) -> Result<(), OpenRouterChatError> {
+        Ok(())
+    }
+
     struct Provider {
         rounds: RefCell<Vec<Result<ChatRoundResult, ChatRoundError>>>,
         observed: RefCell<Vec<Vec<PromptMessage>>>,
@@ -808,10 +814,18 @@ mod tests {
         }
     }
 
+    /// `calculate` returns a billed, optionally confirmed result. With a
+    /// barrier, `fetch` calls are read-only and run concurrently and `explode`
+    /// panics concurrently; `record` calls always run sequentially.
     #[derive(Default)]
     struct Tools {
         calls: Vec<(String, Value, String)>,
         confirm: bool,
+        barrier: Option<std::sync::Arc<std::sync::Barrier>>,
+    }
+
+    fn executed_ids(tools: &Tools) -> Vec<&str> {
+        tools.calls.iter().map(|(_, _, id)| id.as_str()).collect()
     }
 
     impl NativeToolRuntime for Tools {
@@ -820,7 +834,7 @@ mod tests {
         }
 
         fn contains(&self, name: &str, _task_mode: bool) -> bool {
-            name == "calculate"
+            matches!(name, "calculate" | "fetch" | "record" | "explode")
         }
 
         fn execute(
@@ -831,11 +845,42 @@ mod tests {
         ) -> ToolExecutionResult {
             self.calls
                 .push((name.to_owned(), arguments.clone(), tool_call_id.to_owned()));
+            if name != "calculate" {
+                return ToolExecutionResult::output(format!("{name} {tool_call_id}"));
+            }
             ToolExecutionResult {
                 output: "4".to_owned(),
                 failure_fallback: self.confirm.then(|| "synthetic confirmation".to_owned()),
                 billing_segment: Some(json!({"kind": "tool"})),
                 diagnostics: vec!["synthetic tool diagnostic".to_owned()],
+            }
+        }
+
+        fn concurrent_call(
+            &mut self,
+            name: &str,
+            arguments: &Value,
+            _tool_call_id: &str,
+        ) -> Option<ConcurrentToolCall> {
+            let barrier = self.barrier.clone()?;
+            let url = arguments["url"].as_str().unwrap_or_default().to_owned();
+            match name {
+                // Every concurrent call waits for the others: a sequential
+                // loop would deadlock here.
+                "fetch" => Some(Box::new(move || {
+                    barrier.wait();
+                    ToolExecutionResult {
+                        output: format!("page {url}"),
+                        failure_fallback: None,
+                        billing_segment: Some(json!({"url": url})),
+                        diagnostics: Vec::new(),
+                    }
+                })),
+                "explode" => Some(Box::new(move || {
+                    barrier.wait();
+                    std::panic::resume_unwind(Box::new("synthetic tool panic"))
+                })),
+                _ => None,
             }
         }
     }
@@ -1000,6 +1045,26 @@ mod tests {
 
         assert_eq!(&*order.borrow(), &["final_text", "provider_returned"]);
         assert_eq!(result.text, "streamed");
+
+        // A delivery failure while streaming aborts the round before it returns.
+        order.borrow_mut().clear();
+        let error = run_chat_tool_loop_events(
+            "test-operation",
+            &provider,
+            &mut tools,
+            &[],
+            false,
+            1,
+            |_event| Err(OpenRouterChatError::Stream("synthetic delivery".to_owned())),
+        )
+        .err();
+        let Some(error) = error else { unreachable!() };
+        assert_eq!(
+            error.source,
+            OpenRouterChatError::Stream("synthetic delivery".to_owned())
+        );
+        assert_eq!(error.failed_round.text, "streamed");
+        assert!(order.borrow().is_empty());
     }
 
     #[test]
@@ -1020,7 +1085,7 @@ mod tests {
             &[],
             false,
             5,
-            |_text| Ok(()),
+            ignore_text,
         );
         assert!(result.is_ok());
         assert!(tools.calls.is_empty());
@@ -1040,7 +1105,7 @@ mod tests {
             &[],
             false,
             1,
-            |_text| Ok(()),
+            ignore_text,
         )
         .unwrap_or_else(|error| *error.partial);
         assert_eq!(tools.calls[0].1, json!({}));
@@ -1064,13 +1129,10 @@ mod tests {
             &[],
             false,
             5,
-            |_text| Ok(()),
+            ignore_text,
         )
         .err();
-        assert!(error.is_some());
-        let Some(error) = error else {
-            return;
-        };
+        let Some(error) = error else { unreachable!() };
         assert_eq!(error.provider_rounds, 1);
         assert_eq!(error.partial.text, "partial");
         assert_eq!(error.partial.billing_segments[0]["pending"], true);
@@ -1105,7 +1167,7 @@ mod tests {
             &[],
             false,
             5,
-            |_text| Ok(()),
+            ignore_text,
         )
         .unwrap_or_else(|error| *error.partial);
 
@@ -1140,17 +1202,17 @@ mod tests {
         };
         let mut tools = Tools::default();
 
-        let error = run_chat_tool_loop_events(
+        let error = run_chat_tool_loop(
             "test-operation",
             &provider,
             &mut tools,
             &[],
             false,
             DEFAULT_MAX_TOOL_ROUNDS,
-            |_event| Ok(()),
+            ignore_text,
         )
-        .err()
-        .unwrap_or_else(|| unreachable!());
+        .err();
+        let Some(error) = error else { unreachable!() };
 
         assert_eq!(error.provider_rounds, 1);
         assert_eq!(provider.observed.borrow().len(), 1);
@@ -1189,10 +1251,10 @@ mod tests {
             &[],
             false,
             5,
-            |_text| Ok(()),
+            ignore_text,
         )
-        .err()
-        .unwrap_or_else(|| unreachable!());
+        .err();
+        let Some(error) = error else { unreachable!() };
 
         assert_eq!(error.provider_rounds, 4);
         assert_eq!(error.partial.tool_calls_executed, 1);
@@ -1236,10 +1298,10 @@ mod tests {
             &[],
             false,
             5,
-            |_text| Ok(()),
+            ignore_text,
         )
-        .err()
-        .unwrap_or_else(|| unreachable!());
+        .err();
+        let Some(error) = error else { unreachable!() };
 
         assert_eq!(tools.calls.len(), 2);
         assert_eq!(
@@ -1270,10 +1332,10 @@ mod tests {
                 &[],
                 false,
                 5,
-                |_text| Ok(()),
+                ignore_text,
             )
-            .err()
-            .unwrap_or_else(|| unreachable!());
+            .err();
+            let Some(error) = error else { unreachable!() };
 
             assert_eq!(error.provider_rounds, 1);
             assert_eq!(provider.observed.borrow().len(), 1);
@@ -1319,61 +1381,6 @@ mod tests {
             "synthetic delivery failure".to_owned()
         )));
     }
-    /// `fetch` calls are read-only and run concurrently; `record` calls have
-    /// side effects and run sequentially.
-    struct ConcurrentTools {
-        barrier: std::sync::Arc<std::sync::Barrier>,
-        sequential: Vec<String>,
-    }
-
-    impl NativeToolRuntime for ConcurrentTools {
-        fn schemas(&self, _task_mode: bool) -> Vec<Value> {
-            Vec::new()
-        }
-
-        fn contains(&self, name: &str, _task_mode: bool) -> bool {
-            matches!(name, "fetch" | "record" | "explode")
-        }
-
-        fn execute(
-            &mut self,
-            name: &str,
-            _arguments: &Value,
-            tool_call_id: &str,
-        ) -> ToolExecutionResult {
-            self.sequential.push(tool_call_id.to_owned());
-            ToolExecutionResult::output(format!("{name} {tool_call_id}"))
-        }
-
-        fn concurrent_call(
-            &mut self,
-            name: &str,
-            arguments: &Value,
-            _tool_call_id: &str,
-        ) -> Option<ConcurrentToolCall> {
-            let barrier = std::sync::Arc::clone(&self.barrier);
-            let url = arguments["url"].as_str().unwrap_or_default().to_owned();
-            match name {
-                // Every concurrent call waits for the others: a sequential
-                // loop would deadlock here.
-                "fetch" => Some(Box::new(move || {
-                    barrier.wait();
-                    ToolExecutionResult {
-                        output: format!("page {url}"),
-                        failure_fallback: None,
-                        billing_segment: Some(json!({"url": url})),
-                        diagnostics: Vec::new(),
-                    }
-                })),
-                "explode" => Some(Box::new(move || {
-                    barrier.wait();
-                    std::panic::resume_unwind(Box::new("synthetic tool panic"))
-                })),
-                _ => None,
-            }
-        }
-    }
-
     fn numbered_call(index: i64, name: &str, url: &str) -> StreamToolCall {
         StreamToolCall {
             index,
@@ -1403,9 +1410,9 @@ mod tests {
             ]),
             observed: RefCell::new(Vec::new()),
         };
-        let mut tools = ConcurrentTools {
-            barrier: std::sync::Arc::new(std::sync::Barrier::new(4)),
-            sequential: Vec::new(),
+        let mut tools = Tools {
+            barrier: Some(std::sync::Arc::new(std::sync::Barrier::new(4))),
+            ..Tools::default()
         };
         let mut results = Vec::new();
         let result = run_chat_tool_loop_events(
@@ -1426,7 +1433,7 @@ mod tests {
 
         assert_eq!(result.text, "done");
         assert_eq!(result.tool_calls_executed, 5);
-        assert_eq!(tools.sequential, ["call-1"]);
+        assert_eq!(executed_ids(&tools), ["call-1"]);
         assert_eq!(
             results,
             [
@@ -1467,9 +1474,9 @@ mod tests {
         };
         // A one-party barrier never blocks, yet the lone fetch still goes
         // through `execute` because concurrency needs two read-only calls.
-        let mut tools = ConcurrentTools {
-            barrier: std::sync::Arc::new(std::sync::Barrier::new(1)),
-            sequential: Vec::new(),
+        let mut tools = Tools {
+            barrier: Some(std::sync::Arc::new(std::sync::Barrier::new(1))),
+            ..Tools::default()
         };
         let result = run_chat_tool_loop(
             "test-operation",
@@ -1478,10 +1485,10 @@ mod tests {
             &[],
             false,
             1,
-            |_| Ok(()),
+            ignore_text,
         )
         .unwrap_or_else(|error| *error.partial);
-        assert_eq!(tools.sequential, ["call-0", "call-1"]);
+        assert_eq!(executed_ids(&tools), ["call-0", "call-1"]);
         assert!(result.stopped_at_limit);
 
         let provider = Provider {
@@ -1495,9 +1502,9 @@ mod tests {
             ))]),
             observed: RefCell::new(Vec::new()),
         };
-        let mut tools = ConcurrentTools {
-            barrier: std::sync::Arc::new(std::sync::Barrier::new(2)),
-            sequential: Vec::new(),
+        let mut tools = Tools {
+            barrier: Some(std::sync::Arc::new(std::sync::Barrier::new(2))),
+            ..Tools::default()
         };
         let error = run_chat_tool_loop_events(
             "test-operation",
@@ -1513,10 +1520,288 @@ mod tests {
                 _ => Ok(()),
             },
         )
-        .err()
-        .unwrap_or_else(|| unreachable!());
+        .err();
+        let Some(error) = error else { unreachable!() };
         // The running fetches are joined before the error is returned.
         assert_eq!(error.partial.tool_calls_executed, 1);
-        assert!(tools.sequential.is_empty());
+        assert!(tools.calls.is_empty());
+    }
+
+    struct SseTransport {
+        body: String,
+        requests: Rc<RefCell<usize>>,
+    }
+
+    impl OpenRouterStreamTransport for SseTransport {
+        fn post_stream(
+            &self,
+            request: &bot_adapters::openrouter_chat::HttpRequest,
+            on_bytes: &mut dyn FnMut(&[u8]) -> Result<(), OpenRouterChatError>,
+        ) -> Result<(), OpenRouterChatError> {
+            assert!(request.body.contains("\"stream\":true"));
+            *self.requests.borrow_mut() += 1;
+            on_bytes(self.body.as_bytes())
+        }
+    }
+
+    fn reasoning_streamer(requests: &Rc<RefCell<usize>>) -> OpenRouterChatStreamer<SseTransport> {
+        let chunk = json!({
+            "id": "generation-1",
+            "model": "resolved/model",
+            "choices": [{
+                "delta": {"reasoning": "thinking ", "content": "answer"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2, "cost": "0.0001"}
+        });
+        OpenRouterChatStreamer::new(
+            SseTransport {
+                body: format!("data: {chunk}\n\ndata: [DONE]\n\n"),
+                requests: Rc::clone(requests),
+            },
+            "synthetic-key",
+            "https://synthetic.invalid/api/v1",
+            "requested/model",
+        )
+    }
+
+    #[test]
+    fn openrouter_streamer_surfaces_reasoning_and_text_through_the_tool_loop() {
+        let requests = Rc::new(RefCell::new(0));
+        let streamer = reasoning_streamer(&requests);
+        let mut tools = Tools::default();
+        let mut events = Vec::new();
+        let result = run_chat_tool_loop_events(
+            "test-operation",
+            &streamer,
+            &mut tools,
+            &[PromptMessage::text(PromptRole::User, "question")],
+            false,
+            DEFAULT_MAX_TOOL_ROUNDS,
+            |event| {
+                events.push(event);
+                Ok(())
+            },
+        )
+        .unwrap_or_else(|error| *error.partial);
+        assert_eq!(
+            events,
+            [
+                ChatToolLoopEvent::ReasoningDelta("thinking ".to_owned()),
+                ChatToolLoopEvent::FinalText("answer".to_owned()),
+            ]
+        );
+        assert_eq!(result.text, "answer");
+        assert_eq!(result.provider_rounds, 1);
+        assert_eq!(result.billing_segments.len(), 1);
+        assert_eq!(*requests.borrow(), 1);
+
+        // The text-only port drops reasoning and streams just the answer.
+        let mut texts = Vec::new();
+        let round = ChatRoundStream::stream_round(
+            &streamer,
+            &[PromptMessage::text(PromptRole::User, "question")],
+            &[],
+            &mut |text| {
+                texts.push(text.to_owned());
+                Ok(())
+            },
+        )
+        .unwrap_or_else(|error| *error.partial);
+        assert_eq!(texts, ["answer"]);
+        assert_eq!(round.reasoning, "thinking ");
+        assert_eq!(*requests.borrow(), 2);
+    }
+
+    #[test]
+    fn trace_and_tool_event_delivery_failures_stop_before_running_tools() {
+        for failing in ["reset", "tool_call"] {
+            let provider = Provider {
+                rounds: RefCell::new(vec![Ok(round(
+                    "checking",
+                    vec![call("calculate", r#"{"expression":"2+2"}"#)],
+                    json!({"round": 1}),
+                ))]),
+                observed: RefCell::new(Vec::new()),
+            };
+            let mut tools = Tools::default();
+            let error = run_chat_tool_loop_events(
+                "test-operation",
+                &provider,
+                &mut tools,
+                &[],
+                false,
+                DEFAULT_MAX_TOOL_ROUNDS,
+                |event| match (failing, event) {
+                    ("reset", ChatToolLoopEvent::ResetToTrace)
+                    | ("tool_call", ChatToolLoopEvent::ToolCall { .. }) => {
+                        Err(OpenRouterChatError::Stream(failing.to_owned()))
+                    }
+                    _ => Ok(()),
+                },
+            )
+            .err();
+            let Some(error) = error else { unreachable!() };
+            assert_eq!(
+                error.source,
+                OpenRouterChatError::Stream(failing.to_owned())
+            );
+            assert_eq!(error.provider_rounds, 1);
+            assert_eq!(error.partial.tool_calls_executed, 0);
+            assert_eq!(error.failed_round.tool_calls.len(), 1);
+            assert!(tools.calls.is_empty());
+        }
+    }
+
+    #[test]
+    fn fetch_traces_keep_only_the_page_location() {
+        let trace = tool_trace(
+            &call("web_fetch", "{}"),
+            &json!({"url": "https://user:secret@example.com/page?token=private#section"}),
+            None,
+        );
+        assert_eq!(trace["url"], "https://example.com/page");
+        assert!(trace.get("output_chars").is_none());
+        let missing = tool_trace(&call("web_fetch", "{}"), &json!({}), None);
+        assert_eq!(missing["url"], "[invalid URL]");
+    }
+
+    #[test]
+    fn provider_error_kinds_are_stable_trace_labels() {
+        let cases = [
+            (OpenRouterChatError::MissingApiKey, "missing_api_key"),
+            (OpenRouterChatError::MissingModel, "missing_model"),
+            (
+                OpenRouterChatError::MissingModelPricing {
+                    model: "synthetic/model".to_owned(),
+                },
+                "missing_model_pricing",
+            ),
+            (OpenRouterChatError::InvalidBaseUrl, "invalid_base_url"),
+            (
+                OpenRouterChatError::RequestJson("synthetic".to_owned()),
+                "request_json",
+            ),
+            (
+                OpenRouterChatError::Transport("synthetic".to_owned()),
+                "transport",
+            ),
+            (
+                OpenRouterChatError::RateLimited {
+                    retry_after_seconds: None,
+                    message: "synthetic".to_owned(),
+                },
+                "rate_limited",
+            ),
+            (
+                OpenRouterChatError::Http {
+                    status_code: 502,
+                    message: "synthetic".to_owned(),
+                },
+                "http_502",
+            ),
+            (
+                OpenRouterChatError::InvalidJson("synthetic".to_owned()),
+                "invalid_json",
+            ),
+            (OpenRouterChatError::ResponseTooLarge, "response_too_large"),
+            (OpenRouterChatError::MalformedResponse, "malformed_response"),
+            (OpenRouterChatError::IncompleteStream, "incomplete_stream"),
+            (
+                OpenRouterChatError::Stream("synthetic".to_owned()),
+                "stream_consumer_or_provider",
+            ),
+        ];
+        for (error, kind) in cases {
+            assert_eq!(provider_error_kind(&error), kind);
+        }
+    }
+
+    #[test]
+    fn streaming_delivery_failures_are_not_retried() {
+        let provider = Provider {
+            rounds: RefCell::new(vec![
+                Ok(round("undeliverable", Vec::new(), json!({"round": 1}))),
+                Ok(round("unexpected retry", Vec::new(), json!({"round": 2}))),
+            ]),
+            observed: RefCell::new(Vec::new()),
+        };
+        let mut tools = Tools::default();
+        let error = run_chat_tool_loop(
+            "test-operation",
+            &provider,
+            &mut tools,
+            &[],
+            false,
+            DEFAULT_MAX_TOOL_ROUNDS,
+            |_text| Err(OpenRouterChatError::Stream("synthetic delivery".to_owned())),
+        )
+        .err();
+        let Some(error) = error else { unreachable!() };
+        assert_eq!(
+            error.source,
+            OpenRouterChatError::Stream("synthetic delivery".to_owned())
+        );
+        assert_eq!(error.provider_rounds, 1);
+        assert_eq!(error.partial.text, "undeliverable");
+        assert_eq!(provider.observed.borrow().len(), 1);
+    }
+
+    /// Tools that keep the default, sequential-only call preparation.
+    #[derive(Default)]
+    struct SequentialTools {
+        executed: Vec<String>,
+    }
+
+    impl NativeToolRuntime for SequentialTools {
+        fn schemas(&self, _task_mode: bool) -> Vec<Value> {
+            Vec::new()
+        }
+
+        fn contains(&self, name: &str, _task_mode: bool) -> bool {
+            name == "fetch"
+        }
+
+        fn execute(
+            &mut self,
+            name: &str,
+            _arguments: &Value,
+            tool_call_id: &str,
+        ) -> ToolExecutionResult {
+            self.executed.push(tool_call_id.to_owned());
+            ToolExecutionResult::output(format!("{name} {tool_call_id}"))
+        }
+    }
+
+    #[test]
+    fn tools_without_concurrency_support_run_every_call_in_order() {
+        let provider = Provider {
+            rounds: RefCell::new(vec![
+                Ok(round(
+                    "",
+                    vec![
+                        numbered_call(0, "fetch", "https://a.example"),
+                        numbered_call(1, "fetch", "https://b.example"),
+                    ],
+                    json!({"round": 1}),
+                )),
+                Ok(round("done", Vec::new(), json!({"round": 2}))),
+            ]),
+            observed: RefCell::new(Vec::new()),
+        };
+        let mut tools = SequentialTools::default();
+        let result = run_chat_tool_loop(
+            "test-operation",
+            &provider,
+            &mut tools,
+            &[],
+            false,
+            DEFAULT_MAX_TOOL_ROUNDS,
+            ignore_text,
+        );
+        let Ok(result) = result else { unreachable!() };
+        assert_eq!(result.text, "done");
+        assert_eq!(result.tool_calls_executed, 2);
+        assert_eq!(tools.executed, ["call-0", "call-1"]);
     }
 }

@@ -1495,7 +1495,8 @@ impl BillingRepository {
     where
         F: for<'transaction> Fn(&mut Transaction<'transaction>) -> Result<T, BillingError>,
     {
-        for attempt in 0..CREDIT_TRANSACTION_MAX_ATTEMPTS {
+        let mut attempt = 1;
+        loop {
             let result = (|| {
                 let mut client = self.connect()?;
                 let mut transaction = client.transaction()?;
@@ -1504,17 +1505,15 @@ impl BillingRepository {
                 Ok(result)
             })();
             match result {
-                Ok(result) => return Ok(result),
                 Err(error)
-                    if attempt + 1 < CREDIT_TRANSACTION_MAX_ATTEMPTS
+                    if attempt < CREDIT_TRANSACTION_MAX_ATTEMPTS
                         && is_retryable_transaction_error(&error) =>
                 {
-                    continue;
+                    attempt += 1;
                 }
-                Err(error) => return Err(error),
+                result => return result,
             }
         }
-        Err(BillingError::TransactionRetriesExhausted)
     }
 
     fn balance_for_update(
@@ -1740,6 +1739,7 @@ fn legacy_settlement_metadata(
 mod tests {
     use native_tls::TlsConnector;
     use postgres::Client;
+    use postgres::error::SqlState;
     use postgres_native_tls::MakeTlsConnector;
     use serde_json::{Value, json};
 
@@ -1749,6 +1749,7 @@ mod tests {
         OnboardingGrantResult, PurgeResult, StarPaymentResult, TransferResult,
         ai_mutation_metadata,
     };
+    use crate::billing_schema::fault_injection::{self, TestResult};
     use crate::billing_schema::{BillingSchemaRepository, BillingSchemaResult};
 
     #[test]
@@ -1803,14 +1804,15 @@ mod tests {
 
     #[test]
     fn reads_existing_and_missing_balances() -> Result<(), Box<dyn std::error::Error>> {
-        let Ok(database_url) = std::env::var("TEST_DATABASE_URL") else {
-            return Ok(());
-        };
-        let database_url = isolated_schema_url(&database_url, "billing_read_test")?;
+        std::env::var("TEST_DATABASE_URL").map_or(Ok(()), |url| exercise_billing_repository(&url))
+    }
+
+    fn exercise_billing_repository(database_url: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let database_url = isolated_schema_url(database_url, "billing_read_test")?;
         let connector = TlsConnector::builder().build()?;
         let mut client = Client::connect(&database_url, MakeTlsConnector::new(connector))?;
         BillingSchemaRepository::new(&database_url).ensure_schema()?;
-        client.batch_execute(
+        let outcome = client.batch_execute(
             "DELETE FROM star_payments \
                 WHERE user_id BETWEEN 7000000000001 AND 7000000000999 \
                    OR user_id BETWEEN 8100000000000 AND 8100999999999; \
@@ -1861,7 +1863,8 @@ mod tests {
                     '{\"source\":\"user\",\"operation_id\":\"synthetic-schema-repair\",\
                       \"usage_tag\":\"memory_compaction:synthetic:schema\",\
                       \"reason\":\"unused_stale_reservation\"}');",
-        )?;
+        );
+        outcome?;
 
         let first_schema_url = database_url.clone();
         let second_schema_url = database_url.clone();
@@ -1873,10 +1876,12 @@ mod tests {
         });
         let first_schema = first_schema
             .join()
-            .map_err(|_| std::io::Error::other("first schema migration thread panicked"))??;
+            .ok()
+            .ok_or("first schema migration thread panicked")??;
         let second_schema = second_schema
             .join()
-            .map_err(|_| std::io::Error::other("second schema migration thread panicked"))??;
+            .ok()
+            .ok_or("second schema migration thread panicked")??;
         let schema_results = [first_schema, second_schema];
         assert_eq!(
             schema_results
@@ -1928,7 +1933,8 @@ mod tests {
                     'idx_credit_ledger_user_settlement_lookup' \
                 ))",
             &[],
-        )?;
+        );
+        let schema_evidence = schema_evidence?;
         assert_eq!(schema_evidence.get::<_, i32>(0), 300);
         assert_eq!(schema_evidence.get::<_, i32>(1), 300);
         assert_eq!(schema_evidence.get::<_, i32>(2), 10_000);
@@ -1948,12 +1954,13 @@ mod tests {
                 repaired_compaction_refunds: 0,
             }
         );
-        client.execute(
+        let outcome = client.execute(
             "INSERT INTO credit_accounts (scope_type, scope_id, balance) \
              VALUES ('user', $1, 1234) \
              ON CONFLICT (scope_type, scope_id) DO UPDATE SET balance = EXCLUDED.balance",
             &[&7_000_000_000_001_i64],
-        )?;
+        );
+        outcome?;
         drop(client);
 
         let repository = BillingRepository::new(&database_url);
@@ -1966,15 +1973,11 @@ mod tests {
 
         let connector = TlsConnector::builder().build()?;
         let mut client = Client::connect(&database_url, MakeTlsConnector::new(connector))?;
-        assert_eq!(
-            client
-                .query_one(
-                    "SELECT COUNT(*) FROM credit_accounts WHERE scope_type = 'chat' AND scope_id = $1",
-                    &[&7_000_000_000_002_i64],
-                )?
-                .get::<_, i64>(0),
-            1
+        let outcome = client.query_one(
+            "SELECT COUNT(*) FROM credit_accounts WHERE scope_type = 'chat' AND scope_id = $1",
+            &[&7_000_000_000_002_i64],
         );
+        assert_eq!(outcome?.get::<_, i64>(0), 1);
         assert_eq!(
             repository.grant_onboarding_if_needed(7_000_000_000_003, 300)?,
             OnboardingGrantResult {
@@ -2002,10 +2005,12 @@ mod tests {
         let concurrent_results = [
             first
                 .join()
-                .map_err(|_| std::io::Error::other("first onboarding thread panicked"))??,
+                .ok()
+                .ok_or("first onboarding thread panicked")??,
             second
                 .join()
-                .map_err(|_| std::io::Error::other("second onboarding thread panicked"))??,
+                .ok()
+                .ok_or("second onboarding thread panicked")??,
         ];
         assert_eq!(
             concurrent_results
@@ -2019,11 +2024,12 @@ mod tests {
                 .iter()
                 .all(|result| result.balance == 300)
         );
-        client.batch_execute(
+        let outcome = client.batch_execute(
             "INSERT INTO onboarding_grants (user_id, credits) VALUES \
                 (7000000000004, 1), (7000000000005, 1), (7000000000006, 1) \
              ON CONFLICT (user_id) DO NOTHING;",
-        )?;
+        );
+        outcome?;
         assert_eq!(
             repository.grant_onboarding_if_needed(7_000_000_000_007, 300)?,
             OnboardingGrantResult {
@@ -2037,33 +2043,36 @@ mod tests {
                 COUNT(*) FILTER (WHERE event_type = 'onboarding_denied_overflow') \
              FROM credit_ledger WHERE user_id >= $1 AND user_id <= $2",
             &[&7_000_000_000_001_i64, &7_000_000_000_007_i64],
-        )?;
+        );
+        let event_counts = event_counts?;
         assert_eq!(event_counts.get::<_, i64>(0), 2);
         assert_eq!(event_counts.get::<_, i64>(1), 1);
 
+        let outcome = repository.record_star_payment(
+            "synthetic-charge-1",
+            7_000_000_000_008,
+            "small",
+            100,
+            500,
+            Some("synthetic-payload"),
+        );
         assert_eq!(
-            repository.record_star_payment(
-                "synthetic-charge-1",
-                7_000_000_000_008,
-                "small",
-                100,
-                500,
-                Some("synthetic-payload"),
-            )?,
+            outcome?,
             StarPaymentResult {
                 inserted: true,
                 user_balance: 500,
             }
         );
+        let outcome = repository.record_star_payment(
+            "synthetic-charge-1",
+            7_000_000_000_008,
+            "small",
+            100,
+            500,
+            Some("synthetic-payload"),
+        );
         assert_eq!(
-            repository.record_star_payment(
-                "synthetic-charge-1",
-                7_000_000_000_008,
-                "small",
-                100,
-                500,
-                Some("synthetic-payload"),
-            )?,
+            outcome?,
             StarPaymentResult {
                 inserted: false,
                 user_balance: 500,
@@ -2094,10 +2103,12 @@ mod tests {
         let concurrent_payment_results = [
             first
                 .join()
-                .map_err(|_| std::io::Error::other("first Stars payment thread panicked"))??,
+                .ok()
+                .ok_or("first Stars payment thread panicked")??,
             second
                 .join()
-                .map_err(|_| std::io::Error::other("second Stars payment thread panicked"))??,
+                .ok()
+                .ok_or("second Stars payment thread panicked")??,
         ];
         assert_eq!(
             concurrent_payment_results
@@ -2121,7 +2132,8 @@ mod tests {
              FROM credit_ledger \
              WHERE user_id = $1 AND event_type = 'topup'",
             &[&7_000_000_000_008_i64],
-        )?;
+        );
+        let topup_evidence = topup_evidence?;
         assert_eq!(topup_evidence.get::<_, i64>(0), 2);
         assert_eq!(topup_evidence.get::<_, i64>(1), 2);
 
@@ -2151,7 +2163,8 @@ mod tests {
                 COUNT(*) FILTER (WHERE event_type = 'transfer_user_to_chat') \
              FROM credit_ledger WHERE user_id = $1",
             &[&7_000_000_000_009_i64],
-        )?;
+        );
+        let manual_evidence = manual_evidence?;
         assert_eq!(manual_evidence.get::<_, i64>(0), 1);
         assert_eq!(manual_evidence.get::<_, i64>(1), 2);
 
@@ -2178,10 +2191,12 @@ mod tests {
         let concurrent_transfer_results = [
             first
                 .join()
-                .map_err(|_| std::io::Error::other("first transfer thread panicked"))??,
+                .ok()
+                .ok_or("first transfer thread panicked")??,
             second
                 .join()
-                .map_err(|_| std::io::Error::other("second transfer thread panicked"))??,
+                .ok()
+                .ok_or("second transfer thread panicked")??,
         ];
         assert_eq!(
             concurrent_transfer_results
@@ -2214,88 +2229,81 @@ mod tests {
             )
         });
         let mut concurrent_mint_balances = [
-            first
-                .join()
-                .map_err(|_| std::io::Error::other("first mint thread panicked"))??,
-            second
-                .join()
-                .map_err(|_| std::io::Error::other("second mint thread panicked"))??,
+            first.join().ok().ok_or("first mint thread panicked")??,
+            second.join().ok().ok_or("second mint thread panicked")??,
         ];
         concurrent_mint_balances.sort_unstable();
         assert_eq!(concurrent_mint_balances, [500, 1000]);
 
-        client.execute(
+        let outcome = client.execute(
             "INSERT INTO credit_accounts (scope_type, scope_id, balance) \
              VALUES ('chat', $1, 500) \
              ON CONFLICT (scope_type, scope_id) DO UPDATE SET balance = EXCLUDED.balance",
             &[&7_000_000_000_014_i64],
-        )?;
+        );
+        outcome?;
         let custom_metadata = json!({
             "operation_id": "synthetic-chat-automation",
             "source": "automation"
         });
         let custom_metadata = custom_metadata
             .as_object()
-            .ok_or_else(|| std::io::Error::other("synthetic metadata must be an object"))?;
+            .ok_or("synthetic metadata must be an object")?;
+        let outcome = repository.charge_chat_ai_credits(
+            7_000_000_000_014,
+            200,
+            "ai_reserve",
+            custom_metadata,
+        );
         assert_eq!(
-            repository.charge_chat_ai_credits(
-                7_000_000_000_014,
-                200,
-                "ai_reserve",
-                custom_metadata,
-            )?,
+            outcome?,
             ChatAiChargeResult {
                 charged: true,
                 chat_balance: 300,
             }
         );
+        let outcome = repository.charge_chat_ai_credits(
+            7_000_000_000_014,
+            400,
+            "ai_reserve",
+            custom_metadata,
+        );
         assert_eq!(
-            repository.charge_chat_ai_credits(
-                7_000_000_000_014,
-                400,
-                "ai_reserve",
-                custom_metadata,
-            )?,
+            outcome?,
             ChatAiChargeResult {
                 charged: false,
                 chat_balance: 300,
             }
         );
-        assert_eq!(
-            repository.refund_chat_ai_credits(
-                7_000_000_000_014,
-                100,
-                "ai_refund",
-                custom_metadata,
-            )?,
-            400
+        let outcome =
+            repository.refund_chat_ai_credits(7_000_000_000_014, 100, "ai_refund", custom_metadata);
+        assert_eq!(outcome?, 400);
+        let outcome = repository.apply_chat_ai_debt(
+            7_000_000_000_014,
+            650,
+            "ai_settlement_debt",
+            custom_metadata,
         );
-        assert_eq!(
-            repository.apply_chat_ai_debt(
-                7_000_000_000_014,
-                650,
-                "ai_settlement_debt",
-                custom_metadata,
-            )?,
-            -250
-        );
+        assert_eq!(outcome?, -250);
         let chat_ai_evidence = client.query_one(
             "SELECT COUNT(*), \
                 COUNT(*) FILTER (WHERE metadata->>'source' = 'automation'), \
                 COALESCE(SUM(amount), 0) \
              FROM credit_ledger WHERE chat_id = $1",
             &[&7_000_000_000_014_i64],
-        )?;
+        );
+        let chat_ai_evidence = chat_ai_evidence?;
         assert_eq!(chat_ai_evidence.get::<_, i64>(0), 3);
         assert_eq!(chat_ai_evidence.get::<_, i64>(1), 3);
         assert_eq!(chat_ai_evidence.get::<_, i64>(2), -750);
 
-        client.execute(
+        let outcome = client.execute(
             "INSERT INTO credit_accounts (scope_type, scope_id, balance) \
              VALUES ('chat', $1, 500) \
              ON CONFLICT (scope_type, scope_id) DO UPDATE SET balance = EXCLUDED.balance",
             &[&7_000_000_000_015_i64],
-        )?;
+        );
+        outcome?;
         let first_database_url = database_url.clone();
         let second_database_url = database_url.clone();
         let first = std::thread::spawn(move || {
@@ -2317,10 +2325,12 @@ mod tests {
         let concurrent_chat_charge_results = [
             first
                 .join()
-                .map_err(|_| std::io::Error::other("first chat charge thread panicked"))??,
+                .ok()
+                .ok_or("first chat charge thread panicked")??,
             second
                 .join()
-                .map_err(|_| std::io::Error::other("second chat charge thread panicked"))??,
+                .ok()
+                .ok_or("second chat charge thread panicked")??,
         ];
         assert_eq!(
             concurrent_chat_charge_results
@@ -2335,21 +2345,23 @@ mod tests {
                 .all(|result| result.chat_balance == 200)
         );
 
-        client.batch_execute(
+        let outcome = client.batch_execute(
             "INSERT INTO credit_accounts (scope_type, scope_id, balance) VALUES \
                 ('user', 7000000000016, 500), \
                 ('chat', 7000000000017, 700) \
              ON CONFLICT (scope_type, scope_id) DO UPDATE SET balance = EXCLUDED.balance;",
-        )?;
+        );
+        outcome?;
+        let outcome = repository.apply_ai_debt(
+            7_000_000_000_016,
+            Some(7_000_000_000_017),
+            900,
+            "chat",
+            "ai_settlement_debt",
+            &serde_json::Map::new(),
+        );
         assert_eq!(
-            repository.apply_ai_debt(
-                7_000_000_000_016,
-                Some(7_000_000_000_017),
-                900,
-                "chat",
-                "ai_settlement_debt",
-                &serde_json::Map::new(),
-            )?,
+            outcome?,
             BalancePairResult {
                 user_balance: 500,
                 chat_balance: -200,
@@ -2358,16 +2370,17 @@ mod tests {
         let overridden_metadata = json!({"source": "synthetic_override"});
         let overridden_metadata = overridden_metadata
             .as_object()
-            .ok_or_else(|| std::io::Error::other("synthetic metadata must be an object"))?;
+            .ok_or("synthetic metadata must be an object")?;
+        let outcome = repository.apply_ai_debt(
+            7_000_000_000_016,
+            Some(7_000_000_000_017),
+            200,
+            "invalid",
+            "custom_debt",
+            overridden_metadata,
+        );
         assert_eq!(
-            repository.apply_ai_debt(
-                7_000_000_000_016,
-                Some(7_000_000_000_017),
-                200,
-                "invalid",
-                "custom_debt",
-                overridden_metadata,
-            )?,
+            outcome?,
             BalancePairResult {
                 user_balance: 300,
                 chat_balance: -200,
@@ -2380,7 +2393,8 @@ mod tests {
                 COALESCE(SUM(amount), 0) \
              FROM credit_ledger WHERE user_id = $1",
             &[&7_000_000_000_016_i64],
-        )?;
+        );
+        let debt_evidence = debt_evidence?;
         assert_eq!(debt_evidence.get::<_, i64>(0), 2);
         assert_eq!(debt_evidence.get::<_, i64>(1), 1);
         assert_eq!(debt_evidence.get::<_, i64>(2), 1);
@@ -2411,37 +2425,41 @@ mod tests {
         let mut concurrent_debt_balances = [
             first
                 .join()
-                .map_err(|_| std::io::Error::other("first AI debt thread panicked"))??
+                .ok()
+                .ok_or("first AI debt thread panicked")??
                 .user_balance,
             second
                 .join()
-                .map_err(|_| std::io::Error::other("second AI debt thread panicked"))??
+                .ok()
+                .ok_or("second AI debt thread panicked")??
                 .user_balance,
         ];
         concurrent_debt_balances.sort_unstable();
         assert_eq!(concurrent_debt_balances, [-600, -300]);
 
-        client.batch_execute(
+        let outcome = client.batch_execute(
             "INSERT INTO credit_accounts (scope_type, scope_id, balance) VALUES \
                 ('user', 7000000000019, 100), \
                 ('chat', 7000000000020, 200) \
              ON CONFLICT (scope_type, scope_id) DO UPDATE SET balance = EXCLUDED.balance;",
-        )?;
+        );
+        outcome?;
         let chat_refund_metadata = json!({"idempotency_key": "synthetic-refund-1"});
         let chat_refund_metadata = chat_refund_metadata
             .as_object()
-            .ok_or_else(|| std::io::Error::other("synthetic metadata must be an object"))?;
+            .ok_or("synthetic metadata must be an object")?;
+        let outcome = repository.refund_ai_charge(
+            7_000_000_000_019,
+            Some(7_000_000_000_020),
+            300,
+            "chat",
+            "ai_refund",
+            chat_refund_metadata,
+            Some("synthetic-refund-1"),
+            "",
+        );
         assert_eq!(
-            repository.refund_ai_charge(
-                7_000_000_000_019,
-                Some(7_000_000_000_020),
-                300,
-                "chat",
-                "ai_refund",
-                chat_refund_metadata,
-                Some("synthetic-refund-1"),
-                "",
-            )?,
+            outcome?,
             AiRefundResult {
                 applied: true,
                 reason: None,
@@ -2449,17 +2467,18 @@ mod tests {
                 chat_balance: 500,
             }
         );
+        let outcome = repository.refund_ai_charge(
+            7_000_000_000_019,
+            Some(7_000_000_000_020),
+            300,
+            "chat",
+            "ai_refund",
+            chat_refund_metadata,
+            Some("synthetic-refund-1"),
+            "",
+        );
         assert_eq!(
-            repository.refund_ai_charge(
-                7_000_000_000_019,
-                Some(7_000_000_000_020),
-                300,
-                "chat",
-                "ai_refund",
-                chat_refund_metadata,
-                Some("synthetic-refund-1"),
-                "",
-            )?,
+            outcome?,
             AiRefundResult {
                 applied: false,
                 reason: None,
@@ -2467,7 +2486,7 @@ mod tests {
                 chat_balance: 500,
             }
         );
-        client.execute(
+        let outcome = client.execute(
             "INSERT INTO credit_ledger \
                 (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
              VALUES ('ai_settlement_result', $1, $1, $2, 0, $3)",
@@ -2476,22 +2495,24 @@ mod tests {
                 &7_000_000_000_020_i64,
                 &json!({"operation_id": "settled-operation"}),
             ],
-        )?;
+        );
+        outcome?;
         let settled_metadata = json!({"operation_id": "settled-operation"});
         let settled_metadata = settled_metadata
             .as_object()
-            .ok_or_else(|| std::io::Error::other("synthetic metadata must be an object"))?;
+            .ok_or("synthetic metadata must be an object")?;
+        let outcome = repository.refund_ai_charge(
+            7_000_000_000_019,
+            Some(7_000_000_000_020),
+            200,
+            "user",
+            "ai_refund",
+            settled_metadata,
+            None,
+            "settled-operation",
+        );
         assert_eq!(
-            repository.refund_ai_charge(
-                7_000_000_000_019,
-                Some(7_000_000_000_020),
-                200,
-                "user",
-                "ai_refund",
-                settled_metadata,
-                None,
-                "settled-operation",
-            )?,
+            outcome?,
             AiRefundResult {
                 applied: false,
                 reason: Some("operation_settled".to_owned()),
@@ -2502,18 +2523,19 @@ mod tests {
         let user_refund_metadata = json!({"idempotency_key": "synthetic-refund-2"});
         let user_refund_metadata = user_refund_metadata
             .as_object()
-            .ok_or_else(|| std::io::Error::other("synthetic metadata must be an object"))?;
+            .ok_or("synthetic metadata must be an object")?;
+        let outcome = repository.refund_ai_charge(
+            7_000_000_000_019,
+            Some(7_000_000_000_020),
+            200,
+            "invalid",
+            "ai_refund",
+            user_refund_metadata,
+            Some("synthetic-refund-2"),
+            "",
+        );
         assert_eq!(
-            repository.refund_ai_charge(
-                7_000_000_000_019,
-                Some(7_000_000_000_020),
-                200,
-                "invalid",
-                "ai_refund",
-                user_refund_metadata,
-                Some("synthetic-refund-2"),
-                "",
-            )?,
+            outcome?,
             AiRefundResult {
                 applied: true,
                 reason: None,
@@ -2525,7 +2547,8 @@ mod tests {
             "SELECT COUNT(*), COALESCE(SUM(amount), 0) \
              FROM credit_ledger WHERE user_id = $1 AND event_type = 'ai_refund'",
             &[&7_000_000_000_019_i64],
-        )?;
+        );
+        let refund_evidence = refund_evidence?;
         assert_eq!(refund_evidence.get::<_, i64>(0), 2);
         assert_eq!(refund_evidence.get::<_, i64>(1), 500);
 
@@ -2566,10 +2589,12 @@ mod tests {
         let concurrent_refund_results = [
             first
                 .join()
-                .map_err(|_| std::io::Error::other("first AI refund thread panicked"))??,
+                .ok()
+                .ok_or("first AI refund thread panicked")??,
             second
                 .join()
-                .map_err(|_| std::io::Error::other("second AI refund thread panicked"))??,
+                .ok()
+                .ok_or("second AI refund thread panicked")??,
         ];
         assert_eq!(
             concurrent_refund_results
@@ -2584,12 +2609,13 @@ mod tests {
                 .all(|result| result.user_balance == 100)
         );
 
-        client.batch_execute(
+        let outcome = client.batch_execute(
             "INSERT INTO credit_accounts (scope_type, scope_id, balance) VALUES \
                 ('user', 7000000000022, 500), \
                 ('chat', 7000000000023, 700) \
              ON CONFLICT (scope_type, scope_id) DO UPDATE SET balance = EXCLUDED.balance;",
-        )?;
+        );
+        outcome?;
         let charge_metadata = |key: &str, operation_id: &str| {
             serde_json::Map::from_iter([
                 (
@@ -2603,17 +2629,18 @@ mod tests {
             ])
         };
         let first_charge_metadata = charge_metadata("synthetic-reserve-1", "operation-1");
+        let outcome = repository.charge_ai_credits(
+            7_000_000_000_022,
+            Some(7_000_000_000_023),
+            300,
+            "ai_reserve",
+            &first_charge_metadata,
+            None,
+            Some("synthetic-reserve-1"),
+            "operation-1",
+        );
         assert_eq!(
-            repository.charge_ai_credits(
-                7_000_000_000_022,
-                Some(7_000_000_000_023),
-                300,
-                "ai_reserve",
-                &first_charge_metadata,
-                None,
-                Some("synthetic-reserve-1"),
-                "operation-1",
-            )?,
+            outcome?,
             AiChargeResult {
                 ok: true,
                 applied: true,
@@ -2624,17 +2651,18 @@ mod tests {
                 chat_balance: 700,
             }
         );
+        let outcome = repository.charge_ai_credits(
+            7_000_000_000_022,
+            Some(7_000_000_000_023),
+            300,
+            "ai_reserve",
+            &first_charge_metadata,
+            None,
+            Some("synthetic-reserve-1"),
+            "operation-1",
+        );
         assert_eq!(
-            repository.charge_ai_credits(
-                7_000_000_000_022,
-                Some(7_000_000_000_023),
-                300,
-                "ai_reserve",
-                &first_charge_metadata,
-                None,
-                Some("synthetic-reserve-1"),
-                "operation-1",
-            )?,
+            outcome?,
             AiChargeResult {
                 ok: true,
                 applied: false,
@@ -2646,49 +2674,42 @@ mod tests {
             }
         );
         let second_charge_metadata = charge_metadata("synthetic-reserve-2", "operation-2");
-        assert!(
-            repository
-                .charge_ai_credits(
-                    7_000_000_000_022,
-                    Some(7_000_000_000_023),
-                    400,
-                    "ai_reserve",
-                    &second_charge_metadata,
-                    None,
-                    Some("synthetic-reserve-2"),
-                    "operation-2",
-                )?
-                .source
-                .is_some_and(|source| source == "chat")
+        let outcome = repository.charge_ai_credits(
+            7_000_000_000_022,
+            Some(7_000_000_000_023),
+            400,
+            "ai_reserve",
+            &second_charge_metadata,
+            None,
+            Some("synthetic-reserve-2"),
+            "operation-2",
         );
+        assert!(outcome?.source.is_some_and(|source| source == "chat"));
         let third_charge_metadata = charge_metadata("synthetic-reserve-3", "operation-3");
-        assert_eq!(
-            repository
-                .charge_ai_credits(
-                    7_000_000_000_022,
-                    Some(7_000_000_000_023),
-                    100,
-                    "ai_reserve",
-                    &third_charge_metadata,
-                    Some("chat"),
-                    Some("synthetic-reserve-3"),
-                    "operation-3",
-                )?
-                .chat_balance,
-            200
+        let outcome = repository.charge_ai_credits(
+            7_000_000_000_022,
+            Some(7_000_000_000_023),
+            100,
+            "ai_reserve",
+            &third_charge_metadata,
+            Some("chat"),
+            Some("synthetic-reserve-3"),
+            "operation-3",
         );
+        assert_eq!(outcome?.chat_balance, 200);
         let insufficient_metadata = charge_metadata("synthetic-reserve-4", "operation-4");
+        let outcome = repository.charge_ai_credits(
+            7_000_000_000_022,
+            Some(7_000_000_000_023),
+            300,
+            "ai_reserve",
+            &insufficient_metadata,
+            Some("user"),
+            Some("synthetic-reserve-4"),
+            "operation-4",
+        );
         assert_eq!(
-            repository.charge_ai_credits(
-                7_000_000_000_022,
-                Some(7_000_000_000_023),
-                300,
-                "ai_reserve",
-                &insufficient_metadata,
-                Some("user"),
-                Some("synthetic-reserve-4"),
-                "operation-4",
-            )?,
+            outcome?,
             AiChargeResult {
                 ok: false,
                 applied: false,
@@ -2699,7 +2720,7 @@ mod tests {
                 chat_balance: 200,
             }
         );
-        client.execute(
+        let outcome = client.execute(
             "INSERT INTO credit_ledger \
                 (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
              VALUES ('ai_settlement_result', $1, $1, $2, 0, $3)",
@@ -2708,40 +2729,34 @@ mod tests {
                 &7_000_000_000_023_i64,
                 &json!({"operation_id": "settled-charge-operation"}),
             ],
-        )?;
+        );
+        outcome?;
         let settled_charge_metadata =
             charge_metadata("synthetic-reserve-settled", "settled-charge-operation");
-        assert_eq!(
-            repository
-                .charge_ai_credits(
-                    7_000_000_000_022,
-                    Some(7_000_000_000_023),
-                    10,
-                    "ai_reserve",
-                    &settled_charge_metadata,
-                    None,
-                    Some("synthetic-reserve-settled"),
-                    "settled-charge-operation",
-                )?
-                .reason,
-            Some("operation_settled".to_owned())
+        let outcome = repository.charge_ai_credits(
+            7_000_000_000_022,
+            Some(7_000_000_000_023),
+            10,
+            "ai_reserve",
+            &settled_charge_metadata,
+            None,
+            Some("synthetic-reserve-settled"),
+            "settled-charge-operation",
         );
+        assert_eq!(outcome?.reason, Some("operation_settled".to_owned()));
         let refunded_charge_metadata = charge_metadata("synthetic-reserve-5", "operation-5");
-        assert!(
-            repository
-                .charge_ai_credits(
-                    7_000_000_000_022,
-                    Some(7_000_000_000_023),
-                    50,
-                    "ai_reserve",
-                    &refunded_charge_metadata,
-                    Some("user"),
-                    Some("synthetic-reserve-5"),
-                    "operation-5",
-                )?
-                .applied
+        let outcome = repository.charge_ai_credits(
+            7_000_000_000_022,
+            Some(7_000_000_000_023),
+            50,
+            "ai_reserve",
+            &refunded_charge_metadata,
+            Some("user"),
+            Some("synthetic-reserve-5"),
+            "operation-5",
         );
-        client.execute(
+        assert!(outcome?.applied);
+        let outcome = client.execute(
             "INSERT INTO credit_ledger \
                 (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
              VALUES ('ai_refund', $1, $1, $2, 50, $3)",
@@ -2750,36 +2765,35 @@ mod tests {
                 &7_000_000_000_023_i64,
                 &json!({"settlement_id": "synthetic-reserve-5"}),
             ],
-        )?;
-        assert_eq!(
-            repository
-                .charge_ai_credits(
-                    7_000_000_000_022,
-                    Some(7_000_000_000_023),
-                    50,
-                    "ai_reserve",
-                    &refunded_charge_metadata,
-                    Some("user"),
-                    Some("synthetic-reserve-5"),
-                    "operation-5",
-                )?
-                .reason,
-            Some("reservation_refunded".to_owned())
         );
+        outcome?;
+        let outcome = repository.charge_ai_credits(
+            7_000_000_000_022,
+            Some(7_000_000_000_023),
+            50,
+            "ai_reserve",
+            &refunded_charge_metadata,
+            Some("user"),
+            Some("synthetic-reserve-5"),
+            "operation-5",
+        );
+        assert_eq!(outcome?.reason, Some("reservation_refunded".to_owned()));
         let charge_evidence = client.query_one(
             "SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM credit_ledger \
              WHERE user_id = $1 AND event_type = 'ai_reserve'",
             &[&7_000_000_000_022_i64],
-        )?;
+        );
+        let charge_evidence = charge_evidence?;
         assert_eq!(charge_evidence.get::<_, i64>(0), 4);
         assert_eq!(charge_evidence.get::<_, i64>(1), -850);
 
-        client.execute(
+        let outcome = client.execute(
             "INSERT INTO credit_accounts (scope_type, scope_id, balance) \
              VALUES ('user', $1, 500) \
              ON CONFLICT (scope_type, scope_id) DO UPDATE SET balance = EXCLUDED.balance",
             &[&7_000_000_000_024_i64],
-        )?;
+        );
+        outcome?;
         let first_database_url = database_url.clone();
         let second_database_url = database_url.clone();
         let first = std::thread::spawn(move || {
@@ -2817,10 +2831,12 @@ mod tests {
         let concurrent_charge_results = [
             first
                 .join()
-                .map_err(|_| std::io::Error::other("first AI charge thread panicked"))??,
+                .ok()
+                .ok_or("first AI charge thread panicked")??,
             second
                 .join()
-                .map_err(|_| std::io::Error::other("second AI charge thread panicked"))??,
+                .ok()
+                .ok_or("second AI charge thread panicked")??,
         ];
         assert_eq!(
             concurrent_charge_results
@@ -2840,12 +2856,13 @@ mod tests {
             "segment_id": "segment-1",
             "segment": {"input_tokens": 12, "output_tokens": 34}
         });
-        assert!(repository.record_ai_provider_usage(
+        let outcome = repository.record_ai_provider_usage(
             7_000_000_000_025,
             Some(7_000_000_000_023),
             &provider_metadata,
-        )?);
-        client.execute(
+        );
+        assert!(outcome?);
+        let outcome = client.execute(
             "INSERT INTO credit_ledger \
                 (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
              VALUES ('ai_reserve', $1, $1, NULL, 0, $2)",
@@ -2857,12 +2874,14 @@ mod tests {
                     "source": "user"
                 }),
             ],
-        )?;
-        assert!(!repository.record_ai_provider_usage(
+        );
+        outcome?;
+        let outcome = repository.record_ai_provider_usage(
             7_000_000_000_025,
             Some(7_000_000_000_023),
             &provider_metadata,
-        )?);
+        );
+        assert!(!outcome?);
         let first_database_url = database_url.clone();
         let second_database_url = database_url.clone();
         let first = std::thread::spawn(move || {
@@ -2892,10 +2911,12 @@ mod tests {
         let concurrent_provider_results = [
             first
                 .join()
-                .map_err(|_| std::io::Error::other("first provider thread panicked"))??,
+                .ok()
+                .ok_or("first provider thread panicked")??,
             second
                 .join()
-                .map_err(|_| std::io::Error::other("second provider thread panicked"))??,
+                .ok()
+                .ok_or("second provider thread panicked")??,
         ];
         assert_eq!(
             concurrent_provider_results
@@ -2910,7 +2931,8 @@ mod tests {
              FROM credit_ledger \
              WHERE user_id = $1 AND event_type = 'ai_provider_usage'",
             &[&7_000_000_000_025_i64],
-        )?;
+        );
+        let provider_evidence = provider_evidence?;
         assert_eq!(provider_evidence.get::<_, i64>(0), 2);
         assert_eq!(provider_evidence.get::<_, i64>(1), 1);
         let provider_segments = repository
@@ -2920,16 +2942,18 @@ mod tests {
             provider_segments[0]["input_tokens"],
             serde_json::Value::from(12)
         );
-        assert!(repository.update_ai_provider_usage(
+        let outcome = repository.update_ai_provider_usage(
             "synthetic-provider-operation",
             "segment-1",
             &json!({"input_tokens": 99, "output_tokens": 100}),
-        )?);
-        assert!(!repository.update_ai_provider_usage(
+        );
+        assert!(outcome?);
+        let outcome = repository.update_ai_provider_usage(
             "synthetic-provider-operation",
             "missing-segment",
             &json!({"input_tokens": 0}),
-        )?);
+        );
+        assert!(!outcome?);
         let updated_provider_segments = repository
             .list_ai_provider_segments(7_000_000_000_025, "synthetic-provider-operation")?;
         assert_eq!(
@@ -2941,7 +2965,7 @@ mod tests {
             serde_json::Value::from(1)
         );
 
-        client.batch_execute(
+        let outcome = client.batch_execute(
             "INSERT INTO credit_accounts (scope_type, scope_id, balance) VALUES \
                 ('user', 7000000000026, 500), \
                 ('user', 7000000000027, 500), \
@@ -2951,7 +2975,8 @@ mod tests {
                 ('chat', 7000000000031, 0), \
                 ('user', 7000000000032, 0) \
              ON CONFLICT (scope_type, scope_id) DO UPDATE SET balance = EXCLUDED.balance;",
-        )?;
+        );
+        outcome?;
         let user_settlement_operation = "synthetic-user-settlement";
         let mut user_settlement_hold =
             charge_metadata("synthetic-user-settlement-hold", user_settlement_operation);
@@ -2960,20 +2985,17 @@ mod tests {
             ("message_id".to_owned(), json!("synthetic-message")),
             ("usage_tag".to_owned(), json!("ai_response")),
         ]));
-        assert!(
-            repository
-                .charge_ai_credits(
-                    7_000_000_000_026,
-                    None,
-                    300,
-                    "ai_reserve",
-                    &user_settlement_hold,
-                    None,
-                    Some("synthetic-user-settlement-hold"),
-                    user_settlement_operation,
-                )?
-                .applied
+        let outcome = repository.charge_ai_credits(
+            7_000_000_000_026,
+            None,
+            300,
+            "ai_reserve",
+            &user_settlement_hold,
+            None,
+            Some("synthetic-user-settlement-hold"),
+            user_settlement_operation,
         );
+        assert!(outcome?.applied);
         let caller_metadata = serde_json::Map::from_iter([
             (
                 "source".to_owned(),
@@ -2984,14 +3006,15 @@ mod tests {
                 serde_json::Value::String("synthetic-trace".to_owned()),
             ),
         ]);
+        let outcome = repository.settle_ai_operation_once(
+            7_000_000_000_026,
+            None,
+            user_settlement_operation,
+            100,
+            &caller_metadata,
+        );
         assert_eq!(
-            repository.settle_ai_operation_once(
-                7_000_000_000_026,
-                None,
-                user_settlement_operation,
-                100,
-                &caller_metadata,
-            )?,
+            outcome?,
             AiSettlementResult {
                 applied: true,
                 source: Some("user".to_owned()),
@@ -3003,14 +3026,15 @@ mod tests {
                 chat_balance: 0,
             }
         );
+        let outcome = repository.settle_ai_operation_once(
+            7_000_000_000_026,
+            None,
+            user_settlement_operation,
+            999,
+            &serde_json::Map::new(),
+        );
         assert_eq!(
-            repository.settle_ai_operation_once(
-                7_000_000_000_026,
-                None,
-                user_settlement_operation,
-                999,
-                &serde_json::Map::new(),
-            )?,
+            outcome?,
             AiSettlementResult {
                 applied: false,
                 source: None,
@@ -3037,7 +3061,8 @@ mod tests {
              FROM credit_ledger WHERE user_id = $1 \
                AND metadata->>'operation_id' = $2",
             &[&7_000_000_000_026_i64, &user_settlement_operation],
-        )?;
+        );
+        let user_settlement_evidence = user_settlement_evidence?;
         assert_eq!(user_settlement_evidence.get::<_, i64>(0), 1);
         assert_eq!(user_settlement_evidence.get::<_, i64>(1), 1);
         assert_eq!(user_settlement_evidence.get::<_, i64>(2), 3);
@@ -3048,28 +3073,26 @@ mod tests {
         let chat_settlement_operation = "synthetic-chat-settlement";
         let chat_settlement_hold =
             charge_metadata("synthetic-chat-settlement-hold", chat_settlement_operation);
-        assert!(
-            repository
-                .charge_ai_credits(
-                    7_000_000_000_027,
-                    Some(7_000_000_000_028),
-                    300,
-                    "ai_reserve",
-                    &chat_settlement_hold,
-                    Some("chat"),
-                    Some("synthetic-chat-settlement-hold"),
-                    chat_settlement_operation,
-                )?
-                .applied
+        let outcome = repository.charge_ai_credits(
+            7_000_000_000_027,
+            Some(7_000_000_000_028),
+            300,
+            "ai_reserve",
+            &chat_settlement_hold,
+            Some("chat"),
+            Some("synthetic-chat-settlement-hold"),
+            chat_settlement_operation,
+        );
+        assert!(outcome?.applied);
+        let outcome = repository.settle_ai_operation_once(
+            7_000_000_000_027,
+            Some(7_000_000_000_028),
+            chat_settlement_operation,
+            500,
+            &serde_json::Map::new(),
         );
         assert_eq!(
-            repository.settle_ai_operation_once(
-                7_000_000_000_027,
-                Some(7_000_000_000_028),
-                chat_settlement_operation,
-                500,
-                &serde_json::Map::new(),
-            )?,
+            outcome?,
             AiSettlementResult {
                 applied: true,
                 source: Some("chat".to_owned()),
@@ -3087,7 +3110,8 @@ mod tests {
                AND metadata->>'operation_id' = $2 \
                AND metadata->>'source' = 'chat'",
             &[&7_000_000_000_027_i64, &chat_settlement_operation],
-        )?;
+        );
+        let debt_evidence = debt_evidence?;
         assert_eq!(debt_evidence.get::<_, i64>(0), 1);
         assert_eq!(debt_evidence.get::<_, i64>(1), -200);
 
@@ -3096,20 +3120,17 @@ mod tests {
             "synthetic-concurrent-settlement-hold",
             concurrent_settlement_operation,
         );
-        assert!(
-            repository
-                .charge_ai_credits(
-                    7_000_000_000_029,
-                    None,
-                    300,
-                    "ai_reserve",
-                    &concurrent_settlement_hold,
-                    None,
-                    Some("synthetic-concurrent-settlement-hold"),
-                    concurrent_settlement_operation,
-                )?
-                .applied
+        let outcome = repository.charge_ai_credits(
+            7_000_000_000_029,
+            None,
+            300,
+            "ai_reserve",
+            &concurrent_settlement_hold,
+            None,
+            Some("synthetic-concurrent-settlement-hold"),
+            concurrent_settlement_operation,
         );
+        assert!(outcome?.applied);
         let first_database_url = database_url.clone();
         let second_database_url = database_url.clone();
         let first = std::thread::spawn(move || {
@@ -3133,10 +3154,12 @@ mod tests {
         let concurrent_settlement_results = [
             first
                 .join()
-                .map_err(|_| std::io::Error::other("first settlement thread panicked"))??,
+                .ok()
+                .ok_or("first settlement thread panicked")??,
             second
                 .join()
-                .map_err(|_| std::io::Error::other("second settlement thread panicked"))??,
+                .ok()
+                .ok_or("second settlement thread panicked")??,
         ];
         assert_eq!(
             concurrent_settlement_results
@@ -3151,7 +3174,7 @@ mod tests {
                 .all(|result| result.user_balance == 400)
         );
 
-        client.execute(
+        let outcome = client.execute(
             "INSERT INTO credit_ledger \
                 (event_type, actor_user_id, user_id, chat_id, amount, metadata) VALUES \
                 ('ai_reserve', $1, $1, NULL, -1, $3), \
@@ -3162,7 +3185,8 @@ mod tests {
                 &json!({"operation_id": "synthetic-mixed-payer", "source": "user"}),
                 &json!({"operation_id": "synthetic-mixed-payer", "source": "chat"}),
             ],
-        )?;
+        );
+        outcome?;
         assert!(matches!(
             repository.settle_ai_operation_once(
                 7_000_000_000_030,
@@ -3173,7 +3197,7 @@ mod tests {
             ),
             Err(BillingError::MultiplePayers)
         ));
-        client.execute(
+        let outcome = client.execute(
             "INSERT INTO credit_ledger \
                 (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
              VALUES ('ai_reserve', $1, $1, $2, -1, $3)",
@@ -3182,7 +3206,8 @@ mod tests {
                 &7_000_000_000_031_i64,
                 &json!({"operation_id": "synthetic-missing-chat", "source": "chat"}),
             ],
-        )?;
+        );
+        outcome?;
         assert!(matches!(
             repository.settle_ai_operation_once(
                 7_000_000_000_032,
@@ -3194,14 +3219,15 @@ mod tests {
             Err(BillingError::ChatIdRequired)
         ));
 
-        client.batch_execute(
+        let outcome = client.batch_execute(
             "INSERT INTO credit_accounts (scope_type, scope_id, balance) VALUES \
                 ('user', 7000000000033, 200), \
                 ('user', 7000000000034, 100), \
                 ('chat', 7000000000035, 500), \
                 ('user', 7000000000036, 0) \
              ON CONFLICT (scope_type, scope_id) DO UPDATE SET balance = EXCLUDED.balance;",
-        )?;
+        );
+        outcome?;
         let legacy_metadata = serde_json::Map::from_iter([
             (
                 "source".to_owned(),
@@ -3212,16 +3238,17 @@ mod tests {
                 serde_json::Value::String("legacy-trace".to_owned()),
             ),
         ]);
+        let outcome = repository.settle_legacy_ai_reservation_once(
+            7_000_000_000_033,
+            None,
+            "user",
+            300,
+            100,
+            "synthetic-legacy-user",
+            &legacy_metadata,
+        );
         assert_eq!(
-            repository.settle_legacy_ai_reservation_once(
-                7_000_000_000_033,
-                None,
-                "user",
-                300,
-                100,
-                "synthetic-legacy-user",
-                &legacy_metadata,
-            )?,
+            outcome?,
             LegacySettlementResult {
                 applied: true,
                 adjustment_credit_units: Some(200),
@@ -3229,16 +3256,17 @@ mod tests {
                 chat_balance: 0,
             }
         );
+        let outcome = repository.settle_legacy_ai_reservation_once(
+            7_000_000_000_033,
+            None,
+            "user",
+            999,
+            0,
+            "synthetic-legacy-user",
+            &serde_json::Map::new(),
+        );
         assert_eq!(
-            repository.settle_legacy_ai_reservation_once(
-                7_000_000_000_033,
-                None,
-                "user",
-                999,
-                0,
-                "synthetic-legacy-user",
-                &serde_json::Map::new(),
-            )?,
+            outcome?,
             LegacySettlementResult {
                 applied: false,
                 adjustment_credit_units: None,
@@ -3254,21 +3282,23 @@ mod tests {
              FROM credit_ledger WHERE user_id = $1 \
                AND event_type = 'memory_compaction_settlement'",
             &[&7_000_000_000_033_i64],
-        )?;
+        );
+        let legacy_user_evidence = legacy_user_evidence?;
         assert_eq!(legacy_user_evidence.get::<_, i64>(0), 1);
         assert_eq!(legacy_user_evidence.get::<_, i64>(1), 200);
         assert_eq!(legacy_user_evidence.get::<_, i64>(2), 1);
 
+        let outcome = repository.settle_legacy_ai_reservation_once(
+            7_000_000_000_034,
+            Some(7_000_000_000_035),
+            "chat",
+            300,
+            500,
+            "synthetic-legacy-chat",
+            &serde_json::Map::new(),
+        );
         assert_eq!(
-            repository.settle_legacy_ai_reservation_once(
-                7_000_000_000_034,
-                Some(7_000_000_000_035),
-                "chat",
-                300,
-                500,
-                "synthetic-legacy-chat",
-                &serde_json::Map::new(),
-            )?,
+            outcome?,
             LegacySettlementResult {
                 applied: true,
                 adjustment_credit_units: Some(-200),
@@ -3316,10 +3346,12 @@ mod tests {
         let concurrent_legacy_results = [
             first
                 .join()
-                .map_err(|_| std::io::Error::other("first legacy settlement thread panicked"))??,
+                .ok()
+                .ok_or("first legacy settlement thread panicked")??,
             second
                 .join()
-                .map_err(|_| std::io::Error::other("second legacy settlement thread panicked"))??,
+                .ok()
+                .ok_or("second legacy settlement thread panicked")??,
         ];
         assert_eq!(
             concurrent_legacy_results
@@ -3338,27 +3370,30 @@ mod tests {
             "settlement_id".to_owned(),
             serde_json::Value::String("synthetic-audit-result".to_owned()),
         )]);
-        assert!(repository.record_ai_settlement_result(
+        let outcome = repository.record_ai_settlement_result(
             7_000_000_000_037,
             Some(7_000_000_000_035),
             99,
             "ai_settlement_result",
             &audit_metadata,
-        )?);
-        assert!(!repository.record_ai_settlement_result(
+        );
+        assert!(outcome?);
+        let outcome = repository.record_ai_settlement_result(
             7_000_000_000_037,
             Some(7_000_000_000_035),
             99,
             "ai_settlement_result",
             &audit_metadata,
-        )?);
+        );
+        assert!(!outcome?);
         let audit_evidence = client.query_one(
             "SELECT COUNT(*), COALESCE(SUM(amount), 0), MIN(actor_user_id) \
              FROM credit_ledger WHERE user_id = $1 \
                AND event_type = 'ai_settlement_result' \
                AND metadata->>'settlement_id' = 'synthetic-audit-result'",
             &[&7_000_000_000_037_i64],
-        )?;
+        );
+        let audit_evidence = audit_evidence?;
         assert_eq!(audit_evidence.get::<_, i64>(0), 1);
         assert_eq!(audit_evidence.get::<_, i64>(1), 0);
         assert_eq!(audit_evidence.get::<_, Option<i64>>(2), Some(99));
@@ -3373,7 +3408,7 @@ mod tests {
         );
         assert!(!recent_audit_results[0].created_at.is_empty());
 
-        client.execute(
+        let outcome = client.execute(
             "INSERT INTO credit_ledger \
                 (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
              VALUES ('ai_reserve', $1, $1, NULL, -300, $2)",
@@ -3386,8 +3421,9 @@ mod tests {
                     "trace_id": "unsettled-trace"
                 }),
             ],
-        )?;
-        assert!(repository.record_ai_provider_usage(
+        );
+        outcome?;
+        let outcome = repository.record_ai_provider_usage(
             7_000_000_000_038,
             None,
             &json!({
@@ -3395,8 +3431,9 @@ mod tests {
                 "segment_id": "unsettled-segment",
                 "segment": {"input_tokens": 12}
             }),
-        )?);
-        client.execute(
+        );
+        assert!(outcome?);
+        let outcome = client.execute(
             "INSERT INTO credit_ledger \
                 (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
              VALUES ('ai_reserve', $1, $1, NULL, -100, $2)",
@@ -3409,8 +3446,9 @@ mod tests {
                     "background": true
                 }),
             ],
-        )?;
-        client.execute(
+        );
+        outcome?;
+        let outcome = client.execute(
             "INSERT INTO credit_ledger \
                 (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
              VALUES ('ai_reserve', $1, $1, NULL, -100, $2)",
@@ -3422,25 +3460,23 @@ mod tests {
                     "source": "user"
                 }),
             ],
-        )?;
-        assert!(
-            repository
-                .settle_legacy_ai_reservation_once(
-                    7_000_000_000_039,
-                    None,
-                    "user",
-                    100,
-                    100,
-                    "synthetic-legacy-excluded-usage",
-                    &serde_json::Map::new(),
-                )?
-                .applied
         );
+        outcome?;
+        let outcome = repository.settle_legacy_ai_reservation_once(
+            7_000_000_000_039,
+            None,
+            "user",
+            100,
+            100,
+            "synthetic-legacy-excluded-usage",
+            &serde_json::Map::new(),
+        );
+        assert!(outcome?.applied);
         let unsettled_operations = repository.list_unsettled_ai_operations(500)?;
         let unsettled = unsettled_operations
             .iter()
             .find(|operation| operation.operation_id == "synthetic-unsettled-operation")
-            .ok_or_else(|| std::io::Error::other("unsettled operation must be returned"))?;
+            .ok_or("unsettled operation must be returned")?;
         assert_eq!(unsettled.user_id, 7_000_000_000_038);
         assert_eq!(unsettled.authorized_credit_units, 300);
         assert_eq!(unsettled.source, "user");
@@ -3452,9 +3488,7 @@ mod tests {
         let zero_unsettled = unsettled_operations
             .iter()
             .find(|operation| operation.operation_id == "synthetic-zero-unsettled-operation")
-            .ok_or_else(|| {
-                std::io::Error::other("zero-cost unsettled operation must be returned")
-            })?;
+            .ok_or("zero-cost unsettled operation must be returned")?;
         assert_eq!(zero_unsettled.authorized_credit_units, 0);
         assert!(zero_unsettled.segments.is_empty());
         assert!(
@@ -3473,7 +3507,7 @@ mod tests {
                 .any(|operation| { operation.operation_id == "synthetic-background-operation" })
         );
 
-        client.execute(
+        let outcome = client.execute(
             "INSERT INTO credit_ledger \
                 (event_type, actor_user_id, user_id, chat_id, amount, metadata, created_at) \
              VALUES \
@@ -3481,7 +3515,8 @@ mod tests {
                     NOW() - INTERVAL '31 days'), \
                 ('ai_reconciliation_correction', $1, $1, NULL, 1, '{}', NOW())",
             &[&7_000_000_000_040_i64],
-        )?;
+        );
+        outcome?;
         assert_eq!(
             repository.purge_expired_ai_ledger_events(30)?,
             PurgeResult {
@@ -3489,16 +3524,12 @@ mod tests {
                 retention_days: 30,
             }
         );
-        assert_eq!(
-            client
-                .query_one(
-                    "SELECT COUNT(*) FROM credit_ledger WHERE user_id = $1 \
-                     AND event_type = 'ai_reconciliation_correction'",
-                    &[&7_000_000_000_040_i64],
-                )?
-                .get::<_, i64>(0),
-            1
+        let outcome = client.query_one(
+            "SELECT COUNT(*) FROM credit_ledger WHERE user_id = $1 \
+             AND event_type = 'ai_reconciliation_correction'",
+            &[&7_000_000_000_040_i64],
         );
+        assert_eq!(outcome?.get::<_, i64>(0), 1);
 
         let charge_history_metadata = serde_json::Map::from_iter([
             (
@@ -3512,14 +3543,15 @@ mod tests {
                 Value::Number(123.into()),
             ),
         ]);
-        assert!(repository.record_ai_settlement_result(
+        let outcome = repository.record_ai_settlement_result(
             7_000_000_000_041,
             Some(202),
             7_000_000_000_041,
             "ai_settlement_result",
             &charge_history_metadata,
-        )?);
-        assert!(repository.record_ai_settlement_result(
+        );
+        assert!(outcome?);
+        let outcome = repository.record_ai_settlement_result(
             7_000_000_000_041,
             Some(202),
             7_000_000_000_041,
@@ -3536,7 +3568,8 @@ mod tests {
                     Value::Number(0.into()),
                 ),
             ]),
-        )?);
+        );
+        assert!(outcome?);
         let finalized_charge_rows =
             repository.list_user_ai_charge_rows(7_000_000_000_041, None, "older", 21)?;
         assert_eq!(finalized_charge_rows.len(), 1);
@@ -3581,7 +3614,7 @@ mod tests {
             "message_id": "2",
             "charged_credit_units_total": 1
         });
-        client.execute(
+        let outcome = client.execute(
             "INSERT INTO credit_ledger \
                 (event_type, actor_user_id, user_id, chat_id, amount, metadata, created_at) \
              VALUES \
@@ -3596,12 +3629,14 @@ mod tests {
                 &earlier_settlement,
                 &later_settlement,
             ],
-        )?;
+        );
+        outcome?;
         let reserve_times = client.query(
             "SELECT metadata->>'operation_id', created_at::text FROM credit_ledger \
              WHERE user_id = $1 AND event_type = 'ai_reserve' ORDER BY id",
             &[&history_user_id],
-        )?;
+        );
+        let reserve_times = reserve_times?;
         let history_rows =
             repository.list_user_ai_charge_rows(history_user_id, None, "older", 21)?;
         assert_eq!(history_rows.len(), 2);
@@ -3611,11 +3646,11 @@ mod tests {
             let history = history_rows
                 .iter()
                 .find(|row| row.metadata["operation_id"] == operation_id)
-                .ok_or_else(|| std::io::Error::other("history operation must exist"))?;
+                .ok_or("history operation must exist")?;
             assert_eq!(history.group_created_at, reserve_time);
         }
 
-        client.execute(
+        let outcome = client.execute(
             "INSERT INTO credit_ledger \
                 (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
              VALUES ('ai_reserve', $1, $1, 303, -50, $2)",
@@ -3628,7 +3663,8 @@ mod tests {
                     "source": "user"
                 }),
             ],
-        )?;
+        );
+        outcome?;
         let pending_charge_rows =
             repository.list_user_ai_charge_rows(7_000_000_000_042, None, "older", 21)?;
         assert_eq!(pending_charge_rows.len(), 1);
@@ -3687,26 +3723,494 @@ mod tests {
             7_000_000_000_043_i64,
             7_000_000_000_044_i64,
         ];
-        client.execute(
+        let outcome = client.execute(
             "DELETE FROM star_payments WHERE user_id = ANY($1)",
             &[&&synthetic_ids[..]],
-        )?;
-        client.execute(
+        );
+        outcome?;
+        let outcome = client.execute(
             "DELETE FROM credit_ledger WHERE user_id = ANY($1)",
             &[&&synthetic_ids[..]],
-        )?;
-        client.execute(
+        );
+        outcome?;
+        let outcome = client.execute(
             "DELETE FROM credit_ledger WHERE chat_id = ANY($1)",
             &[&&synthetic_ids[..]],
-        )?;
-        client.execute(
+        );
+        outcome?;
+        let outcome = client.execute(
             "DELETE FROM onboarding_grants WHERE user_id = ANY($1)",
             &[&&synthetic_ids[..]],
-        )?;
-        client.execute(
+        );
+        outcome?;
+        let outcome = client.execute(
             "DELETE FROM credit_accounts WHERE scope_id = ANY($1)",
             &[&&synthetic_ids[..]],
-        )?;
+        );
+        outcome?;
+        Ok(())
+    }
+
+    /// Balances, account rows, and ledger/grant/payment counts: everything a
+    /// failed billing transaction must leave untouched.
+    fn billing_snapshot(client: &mut Client) -> TestResult<[i64; 5]> {
+        let row = client.query_one(
+            "SELECT (SELECT COALESCE(SUM(balance), 0) FROM credit_accounts_data), \
+                (SELECT COUNT(*) FROM credit_accounts_data), \
+                (SELECT COUNT(*) FROM credit_ledger_data), \
+                (SELECT COUNT(*) FROM onboarding_grants_data), \
+                (SELECT COUNT(*) FROM star_payments_data)",
+            &[],
+        );
+        let row = row?;
+        Ok([row.get(0), row.get(1), row.get(2), row.get(3), row.get(4)])
+    }
+
+    /// Runs `operation` with `fragment` failing and checks that exactly the
+    /// targeted statement failed, once, and that nothing was persisted.
+    fn assert_billing_fault<T: std::fmt::Debug>(
+        client: &mut Client,
+        fragment: &str,
+        skip_hits: i64,
+        operation: impl FnOnce() -> Result<T, BillingError>,
+    ) -> TestResult {
+        fault_injection::inject(client, fragment, skip_hits, None, "P0001")?;
+        let before = billing_snapshot(client)?;
+        let outcome = operation();
+        let expected = format!("injected billing fault: {fragment}");
+        assert!(
+            matches!(&outcome, Err(BillingError::Postgres(error))
+                if error.as_db_error().is_some_and(|db| db.message() == expected)),
+            "{fragment}: {outcome:?}"
+        );
+        assert_eq!(fault_injection::hits(client)?, skip_hits + 1, "{fragment}");
+        assert_eq!(
+            billing_snapshot(client)?,
+            before,
+            "{fragment} must roll back"
+        );
+        fault_injection::clear(client)?;
+        Ok(())
+    }
+
+    #[test]
+    fn every_billing_statement_failure_rolls_back_its_transaction() -> TestResult {
+        std::env::var("TEST_DATABASE_URL").map_or(Ok(()), |url| billing_faults(&url))
+    }
+
+    fn billing_faults(database_url: &str) -> TestResult {
+        let url = fault_injection::isolated_schema_url(database_url, "billing_read_faults", "")?;
+        BillingSchemaRepository::new(&url).ensure_schema()?;
+        let mut client = fault_injection::connect(&url)?;
+        let tables = [
+            "credit_accounts",
+            "onboarding_grants",
+            "star_payments",
+            "credit_ledger",
+        ];
+        fault_injection::install(&mut client, &tables, &[])?;
+        let seed = "INSERT INTO credit_accounts (scope_type, scope_id, balance) \
+                VALUES ('user', 10, 1000), ('chat', -20, 1000); \
+             INSERT INTO credit_ledger \
+                (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
+             VALUES \
+                ('ai_reserve', 10, 10, -20, -5, \
+                    '{\"source\":\"chat\",\"operation_id\":\"chat-op\"}'), \
+                ('ai_reserve', 10, 10, -20, -5, \
+                    '{\"source\":\"user\",\"operation_id\":\"user-op\"}'), \
+                ('ai_reserve', 10, 10, NULL, -5, \
+                    '{\"source\":\"user\",\"idempotency_key\":\"held-key\",\
+                      \"settlement_id\":\"held-key\",\"operation_id\":\"held-op\"}')";
+        client.batch_execute(seed)?;
+        let repository = BillingRepository::new(&url);
+        let repository = &repository;
+        let empty = serde_json::Map::new();
+        let empty = &empty;
+        let set_balance = "UPDATE credit_accounts SET balance";
+        let ai_ledger = "VALUES ($1, $2, $2, $3, $4, $5)";
+        let settled_lookup = "AND metadata->>'operation_id' = $2 LIMIT 1";
+
+        let operation = || repository.get_or_create_balance("user", 11);
+        assert_billing_fault(&mut client, "INSERT INTO credit_accounts", 0, operation)?;
+        let created_balance = "SELECT balance FROM credit_accounts WHERE scope_type";
+        assert_billing_fault(&mut client, created_balance, 0, operation)?;
+        let operation =
+            || repository.record_star_payment("fault-charge", 10, "small", 100, 500, None);
+        assert_billing_fault(&mut client, "VALUES ('topup'", 0, operation)?;
+        let operation = || repository.mint_user_credits(10, 5, None);
+        assert_billing_fault(&mut client, "'printcredits'", 0, operation)?;
+        let operation = || repository.mint_user_credits(10, 5, None);
+        assert_billing_fault(&mut client, "FOR UPDATE", 0, operation)?;
+        let operation = || repository.mint_user_credits(10, 5, None);
+        assert_billing_fault(&mut client, "VALUES ($1, $2, 0) ON CONFLICT", 0, operation)?;
+        let operation = || repository.record_star_payment("fault-charge", 10, "s", 1, 5, None);
+        assert_billing_fault(&mut client, "INSERT INTO star_payments", 0, operation)?;
+        let segment = serde_json::json!({"operation_id": "usage-op", "segment_id": "s1"});
+        let operation = || repository.record_ai_provider_usage(10, None, &segment);
+        assert_billing_fault(&mut client, "VALUES ('ai_provider_usage'", 0, operation)?;
+        let operation = || repository.update_ai_provider_usage("usage-op", "s1", &segment);
+        assert_billing_fault(&mut client, "SET metadata = jsonb_set", 0, operation)?;
+        let operation = || repository.list_ai_provider_segments(10, "usage-op");
+        assert_billing_fault(&mut client, "SELECT metadata->'segment'", 0, operation)?;
+        let operation =
+            || repository.record_ai_settlement_result(10, None, 10, "ai_settlement_result", empty);
+        assert_billing_fault(&mut client, "VALUES ($1, $2, $3, $4, 0, $5)", 0, operation)?;
+        let operation = || repository.purge_expired_ai_ledger_events(30);
+        assert_billing_fault(&mut client, "DELETE FROM credit_ledger", 0, operation)?;
+        let operation = || repository.list_recent_ai_settlement_results(5);
+        let recent_results = "ORDER BY created_at DESC, id DESC";
+        assert_billing_fault(&mut client, recent_results, 0, operation)?;
+        let operation = || repository.list_unsettled_ai_operations(5);
+        assert_billing_fault(&mut client, "WITH pending AS", 0, operation)?;
+        let operation = || repository.list_user_ai_charge_rows(10, None, "older", 5);
+        assert_billing_fault(&mut client, "WITH user_ledger AS", 0, operation)?;
+        for (fragment, skip_hits) in [
+            (set_balance, 0),
+            (set_balance, 1),
+            ("'transfer_user_to_chat'", 0),
+            ("'transfer_user_to_chat'", 1),
+        ] {
+            let operation = || repository.transfer_user_to_chat(10, -20, 5);
+            assert_billing_fault(&mut client, fragment, skip_hits, operation)?;
+        }
+        let operation = || repository.charge_chat_ai_credits(-20, 5, "chat_ai_charge", empty);
+        assert_billing_fault(&mut client, "VALUES ($1, NULL, NULL", 0, operation)?;
+        let operation = || repository.refund_chat_ai_credits(-20, 5, "chat_ai_refund", empty);
+        assert_billing_fault(&mut client, "VALUES ($1, NULL, NULL", 0, operation)?;
+        for (fragment, source) in [
+            (set_balance, "chat"),
+            (set_balance, "user"),
+            (ai_ledger, "user"),
+        ] {
+            let operation =
+                || repository.apply_ai_debt(10, Some(-20), 5, source, "ai_settlement_debt", empty);
+            assert_billing_fault(&mut client, fragment, 0, operation)?;
+        }
+        for (fragment, source, key) in [
+            (
+                "metadata->>'idempotency_key' = $3 LIMIT 1",
+                "user",
+                Some("refund-key"),
+            ),
+            (settled_lookup, "user", None),
+            (set_balance, "chat", None),
+            (set_balance, "user", None),
+            (ai_ledger, "user", None),
+        ] {
+            let operation = || {
+                repository.refund_ai_charge(
+                    10,
+                    Some(-20),
+                    5,
+                    source,
+                    "ai_refund",
+                    empty,
+                    key,
+                    "refund-op",
+                )
+            };
+            assert_billing_fault(&mut client, fragment, 0, operation)?;
+        }
+        for (fragment, source, key) in [
+            (
+                "SELECT amount, metadata->>'source'",
+                "user",
+                Some("fresh-key"),
+            ),
+            (
+                "event_type = 'ai_refund' AND metadata->>'settlement_id'",
+                "user",
+                Some("held-key"),
+            ),
+            (settled_lookup, "user", None),
+            (set_balance, "user", Some("fresh-key")),
+            (ai_ledger, "user", Some("fresh-key")),
+            (set_balance, "chat", Some("fresh-key")),
+            (ai_ledger, "chat", Some("fresh-key")),
+        ] {
+            let operation = || {
+                repository.charge_ai_credits(
+                    10,
+                    Some(-20),
+                    5,
+                    "ai_reserve",
+                    empty,
+                    Some(source),
+                    key,
+                    "held-op",
+                )
+            };
+            assert_billing_fault(&mut client, fragment, 0, operation)?;
+        }
+        let operation = || repository.compaction_reservation_settled(10, "user-op", "fault-tag");
+        assert_billing_fault(&mut client, "NULLIF($3, '')", 0, operation)?;
+        for (fragment, operation_id) in [
+            (settled_lookup, "user-op"),
+            ("COALESCE(SUM(-amount), 0)", "user-op"),
+            (set_balance, "chat-op"),
+            (set_balance, "user-op"),
+            (ai_ledger, "user-op"),
+            ("VALUES ('ai_settlement_result'", "user-op"),
+        ] {
+            let operation =
+                || repository.settle_ai_operation_once(10, Some(-20), operation_id, 3, empty);
+            assert_billing_fault(&mut client, fragment, 0, operation)?;
+        }
+        for (fragment, source) in [
+            (
+                "'memory_compaction_settlement' AND metadata->>'usage_tag' = $1",
+                "chat",
+            ),
+            (set_balance, "chat"),
+            (set_balance, "user"),
+            ("VALUES ('memory_compaction_settlement'", "user"),
+        ] {
+            let operation = || {
+                repository.settle_legacy_ai_reservation_once(
+                    10,
+                    Some(-20),
+                    source,
+                    5,
+                    3,
+                    "fault-tag",
+                    empty,
+                )
+            };
+            assert_billing_fault(&mut client, fragment, 0, operation)?;
+        }
+        for fragment in [
+            "SELECT COALESCE((",
+            "SELECT 1 FROM onboarding_grants",
+            "COUNT(*) FILTER (WHERE granted_at",
+            "INSERT INTO onboarding_grants",
+            "VALUES ('onboarding_grant'",
+        ] {
+            let operation = || repository.grant_onboarding_if_needed(12, 300);
+            assert_billing_fault(&mut client, fragment, 0, operation)?;
+        }
+        let recent_grants = "INSERT INTO onboarding_grants (user_id, credits) \
+             VALUES (101, 1), (102, 1), (103, 1), (104, 1)";
+        client.batch_execute(recent_grants)?;
+        let operation = || repository.grant_onboarding_if_needed(13, 300);
+        assert_billing_fault(&mut client, "'onboarding_denied_overflow'", 0, operation)?;
+
+        // Replaying a reservation whose operation has since settled is refused.
+        let settled = "INSERT INTO credit_ledger (event_type, actor_user_id, user_id, amount, metadata) \
+             VALUES ('ai_settlement_result', 10, 10, 0, '{\"operation_id\":\"held-op\"}')";
+        client.batch_execute(settled)?;
+        let replay = repository.charge_ai_credits(
+            10,
+            None,
+            5,
+            "ai_reserve",
+            empty,
+            Some("user"),
+            Some("held-key"),
+            "held-op",
+        );
+        assert_eq!(
+            replay?,
+            AiChargeResult {
+                ok: false,
+                applied: false,
+                reason: Some("operation_settled".to_owned()),
+                source: None,
+                amount: 0,
+                user_balance: 1000,
+                chat_balance: 0,
+            }
+        );
+
+        // Settling exactly the reserved amount records only the result row.
+        let exact = repository.settle_ai_operation_once(10, None, "user-op", 5, empty);
+        assert_eq!(
+            exact?,
+            AiSettlementResult {
+                applied: true,
+                source: Some("user".to_owned()),
+                authorized_credit_units: Some(5),
+                actual_credit_units: Some(5),
+                refunded_credit_units: Some(0),
+                debt_applied_credit_units: Some(0),
+                user_balance: 1000,
+                chat_balance: 0,
+            }
+        );
+        let adjustments = "SELECT COUNT(*) FROM credit_ledger_data \
+             WHERE metadata->>'operation_id' = 'user-op' AND event_type <> 'ai_reserve'";
+        assert_eq!(client.query_one(adjustments, &[])?.get::<_, i64>(0), 1);
+        assert!(repository.compaction_reservation_settled(10, "user-op", "")?);
+        assert!(!repository.compaction_reservation_settled(10, "", "missing-tag")?);
+
+        // Replaying a non-reservation charge reports the recorded payer and
+        // amount without charging again.
+        let recorded_charge = "INSERT INTO credit_ledger \
+                (event_type, actor_user_id, user_id, amount, metadata) \
+             VALUES ('ai_settlement_charge', 10, 10, -7, \
+                '{\"idempotency_key\":\"charge-key\",\"source\":\"chat\"}')";
+        client.batch_execute(recorded_charge)?;
+        let replay = repository.charge_ai_credits(
+            10,
+            None,
+            7,
+            "ai_settlement_charge",
+            empty,
+            Some("user"),
+            Some("charge-key"),
+            "",
+        );
+        assert_eq!(
+            replay?,
+            AiChargeResult {
+                ok: true,
+                applied: false,
+                reason: None,
+                source: Some("chat".to_owned()),
+                amount: 7,
+                user_balance: 1000,
+                chat_balance: 0,
+            }
+        );
+        // Rows written before payers were recorded replay as user-funded.
+        let sourceless_charge = "INSERT INTO credit_ledger \
+                (event_type, actor_user_id, user_id, amount, metadata) \
+             VALUES ('ai_settlement_charge', 10, 10, -4, \
+                '{\"idempotency_key\":\"sourceless-key\",\"source\":\"\"}')";
+        client.batch_execute(sourceless_charge)?;
+        let replay = repository.charge_ai_credits(
+            10,
+            None,
+            4,
+            "ai_settlement_charge",
+            empty,
+            Some("chat"),
+            Some("sourceless-key"),
+            "",
+        );
+        assert_eq!(replay?.source.as_deref(), Some("user"));
+
+        // A refund without its reservation is still reported as unsettled,
+        // with empty reservation metadata and no authorized credits.
+        let orphan_refund = "INSERT INTO credit_ledger \
+                (event_type, actor_user_id, user_id, amount, metadata) \
+             VALUES ('ai_refund', 10, 10, 5, \
+                '{\"operation_id\":\"refund-only-op\",\"source\":\"user\"}')";
+        client.batch_execute(orphan_refund)?;
+        let unsettled = repository.list_unsettled_ai_operations(50)?;
+        let orphan = unsettled
+            .iter()
+            .find(|operation| operation.operation_id == "refund-only-op")
+            .ok_or("refund-only operation must be listed")?;
+        assert_eq!(orphan.reserve_metadata, serde_json::json!({}));
+        assert_eq!(orphan.authorized_credit_units, 0);
+        assert_eq!(orphan.source, "user");
+
+        // A serialization failure is retried and the retry commits once.
+        fault_injection::inject(&mut client, "'printcredits'", 0, Some(1), "40001")?;
+        assert_eq!(repository.mint_user_credits(10, 7, None)?, 1007);
+        assert_eq!(fault_injection::hits(&mut client)?, 2);
+        let minted = "SELECT COUNT(*) FROM credit_ledger_data WHERE event_type = 'printcredits'";
+        assert_eq!(client.query_one(minted, &[])?.get::<_, i64>(0), 1);
+
+        // Persistent deadlocks give up after the attempt limit, unchanged.
+        fault_injection::inject(&mut client, "'printcredits'", 0, None, "40P01")?;
+        let deadlocked = repository.mint_user_credits(10, 7, None);
+        assert!(matches!(&deadlocked, Err(BillingError::Postgres(error))
+            if error.code() == Some(&SqlState::T_R_DEADLOCK_DETECTED)));
+        assert_eq!(fault_injection::hits(&mut client)?, 3);
+        fault_injection::clear(&mut client)?;
+        assert_eq!(repository.get_balance("user", 10)?, 1007);
+        Ok(())
+    }
+
+    const WAITING_SQL: &str = "SELECT COUNT(*) > 0 FROM pg_stat_activity \
+        WHERE application_name = $1 AND wait_event_type = 'Lock' AND wait_event = $2";
+
+    /// Waits until a backend named `application_name` blocks on `wait_event`.
+    fn wait_for_lock(
+        monitor: &mut Client,
+        application_name: &str,
+        wait_event: &str,
+    ) -> TestResult<bool> {
+        let started = std::time::Instant::now();
+        let mut waiting = false;
+        while !waiting && started.elapsed() < std::time::Duration::from_secs(10) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            waiting = monitor
+                .query_one(WAITING_SQL, &[&application_name, &wait_event])?
+                .get(0);
+        }
+        Ok(waiting)
+    }
+
+    #[test]
+    fn onboarding_grants_yield_to_concurrent_grants_and_lock_timeouts() -> TestResult {
+        std::env::var("TEST_DATABASE_URL").map_or(Ok(()), |url| onboarding_races(&url))
+    }
+
+    fn onboarding_races(database_url: &str) -> TestResult {
+        let url =
+            fault_injection::isolated_schema_url(database_url, "billing_onboarding_race", "")?;
+        BillingSchemaRepository::new(&url).ensure_schema()?;
+        let application_name = "billing_onboarding_race";
+        let race_url = format!("{url}&application_name={application_name}");
+        let mut holder = fault_injection::connect(&url)?;
+        let mut monitor = fault_injection::connect(&url)?;
+
+        // While another grant holds the onboarding lock, an impatient caller
+        // gives up at its lock timeout.
+        holder.batch_execute("BEGIN; SELECT pg_advisory_xact_lock(48610001)")?;
+        let impatient = BillingRepository::new(&format!("{url}%20-clock_timeout%3D100"));
+        let timed_out = impatient.grant_onboarding_if_needed(301, 300);
+        assert!(matches!(&timed_out, Err(BillingError::Postgres(error))
+            if error.code() == Some(&SqlState::LOCK_NOT_AVAILABLE)));
+
+        // A caller that saw no grant waits for the lock while the holder
+        // grants that user, so the waiter must not grant a second time.
+        let waiter_url = race_url.clone();
+        let waiter = std::thread::spawn(move || {
+            BillingRepository::new(&waiter_url).grant_onboarding_if_needed(302, 300)
+        });
+        assert!(wait_for_lock(&mut monitor, application_name, "advisory")?);
+        let grant_first = "INSERT INTO onboarding_grants (user_id, credits) VALUES (302, 50); \
+             INSERT INTO credit_accounts (scope_type, scope_id, balance) VALUES ('user', 302, 50); \
+             COMMIT";
+        holder.batch_execute(grant_first)?;
+        let raced = waiter.join().ok().ok_or("waiter panicked")??;
+        assert_eq!(
+            raced,
+            OnboardingGrantResult {
+                granted: false,
+                balance: 50
+            }
+        );
+
+        // A grant written without the lock owns the user's row; the waiter's
+        // insert yields to it and credits nothing.
+        let unlocked_grant =
+            "BEGIN; INSERT INTO onboarding_grants (user_id, credits) VALUES (303, 70)";
+        holder.batch_execute(unlocked_grant)?;
+        let waiter = std::thread::spawn(move || {
+            BillingRepository::new(&race_url).grant_onboarding_if_needed(303, 300)
+        });
+        let outcome = wait_for_lock(&mut monitor, application_name, "transactionid");
+        assert!(outcome?);
+        holder.batch_execute("COMMIT")?;
+        let raced = waiter.join().ok().ok_or("waiter panicked")??;
+        assert_eq!(
+            raced,
+            OnboardingGrantResult {
+                granted: false,
+                balance: 0
+            }
+        );
+        let evidence = "SELECT (SELECT COUNT(*) FROM credit_ledger), \
+             (SELECT credits FROM onboarding_grants WHERE user_id = 303)";
+        let evidence = monitor.query_one(evidence, &[])?;
+        assert_eq!(
+            (evidence.get::<_, i64>(0), evidence.get::<_, i32>(1)),
+            (0, 70)
+        );
         Ok(())
     }
 }

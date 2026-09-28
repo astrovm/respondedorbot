@@ -118,4 +118,12 @@ mod tests {
         assert_eq!(change(Some(-0.001)), "+0%");
         assert_eq!(price(0.0), "0");
     }
+
+    #[test]
+    fn blank_periods_default_to_one_day() {
+        assert_eq!(
+            quote("BTC", 1.0, "USD", Some(1.0), " "),
+            "BTC: 1 USD (+1% 24h)"
+        );
+    }
 }

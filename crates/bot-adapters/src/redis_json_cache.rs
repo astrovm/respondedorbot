@@ -157,18 +157,20 @@ mod tests {
         assert!(cache.set("request_cache:key", "expiring", Some(60))?);
         let mut cache = cache;
         crate::request_cache::RequestCache::set(&mut cache, "market_selection:test", "menu", 0)?;
-        crate::token_signal::TokenSignalCache::set(
+        let outcome = crate::token_signal::TokenSignalCache::set(
             &mut cache,
             "token_signal:state:test",
             "card",
             0,
-        )?;
-        crate::token_signal::TokenSignalCache::set(
+        );
+        outcome?;
+        let outcome = crate::token_signal::TokenSignalCache::set(
             &mut cache,
             "token_signal:state:test",
             "null",
             1,
-        )?;
+        );
+        outcome?;
         assert_eq!(
             cache.take("market_selection:test")?,
             Some("menu".to_owned())
@@ -178,22 +180,16 @@ mod tests {
             crate::request_cache::RequestCache::take(&mut cache, "market_selection:trait")?,
             Some("taken".to_owned())
         );
-        assert!(crate::request_cache::RequestCache::claim(
-            &mut cache,
-            "topup_invoice:1",
-            "1",
-            120
-        )?);
-        assert!(!crate::request_cache::RequestCache::claim(
-            &mut cache,
-            "topup_invoice:1",
-            "1",
-            120
-        )?);
-        match server.join() {
-            Ok(result) => result?,
-            Err(_) => return Err("synthetic Redis server panicked".into()),
-        }
+        let outcome =
+            crate::request_cache::RequestCache::claim(&mut cache, "topup_invoice:1", "1", 120);
+        assert!(outcome?);
+        let outcome =
+            crate::request_cache::RequestCache::claim(&mut cache, "topup_invoice:1", "1", 120);
+        assert!(!outcome?);
+        server
+            .join()
+            .ok()
+            .ok_or("synthetic Redis server panicked")??;
         Ok(())
     }
 
@@ -246,10 +242,10 @@ mod tests {
 
         assert!(cache.set_if_absent("refresh:lock", "1", 10)?);
         assert!(!cache.set_if_absent("refresh:lock", "1", 10)?);
-        match server.join() {
-            Ok(result) => result?,
-            Err(_) => return Err("synthetic Redis server panicked".into()),
-        }
+        server
+            .join()
+            .ok()
+            .ok_or("synthetic Redis server panicked")??;
         Ok(())
     }
 }

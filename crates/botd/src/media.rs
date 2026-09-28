@@ -106,10 +106,8 @@ pub trait MediaRuntime {
 
     fn prepare_image_for_prompt(
         &mut self,
-        _file_id: &str,
-    ) -> Result<Option<PreparedImagePrompt>, String> {
-        Ok(None)
-    }
+        file_id: &str,
+    ) -> Result<Option<PreparedImagePrompt>, String>;
 
     fn execute(&mut self, prepared: PreparedMedia, prompt: &str) -> Result<MediaExecution, String>;
 }
@@ -500,6 +498,8 @@ mod tests {
 
     use super::*;
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     struct Files(Option<Vec<u8>>);
 
     impl MediaFileSource for Files {
@@ -525,11 +525,15 @@ mod tests {
         }
     }
 
-    struct Processor;
+    /// Decodes images and audio unless told the input is unusable.
+    struct Processor {
+        decodes_images: bool,
+        measures_audio: bool,
+    }
 
     impl MediaProcessor for Processor {
         fn prepare_image(&mut self, input: &[u8]) -> Result<Option<PreparedImage>, String> {
-            Ok(Some(PreparedImage {
+            Ok(self.decodes_images.then(|| PreparedImage {
                 bytes: input.to_vec(),
                 mime: "image/webp".to_owned(),
             }))
@@ -540,48 +544,54 @@ mod tests {
             input: &[u8],
             duration_hint_seconds: Option<f64>,
         ) -> Result<Option<PreparedAudio>, String> {
-            Ok(Some(PreparedAudio {
+            Ok(self.measures_audio.then(|| PreparedAudio {
                 bytes: input.to_vec(),
                 duration_seconds: duration_hint_seconds.unwrap_or(4.5),
             }))
         }
     }
 
-    fn pricing_cache() -> (Arc<OpenRouterPricingCache>, thread::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+    type CatalogServer = thread::JoinHandle<std::io::Result<()>>;
+
+    fn pricing_cache()
+    -> Result<(Arc<OpenRouterPricingCache>, CatalogServer), Box<dyn std::error::Error>> {
+        pricing_cache_with(json!({
+            "data": [
+                {
+                    "id": "google/gemini-3.1-flash-lite",
+                    "pricing": {"prompt": "0.000001", "completion": "0.000001"}
+                },
+                {
+                    "id": "microsoft/mai-transcribe-2",
+                    "architecture": {
+                        "modality": "audio->transcription",
+                        "output_modalities": ["transcription"]
+                    },
+                    "pricing": {"prompt": "0.1", "completion": "0"}
+                }
+            ]
+        }))
+    }
+
+    /// Serves one catalog response to the pricing cache's first refresh.
+    fn pricing_cache_with(
+        catalog: Value,
+    ) -> Result<(Arc<OpenRouterPricingCache>, CatalogServer), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
             let mut request = [0_u8; 8_192];
             let _ = stream.read(&mut request);
-            let body = json!({
-                "data": [
-                    {
-                        "id": "google/gemini-3.1-flash-lite",
-                        "pricing": {"prompt": "0.000001", "completion": "0.000001"}
-                    },
-                    {
-                        "id": "microsoft/mai-transcribe-2",
-                        "architecture": {
-                            "modality": "audio->transcription",
-                            "output_modalities": ["transcription"]
-                        },
-                        "pricing": {"prompt": "0.1", "completion": "0"}
-                    }
-                ]
-            })
-            .to_string();
+            let body = catalog.to_string();
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
-            stream
-                .write_all(response.as_bytes())
-                .unwrap_or_else(|_| unreachable!());
+            stream.write_all(response.as_bytes())
         });
-        let cache = OpenRouterPricingCache::new("synthetic-key", &format!("http://{address}"))
-            .unwrap_or_else(|_| unreachable!());
-        (Arc::new(cache), server)
+        let cache = OpenRouterPricingCache::new("synthetic-key", &format!("http://{address}"))?;
+        Ok((Arc::new(cache), server))
     }
 
     struct Vision;
@@ -600,7 +610,10 @@ mod tests {
         }
     }
 
-    struct Transcription;
+    /// Transcribes audio unless told the provider returns nothing.
+    struct Transcription {
+        replies: bool,
+    }
 
     impl TranscriptionProvider for Transcription {
         fn transcribe(
@@ -608,53 +621,33 @@ mod tests {
             _audio: &PreparedAudio,
             _file_id: &str,
         ) -> Result<Option<MediaProviderResult>, String> {
-            Ok(Some(MediaProviderResult {
+            Ok(self.replies.then(|| MediaProviderResult {
                 text: "synthetic transcript".to_owned(),
                 billing_segment: json!({"kind": "transcribe"}),
             }))
         }
     }
 
-    struct SilentAudioProcessor;
+    type TestMedia = NativeMedia<Files, Cache, Processor, Vision, Transcription>;
 
-    impl MediaProcessor for SilentAudioProcessor {
-        fn prepare_image(&mut self, input: &[u8]) -> Result<Option<PreparedImage>, String> {
-            Ok(Some(PreparedImage {
-                bytes: input.to_vec(),
-                mime: "image/webp".to_owned(),
-            }))
-        }
-
-        fn prepare_audio(
-            &mut self,
-            _input: &[u8],
-            _duration_hint_seconds: Option<f64>,
-        ) -> Result<Option<PreparedAudio>, String> {
-            Ok(None)
-        }
-    }
-
-    struct SilentTranscription;
-
-    impl TranscriptionProvider for SilentTranscription {
-        fn transcribe(
-            &mut self,
-            _audio: &PreparedAudio,
-            _file_id: &str,
-        ) -> Result<Option<MediaProviderResult>, String> {
-            Ok(None)
-        }
-    }
-
-    fn media(cache: Cache) -> NativeMedia<Files, Cache, Processor, Vision, Transcription> {
+    fn media_with(files: Option<Vec<u8>>, model: &str) -> TestMedia {
         NativeMedia::new(
-            Files(Some(vec![1, 2, 3])),
-            cache,
-            Processor,
+            Files(files),
+            Cache::default(),
+            Processor {
+                decodes_images: true,
+                measures_audio: true,
+            },
             Vision,
-            Transcription,
-            "google/gemini-3.1-flash-lite",
+            Transcription { replies: true },
+            model,
         )
+    }
+
+    fn media(cache: Cache) -> TestMedia {
+        let mut media = media_with(Some(vec![1, 2, 3]), "google/gemini-3.1-flash-lite");
+        media.cache = cache;
+        media
     }
 
     #[test]
@@ -682,8 +675,8 @@ mod tests {
     }
 
     #[test]
-    fn image_and_audio_are_prepared_reserved_executed_and_cached() {
-        let (pricing, server) = pricing_cache();
+    fn image_and_audio_are_prepared_reserved_executed_and_cached() -> TestResult {
+        let (pricing, server) = pricing_cache()?;
         let mut media = media(Cache::default()).with_openrouter_pricing(pricing);
         let image = media.prepare(MediaKind::Image, "image-1", None);
         assert!(matches!(
@@ -729,18 +722,38 @@ mod tests {
                 .map(String::as_str),
             Some("synthetic transcript")
         );
-        server.join().unwrap_or_else(|_| unreachable!());
+        assert!(matches!(server.join(), Ok(Ok(()))));
+        Ok(())
     }
 
     #[test]
-    fn direct_image_prompt_preparation_returns_processed_image_bytes() {
+    fn direct_image_prompt_preparation_returns_processed_image_bytes() -> TestResult {
         let mut media = media(Cache::default());
         let prepared = media
-            .prepare_image_for_prompt("image-1")
-            .unwrap_or_else(|_| unreachable!())
-            .unwrap_or_else(|| unreachable!());
+            .prepare_image_for_prompt("image-1")?
+            .ok_or("prompt image was not prepared")?;
         assert_eq!(prepared.bytes.as_ref(), &[1, 2, 3]);
         assert_eq!(prepared.mime, "image/webp");
+        Ok(())
+    }
+
+    #[test]
+    fn direct_image_prompt_preparation_rejects_missing_and_undecodable_images() {
+        let mut empty = media_with(Some(Vec::new()), "model");
+        assert_eq!(
+            empty.prepare_image_for_prompt("image-1"),
+            Err(MediaPipelineError::Download.to_string())
+        );
+        let mut undecodable = media(Cache::default());
+        undecodable.processor.decodes_images = false;
+        assert_eq!(
+            undecodable.prepare_image_for_prompt("image-1"),
+            Err(MediaPipelineError::InvalidImage.to_string())
+        );
+        assert_eq!(
+            undecodable.prepare(MediaKind::Image, "image-1", None),
+            Err(MediaPipelineError::InvalidImage.to_string())
+        );
     }
 
     #[test]
@@ -755,14 +768,7 @@ mod tests {
 
     #[test]
     fn download_and_decode_failures_are_explicit_without_panics() {
-        let mut missing = NativeMedia::new(
-            Files(None),
-            Cache::default(),
-            Processor,
-            Vision,
-            Transcription,
-            "model",
-        );
+        let mut missing = media_with(None, "model");
         assert_eq!(
             missing.prepare(MediaKind::Image, "missing", None),
             Err(MediaPipelineError::Download.to_string())
@@ -771,14 +777,8 @@ mod tests {
 
     #[test]
     fn unmeasurable_audio_is_rejected_as_invalid() {
-        let mut media = NativeMedia::new(
-            Files(Some(vec![1, 2, 3])),
-            Cache::default(),
-            SilentAudioProcessor,
-            Vision,
-            Transcription,
-            "model",
-        );
+        let mut media = media_with(Some(vec![1, 2, 3]), "model");
+        media.processor.measures_audio = false;
         assert_eq!(
             media.prepare(MediaKind::Audio, "audio-1", Some(4.5)),
             Err(MediaPipelineError::InvalidAudio.to_string())
@@ -786,24 +786,141 @@ mod tests {
     }
 
     #[test]
-    fn empty_provider_results_are_reported_as_unavailable() {
-        let (pricing, server) = pricing_cache();
-        let mut media = NativeMedia::new(
-            Files(Some(vec![1, 2, 3])),
-            Cache::default(),
-            Processor,
-            Vision,
-            SilentTranscription,
-            "google/gemini-3.1-flash-lite",
-        )
-        .with_openrouter_pricing(pricing);
-        let prepared = media
-            .prepare(MediaKind::Audio, "audio-1", Some(4.5))
-            .unwrap_or_else(|_| unreachable!());
+    fn empty_provider_results_are_reported_as_unavailable() -> TestResult {
+        let (pricing, server) = pricing_cache()?;
+        let mut media = media(Cache::default()).with_openrouter_pricing(pricing);
+        media.transcription.replies = false;
+        let prepared = media.prepare(MediaKind::Audio, "audio-1", Some(4.5))?;
         assert_eq!(
             media.execute(prepared, "ignored"),
             Err(MediaPipelineError::ProviderUnavailable.to_string())
         );
-        server.join().unwrap_or_else(|_| unreachable!());
+        assert!(media.cache.values.is_empty());
+        assert!(matches!(server.join(), Ok(Ok(()))));
+        Ok(())
+    }
+
+    #[test]
+    fn prepared_media_reports_its_kind_and_reserve_for_every_variant() {
+        let cached = PreparedMedia::Cached {
+            kind: MediaKind::Audio,
+            file_id: "cached".to_owned(),
+            text: "cached transcript".to_owned(),
+        };
+        let image = PreparedMedia::Image {
+            file_id: "image".to_owned(),
+            bytes: vec![1],
+            mime: "image/webp".to_owned(),
+            reserve_credit_units: 11,
+        };
+        let audio = PreparedMedia::Audio {
+            file_id: "audio".to_owned(),
+            bytes: vec![2],
+            duration_seconds: 3.0,
+            reserve_credit_units: 29,
+        };
+        assert_eq!(cached.kind(), MediaKind::Audio);
+        assert_eq!(cached.reserve_credit_units(), 0);
+        assert_eq!(image.kind(), MediaKind::Image);
+        assert_eq!(image.reserve_credit_units(), 11);
+        assert_eq!(audio.kind(), MediaKind::Audio);
+        assert_eq!(audio.reserve_credit_units(), 29);
+    }
+
+    #[test]
+    fn upfront_estimates_match_prepared_reserves_and_default_audio_to_one_second() -> TestResult {
+        let (pricing, server) = pricing_cache()?;
+        let mut media = media(Cache::default()).with_openrouter_pricing(pricing);
+        let image_estimate = media.estimate_reserve_credit_units(MediaKind::Image, None);
+        let default_audio = media.estimate_reserve_credit_units(MediaKind::Audio, None);
+        let one_second = media.estimate_reserve_credit_units(MediaKind::Audio, Some(1.0));
+        let long_audio = media.estimate_reserve_credit_units(MediaKind::Audio, Some(3_600.0));
+        assert!(matches!(image_estimate, Ok(units) if units > 0));
+        assert!(matches!(default_audio, Ok(units) if units > 0));
+        assert_eq!(default_audio, one_second);
+        assert!(
+            matches!((&long_audio, &one_second), (Ok(long), Ok(short)) if long > short),
+            "{long_audio:?} {one_second:?}"
+        );
+        // A duration no reserve can represent is rejected rather than wrapped.
+        let unbounded = media.estimate_reserve_credit_units(MediaKind::Audio, Some(f64::MAX));
+        assert!(
+            matches!(&unbounded, Err(error) if !error.is_empty()),
+            "{unbounded:?}"
+        );
+        let prepared = media.prepare(MediaKind::Image, "image-1", None);
+        assert_eq!(
+            prepared.map(|prepared| prepared.reserve_credit_units()),
+            image_estimate
+        );
+        assert!(matches!(server.join(), Ok(Ok(()))));
+        Ok(())
+    }
+
+    #[test]
+    fn image_reserve_failures_reject_the_prepared_image() {
+        let mut media = media_with(Some(vec![1, 2, 3]), "synthetic/unpriced-vision");
+        assert_eq!(
+            media.prepare(MediaKind::Image, "image-1", None),
+            Err(MediaPipelineError::ReserveEstimate(
+                "OpenRouter pricing is unavailable for synthetic/unpriced-vision".to_owned()
+            )
+            .to_string())
+        );
+        assert!(media.cache.values.is_empty());
+    }
+
+    #[test]
+    fn audio_reservation_requires_a_transcription_price_in_the_catalog() -> TestResult {
+        let served = pricing_cache_with(json!({
+            "data": [{
+                "id": "google/gemini-3.1-flash-lite",
+                "pricing": {"prompt": "0.000001", "completion": "0.000001"}
+            }]
+        }));
+        let (pricing, server) = served?;
+        let mut media = media(Cache::default()).with_openrouter_pricing(pricing);
+        let expected = OpenRouterChatError::MissingModelPricing {
+            model: crate::native_ai::OPENROUTER_TRANSCRIPTION_MODEL.to_owned(),
+        }
+        .to_string();
+        assert_eq!(
+            media.estimate_reserve_credit_units(MediaKind::Audio, Some(4.5)),
+            Err(expected.clone())
+        );
+        assert_eq!(
+            media.prepare(MediaKind::Audio, "audio-1", Some(4.5)),
+            Err(MediaPipelineError::ReserveEstimate(expected).to_string())
+        );
+        assert!(matches!(server.join(), Ok(Ok(()))));
+        Ok(())
+    }
+
+    #[test]
+    fn unreachable_pricing_catalog_blocks_audio_reservations() -> TestResult {
+        let pricing = Arc::new(OpenRouterPricingCache::new("synthetic-key", "not-a-url")?);
+        let mut media = media(Cache::default()).with_openrouter_pricing(pricing);
+        let estimate = media.estimate_reserve_credit_units(MediaKind::Audio, Some(4.5));
+        assert!(
+            matches!(&estimate, Err(error) if !error.is_empty()),
+            "{estimate:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn standard_vision_reserve_rejects_prices_it_cannot_represent() {
+        let pricing = TokenPricing {
+            input_per_million: i128::MAX,
+            cached_input_per_million: None,
+            cache_write_per_million: None,
+            audio_input_per_million: None,
+            output_per_million: i128::MAX,
+        };
+        let estimate = estimate_standard_vision_reserve_credit_units(&pricing);
+        assert!(
+            matches!(&estimate, Err(error) if !error.is_empty()),
+            "{estimate:?}"
+        );
     }
 }

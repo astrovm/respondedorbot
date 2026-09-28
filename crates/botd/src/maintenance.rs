@@ -52,7 +52,7 @@ pub fn run_maintenance(
             BillingRepository::new(database_url)
                 .purge_expired_ai_ledger_events(options.ai_ledger_retention_days)?,
         )
-        .unwrap_or_else(|_| json!({"skipped": true, "reason": "serialization failed"}))
+        .unwrap_or(json!({"skipped": true, "reason": "serialization failed"}))
     } else {
         json!({"skipped": true, "reason": "postgres not configured"})
     };
@@ -81,39 +81,69 @@ mod tests {
         assert!(matches!(result, Err(MaintenanceError::InvalidRetention)));
     }
 
-    #[test]
-    fn maintenance_can_run_without_postgres() -> Result<(), String> {
-        let Some(port) = std::env::var("TEST_REDIS_PORT")
-            .ok()
-            .and_then(|value| value.parse().ok())
-        else {
-            return Ok(());
-        };
-        let endpoint = RedisEndpoint {
-            host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
-            port,
-            password: None,
-        };
-        let report = run_maintenance(MaintenanceOptions {
-            redis_endpoint: &endpoint,
-            database_url: None,
+    fn test_redis_endpoint() -> Option<RedisEndpoint> {
+        crate::test_env::redis_endpoint()
+    }
+
+    fn options<'a>(
+        endpoint: &'a RedisEndpoint,
+        database_url: Option<&'a str>,
+    ) -> MaintenanceOptions<'a> {
+        MaintenanceOptions {
+            redis_endpoint: endpoint,
+            database_url,
             redis_maxmemory: "256mb",
             redis_maxmemory_policy: "allkeys-lru",
             ai_ledger_retention_days: 1,
-        })
-        .map_err(|error| error.to_string())?;
-        assert_eq!(report.ledger["reason"], "postgres not configured");
-        if let Ok(database_url) = std::env::var("TEST_DATABASE_URL") {
-            let report = run_maintenance(MaintenanceOptions {
-                redis_endpoint: &endpoint,
-                database_url: Some(&database_url),
-                redis_maxmemory: "256mb",
-                redis_maxmemory_policy: "allkeys-lru",
-                ai_ledger_retention_days: 1,
-            })
-            .map_err(|error| error.to_string())?;
-            assert!(report.ledger.is_object());
         }
-        Ok(())
+    }
+
+    #[test]
+    fn maintenance_can_run_without_postgres() -> Result<(), String> {
+        test_redis_endpoint().map_or(Ok(()), |endpoint| {
+            let report = run_maintenance(options(&endpoint, None)).map_err(crate::error_text)?;
+            assert_eq!(report.ledger["reason"], "postgres not configured");
+            assert!(report.redis.maxmemory.is_some());
+            assert!(report.redis.maxmemory_policy.is_some());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn maintenance_purges_the_postgres_ledger_when_configured() -> Result<(), String> {
+        let stores = test_redis_endpoint().zip(std::env::var("TEST_DATABASE_URL").ok());
+        stores.map_or(Ok(()), |(endpoint, database_url)| {
+            let report = run_maintenance(options(&endpoint, Some(&database_url)))
+                .map_err(crate::error_text)?;
+            assert!(report.ledger.is_object());
+            assert!(report.ledger.get("skipped").is_none());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn unreachable_postgres_is_reported_after_redis_maintenance() -> Result<(), String> {
+        test_redis_endpoint().map_or(Ok(()), |endpoint| {
+            let result = run_maintenance(options(
+                &endpoint,
+                Some("postgresql://synthetic:synthetic@127.0.0.1:1/database?sslmode=disable"),
+            ));
+            assert!(matches!(result, Err(MaintenanceError::Schema(_))));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn unreachable_redis_fails_before_postgres_maintenance() {
+        let endpoint = RedisEndpoint {
+            host: "127.0.0.1".to_owned(),
+            port: 1,
+            password: None,
+        };
+        let result = run_maintenance(options(
+            &endpoint,
+            Some("postgresql://synthetic:synthetic@127.0.0.1:1/database?sslmode=disable"),
+        ));
+        assert!(matches!(result, Err(MaintenanceError::Redis(_))));
     }
 }

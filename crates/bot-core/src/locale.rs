@@ -107,16 +107,15 @@ mod tests {
     }
 
     #[test]
-    fn formats_weekdays_in_the_selected_locale() {
-        let Some(date) = NaiveDate::from_ymd_opt(2026, 9, 1) else {
-            return;
-        };
+    fn formats_weekdays_in_the_selected_locale() -> Result<(), &'static str> {
+        let date = NaiveDate::from_ymd_opt(2026, 9, 1).ok_or("valid date")?;
         assert_eq!(format_date(date, Locale::Es), "martes 01/09/2026");
         assert_eq!(format_date(date, Locale::En), "Tuesday 01/09/2026");
+        Ok(())
     }
 
     #[test]
-    fn names_every_weekday_in_both_locales() {
+    fn names_every_weekday_in_both_locales() -> Result<(), &'static str> {
         let expected = [
             ("lunes", "Monday"),
             ("martes", "Tuesday"),
@@ -128,11 +127,9 @@ mod tests {
         ];
         for (offset, (spanish, english)) in (0_u32..).zip(expected) {
             // 2026-08-31 is a Monday.
-            let Some(date) = NaiveDate::from_ymd_opt(2026, 8, 31)
+            let date = NaiveDate::from_ymd_opt(2026, 8, 31)
                 .and_then(|monday| monday.checked_add_days(chrono::Days::new(offset.into())))
-            else {
-                return;
-            };
+                .ok_or("valid date")?;
             let formatted = date.format("%d/%m/%Y");
             assert_eq!(
                 format_date(date, Locale::Es),
@@ -143,6 +140,7 @@ mod tests {
                 format!("{english} {formatted}")
             );
         }
+        Ok(())
     }
 
     #[test]

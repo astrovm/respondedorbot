@@ -160,16 +160,10 @@ pub fn search_with<T: GiphyTransport>(
     }
 }
 
-#[must_use]
-pub fn search(api_key: &str, term: &str, offset: u16) -> SearchOutcome {
-    match ReqwestGiphyTransport::new() {
-        Ok(transport) => search_with(&transport, api_key, term, offset),
-        Err(kind) => SearchOutcome::TransportError { kind },
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
     use std::cell::RefCell;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -262,11 +256,11 @@ mod tests {
     }
 
     #[test]
-    fn reqwest_transport_sends_the_complete_search_contract() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+    fn reqwest_transport_sends_the_complete_search_contract() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
+            let (mut stream, _) = listener.accept()?;
             let mut request = [0_u8; 2_048];
             let bytes = stream.read(&mut request).unwrap_or_default();
             let request = String::from_utf8_lossy(&request[..bytes]);
@@ -281,27 +275,31 @@ mod tests {
                 assert!(request.contains(expected), "{request}");
             }
             let body = r#"{"data":[]}"#;
-            write!(
+            let written = write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
-            )
-            .unwrap_or_else(|_| unreachable!());
+            );
+            written?;
+            Ok(())
         });
         let transport = ReqwestGiphyTransport::with_search_url(&format!("http://{address}/search"))
-            .unwrap_or_else(|_| unreachable!());
+            .ok()
+            .ok_or("unexpected error")?;
         let response = transport
             .search(&SearchRequest {
                 api_key: "synthetic-key".to_owned(),
                 term: "synthetic term".to_owned(),
                 offset: 9,
             })
-            .unwrap_or_else(|_| unreachable!());
+            .ok()
+            .ok_or("unexpected error")?;
         assert_eq!(response.status_code, 200);
         assert_eq!(response.body, r#"{"data":[]}"#);
-        assert!(server.join().is_ok());
+        assert!(matches!(server.join(), Ok(Ok(()))));
         let unavailable = ReqwestGiphyTransport::with_search_url("http://127.0.0.1:1/search")
-            .unwrap_or_else(|_| unreachable!());
+            .ok()
+            .ok_or("unexpected error")?;
         assert!(
             unavailable
                 .search(&SearchRequest {
@@ -310,6 +308,24 @@ mod tests {
                     offset: 0,
                 })
                 .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reqwest_failures_are_classified_by_cause() {
+        use crate::web_fetch::reqwest_error_fixtures as fixtures;
+        assert_eq!(
+            fixtures::timeout().map(super::classify_error),
+            Some(super::TransportFailureKind::Timeout)
+        );
+        assert_eq!(
+            fixtures::connection().map(super::classify_error),
+            Some(super::TransportFailureKind::Connection)
+        );
+        assert_eq!(
+            fixtures::request().map(super::classify_error),
+            Some(super::TransportFailureKind::Request)
         );
     }
 }

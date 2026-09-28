@@ -102,10 +102,12 @@ use crate::runtime::UpdateHandler;
 use crate::telegram_stream::{StreamFinalizeError, TelegramAiStream};
 
 fn text_without_links(text: &str) -> String {
-    bot_core::links::HTTP_URL.as_ref().map_or_else(
-        || text.to_owned(),
-        |pattern| pattern.replace_all(text, "").into_owned(),
-    )
+    bot_core::links::HTTP_URL
+        .as_ref()
+        .map_or(std::borrow::Cow::Borrowed(text), |pattern| {
+            pattern.replace_all(text, "")
+        })
+        .into_owned()
 }
 
 fn thinking_text(locale: bot_core::locale::Locale) -> &'static str {
@@ -391,6 +393,14 @@ struct StoredMarketSelection {
     source_message_id: Option<i64>,
     requester_id: i64,
     command: String,
+}
+
+impl StoredMarketSelection {
+    /// Every field is a string, an integer, a bool, or a list or option of
+    /// those, which serde_json always serializes.
+    fn encode(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
 }
 
 // Zero stores menu state until it is consumed, without a time limit.
@@ -1267,28 +1277,6 @@ where
         if addressed {
             self.prefetched_link_context = Some(load.context.clone());
         }
-        if !load.replacement.changed {
-            if addressed {
-                return Ok(None);
-            }
-            let incoming = prepare_incoming_command_state(IncomingCommandState {
-                chat_id,
-                message_id,
-                user_id: sender_id,
-                first_name: message.sender_first_name.as_deref(),
-                username: message.sender_username.as_deref(),
-                text,
-                is_group: is_group_chat_type(message.chat_type.as_deref()),
-                timestamp,
-            });
-            if let Ok(incoming) = incoming
-                && let Err(error) = self.state.record_incoming(&incoming)
-            {
-                self.state_diagnostics
-                    .push(format!("unreplaced link state: {error}"));
-            }
-            return Ok(Some(DispatchOutcome::Handled));
-        }
         let shared_by = message.sender_username.as_deref().map_or_else(
             || {
                 [
@@ -1314,7 +1302,27 @@ where
                 link_context: load.context.as_deref(),
             },
         ) else {
-            return Ok(None);
+            // Only changed links produce a plan (the mode is not off here).
+            if addressed {
+                return Ok(None);
+            }
+            let incoming = prepare_incoming_command_state(IncomingCommandState {
+                chat_id,
+                message_id,
+                user_id: sender_id,
+                first_name: message.sender_first_name.as_deref(),
+                username: message.sender_username.as_deref(),
+                text,
+                is_group: is_group_chat_type(message.chat_type.as_deref()),
+                timestamp,
+            });
+            if let Ok(incoming) = incoming
+                && let Err(error) = self.state.record_incoming(&incoming)
+            {
+                self.state_diagnostics
+                    .push(format!("unreplaced link state: {error}"));
+            }
+            return Ok(Some(DispatchOutcome::Handled));
         };
         let sent_key = addressed.then(|| sent_link_fix_key(chat_id, message_id));
         if let Some(key) = sent_key.as_deref()
@@ -1328,18 +1336,19 @@ where
                     .push(format!("sent link fix lookup: {error}")),
             }
         }
-        let video_action = load.oversized_video.map(|video| {
-            let TelegramAction::SendMessage(message) = &plan.send else {
-                return plan.send.clone();
-            };
-            TelegramAction::SendVideo {
-                chat_id: message.chat_id,
-                video: video.into(),
-                reply_to_message_id: message.reply_to_message_id,
-                caption: message.text.clone(),
-                reply_markup: message.reply_markup.clone(),
+        // Link plans always send a message, which carries the video caption.
+        let video_action = match (&plan.send, load.oversized_video) {
+            (TelegramAction::SendMessage(message), Some(video)) => {
+                Some(TelegramAction::SendVideo {
+                    chat_id: message.chat_id,
+                    video: video.into(),
+                    reply_to_message_id: message.reply_to_message_id,
+                    caption: message.text.clone(),
+                    reply_markup: message.reply_markup.clone(),
+                })
             }
-        });
+            _ => None,
+        };
         let receipt = if let Some(video_action) = video_action {
             match self
                 .actions
@@ -1455,11 +1464,9 @@ where
                 credits_awarded,
                 ..
             } => {
-                let Some(payment) = payment_record(&decision) else {
-                    return Err(DispatchError::Invariant(
-                        "recordable payment did not produce a ledger record",
-                    ));
-                };
+                let invariant = "recordable payment did not produce a ledger record";
+                let payment =
+                    payment_record(&decision).ok_or(DispatchError::Invariant(invariant))?;
                 let Some(sink) = self.payment_sink.as_mut() else {
                     return Err(DispatchError::MissingService("payment persistence"));
                 };
@@ -1595,32 +1602,25 @@ where
         }
     }
 
+    /// `chat_id` is the callback chat id, already validated as numeric.
     fn record_market_callback_delivery(
         &mut self,
         context: &CallbackContext,
+        chat_id: i64,
         text: &str,
         sent_message_id: Option<MessageId>,
         command: &str,
         timestamp: i64,
     ) {
-        let Ok(chat_id) = context.chat_id.parse::<i64>() else {
-            self.state_diagnostics
-                .push("invalid market callback chat id for history".to_owned());
-            return;
-        };
-        let Ok(outgoing) = prepare_outgoing_command_state(OutgoingCommandState {
+        if let Ok(outgoing) = prepare_outgoing_command_state(OutgoingCommandState {
             chat_id: ChatId(chat_id),
             incoming_message_id: MessageId(context.message_id),
             sent_message_id,
             text,
             command,
             timestamp,
-        }) else {
-            self.state_diagnostics
-                .push("market callback history plan failed".to_owned());
-            return;
-        };
-        if let Err(error) = self.state.record_outgoing(&outgoing) {
+        }) && let Err(error) = self.state.record_outgoing(&outgoing)
+        {
             self.state_diagnostics
                 .push(format!("market callback history: {error}"));
         }
@@ -1680,11 +1680,7 @@ where
                 "unified".to_owned()
             },
         };
-        let Ok(encoded) = serde_json::to_string(&stored) else {
-            self.state_diagnostics
-                .push("market selection encode failed".to_owned());
-            return Ok(None);
-        };
+        let encoded = stored.encode();
         let key = market_selection_key(&selection_id);
         let Some(source) = self.market_price_source.as_mut() else {
             self.state_diagnostics
@@ -1727,18 +1723,7 @@ where
             return Ok(Some(DispatchOutcome::Handled));
         };
         stored.message_id = sent_message_id.0;
-        let Ok(encoded) = serde_json::to_string(&stored) else {
-            self.state_diagnostics
-                .push("market selection update encode failed".to_owned());
-            if let Some(source) = self.market_price_source.as_mut()
-                && let Err(error) = source.clear_selection(&key)
-            {
-                self.state_diagnostics.push(format!(
-                    "market selection clear after encode failure: {error}"
-                ));
-            }
-            return Ok(Some(DispatchOutcome::Handled));
-        };
+        let encoded = stored.encode();
         if let Some(source) = self.market_price_source.as_mut()
             && let Err(error) = source.save_selection(&key, &encoded, MARKET_SELECTION_TTL_SECONDS)
         {
@@ -1955,42 +1940,24 @@ where
                     .and_then(|load| load.chart.as_ref())
                     .and_then(|chart| chart.token.as_ref())
                     .cloned();
-                token_candidates = if matches!(token_query, SignalQuery::Address(_)) {
-                    if let Some(token) = canonical_token.as_ref() {
-                        let loaded = source.load_token(token);
-                        self.state_diagnostics.extend(loaded.diagnostics);
-                        if let Some(signal) = loaded.signal {
-                            vec![signal]
-                        } else {
-                            let loaded = source.load_candidates(token_query);
-                            self.state_diagnostics.extend(loaded.diagnostics);
-                            loaded.signals
-                        }
-                    } else {
-                        let loaded = source.load_candidates(token_query);
-                        self.state_diagnostics.extend(loaded.diagnostics);
-                        loaded.signals
-                    }
-                } else {
-                    // A provider's symbol match can be a namesake. Discover
-                    // DEX identities first, then add the provider's canonical
-                    // contract as another candidate when it is distinct.
-                    let loaded = source.load_candidates(token_query);
+                // A provider's symbol match can be a namesake. Discover DEX
+                // identities first, then add the provider's canonical contract
+                // as another candidate when it is distinct. Address queries
+                // never consult the provider, so they have no canonical token.
+                let loaded = source.load_candidates(token_query);
+                self.state_diagnostics.extend(loaded.diagnostics);
+                token_candidates = loaded.signals;
+                if let Some(token) = canonical_token.as_ref() {
+                    let loaded = source.load_token(token);
                     self.state_diagnostics.extend(loaded.diagnostics);
-                    let mut candidates = loaded.signals;
-                    if let Some(token) = canonical_token.as_ref() {
-                        let loaded = source.load_token(token);
-                        self.state_diagnostics.extend(loaded.diagnostics);
-                        if let Some(signal) = loaded.signal
-                            && !candidates.iter().any(|candidate| {
-                                market_contracts_match(&candidate.token, &signal.token)
-                            })
-                        {
-                            candidates.push(signal);
-                        }
+                    if let Some(signal) = loaded.signal
+                        && !token_candidates.iter().any(|candidate| {
+                            market_contracts_match(&candidate.token, &signal.token)
+                        })
+                    {
+                        token_candidates.push(signal);
                     }
-                    candidates
-                };
+                }
                 token_candidates.retain(|signal| {
                     self.market_price_source.is_none()
                         || token_signal_matches_query(signal, token_query)
@@ -2341,8 +2308,8 @@ where
         timeframe: Option<&str>,
         timestamp: i64,
     ) -> Result<Vec<u8>, String> {
-        self.token_signal_source.as_mut().map_or_else(
-            || Err("native token-signal source disappeared".to_owned()),
+        self.token_signal_source.as_mut().map_or(
+            Err("native token-signal source disappeared".to_owned()),
             |source| source.render_period_photo(signal, timeframe.unwrap_or("24h"), timestamp),
         )
     }
@@ -2353,25 +2320,22 @@ where
         timeframe: Option<&str>,
         timestamp: i64,
     ) -> (Option<Vec<Vec<f64>>>, String) {
-        let period = timeframe.unwrap_or("24h").to_owned();
-        let Some(source) = self.token_signal_source.as_mut() else {
-            return (None, period);
+        let period = timeframe.unwrap_or("24h");
+        let mut period_candles = |period: &str| {
+            self.token_signal_source
+                .as_mut()
+                .and_then(|source| source.period_candles(signal, period, timestamp).ok())
+                .filter(|candles| !candles.is_empty())
         };
-        let candles = source
-            .period_candles(signal, &period, timestamp)
-            .ok()
-            .filter(|candles| !candles.is_empty());
+        let candles = period_candles(period);
         if candles
             .as_deref()
-            .is_some_and(|candles| has_period_change(candles, &period))
+            .is_some_and(|candles| has_period_change(candles, period))
         {
-            return (candles, period);
+            return (candles, period.to_owned());
         }
-        for wider in wider_periods(&period) {
-            let wider_candles = source
-                .period_candles(signal, wider, timestamp)
-                .ok()
-                .filter(|candles| !candles.is_empty());
+        for wider in wider_periods(period) {
+            let wider_candles = period_candles(wider);
             if wider_candles
                 .as_deref()
                 .is_some_and(|candles| has_period_change(candles, wider))
@@ -2379,7 +2343,7 @@ where
                 return (wider_candles, (*wider).to_owned());
             }
         }
-        (candles, period)
+        (candles, period.to_owned())
     }
 
     fn try_send_token_signal_photo(
@@ -3036,6 +3000,7 @@ where
                 .map_err(DispatchError::Action)?;
             self.record_market_callback_delivery(
                 context,
+                chat_id_value,
                 &text,
                 receipt.message_id,
                 command_name,
@@ -3054,18 +3019,16 @@ where
         let mut delivered = false;
         let mut delivered_text = None;
         if let Some(chart) = load.chart.as_ref() {
-            let rendered = match self
-                .market_price_source
-                .as_mut()
-                .map(|source| source.render_chart(chart, timestamp))
-            {
-                Some(Ok(rendered)) => Some(rendered),
-                Some(Err(error)) => {
+            let rendered = match self.market_price_source.as_mut().map_or(
+                Err("market price source disappeared".to_owned()),
+                |source| source.render_chart(chart, timestamp),
+            ) {
+                Ok(rendered) => Some(rendered),
+                Err(error) => {
                     self.state_diagnostics
                         .push(format!("market chart render failed: {error}"));
                     None
                 }
-                None => None,
             };
             if let Some(rendered) = rendered {
                 let caption = rendered.caption.unwrap_or_else(|| text.clone());
@@ -3156,6 +3119,7 @@ where
             };
             self.record_market_callback_delivery(
                 context,
+                chat_id_value,
                 &text,
                 receipt.message_id,
                 command_name,
@@ -3164,6 +3128,7 @@ where
         } else if let Some((caption, sent_message_id)) = delivered_text {
             self.record_market_callback_delivery(
                 context,
+                chat_id_value,
                 &caption,
                 sent_message_id,
                 command_name,
@@ -3237,6 +3202,7 @@ where
                 .map_err(DispatchError::Action)?;
             self.record_market_callback_delivery(
                 context,
+                chat_id_value,
                 &text,
                 receipt.message_id,
                 command_name,
@@ -3278,6 +3244,7 @@ where
         if delivered {
             self.record_market_callback_delivery(
                 context,
+                chat_id_value,
                 &delivered_text,
                 sent_message_id,
                 command_name,
@@ -3312,6 +3279,7 @@ where
             };
             self.record_market_callback_delivery(
                 context,
+                chat_id_value,
                 &delivered_text,
                 receipt.message_id,
                 command_name,
@@ -3382,10 +3350,9 @@ where
             ("selected", bot_core::locale::Locale::En) => "Quote loaded",
             ("quote", bot_core::locale::Locale::Es) => "Te dejé la cotización",
             ("quote", bot_core::locale::Locale::En) => "Showing the quote",
-            ("retry", bot_core::locale::Locale::Es) => "No pude cargarla. Probá de nuevo",
-            ("retry", bot_core::locale::Locale::En) => "I could not load it. Try again",
-            (_, bot_core::locale::Locale::Es) => "Listo",
-            (_, bot_core::locale::Locale::En) => "Done",
+            // "retry", the only remaining kind callers pass.
+            (_, bot_core::locale::Locale::Es) => "No pude cargarla. Probá de nuevo",
+            (_, bot_core::locale::Locale::En) => "I could not load it. Try again",
         };
         let _receipt = self
             .actions
@@ -3414,34 +3381,39 @@ where
             context.user_language_code.as_deref(),
             &context.chat_type,
         );
-        let parsed = parse_task_callback(&context.data);
-        if parsed == TaskCallbackParse::Close {
-            self.answer_callback_best_effort(context.callback_id.as_deref());
-            if let Ok(chat_id) = context.chat_id.parse::<i64>() {
-                // Best effort: see the signal delete handler above.
-                if self
-                    .actions
-                    .execute(TelegramAction::DeleteMessage {
-                        chat_id: ChatId(chat_id),
-                        message_id: MessageId(context.message_id),
-                    })
-                    .is_err()
-                {
-                    self.state_diagnostics.push(format!(
-                        "callback delete failed chat_id={} message_id={}",
-                        context.chat_id, context.message_id
-                    ));
+        // Either a task list page or a task with its detail mode.
+        let request = match parse_task_callback(&context.data) {
+            TaskCallbackParse::Close => {
+                self.answer_callback_best_effort(context.callback_id.as_deref());
+                if let Ok(chat_id) = context.chat_id.parse::<i64>() {
+                    // Best effort: see the signal delete handler above.
+                    if self
+                        .actions
+                        .execute(TelegramAction::DeleteMessage {
+                            chat_id: ChatId(chat_id),
+                            message_id: MessageId(context.message_id),
+                        })
+                        .is_err()
+                    {
+                        self.state_diagnostics.push(format!(
+                            "callback delete failed chat_id={} message_id={}",
+                            context.chat_id, context.message_id
+                        ));
+                    }
                 }
+                return Ok(DispatchOutcome::Handled);
             }
-            return Ok(DispatchOutcome::Handled);
-        }
-        if parsed == TaskCallbackParse::Guard {
-            self.answer_callback_best_effort(context.callback_id.as_deref());
-            return Ok(DispatchOutcome::Handled);
-        }
-        let Some(source) = self.scheduled_task_source.as_mut() else {
-            return Err(DispatchError::MissingService("scheduled tasks"));
+            TaskCallbackParse::Guard => {
+                self.answer_callback_best_effort(context.callback_id.as_deref());
+                return Ok(DispatchOutcome::Handled);
+            }
+            TaskCallbackParse::Page(page) => Err(page),
+            TaskCallbackParse::Delete(id) => Ok((id, None)),
+            TaskCallbackParse::View(id) => Ok((id, Some(false))),
+            TaskCallbackParse::Confirm(id) => Ok((id, Some(true))),
         };
+        let missing = DispatchError::MissingService("scheduled tasks");
+        let source = self.scheduled_task_source.as_mut().ok_or(missing)?;
         let tasks = match source.list(&context.chat_id) {
             Ok(tasks) => tasks,
             Err(error) => {
@@ -3462,26 +3434,23 @@ where
                 return Ok(DispatchOutcome::Handled);
             }
         };
-        if let TaskCallbackParse::Page(page) = parsed {
-            let view = bot_core::task_commands::render_task_page(&tasks, locale, page);
-            self.answer_callback_best_effort(context.callback_id.as_deref());
-            if let Ok(chat_id) = context.chat_id.parse::<i64>() {
-                self.actions
-                    .try_edit(TelegramAction::EditMessage {
-                        chat_id: ChatId(chat_id),
-                        message_id: MessageId(context.message_id),
-                        text: view.text,
-                        reply_markup: view.keyboard,
-                    })
-                    .map_err(DispatchError::Action)?;
+        let (task_id, detail) = match request {
+            Err(page) => {
+                let view = bot_core::task_commands::render_task_page(&tasks, locale, page);
+                self.answer_callback_best_effort(context.callback_id.as_deref());
+                if let Ok(chat_id) = context.chat_id.parse::<i64>() {
+                    self.actions
+                        .try_edit(TelegramAction::EditMessage {
+                            chat_id: ChatId(chat_id),
+                            message_id: MessageId(context.message_id),
+                            text: view.text,
+                            reply_markup: view.keyboard,
+                        })
+                        .map_err(DispatchError::Action)?;
+                }
+                return Ok(DispatchOutcome::Handled);
             }
-            return Ok(DispatchOutcome::Handled);
-        }
-        let (task_id, detail) = match parsed {
-            TaskCallbackParse::Delete(id) => (id, None),
-            TaskCallbackParse::View(id) => (id, Some(false)),
-            TaskCallbackParse::Confirm(id) => (id, Some(true)),
-            _ => return Ok(DispatchOutcome::Handled),
+            Ok(target) => target,
         };
         let Some(target) = tasks.iter().find(|task| task.id == task_id).cloned() else {
             if let Some(callback_id) = context.callback_id.as_deref() {
@@ -4075,11 +4044,9 @@ where
                 changed,
                 diagnostic,
             } => (changed, diagnostic),
-            ConfigCallbackOutcome::Guard => {
-                self.answer_callback_best_effort(context.callback_id.as_deref());
-                return Ok(DispatchOutcome::Handled);
-            }
-            ConfigCallbackOutcome::NotHandled => {
+            // Config routes always carry the `cfg:` prefix, so "not handled"
+            // only mirrors a guard here.
+            ConfigCallbackOutcome::Guard | ConfigCallbackOutcome::NotHandled => {
                 self.answer_callback_best_effort(context.callback_id.as_deref());
                 return Ok(DispatchOutcome::Handled);
             }
@@ -4210,10 +4177,9 @@ where
             random_sample: None,
         };
         let evaluation = loop {
+            // Trigger words are provided up front, so routing never asks for
+            // them.
             match evaluate_response_routing(&routing) {
-                ResponseRoutingEvaluation::NeedsTriggerWords => {
-                    routing.trigger_words = Some(self.trigger_words.clone());
-                }
                 ResponseRoutingEvaluation::NeedsRandomSample => {
                     routing.random_sample =
                         Some(self.random.unit_interval().map_err(DispatchError::Random)?);
@@ -4282,9 +4248,8 @@ where
         };
 
         let (preparation, stream_finalize, ignored_edit_failures, thinking_status_failed) = {
-            let Some(source) = self.ai_conversation_source.as_mut() else {
-                return Err(DispatchError::MissingService("AI conversation"));
-            };
+            let missing = DispatchError::MissingService("AI conversation");
+            let source = self.ai_conversation_source.as_mut().ok_or(missing)?;
             let mut stream = TelegramAiStream::new(&mut self.actions, chat_id, message_id)
                 .with_thinking_text(thinking_text(locale));
             // The thinking status waits for the source to admit the turn, so
@@ -4360,21 +4325,26 @@ where
                 return self.send_failure_reply(chat_id, message_id, text);
             }
         };
-        let (completion_id, diagnostics) = match preparation {
-            AiPreparation::Silent { diagnostics } => {
+        // Only a reply finalizes the stream, so a silent turn has nothing to
+        // deliver.
+        let (completion_id, diagnostics, stream_finalize) = match (preparation, stream_finalize) {
+            (
+                AiPreparation::Reply {
+                    completion_id,
+                    diagnostics,
+                    ..
+                },
+                Some(stream_finalize),
+            ) => (completion_id, diagnostics, stream_finalize),
+            (
+                AiPreparation::Silent { diagnostics } | AiPreparation::Reply { diagnostics, .. },
+                _,
+            ) => {
                 self.state_diagnostics.extend(diagnostics);
                 return Ok(DispatchOutcome::Handled);
             }
-            AiPreparation::Reply {
-                completion_id,
-                diagnostics,
-                ..
-            } => (completion_id, diagnostics),
         };
         self.state_diagnostics.extend(diagnostics);
-        let Some(stream_finalize) = stream_finalize else {
-            return Ok(DispatchOutcome::Handled);
-        };
         match stream_finalize {
             Ok(delivery) => {
                 if let Some(completion_id) = completion_id
@@ -4506,16 +4476,11 @@ where
             is_group: is_group_chat_type(message.chat_type.as_deref()),
             timestamp,
         });
-        match incoming {
-            Ok(incoming) => {
-                if let Err(error) = self.state.record_incoming(&incoming) {
-                    self.state_diagnostics
-                        .push(format!("incoming media command state: {error}"));
-                }
-            }
-            Err(error) => self
-                .state_diagnostics
-                .push(format!("incoming media command state plan: {error}")),
+        if let Ok(incoming) = incoming
+            && let Err(error) = self.state.record_incoming(&incoming)
+        {
+            self.state_diagnostics
+                .push(format!("incoming media command state: {error}"));
         }
 
         let action = if text.chars().count() > MAX_TELEGRAM_TEXT_LENGTH {
@@ -4568,16 +4533,11 @@ where
             command,
             timestamp,
         });
-        match outgoing {
-            Ok(outgoing) => {
-                if let Err(error) = self.state.record_outgoing(&outgoing) {
-                    self.state_diagnostics
-                        .push(format!("outgoing media command state: {error}"));
-                }
-            }
-            Err(error) => self
-                .state_diagnostics
-                .push(format!("outgoing media command state plan: {error}")),
+        if let Ok(outgoing) = outgoing
+            && let Err(error) = self.state.record_outgoing(&outgoing)
+        {
+            self.state_diagnostics
+                .push(format!("outgoing media command state: {error}"));
         }
         Ok(DispatchOutcome::Handled)
     }
@@ -4599,9 +4559,6 @@ where
         ) else {
             return Ok(DispatchOutcome::Unsupported);
         };
-        if self.ai_conversation_source.is_none() {
-            return Err(DispatchError::MissingService("AI conversation"));
-        }
         let input = AiConversationInput {
             chat_id,
             message_id,
@@ -4715,11 +4672,16 @@ where
                 return self.send_failure_reply(chat_id, message_id, text);
             }
         };
-        let AiPreparation::Reply {
-            text,
-            completion_id,
-            diagnostics,
-        } = preparation
+        // Only a reply finalizes the stream, so a silent summary has nothing
+        // to deliver.
+        let (
+            AiPreparation::Reply {
+                text,
+                completion_id,
+                diagnostics,
+            },
+            Some(stream_finalize),
+        ) = (preparation, stream_finalize)
         else {
             return Ok(DispatchOutcome::Handled);
         };
@@ -4739,9 +4701,6 @@ where
             self.state_diagnostics
                 .push(format!("incoming summary command state: {error}"));
         }
-        let Some(stream_finalize) = stream_finalize else {
-            return Ok(DispatchOutcome::Handled);
-        };
         let receipt = match stream_finalize {
             Ok(receipt) => receipt,
             Err(StreamFinalizeError::MissingMessageId) => {
@@ -4934,17 +4893,79 @@ where
             language_requires_group_authorization,
         );
         let (plan, updated_config) = match language_plan {
-            LanguageCommandPlan::GroupAuthorizationRequired => {
-                return Err(DispatchError::Invariant(
-                    "authorized group language command was not unlocked",
-                ));
-            }
             LanguageCommandPlan::Action {
                 action,
                 updated_config,
             } => (StatelessCommandPlan::Action(action), updated_config),
-            LanguageCommandPlan::NotHandled => (StatelessCommandPlan::NotHandled, None),
+            // Group language commands are settings commands, which the admin
+            // check above either rejects or unlocks, so the planner never
+            // asks for group authorization here.
+            LanguageCommandPlan::GroupAuthorizationRequired | LanguageCommandPlan::NotHandled => {
+                (StatelessCommandPlan::NotHandled, None)
+            }
         };
+        // Billing and admin planners claim only their own commands; any
+        // other command is NotHandled and falls through the chain below.
+        let balance_plan = plan_balance_command(
+            &content.text,
+            &self.bot_name,
+            BalanceCommandContext {
+                chat_id,
+                message_id,
+                user_id: Some(sender_id.0),
+                locale,
+                is_group,
+                billing_available: self.billing_available,
+            },
+        );
+        let charges_plan = plan_charges_command(
+            &content.text,
+            &self.bot_name,
+            ChargesCommandContext {
+                chat_id,
+                message_id,
+                user_id: Some(sender_id.0),
+                locale,
+                timezone_offset_hours: config.timezone_offset,
+                billing_available: self.billing_available,
+            },
+        );
+        let transfer_plan = plan_transfer_command(
+            &content.text,
+            &self.bot_name,
+            TransferCommandContext {
+                chat_id,
+                message_id,
+                user_id: Some(sender_id.0),
+                locale,
+                is_group,
+                billing_available: self.billing_available,
+            },
+        );
+        let printcredits_plan = plan_printcredits_command(
+            &content.text,
+            &self.bot_name,
+            PrintCreditsContext {
+                chat_id,
+                message_id,
+                user_id: sender_id.0,
+                admin_user_id: self.admin_user_id,
+                billing_available: self.billing_available,
+                locale,
+            },
+        );
+        let creditlog_plan = plan_creditlog_command(
+            &content.text,
+            &self.bot_name,
+            PrintCreditsContext {
+                chat_id,
+                message_id,
+                user_id: sender_id.0,
+                admin_user_id: self.admin_user_id,
+                billing_available: self.billing_available,
+                locale,
+            },
+        );
         let plan = if plan != StatelessCommandPlan::NotHandled {
             plan
         } else if let Some(action) = plan_config_command(
@@ -4971,11 +4992,7 @@ where
             parsed.command.as_str(),
             "/tarea" | "/tareas" | "/task" | "/tasks"
         ) {
-            if !parsed.message_text.is_empty() {
-                return Err(DispatchError::Invariant(
-                    "task prompt bypassed the AI routing branch",
-                ));
-            }
+            // Task prompts with text were routed to the AI turn above.
             let Some(source) = self.scheduled_task_source.as_mut() else {
                 return Err(DispatchError::MissingService("scheduled tasks"));
             };
@@ -4994,243 +5011,161 @@ where
             message.reply_to_message_id = Some(message_id);
             message.reply_markup = view.keyboard;
             StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
-        } else if parsed.command == "/balance" {
-            match plan_balance_command(
-                &content.text,
-                &self.bot_name,
-                BalanceCommandContext {
-                    chat_id,
-                    message_id,
-                    user_id: Some(sender_id.0),
-                    locale,
-                    is_group,
-                    billing_available: self.billing_available,
-                },
-            ) {
-                BalanceCommandPlan::Reply(action) => StatelessCommandPlan::Action(action),
-                BalanceCommandPlan::Load {
-                    user_id,
-                    chat_id,
-                    is_group,
-                } => {
-                    let Some(source) = self.balance_source.as_mut() else {
-                        return Err(DispatchError::MissingService("billing balances"));
-                    };
-                    self.state_diagnostics.clear();
-                    let balances = source.load(user_id, is_group.then_some(chat_id.0));
-                    let text = match balances {
-                        Ok(balances) => {
-                            self.state_diagnostics.extend(balances.diagnostics);
-                            balance_reply(balances.user_balance, balances.chat_balance, locale)
-                        }
-                        Err(error) => {
-                            self.state_diagnostics.push(format!(
-                                "balance load chat_id={} user_id={user_id}: {error}",
-                                chat_id.0
-                            ));
-                            match locale {
-                                bot_core::locale::Locale::Es => {
-                                    "Se trabó leyendo tu saldo. Probá de nuevo".to_owned()
-                                }
-                                bot_core::locale::Locale::En => {
-                                    "I could not load your balance. Try again".to_owned()
-                                }
-                            }
-                        }
-                    };
-                    let mut message = SendMessage::new(chat_id, &text);
-                    message.reply_to_message_id = Some(message_id);
-                    StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+        } else if let BalanceCommandPlan::Reply(action) = balance_plan {
+            StatelessCommandPlan::Action(action)
+        } else if let BalanceCommandPlan::Load {
+            user_id,
+            chat_id,
+            is_group,
+        } = balance_plan
+        {
+            let Some(source) = self.balance_source.as_mut() else {
+                return Err(DispatchError::MissingService("billing balances"));
+            };
+            self.state_diagnostics.clear();
+            let balances = source.load(user_id, is_group.then_some(chat_id.0));
+            let text = match balances {
+                Ok(balances) => {
+                    self.state_diagnostics.extend(balances.diagnostics);
+                    balance_reply(balances.user_balance, balances.chat_balance, locale)
                 }
-                BalanceCommandPlan::NotHandled => StatelessCommandPlan::NotHandled,
-            }
-        } else if matches!(parsed.command.as_str(), "/charges" | "/history" | "/gastos") {
-            match plan_charges_command(
-                &content.text,
-                &self.bot_name,
-                ChargesCommandContext {
-                    chat_id,
-                    message_id,
-                    user_id: Some(sender_id.0),
-                    locale,
-                    timezone_offset_hours: config.timezone_offset,
-                    billing_available: self.billing_available,
-                },
-            ) {
-                ChargesCommandPlan::Reply(action) => StatelessCommandPlan::Action(action),
-                ChargesCommandPlan::Load {
-                    user_id,
-                    limit,
-                    timezone_minutes,
-                } => {
-                    let Some(source) = self.charge_history_source.as_mut() else {
-                        return Err(DispatchError::MissingService("charge history"));
-                    };
-                    let (text, keyboard) = match source.load(user_id, limit, None, "older") {
-                        Ok(page) => render_charge_history_page(
-                            &page,
-                            user_id,
-                            limit,
-                            timezone_minutes,
-                            locale,
-                        ),
-                        Err(error) => {
-                            self.state_diagnostics.push(format!(
-                                "charge history load chat_id={} user_id={user_id} limit={limit}: {error}",
-                                chat_id.0
-                            ));
-                            let text = match locale {
-                                bot_core::locale::Locale::Es => {
-                                    "Se trabó leyendo tus gastos. Probá de nuevo"
-                                }
-                                bot_core::locale::Locale::En => {
-                                    "I could not load your spending. Try again"
-                                }
-                            };
-                            (text.to_owned(), None)
+                Err(error) => {
+                    self.state_diagnostics.push(format!(
+                        "balance load chat_id={} user_id={user_id}: {error}",
+                        chat_id.0
+                    ));
+                    match locale {
+                        bot_core::locale::Locale::Es => {
+                            "Se trabó leyendo tu saldo. Probá de nuevo".to_owned()
                         }
-                    };
-                    let mut message = SendMessage::new(chat_id, &text);
-                    message.reply_to_message_id = Some(message_id);
-                    message.reply_markup = keyboard;
-                    StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
-                }
-                ChargesCommandPlan::NotHandled => StatelessCommandPlan::NotHandled,
-            }
-        } else if parsed.command == "/transfer" {
-            match plan_transfer_command(
-                &content.text,
-                &self.bot_name,
-                TransferCommandContext {
-                    chat_id,
-                    message_id,
-                    user_id: Some(sender_id.0),
-                    locale,
-                    is_group,
-                    billing_available: self.billing_available,
-                },
-            ) {
-                TransferCommandPlan::Reply(action) => StatelessCommandPlan::Action(action),
-                TransferCommandPlan::Transfer {
-                    user_id,
-                    chat_id,
-                    amount,
-                } => {
-                    let Some(sink) = self.transfer_sink.as_mut() else {
-                        return Err(DispatchError::MissingService("credit transfers"));
-                    };
-                    let text = match sink.transfer(user_id, chat_id, amount) {
-                        Ok(result) => transfer_result_reply(amount, result, locale),
-                        Err(error) => {
-                            self.state_diagnostics.push(format!(
-                                "credit transfer chat_id={chat_id} user_id={user_id} amount={amount}: {error}"
-                            ));
-                            match locale {
-                                bot_core::locale::Locale::Es => {
-                                    "Se trabó la transferencia. Probá de nuevo".to_owned()
-                                }
-                                bot_core::locale::Locale::En => {
-                                    "The transfer failed. Try again".to_owned()
-                                }
-                            }
+                        bot_core::locale::Locale::En => {
+                            "I could not load your balance. Try again".to_owned()
                         }
-                    };
-                    let mut message = SendMessage::new(ChatId(chat_id), &text);
-                    message.reply_to_message_id = Some(message_id);
-                    StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+                    }
                 }
-                TransferCommandPlan::NotHandled => StatelessCommandPlan::NotHandled,
-            }
-        } else if parsed.command == "/printcredits" {
-            match plan_printcredits_command(
-                &content.text,
-                &self.bot_name,
-                PrintCreditsContext {
-                    chat_id,
-                    message_id,
-                    user_id: sender_id.0,
-                    admin_user_id: self.admin_user_id,
-                    billing_available: self.billing_available,
-                    locale,
-                },
-            ) {
-                PrintCreditsPlan::Reply(action) => StatelessCommandPlan::Action(action),
-                PrintCreditsPlan::Mint { user_id, amount } => {
-                    let Some(sink) = self.admin_credit_sink.as_mut() else {
-                        return Err(DispatchError::MissingService("admin credit minting"));
-                    };
-                    let text = match sink.mint(user_id, amount) {
-                        Ok(balance) => printcredits_result_reply(amount, balance, locale),
-                        Err(error) => {
-                            self.state_diagnostics.push(format!(
-                                "admin credit mint chat_id={} user_id={user_id} amount={amount}: {error}",
-                                chat_id.0
-                            ));
-                            match locale {
-                                bot_core::locale::Locale::Es => {
-                                    "Se trabó imprimiendo créditos. Probá de nuevo".to_owned()
-                                }
-                                bot_core::locale::Locale::En => {
-                                    "I could not mint credits. Try again".to_owned()
-                                }
-                            }
+            };
+            let mut message = SendMessage::new(chat_id, &text);
+            message.reply_to_message_id = Some(message_id);
+            StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+        } else if let ChargesCommandPlan::Reply(action) = charges_plan {
+            StatelessCommandPlan::Action(action)
+        } else if let ChargesCommandPlan::Load {
+            user_id,
+            limit,
+            timezone_minutes,
+        } = charges_plan
+        {
+            let Some(source) = self.charge_history_source.as_mut() else {
+                return Err(DispatchError::MissingService("charge history"));
+            };
+            let (text, keyboard) = match source.load(user_id, limit, None, "older") {
+                Ok(page) => {
+                    render_charge_history_page(&page, user_id, limit, timezone_minutes, locale)
+                }
+                Err(error) => {
+                    self.state_diagnostics.push(format!(
+                        "charge history load chat_id={} user_id={user_id} limit={limit}: {error}",
+                        chat_id.0
+                    ));
+                    let text = match locale {
+                        bot_core::locale::Locale::Es => {
+                            "Se trabó leyendo tus gastos. Probá de nuevo"
                         }
+                        bot_core::locale::Locale::En => "I could not load your spending. Try again",
                     };
-                    let mut message = SendMessage::new(chat_id, &text);
-                    message.reply_to_message_id = Some(message_id);
-                    StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+                    (text.to_owned(), None)
                 }
-                PrintCreditsPlan::NotHandled => StatelessCommandPlan::NotHandled,
-            }
-        } else if parsed.command == "/creditlog" {
-            match plan_creditlog_command(
-                &content.text,
-                &self.bot_name,
-                PrintCreditsContext {
-                    chat_id,
-                    message_id,
-                    user_id: sender_id.0,
-                    admin_user_id: self.admin_user_id,
-                    billing_available: self.billing_available,
-                    locale,
-                },
-            ) {
-                CreditLogPlan::Reply(action) => StatelessCommandPlan::Action(action),
-                CreditLogPlan::Load { limit } => {
-                    let Some(source) = self.admin_creditlog_source.as_mut() else {
-                        return Err(DispatchError::MissingService("admin credit log"));
-                    };
-                    let text = match source.load(limit) {
-                        Ok(entries) if entries.is_empty() => match locale {
-                            bot_core::locale::Locale::Es => {
-                                "No hay liquidaciones de IA recientes".to_owned()
-                            }
-                            bot_core::locale::Locale::En => {
-                                "There are no recent AI settlements".to_owned()
-                            }
-                        },
-                        Ok(entries) => render_creditlog(&entries, locale),
-                        Err(error) => {
-                            self.state_diagnostics.push(format!(
-                                "admin creditlog chat_id={} user_id={} limit={limit}: {error}",
-                                chat_id.0, sender_id.0
-                            ));
-                            match locale {
-                                bot_core::locale::Locale::Es => {
-                                    "Se trabó leyendo el creditlog. Probá de nuevo".to_owned()
-                                }
-                                bot_core::locale::Locale::En => {
-                                    "I could not load the credit log. Try again".to_owned()
-                                }
-                            }
+            };
+            let mut message = SendMessage::new(chat_id, &text);
+            message.reply_to_message_id = Some(message_id);
+            message.reply_markup = keyboard;
+            StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+        } else if let TransferCommandPlan::Reply(action) = transfer_plan {
+            StatelessCommandPlan::Action(action)
+        } else if let TransferCommandPlan::Transfer {
+            user_id,
+            chat_id,
+            amount,
+        } = transfer_plan
+        {
+            let Some(sink) = self.transfer_sink.as_mut() else {
+                return Err(DispatchError::MissingService("credit transfers"));
+            };
+            let text = match sink.transfer(user_id, chat_id, amount) {
+                Ok(result) => transfer_result_reply(amount, result, locale),
+                Err(error) => {
+                    self.state_diagnostics.push(format!(
+                            "credit transfer chat_id={chat_id} user_id={user_id} amount={amount}: {error}"
+                        ));
+                    match locale {
+                        bot_core::locale::Locale::Es => {
+                            "Se trabó la transferencia. Probá de nuevo".to_owned()
                         }
-                    };
-                    let mut message = SendMessage::new(chat_id, &text);
-                    message.reply_to_message_id = Some(message_id);
-                    StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+                        bot_core::locale::Locale::En => "The transfer failed. Try again".to_owned(),
+                    }
                 }
-                CreditLogPlan::NotHandled => StatelessCommandPlan::NotHandled,
-            }
+            };
+            let mut message = SendMessage::new(ChatId(chat_id), &text);
+            message.reply_to_message_id = Some(message_id);
+            StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+        } else if let PrintCreditsPlan::Reply(action) = printcredits_plan {
+            StatelessCommandPlan::Action(action)
+        } else if let PrintCreditsPlan::Mint { user_id, amount } = printcredits_plan {
+            let Some(sink) = self.admin_credit_sink.as_mut() else {
+                return Err(DispatchError::MissingService("admin credit minting"));
+            };
+            let text = match sink.mint(user_id, amount) {
+                Ok(balance) => printcredits_result_reply(amount, balance, locale),
+                Err(error) => {
+                    self.state_diagnostics.push(format!(
+                        "admin credit mint chat_id={} user_id={user_id} amount={amount}: {error}",
+                        chat_id.0
+                    ));
+                    match locale {
+                        bot_core::locale::Locale::Es => {
+                            "Se trabó imprimiendo créditos. Probá de nuevo".to_owned()
+                        }
+                        bot_core::locale::Locale::En => {
+                            "I could not mint credits. Try again".to_owned()
+                        }
+                    }
+                }
+            };
+            let mut message = SendMessage::new(chat_id, &text);
+            message.reply_to_message_id = Some(message_id);
+            StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+        } else if let CreditLogPlan::Reply(action) = creditlog_plan {
+            StatelessCommandPlan::Action(action)
+        } else if let CreditLogPlan::Load { limit } = creditlog_plan {
+            let Some(source) = self.admin_creditlog_source.as_mut() else {
+                return Err(DispatchError::MissingService("admin credit log"));
+            };
+            let text = match source.load(limit) {
+                Ok(entries) if entries.is_empty() => match locale {
+                    bot_core::locale::Locale::Es => {
+                        "No hay liquidaciones de IA recientes".to_owned()
+                    }
+                    bot_core::locale::Locale::En => "There are no recent AI settlements".to_owned(),
+                },
+                Ok(entries) => render_creditlog(&entries, locale),
+                Err(error) => {
+                    self.state_diagnostics.push(format!(
+                        "admin creditlog chat_id={} user_id={} limit={limit}: {error}",
+                        chat_id.0, sender_id.0
+                    ));
+                    match locale {
+                        bot_core::locale::Locale::Es => {
+                            "Se trabó leyendo el creditlog. Probá de nuevo".to_owned()
+                        }
+                        bot_core::locale::Locale::En => {
+                            "I could not load the credit log. Try again".to_owned()
+                        }
+                    }
+                }
+            };
+            let mut message = SendMessage::new(chat_id, &text);
+            message.reply_to_message_id = Some(message_id);
+            StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if classify_bcra_command(&parsed.command) {
             let Some(source) = self.bcra_source.as_mut() else {
                 return Err(DispatchError::MissingService("BCRA market data"));
@@ -5494,20 +5429,7 @@ where
             StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if parsed.command == "/random" {
             match parse_random_selection(&parsed.message_text) {
-                Err(_) => {
-                    let text = match locale {
-                        bot_core::locale::Locale::Es => {
-                            "Mandate algo como 'pizza, carne, sushi' o '1-10', boludo, no me hagas laburar al pedo"
-                        }
-                        bot_core::locale::Locale::En => {
-                            "Send options like 'pizza, steak, sushi' or a range like '1-10'"
-                        }
-                    };
-                    let mut message = SendMessage::new(chat_id, text);
-                    message.reply_to_message_id = Some(message_id);
-                    StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
-                }
-                Ok(RandomSelection::Invalid) => {
+                Err(_) | Ok(RandomSelection::Invalid) => {
                     let text = match locale {
                         bot_core::locale::Locale::Es => {
                             "Mandate algo como 'pizza, carne, sushi' o '1-10', boludo, no me hagas laburar al pedo"
@@ -5583,16 +5505,11 @@ where
                     is_group,
                     timestamp,
                 });
-                match incoming {
-                    Ok(incoming) => {
-                        if let Err(error) = self.state.record_incoming(&incoming) {
-                            self.state_diagnostics
-                                .push(format!("incoming command state: {error}"));
-                        }
-                    }
-                    Err(error) => self
-                        .state_diagnostics
-                        .push(format!("incoming command state plan: {error}")),
+                if let Ok(incoming) = incoming
+                    && let Err(error) = self.state.record_incoming(&incoming)
+                {
+                    self.state_diagnostics
+                        .push(format!("incoming command state: {error}"));
                 }
                 let response_text = match &action {
                     TelegramAction::SendMessage(message) => Some(message.text.clone()),
@@ -5630,16 +5547,11 @@ where
                         command: &command,
                         timestamp,
                     });
-                    match outgoing {
-                        Ok(outgoing) => {
-                            if let Err(error) = self.state.record_outgoing(&outgoing) {
-                                self.state_diagnostics
-                                    .push(format!("outgoing command state: {error}"));
-                            }
-                        }
-                        Err(error) => self
-                            .state_diagnostics
-                            .push(format!("outgoing command state plan: {error}")),
+                    if let Ok(outgoing) = outgoing
+                        && let Err(error) = self.state.record_outgoing(&outgoing)
+                    {
+                        self.state_diagnostics
+                            .push(format!("outgoing command state: {error}"));
                     }
                 }
                 Ok(DispatchOutcome::Handled)
@@ -5738,13 +5650,12 @@ where
 mod tests {
     use std::cell::RefCell;
     use std::collections::{HashMap, VecDeque};
-    use std::convert::Infallible;
     use std::rc::Rc;
 
     use bot_adapters::telegram_polling::{IncomingEvent, IncomingMessage, IncomingUpdate};
     use bot_core::chat_config::ChatConfig;
     use bot_core::command_state::{IncomingCommandWritePlan, OutgoingCommandWritePlan};
-    use bot_core::telegram_actions::{MAX_TELEGRAM_TEXT_LENGTH, TelegramAction};
+    use bot_core::telegram_actions::{MAX_TELEGRAM_TEXT_LENGTH, SendMessage, TelegramAction};
     use bot_core::telegram_input::{ChatId, MessageContent, MessageId, UserId};
     use bot_core::telegram_payments::StarPaymentRecord;
     use bot_core::token_signals::{
@@ -5840,47 +5751,220 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct Actions(Vec<TelegramAction>);
+    /// Which executed actions a scripted failure applies to.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ActionKind {
+        Any,
+        SendMessage,
+        DeleteMessage,
+        AnswerCallback,
+        SetCommands,
+    }
 
-    impl ActionSink for Actions {
-        type Error = Infallible;
-
-        fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
-            self.0.push(action);
-            Ok(ActionReceipt {
-                message_id: Some(MessageId(700)),
-            })
+    impl ActionKind {
+        fn matches(self, action: &TelegramAction) -> bool {
+            match self {
+                Self::Any => true,
+                Self::SendMessage => matches!(action, TelegramAction::SendMessage(_)),
+                Self::DeleteMessage => matches!(action, TelegramAction::DeleteMessage { .. }),
+                Self::AnswerCallback => matches!(action, TelegramAction::AnswerCallback { .. }),
+                Self::SetCommands => matches!(action, TelegramAction::SetCommands { .. }),
+            }
         }
     }
 
-    enum PhotoOutcome {
-        Skipped,
+    /// Message ids the fake sink confirms for executed actions.
+    #[derive(Debug, Clone, Copy)]
+    enum Receipts {
+        Fixed(Option<MessageId>),
+        /// Sent messages and photos get increasing ids; other actions get 0.
+        Sequential(i64),
+    }
+
+    impl Default for Receipts {
+        fn default() -> Self {
+            Self::Fixed(Some(MessageId(700)))
+        }
+    }
+
+    /// How a fake sink answers one of the `try_*` delivery attempts.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    enum Attempt {
+        #[default]
+        Deliver,
+        Skip,
         Unconfirmed,
+        Fail,
     }
 
-    struct PhotoActions {
-        outcome: PhotoOutcome,
+    #[derive(Debug)]
+    struct ExecuteFailure {
+        kind: ActionKind,
+        remaining: usize,
+        error: &'static str,
+        /// Whether the rejected action is still recorded as attempted.
+        record: bool,
     }
 
-    impl ActionSink for PhotoActions {
-        type Error = Infallible;
+    #[derive(Debug, Default)]
+    struct ActionScript {
+        receipts: Receipts,
+        failure: Option<ExecuteFailure>,
+        photo: Attempt,
+        edit: Attempt,
+        video: Attempt,
+        animation: Attempt,
+        invoice: Attempt,
+        /// Leading invoice attempts Telegram refuses before `invoice` applies.
+        invoice_refusals: usize,
+    }
 
-        fn execute(&mut self, _action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
-            Ok(ActionReceipt {
-                message_id: Some(MessageId(700)),
-            })
+    impl ActionScript {
+        fn photo(attempt: Attempt) -> Self {
+            Self {
+                photo: attempt,
+                ..Self::default()
+            }
+        }
+
+        fn edit(attempt: Attempt) -> Self {
+            Self {
+                edit: attempt,
+                ..Self::default()
+            }
+        }
+
+        fn invoice(attempt: Attempt) -> Self {
+            Self {
+                invoice: attempt,
+                ..Self::default()
+            }
+        }
+    }
+
+    /// The single Telegram sink every dispatcher test uses, so all of them
+    /// exercise one `NativeDispatcher` instantiation. It records every
+    /// delivered action and follows its script for failures.
+    #[derive(Default)]
+    struct Actions(Vec<TelegramAction>, ActionScript);
+
+    impl Actions {
+        fn scripted(script: ActionScript) -> Self {
+            Self(Vec::new(), script)
+        }
+    }
+
+    fn attempt_actions(attempt: Attempt, script: fn(Attempt) -> ActionScript) -> Actions {
+        Actions::scripted(script(attempt))
+    }
+
+    fn failing_actions(
+        kind: ActionKind,
+        remaining: usize,
+        error: &'static str,
+        record: bool,
+    ) -> Actions {
+        Actions::scripted(ActionScript {
+            failure: Some(ExecuteFailure {
+                kind,
+                remaining,
+                error,
+                record,
+            }),
+            ..ActionScript::default()
+        })
+    }
+
+    impl ActionSink for Actions {
+        type Error = &'static str;
+
+        fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
+            if let Some(failure) = self.1.failure.as_mut()
+                && failure.remaining > 0
+                && failure.kind.matches(&action)
+            {
+                failure.remaining -= 1;
+                if failure.record {
+                    self.0.push(action);
+                }
+                return Err(failure.error);
+            }
+            let message_id = match &mut self.1.receipts {
+                Receipts::Fixed(message_id) => *message_id,
+                Receipts::Sequential(next) => Some(MessageId(
+                    if matches!(
+                        action,
+                        TelegramAction::SendMessage(_) | TelegramAction::SendPhoto { .. }
+                    ) {
+                        *next += 1;
+                        *next - 1
+                    } else {
+                        0
+                    },
+                )),
+            };
+            self.0.push(action);
+            Ok(ActionReceipt { message_id })
         }
 
         fn try_photo(
             &mut self,
-            _action: TelegramAction,
+            action: TelegramAction,
         ) -> Result<Option<ActionReceipt>, Self::Error> {
-            match self.outcome {
-                PhotoOutcome::Skipped => Ok(None),
-                PhotoOutcome::Unconfirmed => Ok(Some(ActionReceipt { message_id: None })),
+            match self.1.photo {
+                Attempt::Deliver => self.execute(action).map(Some),
+                Attempt::Skip => Ok(None),
+                Attempt::Unconfirmed => Ok(Some(ActionReceipt { message_id: None })),
+                Attempt::Fail => Err("synthetic photo failure"),
             }
         }
+
+        fn try_edit(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
+            if self.1.edit == Attempt::Deliver {
+                return self.execute(action).map(|_receipt| true);
+            }
+            self.0.push(action);
+            if self.1.edit == Attempt::Fail {
+                return Err("synthetic edit failure");
+            }
+            Ok(false)
+        }
+
+        fn try_video(
+            &mut self,
+            action: TelegramAction,
+        ) -> Result<Option<ActionReceipt>, Self::Error> {
+            if self.1.video == Attempt::Deliver {
+                return self.execute(action).map(Some);
+            }
+            Ok(None)
+        }
+
+        fn try_animation(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
+            if self.1.animation == Attempt::Deliver {
+                return self.execute(action).map(|_receipt| true);
+            }
+            Ok(false)
+        }
+
+        fn try_invoice(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
+            if self.1.invoice_refusals == 0 && self.1.invoice == Attempt::Deliver {
+                return self.execute(action).map(|_receipt| true);
+            }
+            self.0.push(action);
+            if self.1.invoice_refusals > 0 {
+                self.1.invoice_refusals -= 1;
+                return Ok(false);
+            }
+            if self.1.invoice == Attempt::Fail {
+                return Err("synthetic invoice transport failure");
+            }
+            Ok(false)
+        }
+    }
+
+    fn photo_actions(attempt: Attempt) -> Actions {
+        attempt_actions(attempt, ActionScript::photo)
     }
 
     #[derive(Clone, Copy)]
@@ -5890,51 +5974,19 @@ mod tests {
         Rejected,
     }
 
-    struct DeliveryActions {
-        outcome: DeliveryOutcome,
-        actions: Vec<TelegramAction>,
-    }
-
-    impl DeliveryActions {
-        fn new(outcome: DeliveryOutcome) -> Self {
-            Self {
-                outcome,
-                actions: Vec::new(),
-            }
-        }
-    }
-
-    impl ActionSink for DeliveryActions {
-        type Error = &'static str;
-
-        fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
-            self.actions.push(action);
-            match self.outcome {
-                DeliveryOutcome::Confirmed => Ok(ActionReceipt {
-                    message_id: Some(MessageId(700)),
-                }),
-                DeliveryOutcome::Unconfirmed => Ok(ActionReceipt { message_id: None }),
-                DeliveryOutcome::Rejected => Err("synthetic delivery rejection"),
-            }
-        }
-    }
-
-    struct PhotoFailureActions {
-        actions: Vec<TelegramAction>,
-    }
-
-    impl ActionSink for PhotoFailureActions {
-        type Error = &'static str;
-
-        fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
-            self.actions.push(action);
-            Ok(ActionReceipt {
-                message_id: Some(MessageId(700)),
-            })
-        }
-
-        fn try_photo(&mut self, _: TelegramAction) -> Result<Option<ActionReceipt>, Self::Error> {
-            Err("synthetic photo failure")
+    fn delivery_actions(outcome: DeliveryOutcome) -> Actions {
+        match outcome {
+            DeliveryOutcome::Confirmed => Actions::default(),
+            DeliveryOutcome::Unconfirmed => Actions::scripted(ActionScript {
+                receipts: Receipts::Fixed(None),
+                ..ActionScript::default()
+            }),
+            DeliveryOutcome::Rejected => failing_actions(
+                ActionKind::Any,
+                usize::MAX,
+                "synthetic delivery rejection",
+                true,
+            ),
         }
     }
 
@@ -5942,17 +5994,34 @@ mod tests {
     struct State {
         incoming: Vec<IncomingCommandWritePlan>,
         outgoing: Vec<OutgoingCommandWritePlan>,
+        /// Rejects every write, like unavailable message storage.
+        failing: bool,
+    }
+
+    impl State {
+        fn failing() -> Self {
+            Self {
+                failing: true,
+                ..Self::default()
+            }
+        }
     }
 
     impl MessageStateSink for State {
-        type Error = Infallible;
+        type Error = &'static str;
 
         fn record_incoming(&mut self, plan: &IncomingCommandWritePlan) -> Result<(), Self::Error> {
+            if self.failing {
+                return Err("synthetic incoming failure");
+            }
             self.incoming.push(plan.clone());
             Ok(())
         }
 
         fn record_outgoing(&mut self, plan: &OutgoingCommandWritePlan) -> Result<(), Self::Error> {
+            if self.failing {
+                return Err("synthetic outgoing failure");
+            }
             self.outgoing.push(plan.clone());
             Ok(())
         }
@@ -5999,13 +6068,11 @@ mod tests {
             input: AiConversationInput,
             on_token: &mut dyn FnMut(&str) -> Result<(), String>,
         ) -> Result<AiPreparation, String> {
-            self.prepared.borrow_mut().push(input);
+            let preparation = self.prepare(input);
             for token in &self.tokens {
                 on_token(token)?;
             }
-            self.preparation
-                .take()
-                .unwrap_or_else(|| Ok(AiPreparation::silent()))
+            preparation
         }
 
         fn prepare_streaming_events(
@@ -6112,12 +6179,16 @@ mod tests {
     struct Samples {
         choice_index: usize,
         integer: BigInt,
+        failing: bool,
     }
 
     impl RandomSource for Samples {
-        type Error = Infallible;
+        type Error = &'static str;
 
         fn choice_index(&mut self, _upper_exclusive: usize) -> Result<usize, Self::Error> {
+            if self.failing {
+                return Err("synthetic random failure");
+            }
             Ok(self.choice_index)
         }
 
@@ -6126,6 +6197,9 @@ mod tests {
             _start: &BigInt,
             _end: &BigInt,
         ) -> Result<BigInt, Self::Error> {
+            if self.failing {
+                return Err("synthetic random failure");
+            }
             Ok(self.integer.clone())
         }
     }
@@ -6134,6 +6208,7 @@ mod tests {
         Samples {
             choice_index: 1,
             integer: BigInt::from(2_u8),
+            failing: false,
         }
     }
 
@@ -6232,49 +6307,11 @@ mod tests {
 
     impl ScheduledTaskSource for SequencedTasks {
         fn list(&mut self, _chat_id: &str) -> Result<Vec<ScheduledTask>, String> {
-            self.lists.pop_front().unwrap_or_else(|| Ok(Vec::new()))
+            self.lists.pop_front().unwrap_or(Ok(Vec::new()))
         }
 
         fn cancel(&mut self, _task_id: &TaskId, _chat_id: &str) -> Result<bool, String> {
             Ok(true)
-        }
-    }
-
-    #[derive(Default)]
-    struct EditFailActions(Vec<TelegramAction>);
-
-    impl ActionSink for EditFailActions {
-        type Error = &'static str;
-
-        fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
-            self.0.push(action);
-            Ok(ActionReceipt {
-                message_id: Some(MessageId(700)),
-            })
-        }
-
-        fn try_edit(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
-            self.0.push(action);
-            Err("synthetic edit failure")
-        }
-    }
-
-    #[derive(Default)]
-    struct EditSkipActions(Vec<TelegramAction>);
-
-    impl ActionSink for EditSkipActions {
-        type Error = Infallible;
-
-        fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
-            self.0.push(action);
-            Ok(ActionReceipt {
-                message_id: Some(MessageId(700)),
-            })
-        }
-
-        fn try_edit(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
-            self.0.push(action);
-            Ok(false)
         }
     }
 
@@ -6336,7 +6373,7 @@ mod tests {
     fn delivery_dispatcher(
         source: AiSource,
         outcome: DeliveryOutcome,
-    ) -> NativeDispatcher<Config, DeliveryActions, State, Values, Samples, Authorization> {
+    ) -> NativeDispatcher<Config, Actions, State, Values, Samples, Authorization> {
         NativeDispatcher::new(
             Config {
                 value: Ok(ChatConfig {
@@ -6345,7 +6382,7 @@ mod tests {
                 }),
                 chat_ids: Vec::new(),
             },
-            DeliveryActions::new(outcome),
+            delivery_actions(outcome),
             State::default(),
             values(),
             random(),
@@ -6355,33 +6392,88 @@ mod tests {
         .with_ai_conversation_source(Box::new(source))
     }
 
+    fn sent_message(action: &TelegramAction) -> Option<&SendMessage> {
+        match action {
+            TelegramAction::SendMessage(message) => Some(message),
+            _ => None,
+        }
+    }
+
+    /// Messages a fake sink recorded, in order, skipping every other action.
+    fn sent_messages(actions: &[TelegramAction]) -> Vec<&SendMessage> {
+        actions.iter().filter_map(sent_message).collect()
+    }
+
+    fn sent_texts(actions: &[TelegramAction]) -> Vec<&str> {
+        sent_messages(actions)
+            .into_iter()
+            .map(|message| message.text.as_str())
+            .collect()
+    }
+
+    /// The first recorded action, which must be a sent message; indexing
+    /// fails the test otherwise.
+    fn first_sent(actions: &[TelegramAction]) -> &SendMessage {
+        sent_messages(&actions[..1])[0]
+    }
+
+    /// The last recorded action, which must be a sent message.
+    fn last_sent(actions: &[TelegramAction]) -> &SendMessage {
+        sent_messages(&actions[actions.len() - 1..])[0]
+    }
+
+    /// The only recorded action, which must be a sent message.
+    fn only_sent(actions: &[TelegramAction]) -> &SendMessage {
+        assert_eq!(actions.len(), 1, "expected one action: {actions:?}");
+        sent_messages(actions)[0]
+    }
+
     fn update(text: &str, language: Option<&str>) -> IncomingUpdate {
+        message_update(text, language, |_| {})
+    }
+
+    /// A private-chat message update adjusted by `edit` before it is wrapped.
+    fn message_update(
+        text: &str,
+        language: Option<&str>,
+        edit: impl FnOnce(&mut IncomingMessage),
+    ) -> IncomingUpdate {
+        let mut message = incoming_message(text, language);
+        edit(&mut message);
+        wrap_message(message)
+    }
+
+    fn wrap_message(message: IncomingMessage) -> IncomingUpdate {
         IncomingUpdate {
             update_id: 99,
-            event: IncomingEvent::Message(Box::new(IncomingMessage {
-                message_id: Some(MessageId(7)),
-                chat_id: Some(ChatId(-42)),
-                chat_type: Some("private".to_owned()),
-                chat_title: None,
-                sender_id: Some(UserId(88)),
-                sender_first_name: Some("Synthetic".to_owned()),
-                sender_last_name: None,
-                sender_username: Some("tester".to_owned()),
-                sender_language_code: language.map(ToOwned::to_owned),
-                has_reply: false,
-                replied_message_id: None,
-                replied_sender_first_name: None,
-                replied_sender_username: None,
-                replied_text: None,
-                visual_media_kind: None,
-                audio_media_kind: None,
-                audio_duration_seconds: None,
-                content: Some(MessageContent {
-                    text: text.to_owned(),
-                    photo_file_id: None,
-                    audio_file_id: None,
-                }),
-            })),
+            event: IncomingEvent::Message(Box::new(message)),
+        }
+    }
+
+    fn incoming_message(text: &str, language: Option<&str>) -> IncomingMessage {
+        IncomingMessage {
+            message_id: Some(MessageId(7)),
+            chat_id: Some(ChatId(-42)),
+            chat_type: Some("private".to_owned()),
+            chat_title: None,
+            sender_id: Some(UserId(88)),
+            sender_first_name: Some("Synthetic".to_owned()),
+            sender_last_name: None,
+            sender_username: Some("tester".to_owned()),
+            sender_language_code: language.map(ToOwned::to_owned),
+            has_reply: false,
+            replied_message_id: None,
+            replied_sender_first_name: None,
+            replied_sender_username: None,
+            replied_text: None,
+            visual_media_kind: None,
+            audio_media_kind: None,
+            audio_duration_seconds: None,
+            content: Some(MessageContent {
+                text: text.to_owned(),
+                photo_file_id: None,
+                audio_file_id: None,
+            }),
         }
     }
 
@@ -6595,10 +6687,8 @@ mod tests {
     impl BitcoinPriceSource for BitcoinPrices {
         fn price(&mut self, currency: &str) -> Result<Option<f64>, String> {
             self.calls.borrow_mut().push(currency.to_owned());
-            if self.results.is_empty() {
-                return Err("no synthetic price".to_owned());
-            }
-            self.results.remove(0)
+            let next = (!self.results.is_empty()).then(|| self.results.remove(0));
+            next.unwrap_or(Err("no synthetic price".to_owned()))
         }
     }
 
@@ -6766,6 +6856,7 @@ mod tests {
         query_load: TokenSignalLoad,
         photo: Result<Vec<u8>, String>,
         periods: Rc<RefCell<Vec<String>>>,
+        state: Option<SignalState>,
     }
 
     impl TokenSignalSource for WideningSignals {
@@ -6807,10 +6898,11 @@ mod tests {
         }
 
         fn load_state(&mut self, _signal_id: &str) -> Result<Option<SignalState>, String> {
-            Ok(None)
+            Ok(self.state.clone())
         }
 
-        fn save_state(&mut self, _signal_id: &str, _state: &SignalState) -> Result<(), String> {
+        fn save_state(&mut self, _signal_id: &str, state: &SignalState) -> Result<(), String> {
+            self.state = Some(state.clone());
             Ok(())
         }
     }
@@ -6857,15 +6949,9 @@ mod tests {
             period: &str,
             now: i64,
         ) -> Result<Vec<Vec<f64>>, String> {
-            let span = match period {
-                "1h" => 3_600.0,
-                "24h" => 86_400.0,
-                "7d" => 7.0 * 86_400.0,
-                "30d" => 30.0 * 86_400.0,
-                _ => 86_400.0,
-            };
+            let span = super::period_seconds(period);
             Ok(vec![
-                vec![now as f64 - span, 1.0, 1.0, 1.0, 100.0],
+                vec![(now - span) as f64, 1.0, 1.0, 1.0, 100.0],
                 vec![now as f64, 2.0, 2.0, 2.0, 125.0],
             ])
         }
@@ -6885,37 +6971,6 @@ mod tests {
         fn clear_state(&mut self, _signal_id: &str) -> Result<(), String> {
             *self.state.borrow_mut() = None;
             Ok(())
-        }
-    }
-
-    struct MessageIdActions {
-        next_message_id: i64,
-        actions: Vec<TelegramAction>,
-    }
-
-    impl MessageIdActions {
-        fn new(next_message_id: i64) -> Self {
-            Self {
-                next_message_id,
-                actions: Vec::new(),
-            }
-        }
-    }
-
-    impl ActionSink for MessageIdActions {
-        type Error = Infallible;
-
-        fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
-            let message_id = match &action {
-                TelegramAction::SendMessage(_) | TelegramAction::SendPhoto { .. } => {
-                    let message_id = MessageId(self.next_message_id);
-                    self.next_message_id += 1;
-                    Some(message_id)
-                }
-                _ => Some(MessageId(0)),
-            };
-            self.actions.push(action);
-            Ok(ActionReceipt { message_id })
         }
     }
 
@@ -7088,9 +7143,7 @@ mod tests {
         assert_eq!(dispatcher.state.outgoing.len(), 1);
         assert_eq!(dispatcher.state.outgoing[0].message.message_id, "bot_700");
         assert!(dispatcher.state_diagnostics().is_empty());
-        let TelegramAction::SendMessage(message) = &dispatcher.actions.0[0] else {
-            return;
-        };
+        let message = first_sent(&dispatcher.actions.0);
         assert_eq!(message.text, "101 in base 2 is 5 in base 10");
         assert_eq!(dispatcher.last_outcome(), Some(DispatchOutcome::Handled));
     }
@@ -7122,10 +7175,9 @@ mod tests {
             dispatcher.dispatch(update("/random １-３", None)),
             Ok(DispatchOutcome::Handled)
         );
-        let mut replied = update("/time", None);
-        if let IncomingEvent::Message(message) = &mut replied.event {
+        let replied = message_update("/time", None, |message| {
             message.has_reply = true;
-        }
+        });
         assert_eq!(
             dispatcher.dispatch(replied),
             Err(DispatchError::MissingService("AI conversation"))
@@ -7157,15 +7209,7 @@ mod tests {
             dispatcher.dispatch(incomplete),
             Ok(DispatchOutcome::Unsupported)
         );
-        let texts = dispatcher
-            .actions
-            .0
-            .iter()
-            .filter_map(|action| match action {
-                TelegramAction::SendMessage(message) => Some(message.text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+        let texts = sent_texts(&dispatcher.actions.0);
         assert_eq!(
             texts,
             ["Ahí tenés, boludo: １２ en base 10 es 1100 en base 2", "2"]
@@ -7243,11 +7287,16 @@ mod tests {
         assert_eq!(prepared[0].timezone_offset_hours, 4);
         assert!(!prepared[0].spontaneous);
         assert!(ignored.borrow().is_empty());
-        let [TelegramAction::SendMessage(message)] = dispatcher.actions.0.as_slice() else {
-            return;
-        };
-        assert_eq!(message.text, "native answer");
-        assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
+        // The draft placeholder is edited into the final answer.
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [
+                TelegramAction::SendMessage(draft),
+                TelegramAction::EditMessage { message_id: MessageId(700), text, .. },
+            ] if draft.text == "Thinking."
+                && draft.reply_to_message_id == Some(MessageId(7))
+                && text == "native answer"
+        ));
         assert_eq!(
             deliveries.borrow().as_slice(),
             [AiDelivery {
@@ -7282,11 +7331,17 @@ mod tests {
             dispatcher.dispatch(update("answer me", Some("en"))),
             Ok(DispatchOutcome::Handled)
         );
-        let [TelegramAction::SendMessage(message)] = dispatcher.actions.0.as_slice() else {
-            return;
-        };
-        assert_eq!(message.text, "I could not answer. Try again");
-        assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
+        // The draft placeholder is removed before the retry reply.
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [
+                TelegramAction::SendMessage(draft),
+                TelegramAction::DeleteMessage { message_id: MessageId(700), .. },
+                TelegramAction::SendMessage(message),
+            ] if draft.text == "Thinking."
+                && message.text == "I could not answer. Try again"
+                && message.reply_to_message_id == Some(MessageId(7))
+        ));
         assert_eq!(
             dispatcher.state_diagnostics(),
             ["AI conversation: synthetic provider failure"]
@@ -7317,17 +7372,15 @@ mod tests {
             "@mybot",
         )
         .with_ai_conversation_source(Box::new(source));
-        let mut incoming = update("/transcript", Some("en"));
-        let IncomingEvent::Message(message) = &mut incoming.event else {
-            return;
-        };
-        message.has_reply = true;
-        message.replied_message_id = Some(MessageId(6));
-        message.audio_media_kind = Some("voice".to_owned());
-        message.audio_duration_seconds = Some(4);
-        if let Some(content) = message.content.as_mut() {
-            content.audio_file_id = Some("voice-1".to_owned());
-        }
+        let incoming = message_update("/transcript", Some("en"), |message| {
+            message.has_reply = true;
+            message.replied_message_id = Some(MessageId(6));
+            message.audio_media_kind = Some("voice".to_owned());
+            message.audio_duration_seconds = Some(4);
+            if let Some(content) = message.content.as_mut() {
+                content.audio_file_id = Some("voice-1".to_owned());
+            }
+        });
 
         assert_eq!(dispatcher.dispatch(incoming), Ok(DispatchOutcome::Handled));
         let prepared = prepared.borrow();
@@ -7345,9 +7398,7 @@ mod tests {
                 .as_ref()
                 .is_some_and(|metadata| metadata.payload.contains("/transcript"))
         );
-        let [TelegramAction::SendMessage(message)] = dispatcher.actions.0.as_slice() else {
-            return;
-        };
+        let message = only_sent(&dispatcher.actions.0);
         assert_eq!(message.text, "synthetic transcript");
         assert_eq!(
             deliveries.borrow().as_slice(),
@@ -7390,22 +7441,19 @@ mod tests {
                 dispatcher.dispatch(update("/transcript https://youtu.be/synthetic", None)),
                 Ok(DispatchOutcome::Handled)
             );
-            let [
-                TelegramAction::SendDocument {
+            // Long transcripts are sent as a complete text document.
+            assert!(matches!(
+                dispatcher.actions.0.as_slice(),
+                [TelegramAction::SendDocument {
                     document,
                     file_name,
-                    reply_to_message_id,
+                    reply_to_message_id: Some(MessageId(7)),
                     caption,
                     ..
-                },
-            ] = dispatcher.actions.0.as_slice()
-            else {
-                unreachable!("long transcripts must be sent as documents");
-            };
-            assert_eq!(document.as_ref(), transcript.as_bytes());
-            assert_eq!(file_name, "youtube-transcript.txt");
-            assert_eq!(*reply_to_message_id, Some(MessageId(7)));
-            assert!(caption.is_empty());
+                }] if document.as_ref() == transcript.as_bytes()
+                    && file_name == "youtube-transcript.txt"
+                    && caption.is_empty()
+            ));
             let expected = completion_id
                 .map(|completion_id| AiDelivery {
                     completion_id,
@@ -7441,9 +7489,7 @@ mod tests {
             dispatcher.dispatch(update("/transcribe", None)),
             Ok(DispatchOutcome::Handled)
         );
-        let [TelegramAction::SendMessage(message)] = dispatcher.actions.0.as_slice() else {
-            return;
-        };
+        let message = only_sent(&dispatcher.actions.0);
         assert_eq!(message.text, "Se trabó el /transcribe. Probá más tarde");
         assert_eq!(
             dispatcher.state_diagnostics(),
@@ -7536,10 +7582,15 @@ mod tests {
             dispatcher.dispatch(update("/summary", Some("en"))),
             Ok(DispatchOutcome::Handled)
         );
-        let [TelegramAction::SendMessage(message)] = dispatcher.actions.0.as_slice() else {
-            return;
-        };
-        assert_eq!(message.text, "I could not generate the summary. Try again");
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [
+                TelegramAction::SendMessage(draft),
+                TelegramAction::DeleteMessage { message_id: MessageId(700), .. },
+                TelegramAction::SendMessage(message),
+            ] if draft.text == "Thinking."
+                && message.text == "I could not generate the summary. Try again"
+        ));
         assert_eq!(
             dispatcher.state_diagnostics(),
             ["summary command: synthetic summary failure"]
@@ -7824,6 +7875,7 @@ mod tests {
             Samples {
                 choice_index: 9_999,
                 integer: BigInt::from(2_u8),
+                failing: false,
             },
             authorization(),
             "@mybot",
@@ -7835,23 +7887,19 @@ mod tests {
             }),
             ..source
         }));
-        let mut ordinary = update("ordinary group message", None);
-        let IncomingEvent::Message(message) = &mut ordinary.event else {
-            return;
-        };
-        message.chat_type = Some("group".to_owned());
+        let ordinary = message_update("ordinary group message", None, |message| {
+            message.chat_type = Some("group".to_owned());
+        });
         assert_eq!(dispatcher.dispatch(ordinary), Ok(DispatchOutcome::Handled));
 
-        let mut followup = update("and why?", None);
-        let IncomingEvent::Message(message) = &mut followup.event else {
-            return;
-        };
-        message.chat_type = Some("group".to_owned());
-        message.has_reply = true;
-        message.replied_message_id = Some(MessageId(3));
-        message.replied_sender_first_name = Some("Gordo".to_owned());
-        message.replied_sender_username = Some("mybot".to_owned());
-        message.replied_text = Some("command answer".to_owned());
+        let followup = message_update("and why?", None, |message| {
+            message.chat_type = Some("group".to_owned());
+            message.has_reply = true;
+            message.replied_message_id = Some(MessageId(3));
+            message.replied_sender_first_name = Some("Gordo".to_owned());
+            message.replied_sender_username = Some("mybot".to_owned());
+            message.replied_text = Some("command answer".to_owned());
+        });
         assert_eq!(dispatcher.dispatch(followup), Ok(DispatchOutcome::Handled));
         assert!(prepared.borrow().is_empty());
         assert_eq!(ignored.borrow().len(), 2);
@@ -7880,25 +7928,19 @@ mod tests {
         )
         .with_ai_conversation_source(Box::new(source));
 
-        let mut plain = update("che", None);
-        let IncomingEvent::Message(message) = &mut plain.event else {
-            return;
-        };
-        message.chat_type = Some("group".to_owned());
+        let plain = message_update("che", None, |message| {
+            message.chat_type = Some("group".to_owned());
+        });
         assert_eq!(dispatcher.dispatch(plain), Ok(DispatchOutcome::Handled));
 
-        let mut command = update("/che seguís ahí?", None);
-        let IncomingEvent::Message(message) = &mut command.event else {
-            return;
-        };
-        message.chat_type = Some("group".to_owned());
+        let command = message_update("/che seguís ahí?", None, |message| {
+            message.chat_type = Some("group".to_owned());
+        });
         assert_eq!(dispatcher.dispatch(command), Ok(DispatchOutcome::Handled));
 
-        let mut other_bot = update("/balance@otherbot", None);
-        let IncomingEvent::Message(message) = &mut other_bot.event else {
-            return;
-        };
-        message.chat_type = Some("group".to_owned());
+        let other_bot = message_update("/balance@otherbot", None, |message| {
+            message.chat_type = Some("group".to_owned());
+        });
         assert_eq!(dispatcher.dispatch(other_bot), Ok(DispatchOutcome::Handled));
 
         assert_eq!(ignored.borrow().len(), 2);
@@ -7963,20 +8005,18 @@ mod tests {
             Err(DispatchError::Config("synthetic config failure"))
         ));
 
-        struct FailingActions;
-        impl ActionSink for FailingActions {
-            type Error = &'static str;
-            fn execute(&mut self, _action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
-                Err("synthetic action failure")
-            }
-        }
         let config = Config {
             value: Ok(ChatConfig::default()),
             chat_ids: Vec::new(),
         };
         let mut dispatcher = NativeDispatcher::new(
             config,
-            FailingActions,
+            failing_actions(
+                ActionKind::Any,
+                usize::MAX,
+                "synthetic action failure",
+                false,
+            ),
             State::default(),
             values(),
             random(),
@@ -8020,15 +8060,7 @@ mod tests {
             dispatcher.dispatch(update("/instance", None)),
             Ok(DispatchOutcome::Handled)
         );
-        let texts = dispatcher
-            .actions
-            .0
-            .iter()
-            .filter_map(|action| match action {
-                TelegramAction::SendMessage(message) => Some(message.text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+        let texts = sent_texts(&dispatcher.actions.0);
         assert_eq!(
             texts,
             vec!["1672531200", "I am running on synthetic-instance"]
@@ -8057,9 +8089,7 @@ mod tests {
             dispatcher.dispatch(update("/help", Some("es"))),
             Ok(DispatchOutcome::Handled)
         );
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&dispatcher.actions.0);
         assert!(message.text.starts_with("Help\n\n"));
         assert!(message.reply_markup.is_some());
         assert_eq!(dispatcher.state.incoming.len(), 1);
@@ -8098,23 +8128,13 @@ mod tests {
             dispatcher.dispatch(update("/command もうすぐです", Some("es"))),
             Ok(DispatchOutcome::Handled)
         );
-        let mut replied = update("/comando@mybot", Some("es"));
-        let IncomingEvent::Message(message) = &mut replied.event else {
-            return;
-        };
-        message.has_reply = true;
-        message.replied_message_id = Some(MessageId(6));
-        message.replied_text = Some("quoted content".to_owned());
+        let replied = message_update("/comando@mybot", Some("es"), |message| {
+            message.has_reply = true;
+            message.replied_message_id = Some(MessageId(6));
+            message.replied_text = Some("quoted content".to_owned());
+        });
         assert_eq!(dispatcher.dispatch(replied), Ok(DispatchOutcome::Handled));
-        let texts = dispatcher
-            .actions
-            .0
-            .iter()
-            .filter_map(|action| match action {
-                TelegramAction::SendMessage(message) => Some(message.text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+        let texts = sent_texts(&dispatcher.actions.0);
         assert_eq!(
             texts,
             vec![
@@ -8162,9 +8182,7 @@ mod tests {
             calls.borrow().as_slice(),
             &[(bot_core::locale::Locale::En, 1_672_531_200)]
         );
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&dispatcher.actions.0);
         assert_eq!(message.text, "synthetic BCRA variables");
         assert_eq!(dispatcher.state_diagnostics(), &["synthetic stale source"]);
         assert_eq!(dispatcher.state.incoming.len(), 1);
@@ -8194,9 +8212,7 @@ mod tests {
             failed.dispatch(update("/bcra", None)),
             Ok(DispatchOutcome::Handled)
         );
-        let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&failed.actions.0);
         assert!(message.text.contains("No pude conseguir las variables"));
 
         let config = Config {
@@ -8252,9 +8268,7 @@ mod tests {
             calls.borrow().as_slice(),
             &[(6, bot_core::locale::Locale::En, 1_672_531_200)]
         );
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&dispatcher.actions.0);
         assert_eq!(message.text, "synthetic dollar rates");
         assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
         assert_eq!(dispatcher.state.incoming.len(), 1);
@@ -8281,9 +8295,7 @@ mod tests {
             invalid.dispatch(update("/dolar 7d", None)),
             Ok(DispatchOutcome::Handled)
         );
-        let Some(TelegramAction::SendMessage(message)) = invalid.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&invalid.actions.0);
         assert!(message.text.contains("7d"));
         assert!(message.text.contains("No conozco el período"));
 
@@ -8311,9 +8323,7 @@ mod tests {
             failed.dispatch(update("/dollar", None)),
             Ok(DispatchOutcome::Handled)
         );
-        let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&failed.actions.0);
         assert_eq!(
             message.text,
             "No pude traer las cotizaciones del dólar, boludo. Probá más tarde"
@@ -8379,9 +8389,7 @@ mod tests {
             calls.borrow().as_slice(),
             &[("Example City, Exampleland".to_owned(), 1_672_531_200)]
         );
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&dispatcher.actions.0);
         assert!(message.text.contains("Example City, Exampleland"));
         assert!(message.text.contains("Mostly clear, feels like"));
         assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
@@ -8418,9 +8426,7 @@ mod tests {
             Ok(DispatchOutcome::Handled)
         );
         assert_eq!(default_calls.borrow()[0].0, "Buenos Aires");
-        let Some(TelegramAction::SendMessage(message)) = default.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&default.actions.0);
         assert_eq!(
             message.text,
             "No pude conseguir el clima de Buenos Aires. Probá más tarde"
@@ -8464,9 +8470,7 @@ mod tests {
             Ok(DispatchOutcome::Handled)
         );
         assert_eq!(calls.borrow().as_slice(), &[1_672_531_200]);
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&dispatcher.actions.0);
         assert!(message.text.contains("Polymarket elections by liquidity"));
         assert!(message.text.contains("Candidate A 72%"));
         assert_eq!(
@@ -8510,9 +8514,7 @@ mod tests {
             failed.dispatch(update("/eleccion", None)),
             Ok(DispatchOutcome::Handled)
         );
-        let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&failed.actions.0);
         assert_eq!(
             message.text,
             "No pude traer las elecciones de Polymarket. Probá más tarde"
@@ -8584,9 +8586,7 @@ mod tests {
             calls.borrow().as_slice(),
             &[("Apple Inc".to_owned(), 1_672_531_200)]
         );
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&dispatcher.actions.0);
         assert_eq!(
             message.text,
             "AAPL: 205.5 USD (+1.25% 24h)\nUnknown: not found"
@@ -8639,9 +8639,7 @@ mod tests {
                 1_672_531_200,
             )]
         );
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&dispatcher.actions.0);
         assert_eq!(message.text, "BTC: 50000 USD (+2.5% 24h)");
         assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
         assert_eq!(dispatcher.state.incoming.len(), 1);
@@ -8696,9 +8694,7 @@ mod tests {
             failed.dispatch(update("/acciones", None)),
             Ok(DispatchOutcome::Handled)
         );
-        let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&failed.actions.0);
         assert_eq!(
             message.text,
             "No pude traer el top de acciones. Probá de nuevo"
@@ -8766,9 +8762,7 @@ mod tests {
             Ok(DispatchOutcome::Handled)
         );
         assert_eq!(calls.borrow().as_slice(), &[1_672_531_200]);
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&dispatcher.actions.0);
         assert_eq!(
             message.text,
             "Brent: 98.15 USD (-8.78% 24h)\nWTI: 95.45 USD (+1.25% 24h)"
@@ -8806,9 +8800,7 @@ mod tests {
             failed.dispatch(update("/petroleo", None)),
             Ok(DispatchOutcome::Handled)
         );
-        let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&failed.actions.0);
         assert_eq!(
             message.text,
             "No pude traer el precio del petróleo, boludo. Probá más tarde"
@@ -8929,9 +8921,7 @@ mod tests {
             fallback.dispatch(update("/gn", None)),
             Ok(DispatchOutcome::Handled)
         );
-        let Some(TelegramAction::SendMessage(message)) = fallback.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&fallback.actions.0);
         assert_eq!(message.text, "Buenas noches, boludo");
 
         let config = Config {
@@ -8946,6 +8936,7 @@ mod tests {
             Samples {
                 choice_index: 0,
                 integer: BigInt::from(0_u8),
+                failing: false,
             },
             authorization(),
             "@mybot",
@@ -8961,36 +8952,24 @@ mod tests {
             non_http.dispatch(update("/gm", None)),
             Ok(DispatchOutcome::Handled)
         );
-        let Some(TelegramAction::SendMessage(message)) = non_http.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&non_http.actions.0);
         assert_eq!(message.text, "cached greeting");
         assert_eq!(non_http.state.outgoing.len(), 1);
     }
 
     #[test]
     fn greeting_animation_delivery_failure_is_silent_and_missing_source_stays_legacy() {
-        struct DroppingAnimations;
-
-        impl ActionSink for DroppingAnimations {
-            type Error = Infallible;
-
-            fn execute(&mut self, _action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
-                Ok(ActionReceipt { message_id: None })
-            }
-
-            fn try_animation(&mut self, _action: TelegramAction) -> Result<bool, Self::Error> {
-                Ok(false)
-            }
-        }
-
         let config = Config {
             value: Ok(ChatConfig::default()),
             chat_ids: Vec::new(),
         };
         let mut dispatcher = NativeDispatcher::new(
             config,
-            DroppingAnimations,
+            Actions::scripted(ActionScript {
+                receipts: Receipts::Fixed(None),
+                animation: Attempt::Skip,
+                ..ActionScript::default()
+            }),
             State::default(),
             values(),
             random(),
@@ -9013,6 +8992,13 @@ mod tests {
         );
         assert_eq!(dispatcher.state.incoming.len(), 1);
         assert!(dispatcher.state.outgoing.is_empty());
+        // A later text reply without a confirmed message id is still
+        // recorded against the requesting message.
+        assert_eq!(
+            dispatcher.dispatch(update("/time", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(dispatcher.state.incoming.len(), 2);
 
         let config = Config {
             value: Ok(ChatConfig::default()),
@@ -9074,9 +9060,7 @@ mod tests {
             Ok(DispatchOutcome::Handled)
         );
         assert_eq!(*calls.borrow(), 1);
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&dispatcher.actions.0);
         assert!(
             message
                 .text
@@ -9122,9 +9106,7 @@ mod tests {
             failed.dispatch(update("/rulo ignored", Some("es"))),
             Ok(DispatchOutcome::Handled)
         );
-        let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&failed.actions.0);
         assert_eq!(
             message.text,
             "I could not load dollar rates. Try again later"
@@ -9183,9 +9165,7 @@ mod tests {
             Ok(DispatchOutcome::Handled)
         );
         assert_eq!(*calls.borrow(), 1);
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&dispatcher.actions.0);
         assert_eq!(
             message.text,
             "Card and crypto arbitrage\nProfit: 62.68% (fee 0.5%)\n\nRates in ARS\nOfficial: 100\nUSDT: 195\nCard: 150\n\n100 USD card purchase\n= 15,000 ARS = 76.92 USDT\nProfit: 9,402.5 ARS / 48.22 USDT\nTotal: 24,402.5 ARS / 125.14 USDT"
@@ -9226,15 +9206,7 @@ mod tests {
         );
         assert_eq!(*calls.borrow(), 1);
         assert!(dispatcher.state_diagnostics()[0].contains("synthetic upstream failure"));
-        let texts = dispatcher
-            .actions
-            .0
-            .iter()
-            .filter_map(|action| match action {
-                TelegramAction::SendMessage(message) => Some(message.text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+        let texts = sent_texts(&dispatcher.actions.0);
         assert_eq!(
             texts,
             vec![
@@ -9246,9 +9218,7 @@ mod tests {
             dispatcher.dispatch(update("/devo ０.５", None)),
             Ok(DispatchOutcome::Handled)
         );
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.last() else {
-            return;
-        };
+        let message = last_sent(&dispatcher.actions.0);
         assert_eq!(
             message.text,
             "Usá: /devo <comisión %>[, <monto de la compra en USD>]\nEjemplo: /devo 0.5, 100"
@@ -9308,15 +9278,7 @@ mod tests {
             );
         }
         assert_eq!(calls.borrow().as_slice(), &["USD", "ARS", "USD", "USD"]);
-        let texts = dispatcher
-            .actions
-            .0
-            .iter()
-            .filter_map(|action| match action {
-                TelegramAction::SendMessage(message) => Some(message.text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+        let texts = sent_texts(&dispatcher.actions.0);
         assert_eq!(
             texts[0],
             "1 satoshi = $0.00050000 USD\n1 satoshi = $0.1000 ARS\n\n$1 USD = 2,000 sats\n$1 ARS = 10.000 sats"
@@ -9360,15 +9322,7 @@ mod tests {
             dispatcher.dispatch(update("/satoshi", None)),
             Ok(DispatchOutcome::Handled)
         );
-        let texts = dispatcher
-            .actions
-            .0
-            .iter()
-            .filter_map(|action| match action {
-                TelegramAction::SendMessage(message) => Some(message.text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+        let texts = sent_texts(&dispatcher.actions.0);
         assert_eq!(
             texts,
             vec![
@@ -9421,9 +9375,7 @@ mod tests {
             Ok(DispatchOutcome::Handled)
         );
         assert_eq!(calls.borrow().as_slice(), &[(88, 10_000)]);
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&dispatcher.actions.0);
         assert_eq!(
             message.text,
             "Minted 100.00 credits\nYour balance is 120.00"
@@ -9461,9 +9413,7 @@ mod tests {
             Ok(DispatchOutcome::Handled)
         );
         assert!(denied_calls.borrow().is_empty());
-        let Some(TelegramAction::SendMessage(message)) = denied.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&denied.actions.0);
         assert_eq!(message.text, "This command is only for the admin");
 
         let failed_calls = Rc::new(RefCell::new(Vec::new()));
@@ -9490,9 +9440,7 @@ mod tests {
             Ok(DispatchOutcome::Handled)
         );
         assert_eq!(failed_calls.borrow().as_slice(), &[(88, 100)]);
-        let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&failed.actions.0);
         assert_eq!(
             message.text,
             "Se trabó imprimiendo créditos. Probá de nuevo"
@@ -9561,9 +9509,7 @@ mod tests {
             Ok(DispatchOutcome::Handled)
         );
         assert_eq!(calls.borrow().as_slice(), &[2]);
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&dispatcher.actions.0);
         assert!(message.text.starts_with("Latest AI settlements:"));
         assert!(
             message
@@ -9611,9 +9557,7 @@ mod tests {
                 dispatcher.dispatch(update("/creditlog", None)),
                 Ok(DispatchOutcome::Handled)
             );
-            let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
-                return;
-            };
+            let message = first_sent(&dispatcher.actions.0);
             assert_eq!(message.text, expected);
         }
 
@@ -9673,9 +9617,14 @@ mod tests {
             Ok("en")
         );
         assert!(dispatcher.config.chat_ids.contains(&"set:-42".to_owned()));
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.last() else {
-            return;
-        };
+        // The update replies in English and then moves the chat's command
+        // menu to English as well.
+        assert!(matches!(
+            dispatcher.actions.0.last(),
+            Some(TelegramAction::SetCommands { commands, .. })
+                if commands.first().is_some_and(|command| command.description == "ask me anything")
+        ));
+        let message = last_sent(&dispatcher.actions.0[..dispatcher.actions.0.len() - 1]);
         assert_eq!(message.text, "Done, I will speak English now");
         assert_eq!(
             message
@@ -9702,10 +9651,9 @@ mod tests {
             authorization(),
             "@mybot",
         );
-        let mut group_update = update("/language en", None);
-        if let IncomingEvent::Message(message) = &mut group_update.event {
+        let group_update = message_update("/language en", None, |message| {
             message.chat_type = Some("supergroup".to_owned());
-        }
+        });
         assert_eq!(
             dispatcher.dispatch(group_update),
             Ok(DispatchOutcome::Handled)
@@ -9739,17 +9687,14 @@ mod tests {
             denied,
             "@mybot",
         );
-        let mut group_update = update("/idioma en", None);
-        if let IncomingEvent::Message(message) = &mut group_update.event {
+        let group_update = message_update("/idioma en", None, |message| {
             message.chat_type = Some("group".to_owned());
-        }
+        });
         assert_eq!(
             dispatcher.dispatch(group_update),
             Ok(DispatchOutcome::Handled)
         );
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&dispatcher.actions.0);
         assert_eq!(message.text, "Este comando es solo para admins del grupo");
         assert!(dispatcher.state.incoming.is_empty());
         assert!(dispatcher.state.outgoing.is_empty());
@@ -9785,9 +9730,7 @@ mod tests {
             Ok(DispatchOutcome::Handled)
         );
         assert!(dispatcher.authorization.checks.is_empty());
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&dispatcher.actions.0);
         assert!(message.text.starts_with("Settings"));
         assert_eq!(
             message
@@ -9824,10 +9767,9 @@ mod tests {
             authorization(),
             "@mybot",
         );
-        let mut group_update = update("/configs", None);
-        if let IncomingEvent::Message(message) = &mut group_update.event {
+        let group_update = message_update("/configs", None, |message| {
             message.chat_type = Some("group".to_owned());
-        }
+        });
         assert_eq!(
             dispatcher.dispatch(group_update),
             Ok(DispatchOutcome::Handled)
@@ -9836,9 +9778,7 @@ mod tests {
             dispatcher.authorization.checks,
             [("-42".to_owned(), "88".to_owned())]
         );
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&dispatcher.actions.0);
         assert!(message.text.starts_with("Configuración"));
         assert_eq!(
             message
@@ -9882,17 +9822,14 @@ mod tests {
             denied,
             "@mybot",
         );
-        let mut group_update = update("/config", None);
-        if let IncomingEvent::Message(message) = &mut group_update.event {
+        let group_update = message_update("/config", None, |message| {
             message.chat_type = Some("supergroup".to_owned());
-        }
+        });
         assert_eq!(
             dispatcher.dispatch(group_update),
             Ok(DispatchOutcome::Handled)
         );
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&dispatcher.actions.0);
         assert_eq!(message.text, "Only group admins can use this command");
         assert!(dispatcher.state.incoming.is_empty());
         assert!(dispatcher.state.outgoing.is_empty());
@@ -10114,30 +10051,17 @@ mod tests {
 
     #[test]
     fn config_callback_uses_new_message_fallback_before_acknowledging() {
-        #[derive(Default)]
-        struct EditFallbackActions(Vec<TelegramAction>);
-
-        impl ActionSink for EditFallbackActions {
-            type Error = Infallible;
-
-            fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
-                self.0.push(action);
-                Ok(ActionReceipt { message_id: None })
-            }
-
-            fn try_edit(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
-                self.0.push(action);
-                Ok(false)
-            }
-        }
-
         let config = Config {
             value: Ok(ChatConfig::default()),
             chat_ids: Vec::new(),
         };
         let mut dispatcher = NativeDispatcher::new(
             config,
-            EditFallbackActions::default(),
+            Actions::scripted(ActionScript {
+                receipts: Receipts::Fixed(None),
+                edit: Attempt::Skip,
+                ..ActionScript::default()
+            }),
             State::default(),
             values(),
             random(),
@@ -10168,7 +10092,11 @@ mod tests {
                 value: Ok(ChatConfig::default()),
                 chat_ids: Vec::new(),
             },
-            EditFallbackActions::default(),
+            Actions::scripted(ActionScript {
+                receipts: Receipts::Fixed(None),
+                edit: Attempt::Skip,
+                ..ActionScript::default()
+            }),
             State::default(),
             values(),
             random(),
@@ -10293,17 +10221,16 @@ mod tests {
             dispatcher.actions.0.first(),
             Some(TelegramAction::SendMessage(_))
         ));
-        if let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() {
-            assert!(message.text.starts_with("Tareas"));
-            assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
-            let callback = message
-                .reply_markup
-                .as_ref()
-                .and_then(|keyboard| keyboard.inline_keyboard.first())
-                .and_then(|row| row.first())
-                .and_then(|button| button.callback_data.as_deref());
-            assert_eq!(callback, Some("task:view:task0001"));
-        }
+        let message = first_sent(&dispatcher.actions.0);
+        assert!(message.text.starts_with("Tareas"));
+        assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
+        let callback = message
+            .reply_markup
+            .as_ref()
+            .and_then(|keyboard| keyboard.inline_keyboard.first())
+            .and_then(|row| row.first())
+            .and_then(|button| button.callback_data.as_deref());
+        assert_eq!(callback, Some("task:view:task0001"));
 
         assert_eq!(
             dispatcher.dispatch(update("/tarea create something", None)),
@@ -10372,33 +10299,23 @@ mod tests {
             queries.borrow().as_slice(),
             [SignalQuery::Address(TokenAddress { chain_id, .. })] if chain_id == "solana"
         ));
-        let [
-            TelegramAction::SendPhoto {
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [TelegramAction::SendPhoto {
                 photo,
-                reply_to_message_id,
+                reply_to_message_id: Some(MessageId(7)),
                 caption,
-                parse_mode,
+                parse_mode: Some(bot_core::telegram_actions::ParseMode::Html),
                 reply_markup: Some(keyboard),
                 ..
-            },
-        ] = dispatcher.actions.0.as_slice()
-        else {
-            return;
-        };
-        assert_eq!(photo.as_ref(), b"synthetic-png");
-        assert_eq!(*reply_to_message_id, Some(MessageId(7)));
-        assert_eq!(
-            *parse_mode,
-            Some(bot_core::telegram_actions::ParseMode::Html)
-        );
-        assert!(caption.contains("Synthetic Token"));
-        assert_eq!(
-            keyboard.inline_keyboard[0][1]
-                .copy_text
-                .as_ref()
-                .map(|copy| copy.text.as_str()),
-            Some("J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump")
-        );
+            }] if photo.as_ref() == b"synthetic-png"
+                && caption.contains("Synthetic Token")
+                && keyboard.inline_keyboard[0][1]
+                    .copy_text
+                    .as_ref()
+                    .map(|copy| copy.text.as_str())
+                    == Some("J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump")
+        ));
         let saved = saved.borrow();
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].0.len(), 12);
@@ -10729,9 +10646,8 @@ mod tests {
         }
 
         fn take_selection(&mut self, key: &str) -> Result<Option<String>, String> {
-            if let Some(error) = &self.fail_load {
-                return Err(error.clone());
-            }
+            // A failing `fail_load` read already stops the callback before
+            // the take, so taking never fails here.
             Ok(self.stored.borrow_mut().remove(key))
         }
 
@@ -10805,11 +10721,9 @@ mod tests {
 
     #[test]
     fn market_selection_persistence_handles_missing_context_and_delivery_failures() {
-        let mut no_chat = update("/p libra", Some("en"));
-        let IncomingEvent::Message(message) = &mut no_chat.event else {
-            unreachable!();
-        };
-        message.chat_id = None;
+        let mut no_chat = incoming_message("/p libra", Some("en"));
+        no_chat.chat_id = None;
+        let message = &no_chat;
         let selection = market_selection_fixture(None);
         let mut missing_context = dispatcher();
         assert_eq!(
@@ -10825,9 +10739,7 @@ mod tests {
         );
 
         let mut no_source = dispatcher();
-        let IncomingEvent::Message(message) = update("/p libra", Some("en")).event else {
-            unreachable!();
-        };
+        let message = incoming_message("/p libra", Some("en"));
         assert_eq!(
             no_source.persist_market_selection(
                 &message,
@@ -10881,7 +10793,7 @@ mod tests {
                 value: Ok(ChatConfig::default()),
                 chat_ids: Vec::new(),
             },
-            DeliveryActions::new(DeliveryOutcome::Rejected),
+            delivery_actions(DeliveryOutcome::Rejected),
             State::default(),
             values(),
             random(),
@@ -10917,7 +10829,7 @@ mod tests {
                 value: Ok(ChatConfig::default()),
                 chat_ids: Vec::new(),
             },
-            DeliveryActions::new(DeliveryOutcome::Unconfirmed),
+            delivery_actions(DeliveryOutcome::Unconfirmed),
             State::default(),
             values(),
             random(),
@@ -11042,23 +10954,28 @@ mod tests {
             )),
             Ok(DispatchOutcome::Handled)
         );
-        let callback = dispatcher
+        let page_edits = dispatcher
             .actions
             .0
             .iter()
-            .rev()
-            .find_map(|action| match action {
+            .filter_map(|action| match action {
                 TelegramAction::EditMessage {
                     message_id: MessageId(700),
                     reply_markup: Some(markup),
                     ..
-                } => markup
+                } => Some(markup),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let callback = page_edits
+            .last()
+            .and_then(|markup| {
+                markup
                     .inline_keyboard
                     .first()?
                     .first()?
                     .callback_data
-                    .clone(),
-                _ => None,
+                    .clone()
             })
             .ok_or("missing page edit")?;
         assert_eq!(callback, format!("mkt:select:{id}:5"));
@@ -11211,17 +11128,15 @@ mod tests {
                 render_caption: None,
             };
         let stored_value = |chat_id: &str, message_id: i64, requester_id: i64| {
-            let Ok(stored_value) = serde_json::to_string(&StoredMarketSelection {
+            StoredMarketSelection {
                 selection: selection.clone(),
                 chat_id: chat_id.to_owned(),
                 message_id,
                 source_message_id: Some(message_id),
                 requester_id,
                 command: "unified".to_owned(),
-            }) else {
-                unreachable!("synthetic stored market selection must serialize")
-            };
-            stored_value
+            }
+            .encode()
         };
 
         let mut malformed = dispatcher().with_market_price_source(Box::new(source(
@@ -11559,14 +11474,14 @@ mod tests {
             )));
         }
 
-        for outcome in [PhotoOutcome::Skipped, PhotoOutcome::Unconfirmed] {
+        for outcome in [Attempt::Skip, Attempt::Unconfirmed] {
             let stored = Rc::new(RefCell::new(HashMap::new()));
             let mut dispatcher = NativeDispatcher::new(
                 Config {
                     value: Ok(ChatConfig::default()),
                     chat_ids: Vec::new(),
                 },
-                PhotoActions { outcome },
+                photo_actions(outcome),
                 State::default(),
                 values(),
                 random(),
@@ -11612,9 +11527,7 @@ mod tests {
                 value: Ok(ChatConfig::default()),
                 chat_ids: Vec::new(),
             },
-            PhotoFailureActions {
-                actions: Vec::new(),
-            },
+            attempt_actions(Attempt::Fail, ActionScript::photo),
             State::default(),
             values(),
             random(),
@@ -11688,13 +11601,11 @@ mod tests {
                     queries: Rc::new(RefCell::new(Vec::new())),
                     saved: Rc::clone(&saved),
                 }));
-            let input = timeframe.map_or("/p libra", |period| {
-                if period == "7d" {
-                    "/p libra 7d"
-                } else {
-                    "/p libra"
-                }
-            });
+            let input = if timeframe == Some("7d") {
+                "/p libra 7d"
+            } else {
+                "/p libra"
+            };
             assert_eq!(
                 dispatcher.dispatch(update(input, Some("en"))),
                 Ok(DispatchOutcome::Handled)
@@ -11738,9 +11649,7 @@ mod tests {
                 value: Ok(ChatConfig::default()),
                 chat_ids: Vec::new(),
             },
-            PhotoActions {
-                outcome: PhotoOutcome::Skipped,
-            },
+            photo_actions(Attempt::Skip),
             State::default(),
             values(),
             random(),
@@ -11824,16 +11733,15 @@ mod tests {
     #[test]
     fn market_callbacks_localize_empty_candidate_quotes_and_history_failures() {
         let selection = market_selection_fixture(None);
-        let Ok(stored_value) = serde_json::to_string(&StoredMarketSelection {
+        let stored_value = StoredMarketSelection {
             selection,
             chat_id: "-42".to_owned(),
             message_id: 7,
             source_message_id: Some(6),
             requester_id: 88,
             command: "crypto".to_owned(),
-        }) else {
-            unreachable!("synthetic stored market selection must serialize")
-        };
+        }
+        .encode();
         let stored = Rc::new(RefCell::new(HashMap::from([(
             "market_selection:empty-candidate".to_owned(),
             stored_value,
@@ -12000,6 +11908,16 @@ mod tests {
             Err("market selection storage unavailable".to_owned())
         );
         assert_eq!(source.clear_selection("key"), Ok(()));
+        // A dispatcher backed only by the defaults answers without a quote.
+        let mut bare = dispatcher().with_market_price_source(Box::new(BareMarket));
+        assert_eq!(
+            bare.dispatch(update("/p btc", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            sent_texts(&bare.actions.0),
+            ["I could not get a quote for btc"]
+        );
 
         assert_eq!(short_market_address("short"), "short");
         assert_eq!(short_market_address("123456789012345678"), "123456…5678");
@@ -12345,6 +12263,7 @@ mod tests {
             },
             photo: Ok(vec![1]),
             periods: Rc::clone(&periods),
+            state: None,
         }));
         assert_eq!(
             direct.dispatch(update("/p syn 7d", Some("en"))),
@@ -12363,6 +12282,7 @@ mod tests {
             },
             photo: Ok(vec![1]),
             periods: Rc::clone(&periods),
+            state: None,
         }));
         assert_eq!(
             widened.dispatch(update("/p syn", Some("en"))),
@@ -12373,6 +12293,24 @@ mod tests {
             TelegramAction::SendPhoto { reply_to_message_id: Some(MessageId(7)), caption, .. }
                 if caption.contains("+25% 2d")
         )));
+        // The widened card remembers its state; refreshing it after the pair
+        // disappeared from the provider answers that no data is available.
+        let refresh = format!(
+            "sig:ref:{}",
+            bot_core::token_signals::stable_signal_id(-42, 7, 88, 1_672_531_200)
+        );
+        assert_eq!(
+            widened.dispatch(callback_update(&refresh, "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            widened.actions.0.last(),
+            Some(TelegramAction::AnswerCallback {
+                text: Some(_),
+                show_alert: true,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -12392,7 +12330,10 @@ mod tests {
                     value: Ok(ChatConfig::default()),
                     chat_ids: Vec::new(),
                 },
-                MessageIdActions::new(700),
+                Actions::scripted(ActionScript {
+                    receipts: Receipts::Sequential(700),
+                    ..ActionScript::default()
+                }),
                 State::default(),
                 values(),
                 random(),
@@ -12452,20 +12393,20 @@ mod tests {
             );
             let selection_callback = dispatcher
                 .actions
-                .actions
+                .0
                 .iter()
-                .find_map(|action| match action {
-                    TelegramAction::SendMessage(message) => message
+                .filter_map(sent_message)
+                .find_map(|message| {
+                    message
                         .reply_markup
                         .as_ref()?
                         .inline_keyboard
                         .get(1)?
                         .first()?
                         .callback_data
-                        .clone(),
-                    _ => None,
+                        .clone()
                 })
-                .ok_or_else(|| "DEX selection callback".to_owned())?;
+                .ok_or("DEX selection callback".to_owned())?;
             assert!(selection_callback.ends_with(":1"));
 
             assert_eq!(
@@ -12479,7 +12420,7 @@ mod tests {
             );
             let signal_callback = dispatcher
                 .actions
-                .actions
+                .0
                 .iter()
                 .find_map(|action| match action {
                     TelegramAction::SendPhoto {
@@ -12494,8 +12435,8 @@ mod tests {
                     }),
                     _ => None,
                 })
-                .ok_or_else(|| "refresh callback on delivered DEX card".to_owned())?;
-            assert!(dispatcher.actions.actions.iter().any(|action| matches!(
+                .ok_or("refresh callback on delivered DEX card".to_owned())?;
+            assert!(dispatcher.actions.0.iter().any(|action| matches!(
                 action,
                 TelegramAction::SendPhoto {
                     reply_to_message_id: Some(MessageId(7)),
@@ -12527,7 +12468,7 @@ mod tests {
                 Ok(DispatchOutcome::Handled)
             );
             assert_eq!(periods.borrow().as_slice(), [expected, expected]);
-            assert!(dispatcher.actions.actions.iter().any(|action| matches!(
+            assert!(dispatcher.actions.0.iter().any(|action| matches!(
                 action,
                 TelegramAction::EditMessagePhoto {
                     message_id: MessageId(701),
@@ -12553,7 +12494,7 @@ mod tests {
                 )),
                 Ok(DispatchOutcome::Handled)
             );
-            assert!(dispatcher.actions.actions.iter().any(|action| matches!(
+            assert!(dispatcher.actions.0.iter().any(|action| matches!(
                 action,
                 TelegramAction::DeleteMessage {
                     chat_id: ChatId(-42),
@@ -12561,7 +12502,7 @@ mod tests {
                 }
             )));
             assert!(token_state.borrow().is_none());
-            assert!(!dispatcher.actions.actions.iter().any(|action| matches!(
+            assert!(!dispatcher.actions.0.iter().any(|action| matches!(
             action,
             TelegramAction::SendMessage(message)
                 if message.text == "Selection processed" || message.text == "selección procesada"
@@ -12594,7 +12535,10 @@ mod tests {
                 value: Ok(ChatConfig::default()),
                 chat_ids: Vec::new(),
             },
-            MessageIdActions::new(700),
+            Actions::scripted(ActionScript {
+                receipts: Receipts::Sequential(700),
+                ..ActionScript::default()
+            }),
             State::default(),
             values(),
             random(),
@@ -12651,20 +12595,20 @@ mod tests {
         );
         let selection_callback = dispatcher
             .actions
-            .actions
+            .0
             .iter()
-            .find_map(|action| match action {
-                TelegramAction::SendMessage(message) => message
+            .filter_map(sent_message)
+            .find_map(|message| {
+                message
                     .reply_markup
                     .as_ref()?
                     .inline_keyboard
                     .get(1)?
                     .first()?
                     .callback_data
-                    .clone(),
-                _ => None,
+                    .clone()
             })
-            .ok_or_else(|| "DEX selection callback".to_owned())?;
+            .ok_or("DEX selection callback".to_owned())?;
 
         assert_eq!(
             dispatcher.dispatch(callback_update_for_message(
@@ -12676,13 +12620,13 @@ mod tests {
             Ok(DispatchOutcome::Handled)
         );
         assert_eq!(stored.borrow().len(), 1);
-        assert!(dispatcher.actions.actions.iter().any(|action| matches!(
+        assert!(dispatcher.actions.0.iter().any(|action| matches!(
             action,
             TelegramAction::SendMessage(message)
                 if message.reply_to_message_id == Some(MessageId(7))
                     && message.text.contains("get a quote")
         )));
-        assert!(!dispatcher.actions.actions.iter().any(|action| matches!(
+        assert!(!dispatcher.actions.0.iter().any(|action| matches!(
             action,
             TelegramAction::DeleteMessage {
                 message_id: MessageId(700),
@@ -12701,14 +12645,14 @@ mod tests {
             Ok(DispatchOutcome::Handled)
         );
         assert!(stored.borrow().is_empty());
-        assert!(dispatcher.actions.actions.iter().any(|action| matches!(
+        assert!(dispatcher.actions.0.iter().any(|action| matches!(
             action,
             TelegramAction::SendPhoto {
                 reply_to_message_id: Some(MessageId(7)),
                 ..
             }
         )));
-        assert!(dispatcher.actions.actions.iter().any(|action| matches!(
+        assert!(dispatcher.actions.0.iter().any(|action| matches!(
             action,
             TelegramAction::DeleteMessage {
                 chat_id: ChatId(-42),
@@ -12861,9 +12805,7 @@ mod tests {
                 value: Ok(ChatConfig::default()),
                 chat_ids: Vec::new(),
             },
-            PhotoActions {
-                outcome: PhotoOutcome::Skipped,
-            },
+            photo_actions(Attempt::Skip),
             State::default(),
             values(),
             random(),
@@ -12907,10 +12849,8 @@ mod tests {
 
     #[test]
     fn market_dispatch_boundaries_cover_query_guards_scopes_and_localized_fallbacks() {
-        let mut unsupported = update("/p 0h", Some("en"));
-        let IncomingEvent::Message(message) = &mut unsupported.event else {
-            unreachable!();
-        };
+        let mut unsupported = incoming_message("/p 0h", Some("en"));
+        let message = &mut unsupported;
         let mut query_guards = dispatcher();
         assert_eq!(
             query_guards.dispatch_asset_prices(
@@ -12944,9 +12884,7 @@ mod tests {
             Ok(Some(DispatchOutcome::Unsupported))
         );
 
-        let IncomingEvent::Message(message) = update("/p btc", Some("en")).event else {
-            unreachable!();
-        };
+        let message = incoming_message("/p btc", Some("en"));
         let mut no_market = dispatcher();
         assert_eq!(
             no_market.dispatch_market_price_query(
@@ -13146,16 +13084,16 @@ mod tests {
             .actions
             .0
             .iter()
-            .find_map(|action| match action {
-                TelegramAction::SendMessage(message) => message
+            .filter_map(sent_message)
+            .find_map(|message| {
+                message
                     .reply_markup
                     .as_ref()
                     .and_then(|keyboard| keyboard.inline_keyboard.get(1))
                     .and_then(|row| row.first())
-                    .and_then(|button| button.callback_data.clone()),
-                _ => None,
+                    .and_then(|button| button.callback_data.clone())
             })
-            .ok_or_else(|| "selection callback".to_owned())?;
+            .ok_or("selection callback".to_owned())?;
         assert!(callback_data.starts_with("mkt:select:"));
         assert_eq!(
             dispatcher.dispatch(callback_update_for_message(
@@ -13285,20 +13223,18 @@ mod tests {
             .actions
             .0
             .iter()
-            .filter_map(|action| match action {
-                TelegramAction::SendMessage(message) => {
-                    message.reply_markup.as_ref().map(|keyboard| {
-                        (
-                            message.text.clone(),
-                            keyboard
-                                .inline_keyboard
-                                .iter()
-                                .filter_map(|row| row.first()?.callback_data.clone())
-                                .collect::<Vec<_>>(),
-                        )
-                    })
-                }
-                _ => None,
+            .filter_map(sent_message)
+            .filter_map(|message| {
+                message.reply_markup.as_ref().map(|keyboard| {
+                    (
+                        message.text.clone(),
+                        keyboard
+                            .inline_keyboard
+                            .iter()
+                            .filter_map(|row| row.first()?.callback_data.clone())
+                            .collect::<Vec<_>>(),
+                    )
+                })
             })
             .collect::<Vec<_>>();
         assert_eq!(menus.len(), 2);
@@ -13311,11 +13247,11 @@ mod tests {
         let libra_selection_id = libra_second
             .split(':')
             .nth(2)
-            .ok_or_else(|| "libra callback id".to_owned())?;
+            .ok_or("libra callback id".to_owned())?;
         let trump_selection_id = trump_first
             .split(':')
             .nth(2)
-            .ok_or_else(|| "trump callback id".to_owned())?;
+            .ok_or("trump callback id".to_owned())?;
         assert_ne!(libra_selection_id, trump_selection_id);
         assert!(dispatcher.actions.0.iter().any(|action| matches!(
             action,
@@ -13417,18 +13353,18 @@ mod tests {
             .actions
             .0
             .iter()
-            .find_map(|action| match action {
-                TelegramAction::SendMessage(message) => message
+            .filter_map(sent_message)
+            .find_map(|message| {
+                message
                     .reply_markup
                     .as_ref()?
                     .inline_keyboard
                     .first()?
                     .first()?
                     .callback_data
-                    .clone(),
-                _ => None,
+                    .clone()
             })
-            .ok_or_else(|| "selection callback".to_owned())?;
+            .ok_or("selection callback".to_owned())?;
         assert_eq!(stored.borrow().len(), 1);
 
         assert_eq!(
@@ -13483,18 +13419,18 @@ mod tests {
             .actions
             .0
             .iter()
-            .find_map(|action| match action {
-                TelegramAction::SendMessage(message) => message
+            .filter_map(sent_message)
+            .find_map(|message| {
+                message
                     .reply_markup
                     .as_ref()?
                     .inline_keyboard
                     .first()?
                     .first()?
                     .callback_data
-                    .clone(),
-                _ => None,
+                    .clone()
             })
-            .ok_or_else(|| "selection callback".to_owned())?;
+            .ok_or("selection callback".to_owned())?;
         assert!(callback.starts_with("mkt:select:"));
         assert_eq!(stored.borrow().len(), 1);
 
@@ -13538,27 +13474,6 @@ mod tests {
         Ok(())
     }
 
-    struct FailOnceCallbackActions {
-        actions: Vec<TelegramAction>,
-        send_failures: usize,
-    }
-
-    impl ActionSink for FailOnceCallbackActions {
-        type Error = &'static str;
-
-        fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
-            if matches!(action, TelegramAction::SendMessage(_)) && self.send_failures > 0 {
-                self.actions.push(action);
-                self.send_failures -= 1;
-                return Err("synthetic quote send failure");
-            }
-            self.actions.push(action);
-            Ok(ActionReceipt {
-                message_id: Some(MessageId(700)),
-            })
-        }
-    }
-
     #[test]
     fn failed_quote_send_restores_the_selection_for_retry() -> Result<(), String> {
         let stored = Rc::new(RefCell::new(HashMap::new()));
@@ -13567,10 +13482,12 @@ mod tests {
                 value: Ok(ChatConfig::default()),
                 chat_ids: Vec::new(),
             },
-            FailOnceCallbackActions {
-                actions: Vec::new(),
-                send_failures: 0,
-            },
+            failing_actions(
+                ActionKind::SendMessage,
+                0,
+                "synthetic quote send failure",
+                true,
+            ),
             State::default(),
             values(),
             random(),
@@ -13589,21 +13506,26 @@ mod tests {
         );
         let callback = dispatcher
             .actions
-            .actions
+            .0
             .iter()
-            .find_map(|action| match action {
-                TelegramAction::SendMessage(message) => message
+            .filter_map(sent_message)
+            .find_map(|message| {
+                message
                     .reply_markup
                     .as_ref()?
                     .inline_keyboard
                     .first()?
                     .first()?
                     .callback_data
-                    .clone(),
-                _ => None,
+                    .clone()
             })
-            .ok_or_else(|| "selection callback".to_owned())?;
-        dispatcher.actions.send_failures = 1;
+            .ok_or("selection callback".to_owned())?;
+        dispatcher.actions.1.failure = Some(ExecuteFailure {
+            kind: ActionKind::SendMessage,
+            remaining: 1,
+            error: "synthetic quote send failure",
+            record: true,
+        });
         assert!(matches!(
             dispatcher.dispatch(callback_update_for_message(
                 &callback,
@@ -13636,7 +13558,7 @@ mod tests {
     }
 
     struct ScriptedTakeMarketPrices {
-        load: Option<String>,
+        load: Result<Option<String>, String>,
         takes: RefCell<VecDeque<Result<Option<String>, String>>>,
         saves: RefCell<VecDeque<Result<(), String>>>,
         candidate: MarketPriceLoad,
@@ -13672,7 +13594,7 @@ mod tests {
         }
 
         fn load_selection(&mut self, _key: &str) -> Result<Option<String>, String> {
-            Ok(self.load.clone())
+            self.load.clone()
         }
 
         fn take_selection(&mut self, _key: &str) -> Result<Option<String>, String> {
@@ -13681,15 +13603,15 @@ mod tests {
     }
 
     fn stored_selection_value() -> Result<String, String> {
-        serde_json::to_string(&StoredMarketSelection {
+        Ok(StoredMarketSelection {
             selection: market_selection_fixture(None),
             chat_id: "-42".to_owned(),
             message_id: 7,
             source_message_id: Some(6),
             requester_id: 88,
             command: "crypto".to_owned(),
-        })
-        .map_err(|error| error.to_string())
+        }
+        .encode())
     }
 
     fn race_callback() -> IncomingUpdate {
@@ -13708,7 +13630,7 @@ mod tests {
     fn losing_the_take_race_answers_expired_without_sending() -> Result<(), String> {
         let mut dispatcher =
             dispatcher().with_market_price_source(Box::new(ScriptedTakeMarketPrices {
-                load: Some(stored_selection_value()?),
+                load: Ok(Some(stored_selection_value()?)),
                 takes: RefCell::new(VecDeque::from([Ok(None)])),
                 saves: RefCell::new(VecDeque::from([Ok(()), Ok(())])),
                 candidate: market_candidate_quote(),
@@ -13753,7 +13675,7 @@ mod tests {
     fn failed_take_answers_expired_with_diagnostics() -> Result<(), String> {
         let mut dispatcher =
             dispatcher().with_market_price_source(Box::new(ScriptedTakeMarketPrices {
-                load: Some(stored_selection_value()?),
+                load: Ok(Some(stored_selection_value()?)),
                 takes: RefCell::new(VecDeque::from([Err("synthetic take failure".to_owned())])),
                 saves: RefCell::new(VecDeque::new()),
                 candidate: market_candidate_quote(),
@@ -13775,7 +13697,7 @@ mod tests {
     fn undecodable_take_answers_expired_with_diagnostics() -> Result<(), String> {
         let mut dispatcher =
             dispatcher().with_market_price_source(Box::new(ScriptedTakeMarketPrices {
-                load: Some(stored_selection_value()?),
+                load: Ok(Some(stored_selection_value()?)),
                 takes: RefCell::new(VecDeque::from([Ok(Some("not-json".to_owned()))])),
                 saves: RefCell::new(VecDeque::new()),
                 candidate: market_candidate_quote(),
@@ -13824,18 +13746,18 @@ mod tests {
             .actions
             .0
             .iter()
-            .find_map(|action| match action {
-                TelegramAction::SendMessage(message) => message
+            .filter_map(sent_message)
+            .find_map(|message| {
+                message
                     .reply_markup
                     .as_ref()?
                     .inline_keyboard
                     .first()?
                     .first()?
                     .callback_data
-                    .clone(),
-                _ => None,
+                    .clone()
             })
-            .ok_or_else(|| "selection callback".to_owned())?;
+            .ok_or("selection callback".to_owned())?;
         assert_eq!(
             dispatcher.dispatch(callback_update_for_message(
                 &callback,
@@ -13861,24 +13783,6 @@ mod tests {
         Ok(())
     }
 
-    struct DeleteFailureActions {
-        actions: Vec<TelegramAction>,
-    }
-
-    impl ActionSink for DeleteFailureActions {
-        type Error = &'static str;
-
-        fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
-            if matches!(action, TelegramAction::DeleteMessage { .. }) {
-                return Err("synthetic delete failure");
-            }
-            self.actions.push(action);
-            Ok(ActionReceipt {
-                message_id: Some(MessageId(700)),
-            })
-        }
-    }
-
     #[test]
     fn failed_menu_deletes_stay_handled_with_diagnostics() -> Result<(), String> {
         let mut dispatcher = NativeDispatcher::new(
@@ -13886,9 +13790,12 @@ mod tests {
                 value: Ok(ChatConfig::default()),
                 chat_ids: Vec::new(),
             },
-            DeleteFailureActions {
-                actions: Vec::new(),
-            },
+            failing_actions(
+                ActionKind::DeleteMessage,
+                usize::MAX,
+                "synthetic delete failure",
+                false,
+            ),
             State::default(),
             values(),
             random(),
@@ -13936,9 +13843,12 @@ mod tests {
                 value: Ok(ChatConfig::default()),
                 chat_ids: Vec::new(),
             },
-            DeleteFailureActions {
-                actions: Vec::new(),
-            },
+            failing_actions(
+                ActionKind::DeleteMessage,
+                usize::MAX,
+                "synthetic delete failure",
+                false,
+            ),
             State::default(),
             values(),
             random(),
@@ -13972,24 +13882,6 @@ mod tests {
         Ok(())
     }
 
-    struct ToastFailureActions {
-        actions: Vec<TelegramAction>,
-    }
-
-    impl ActionSink for ToastFailureActions {
-        type Error = &'static str;
-
-        fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
-            if matches!(action, TelegramAction::AnswerCallback { .. }) {
-                return Err("synthetic toast failure");
-            }
-            self.actions.push(action);
-            Ok(ActionReceipt {
-                message_id: Some(MessageId(700)),
-            })
-        }
-    }
-
     #[test]
     fn failed_post_delivery_toast_does_not_retry_into_a_duplicate() -> Result<(), String> {
         let stored = Rc::new(RefCell::new(HashMap::new()));
@@ -13998,9 +13890,12 @@ mod tests {
                 value: Ok(ChatConfig::default()),
                 chat_ids: Vec::new(),
             },
-            ToastFailureActions {
-                actions: Vec::new(),
-            },
+            failing_actions(
+                ActionKind::AnswerCallback,
+                usize::MAX,
+                "synthetic toast failure",
+                false,
+            ),
             State::default(),
             values(),
             random(),
@@ -14019,20 +13914,20 @@ mod tests {
         );
         let callback = dispatcher
             .actions
-            .actions
+            .0
             .iter()
-            .find_map(|action| match action {
-                TelegramAction::SendMessage(message) => message
+            .filter_map(sent_message)
+            .find_map(|message| {
+                message
                     .reply_markup
                     .as_ref()?
                     .inline_keyboard
                     .first()?
                     .first()?
                     .callback_data
-                    .clone(),
-                _ => None,
+                    .clone()
             })
-            .ok_or_else(|| "selection callback".to_owned())?;
+            .ok_or("selection callback".to_owned())?;
         // The quote was delivered; the dead toast is a diagnostic, not a
         // retry into a second quote.
         assert_eq!(
@@ -14068,7 +13963,7 @@ mod tests {
             tag: "SOL".to_owned(),
             address: "J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump".to_owned(),
         };
-        serde_json::to_string(&StoredMarketSelection {
+        Ok(StoredMarketSelection {
             selection: MarketSelection {
                 query: "syn".to_owned(),
                 timeframe: Some("1m".to_owned()),
@@ -14094,8 +13989,8 @@ mod tests {
             source_message_id: Some(6),
             requester_id: 88,
             command: "unified".to_owned(),
-        })
-        .map_err(|error| error.to_string())
+        }
+        .encode())
     }
 
     fn token_selection_dispatcher<Actions>(
@@ -14153,16 +14048,18 @@ mod tests {
             token_selection_value()?,
         )])));
         let mut dispatcher = token_selection_dispatcher(
-            FailOnceCallbackActions {
-                actions: Vec::new(),
-                send_failures: 1,
-            },
+            failing_actions(
+                ActionKind::SendMessage,
+                1,
+                "synthetic quote send failure",
+                true,
+            ),
             Rc::clone(&stored),
         );
         let callback = format!("mkt:select:{selection_id}:0");
         let select = |dispatcher: &mut NativeDispatcher<
             Config,
-            FailOnceCallbackActions,
+            Actions,
             State,
             Values,
             Samples,
@@ -14194,9 +14091,12 @@ mod tests {
             token_selection_value()?,
         )])));
         let mut dispatcher = token_selection_dispatcher(
-            ToastFailureActions {
-                actions: Vec::new(),
-            },
+            failing_actions(
+                ActionKind::AnswerCallback,
+                usize::MAX,
+                "synthetic toast failure",
+                false,
+            ),
             Rc::clone(&stored),
         );
         let callback = format!("mkt:select:{selection_id}:0");
@@ -14224,7 +14124,7 @@ mod tests {
     fn invalid_taken_candidate_restores_the_menu() -> Result<(), String> {
         let mut dispatcher =
             dispatcher().with_market_price_source(Box::new(ScriptedTakeMarketPrices {
-                load: Some(stored_selection_value()?),
+                load: Ok(Some(stored_selection_value()?)),
                 takes: RefCell::new(VecDeque::from([Ok(Some(stored_selection_value()?))])),
                 saves: RefCell::new(VecDeque::new()),
                 candidate: market_candidate_quote(),
@@ -14265,9 +14165,12 @@ mod tests {
                 value: Ok(ChatConfig::default()),
                 chat_ids: Vec::new(),
             },
-            ToastFailureActions {
-                actions: Vec::new(),
-            },
+            failing_actions(
+                ActionKind::AnswerCallback,
+                usize::MAX,
+                "synthetic toast failure",
+                false,
+            ),
             State::default(),
             values(),
             random(),
@@ -14275,7 +14178,7 @@ mod tests {
             "@mybot",
         )
         .with_market_price_source(Box::new(ScriptedTakeMarketPrices {
-            load: Some(stored_selection_value()?),
+            load: Ok(Some(stored_selection_value()?)),
             takes: RefCell::new(VecDeque::from([Ok(Some(stored_selection_value()?))])),
             saves: RefCell::new(VecDeque::new()),
             candidate: MarketPriceLoad {
@@ -14296,7 +14199,7 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.contains("market selection answer failed"))
         );
-        assert!(dispatcher.actions.actions.iter().any(|action| matches!(
+        assert!(dispatcher.actions.0.iter().any(|action| matches!(
             action,
             TelegramAction::SendMessage(message) if message.text.contains("I could not get a quote")
         )));
@@ -14315,9 +14218,12 @@ mod tests {
                 value: Ok(ChatConfig::default()),
                 chat_ids: Vec::new(),
             },
-            ToastFailureActions {
-                actions: Vec::new(),
-            },
+            failing_actions(
+                ActionKind::AnswerCallback,
+                usize::MAX,
+                "synthetic toast failure",
+                false,
+            ),
             State::default(),
             values(),
             random(),
@@ -14518,9 +14424,7 @@ mod tests {
             dispatcher.actions.0.first(),
             Some(TelegramAction::SendMessage(_))
         ));
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&dispatcher.actions.0);
         assert!(
             message
                 .reply_markup
@@ -14552,21 +14456,23 @@ mod tests {
         );
         assert_eq!(stored.borrow().len(), 1);
 
-        let callback = dispatcher.actions.0.iter().find_map(|action| match action {
-            TelegramAction::SendMessage(message) => message
-                .reply_markup
-                .as_ref()?
-                .inline_keyboard
-                .get(1)?
-                .first()?
-                .callback_data
-                .clone(),
-            _ => None,
-        });
+        let callback = dispatcher
+            .actions
+            .0
+            .iter()
+            .filter_map(sent_message)
+            .find_map(|message| {
+                message
+                    .reply_markup
+                    .as_ref()?
+                    .inline_keyboard
+                    .get(1)?
+                    .first()?
+                    .callback_data
+                    .clone()
+            });
         assert!(callback.is_some(), "token selection callback");
-        let Some(callback) = callback else {
-            return;
-        };
+        let callback = callback.unwrap_or_default();
         assert_eq!(
             dispatcher.dispatch(callback_update_for_message(
                 &callback,
@@ -14652,9 +14558,7 @@ mod tests {
             dispatcher.dispatch(update("/s rkh 1m", Some("en"))),
             Ok(DispatchOutcome::Handled)
         );
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&dispatcher.actions.0);
         assert!(
             message
                 .reply_markup
@@ -14682,15 +14586,14 @@ mod tests {
             Some(3)
         );
 
-        let Some(callback) = message
+        let callback = message
             .reply_markup
             .as_ref()
             .and_then(|markup| markup.inline_keyboard.first())
             .and_then(|row| row.first())
-            .and_then(|button| button.callback_data.clone())
-        else {
-            return;
-        };
+            .and_then(|button| button.callback_data.clone());
+        assert!(callback.is_some(), "selection callback");
+        let callback = callback.unwrap_or_default();
         assert_eq!(
             dispatcher.dispatch(callback_update_for_message(
                 &callback,
@@ -14766,9 +14669,7 @@ mod tests {
             dispatcher.dispatch(update("/c rkh 1m", Some("en"))),
             Ok(DispatchOutcome::Handled)
         );
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&dispatcher.actions.0);
         assert!(
             message
                 .reply_markup
@@ -14864,9 +14765,7 @@ mod tests {
             dispatcher.dispatch(update("/p laptop", Some("en"))),
             Ok(DispatchOutcome::Handled)
         );
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&dispatcher.actions.0);
         assert!(message.text.contains("Official Laptop"));
         assert!(message.text.contains("Provider Laptop"));
         assert!(message.text.contains("base:BASE 0x000000…000001"));
@@ -15113,9 +15012,7 @@ mod tests {
                 value: Ok(ChatConfig::default()),
                 chat_ids: Vec::new(),
             },
-            PhotoFailureActions {
-                actions: Vec::new(),
-            },
+            attempt_actions(Attempt::Fail, ActionScript::photo),
             State::default(),
             values(),
             random(),
@@ -15163,7 +15060,7 @@ mod tests {
             )),
             Ok(DispatchOutcome::Handled)
         );
-        assert!(photo_failure.actions.actions.iter().any(|action| matches!(
+        assert!(photo_failure.actions.0.iter().any(|action| matches!(
             action,
             TelegramAction::SendMessage(message)
                 if message.parse_mode == Some(bot_core::telegram_actions::ParseMode::Html)
@@ -15382,13 +15279,13 @@ mod tests {
 
     #[test]
     fn undelivered_market_photos_fall_back_to_recorded_text() {
-        for outcome in [PhotoOutcome::Skipped, PhotoOutcome::Unconfirmed] {
+        for outcome in [Attempt::Skip, Attempt::Unconfirmed] {
             let mut dispatcher = NativeDispatcher::new(
                 Config {
                     value: Ok(ChatConfig::default()),
                     chat_ids: vec![],
                 },
-                PhotoActions { outcome },
+                photo_actions(outcome),
                 State::default(),
                 values(),
                 random(),
@@ -16075,13 +15972,13 @@ mod tests {
                 .any(|entry| entry.contains("state write failed"))
         );
 
-        for outcome in [PhotoOutcome::Skipped, PhotoOutcome::Unconfirmed] {
+        for outcome in [Attempt::Skip, Attempt::Unconfirmed] {
             let mut delivery_failed = NativeDispatcher::new(
                 Config {
                     value: Ok(ChatConfig::default()),
                     chat_ids: Vec::new(),
                 },
-                PhotoActions { outcome },
+                photo_actions(outcome),
                 State::default(),
                 values(),
                 random(),
@@ -16386,12 +16283,15 @@ mod tests {
     fn task_callback_tolerates_non_numeric_chat_ids_and_edit_rejection()
     -> Result<(), TaskStateError> {
         let callback_with_chat = |chat_id: Value| {
-            let mut update = callback_update("task:del:task0001", "private", Some("en"));
-            let IncomingEvent::CallbackQuery(callback) = &mut update.event else {
-                unreachable!();
-            };
-            callback["message"]["chat"]["id"] = chat_id;
-            update
+            callback_update_with_context(
+                "task:del:task0001",
+                chat_id,
+                "private",
+                7,
+                Some(88),
+                Some("en"),
+                Some("callback-1"),
+            )
         };
 
         let mut invalid_chat = dispatcher().with_scheduled_task_source(Box::new(Tasks {
@@ -16409,7 +16309,7 @@ mod tests {
                 value: Ok(ChatConfig::default()),
                 chat_ids: Vec::new(),
             },
-            EditFailActions::default(),
+            attempt_actions(Attempt::Fail, ActionScript::edit),
             State::default(),
             values(),
             random(),
@@ -16475,19 +16375,16 @@ mod tests {
             calls.borrow().as_slice(),
             [(88, 2, Some(29), "older".to_owned())]
         );
-        let Some(TelegramAction::EditMessage {
-            text, reply_markup, ..
-        }) = dispatcher.actions.0.first()
-        else {
-            return;
-        };
-        assert_eq!(text, "Gastos de IA\n\n26/08 14:00 | respuesta: 0.04 cr");
-        assert_eq!(
-            reply_markup
-                .as_ref()
-                .and_then(|keyboard| keyboard.inline_keyboard[0][0].callback_data.as_deref()),
-            Some("chg:88:2:n:20:-180")
-        );
+        assert!(matches!(
+            dispatcher.actions.0.first(),
+            Some(TelegramAction::EditMessage {
+                text,
+                reply_markup: Some(keyboard),
+                ..
+            }) if text == "Gastos de IA\n\n26/08 14:00 | respuesta: 0.04 cr"
+                && keyboard.inline_keyboard[0][0].callback_data.as_deref()
+                    == Some("chg:88:2:n:20:-180")
+        ));
         assert!(matches!(
             dispatcher.actions.0.get(1),
             Some(TelegramAction::AnswerCallback {
@@ -16530,14 +16427,14 @@ mod tests {
             .iter()
             .zip(["This button expired", "This history is not yours"])
         {
-            let TelegramAction::AnswerCallback {
-                text, show_alert, ..
-            } = action
-            else {
-                return;
-            };
-            assert_eq!(text.as_deref(), Some(expected));
-            assert!(*show_alert);
+            assert!(matches!(
+                action,
+                TelegramAction::AnswerCallback {
+                    text: Some(text),
+                    show_alert: true,
+                    ..
+                } if text == expected
+            ));
         }
 
         let config = Config {
@@ -16635,7 +16532,7 @@ mod tests {
 
         let mut rejected = NativeDispatcher::new(
             config(),
-            EditFailActions::default(),
+            attempt_actions(Attempt::Fail, ActionScript::edit),
             State::default(),
             values(),
             random(),
@@ -16667,7 +16564,7 @@ mod tests {
 
         let mut skipped = NativeDispatcher::new(
             config(),
-            EditSkipActions::default(),
+            attempt_actions(Attempt::Skip, ActionScript::edit),
             State::default(),
             values(),
             random(),
@@ -16853,9 +16750,7 @@ mod tests {
             dispatcher.dispatch(update("/topup", Some("en"))),
             Ok(DispatchOutcome::Handled)
         );
-        let Some(TelegramAction::SendMessage(command)) = dispatcher.actions.0.first() else {
-            return;
-        };
+        let command = first_sent(&dispatcher.actions.0);
         assert!(command.text.starts_with("Cargar créditos\n\n"));
         assert_eq!(
             command
@@ -16887,30 +16782,17 @@ mod tests {
 
     #[test]
     fn topup_invoice_failure_answers_with_an_alert_without_retrying_the_charge() {
-        #[derive(Default)]
-        struct InvoiceFailure(Vec<TelegramAction>);
-
-        impl ActionSink for InvoiceFailure {
-            type Error = Infallible;
-
-            fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
-                self.0.push(action);
-                Ok(ActionReceipt { message_id: None })
-            }
-
-            fn try_invoice(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
-                self.0.push(action);
-                Ok(false)
-            }
-        }
-
         let config = Config {
             value: Ok(ChatConfig::default()),
             chat_ids: Vec::new(),
         };
         let mut dispatcher = NativeDispatcher::new(
             config,
-            InvoiceFailure::default(),
+            Actions::scripted(ActionScript {
+                receipts: Receipts::Fixed(None),
+                invoice: Attempt::Skip,
+                ..ActionScript::default()
+            }),
             State::default(),
             values(),
             random(),
@@ -16986,32 +16868,6 @@ mod tests {
 
     #[test]
     fn topup_invoice_failure_releases_the_claim_for_retry() -> Result<(), String> {
-        #[derive(Default)]
-        struct FlakyInvoice {
-            actions: Vec<TelegramAction>,
-            invoice_failures: usize,
-        }
-
-        impl ActionSink for FlakyInvoice {
-            type Error = Infallible;
-
-            fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
-                self.actions.push(action);
-                Ok(ActionReceipt {
-                    message_id: Some(MessageId(700)),
-                })
-            }
-
-            fn try_invoice(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
-                self.actions.push(action);
-                if self.invoice_failures > 0 {
-                    self.invoice_failures -= 1;
-                    return Ok(false);
-                }
-                Ok(true)
-            }
-        }
-
         let config = Config {
             value: Ok(ChatConfig {
                 language: "en".to_owned(),
@@ -17022,10 +16878,10 @@ mod tests {
         let stored = Rc::new(RefCell::new(HashMap::new()));
         let mut dispatcher = NativeDispatcher::new(
             config,
-            FlakyInvoice {
-                actions: Vec::new(),
-                invoice_failures: 1,
-            },
+            Actions::scripted(ActionScript {
+                invoice_refusals: 1,
+                ..ActionScript::default()
+            }),
             State::default(),
             values(),
             random(),
@@ -17048,7 +16904,7 @@ mod tests {
         // retry invoiced normally instead of answering "already above".
         let invoices = dispatcher
             .actions
-            .actions
+            .0
             .iter()
             .filter(|action| matches!(action, TelegramAction::SendInvoice { .. }))
             .count();
@@ -17076,7 +16932,7 @@ mod tests {
             "@mybot",
         )
         .with_market_price_source(Box::new(ScriptedTakeMarketPrices {
-            load: None,
+            load: Ok(None),
             takes: RefCell::new(VecDeque::new()),
             saves: RefCell::new(VecDeque::new()),
             candidate: market_candidate_quote(),
@@ -17103,26 +16959,6 @@ mod tests {
 
     #[test]
     fn topup_invoice_transport_failure_releases_the_claim() -> Result<(), String> {
-        struct FailingInvoice {
-            actions: Vec<TelegramAction>,
-        }
-
-        impl ActionSink for FailingInvoice {
-            type Error = &'static str;
-
-            fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
-                self.actions.push(action);
-                Ok(ActionReceipt {
-                    message_id: Some(MessageId(700)),
-                })
-            }
-
-            fn try_invoice(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
-                self.actions.push(action);
-                Err("synthetic invoice transport failure")
-            }
-        }
-
         let config = Config {
             value: Ok(ChatConfig {
                 language: "en".to_owned(),
@@ -17133,9 +16969,7 @@ mod tests {
         let stored = Rc::new(RefCell::new(HashMap::new()));
         let mut dispatcher = NativeDispatcher::new(
             config,
-            FailingInvoice {
-                actions: Vec::new(),
-            },
+            attempt_actions(Attempt::Fail, ActionScript::invoice),
             State::default(),
             values(),
             random(),
@@ -17155,6 +16989,22 @@ mod tests {
             Err(DispatchError::Action(_))
         ));
         assert!(stored.borrow().is_empty());
+        // Closing the pack menu afterwards still reaches Telegram.
+        assert_eq!(
+            dispatcher.dispatch(callback_update("topup:close", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [
+                TelegramAction::SendInvoice { .. },
+                TelegramAction::AnswerCallback { .. },
+                TelegramAction::DeleteMessage {
+                    message_id: MessageId(7),
+                    ..
+                },
+            ]
+        ));
         Ok(())
     }
 
@@ -17230,9 +17080,7 @@ mod tests {
             Ok(DispatchOutcome::Handled)
         );
         assert_eq!(calls.borrow().as_slice(), [(88, None)]);
-        let Some(TelegramAction::SendMessage(message)) = private.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&private.actions.0);
         assert_eq!(
             message.text,
             "Saldo de IA: 42.00 créditos\n\nCargá más con /topup"
@@ -17266,15 +17114,12 @@ mod tests {
             }),
             calls: Rc::clone(&calls),
         }));
-        let mut group_update = update("/balance", Some("es"));
-        if let IncomingEvent::Message(message) = &mut group_update.event {
+        let group_update = message_update("/balance", Some("es"), |message| {
             message.chat_type = Some("group".to_owned());
-        }
+        });
         assert_eq!(group.dispatch(group_update), Ok(DispatchOutcome::Handled));
         assert_eq!(calls.borrow().as_slice(), [(88, None), (88, Some(-42))]);
-        let Some(TelegramAction::SendMessage(message)) = group.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&group.actions.0);
         assert!(
             message
                 .text
@@ -17308,9 +17153,7 @@ mod tests {
             failed.dispatch(update("/balance", Some("es"))),
             Ok(DispatchOutcome::Handled)
         );
-        let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&failed.actions.0);
         assert_eq!(message.text, "I could not load your balance. Try again");
         assert!(failed.state_diagnostics()[0].contains("synthetic database failure"));
 
@@ -17380,18 +17223,16 @@ mod tests {
             calls.borrow().as_slice(),
             [(88, 2, None, "older".to_owned())]
         );
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&dispatcher.actions.0);
         assert_eq!(
             message.text,
             "Gastos de IA\n\n26/08 14:32 | 0.08 cr\n  respuesta 0.03 cr\n  web 0.05 cr"
         );
-        let Some(keyboard) = message.reply_markup.as_ref() else {
-            return;
-        };
         assert_eq!(
-            keyboard.inline_keyboard[0][0].callback_data.as_deref(),
+            message
+                .reply_markup
+                .as_ref()
+                .and_then(|keyboard| keyboard.inline_keyboard[0][0].callback_data.as_deref()),
             Some("chg:88:2:o:30:-180")
         );
     }
@@ -17428,9 +17269,7 @@ mod tests {
             empty.dispatch(update("/history", Some("es"))),
             Ok(DispatchOutcome::Handled)
         );
-        let Some(TelegramAction::SendMessage(message)) = empty.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&empty.actions.0);
         assert_eq!(message.text, "You have no recent AI spending");
 
         let config = Config {
@@ -17450,9 +17289,7 @@ mod tests {
             invalid.dispatch(update("/gastos 0", Some("es"))),
             Ok(DispatchOutcome::Handled)
         );
-        let Some(TelegramAction::SendMessage(message)) = invalid.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&invalid.actions.0);
         assert_eq!(message.text, "Mandalo así: /gastos [cantidad]");
 
         let config = Config {
@@ -17476,9 +17313,7 @@ mod tests {
             failed.dispatch(update("/charges", Some("es"))),
             Ok(DispatchOutcome::Handled)
         );
-        let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&failed.actions.0);
         assert_eq!(message.text, "Se trabó leyendo tus gastos. Probá de nuevo");
         assert!(failed.state_diagnostics()[0].contains("synthetic history failure"));
 
@@ -17526,15 +17361,12 @@ mod tests {
             }),
             calls: Rc::clone(&calls),
         }));
-        let mut group_update = update("/transfer 0.1", Some("es"));
-        if let IncomingEvent::Message(message) = &mut group_update.event {
+        let group_update = message_update("/transfer 0.1", Some("es"), |message| {
             message.chat_type = Some("group".to_owned());
-        }
+        });
         assert_eq!(success.dispatch(group_update), Ok(DispatchOutcome::Handled));
         assert_eq!(calls.borrow().as_slice(), [(88, -42, 10)]);
-        let Some(TelegramAction::SendMessage(message)) = success.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&success.actions.0);
         assert_eq!(
             message.text,
             "Pasaste 0.10 créditos al grupo\n\nTu saldo: 2.85 créditos\nSaldo del grupo: 12.15 créditos"
@@ -17564,17 +17396,14 @@ mod tests {
             }),
             calls,
         }));
-        let mut group_update = update("/transfer 1.5", Some("es"));
-        if let IncomingEvent::Message(message) = &mut group_update.event {
+        let group_update = message_update("/transfer 1.5", Some("es"), |message| {
             message.chat_type = Some("supergroup".to_owned());
-        }
+        });
         assert_eq!(
             insufficient.dispatch(group_update),
             Ok(DispatchOutcome::Handled)
         );
-        let Some(TelegramAction::SendMessage(message)) = insufficient.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&insufficient.actions.0);
         assert_eq!(
             message.text,
             "Not enough personal balance: you have 0.70 credits\nTry a smaller amount or add credits with /topup"
@@ -17600,9 +17429,7 @@ mod tests {
             private.dispatch(update("/transfer 1", Some("es"))),
             Ok(DispatchOutcome::Handled)
         );
-        let Some(TelegramAction::SendMessage(message)) = private.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&private.actions.0);
         assert_eq!(
             message.text,
             "Esto es para grupos, capo. Usalo ahí: /transfer <monto>"
@@ -17625,14 +17452,11 @@ mod tests {
             result: Err("synthetic uncertain transaction".to_owned()),
             calls: Rc::new(RefCell::new(Vec::new())),
         }));
-        let mut group_update = update("/transfer 1", Some("es"));
-        if let IncomingEvent::Message(message) = &mut group_update.event {
+        let group_update = message_update("/transfer 1", Some("es"), |message| {
             message.chat_type = Some("group".to_owned());
-        }
+        });
         assert_eq!(failed.dispatch(group_update), Ok(DispatchOutcome::Handled));
-        let Some(TelegramAction::SendMessage(message)) = failed.actions.0.first() else {
-            return;
-        };
+        let message = first_sent(&failed.actions.0);
         assert_eq!(message.text, "Se trabó la transferencia. Probá de nuevo");
         assert!(failed.state_diagnostics()[0].contains("synthetic uncertain transaction"));
 
@@ -17649,10 +17473,9 @@ mod tests {
             authorization(),
             "@mybot",
         );
-        let mut group_update = update("/transfer 1", Some("es"));
-        if let IncomingEvent::Message(message) = &mut group_update.event {
+        let group_update = message_update("/transfer 1", Some("es"), |message| {
             message.chat_type = Some("group".to_owned());
-        }
+        });
         assert_eq!(
             shadow.dispatch(group_update),
             Err(DispatchError::MissingService("credit transfers"))
@@ -17698,9 +17521,7 @@ mod tests {
                 payload: "topup:p50:42:en".to_owned(),
             }]
         );
-        let [TelegramAction::SendMessage(message)] = dispatcher.actions.0.as_slice() else {
-            return;
-        };
+        let message = only_sent(&dispatcher.actions.0);
         assert_eq!(message.chat_id, ChatId(42));
         assert_eq!(
             message.text,
@@ -17746,9 +17567,7 @@ mod tests {
                 dispatcher.dispatch(successful_payment_update("p50", 42, 25, Some("en"))),
                 Ok(DispatchOutcome::Handled)
             );
-            let [TelegramAction::SendMessage(message)] = dispatcher.actions.0.as_slice() else {
-                return;
-            };
+            let message = only_sent(&dispatcher.actions.0);
             assert_eq!(message.text, expected);
             assert_eq!(!dispatcher.state_diagnostics().is_empty(), diagnostic);
         }
@@ -17791,9 +17610,7 @@ mod tests {
             Ok(DispatchOutcome::Handled)
         );
         assert!(records.borrow().is_empty());
-        let Some(TelegramAction::SendMessage(message)) = dispatcher.actions.0.last() else {
-            return;
-        };
+        let message = last_sent(&dispatcher.actions.0);
         assert_eq!(
             message.text,
             "AI credits are unavailable right now. Try again later or tell the admin"
@@ -17857,15 +17674,7 @@ mod tests {
             dispatcher.dispatch(update("/random invalid", None)),
             Ok(DispatchOutcome::Handled)
         );
-        let texts = dispatcher
-            .actions
-            .0
-            .iter()
-            .filter_map(|action| match action {
-                TelegramAction::SendMessage(message) => Some(message.text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+        let texts = sent_texts(&dispatcher.actions.0);
         assert_eq!(
             texts,
             [
@@ -17898,19 +17707,17 @@ mod tests {
             dispatcher.dispatch(update("https://x.com/a/status/1", None)),
             Ok(DispatchOutcome::Handled)
         );
-        let [TelegramAction::SendMessage(message)] = dispatcher.actions.0.as_slice() else {
-            return;
-        };
+        let message = only_sent(&dispatcher.actions.0);
         assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
         assert_eq!(
             message.text,
             "https://fixupx.com/a/status/1\n\ncompartido por @tester"
         );
-        let Some(markup) = &message.reply_markup else {
-            return;
-        };
         assert_eq!(
-            markup.inline_keyboard[0][0].url.as_deref(),
+            message
+                .reply_markup
+                .as_ref()
+                .and_then(|markup| markup.inline_keyboard[0][0].url.as_deref()),
             Some("https://x.com/a/status/1")
         );
         assert!(dispatcher.state.incoming.is_empty());
@@ -17946,45 +17753,25 @@ mod tests {
             dispatcher.dispatch(update("https://instagram.com/reel/a", None)),
             Ok(DispatchOutcome::Handled)
         );
-        let [
-            TelegramAction::SendVideo {
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [TelegramAction::SendVideo {
                 video,
                 caption,
-                reply_to_message_id,
+                reply_to_message_id: Some(MessageId(7)),
                 ..
-            },
-        ] = dispatcher.actions.0.as_slice()
-        else {
-            return;
-        };
-        assert_eq!(video.as_ref(), &[1, 2, 3]);
-        assert!(caption.contains("compartido por @tester"));
-        assert_eq!(*reply_to_message_id, Some(MessageId(7)));
+            }] if video.as_ref() == [1, 2, 3] && caption.contains("compartido por @tester")
+        ));
 
-        #[derive(Default)]
-        struct RejectVideo(Vec<TelegramAction>);
-        impl ActionSink for RejectVideo {
-            type Error = Infallible;
-
-            fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
-                self.0.push(action);
-                Ok(ActionReceipt {
-                    message_id: Some(MessageId(701)),
-                })
-            }
-
-            fn try_video(
-                &mut self,
-                _action: TelegramAction,
-            ) -> Result<Option<ActionReceipt>, Self::Error> {
-                Ok(None)
-            }
-        }
         let mut source = links(true);
         source.oversized_video = Some(vec![4, 5, 6]);
         let mut fallback = NativeDispatcher::new(
             config(),
-            RejectVideo::default(),
+            Actions::scripted(ActionScript {
+                receipts: Receipts::Fixed(Some(MessageId(701))),
+                video: Attempt::Skip,
+                ..ActionScript::default()
+            }),
             State::default(),
             values(),
             random(),
@@ -18023,32 +17810,25 @@ mod tests {
             "@mybot",
         )
         .with_link_replacement_source(Box::new(links(true)));
-        let mut incoming = update("https://x.com/a/status/1", Some("en"));
-        let IncomingEvent::Message(message) = &mut incoming.event else {
-            return;
-        };
-        message.has_reply = true;
-        message.replied_message_id = Some(MessageId(3));
-        message.sender_username = None;
-        message.sender_first_name = Some("Ana".to_owned());
-        message.sender_last_name = Some("Test".to_owned());
+        let incoming = message_update("https://x.com/a/status/1", Some("en"), |message| {
+            message.has_reply = true;
+            message.replied_message_id = Some(MessageId(3));
+            message.sender_username = None;
+            message.sender_first_name = Some("Ana".to_owned());
+            message.sender_last_name = Some("Test".to_owned());
+        });
         assert_eq!(dispatcher.dispatch(incoming), Ok(DispatchOutcome::Handled));
-        let [
-            TelegramAction::SendMessage(message),
-            TelegramAction::DeleteMessage {
-                chat_id,
-                message_id,
-            },
-        ] = dispatcher.actions.0.as_slice()
-        else {
-            return;
-        };
-        assert_eq!(message.reply_to_message_id, Some(MessageId(3)));
-        assert_eq!(
-            message.text,
-            "https://fixupx.com/a/status/1\n\nshared by Ana Test"
-        );
-        assert_eq!((*chat_id, *message_id), (ChatId(-42), MessageId(7)));
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [
+                TelegramAction::SendMessage(message),
+                TelegramAction::DeleteMessage {
+                    chat_id: ChatId(-42),
+                    message_id: MessageId(7),
+                },
+            ] if message.reply_to_message_id == Some(MessageId(3))
+                && message.text == "https://fixupx.com/a/status/1\n\nshared by Ana Test"
+        ));
     }
 
     #[test]
@@ -18107,12 +17887,10 @@ mod tests {
             dispatcher.dispatch(update("/ask https://x.com/a/status/1", None)),
             Err(DispatchError::MissingService("AI conversation"))
         );
-        let mut reply = update("mirá https://x.com/a/status/1", None);
-        let IncomingEvent::Message(message) = &mut reply.event else {
-            return;
-        };
-        message.has_reply = true;
-        message.replied_message_id = Some(MessageId(3));
+        let reply = message_update("mirá https://x.com/a/status/1", None, |message| {
+            message.has_reply = true;
+            message.replied_message_id = Some(MessageId(3));
+        });
         assert_eq!(
             dispatcher.dispatch(reply),
             Err(DispatchError::MissingService("AI conversation"))
@@ -18148,11 +17926,13 @@ mod tests {
     }
 
     fn group_link_update(text: &str) -> IncomingUpdate {
-        let mut incoming = update(text, None);
-        if let IncomingEvent::Message(message) = &mut incoming.event {
-            message.chat_type = Some("group".to_owned());
-        }
-        incoming
+        wrap_message(group_link_message(text))
+    }
+
+    fn group_link_message(text: &str) -> IncomingMessage {
+        let mut message = incoming_message(text, None);
+        message.chat_type = Some("group".to_owned());
+        message
     }
 
     #[test]
@@ -18189,10 +17969,10 @@ mod tests {
                 Some(TelegramAction::SendMessage(fixed)) if fixed.text.contains("fixupx.com")
             ));
             // The original stays so the AI answer can reply to it.
-            assert!(!actions.iter().any(|action| matches!(
-                action,
-                TelegramAction::DeleteMessage { message_id, .. } if *message_id == MessageId(7)
-            )));
+            assert!(!actions.contains(&TelegramAction::DeleteMessage {
+                chat_id: ChatId(-42),
+                message_id: MessageId(7),
+            }));
             assert!(actions.iter().any(|action| matches!(
                 action,
                 TelegramAction::SendMessage(reply) if reply.text == "Pensando."
@@ -18277,13 +18057,12 @@ mod tests {
         )
         .with_link_replacement_source(Box::new(links(false)))
         .with_ai_conversation_source(Box::new(source));
-        let mut reply = group_link_update("https://x.com/a/status/1");
-        if let IncomingEvent::Message(message) = &mut reply.event {
-            message.has_reply = true;
-            message.replied_message_id = Some(MessageId(3));
-            message.replied_sender_username = Some("mybot".to_owned());
-            message.replied_text = Some("hola".to_owned());
-        }
+        let mut reply = group_link_message("https://x.com/a/status/1");
+        reply.has_reply = true;
+        reply.replied_message_id = Some(MessageId(3));
+        reply.replied_sender_username = Some("mybot".to_owned());
+        reply.replied_text = Some("hola".to_owned());
+        let reply = wrap_message(reply);
         assert_eq!(dispatcher.dispatch(reply), Ok(DispatchOutcome::Handled));
         assert_eq!(prepared.borrow().len(), 1);
         // Replacement already inspected the link and found nothing to add.
@@ -18310,35 +18089,19 @@ mod tests {
     #[test]
     fn addressing_requires_a_mention_a_reply_to_the_bot_or_private_commentary() {
         let message = |text: &str, chat_type: &str| {
-            let mut incoming = update(text, None);
-            if let IncomingEvent::Message(message) = &mut incoming.event {
-                message.chat_type = Some(chat_type.to_owned());
-                message.replied_sender_username =
-                    text.starts_with("reply").then(|| "MyBot".to_owned());
-            }
-            match incoming.event {
-                IncomingEvent::Message(message) => Some(*message),
-                _ => None,
-            }
+            let mut message = incoming_message(text, None);
+            message.chat_type = Some(chat_type.to_owned());
+            message.replied_sender_username = text.starts_with("reply").then(|| "MyBot".to_owned());
+            message
         };
-        let (
-            Some(group_link),
-            Some(private_link),
-            Some(private_text),
-            Some(group_mention),
-            Some(group_reply),
-            Some(group_text),
-        ) = (
+        let (group_link, private_link, private_text, group_mention, group_reply, group_text) = (
             message("https://x.com/a/status/1", "group"),
             message("https://x.com/a/status/1", "private"),
             message("mirá https://x.com/a/status/1", "private"),
             message("@mybot https://x.com/a/status/1", "group"),
             message("reply https://x.com/a/status/1", "group"),
             message("mirá https://x.com/a/status/1", "group"),
-        )
-        else {
-            return;
-        };
+        );
         let addressed_with = |bot_name: &str,
                               message: &IncomingMessage,
                               config: &ChatConfig,
@@ -18458,22 +18221,6 @@ mod tests {
 
     #[test]
     fn random_source_errors_are_not_acknowledged() {
-        struct FailingRandom;
-        impl RandomSource for FailingRandom {
-            type Error = &'static str;
-
-            fn choice_index(&mut self, _upper_exclusive: usize) -> Result<usize, Self::Error> {
-                Err("synthetic random failure")
-            }
-
-            fn inclusive_integer(
-                &mut self,
-                _start: &BigInt,
-                _end: &BigInt,
-            ) -> Result<BigInt, Self::Error> {
-                Err("synthetic random failure")
-            }
-        }
         let config = Config {
             value: Ok(ChatConfig::default()),
             chat_ids: Vec::new(),
@@ -18483,7 +18230,10 @@ mod tests {
             Actions::default(),
             State::default(),
             values(),
-            FailingRandom,
+            Samples {
+                failing: true,
+                ..random()
+            },
             authorization(),
             "@mybot",
         );
@@ -18493,28 +18243,16 @@ mod tests {
         ));
         assert!(dispatcher.actions.0.is_empty());
         assert!(dispatcher.state.incoming.is_empty());
+        // Numeric ranges draw an integer from the same failing source.
+        assert!(matches!(
+            dispatcher.dispatch(update("/random 1-10", None)),
+            Err(DispatchError::Random("synthetic random failure"))
+        ));
+        assert!(dispatcher.actions.0.is_empty());
     }
 
     #[test]
     fn state_failures_are_diagnostic_and_do_not_duplicate_or_block_delivery() {
-        struct FailingState;
-        impl MessageStateSink for FailingState {
-            type Error = &'static str;
-
-            fn record_incoming(
-                &mut self,
-                _plan: &IncomingCommandWritePlan,
-            ) -> Result<(), Self::Error> {
-                Err("synthetic incoming failure")
-            }
-
-            fn record_outgoing(
-                &mut self,
-                _plan: &OutgoingCommandWritePlan,
-            ) -> Result<(), Self::Error> {
-                Err("synthetic outgoing failure")
-            }
-        }
         let config = Config {
             value: Ok(ChatConfig::default()),
             chat_ids: Vec::new(),
@@ -18522,7 +18260,7 @@ mod tests {
         let mut dispatcher = NativeDispatcher::new(
             config,
             Actions::default(),
-            FailingState,
+            State::failing(),
             values(),
             random(),
             authorization(),
@@ -18546,15 +18284,14 @@ mod tests {
         source.summary_preparation =
             Some(Ok(AiPreparation::reply("synthetic summary result", None)));
         let mut dispatcher = dispatcher.with_ai_conversation_source(Box::new(source));
-        let mut media = update("/transcribe", None);
-        if let IncomingEvent::Message(message) = &mut media.event {
+        let media = message_update("/transcribe", None, |message| {
             message.has_reply = true;
             message.replied_message_id = Some(MessageId(6));
             message.audio_media_kind = Some("voice".to_owned());
             if let Some(content) = message.content.as_mut() {
                 content.audio_file_id = Some("synthetic-audio".to_owned());
             }
-        }
+        });
         assert_eq!(dispatcher.dispatch(media), Ok(DispatchOutcome::Handled));
         assert!(dispatcher.state_diagnostics().iter().any(|diagnostic| {
             diagnostic == "incoming media command state: synthetic incoming failure"
@@ -18588,12 +18325,11 @@ mod tests {
             "@mybot",
         )
         .with_ai_conversation_source(Box::new(metadata_source));
-        let mut reply = update("synthetic follow-up", None);
-        if let IncomingEvent::Message(message) = &mut reply.event {
+        let reply = message_update("synthetic follow-up", None, |message| {
             message.has_reply = true;
             message.replied_message_id = Some(MessageId(6));
             message.replied_sender_username = Some("mybot".to_owned());
-        }
+        });
         assert_eq!(
             metadata_dispatcher.dispatch(reply),
             Ok(DispatchOutcome::Handled)
@@ -18622,10 +18358,9 @@ mod tests {
             "@mybot",
         )
         .with_ai_conversation_source(Box::new(ignored_source));
-        let mut ordinary = update("synthetic group message", None);
-        if let IncomingEvent::Message(message) = &mut ordinary.event {
+        let ordinary = message_update("synthetic group message", None, |message| {
             message.chat_type = Some("group".to_owned());
-        }
+        });
         assert_eq!(
             ignored_dispatcher.dispatch(ordinary),
             Ok(DispatchOutcome::Handled)
@@ -18645,6 +18380,7 @@ mod tests {
         let mut samples = Samples {
             choice_index: usize::MAX,
             integer: BigInt::from(0_u8),
+            failing: false,
         };
         assert_eq!(samples.unit_interval(), Ok(0.9999));
 
@@ -18678,7 +18414,7 @@ mod tests {
                     value: Ok(ChatConfig::default()),
                     chat_ids: Vec::new(),
                 },
-                EditFailActions::default(),
+                attempt_actions(Attempt::Fail, ActionScript::edit),
                 State::default(),
                 values(),
                 random(),
@@ -18692,10 +18428,12 @@ mod tests {
                 update("synthetic question", None)
             };
             assert_eq!(dispatcher.dispatch(input), Ok(DispatchOutcome::Handled));
-            assert!(dispatcher.state_diagnostics().iter().any(|diagnostic| {
-                diagnostic.contains("Telegram stream ignored")
-                    || diagnostic.contains("Telegram send returned no message")
-            }));
+            assert!(
+                dispatcher
+                    .state_diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.contains("Telegram stream ignored"))
+            );
         }
 
         let (source, _observations) = ai_source(Err("synthetic provider failure".to_owned()));
@@ -18740,15 +18478,14 @@ mod tests {
             "@mybot",
         )
         .with_ai_conversation_source(Box::new(source));
-        let mut media = update("/transcribe", None);
-        if let IncomingEvent::Message(message) = &mut media.event {
+        let media = message_update("/transcribe", None, |message| {
             message.has_reply = true;
             message.replied_message_id = Some(MessageId(6));
             message.audio_media_kind = Some("voice".to_owned());
             if let Some(content) = message.content.as_mut() {
                 content.audio_file_id = Some("synthetic-audio".to_owned());
             }
-        }
+        });
         assert_eq!(missing_media.dispatch(media), Ok(DispatchOutcome::Handled));
         assert_eq!(
             missing_media.dispatch(update("/summary", None)),
@@ -18770,18 +18507,2202 @@ mod tests {
             Samples {
                 choice_index: 9_999,
                 integer: BigInt::from(0_u8),
+                failing: false,
             },
             authorization(),
             "@mybot",
         )
         .with_ai_conversation_source(Box::new(source));
-        let mut group = update("synthetic group message", None);
-        if let IncomingEvent::Message(message) = &mut group.event {
+        let group = message_update("synthetic group message", None, |message| {
             message.chat_type = Some("group".to_owned());
-        }
+        });
         assert_eq!(
             random_dispatcher.dispatch(group),
             Ok(DispatchOutcome::Handled)
         );
+    }
+
+    fn market_candidate(
+        id: &str,
+        symbol: &str,
+        name: &str,
+        exchange: &str,
+        contracts: Vec<TokenAddress>,
+    ) -> bot_core::market_prices::MarketCandidate {
+        bot_core::market_prices::MarketCandidate {
+            id: id.to_owned(),
+            symbol: symbol.to_owned(),
+            name: name.to_owned(),
+            slug: symbol.to_ascii_lowercase(),
+            price: "1".to_owned(),
+            change: "0".to_owned(),
+            currency: String::new(),
+            exchange: exchange.to_owned(),
+            asset_type: String::new(),
+            contracts,
+        }
+    }
+
+    #[test]
+    fn unnamed_dex_tokens_are_labelled_by_their_symbol() {
+        let mut signal = token_signal();
+        signal.pair.base_token.name = String::new();
+        let candidate = super::market_token_candidate(&signal, Some("24h"), None);
+        assert_eq!(candidate.name, "SYN");
+        assert_eq!(candidate.symbol, "SYN");
+        assert_eq!(
+            candidate.id,
+            "token:solana:solana:J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump"
+        );
+    }
+
+    #[test]
+    fn provider_candidates_replace_overlapping_dex_candidates() {
+        let token = token_signal().token;
+        let mut candidates = vec![
+            market_candidate("token:solana:solana:x", "SYN", "", "", vec![token.clone()]),
+            market_candidate("42", "SYN", "Synthetic", "", vec![token.clone()]),
+            // A second DEX duplicate never replaces the provider identity.
+            market_candidate("token:solana:solana:y", "SYN", "", "", vec![token]),
+        ];
+        deduplicate_market_candidates(&mut candidates);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].id, "42");
+        assert_eq!(candidates[0].name, "Synthetic");
+    }
+
+    #[test]
+    fn token_signals_match_symbol_name_and_slug_queries() {
+        let signal = token_signal();
+        let matches = |query: SignalQuery| super::token_signal_matches_query(&signal, &query);
+        assert!(matches(SignalQuery::Symbol("$syn".to_owned())));
+        assert!(matches(SignalQuery::Symbol("synthetic token".to_owned())));
+        assert!(!matches(SignalQuery::Symbol("other".to_owned())));
+        assert!(matches(SignalQuery::Slug("synthetic-token".to_owned())));
+        assert!(matches(SignalQuery::Slug("syn".to_owned())));
+        assert!(!matches(SignalQuery::Slug("other-token".to_owned())));
+    }
+
+    #[test]
+    fn provider_requests_use_slugs_and_detected_contract_addresses() {
+        let token = token_signal().token;
+        assert_eq!(
+            super::provider_request_text(
+                "https://www.coingecko.com/en/coins/libra",
+                &SignalQuery::Slug("libra".to_owned())
+            ),
+            "libra"
+        );
+        assert_eq!(
+            super::provider_request_text(
+                "https://dexscreener.com/solana/J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump",
+                &SignalQuery::Address(token.clone())
+            ),
+            token.address
+        );
+        assert_eq!(
+            super::provider_request_text(&token.address, &SignalQuery::Address(token.clone())),
+            token.address
+        );
+        assert_eq!(
+            super::provider_request_text("syn", &SignalQuery::Symbol("syn".to_owned())),
+            "syn"
+        );
+    }
+
+    #[test]
+    fn market_selection_buttons_disambiguate_identical_labels() {
+        let token = token_signal().token;
+        let selection = bot_core::market_prices::MarketSelection {
+            query: "syn".to_owned(),
+            timeframe: None,
+            target_symbol: "USD".to_owned(),
+            target_parameter: "USD".to_owned(),
+            conversion: None,
+            candidates: vec![
+                market_candidate("stock:SYN", "SYN", "Synthetic Inc", "", Vec::new()),
+                market_candidate("stock:SYN", "SYN", "Synthetic Inc", "", Vec::new()),
+                market_candidate("7", "SYN", "Synthetic", "", vec![token.clone()]),
+                market_candidate("8", "SYN", "Synthetic", "", vec![token]),
+            ],
+        };
+        let keyboard =
+            super::market_selection_page("sel", &selection, bot_core::locale::Locale::En, 0);
+        let labels = keyboard
+            .inline_keyboard
+            .iter()
+            .take(4)
+            .map(|row| row[0].text.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [
+                // A stock without an exchange shows only its ticker, and
+                // duplicates without contracts fall back to their ids.
+                "Synthetic Inc, SYN [stock:SYN]",
+                "Synthetic Inc, SYN [stock:SYN]",
+                "Synthetic, SYN (solana) [J8PSdN…pump]",
+                "Synthetic, SYN (solana) [J8PSdN…pump]",
+            ]
+        );
+    }
+
+    /// Message state storage that rejects every write.
+    fn broken_state_dispatcher(
+        config: ChatConfig,
+    ) -> NativeDispatcher<Config, Actions, State, Values, Samples, Authorization> {
+        NativeDispatcher::new(
+            Config {
+                value: Ok(config),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::failing(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+    }
+
+    /// Link replacement that only implements the required loader, so the AI
+    /// turn falls back to the trait's "no preview" default. It never finds a
+    /// better link.
+    struct LoadOnlyLinks;
+
+    impl LinkReplacementSource for LoadOnlyLinks {
+        fn load(&mut self, text: &str, _now_unix: i64) -> LinkReplacementLoad {
+            LinkReplacementLoad {
+                replacement: LinkReplacement {
+                    text: text.to_owned(),
+                    changed: false,
+                    original_links: Vec::new(),
+                },
+                context: None,
+                oversized_video: None,
+                diagnostics: Vec::new(),
+            }
+        }
+    }
+
+    #[test]
+    fn link_replacement_guards_skip_incomplete_and_unreplaceable_messages() {
+        let mut dispatcher = dispatcher().with_link_replacement_source(Box::new(links(true)));
+        let config = ChatConfig::default();
+        let mut anonymous = incoming_message("https://x.com/a/status/1", None);
+        anonymous.sender_id = None;
+        assert_eq!(
+            dispatcher.dispatch_link_replacement(
+                &anonymous,
+                &config,
+                bot_core::locale::Locale::Es,
+                1_672_531_200,
+                false,
+            ),
+            Ok(Some(DispatchOutcome::Unsupported))
+        );
+        let ordinary = incoming_message("mirá https://example.com/nota", None);
+        assert_eq!(
+            dispatcher.dispatch_link_replacement(
+                &ordinary,
+                &config,
+                bot_core::locale::Locale::Es,
+                1_672_531_200,
+                false,
+            ),
+            Ok(None)
+        );
+        assert!(dispatcher.actions.0.is_empty());
+    }
+
+    #[test]
+    fn link_replacement_state_failures_are_diagnostic() {
+        let mut unchanged = broken_state_dispatcher(ChatConfig::default())
+            .with_link_replacement_source(Box::new(links(false)));
+        assert_eq!(
+            unchanged.dispatch(update("https://x.com/a/status/1", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(unchanged.actions.0.is_empty());
+        assert_eq!(
+            unchanged.state_diagnostics(),
+            ["unreplaced link state: synthetic incoming failure"]
+        );
+
+        let mut fixed = broken_state_dispatcher(ChatConfig::default())
+            .with_link_replacement_source(Box::new(links(true)));
+        assert_eq!(
+            fixed.dispatch(update("https://x.com/a/status/1", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            sent_texts(&fixed.actions.0),
+            ["https://fixupx.com/a/status/1\n\ncompartido por @tester"]
+        );
+        assert_eq!(
+            fixed.state_diagnostics(),
+            ["fixed link state: synthetic outgoing failure"]
+        );
+    }
+
+    #[test]
+    fn addressed_link_fix_marker_failures_do_not_block_the_fix_or_the_answer() {
+        let (source, (prepared, _ignored, _deliveries)) =
+            ai_source(Ok(AiPreparation::reply("respuesta", None)));
+        let mut dispatcher = dispatcher()
+            .with_link_replacement_source(Box::new(links(true)))
+            .with_market_price_source(Box::new(ScriptedTakeMarketPrices {
+                load: Err("synthetic marker lookup failure".to_owned()),
+                takes: RefCell::new(VecDeque::new()),
+                saves: RefCell::new(VecDeque::from([Err(
+                    "synthetic marker save failure".to_owned()
+                )])),
+                candidate: market_candidate_quote(),
+            }))
+            .with_ai_conversation_source(Box::new(source));
+        assert_eq!(
+            dispatcher.dispatch(group_link_update("@mybot mirá https://x.com/a/status/1")),
+            Ok(DispatchOutcome::Handled)
+        );
+        let diagnostics = dispatcher.state_diagnostics();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|entry| entry == "sent link fix lookup: synthetic marker lookup failure")
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|entry| entry == "sent link fix marker: synthetic marker save failure")
+        );
+        assert_eq!(
+            first_sent(&dispatcher.actions.0).text,
+            "https://fixupx.com/a/status/1\n\ncompartido por @tester"
+        );
+        assert_eq!(prepared.borrow().len(), 1);
+    }
+
+    #[test]
+    fn link_sources_without_previews_leave_the_ai_turn_without_link_context() {
+        let (source, (prepared, _ignored, _deliveries)) =
+            ai_source(Ok(AiPreparation::reply("respuesta", None)));
+        let mut dispatcher = dispatcher()
+            .with_link_replacement_source(Box::new(LoadOnlyLinks))
+            .with_ai_conversation_source(Box::new(source));
+        assert_eq!(
+            dispatcher.dispatch(group_link_update("@mybot leé https://example.com/nota")),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(prepared.borrow().len(), 1);
+        assert_eq!(prepared.borrow()[0].link_context, None);
+        // An unaddressed link it cannot improve is only remembered.
+        let answered = dispatcher.actions.0.len();
+        assert_eq!(
+            dispatcher.dispatch(group_link_update("https://x.com/a/status/1")),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(dispatcher.actions.0.len(), answered);
+        assert_eq!(dispatcher.state.incoming.len(), 1);
+        assert_eq!(prepared.borrow().len(), 1);
+    }
+
+    #[test]
+    fn token_signal_source_defaults_expand_loads_and_offer_no_history() {
+        let mut source = NoHistorySignals(Some(token_signal()));
+        let candidates = source.load_candidates(&SignalQuery::Symbol("syn".to_owned()));
+        assert_eq!(candidates.signals, [token_signal()]);
+        assert!(candidates.diagnostics.is_empty());
+        assert_eq!(
+            source.render_period_photo(&token_signal(), "24h", 1_672_531_200),
+            Err("requested token history unavailable".to_owned())
+        );
+        assert_eq!(
+            source.period_candles(&token_signal(), "24h", 1_672_531_200),
+            Ok(Vec::new())
+        );
+        assert_eq!(source.load_state("abc"), Ok(None));
+        assert_eq!(source.save_state("abc", &requester_state(None)), Ok(()));
+        assert_eq!(source.clear_state("abc"), Ok(()));
+    }
+
+    fn payment_message(chat: Value, from: Value, payment: Value) -> IncomingUpdate {
+        IncomingUpdate {
+            update_id: 103,
+            event: IncomingEvent::SuccessfulPayment(Map::from_iter([
+                ("chat".to_owned(), chat),
+                ("from".to_owned(), from),
+                ("successful_payment".to_owned(), payment),
+            ])),
+        }
+    }
+
+    fn valid_payment(payload: &str) -> Value {
+        json!({
+            "currency": "XTR",
+            "invoice_payload": payload,
+            "telegram_payment_charge_id": "charge-1",
+            "total_amount": 25,
+        })
+    }
+
+    #[test]
+    fn malformed_and_anonymous_successful_payments_are_acknowledged_silently() {
+        let records = Rc::new(RefCell::new(Vec::new()));
+        let mut dispatcher = dispatcher().with_payment_sink(Box::new(Payments {
+            result: Ok(StarPaymentReceipt {
+                inserted: true,
+                user_balance: 5_000,
+            }),
+            records: Rc::clone(&records),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(payment_message(
+                json!("not an object"),
+                json!({"id": 42}),
+                valid_payment("topup:p50:42:en"),
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            dispatcher.state_diagnostics(),
+            [
+                "invalid successful payment: Telegram payment message, chat, or payment payload is malformed"
+            ]
+        );
+        for (chat, from) in [
+            (json!({"type": "private"}), json!({"id": 42})),
+            (json!({"id": 42, "type": "private"}), json!({})),
+        ] {
+            assert_eq!(
+                dispatcher.dispatch(payment_message(
+                    chat,
+                    from,
+                    valid_payment("topup:p50:42:en")
+                )),
+                Ok(DispatchOutcome::Handled)
+            );
+        }
+        assert!(dispatcher.actions.0.is_empty());
+        assert!(records.borrow().is_empty());
+    }
+
+    #[test]
+    fn spanish_payment_failures_are_localized() {
+        let records = Rc::new(RefCell::new(Vec::new()));
+        let mut dispatcher = dispatcher().with_payment_sink(Box::new(Payments {
+            result: Err("synthetic ledger failure".to_owned()),
+            records: Rc::clone(&records),
+        }));
+        let chat = json!({"id": 42, "type": "private"});
+        assert_eq!(
+            dispatcher.dispatch(payment_message(
+                chat.clone(),
+                json!({"id": 42}),
+                json!({
+                    "currency": "XTR",
+                    "invoice_payload": "topup:p50:42:es",
+                    "telegram_payment_charge_id": "charge-1",
+                    "total_amount": 24,
+                }),
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            dispatcher.dispatch(payment_message(
+                chat,
+                json!({"id": 42}),
+                valid_payment("topup:p50:42:es"),
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            sent_texts(&dispatcher.actions.0),
+            [
+                "Me cayó un pago raro y no lo pude validar. Avisale al admin",
+                "Me entró la guita pero se trabó la acreditación. Avisale al admin",
+            ]
+        );
+        assert_eq!(records.borrow().len(), 1);
+        assert!(dispatcher.state_diagnostics()[0].contains("charge_id=charge-1"));
+    }
+
+    #[test]
+    fn recorded_payment_in_a_non_numeric_chat_is_an_invariant_failure() {
+        let records = Rc::new(RefCell::new(Vec::new()));
+        let mut dispatcher = dispatcher().with_payment_sink(Box::new(Payments {
+            result: Ok(StarPaymentReceipt {
+                inserted: true,
+                user_balance: 5_000,
+            }),
+            records: Rc::clone(&records),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(payment_message(
+                json!({"id": "channel", "type": "private"}),
+                json!({"id": 42}),
+                valid_payment("topup:p50:42:en"),
+            )),
+            Err(DispatchError::Invariant(
+                "validated payment chat id was not numeric"
+            ))
+        );
+        // The ledger write is idempotent, so a retry cannot double credit.
+        assert_eq!(records.borrow().len(), 1);
+        assert!(dispatcher.actions.0.is_empty());
+    }
+
+    #[test]
+    fn command_menu_sync_failure_does_not_block_the_language_reply() {
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            failing_actions(
+                ActionKind::SetCommands,
+                usize::MAX,
+                "synthetic menu failure",
+                false,
+            ),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        assert_eq!(
+            dispatcher.dispatch(update("/idioma en", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            sent_texts(&dispatcher.actions.0),
+            ["Done, I will speak English now"]
+        );
+        assert_eq!(
+            dispatcher.state_diagnostics(),
+            ["chat command menu update failed chat_id=-42"]
+        );
+    }
+
+    #[test]
+    fn price_delivery_state_failures_are_diagnostic() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mut dispatcher = broken_state_dispatcher(ChatConfig::default())
+            .with_market_price_source(Box::new(MarketPrices {
+                result: MarketPriceLoad {
+                    chart: None,
+                    selection: None,
+                    no_assets_found: false,
+                    text: "BTC: 1 USD".to_owned(),
+                    diagnostics: Vec::new(),
+                },
+                calls: Rc::clone(&calls),
+            }));
+        assert_eq!(
+            dispatcher.dispatch(update("/p btc", None)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(sent_texts(&dispatcher.actions.0), ["BTC: 1 USD"]);
+        assert_eq!(
+            dispatcher.state_diagnostics(),
+            [
+                "incoming price state: synthetic incoming failure",
+                "outgoing price state: synthetic outgoing failure",
+            ]
+        );
+    }
+
+    /// Token signals with scripted discovery, lookups, rendering and state.
+    struct ScriptedSignals {
+        candidates: Vec<TokenSignal>,
+        token: Option<TokenSignal>,
+        photo: Result<Vec<u8>, String>,
+        state: Result<Option<SignalState>, String>,
+        clear_error: Option<String>,
+    }
+
+    impl ScriptedSignals {
+        fn new(candidates: Vec<TokenSignal>, token: Option<TokenSignal>) -> Self {
+            Self {
+                candidates,
+                token,
+                photo: Ok(b"scripted-card".to_vec()),
+                state: Ok(None),
+                clear_error: None,
+            }
+        }
+    }
+
+    impl TokenSignalSource for ScriptedSignals {
+        fn load(&mut self, _query: &SignalQuery) -> TokenSignalLoad {
+            TokenSignalLoad {
+                signal: self.candidates.first().cloned(),
+                diagnostics: Vec::new(),
+            }
+        }
+
+        /// The best match first, followed by the other scripted pairs.
+        fn load_candidates(&mut self, query: &SignalQuery) -> super::TokenSignalCandidates {
+            let best = self.load(query);
+            super::TokenSignalCandidates {
+                signals: best
+                    .signal
+                    .into_iter()
+                    .chain(self.candidates.iter().skip(1).cloned())
+                    .collect(),
+                diagnostics: vec!["scripted discovery".to_owned()],
+            }
+        }
+
+        fn load_token(&mut self, _token: &TokenAddress) -> TokenSignalLoad {
+            TokenSignalLoad {
+                signal: self.token.clone(),
+                diagnostics: Vec::new(),
+            }
+        }
+
+        fn render_period_photo(
+            &mut self,
+            _: &TokenSignal,
+            _: &str,
+            _: i64,
+        ) -> Result<Vec<u8>, String> {
+            self.photo.clone()
+        }
+
+        fn load_state(&mut self, _signal_id: &str) -> Result<Option<SignalState>, String> {
+            self.state.clone()
+        }
+
+        fn save_state(&mut self, _signal_id: &str, _state: &SignalState) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn clear_state(&mut self, _signal_id: &str) -> Result<(), String> {
+            self.clear_error.clone().map_or(Ok(()), Err)
+        }
+    }
+
+    /// Token signals that rely on the trait's defaults: no candle history
+    /// and no period photo.
+    struct NoHistorySignals(Option<TokenSignal>);
+
+    impl TokenSignalSource for NoHistorySignals {
+        fn load(&mut self, _query: &SignalQuery) -> TokenSignalLoad {
+            TokenSignalLoad {
+                signal: self.0.clone(),
+                diagnostics: Vec::new(),
+            }
+        }
+
+        fn load_token(&mut self, _token: &TokenAddress) -> TokenSignalLoad {
+            self.load(&SignalQuery::Symbol(String::new()))
+        }
+
+        fn load_state(&mut self, _signal_id: &str) -> Result<Option<SignalState>, String> {
+            Ok(None)
+        }
+
+        fn save_state(&mut self, _signal_id: &str, _state: &SignalState) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn token_signal_at(address: &str) -> TokenSignal {
+        let mut signal = token_signal();
+        signal.token.address = address.to_owned();
+        signal.pair.base_token.address = address.to_owned();
+        signal
+    }
+
+    const SECOND_MINT: &str = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
+
+    fn quote_load(text: &str, no_assets_found: bool) -> MarketPriceLoad {
+        MarketPriceLoad {
+            chart: None,
+            selection: None,
+            no_assets_found,
+            text: text.to_owned(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn market_prices(result: MarketPriceLoad) -> Box<MarketPrices> {
+        Box::new(MarketPrices {
+            result,
+            calls: Rc::new(RefCell::new(Vec::new())),
+        })
+    }
+
+    fn selection_storage(
+        initial: MarketPriceLoad,
+        candidate: MarketPriceLoad,
+        stored: &Rc<RefCell<HashMap<String, String>>>,
+    ) -> Box<SelectionStorageMarketPrices> {
+        Box::new(SelectionStorageMarketPrices {
+            initial,
+            candidate,
+            stored: Rc::clone(stored),
+            save_calls: Rc::new(RefCell::new(0)),
+            fail_save_at: None,
+            fail_load: None,
+            fail_clear: None,
+            render_success: false,
+            render_caption: None,
+        })
+    }
+
+    fn libra_chart(token: Option<TokenAddress>) -> bot_core::market_prices::MarketChart {
+        bot_core::market_prices::MarketChart {
+            timeframe: None,
+            symbol: "LIBRA".to_owned(),
+            name: "Libra Finance".to_owned(),
+            yahoo_symbol: "LIBRA-USD".to_owned(),
+            token,
+            candidate: None,
+        }
+    }
+
+    #[test]
+    fn conversion_queries_with_several_assets_persist_a_selection_menu() {
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let mut dispatcher = dispatcher().with_market_price_source(selection_storage(
+            market_selection_load(None),
+            market_candidate_quote(),
+            &stored,
+        ));
+        assert_eq!(
+            dispatcher.dispatch(update("/p 2 libra in usd", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let menu = only_sent(&dispatcher.actions.0);
+        assert_eq!(menu.text, "Choose an asset: libra");
+        assert!(menu.reply_markup.is_some());
+        assert_eq!(stored.borrow().len(), 1);
+    }
+
+    #[test]
+    fn several_dex_matches_extend_the_provider_menu() {
+        let mut dispatcher = dispatcher()
+            .with_market_price_source(market_prices(market_selection_load(None)))
+            .with_token_signal_source(Box::new(ScriptedSignals::new(
+                vec![token_signal(), token_signal_at(SECOND_MINT)],
+                None,
+            )));
+        assert_eq!(
+            dispatcher.dispatch(update("/p $syn", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        // Without menu storage the choices are listed as text instead.
+        let reply = only_sent(&dispatcher.actions.0);
+        assert!(reply.reply_markup.is_none());
+        assert!(reply.text.contains("Libra Finance"));
+        assert_eq!(reply.text.matches("Synthetic Token").count(), 2);
+        assert!(
+            dispatcher
+                .state_diagnostics()
+                .iter()
+                .any(|entry| entry.starts_with("market selection storage unavailable"))
+        );
+    }
+
+    #[test]
+    fn address_queries_with_several_dex_pairs_list_every_distinct_contract() {
+        let address = token_signal().token.address;
+        let mut distinct = dispatcher().with_token_signal_source(Box::new(ScriptedSignals::new(
+            vec![token_signal(), token_signal_at(SECOND_MINT)],
+            None,
+        )));
+        assert_eq!(
+            distinct.dispatch(update(&format!("/p {address}"), Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let reply = only_sent(&distinct.actions.0);
+        assert_eq!(reply.text.matches("Synthetic Token").count(), 2);
+        assert!(reply.reply_markup.is_none());
+
+        // Two pairs of one contract collapse into a single candidate, which
+        // is not a unique signal, so the reply says nothing was found.
+        let mut duplicated = dispatcher().with_token_signal_source(Box::new(ScriptedSignals::new(
+            vec![token_signal(), token_signal()],
+            None,
+        )));
+        assert_eq!(
+            duplicated.dispatch(update(&format!("/p {address}"), Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            sent_texts(&duplicated.actions.0),
+            [format!("I could not find data for {address}")]
+        );
+    }
+
+    #[test]
+    fn provider_chart_tokens_fall_back_to_the_dex_card() {
+        let mut dispatcher = dispatcher()
+            .with_market_price_source(market_prices(MarketPriceLoad {
+                chart: Some(libra_chart(Some(token_signal().token))),
+                ..quote_load("LIBRA: 0.007 USD", false)
+            }))
+            .with_token_signal_source(Box::new(ScriptedSignals::new(
+                Vec::new(),
+                Some(token_signal()),
+            )));
+        assert_eq!(
+            dispatcher.dispatch(update("/p libra", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [TelegramAction::SendPhoto { photo, reply_to_message_id: Some(MessageId(7)), .. }]
+                if photo.as_ref() == b"scripted-card"
+        ));
+        assert_eq!(dispatcher.state.outgoing.len(), 1);
+    }
+
+    #[test]
+    fn unresolved_token_queries_report_the_missing_quote_in_each_locale() {
+        for (language, expected) in [
+            ("en", "I could not get a quote for $foo"),
+            ("es", "No pude conseguir una cotización para $foo"),
+        ] {
+            let mut dispatcher = dispatcher()
+                .with_market_price_source(market_prices(quote_load("", true)))
+                .with_token_signal_source(Box::new(ScriptedSignals::new(Vec::new(), None)));
+            assert_eq!(
+                dispatcher.dispatch(update("/p $foo", Some(language))),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert_eq!(sent_texts(&dispatcher.actions.0), [expected]);
+        }
+        let address = token_signal().token.address;
+        let mut missing =
+            dispatcher().with_token_signal_source(Box::new(ScriptedSignals::new(Vec::new(), None)));
+        assert_eq!(
+            missing.dispatch(update(&format!("/p {address}"), Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            sent_texts(&missing.actions.0),
+            [format!("No encontré datos para {address}")]
+        );
+    }
+
+    #[test]
+    fn empty_multi_asset_quotes_are_localized_per_request() {
+        let mut dispatcher =
+            dispatcher().with_market_price_source(market_prices(MarketPriceLoad {
+                chart: Some(libra_chart(None)),
+                ..quote_load(" ", false)
+            }));
+        assert_eq!(
+            dispatcher.dispatch(update("/p libra, eth", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            sent_texts(&dispatcher.actions.0),
+            [
+                "No pude conseguir una cotización para LIBRA\nNo pude conseguir una cotización para LIBRA"
+            ]
+        );
+        let mut english = configured(ChatConfig::default(), Actions::default())
+            .with_market_price_source(market_prices(MarketPriceLoad {
+                chart: Some(libra_chart(None)),
+                ..quote_load("", false)
+            }));
+        assert_eq!(
+            english.dispatch(update("/p libra, eth", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            sent_texts(&english.actions.0),
+            ["I could not get a quote for LIBRA\nI could not get a quote for LIBRA"]
+        );
+    }
+
+    #[test]
+    fn voice_durations_reach_ai_and_summary_turns() {
+        let (mut source, (prepared, _ignored, _deliveries)) =
+            ai_source(Ok(AiPreparation::reply("respuesta", None)));
+        source.summary_preparation = Some(Ok(AiPreparation::reply("resumen", None)));
+        let mut dispatcher = dispatcher().with_ai_conversation_source(Box::new(source));
+        for text in ["qué dice este audio", "/summary"] {
+            let voice = message_update(text, None, |message| {
+                message.audio_media_kind = Some("voice".to_owned());
+                message.audio_duration_seconds = Some(3);
+            });
+            assert_eq!(dispatcher.dispatch(voice), Ok(DispatchOutcome::Handled));
+        }
+        let durations = prepared
+            .borrow()
+            .iter()
+            .map(|input| input.audio_duration_seconds)
+            .collect::<Vec<_>>();
+        assert_eq!(durations, [Some(3.0), Some(3.0)]);
+    }
+
+    #[test]
+    fn rejected_stream_drafts_fail_the_turn_with_a_retry_reply() {
+        for (text, diagnostic, reply) in [
+            (
+                "synthetic question",
+                "AI conversation: Telegram rejected the streamed response: synthetic draft failure",
+                "Me quedé reculando y no te pude responder. Probá de nuevo",
+            ),
+            (
+                "/summary",
+                "summary command: Telegram rejected the summary stream: synthetic draft failure",
+                "No pude generar el resumen. Probá de nuevo",
+            ),
+        ] {
+            let (mut source, _observations) =
+                ai_source(Ok(AiPreparation::reply("respuesta", None)));
+            source.tokens = vec!["borrador".to_owned()];
+            source.summary_preparation = Some(Ok(AiPreparation::reply("resumen", None)));
+            // The thinking status and the first draft are both rejected.
+            let mut dispatcher = configured(
+                ChatConfig::default(),
+                failing_actions(ActionKind::SendMessage, 2, "synthetic draft failure", false),
+            )
+            .with_ai_conversation_source(Box::new(source));
+            assert_eq!(
+                dispatcher.dispatch(update(text, None)),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert!(
+                dispatcher
+                    .state_diagnostics()
+                    .iter()
+                    .any(|entry| entry == diagnostic)
+            );
+            assert_eq!(sent_texts(&dispatcher.actions.0), [reply]);
+        }
+    }
+
+    #[test]
+    fn token_cards_report_missing_history_and_failed_photos() {
+        let no_sender = {
+            let mut message = incoming_message("/p $syn", Some("en"));
+            message.sender_id = None;
+            message
+        };
+        let mut anonymous = dispatcher()
+            .with_token_signal_source(Box::new(ScriptedSignals::new(vec![token_signal()], None)));
+        assert_eq!(
+            anonymous.dispatch_asset_prices(
+                &no_sender,
+                "$syn",
+                bot_core::market_prices::MarketPriceCommand::Unified,
+                bot_core::locale::Locale::En,
+                1_672_531_200,
+            ),
+            Ok(Some(DispatchOutcome::Unsupported))
+        );
+
+        for (query, reported) in [
+            ("$syn", "query=syn"),
+            (
+                "https://www.coingecko.com/en/coins/synthetic-token",
+                "query=synthetic-token",
+            ),
+        ] {
+            let mut no_history = dispatcher()
+                .with_token_signal_source(Box::new(NoHistorySignals(Some(token_signal()))));
+            assert_eq!(
+                no_history.dispatch(update(&format!("/p {query}"), Some("es"))),
+                Ok(DispatchOutcome::Handled)
+            );
+            let reply = only_sent(&no_history.actions.0);
+            assert!(
+                reply
+                    .text
+                    .ends_with("\nNo tengo historial de 24h; te dejo la cotización")
+            );
+            assert_eq!(
+                reply.parse_mode,
+                Some(bot_core::telegram_actions::ParseMode::Html)
+            );
+            assert!(
+                no_history
+                    .state_diagnostics()
+                    .iter()
+                    .any(|entry| entry
+                        == &format!("token signal photo failed chat_id=-42 {reported}"))
+            );
+        }
+
+        let mut failed_photo = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            attempt_actions(Attempt::Fail, ActionScript::photo),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_token_signal_source(Box::new(ScriptedSignals::new(vec![token_signal()], None)));
+        assert_eq!(
+            failed_photo.dispatch(update("/p $syn", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(sent_messages(&failed_photo.actions.0).len(), 1);
+        assert!(failed_photo.state_diagnostics().iter().any(|entry| {
+            entry.starts_with("token signal photo delivery failed chat_id=-42 signal_id=")
+        }));
+    }
+
+    fn requester_state(last_refresh_at: Option<i64>) -> SignalState {
+        let signal = token_signal();
+        SignalState {
+            chart_period: None,
+            chat_id: "-42".to_owned(),
+            message_id: 7,
+            source_message_id: 6,
+            requester_id: "88".to_owned(),
+            chain_id: signal.token.chain_id,
+            network: signal.token.network,
+            tag: signal.token.tag,
+            address: signal.token.address,
+            last_refresh_at,
+        }
+    }
+
+    fn silent_signal_callback(data: &str) -> IncomingUpdate {
+        callback_update_with_context(data, json!(-42), "private", 7, Some(88), Some("en"), None)
+    }
+
+    #[test]
+    fn token_signal_callbacks_without_an_id_complete_without_toasts() {
+        let scripted = |state: Result<Option<SignalState>, String>| {
+            let mut source = ScriptedSignals::new(Vec::new(), Some(token_signal()));
+            source.state = state;
+            source
+        };
+        let mut unreadable = dispatcher().with_token_signal_source(Box::new(scripted(Err(
+            "synthetic state failure".to_owned(),
+        ))));
+        assert_eq!(
+            unreadable.dispatch(silent_signal_callback("sig:ref:abc")),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(unreadable.actions.0.is_empty());
+        assert_eq!(
+            unreadable.state_diagnostics(),
+            ["token signal state read failed chat_id=-42 signal_id=abc: synthetic state failure"]
+        );
+
+        let mut other_owner = requester_state(None);
+        other_owner.requester_id = "7".to_owned();
+        let mut cooldown = requester_state(Some(1_672_531_195));
+        cooldown.chart_period = Some("7d".to_owned());
+        for state in [None, Some(other_owner), Some(cooldown)] {
+            let mut dispatcher =
+                dispatcher().with_token_signal_source(Box::new(scripted(Ok(state))));
+            assert_eq!(
+                dispatcher.dispatch(silent_signal_callback("sig:ref:abc")),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert!(dispatcher.actions.0.is_empty());
+        }
+
+        let mut no_data_source = scripted(Ok(Some(requester_state(None))));
+        no_data_source.token = None;
+        let mut render_failure = scripted(Ok(Some(requester_state(None))));
+        render_failure.photo = Err("synthetic render failure".to_owned());
+        for source in [no_data_source, render_failure] {
+            let mut dispatcher = dispatcher().with_token_signal_source(Box::new(source));
+            assert_eq!(
+                dispatcher.dispatch(silent_signal_callback("sig:ref:abc")),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert!(dispatcher.actions.0.is_empty());
+        }
+
+        let mut refreshed = dispatcher()
+            .with_token_signal_source(Box::new(scripted(Ok(Some(requester_state(None))))));
+        assert_eq!(
+            refreshed.dispatch(silent_signal_callback("sig:ref:abc")),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            refreshed.actions.0.as_slice(),
+            [TelegramAction::EditMessagePhoto {
+                message_id: MessageId(7),
+                ..
+            }]
+        ));
+
+        let mut deleting = scripted(Ok(Some(requester_state(None))));
+        deleting.clear_error = Some("synthetic clear failure".to_owned());
+        let mut deleted = dispatcher().with_token_signal_source(Box::new(deleting));
+        assert_eq!(
+            deleted.dispatch(silent_signal_callback("sig:del:abc")),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            deleted.actions.0,
+            [TelegramAction::DeleteMessage {
+                chat_id: ChatId(-42),
+                message_id: MessageId(7),
+            }]
+        );
+        assert_eq!(
+            deleted.state_diagnostics(),
+            ["token signal state cleanup failed: synthetic clear failure"]
+        );
+    }
+
+    #[test]
+    fn token_signal_callbacks_reject_malformed_ids_chats_and_failed_edits() {
+        let owned = || {
+            let mut source = ScriptedSignals::new(Vec::new(), Some(token_signal()));
+            source.state = Ok(Some(requester_state(None)));
+            source
+        };
+        let mut missing_id = dispatcher().with_token_signal_source(Box::new(owned()));
+        assert_eq!(
+            missing_id.dispatch(callback_update("sig:ref", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let mut foreign_chat = dispatcher().with_token_signal_source(Box::new(owned()));
+        assert_eq!(
+            foreign_chat.dispatch(callback_update_with_context(
+                "sig:ref:abc",
+                json!("channel"),
+                "private",
+                7,
+                Some(88),
+                Some("en"),
+                Some("callback-1"),
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        for actions in [&missing_id.actions.0, &foreign_chat.actions.0] {
+            assert_eq!(
+                actions.as_slice(),
+                [TelegramAction::AnswerCallback {
+                    callback_id: "callback-1".to_owned(),
+                    text: None,
+                    show_alert: false,
+                }]
+            );
+        }
+
+        let mut rejected_edit = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            attempt_actions(Attempt::Fail, ActionScript::edit),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_token_signal_source(Box::new(owned()));
+        assert_eq!(
+            rejected_edit.dispatch(callback_update("sig:ref:abc", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            rejected_edit.state_diagnostics(),
+            ["token signal Telegram refresh failed chat_id=-42 signal_id=abc"]
+        );
+        assert!(matches!(
+            rejected_edit.actions.0.as_slice(),
+            [
+                TelegramAction::EditMessagePhoto { .. },
+                TelegramAction::AnswerCallback {
+                    show_alert: true,
+                    ..
+                },
+            ]
+        ));
+
+        assert_eq!(
+            dispatcher().dispatch(callback_update("mkt:select:abc:0", "private", Some("en"))),
+            Err(DispatchError::MissingService("market prices"))
+        );
+    }
+
+    fn first_selection_callback() -> String {
+        format!(
+            "mkt:select:{}:0",
+            market_selection_id(-42, 7, 88, 1_672_531_200, 0)
+        )
+    }
+
+    fn token_chart_quote() -> MarketPriceLoad {
+        MarketPriceLoad {
+            chart: Some(libra_chart(Some(token_signal().token))),
+            ..quote_load("LIBRA: 0.007 USD", false)
+        }
+    }
+
+    #[test]
+    fn selected_chart_tokens_fall_back_to_the_quote_when_no_card_is_sent() {
+        let token_sources: [Option<Box<dyn TokenSignalSource>>; 3] = [
+            Some(Box::new(NoHistorySignals(Some(token_signal())))),
+            Some(Box::new(ScriptedSignals::new(Vec::new(), None))),
+            None,
+        ];
+        for token_source in token_sources {
+            let stored = Rc::new(RefCell::new(HashMap::new()));
+            let mut dispatcher = dispatcher().with_market_price_source(selection_storage(
+                market_selection_load(None),
+                token_chart_quote(),
+                &stored,
+            ));
+            if let Some(source) = token_source {
+                dispatcher = dispatcher.with_token_signal_source(source);
+            }
+            assert_eq!(
+                dispatcher.dispatch(update("/p libra", Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert_eq!(
+                dispatcher.dispatch(callback_update_for_message(
+                    &first_selection_callback(),
+                    "private",
+                    Some("en"),
+                    700,
+                )),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert_eq!(sent_texts(&dispatcher.actions.0)[1..], ["LIBRA: 0.007 USD"]);
+            assert!(stored.borrow().is_empty());
+        }
+
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let mut failed_photo = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            attempt_actions(Attempt::Fail, ActionScript::photo),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_market_price_source(selection_storage(
+            market_selection_load(None),
+            token_chart_quote(),
+            &stored,
+        ))
+        .with_token_signal_source(Box::new(ScriptedSignals::new(
+            Vec::new(),
+            Some(token_signal()),
+        )));
+        assert_eq!(
+            failed_photo.dispatch(update("/p libra", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            failed_photo.dispatch(callback_update_for_message(
+                &first_selection_callback(),
+                "private",
+                Some("en"),
+                700,
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            failed_photo
+                .state_diagnostics()
+                .iter()
+                .any(|entry| entry == "token chart photo delivery failed")
+        );
+        assert_eq!(
+            sent_texts(&failed_photo.actions.0)[1..],
+            ["LIBRA: 0.007 USD"]
+        );
+    }
+
+    #[test]
+    fn selected_quote_history_failures_are_diagnostic() {
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let mut dispatcher = broken_state_dispatcher(ChatConfig::default())
+            .with_market_price_source(selection_storage(
+                market_selection_load(None),
+                market_candidate_quote(),
+                &stored,
+            ));
+        assert_eq!(
+            dispatcher.dispatch(update("/p libra", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            dispatcher.dispatch(callback_update_for_message(
+                &first_selection_callback(),
+                "private",
+                Some("en"),
+                700,
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            dispatcher
+                .state_diagnostics()
+                .iter()
+                .any(|entry| entry == "market callback history: synthetic outgoing failure")
+        );
+        assert_eq!(
+            sent_texts(&dispatcher.actions.0)[1..],
+            ["LIBRA: 0.007 USD (N/A 24h)"]
+        );
+    }
+
+    #[test]
+    fn selected_dex_candidate_without_data_is_localized() {
+        let mut selection = market_selection_fixture(None);
+        selection.candidates = vec![super::market_token_candidate(&token_signal(), None, None)];
+        let stored = Rc::new(RefCell::new(HashMap::from([(
+            "market_selection:dex-only".to_owned(),
+            StoredMarketSelection {
+                selection,
+                chat_id: "-42".to_owned(),
+                message_id: 7,
+                source_message_id: Some(6),
+                requester_id: 88,
+                command: "unified".to_owned(),
+            }
+            .encode(),
+        )])));
+        let mut dispatcher = dispatcher()
+            .with_market_price_source(selection_storage(
+                market_selection_load(None),
+                market_candidate_quote(),
+                &stored,
+            ))
+            .with_token_signal_source(Box::new(ScriptedSignals::new(Vec::new(), None)));
+        assert_eq!(
+            dispatcher.dispatch(callback_update(
+                "mkt:select:dex-only:0",
+                "private",
+                Some("es")
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            sent_texts(&dispatcher.actions.0),
+            ["No pude conseguir una cotización para SYN"]
+        );
+        // The menu is restored so the user can retry the same choice.
+        assert_eq!(stored.borrow().len(), 1);
+    }
+
+    /// A sink that only implements `execute`, relying on every trait default.
+    #[derive(Default)]
+    struct PlainActions(Vec<TelegramAction>);
+
+    impl ActionSink for PlainActions {
+        type Error = &'static str;
+
+        fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
+            self.0.push(action);
+            Ok(ActionReceipt {
+                message_id: Some(MessageId(9)),
+            })
+        }
+    }
+
+    #[test]
+    fn default_delivery_attempts_execute_the_action() {
+        let mut sink = PlainActions::default();
+        let message = || TelegramAction::SendMessage(SendMessage::new(ChatId(-42), "synthetic"));
+        assert_eq!(sink.try_edit(message()), Ok(true));
+        assert_eq!(sink.try_invoice(message()), Ok(true));
+        assert_eq!(sink.try_animation(message()), Ok(true));
+        let confirmed = Some(ActionReceipt {
+            message_id: Some(MessageId(9)),
+        });
+        assert_eq!(sink.try_video(message()), Ok(confirmed));
+        assert_eq!(sink.try_photo(message()), Ok(confirmed));
+        assert_eq!(sink.0.len(), 5);
+    }
+
+    fn configured(
+        config: ChatConfig,
+        actions: Actions,
+    ) -> NativeDispatcher<Config, Actions, State, Values, Samples, Authorization> {
+        NativeDispatcher::new(
+            Config {
+                value: Ok(config),
+                chat_ids: Vec::new(),
+            },
+            actions,
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+    }
+
+    fn english() -> ChatConfig {
+        ChatConfig {
+            language: "en".to_owned(),
+            ..ChatConfig::default()
+        }
+    }
+
+    fn uncalled_back(data: &str, chat_id: Value, chat_type: &str) -> IncomingUpdate {
+        callback_update_with_context(data, chat_id, chat_type, 7, Some(88), Some("en"), None)
+    }
+
+    #[test]
+    fn trigger_words_sample_random_replies_and_propagate_random_failures() {
+        let random_replies = ChatConfig {
+            ai_random_replies: true,
+            ..ChatConfig::default()
+        };
+        let (source, (prepared, ignored, _deliveries)) =
+            ai_source(Ok(AiPreparation::reply("respuesta", None)));
+        let mut dispatcher = configured(random_replies.clone(), Actions::default())
+            .with_trigger_words(vec!["gordo".to_owned()])
+            .with_ai_conversation_source(Box::new(source));
+        dispatcher.random.choice_index = 0;
+        assert_eq!(
+            dispatcher.dispatch(group_link_update("che gordo, qué hacés")),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(prepared.borrow().len(), 1);
+        assert!(prepared.borrow()[0].spontaneous);
+        assert!(ignored.borrow().is_empty());
+
+        let (source, _observations) = ai_source(Ok(AiPreparation::silent()));
+        let mut failing = configured(random_replies, Actions::default())
+            .with_trigger_words(vec!["gordo".to_owned()])
+            .with_ai_conversation_source(Box::new(source));
+        failing.random.failing = true;
+        assert_eq!(
+            failing.dispatch(group_link_update("che gordo")),
+            Err(DispatchError::Random("synthetic random failure"))
+        );
+        assert!(failing.actions.0.is_empty());
+    }
+
+    #[test]
+    fn provider_chart_tokens_without_cards_fall_back_or_fail_loudly() {
+        let chart_quote = || {
+            market_prices(MarketPriceLoad {
+                chart: Some(libra_chart(Some(token_signal().token))),
+                ..quote_load("LIBRA: 0.007 USD", false)
+            })
+        };
+        let mut unknown_token = dispatcher()
+            .with_market_price_source(chart_quote())
+            .with_token_signal_source(Box::new(ScriptedSignals::new(Vec::new(), None)));
+        assert_eq!(
+            unknown_token.dispatch(update("/p libra", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            sent_texts(&unknown_token.actions.0),
+            ["LIBRA: 0.007 USD\nChart unavailable. Try again later"]
+        );
+        assert!(
+            unknown_token
+                .state_diagnostics()
+                .iter()
+                .any(|entry| entry == "market chart unavailable or undelivered: LIBRA")
+        );
+
+        let rejecting = || {
+            failing_actions(
+                ActionKind::SendMessage,
+                usize::MAX,
+                "synthetic send failure",
+                false,
+            )
+        };
+        let mut chart_card = configured(ChatConfig::default(), rejecting())
+            .with_market_price_source(chart_quote())
+            .with_token_signal_source(Box::new(NoHistorySignals(Some(token_signal()))));
+        assert_eq!(
+            chart_card.dispatch(update("/p libra", Some("en"))),
+            Err(DispatchError::Action("synthetic send failure"))
+        );
+        let mut direct_card = configured(ChatConfig::default(), rejecting())
+            .with_token_signal_source(Box::new(NoHistorySignals(Some(token_signal()))));
+        assert_eq!(
+            direct_card.dispatch(update("/p $syn", Some("en"))),
+            Err(DispatchError::Action("synthetic send failure"))
+        );
+        let mut stock = configured(ChatConfig::default(), rejecting())
+            .with_market_price_source(market_prices(quote_load("AAPL: 1 USD", false)));
+        assert_eq!(
+            stock.dispatch(update("/s aapl", Some("en"))),
+            Err(DispatchError::Action("synthetic send failure"))
+        );
+    }
+
+    fn task_dispatcher(
+        source: Box<dyn super::ScheduledTaskSource>,
+        is_admin: bool,
+    ) -> NativeDispatcher<Config, Actions, State, Values, Samples, Authorization> {
+        let mut dispatcher = dispatcher().with_scheduled_task_source(source);
+        dispatcher.authorization.is_admin = is_admin;
+        dispatcher
+    }
+
+    fn tasks(owner: i64) -> Result<Box<Tasks>, TaskStateError> {
+        Ok(Box::new(Tasks {
+            lists: vec![vec![scheduled_task(owner)?]],
+            cancellations: Rc::new(RefCell::new(Vec::new())),
+        }))
+    }
+
+    #[test]
+    fn task_callbacks_without_callback_ids_finish_silently() -> Result<(), TaskStateError> {
+        let chat = || json!(-42);
+        let cases: Vec<(Box<dyn super::ScheduledTaskSource>, &str, &str, bool)> = vec![
+            (
+                Box::new(FallibleTasks {
+                    list_result: Err("synthetic list failure".to_owned()),
+                    cancel_result: Ok(true),
+                }),
+                "task:del:task0001",
+                "private",
+                true,
+            ),
+            (tasks(88)?, "task:del:task0404", "private", true),
+            (tasks(55)?, "task:del:task0001", "group", false),
+            (
+                Box::new(FallibleTasks {
+                    list_result: Ok(vec![scheduled_task(88)?]),
+                    cancel_result: Ok(false),
+                }),
+                "task:del:task0001",
+                "private",
+                true,
+            ),
+            (
+                Box::new(FallibleTasks {
+                    list_result: Ok(vec![scheduled_task(88)?]),
+                    cancel_result: Err("synthetic cancel failure".to_owned()),
+                }),
+                "task:del:task0001",
+                "private",
+                true,
+            ),
+        ];
+        for (source, data, chat_type, is_admin) in cases {
+            let mut dispatcher = task_dispatcher(source, is_admin);
+            assert_eq!(
+                dispatcher.dispatch(uncalled_back(data, chat(), chat_type)),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert!(dispatcher.actions.0.is_empty(), "{data} in {chat_type}");
+        }
+
+        let mut deleted = task_dispatcher(tasks(88)?, true);
+        assert_eq!(
+            deleted.dispatch(uncalled_back("task:del:task0001", chat(), "private")),
+            Ok(DispatchOutcome::Handled)
+        );
+        // The list is refreshed in place without a toast.
+        assert!(matches!(
+            deleted.actions.0.as_slice(),
+            [TelegramAction::EditMessage {
+                message_id: MessageId(7),
+                ..
+            }]
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn task_callbacks_in_non_numeric_chats_only_acknowledge() -> Result<(), TaskStateError> {
+        for data in ["task:close", "task:page:1", "task:view:task0001"] {
+            let mut dispatcher = task_dispatcher(tasks(88)?, true);
+            assert_eq!(
+                dispatcher.dispatch(callback_update_with_context(
+                    data,
+                    json!("channel"),
+                    "private",
+                    7,
+                    Some(88),
+                    Some("en"),
+                    Some("callback-1"),
+                )),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert_eq!(
+                dispatcher.actions.0,
+                [TelegramAction::AnswerCallback {
+                    callback_id: "callback-1".to_owned(),
+                    text: None,
+                    show_alert: false,
+                }],
+                "{data}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn help_and_payment_callbacks_reject_non_numeric_chats() {
+        for data in [
+            "help:close",
+            "topup:p50",
+            "chg:88:2:o:29:-180",
+            "cfg:page:home",
+        ] {
+            let mut dispatcher = dispatcher();
+            assert_eq!(
+                dispatcher.dispatch(callback_update_with_context(
+                    data,
+                    json!("channel"),
+                    "private",
+                    7,
+                    Some(88),
+                    Some("en"),
+                    Some("callback-1"),
+                )),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert_eq!(
+                dispatcher.actions.0,
+                [TelegramAction::AnswerCallback {
+                    callback_id: "callback-1".to_owned(),
+                    text: None,
+                    show_alert: false,
+                }],
+                "{data}"
+            );
+        }
+        let mut topup = dispatcher();
+        assert_eq!(
+            topup.dispatch(callback_update_with_context(
+                "topup:p50",
+                json!("channel"),
+                "private",
+                7,
+                Some(88),
+                Some("en"),
+                None,
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            topup.state_diagnostics(),
+            ["invalid top-up callback chat id"]
+        );
+    }
+
+    #[test]
+    fn topup_callbacks_without_ids_and_repeated_taps_stay_quiet() {
+        let mut unknown = dispatcher();
+        assert_eq!(
+            unknown.dispatch(uncalled_back("topup:missing", json!(-42), "private")),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(unknown.actions.0.is_empty());
+
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let mut repeated =
+            dispatcher().with_market_price_source(Box::new(SelectableMarketPrices {
+                initial: market_selection_load(None),
+                candidate: market_candidate_quote(),
+                stored: Rc::clone(&stored),
+                selected: Rc::new(RefCell::new(Vec::new())),
+            }));
+        // Without a callback id the invoice is sent but nothing is answered.
+        assert_eq!(
+            repeated.dispatch(uncalled_back("topup:p50", json!(88), "private")),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            repeated.actions.0.as_slice(),
+            [TelegramAction::SendInvoice { .. }]
+        ));
+        assert_eq!(
+            repeated.dispatch(uncalled_back("topup:p50", json!(88), "private")),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(repeated.actions.0.len(), 1);
+        assert_eq!(
+            repeated.dispatch(callback_update_with_context(
+                "topup:p50",
+                json!(88),
+                "private",
+                7,
+                Some(88),
+                Some("es"),
+                Some("callback-2"),
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            repeated.actions.0.last(),
+            Some(TelegramAction::AnswerCallback { text: Some(text), show_alert: false, .. })
+                if text == "Ya te dejé la factura más arriba"
+        ));
+    }
+
+    #[test]
+    fn refused_topup_invoice_reports_a_failed_claim_release() {
+        let mut dispatcher = configured(
+            english(),
+            Actions::scripted(ActionScript {
+                invoice: Attempt::Skip,
+                ..ActionScript::default()
+            }),
+        )
+        .with_market_price_source(Box::new(ScriptedTakeMarketPrices {
+            load: Ok(None),
+            takes: RefCell::new(VecDeque::from([
+                Err("synthetic release failure".to_owned()),
+            ])),
+            saves: RefCell::new(VecDeque::new()),
+            candidate: market_candidate_quote(),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(callback_update("topup:p50", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(dispatcher.state_diagnostics().iter().any(|entry| entry
+            == "topup invoice claim release failed chat_id=-42 key=topup_invoice:88:p50: synthetic release failure"));
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [
+                TelegramAction::SendInvoice { .. },
+                TelegramAction::AnswerCallback {
+                    show_alert: true,
+                    ..
+                },
+            ]
+        ));
+    }
+
+    fn charge_page(groups: bool) -> ChargeHistoryPage {
+        ChargeHistoryPage {
+            groups: if groups {
+                vec![ChargeHistoryGroup {
+                    cursor_id: 20,
+                    created_at: "2026-08-26T17:00:00+00:00".to_owned(),
+                    entries: vec![ChargeHistoryEntry {
+                        id: 20,
+                        event_type: "ai_settlement_result".to_owned(),
+                        metadata: json!({"charged_credit_units_total":4}),
+                    }],
+                }]
+            } else {
+                Vec::new()
+            },
+            has_newer: false,
+            has_older: false,
+            newer_cursor: Some(20),
+            older_cursor: Some(20),
+        }
+    }
+
+    fn charge_histories(result: Result<ChargeHistoryPage, String>) -> Box<ChargeHistories> {
+        Box::new(ChargeHistories {
+            result,
+            calls: Rc::new(RefCell::new(Vec::new())),
+        })
+    }
+
+    #[test]
+    fn charge_history_callbacks_without_ids_skip_every_toast() {
+        let data = "chg:88:2:o:29:-180";
+        let mut foreign =
+            dispatcher().with_charge_history_source(charge_histories(Ok(charge_page(true))));
+        assert_eq!(
+            foreign.dispatch(uncalled_back("chg:55:2:o:29:-180", json!(-42), "private")),
+            Ok(DispatchOutcome::Handled)
+        );
+        let mut failed = configured(english(), Actions::default())
+            .with_charge_history_source(charge_histories(Err("synthetic read failure".to_owned())));
+        assert_eq!(
+            failed.dispatch(uncalled_back(data, json!(-42), "private")),
+            Ok(DispatchOutcome::Handled)
+        );
+        let mut empty = configured(english(), Actions::default())
+            .with_charge_history_source(charge_histories(Ok(charge_page(false))));
+        assert_eq!(
+            empty.dispatch(uncalled_back(data, json!(-42), "private")),
+            Ok(DispatchOutcome::Handled)
+        );
+        let mut rejected = configured(
+            ChatConfig::default(),
+            attempt_actions(Attempt::Fail, ActionScript::edit),
+        )
+        .with_charge_history_source(charge_histories(Ok(charge_page(true))));
+        assert_eq!(
+            rejected.dispatch(uncalled_back(data, json!(-42), "private")),
+            Ok(DispatchOutcome::Handled)
+        );
+        for dispatcher in [&foreign, &failed, &empty] {
+            assert!(dispatcher.actions.0.is_empty());
+        }
+        assert!(matches!(
+            rejected.actions.0.as_slice(),
+            [TelegramAction::EditMessage { .. }]
+        ));
+        let mut edited =
+            dispatcher().with_charge_history_source(charge_histories(Ok(charge_page(true))));
+        assert_eq!(
+            edited.dispatch(uncalled_back(data, json!(-42), "private")),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            edited.actions.0.as_slice(),
+            [TelegramAction::EditMessage { .. }]
+        ));
+    }
+
+    #[test]
+    fn charge_history_callback_toasts_are_localized() {
+        let data = "chg:88:2:o:29:-180";
+        let mut failed = configured(english(), Actions::default())
+            .with_charge_history_source(charge_histories(Err("synthetic read failure".to_owned())));
+        assert_eq!(
+            failed.dispatch(callback_update(data, "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let mut empty = configured(english(), Actions::default())
+            .with_charge_history_source(charge_histories(Ok(charge_page(false))));
+        assert_eq!(
+            empty.dispatch(callback_update(data, "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let mut rejected = configured(
+            ChatConfig::default(),
+            attempt_actions(Attempt::Fail, ActionScript::edit),
+        )
+        .with_charge_history_source(charge_histories(Ok(charge_page(true))));
+        assert_eq!(
+            rejected.dispatch(callback_update(data, "private", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        for (actions, expected) in [
+            (
+                &failed.actions.0,
+                "I could not load your spending. Try again",
+            ),
+            (&empty.actions.0, "There is no more spending to show"),
+            (
+                &rejected.actions.0,
+                "Se trabó leyendo tus gastos. Probá de nuevo",
+            ),
+        ] {
+            assert!(matches!(
+                actions.last(),
+                Some(TelegramAction::AnswerCallback { text: Some(text), .. }) if text == expected
+            ));
+        }
+        assert_eq!(
+            dispatcher().dispatch(callback_update(data, "private", Some("en"))),
+            Err(DispatchError::MissingService("charge history"))
+        );
+    }
+
+    #[test]
+    fn config_callbacks_report_denials_invalid_values_and_rejected_edits() {
+        let mut denied = configured(english(), Actions::default());
+        denied.authorization.is_admin = false;
+        assert_eq!(
+            denied.dispatch(callback_update("cfg:random:on", "group", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            denied.actions.0.as_slice(),
+            [TelegramAction::AnswerCallback { text: Some(text), show_alert: true, .. }]
+                if text == "Only group admins can use this command"
+        ));
+        let mut admin = configured(english(), Actions::default());
+        assert_eq!(
+            admin.dispatch(callback_update("cfg:random:on", "group", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            admin.authorization.checks,
+            [("-42".to_owned(), "88".to_owned())]
+        );
+        assert!(matches!(
+            admin.actions.0.as_slice(),
+            [
+                TelegramAction::EditMessage {
+                    message_id: MessageId(7),
+                    ..
+                },
+                TelegramAction::AnswerCallback { .. },
+            ]
+        ));
+        assert!(admin.config.chat_ids.contains(&"set:-42".to_owned()));
+        let mut quiet_denial = configured(english(), Actions::default());
+        quiet_denial.authorization.is_admin = false;
+        assert_eq!(
+            quiet_denial.dispatch(uncalled_back("cfg:random:on", json!(-42), "group")),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(quiet_denial.actions.0.is_empty());
+
+        for (data, expected) in [
+            (
+                "cfg:timezone:abc",
+                "Invalid timezone callback value chat_id=-42 value=abc",
+            ),
+            (
+                "cfg:creditless:-5",
+                "Invalid creditless callback value chat_id=-42 value=-5",
+            ),
+        ] {
+            let mut invalid = dispatcher();
+            assert_eq!(
+                invalid.dispatch(callback_update(data, "private", Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert_eq!(invalid.state_diagnostics(), [expected]);
+            assert!(
+                invalid
+                    .config
+                    .chat_ids
+                    .iter()
+                    .all(|id| !id.starts_with("set:"))
+            );
+        }
+
+        let mut rejected = configured(
+            ChatConfig::default(),
+            attempt_actions(Attempt::Fail, ActionScript::edit),
+        );
+        assert_eq!(
+            rejected.dispatch(callback_update("cfg:random:on", "private", Some("en"))),
+            Err(DispatchError::Action("synthetic edit failure"))
+        );
+        assert!(matches!(
+            rejected.actions.0.last(),
+            Some(TelegramAction::AnswerCallback { text: None, .. })
+        ));
+    }
+
+    #[test]
+    fn command_handlers_guard_incomplete_messages_and_missing_ai() {
+        let mut anonymous = incoming_message("/transcribe", None);
+        anonymous.sender_id = None;
+        let config = ChatConfig::default();
+        let locale = bot_core::locale::Locale::Es;
+        let mut dispatcher = dispatcher();
+        assert_eq!(
+            dispatcher.dispatch_ai_message(&anonymous, &config, locale, 1, "/ask", "hola"),
+            Ok(DispatchOutcome::Unsupported)
+        );
+        assert_eq!(
+            dispatcher.dispatch_media_command(&anonymous, &config, locale, 1, "/transcribe", ""),
+            Ok(DispatchOutcome::Unsupported)
+        );
+        assert_eq!(
+            dispatcher.dispatch_summary_command(&anonymous, &config, locale, 1, "/summary", ""),
+            Ok(DispatchOutcome::Unsupported)
+        );
+        for command in ["/transcribe", "/summary"] {
+            assert_eq!(
+                dispatcher.dispatch(update(command, None)),
+                Err(DispatchError::MissingService("AI conversation"))
+            );
+        }
+        assert!(dispatcher.actions.0.is_empty());
+    }
+
+    #[test]
+    fn spanish_summary_failure_is_localized() {
+        let (mut source, _observations) = ai_source(Ok(AiPreparation::silent()));
+        source.summary_preparation = Some(Err("synthetic summary failure".to_owned()));
+        let mut dispatcher = dispatcher().with_ai_conversation_source(Box::new(source));
+        assert_eq!(
+            dispatcher.dispatch(update("/resumen", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            sent_texts(&dispatcher.actions.0),
+            ["Pensando.", "No pude generar el resumen. Probá de nuevo"]
+        );
+    }
+
+    #[test]
+    fn task_list_command_survives_a_failed_listing() {
+        let mut dispatcher = dispatcher().with_scheduled_task_source(Box::new(FallibleTasks {
+            list_result: Err("synthetic list failure".to_owned()),
+            cancel_result: Ok(true),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(update("/tareas", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            dispatcher.state_diagnostics(),
+            ["scheduled task list command chat_id=-42: synthetic list failure"]
+        );
+        assert_eq!(sent_messages(&dispatcher.actions.0).len(), 1);
+    }
+
+    #[test]
+    fn billing_and_admin_commands_localize_failures_and_unavailability() {
+        let mut unavailable = dispatcher().with_billing_available(false);
+        assert_eq!(
+            unavailable.dispatch(update("/balance", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(sent_messages(&unavailable.actions.0).len(), 1);
+
+        let mut balance = dispatcher().with_balance_source(Box::new(Balances {
+            result: Err("synthetic balance failure".to_owned()),
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            balance.dispatch(update("/balance", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let mut charges = configured(english(), Actions::default())
+            .with_charge_history_source(charge_histories(Err("synthetic read failure".to_owned())));
+        assert_eq!(
+            charges.dispatch(update("/charges", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let mut transfer =
+            configured(english(), Actions::default()).with_transfer_sink(Box::new(Transfers {
+                result: Err("synthetic transfer failure".to_owned()),
+                calls: Rc::new(RefCell::new(Vec::new())),
+            }));
+        let group_transfer = message_update("/transfer 1", Some("en"), |message| {
+            message.chat_type = Some("group".to_owned());
+        });
+        assert_eq!(
+            transfer.dispatch(group_transfer),
+            Ok(DispatchOutcome::Handled)
+        );
+        let mut mint = configured(english(), Actions::default())
+            .with_admin_user_id(Some(88))
+            .with_admin_credit_sink(Box::new(AdminCredits {
+                result: Err("synthetic mint failure".to_owned()),
+                calls: Rc::new(RefCell::new(Vec::new())),
+            }));
+        assert_eq!(
+            mint.dispatch(update("/printcredits 1", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let creditlog = |result| {
+            configured(english(), Actions::default())
+                .with_admin_user_id(Some(88))
+                .with_admin_creditlog_source(Box::new(AdminCreditLogs {
+                    result,
+                    calls: Rc::new(RefCell::new(Vec::new())),
+                }))
+        };
+        let mut empty_log = creditlog(Ok(Vec::new()));
+        assert_eq!(
+            empty_log.dispatch(update("/creditlog", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let mut failed_log = creditlog(Err("synthetic log failure".to_owned()));
+        assert_eq!(
+            failed_log.dispatch(update("/creditlog", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let mut foreign_log = creditlog(Ok(Vec::new()));
+        foreign_log.admin_user_id = Some(1);
+        assert_eq!(
+            foreign_log.dispatch(update("/creditlog", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let texts = [
+            &balance,
+            &charges,
+            &transfer,
+            &mint,
+            &empty_log,
+            &failed_log,
+        ]
+        .map(|dispatcher| last_sent(&dispatcher.actions.0).text.clone());
+        assert_eq!(
+            texts,
+            [
+                "Se trabó leyendo tu saldo. Probá de nuevo",
+                "I could not load your spending. Try again",
+                "The transfer failed. Try again",
+                "I could not mint credits. Try again",
+                "There are no recent AI settlements",
+                "I could not load the credit log. Try again",
+            ]
+        );
+        // Only the admin may read the log; others get a plain refusal.
+        assert_eq!(sent_messages(&foreign_log.actions.0).len(), 1);
+    }
+
+    #[test]
+    fn market_data_failures_are_localized_in_english() {
+        let mut bcra =
+            configured(english(), Actions::default()).with_bcra_source(Box::new(BcraVariables {
+                result: BcraLoad {
+                    text: None,
+                    diagnostics: Vec::new(),
+                },
+                calls: Rc::new(RefCell::new(Vec::new())),
+            }));
+        assert_eq!(
+            bcra.dispatch(update("/bcra", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let mut dollar = configured(english(), Actions::default()).with_dollar_market_source(
+            Box::new(DollarMarket {
+                result: DollarMarketLoad {
+                    text: None,
+                    diagnostics: Vec::new(),
+                },
+                calls: Rc::new(RefCell::new(Vec::new())),
+            }),
+        );
+        assert_eq!(
+            dollar.dispatch(update("/dolar", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            [
+                only_sent(&bcra.actions.0).text.as_str(),
+                only_sent(&dollar.actions.0).text.as_str(),
+            ],
+            [
+                "I could not load the BCRA variables. Try again later",
+                "I could not load dollar rates. Try again later",
+            ]
+        );
+    }
+
+    #[test]
+    fn numeric_price_queries_use_the_provider_text_directly() {
+        let mut missing = dispatcher();
+        assert_eq!(
+            missing.dispatch(update("/p 123", Some("en"))),
+            Err(DispatchError::MissingService("market prices"))
+        );
+        let mut menu = configured(english(), Actions::default())
+            .with_market_price_source(market_prices(market_selection_load(None)));
+        assert_eq!(
+            menu.dispatch(update("/p 123", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(only_sent(&menu.actions.0).text.contains("Libra Finance"));
+        let mut empty = dispatcher().with_market_price_source(market_prices(quote_load("", true)));
+        assert_eq!(
+            empty.dispatch(update("/p 123", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let mut english_empty = configured(english(), Actions::default())
+            .with_market_price_source(market_prices(quote_load("", true)));
+        assert_eq!(
+            english_empty.dispatch(update("/p 123", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let mut quoted =
+            dispatcher().with_market_price_source(market_prices(quote_load("123 quoted", false)));
+        assert_eq!(
+            quoted.dispatch(update("/p 123", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            [
+                only_sent(&empty.actions.0).text.as_str(),
+                only_sent(&english_empty.actions.0).text.as_str(),
+                only_sent(&quoted.actions.0).text.as_str(),
+            ],
+            [
+                "No pude conseguir una cotización. Probá más tarde",
+                "I could not get a quote. Try again later",
+                "123 quoted",
+            ]
+        );
+    }
+
+    #[test]
+    fn out_of_range_random_choices_are_invariant_failures() {
+        let mut greeting = dispatcher().with_greeting_pool_source(Box::new(GreetingPools {
+            result: GreetingPoolLoad {
+                urls: vec!["https://example.test/greeting.gif".to_owned()],
+                diagnostics: Vec::new(),
+            },
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }));
+        greeting.random.choice_index = 5;
+        assert_eq!(
+            greeting.dispatch(update("/gm", None)),
+            Err(DispatchError::Invariant(
+                "random greeting index out of bounds"
+            ))
+        );
+        let mut choice = dispatcher();
+        choice.random.choice_index = 5;
+        assert_eq!(
+            choice.dispatch(update("/random alpha, beta", None)),
+            Err(DispatchError::Invariant("random reply index out of bounds"))
+        );
+        assert!(greeting.actions.0.is_empty() && choice.actions.0.is_empty());
+    }
+
+    #[test]
+    fn missing_prices_and_malformed_random_requests_are_explained() {
+        let mut satoshi = dispatcher().with_bitcoin_price_source(Box::new(BitcoinPrices {
+            results: vec![Ok(None)],
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            satoshi.dispatch(update("/sats", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(sent_messages(&satoshi.actions.0).len(), 1);
+        let mut random = dispatcher();
+        assert_eq!(
+            random.dispatch(update("/random", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            sent_texts(&random.actions.0),
+            [
+                "Mandate algo como 'pizza, carne, sushi' o '1-10', boludo, no me hagas laburar al pedo"
+            ]
+        );
+    }
+
+    fn malformed_pre_checkout(id: Value, payload: &str) -> IncomingUpdate {
+        IncomingUpdate {
+            update_id: 104,
+            event: IncomingEvent::PreCheckoutQuery(Map::from_iter([
+                ("id".to_owned(), id),
+                ("from".to_owned(), json!("malformed")),
+                ("invoice_payload".to_owned(), json!(payload)),
+                ("currency".to_owned(), json!("XTR")),
+                ("total_amount".to_owned(), json!(25)),
+            ])),
+        }
+    }
+
+    #[test]
+    fn malformed_pre_checkout_answers_only_string_query_ids() {
+        let mut numeric_id = dispatcher();
+        assert_eq!(
+            numeric_id.dispatch(malformed_pre_checkout(json!(5), "topup:p50:42:es")),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(numeric_id.actions.0.is_empty());
+        assert!(numeric_id.state_diagnostics()[0].starts_with("invalid pre-checkout query:"));
+        let mut spanish = dispatcher();
+        assert_eq!(
+            spanish.dispatch(malformed_pre_checkout(json!("query-1"), "topup:p50:42:es")),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            spanish.actions.0.as_slice(),
+            [TelegramAction::AnswerPreCheckout { ok: false, error_message: Some(text), .. }]
+                if text == "Ese pago vino raro y no te lo pude validar"
+        ));
     }
 }

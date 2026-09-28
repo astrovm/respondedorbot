@@ -137,9 +137,8 @@ pub trait ConversationBilling {
 
     fn release_operation(&mut self, operation_id: &str);
 
-    fn personal_balance(&mut self, _user_id: i64) -> Result<Option<i64>, String> {
-        Ok(None)
-    }
+    /// Returns `Ok(None)` when balances cannot be read.
+    fn personal_balance(&mut self, user_id: i64) -> Result<Option<i64>, String>;
 }
 
 pub trait ConversationToolFactory {
@@ -469,10 +468,7 @@ where
                 ..PreparedYoutubeContext::default()
             });
         }
-        let runtime = self
-            .youtube
-            .as_mut()
-            .ok_or_else(|| "YouTube runtime disappeared".to_owned())?;
+        let runtime = self.youtube.as_mut().ok_or("YouTube runtime disappeared")?;
         match runtime.prepare(&input.message_text, input.reply_context.as_deref()) {
             Ok(Some(preparation)) => Ok(PreparedYoutubeContext {
                 matched: true,
@@ -523,7 +519,7 @@ where
             let direct_image = self
                 .media
                 .as_mut()
-                .ok_or_else(|| "native media runtime disappeared".to_owned())?
+                .ok_or("native media runtime disappeared")?
                 .prepare_image_for_prompt(file_id)
                 .unwrap_or_default();
             if let Some(image) = direct_image {
@@ -539,7 +535,7 @@ where
         let prepared = match self
             .media
             .as_mut()
-            .ok_or_else(|| "native media runtime disappeared".to_owned())?
+            .ok_or("native media runtime disappeared")?
             .prepare(kind, file_id, duration)
         {
             Ok(prepared) => prepared,
@@ -584,7 +580,7 @@ where
         match self
             .media
             .as_mut()
-            .ok_or_else(|| "native media runtime disappeared".to_owned())?
+            .ok_or("native media runtime disappeared")?
             .execute(prepared, prompt)
         {
             Ok(execution) => {
@@ -654,7 +650,7 @@ where
         let prepared = match self
             .media
             .as_mut()
-            .ok_or_else(|| "native media runtime disappeared".to_owned())?
+            .ok_or("native media runtime disappeared")?
             .prepare(kind, file_id, duration)
         {
             Ok(prepared) => prepared,
@@ -693,7 +689,7 @@ where
                 match self
                     .media
                     .as_mut()
-                    .ok_or_else(|| "native media runtime disappeared".to_owned())?
+                    .ok_or("native media runtime disappeared")?
                     .execute(prepared, prompt)
                 {
                     Ok(execution) => {
@@ -743,7 +739,7 @@ where
         let (text, segments, diagnostics) = match self
             .media
             .as_mut()
-            .ok_or_else(|| "native media runtime disappeared".to_owned())?
+            .ok_or("native media runtime disappeared")?
             .execute(prepared, prompt)
         {
             Ok(execution) => {
@@ -1890,7 +1886,7 @@ fn estimate_reserve(
         model,
         &pricing,
     )
-    .map_err(|error| error.to_string())
+    .map_err(error_text)
 }
 
 fn estimated_message(message: &PromptMessage) -> EstimatedMessage {
@@ -1931,10 +1927,15 @@ fn estimated_message(message: &PromptMessage) -> EstimatedMessage {
 
 fn price_segments(segments: &[Value]) -> Result<i64, String> {
     calculate_billing_for_segments(&Value::Array(segments.to_vec()))
-        .map_err(|error| error.to_string())?
+        .map_err(error_text)?
         .get("charged_credit_units")
         .and_then(Value::as_i64)
-        .ok_or_else(|| "AI pricing output omitted charged_credit_units".to_owned())
+        .ok_or("AI pricing output omitted charged_credit_units")
+        .map_err(str::to_owned)
+}
+
+fn error_text(error: impl std::fmt::Display) -> String {
+    error.to_string()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2021,7 +2022,7 @@ fn formatted_time(timestamp: i64, timezone_offset_hours: i64) -> String {
 fn shifted_time(timestamp: i64, timezone_offset_hours: i64) -> DateTime<FixedOffset> {
     let utc = DateTime::<Utc>::from_timestamp(timestamp, 0).unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
     let seconds = timezone_offset_hours.clamp(-23, 23).saturating_mul(3_600) as i32;
-    let offset = FixedOffset::east_opt(seconds).unwrap_or_else(|| Utc.fix());
+    let offset = FixedOffset::east_opt(seconds).unwrap_or(Utc.fix());
     utc.with_timezone(&offset)
 }
 
@@ -2039,7 +2040,7 @@ mod tests {
     use std::sync::Arc;
 
     use bot_adapters::openrouter_chat::{OpenRouterChatError, OpenRouterPricingCache};
-    use bot_core::provider_pricing::DEEPSEEK_MODEL;
+    use bot_core::provider_pricing::{DEEPSEEK_FLASH_MODEL, DEEPSEEK_MODEL};
     use bot_core::provider_stream_policy::StreamToolCall;
     use bot_core::telegram_input::{ChatId, MessageId, UserId};
 
@@ -2088,6 +2089,34 @@ mod tests {
             })?;
             Ok(round)
         }
+
+        /// Streams the queued round's reasoning before its text, as the
+        /// OpenRouter streamer does.
+        fn stream_round_events(
+            &self,
+            messages: &[PromptMessage],
+            tools: &[Value],
+            on_event: &mut dyn FnMut(ProviderStreamEvent) -> Result<(), OpenRouterChatError>,
+        ) -> Result<ChatRoundResult, ChatRoundError> {
+            let reasoning = self
+                .rounds
+                .borrow()
+                .front()
+                .and_then(|round| round.as_ref().ok())
+                .map(|round| round.reasoning.clone())
+                .unwrap_or_default();
+            if !reasoning.is_empty() {
+                on_event(ProviderStreamEvent::ReasoningDelta(reasoning)).map_err(|source| {
+                    ChatRoundError {
+                        source,
+                        partial: Box::new(round("", None)),
+                    }
+                })?;
+            }
+            self.stream_round(messages, tools, &mut |text| {
+                on_event(ProviderStreamEvent::TextDelta(text.to_owned()))
+            })
+        }
     }
 
     fn round(text: &str, cost: Option<&str>) -> ChatRoundResult {
@@ -2107,47 +2136,22 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct NoTools;
-
-    impl NativeToolRuntime for NoTools {
-        fn schemas(&self, _task_mode: bool) -> Vec<Value> {
-            Vec::new()
-        }
-
-        fn contains(&self, _name: &str, _task_mode: bool) -> bool {
-            false
-        }
-
-        fn execute(
-            &mut self,
-            _name: &str,
-            _arguments: &Value,
-            _tool_call_id: &str,
-        ) -> ToolExecutionResult {
-            ToolExecutionResult::output("")
-        }
+    /// Tool runtime exposing at most one tool; confirmed tools end the turn
+    /// with their own confirmation, like `task_set`.
+    struct FakeTools {
+        name: Option<&'static str>,
+        confirmed: bool,
     }
 
-    struct Tools;
-
-    impl ConversationToolFactory for Tools {
-        type Tools = NoTools;
-
-        fn create(&mut self, _input: &AiConversationInput) -> Result<Self::Tools, String> {
-            Ok(NoTools)
-        }
-    }
-
-    struct ConfirmingTool;
-
-    impl NativeToolRuntime for ConfirmingTool {
+    impl NativeToolRuntime for FakeTools {
         fn schemas(&self, _task_mode: bool) -> Vec<Value> {
-            vec![json!({"type": "function"})]
+            self.name
+                .map(|name| vec![json!({"type": "function", "function": {"name": name}})])
+                .unwrap_or_default()
         }
 
         fn contains(&self, name: &str, _task_mode: bool) -> bool {
-            name == "task_set"
+            self.name == Some(name)
         }
 
         fn execute(
@@ -2156,24 +2160,68 @@ mod tests {
             _arguments: &Value,
             _tool_call_id: &str,
         ) -> ToolExecutionResult {
-            ToolExecutionResult::confirmed_output("synthetic task confirmation")
+            if self.confirmed {
+                ToolExecutionResult::confirmed_output("synthetic task confirmation")
+            } else {
+                ToolExecutionResult::output("synthetic lookup result")
+            }
         }
     }
 
-    struct ConfirmingTools;
+    /// The single tool factory type every test uses, so each generic
+    /// conversation function has one instantiation.
+    #[derive(Default)]
+    struct Tools {
+        name: Option<&'static str>,
+        confirmed: bool,
+        fail: bool,
+    }
 
-    impl ConversationToolFactory for ConfirmingTools {
-        type Tools = ConfirmingTool;
+    impl Tools {
+        /// Answers every lookup call, so a provider that keeps calling it runs
+        /// into the tool round limit.
+        fn lookup() -> Self {
+            Self {
+                name: Some("synthetic_lookup"),
+                ..Self::default()
+            }
+        }
+
+        fn confirming() -> Self {
+            Self {
+                name: Some("task_set"),
+                confirmed: true,
+                fail: false,
+            }
+        }
+    }
+
+    impl ConversationToolFactory for Tools {
+        type Tools = FakeTools;
 
         fn create(&mut self, _input: &AiConversationInput) -> Result<Self::Tools, String> {
-            Ok(ConfirmingTool)
+            if self.fail {
+                return Err("synthetic tool factory failure".to_owned());
+            }
+            Ok(FakeTools {
+                name: self.name,
+                confirmed: self.confirmed,
+            })
         }
     }
 
-    struct Media;
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum YoutubeOutcome {
+        Transcript,
+        /// The transcript was cached after the reservation was estimated.
+        CacheHit,
+        CaptionFailure,
+        Unavailable,
+        RuntimeError,
+    }
 
     struct Youtube {
-        fail: bool,
+        outcome: YoutubeOutcome,
         cached: bool,
     }
 
@@ -2195,215 +2243,82 @@ mod tests {
         ) -> Result<Option<YoutubePreparation>, String> {
             let has_youtube = message_text.contains("youtu")
                 || reply_context.is_some_and(|context| context.contains("youtu"));
-            Ok(has_youtube.then(|| YoutubePreparation {
-                context: (!self.fail)
-                    .then(|| "YOUTUBE VIDEO TRANSCRIPT:\nsynthetic transcript".to_owned()),
-                transcript: (!self.fail).then(|| "synthetic transcript".to_owned()),
-                billing_segment: (!self.fail && !self.cached).then(|| {
-                    json!({
-                        "kind": "youtube_transcript",
-                        "source": "supadata",
-                        "metadata": {"provider": "supadata"}
-                    })
-                }),
-                diagnostics: if self.fail {
-                    vec!["synthetic YouTube failure".to_owned()]
-                } else {
-                    Vec::new()
-                },
-                failed: self.fail,
-            }))
-        }
-    }
-
-    impl MediaRuntime for Media {
-        fn estimate_reserve_credit_units(
-            &mut self,
-            kind: MediaKind,
-            duration_hint_seconds: Option<f64>,
-        ) -> Result<i64, String> {
-            assert_eq!(kind, MediaKind::Audio);
-            assert_eq!(duration_hint_seconds, Some(4.5));
-            Ok(7)
-        }
-
-        fn prepare(
-            &mut self,
-            kind: MediaKind,
-            file_id: &str,
-            duration_hint_seconds: Option<f64>,
-        ) -> Result<crate::media::PreparedMedia, String> {
-            assert_eq!(kind, MediaKind::Audio);
-            assert_eq!(duration_hint_seconds, Some(4.5));
-            Ok(crate::media::PreparedMedia::Audio {
-                file_id: file_id.to_owned(),
-                bytes: b"audio".to_vec(),
-                duration_seconds: 4.5,
-                reserve_credit_units: 7,
-            })
-        }
-
-        fn execute(
-            &mut self,
-            prepared: crate::media::PreparedMedia,
-            _prompt: &str,
-        ) -> Result<MediaExecution, String> {
-            let crate::media::PreparedMedia::Audio { file_id, .. } = prepared else {
-                return Err("unexpected media".to_owned());
-            };
-            Ok(MediaExecution {
-                kind: MediaKind::Audio,
-                file_id,
-                text: "synthetic transcript".to_owned(),
-                billing_segment: Some(json!({
-                    "kind": "transcribe",
-                    "model": "microsoft/mai-transcribe-2",
-                    "usage": {"seconds": 4.5, "cost": "0.000125"},
-                    "audio_seconds": 4.5,
-                    "source": "openrouter",
-                    "metadata": {"provider": "openrouter"}
+            let fail = self.outcome == YoutubeOutcome::CaptionFailure;
+            match self.outcome {
+                YoutubeOutcome::RuntimeError => Err("synthetic YouTube runtime failure".to_owned()),
+                YoutubeOutcome::Unavailable => Ok(None),
+                YoutubeOutcome::Transcript
+                | YoutubeOutcome::CacheHit
+                | YoutubeOutcome::CaptionFailure => Ok(has_youtube.then(|| YoutubePreparation {
+                    context: (!fail)
+                        .then(|| "YOUTUBE VIDEO TRANSCRIPT:\nsynthetic transcript".to_owned()),
+                    transcript: (!fail).then(|| "synthetic transcript".to_owned()),
+                    billing_segment: (self.outcome == YoutubeOutcome::Transcript && !self.cached)
+                        .then(|| {
+                            json!({
+                                "kind": "youtube_transcript",
+                                "source": "supadata",
+                                "metadata": {"provider": "supadata"}
+                            })
+                        }),
+                    diagnostics: if fail {
+                        vec!["synthetic YouTube failure".to_owned()]
+                    } else {
+                        Vec::new()
+                    },
+                    failed: fail,
                 })),
-                cached: false,
-            })
-        }
-    }
-
-    struct StickerMedia {
-        fail_execute: bool,
-    }
-
-    impl MediaRuntime for StickerMedia {
-        fn estimate_reserve_credit_units(
-            &mut self,
-            _kind: MediaKind,
-            _duration_hint_seconds: Option<f64>,
-        ) -> Result<i64, String> {
-            Err("cached media must skip reserve estimation".to_owned())
-        }
-
-        fn prepare(
-            &mut self,
-            kind: MediaKind,
-            file_id: &str,
-            duration_hint_seconds: Option<f64>,
-        ) -> Result<crate::media::PreparedMedia, String> {
-            assert_eq!(kind, MediaKind::Image);
-            assert_eq!(duration_hint_seconds, None);
-            Ok(crate::media::PreparedMedia::Cached {
-                kind,
-                file_id: file_id.to_owned(),
-                text: "ignored by fake execution".to_owned(),
-            })
-        }
-
-        fn execute(
-            &mut self,
-            prepared: crate::media::PreparedMedia,
-            prompt: &str,
-        ) -> Result<MediaExecution, String> {
-            assert!(prompt.starts_with("Describe this sticker"));
-            if self.fail_execute {
-                return Err("synthetic cached media failure".to_owned());
             }
-            Ok(MediaExecution {
-                kind: prepared.kind(),
-                file_id: "sticker-1".to_owned(),
-                text: "**synthetic** [sticker](https://example.test)".to_owned(),
-                billing_segment: None,
-                cached: true,
-            })
         }
     }
 
-    struct GifMedia;
-
-    impl MediaRuntime for GifMedia {
-        fn estimate_reserve_credit_units(
-            &mut self,
-            _kind: MediaKind,
-            _duration_hint_seconds: Option<f64>,
-        ) -> Result<i64, String> {
-            Err("cached media must skip reserve estimation".to_owned())
-        }
-
-        fn prepare(
-            &mut self,
-            kind: MediaKind,
-            file_id: &str,
-            duration_hint_seconds: Option<f64>,
-        ) -> Result<crate::media::PreparedMedia, String> {
-            assert_eq!(kind, MediaKind::Image);
-            assert_eq!(duration_hint_seconds, None);
-            Ok(crate::media::PreparedMedia::Cached {
-                kind,
-                file_id: file_id.to_owned(),
-                text: "synthetic GIF description".to_owned(),
-            })
-        }
-
-        fn execute(
-            &mut self,
-            prepared: crate::media::PreparedMedia,
-            prompt: &str,
-        ) -> Result<MediaExecution, String> {
-            assert!(prompt.starts_with("Describe this GIF"));
-            Ok(MediaExecution {
-                kind: prepared.kind(),
-                file_id: "synthetic-gif".to_owned(),
-                text: "synthetic GIF description".to_owned(),
-                billing_segment: None,
-                cached: true,
-            })
-        }
-    }
-
-    struct DownloadFailureMedia;
-
-    impl MediaRuntime for DownloadFailureMedia {
-        fn estimate_reserve_credit_units(
-            &mut self,
-            kind: MediaKind,
-            duration_hint_seconds: Option<f64>,
-        ) -> Result<i64, String> {
-            assert_eq!(kind, MediaKind::Audio);
-            assert_eq!(duration_hint_seconds, Some(2.0));
-            Ok(1)
-        }
-
-        fn prepare(
-            &mut self,
-            _kind: MediaKind,
-            _file_id: &str,
-            _duration_hint_seconds: Option<f64>,
-        ) -> Result<crate::media::PreparedMedia, String> {
-            Err(MediaPipelineError::Download.to_string())
-        }
-
-        fn execute(
-            &mut self,
-            _prepared: crate::media::PreparedMedia,
-            _prompt: &str,
-        ) -> Result<MediaExecution, String> {
-            Err("must not execute".to_owned())
-        }
-    }
-
-    struct ConfigurableMedia {
+    /// Configurable media runtime. Uncached preparations carry the configured
+    /// estimate as their reserve, like the native pipeline does.
+    #[derive(Default)]
+    struct FakeMedia {
+        reserve_credit_units: i64,
         prepare_error: Option<String>,
         execute_error: Option<String>,
-        reserve_credit_units: i64,
+        cached: bool,
+        direct_image: bool,
+        text: &'static str,
+        expected_prompt: Option<&'static str>,
     }
 
-    impl MediaRuntime for ConfigurableMedia {
+    impl FakeMedia {
+        fn transcriber() -> Self {
+            Self {
+                reserve_credit_units: 7,
+                text: "synthetic transcript",
+                ..Self::default()
+            }
+        }
+
+        fn describer(reserve_credit_units: i64) -> Self {
+            Self {
+                reserve_credit_units,
+                text: "synthetic media result",
+                ..Self::default()
+            }
+        }
+
+        fn cached(text: &'static str, expected_prompt: &'static str) -> Self {
+            Self {
+                cached: true,
+                text,
+                expected_prompt: Some(expected_prompt),
+                ..Self::default()
+            }
+        }
+    }
+
+    impl MediaRuntime for FakeMedia {
         fn estimate_reserve_credit_units(
             &mut self,
-            kind: MediaKind,
+            _kind: MediaKind,
             _duration_hint_seconds: Option<f64>,
         ) -> Result<i64, String> {
-            Ok(match kind {
-                MediaKind::Image => self.reserve_credit_units,
-                MediaKind::Audio => 1,
-            })
+            Ok(self.reserve_credit_units)
         }
 
         fn prepare(
@@ -2415,91 +2330,91 @@ mod tests {
             if let Some(error) = &self.prepare_error {
                 return Err(error.clone());
             }
+            if self.cached {
+                return Ok(crate::media::PreparedMedia::Cached {
+                    kind,
+                    file_id: file_id.to_owned(),
+                    text: self.text.to_owned(),
+                });
+            }
+            let reserve_credit_units =
+                self.estimate_reserve_credit_units(kind, duration_hint_seconds)?;
             Ok(match kind {
                 MediaKind::Image => crate::media::PreparedMedia::Image {
                     file_id: file_id.to_owned(),
                     bytes: b"synthetic image".to_vec(),
                     mime: "image/png".to_owned(),
-                    reserve_credit_units: self.reserve_credit_units,
+                    reserve_credit_units,
                 },
                 MediaKind::Audio => crate::media::PreparedMedia::Audio {
                     file_id: file_id.to_owned(),
                     bytes: b"synthetic audio".to_vec(),
                     duration_seconds: duration_hint_seconds.unwrap_or(1.0),
-                    reserve_credit_units: self.reserve_credit_units,
+                    reserve_credit_units,
                 },
             })
-        }
-
-        fn execute(
-            &mut self,
-            prepared: crate::media::PreparedMedia,
-            _prompt: &str,
-        ) -> Result<MediaExecution, String> {
-            if let Some(error) = &self.execute_error {
-                return Err(error.clone());
-            }
-            Ok(MediaExecution {
-                kind: prepared.kind(),
-                file_id: "synthetic-media".to_owned(),
-                text: "synthetic media result".to_owned(),
-                billing_segment: Some(json!({
-                    "kind":"vision",
-                    "model":"synthetic/model",
-                    "usage":{"cost":"0.0001"},
-                    "source":"openrouter",
-                    "metadata":{"provider":"openrouter"}
-                })),
-                cached: false,
-            })
-        }
-    }
-
-    struct DirectImageMedia;
-
-    impl MediaRuntime for DirectImageMedia {
-        fn estimate_reserve_credit_units(
-            &mut self,
-            _kind: MediaKind,
-            _duration_hint_seconds: Option<f64>,
-        ) -> Result<i64, String> {
-            Err("legacy media path should not estimate direct images".to_owned())
-        }
-
-        fn prepare(
-            &mut self,
-            _kind: MediaKind,
-            _file_id: &str,
-            _duration_hint_seconds: Option<f64>,
-        ) -> Result<crate::media::PreparedMedia, String> {
-            Err("legacy media path should not prepare direct images".to_owned())
         }
 
         fn prepare_image_for_prompt(
             &mut self,
             file_id: &str,
         ) -> Result<Option<crate::media::PreparedImagePrompt>, String> {
-            assert_eq!(file_id, "synthetic-image");
-            Ok(Some(crate::media::PreparedImagePrompt {
-                bytes: Arc::from(b"synthetic direct image".to_vec()),
-                mime: "image/png".to_owned(),
-            }))
+            Ok(self
+                .direct_image
+                .then(|| crate::media::PreparedImagePrompt {
+                    bytes: Arc::from(format!("direct image {file_id}").into_bytes()),
+                    mime: "image/png".to_owned(),
+                }))
         }
 
         fn execute(
             &mut self,
-            _prepared: crate::media::PreparedMedia,
-            _prompt: &str,
+            prepared: crate::media::PreparedMedia,
+            prompt: &str,
         ) -> Result<MediaExecution, String> {
-            Err("legacy media path should not execute direct images".to_owned())
+            if let Some(expected) = self.expected_prompt {
+                assert!(prompt.starts_with(expected), "unexpected prompt: {prompt}");
+            }
+            if let Some(error) = &self.execute_error {
+                return Err(error.clone());
+            }
+            let kind = prepared.kind();
+            let cached = matches!(prepared, crate::media::PreparedMedia::Cached { .. });
+            Ok(MediaExecution {
+                kind,
+                file_id: "synthetic-media".to_owned(),
+                text: self.text.to_owned(),
+                billing_segment: (!cached).then(|| match kind {
+                    MediaKind::Audio => json!({
+                        "kind": "transcribe",
+                        "model": "microsoft/mai-transcribe-2",
+                        "usage": {"seconds": 4.5, "cost": "0.000125"},
+                        "audio_seconds": 4.5,
+                        "source": "openrouter",
+                        "metadata": {"provider": "openrouter"}
+                    }),
+                    MediaKind::Image => json!({
+                        "kind": "vision",
+                        "model": "synthetic/model",
+                        "usage": {"cost": "0.0001"},
+                        "source": "openrouter",
+                        "metadata": {"provider": "openrouter"}
+                    }),
+                }),
+                cached,
+            })
         }
     }
 
     #[derive(Default)]
     struct State {
         memory: ConversationMemory,
+        memory_error: Option<String>,
+        /// Search text, reply target, and current message of each memory load.
+        memory_lookups: Vec<(String, Option<String>, Option<String>)>,
         incoming: Vec<AiConversationInput>,
         outgoing: Vec<(AiConversationInput, Option<i64>, String)>,
+        outgoing_error: Option<String>,
     }
 
     impl ConversationState for State {
@@ -2514,12 +2429,19 @@ mod tests {
         fn load_memory(
             &mut self,
             _chat_id: &str,
-            _search_text: &str,
-            _reply_to_message_id: Option<&str>,
-            _current_message_id: Option<&str>,
+            search_text: &str,
+            reply_to_message_id: Option<&str>,
+            current_message_id: Option<&str>,
             _max_history_messages: usize,
         ) -> Result<ConversationMemory, String> {
-            Ok(self.memory.clone())
+            self.memory_lookups.push((
+                search_text.to_owned(),
+                reply_to_message_id.map(str::to_owned),
+                current_message_id.map(str::to_owned),
+            ));
+            self.memory_error
+                .clone()
+                .map_or_else(|| Ok(self.memory.clone()), Err)
         }
 
         fn record_incoming(&mut self, input: &AiConversationInput) -> Result<(), String> {
@@ -2535,7 +2457,7 @@ mod tests {
         ) -> Result<(), String> {
             self.outgoing
                 .push((input.clone(), sent_message_id, text.to_owned()));
-            Ok(())
+            self.outgoing_error.clone().map_or(Ok(()), Err)
         }
     }
 
@@ -2544,6 +2466,8 @@ mod tests {
         decisions: VecDeque<ReserveDecision>,
         reserves: Vec<ReserveRequest>,
         reserve_error: Option<String>,
+        /// Reservations that succeed before `reserve_error` applies.
+        reserve_error_after: usize,
         segments: Vec<ProviderSegmentRequest>,
         settlements: Vec<SettlementRequest>,
         released_operations: Vec<String>,
@@ -2557,7 +2481,9 @@ mod tests {
     impl ConversationBilling for Billing {
         fn reserve(&mut self, request: ReserveRequest) -> Result<ReserveDecision, String> {
             self.reserves.push(request);
-            if let Some(error) = &self.reserve_error {
+            if let Some(error) = &self.reserve_error
+                && self.reserves.len() > self.reserve_error_after
+            {
                 return Err(error.clone());
             }
             Ok(self.decisions.pop_front().unwrap_or(ReserveDecision {
@@ -2700,7 +2626,7 @@ mod tests {
                 rounds: RefCell::new(rounds.into()),
                 prompts: RefCell::new(Vec::new()),
             },
-            Tools,
+            Tools::default(),
             State {
                 memory: ConversationMemory {
                     summary: Some("prior summary".to_owned()),
@@ -2720,6 +2646,113 @@ mod tests {
         )
     }
 
+    /// Unwraps values a test has already established, without a separate
+    /// failure branch.
+    trait Must<T> {
+        fn must(self) -> T;
+    }
+
+    impl<T, E> Must<T> for Result<T, E> {
+        fn must(self) -> T {
+            let Ok(value) = self else { unreachable!() };
+            value
+        }
+    }
+
+    impl<T> Must<T> for Option<T> {
+        fn must(self) -> T {
+            let Some(value) = self else { unreachable!() };
+            value
+        }
+    }
+
+    fn ignore_token(_token: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Splits a reply into text, completion id, and diagnostics; silent turns
+    /// have none.
+    fn reply_parts(preparation: AiPreparation) -> Option<(String, Option<String>, Vec<String>)> {
+        match preparation {
+            AiPreparation::Reply {
+                text,
+                completion_id,
+                diagnostics,
+            } => Some((text, completion_id, diagnostics)),
+            AiPreparation::Silent { .. } => None,
+        }
+    }
+
+    fn reply(preparation: Result<AiPreparation, String>) -> (String, Option<String>, Vec<String>) {
+        reply_parts(preparation.must()).must()
+    }
+
+    fn command_reply(
+        preparation: Result<Option<AiPreparation>, String>,
+    ) -> (String, Option<String>, Vec<String>) {
+        reply_parts(preparation.must().must()).must()
+    }
+
+    /// Requires a reply that still waits for its delivery outcome.
+    fn pending(
+        (text, completion_id, diagnostics): (String, Option<String>, Vec<String>),
+    ) -> (String, String, Vec<String>) {
+        (text, completion_id.must(), diagnostics)
+    }
+
+    fn prepare_with_events(
+        service: &mut NativeConversation<Provider, Tools, State, Billing>,
+        request: AiConversationInput,
+    ) -> (Result<AiPreparation, String>, Vec<AiStreamEvent>) {
+        let mut events = Vec::new();
+        let preparation = service.prepare_streaming_events(request, &mut |event| {
+            events.push(event);
+            Ok(())
+        });
+        (preparation, events)
+    }
+
+    fn prompt_text(messages: &[PromptMessage]) -> String {
+        messages
+            .iter()
+            .filter_map(|message| match &message.content {
+                PromptContent::Text(text) => Some(text.as_str()),
+                PromptContent::TextParts(_)
+                | PromptContent::Image { .. }
+                | PromptContent::Empty => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn denied() -> ReserveDecision {
+        ReserveDecision {
+            authorized: false,
+            user_balance: 0,
+            chat_balance: 0,
+            source: None,
+            denial: None,
+        }
+    }
+
+    fn authorized() -> ReserveDecision {
+        ReserveDecision {
+            authorized: true,
+            user_balance: 1_000,
+            chat_balance: 0,
+            source: Some(PayerSource::User),
+            denial: None,
+        }
+    }
+
+    fn deliver(completion_id: String, delivered: bool) -> AiDelivery {
+        AiDelivery {
+            completion_id,
+            delivered,
+            sent_message_id: delivered.then_some(MessageId(99)),
+        }
+    }
+
     #[test]
     fn successful_turn_reserves_context_then_settles_only_after_delivery() {
         let mut service = conversation(
@@ -2727,14 +2760,7 @@ mod tests {
             Billing::default(),
         );
         let preparation = service.prepare(input());
-        let Ok(AiPreparation::Reply {
-            text,
-            completion_id: Some(completion_id),
-            ..
-        }) = preparation
-        else {
-            return;
-        };
+        let (text, completion_id, _) = pending(reply(preparation));
         assert_eq!(text, "answer");
         assert!(!service.billing.reserves.is_empty());
         assert!(service.billing.settlements.is_empty());
@@ -2825,7 +2851,7 @@ mod tests {
                     rounds: RefCell::new(rounds.into()),
                     prompts: RefCell::new(Vec::new()),
                 },
-                ConfirmingTools,
+                Tools::confirming(),
                 State::default(),
                 Billing::default(),
                 "synthetic persona",
@@ -2870,14 +2896,14 @@ mod tests {
             },
         )
         .with_youtube(Box::new(Youtube {
-            fail: false,
+            outcome: YoutubeOutcome::Transcript,
             cached: false,
         }));
         let mut request = input();
         request.message_text = "https://youtu.be/synthetic-video".to_owned();
         let preparation = service
             .prepare_youtube(&request, "synthetic-operation")
-            .unwrap_or_else(|_| unreachable!());
+            .must();
 
         assert!(preparation.matched);
         assert!(
@@ -2895,20 +2921,14 @@ mod tests {
             Billing::default(),
         )
         .with_youtube(Box::new(Youtube {
-            fail: false,
+            outcome: YoutubeOutcome::Transcript,
             cached: false,
         }));
         let mut request = input();
         request.reply_context = Some("https://youtube.com/live/synthetic-video".to_owned());
         request.has_reply = true;
         let preparation = service.prepare(request);
-        let Ok(AiPreparation::Reply {
-            completion_id: Some(completion_id),
-            ..
-        }) = preparation
-        else {
-            return;
-        };
+        let (_, completion_id, _) = pending(reply(preparation));
         let prompt = service.provider.prompts.borrow()[0]
             .iter()
             .filter_map(|message| match &message.content {
@@ -2950,7 +2970,7 @@ mod tests {
         for spontaneous in [false, true] {
             let mut service =
                 conversation(Vec::new(), Billing::default()).with_youtube(Box::new(Youtube {
-                    fail: true,
+                    outcome: YoutubeOutcome::CaptionFailure,
                     cached: false,
                 }));
             let mut request = input();
@@ -2962,14 +2982,7 @@ mod tests {
                 assert_eq!(service.billing.settlements[0].actual_credit_units, 0);
                 assert!(service.billing.segments.is_empty());
             } else {
-                let Ok(AiPreparation::Reply {
-                    text,
-                    completion_id: Some(completion_id),
-                    diagnostics,
-                }) = preparation
-                else {
-                    return;
-                };
+                let (text, completion_id, diagnostics) = pending(reply(preparation));
                 assert!(text.contains("YouTube video"));
                 assert!(diagnostics[0].contains("synthetic YouTube failure"));
                 assert!(
@@ -3075,13 +3088,7 @@ mod tests {
                 ..Billing::default()
             },
         );
-        let Ok(AiPreparation::Reply {
-            completion_id: Some(completion_id),
-            ..
-        }) = service.prepare(input())
-        else {
-            return;
-        };
+        let (_, completion_id, _) = pending(reply(service.prepare(input())));
 
         assert!(
             service
@@ -3112,17 +3119,8 @@ mod tests {
     #[test]
     fn malformed_delivery_pricing_releases_the_active_operation() {
         let mut service = conversation(vec![Ok(round("answer", None))], Billing::default());
-        let Ok(AiPreparation::Reply {
-            completion_id: Some(completion_id),
-            ..
-        }) = service.prepare(input())
-        else {
-            return;
-        };
-        let Some(pending) = service.pending.get_mut(&completion_id) else {
-            return;
-        };
-        pending.segments = vec![json!("invalid segment")];
+        let (_, completion_id, _) = pending(reply(service.prepare(input())));
+        service.pending.get_mut(&completion_id).must().segments = vec![json!("invalid segment")];
 
         assert!(
             service
@@ -3150,14 +3148,7 @@ mod tests {
             expected_marker: Some("0".to_owned()),
             target_marker: "1".to_owned(),
         });
-        let prepared = service.prepare(input())?;
-        let AiPreparation::Reply {
-            completion_id: Some(completion_id),
-            ..
-        } = prepared
-        else {
-            return Err("expected a prepared reply".to_owned());
-        };
+        let (_, completion_id, _) = pending(reply(service.prepare(input())));
         assert!(scheduled.borrow().is_empty());
         service.complete_delivery(AiDelivery {
             completion_id,
@@ -3249,18 +3240,12 @@ mod tests {
     #[test]
     fn audio_is_reserved_transcribed_added_to_context_and_settled_with_chat_usage() {
         let mut service = conversation(vec![Ok(round("answer", None))], Billing::default())
-            .with_media(Box::new(Media));
+            .with_media(Box::new(FakeMedia::transcriber()));
         let mut request = input();
         request.audio_file_id = Some("audio-1".to_owned());
         request.audio_duration_seconds = Some(4.5);
         let preparation = service.prepare(request);
-        let Ok(AiPreparation::Reply {
-            completion_id: Some(completion_id),
-            ..
-        }) = preparation
-        else {
-            return;
-        };
+        let (_, completion_id, _) = pending(reply(preparation));
         assert!(
             service
                 .billing
@@ -3297,7 +3282,8 @@ mod tests {
 
     #[test]
     fn explicit_media_command_transcribes_and_settles_only_after_delivery() {
-        let mut service = conversation(Vec::new(), Billing::default()).with_media(Box::new(Media));
+        let mut service = conversation(Vec::new(), Billing::default())
+            .with_media(Box::new(FakeMedia::transcriber()));
         let mut request = input();
         request.command = "/transcribe".to_owned();
         request.has_reply = true;
@@ -3305,14 +3291,7 @@ mod tests {
         request.audio_file_id = Some("audio-1".to_owned());
         request.audio_duration_seconds = Some(4.5);
         let preparation = service.prepare_media_command(request);
-        let Ok(Some(AiPreparation::Reply {
-            text,
-            completion_id: Some(completion_id),
-            ..
-        })) = preparation
-        else {
-            return;
-        };
+        let (text, completion_id, _) = pending(command_reply(preparation));
         assert_eq!(text, "synthetic transcript");
         assert_eq!(
             service.billing.reserves[0].metadata["usage_tag"],
@@ -3339,7 +3318,8 @@ mod tests {
 
     #[test]
     fn explicit_media_command_accepts_media_attached_to_the_command_message() {
-        let mut service = conversation(Vec::new(), Billing::default()).with_media(Box::new(Media));
+        let mut service = conversation(Vec::new(), Billing::default())
+            .with_media(Box::new(FakeMedia::transcriber()));
         let mut request = input();
         request.command = "/transcribe".to_owned();
         request.has_reply = false;
@@ -3364,9 +3344,9 @@ mod tests {
             ),
         ] {
             let mut service = conversation(Vec::new(), Billing::default())
-                .with_media(Box::new(Media))
+                .with_media(Box::new(FakeMedia::transcriber()))
                 .with_youtube(Box::new(Youtube {
-                    fail: false,
+                    outcome: YoutubeOutcome::Transcript,
                     cached: false,
                 }));
             let mut request = input();
@@ -3374,14 +3354,8 @@ mod tests {
             request.message_text = message_text.to_owned();
             request.reply_context = reply_context;
 
-            let Ok(Some(AiPreparation::Reply {
-                text,
-                completion_id: Some(completion_id),
-                ..
-            })) = service.prepare_media_command(request)
-            else {
-                unreachable!();
-            };
+            let (text, completion_id, _) =
+                pending(command_reply(service.prepare_media_command(request)));
             assert_eq!(text, "synthetic transcript");
             assert_eq!(service.billing.reserves.len(), 1);
             assert_eq!(service.billing.reserves[0].amount, 60);
@@ -3412,7 +3386,7 @@ mod tests {
 
         let mut cached =
             conversation(Vec::new(), Billing::default()).with_youtube(Box::new(Youtube {
-                fail: false,
+                outcome: YoutubeOutcome::Transcript,
                 cached: true,
             }));
         assert!(matches!(
@@ -3427,7 +3401,7 @@ mod tests {
 
         let mut failed =
             conversation(Vec::new(), Billing::default()).with_youtube(Box::new(Youtube {
-                fail: true,
+                outcome: YoutubeOutcome::CaptionFailure,
                 cached: false,
             }));
         assert!(matches!(
@@ -3447,8 +3421,9 @@ mod tests {
 
     #[test]
     fn transcript_alias_describes_telegram_gifs() {
-        let mut service =
-            conversation(Vec::new(), Billing::default()).with_media(Box::new(GifMedia));
+        let mut service = conversation(Vec::new(), Billing::default()).with_media(Box::new(
+            FakeMedia::cached("synthetic GIF description", "Describe this GIF"),
+        ));
         let mut request = input();
         request.command = "/transcript".to_owned();
         request.visual_media_kind = Some("animation".to_owned());
@@ -3463,16 +3438,11 @@ mod tests {
 
     #[test]
     fn explicit_media_command_without_media_returns_reply_help_without_reserving() {
-        let mut service = conversation(Vec::new(), Billing::default()).with_media(Box::new(Media));
+        let mut service = conversation(Vec::new(), Billing::default())
+            .with_media(Box::new(FakeMedia::transcriber()));
         let preparation = service.prepare_media_command(input());
-        let Ok(Some(AiPreparation::Reply {
-            text,
-            completion_id: None,
-            ..
-        })) = preparation
-        else {
-            unreachable!();
-        };
+        let (text, completion_id, _) = command_reply(preparation);
+        assert_eq!(completion_id, None);
         assert_eq!(text, media_command_reply_required(Locale::En));
         assert!(service.billing.reserves.is_empty());
         assert!(service.billing.settlements.is_empty());
@@ -3481,9 +3451,10 @@ mod tests {
     #[test]
     fn explicit_sticker_command_uses_sticker_copy_and_sanitizes_cached_text() {
         let mut service =
-            conversation(Vec::new(), Billing::default()).with_media(Box::new(StickerMedia {
-                fail_execute: false,
-            }));
+            conversation(Vec::new(), Billing::default()).with_media(Box::new(FakeMedia::cached(
+                "**synthetic** [sticker](https://example.test)",
+                "Describe this sticker",
+            )));
         let mut request = input();
         request.command = "/describe".to_owned();
         request.has_reply = true;
@@ -3496,12 +3467,12 @@ mod tests {
                 if text == "synthetic sticker"
         ));
 
-        let mut failed = conversation(Vec::new(), Billing::default())
-            .with_media(Box::new(StickerMedia { fail_execute: true }));
-        let preparation = failed
-            .prepare_media_command(request)
-            .unwrap_or_else(|_| unreachable!())
-            .unwrap_or_else(|| unreachable!());
+        let mut failed =
+            conversation(Vec::new(), Billing::default()).with_media(Box::new(FakeMedia {
+                execute_error: Some("synthetic cached media failure".to_owned()),
+                ..FakeMedia::cached("ignored", "Describe this sticker")
+            }));
+        let preparation = failed.prepare_media_command(request).must().must();
         assert!(matches!(
             preparation,
             AiPreparation::Reply {
@@ -3517,21 +3488,18 @@ mod tests {
     #[test]
     fn explicit_media_download_failure_is_localized_without_reserving() {
         let mut service =
-            conversation(Vec::new(), Billing::default()).with_media(Box::new(DownloadFailureMedia));
+            conversation(Vec::new(), Billing::default()).with_media(Box::new(FakeMedia {
+                prepare_error: Some(MediaPipelineError::Download.to_string()),
+                ..FakeMedia::transcriber()
+            }));
         let mut request = input();
         request.command = "/transcribe".to_owned();
         request.has_reply = true;
         request.audio_file_id = Some("voice-1".to_owned());
         request.audio_duration_seconds = Some(2.0);
         let preparation = service.prepare_media_command(request);
-        let Ok(Some(AiPreparation::Reply {
-            text,
-            completion_id: None,
-            diagnostics,
-        })) = preparation
-        else {
-            return;
-        };
+        let (text, completion_id, diagnostics) = command_reply(preparation);
+        assert_eq!(completion_id, None);
         assert_eq!(text, "I could not download the audio. Send it again");
         assert_eq!(diagnostics.len(), 1);
         assert!(service.billing.reserves.is_empty());
@@ -3547,14 +3515,12 @@ mod tests {
             vec![Ok(round("synthetic answer", None))],
             Billing::default(),
         )
-        .with_media(Box::new(ConfigurableMedia {
+        .with_media(Box::new(FakeMedia {
             prepare_error: Some("synthetic preparation failure".to_owned()),
             execute_error: None,
-            reserve_credit_units: 5,
+            ..FakeMedia::describer(5)
         }));
-        let result = preparation_failure
-            .prepare(request.clone())
-            .unwrap_or_else(|_| unreachable!());
+        let result = preparation_failure.prepare(request.clone()).must();
         assert!(
             matches!(result, AiPreparation::Reply { diagnostics, .. } if diagnostics.iter().any(|value| value.contains("synthetic preparation failure")))
         );
@@ -3582,14 +3548,12 @@ mod tests {
                 ..Billing::default()
             },
         )
-        .with_media(Box::new(ConfigurableMedia {
+        .with_media(Box::new(FakeMedia {
             prepare_error: None,
             execute_error: None,
-            reserve_credit_units: 5,
+            ..FakeMedia::describer(5)
         }));
-        let result = reserve_failure
-            .prepare(request.clone())
-            .unwrap_or_else(|_| unreachable!());
+        let result = reserve_failure.prepare(request.clone()).must();
         assert!(matches!(
             result,
             AiPreparation::Reply {
@@ -3607,14 +3571,12 @@ mod tests {
             vec![Ok(round("synthetic answer", None))],
             Billing::default(),
         )
-        .with_media(Box::new(ConfigurableMedia {
+        .with_media(Box::new(FakeMedia {
             prepare_error: None,
             execute_error: Some("synthetic media provider failure".to_owned()),
-            reserve_credit_units: 5,
+            ..FakeMedia::describer(5)
         }));
-        let result = provider_failure
-            .prepare(request)
-            .unwrap_or_else(|_| unreachable!());
+        let result = provider_failure.prepare(request).must();
         assert!(
             matches!(result, AiPreparation::Reply { diagnostics, .. } if diagnostics.iter().any(|value| value.contains("synthetic media provider failure")))
         );
@@ -3636,10 +3598,10 @@ mod tests {
                 ..Billing::default()
             },
         )
-        .with_media(Box::new(ConfigurableMedia {
+        .with_media(Box::new(FakeMedia {
             prepare_error: None,
             execute_error: None,
-            reserve_credit_units: 5,
+            ..FakeMedia::describer(5)
         }));
         let mut denied_input = input();
         denied_input.audio_file_id = Some("synthetic-audio".to_owned());
@@ -3659,10 +3621,10 @@ mod tests {
                 ..Billing::default()
             },
         )
-        .with_media(Box::new(ConfigurableMedia {
+        .with_media(Box::new(FakeMedia {
             prepare_error: None,
             execute_error: None,
-            reserve_credit_units: 5,
+            ..FakeMedia::describer(5)
         }));
         let mut reserve_input = input();
         reserve_input.audio_file_id = Some("synthetic-audio".to_owned());
@@ -3678,26 +3640,16 @@ mod tests {
         );
 
         let mut provider_failure =
-            conversation(Vec::new(), Billing::default()).with_media(Box::new(ConfigurableMedia {
+            conversation(Vec::new(), Billing::default()).with_media(Box::new(FakeMedia {
                 prepare_error: None,
                 execute_error: Some("synthetic provider failure".to_owned()),
-                reserve_credit_units: 1,
+                ..FakeMedia::describer(1)
             }));
         let mut audio = input();
         audio.audio_file_id = Some("synthetic-audio".to_owned());
         audio.audio_duration_seconds = Some(1.0);
-        let result = provider_failure
-            .prepare_media_command(audio)
-            .unwrap_or_else(|_| unreachable!())
-            .unwrap_or_else(|| unreachable!());
-        let AiPreparation::Reply {
-            completion_id: Some(completion_id),
-            diagnostics,
-            ..
-        } = result
-        else {
-            unreachable!();
-        };
+        let result = provider_failure.prepare_media_command(audio).must().must();
+        let (_, completion_id, diagnostics) = pending(reply(Ok(result)));
         assert!(diagnostics[0].contains("synthetic provider failure"));
         assert!(
             provider_failure
@@ -3720,21 +3672,15 @@ mod tests {
             vec![Ok(round("synthetic answer", None))],
             Billing::default(),
         )
-        .with_media(Box::new(ConfigurableMedia {
+        .with_media(Box::new(FakeMedia {
             prepare_error: None,
             execute_error: None,
-            reserve_credit_units: 5,
+            ..FakeMedia::describer(5)
         }));
         let mut request = input();
         request.photo_file_id = Some("synthetic-image".to_owned());
-        let result = service.prepare(request).unwrap_or_else(|_| unreachable!());
-        let AiPreparation::Reply {
-            completion_id: Some(completion_id),
-            ..
-        } = result
-        else {
-            unreachable!();
-        };
+        let result = service.prepare(request).must();
+        let (_, completion_id, _) = pending(reply(Ok(result)));
         let prompts = service.provider.prompts.borrow();
         let prompt = prompts[0]
             .iter()
@@ -3764,35 +3710,25 @@ mod tests {
             vec![Ok(round("synthetic answer", None))],
             Billing::default(),
         )
-        .with_media(Box::new(DirectImageMedia));
+        .with_media(Box::new(FakeMedia {
+            direct_image: true,
+            ..FakeMedia::default()
+        }));
         let mut request = input();
         request.photo_file_id = Some("synthetic-image".to_owned());
 
-        let result = service.prepare(request).unwrap_or_else(|_| unreachable!());
-        let AiPreparation::Reply {
-            completion_id: Some(completion_id),
-            ..
-        } = result
-        else {
-            unreachable!();
-        };
+        let result = service.prepare(request).must();
+        let (_, completion_id, _) = pending(reply(Ok(result)));
 
         let prompts = service.provider.prompts.borrow();
-        let Some(PromptMessage {
-            content: PromptContent::Image { text_parts, image },
-            ..
-        }) = prompts[0].last()
-        else {
-            unreachable!();
-        };
-        assert!(text_parts.iter().any(|part| part.contains("MESSAGE:")));
-        assert!(
-            text_parts
-                .iter()
-                .any(|part| part.contains("Attached image"))
-        );
-        assert_eq!(image.mime, "image/png");
-        assert_eq!(image.bytes.as_ref(), b"synthetic direct image");
+        assert!(matches!(
+            prompts[0].last().map(|message| &message.content),
+            Some(PromptContent::Image { text_parts, image })
+                if text_parts.iter().any(|part| part.contains("MESSAGE:"))
+                    && text_parts.iter().any(|part| part.contains("Attached image"))
+                    && image.mime == "image/png"
+                    && image.bytes.as_ref() == b"direct image synthetic-image"
+        ));
         drop(prompts);
 
         assert!(
@@ -3810,9 +3746,7 @@ mod tests {
 
     #[test]
     fn delivery_reasons_cover_conversation_media_and_summary_outcomes() {
-        let segment = round("synthetic", None)
-            .billing_segment
-            .unwrap_or_else(|| unreachable!());
+        let segment = round("synthetic", None).billing_segment.must();
         let cases = [
             (
                 PendingKind::Conversation {
@@ -3829,6 +3763,14 @@ mod tests {
                 false,
                 Vec::new(),
                 "ai_response_delivery_failure_refund",
+            ),
+            (
+                PendingKind::Conversation {
+                    provider_failed: false,
+                },
+                false,
+                vec![segment.clone()],
+                "ai_response_provider_usage_before_delivery_failure",
             ),
             (
                 PendingKind::MediaCommand,
@@ -3974,10 +3916,10 @@ mod tests {
             vec![Ok(round("synthetic answer", None))],
             Billing::default(),
         )
-        .with_media(Box::new(ConfigurableMedia {
+        .with_media(Box::new(FakeMedia {
             prepare_error: None,
             execute_error: None,
-            reserve_credit_units: 0,
+            ..FakeMedia::describer(0)
         }));
         assert!(matches!(
             media_without_attachment.prepare(input()),
@@ -4044,14 +3986,13 @@ mod tests {
         let mut no_media = conversation(Vec::new(), Billing::default());
         assert_eq!(no_media.prepare_media_command(input()), Ok(None));
         let mut configured = conversation(Vec::new(), Billing::default())
-            .with_media(Box::new(ConfigurableMedia {
+            .with_media(Box::new(FakeMedia {
                 prepare_error: None,
                 execute_error: None,
-                reserve_credit_units: 0,
+                ..FakeMedia::describer(0)
             }))
             .with_openrouter_pricing(Arc::new(
-                OpenRouterPricingCache::new("synthetic-key", "not-a-url")
-                    .unwrap_or_else(|_| unreachable!("pricing cache construction")),
+                OpenRouterPricingCache::new("synthetic-key", "not-a-url").must(),
             ));
         let mut replied_without_media = input();
         replied_without_media.has_reply = true;
@@ -4066,20 +4007,15 @@ mod tests {
 
     #[test]
     fn abort_and_settlement_failures_keep_both_diagnostics() {
-        struct FailingTools;
-        impl ConversationToolFactory for FailingTools {
-            type Tools = NoTools;
-
-            fn create(&mut self, _input: &AiConversationInput) -> Result<Self::Tools, String> {
-                Err("synthetic tool factory failure".to_owned())
-            }
-        }
         let mut preparation = NativeConversation::new(
             Provider {
                 rounds: RefCell::new(VecDeque::new()),
                 prompts: RefCell::new(Vec::new()),
             },
-            FailingTools,
+            Tools {
+                fail: true,
+                ..Tools::default()
+            },
             State::default(),
             Billing {
                 abort_failure: true,
@@ -4101,13 +4037,7 @@ mod tests {
                 ..Billing::default()
             },
         );
-        let AiPreparation::Reply {
-            completion_id: Some(completion_id),
-            ..
-        } = delivery.prepare(input()).unwrap_or_else(|_| unreachable!())
-        else {
-            unreachable!();
-        };
+        let (_, completion_id, _) = pending(reply(Ok(delivery.prepare(input()).must())));
         let error = delivery
             .complete_delivery(AiDelivery {
                 completion_id,
@@ -4134,23 +4064,15 @@ mod tests {
             streamed.push_str(token);
             Ok(())
         });
-        let Ok(Some(AiPreparation::Reply {
-            text,
-            completion_id: Some(completion_id),
-            ..
-        })) = preparation
-        else {
-            return;
-        };
+        let (text, completion_id, _) = pending(command_reply(preparation));
         assert_eq!(streamed, "**synthetic summary**");
         assert_eq!(text, "synthetic summary");
         let prompts = service.provider.prompts.borrow();
-        let PromptContent::Text(prompt) =
-            &prompts[0].last().unwrap_or_else(|| unreachable!()).content
-        else {
-            return;
-        };
-        assert!(prompt.starts_with("focus on decisions. update the previous summary"));
+        assert!(matches!(
+            prompts[0].last().map(|message| &message.content),
+            Some(PromptContent::Text(prompt))
+                if prompt.starts_with("focus on decisions. update the previous summary")
+        ));
         drop(prompts);
 
         assert_eq!(
@@ -4179,14 +4101,7 @@ mod tests {
             cached_tokens.push_str(token);
             Ok(())
         });
-        let Ok(Some(AiPreparation::Reply {
-            text,
-            completion_id: Some(completion_id),
-            ..
-        })) = cached_result
-        else {
-            return;
-        };
+        let (text, completion_id, _) = pending(command_reply(cached_result));
         assert_eq!(text, "cached summary");
         assert_eq!(cached_tokens, "cached summary");
         assert!(cached.provider.prompts.borrow().is_empty());
@@ -4203,7 +4118,7 @@ mod tests {
         let mut empty = conversation(Vec::new(), Billing::default());
         empty.state.memory.history.clear();
         empty.state.memory.summary = None;
-        let empty_result = empty.prepare_summary_command_streaming(input(), &mut |_token| Ok(()));
+        let empty_result = empty.prepare_summary_command_streaming(input(), &mut ignore_token);
         assert!(matches!(
             empty_result,
             Ok(Some(AiPreparation::Reply { ref text, .. }))
@@ -4228,15 +4143,8 @@ mod tests {
             })],
             Billing::default(),
         );
-        let preparation = service.prepare_summary_command_streaming(input(), &mut |_token| Ok(()));
-        let Ok(Some(AiPreparation::Reply {
-            text,
-            completion_id: Some(completion_id),
-            ..
-        })) = preparation
-        else {
-            return;
-        };
+        let preparation = service.prepare_summary_command_streaming(input(), &mut ignore_token);
+        let (text, completion_id, _) = pending(command_reply(preparation));
         assert_eq!(text, "I could not generate the summary. Try again");
         assert_eq!(
             service.complete_delivery(AiDelivery {
@@ -4269,14 +4177,7 @@ mod tests {
                 ..Billing::default()
             },
         );
-        let Ok(AiPreparation::Reply {
-            text,
-            completion_id,
-            ..
-        }) = explicit.prepare(input())
-        else {
-            return;
-        };
+        let (text, completion_id, _) = reply(explicit.prepare(input()));
         assert!(text.contains("Balance: 0.25"));
         assert_eq!(completion_id, None);
         assert!(explicit.provider.prompts.borrow().is_empty());
@@ -4291,8 +4192,8 @@ mod tests {
             },
         );
         assert_eq!(
-            spontaneous.prepare(spontaneous_input),
-            Ok(AiPreparation::silent())
+            spontaneous.prepare(spontaneous_input).map(reply_parts),
+            Ok(None)
         );
         assert!(spontaneous.provider.prompts.borrow().is_empty());
     }
@@ -4303,11 +4204,7 @@ mod tests {
         let mut request = input();
         request.link_context =
             Some("LINKS DEL MENSAJE:\n1. https://example.com/nota\ntitulo: nota".to_owned());
-        let mut events = Vec::new();
-        let preparation = service.prepare_streaming_events(request, &mut |event| {
-            events.push(event);
-            Ok(())
-        });
+        let (preparation, events) = prepare_with_events(&mut service, request);
         assert!(matches!(preparation, Ok(AiPreparation::Reply { .. })));
         assert_eq!(events.first(), Some(&AiStreamEvent::Admitted));
         let prompt = service.provider.prompts.borrow()[0]
@@ -4337,23 +4234,20 @@ mod tests {
                     ..Billing::default()
                 },
             );
-            let mut events = Vec::new();
-            let _preparation = service.prepare_streaming_events(request, &mut |event| {
-                events.push(event);
-                Ok(())
-            });
+            let (preparation, events) = prepare_with_events(&mut service, request);
+            assert!(matches!(
+                preparation.map(reply_parts),
+                Ok(parts) if parts.is_some() != spontaneous
+            ));
             assert!(events.is_empty());
         }
 
         let mut spontaneous_input = input();
         spontaneous_input.spontaneous = true;
         let mut spontaneous = conversation(vec![Ok(round("answer", None))], Billing::default());
-        let mut events = Vec::new();
-        let _preparation = spontaneous.prepare_streaming_events(spontaneous_input, &mut |event| {
-            events.push(event);
-            Ok(())
-        });
+        let (_, events) = prepare_with_events(&mut spontaneous, spontaneous_input);
         assert!(!events.contains(&AiStreamEvent::Admitted));
+        assert_eq!(events, [AiStreamEvent::FinalText("answer".to_owned())]);
     }
 
     #[test]
@@ -4420,14 +4314,7 @@ mod tests {
             })],
             Billing::default(),
         );
-        let Ok(AiPreparation::Reply {
-            completion_id: Some(completion_id),
-            diagnostics,
-            ..
-        }) = service.prepare(input())
-        else {
-            return;
-        };
+        let (_, completion_id, diagnostics) = pending(reply(service.prepare(input())));
         assert!(
             diagnostics
                 .iter()
@@ -4603,15 +4490,6 @@ mod tests {
         assert_eq!(format_credit_units(-1), "0.00");
         assert_eq!(format_credit_units(123_456), "1,234.56");
 
-        let mut tools = NoTools;
-        assert!(!tools.contains("synthetic", false));
-        assert_eq!(
-            tools
-                .execute("synthetic", &Value::Null, "synthetic-call")
-                .output,
-            ""
-        );
-
         let mut spanish_group = input();
         spanish_group.chat_type = "supergroup".to_owned();
         assert!(
@@ -4647,58 +4525,30 @@ mod tests {
             },
         );
         assert!(matches!(
-            service.prepare_summary_command_streaming(input(), &mut |_token| Ok(())),
+            service.prepare_summary_command_streaming(input(), &mut ignore_token),
             Ok(Some(AiPreparation::Reply {
                 completion_id: None,
                 ..
             }))
         ));
 
-        struct FailingSummaryState;
-        impl ConversationState for FailingSummaryState {
-            fn reply_metadata(
-                &mut self,
-                _chat_id: &str,
-                _message_id: &str,
-            ) -> Result<Option<AiReplyMetadata>, String> {
-                Ok(None)
-            }
-            fn load_memory(
-                &mut self,
-                _chat_id: &str,
-                _search_text: &str,
-                _reply_to_message_id: Option<&str>,
-                _current_message_id: Option<&str>,
-                _max_history_messages: usize,
-            ) -> Result<ConversationMemory, String> {
-                Err("synthetic memory failure".to_owned())
-            }
-            fn record_incoming(&mut self, _input: &AiConversationInput) -> Result<(), String> {
-                Ok(())
-            }
-            fn record_outgoing(
-                &mut self,
-                _input: &AiConversationInput,
-                _sent_message_id: Option<i64>,
-                _text: &str,
-            ) -> Result<(), String> {
-                Ok(())
-            }
-        }
         let mut failing = NativeConversation::new(
             Provider {
                 rounds: RefCell::new(VecDeque::new()),
                 prompts: RefCell::new(Vec::new()),
             },
-            Tools,
-            FailingSummaryState,
+            Tools::default(),
+            State {
+                memory_error: Some("synthetic memory failure".to_owned()),
+                ..State::default()
+            },
             Billing::default(),
             "synthetic persona",
             DEEPSEEK_MODEL,
             5,
         );
         assert_eq!(
-            failing.prepare_summary_command_streaming(input(), &mut |_token| Ok(())),
+            failing.prepare_summary_command_streaming(input(), &mut ignore_token),
             Err("synthetic memory failure".to_owned())
         );
         assert_eq!(
@@ -4729,7 +4579,7 @@ mod tests {
             text: "synthetic context ".repeat(1_000),
         }];
         assert!(matches!(
-            extension_denied.prepare_summary_command_streaming(input(), &mut |_token| Ok(())),
+            extension_denied.prepare_summary_command_streaming(input(), &mut ignore_token),
             Ok(Some(AiPreparation::Reply {
                 completion_id: None,
                 ..
@@ -4739,6 +4589,846 @@ mod tests {
             extension_denied.billing.settlements[0].reason,
             "summary_reserve_adjustment_failed"
         );
+    }
+
+    fn youtube_conversation(
+        outcome: YoutubeOutcome,
+        billing: Billing,
+    ) -> NativeConversation<Provider, Tools, State, Billing> {
+        conversation(vec![Ok(round("synthetic answer", None))], billing).with_youtube(Box::new(
+            Youtube {
+                outcome,
+                cached: false,
+            },
+        ))
+    }
+
+    fn youtube_request(command: &str) -> AiConversationInput {
+        let mut request = input();
+        request.command = command.to_owned();
+        request.message_text = "https://youtu.be/synthetic-video".to_owned();
+        request
+    }
+
+    #[test]
+    fn memory_lookup_searches_the_message_and_includes_the_replied_message() {
+        let mut service = conversation(vec![Ok(round("answer", None))], Billing::default());
+        let mut request = input();
+        request.reply_to_message_id = Some(MessageId(5));
+        let (text, _, _) = pending(reply(service.prepare(request)));
+        assert_eq!(text, "answer");
+        assert_eq!(
+            service.state.memory_lookups,
+            [(
+                "what happened?".to_owned(),
+                Some("5".to_owned()),
+                Some("7".to_owned())
+            )]
+        );
+    }
+
+    #[test]
+    fn memory_failures_settle_the_admission_and_abort_the_operation() {
+        let failing_state = || State {
+            memory_error: Some("synthetic memory failure".to_owned()),
+            ..State::default()
+        };
+        let mut service = NativeConversation::new(
+            Provider {
+                rounds: RefCell::new(VecDeque::new()),
+                prompts: RefCell::new(Vec::new()),
+            },
+            Tools::default(),
+            failing_state(),
+            Billing::default(),
+            "synthetic persona",
+            DEEPSEEK_MODEL,
+            5,
+        );
+        assert_eq!(
+            service.prepare(input()),
+            Err("synthetic memory failure".to_owned())
+        );
+        assert_eq!(
+            service.billing.settlements[0].reason,
+            "ai_request_preparation_failed"
+        );
+        assert_eq!(service.billing.settlements[0].actual_credit_units, 0);
+        assert_eq!(service.billing.released_operations, ["ai:42:7:88"]);
+        assert!(service.provider.prompts.borrow().is_empty());
+
+        let mut unsettled = NativeConversation::new(
+            Provider {
+                rounds: RefCell::new(VecDeque::new()),
+                prompts: RefCell::new(Vec::new()),
+            },
+            Tools::default(),
+            failing_state(),
+            Billing {
+                settlement_failure: true,
+                ..Billing::default()
+            },
+            "synthetic persona",
+            DEEPSEEK_MODEL,
+            5,
+        );
+        assert_eq!(
+            unsettled.prepare(input()),
+            Err("synthetic settlement failure".to_owned())
+        );
+        assert_eq!(unsettled.billing.released_operations, ["ai:42:7:88"]);
+    }
+
+    #[test]
+    fn reservation_failures_abort_before_any_provider_io() {
+        let mut base = conversation(
+            vec![Ok(round("must not run", None))],
+            Billing {
+                reserve_error: Some("synthetic reserve failure".to_owned()),
+                ..Billing::default()
+            },
+        );
+        assert_eq!(
+            base.prepare(input()),
+            Err("synthetic reserve failure".to_owned())
+        );
+        assert_eq!(base.billing.reserves.len(), 1);
+        assert_eq!(base.billing.released_operations, ["ai:42:7:88"]);
+        assert!(base.provider.prompts.borrow().is_empty());
+
+        let mut extension = conversation(
+            vec![Ok(round("must not run", None))],
+            Billing {
+                reserve_error: Some("synthetic extension failure".to_owned()),
+                reserve_error_after: 1,
+                ..Billing::default()
+            },
+        );
+        assert_eq!(
+            extension.prepare(input()),
+            Err("synthetic extension failure".to_owned())
+        );
+        assert_eq!(
+            extension.billing.reserves[1].metadata["usage_tag"],
+            "ai_response_context_extension"
+        );
+        assert_eq!(extension.billing.released_operations, ["ai:42:7:88"]);
+        assert!(extension.provider.prompts.borrow().is_empty());
+
+        let mut summary = conversation(
+            Vec::new(),
+            Billing {
+                reserve_error: Some("synthetic summary reserve failure".to_owned()),
+                ..Billing::default()
+            },
+        );
+        assert_eq!(
+            summary.prepare_summary_command_streaming(input(), &mut ignore_token),
+            Err("synthetic summary reserve failure".to_owned())
+        );
+        assert_eq!(summary.billing.released_operations, ["summary:42:7:88"]);
+
+        let mut summary_extension = conversation(
+            Vec::new(),
+            Billing {
+                reserve_error: Some("synthetic summary extension failure".to_owned()),
+                reserve_error_after: 1,
+                ..Billing::default()
+            },
+        );
+        assert_eq!(
+            summary_extension.prepare_summary_command_streaming(input(), &mut ignore_token),
+            Err("synthetic summary extension failure".to_owned())
+        );
+        assert_eq!(
+            summary_extension.billing.reserves[1].metadata["usage_tag"],
+            "summary_command_context_extension"
+        );
+        assert!(summary_extension.provider.prompts.borrow().is_empty());
+    }
+
+    #[test]
+    fn denied_extensions_report_settlement_failures_and_stay_silent_when_spontaneous() {
+        let long_history = || {
+            vec![HistoryMessage {
+                role: PromptRole::User,
+                text: "synthetic context ".repeat(1_000),
+            }]
+        };
+        let mut unsettled = conversation(
+            Vec::new(),
+            Billing {
+                decisions: VecDeque::from([authorized(), denied()]),
+                settlement_failure: true,
+                ..Billing::default()
+            },
+        );
+        unsettled.state.memory.history = long_history();
+        assert_eq!(
+            unsettled.prepare(input()),
+            Err("synthetic settlement failure".to_owned())
+        );
+        assert_eq!(
+            unsettled.billing.settlements[0].reason,
+            "ai_response_reserve_adjustment_failed"
+        );
+
+        let mut spontaneous_input = input();
+        spontaneous_input.spontaneous = true;
+        let mut spontaneous = conversation(
+            vec![Ok(round("must not run", None))],
+            Billing {
+                decisions: VecDeque::from([authorized(), denied()]),
+                ..Billing::default()
+            },
+        );
+        spontaneous.state.memory.history = long_history();
+        assert_eq!(
+            spontaneous.prepare(spontaneous_input),
+            Ok(AiPreparation::silent())
+        );
+        assert_eq!(
+            spontaneous.billing.settlements[0].reason,
+            "ai_response_reserve_adjustment_failed"
+        );
+        assert!(spontaneous.provider.prompts.borrow().is_empty());
+
+        let mut summary = conversation(
+            Vec::new(),
+            Billing {
+                decisions: VecDeque::from([authorized(), denied()]),
+                settlement_failure: true,
+                ..Billing::default()
+            },
+        );
+        summary.state.memory.history = long_history();
+        assert_eq!(
+            summary.prepare_summary_command_streaming(input(), &mut ignore_token),
+            Err("synthetic settlement failure".to_owned())
+        );
+        assert_eq!(
+            summary.billing.settlements[0].reason,
+            "summary_reserve_adjustment_failed"
+        );
+    }
+
+    #[test]
+    fn prompts_that_fit_the_base_reservation_skip_the_context_extension() {
+        let mut service = NativeConversation::new(
+            Provider {
+                rounds: RefCell::new(VecDeque::new()),
+                prompts: RefCell::new(Vec::new()),
+            },
+            Tools::default(),
+            State::default(),
+            Billing::default(),
+            "synthetic persona",
+            DEEPSEEK_FLASH_MODEL,
+            5,
+        );
+        // The admission reserve only prices the message itself; pad it until
+        // the full prompt rounds to the same credit units.
+        let mut request = input();
+        let fitting = (0..4_000).find_map(|padding| {
+            request.message_text = format!("hello{}", " x".repeat(padding));
+            let base = estimate_reserve(
+                &[PromptMessage::text(PromptRole::User, &request.message_text)],
+                DEEPSEEK_FLASH_MODEL,
+                None,
+            )
+            .ok()?;
+            let full = service.prompt(&request, None, None, None).ok()?;
+            let full = estimate_reserve(&full.messages, DEEPSEEK_FLASH_MODEL, None).ok()?;
+            (full <= base).then(|| request.clone())
+        });
+        let request = fitting.must();
+        service
+            .provider
+            .rounds
+            .borrow_mut()
+            .push_back(Ok(round("synthetic answer", None)));
+
+        let (text, _, _) = pending(reply(service.prepare(request)));
+
+        assert_eq!(text, "synthetic answer");
+        assert_eq!(service.billing.reserves.len(), 1);
+        assert_eq!(
+            service.billing.reserves[0].metadata["usage_tag"],
+            "ai_response_base"
+        );
+
+        let mut summary = NativeConversation::new(
+            Provider {
+                rounds: RefCell::new(VecDeque::from([Ok(round("- synthetic item", None))])),
+                prompts: RefCell::new(Vec::new()),
+            },
+            Tools::default(),
+            State {
+                memory: ConversationMemory {
+                    history: vec![HistoryMessage {
+                        role: PromptRole::User,
+                        text: "hi".to_owned(),
+                    }],
+                    ..ConversationMemory::default()
+                },
+                ..State::default()
+            },
+            Billing::default(),
+            "p",
+            DEEPSEEK_FLASH_MODEL,
+            5,
+        );
+        let (text, _, _) = pending(command_reply(
+            summary.prepare_summary_command_streaming(input(), &mut ignore_token),
+        ));
+        assert_eq!(text, "- synthetic item");
+        assert_eq!(summary.billing.reserves.len(), 1);
+        assert_eq!(
+            summary.billing.reserves[0].metadata["usage_tag"],
+            "summary_command_base"
+        );
+    }
+
+    #[test]
+    fn reasoning_is_streamed_as_thoughts_before_the_answer() {
+        let thinking_round = |text: &str| {
+            Ok(ChatRoundResult {
+                reasoning: "synthetic reasoning".to_owned(),
+                ..round(text, None)
+            })
+        };
+        let mut service =
+            conversation(vec![thinking_round("synthetic answer")], Billing::default());
+        let (preparation, events) = prepare_with_events(&mut service, input());
+        let (text, _, _) = pending(reply(preparation));
+        assert_eq!(text, "synthetic answer");
+        assert_eq!(
+            events,
+            [
+                AiStreamEvent::Admitted,
+                AiStreamEvent::Thought("synthetic reasoning".to_owned()),
+                AiStreamEvent::FinalText("synthetic answer".to_owned()),
+            ]
+        );
+
+        let mut summary =
+            conversation(vec![thinking_round("- synthetic item")], Billing::default());
+        let mut events = Vec::new();
+        let (text, completion_id, _) = pending(command_reply(
+            summary.prepare_summary_command_streaming_events(input(), &mut |event| {
+                events.push(event);
+                Ok(())
+            }),
+        ));
+        assert_eq!(text, "- synthetic item");
+        assert_eq!(
+            events,
+            [
+                AiStreamEvent::Thought("synthetic reasoning".to_owned()),
+                AiStreamEvent::FinalText("- synthetic item".to_owned()),
+            ]
+        );
+        assert_eq!(
+            summary.complete_delivery(deliver(completion_id, true)),
+            Ok(())
+        );
+        assert_eq!(
+            summary.billing.settlements[0].reason,
+            "summary_command_stream_success"
+        );
+
+        let mut tokens_only =
+            conversation(vec![thinking_round("- synthetic item")], Billing::default());
+        let mut tokens = Vec::new();
+        let (text, _, _) = pending(command_reply(
+            tokens_only.prepare_summary_command_streaming(input(), &mut |token| {
+                tokens.push(token.to_owned());
+                Ok(())
+            }),
+        ));
+        assert_eq!(text, "- synthetic item");
+        assert_eq!(tokens, ["- synthetic item"]);
+    }
+
+    #[test]
+    fn rejected_stream_consumers_fail_the_turn_with_a_refundable_fallback() {
+        let mut service = conversation(
+            vec![Ok(round("synthetic answer", None))],
+            Billing::default(),
+        );
+        let (text, completion_id, diagnostics) =
+            pending(reply(service.prepare_streaming(input(), &mut |_token| {
+                Err("synthetic Telegram rejection".to_owned())
+            })));
+        assert_eq!(text, "I could not answer. Try again");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|value| value.contains("synthetic Telegram rejection"))
+        );
+        assert_eq!(
+            service.complete_delivery(deliver(completion_id, true)),
+            Ok(())
+        );
+        assert_eq!(
+            service.billing.settlements[0].reason,
+            "ai_response_provider_usage_before_fallback"
+        );
+        assert_eq!(service.billing.settlements[0].actual_credit_units, 2);
+
+        let mut summary = conversation(
+            vec![Ok(ChatRoundResult {
+                reasoning: "synthetic reasoning".to_owned(),
+                ..round("- synthetic item", None)
+            })],
+            Billing::default(),
+        );
+        let (text, completion_id, diagnostics) = pending(command_reply(
+            summary.prepare_summary_command_streaming_events(input(), &mut |event| {
+                Err(format!("synthetic rejection of {event:?}"))
+            }),
+        ));
+        assert_eq!(text, "I could not generate the summary. Try again");
+        assert_eq!(
+            diagnostics,
+            [
+                r#"summary provider stream: OpenRouter stream returned an error: synthetic rejection of Thought("synthetic reasoning")"#
+            ]
+        );
+        assert_eq!(
+            summary.complete_delivery(deliver(completion_id, true)),
+            Ok(())
+        );
+        assert_eq!(
+            summary.billing.settlements[0].reason,
+            "summary_stream_failed_refund"
+        );
+        assert_eq!(summary.billing.settlements[0].actual_credit_units, 0);
+    }
+
+    #[test]
+    fn tool_round_limit_falls_back_and_bills_the_rounds_already_used() {
+        let tool_round = ChatRoundResult {
+            tool_calls: vec![StreamToolCall {
+                index: 0,
+                id: "synthetic-call".to_owned(),
+                call_type: "function".to_owned(),
+                name: "synthetic_lookup".to_owned(),
+                arguments: "{}".to_owned(),
+            }],
+            finish_reason: Some("tool_calls".to_owned()),
+            ..round("", None)
+        };
+        let mut service = NativeConversation::new(
+            Provider {
+                rounds: RefCell::new(VecDeque::from([Ok(tool_round)])),
+                prompts: RefCell::new(Vec::new()),
+            },
+            Tools::lookup(),
+            State::default(),
+            Billing::default(),
+            "synthetic persona",
+            DEEPSEEK_MODEL,
+            1,
+        );
+        let (preparation, events) = prepare_with_events(&mut service, input());
+        let (text, completion_id, diagnostics) = pending(reply(preparation));
+        assert_eq!(text, "I could not answer. Try again");
+        assert!(diagnostics.contains(
+            &"AI tool loop limit reached: operation_id=ai:42:7:88 provider_rounds=1 tool_calls_executed=1"
+                .to_owned()
+        ));
+        assert!(events.contains(&AiStreamEvent::ToolResult {
+            id: "synthetic-call".to_owned(),
+            name: "synthetic_lookup".to_owned(),
+            output: "synthetic lookup result".to_owned(),
+        }));
+        assert_eq!(
+            service.complete_delivery(deliver(completion_id, true)),
+            Ok(())
+        );
+        assert_eq!(
+            service.billing.settlements[0].reason,
+            "ai_response_provider_usage_before_fallback"
+        );
+        assert!(service.billing.settlements[0].actual_credit_units > 0);
+    }
+
+    #[test]
+    fn spontaneous_failures_without_usage_are_refunded_silently() {
+        let unbilled_failure = || {
+            vec![Err(ChatRoundError {
+                source: OpenRouterChatError::Stream("synthetic provider failure".to_owned()),
+                partial: Box::new(ChatRoundResult {
+                    billing_segment: None,
+                    ..round("partial", None)
+                }),
+            })]
+        };
+        let mut request = input();
+        request.spontaneous = true;
+        let mut service = conversation(unbilled_failure(), Billing::default());
+        assert!(matches!(
+            service.prepare(request.clone()),
+            Ok(AiPreparation::Silent { ref diagnostics })
+                if diagnostics.iter().any(|value| value.contains("synthetic provider failure"))
+        ));
+        assert_eq!(
+            service.billing.settlements[0].reason,
+            "ai_response_failed_refund"
+        );
+        assert_eq!(service.billing.settlements[0].actual_credit_units, 0);
+        assert!(service.billing.segments.is_empty());
+
+        let mut unsettled = conversation(
+            unbilled_failure(),
+            Billing {
+                settlement_failure: true,
+                ..Billing::default()
+            },
+        );
+        assert_eq!(
+            unsettled.prepare(request),
+            Err("synthetic settlement failure".to_owned())
+        );
+        assert_eq!(unsettled.billing.released_operations, ["ai:42:7:88"]);
+    }
+
+    #[test]
+    fn youtube_runtime_gaps_keep_the_turn_and_refund_what_was_not_used() {
+        let mut unavailable = youtube_conversation(YoutubeOutcome::Unavailable, Billing::default());
+        let (text, completion_id, _) = pending(reply(unavailable.prepare(youtube_request("what"))));
+        assert_eq!(text, "synthetic answer");
+        assert!(
+            !prompt_text(&unavailable.provider.prompts.borrow()[0])
+                .contains("YOUTUBE VIDEO TRANSCRIPT")
+        );
+        assert_eq!(
+            unavailable.billing.reserves[1].metadata["usage_tag"],
+            "youtube_transcript"
+        );
+        assert_eq!(
+            unavailable.complete_delivery(deliver(completion_id, true)),
+            Ok(())
+        );
+        assert_eq!(unavailable.billing.segments.len(), 1);
+        assert_eq!(unavailable.billing.segments[0].segment["kind"], "chat");
+
+        let mut failing = youtube_conversation(YoutubeOutcome::RuntimeError, Billing::default());
+        let (text, completion_id, diagnostics) =
+            pending(reply(failing.prepare(youtube_request("what"))));
+        assert_eq!(
+            text,
+            "I could not get captions for that YouTube video. Try again later"
+        );
+        assert_eq!(
+            diagnostics,
+            ["YouTube transcript preparation failed: synthetic YouTube runtime failure"]
+        );
+        assert!(failing.provider.prompts.borrow().is_empty());
+        assert_eq!(
+            failing.complete_delivery(deliver(completion_id, true)),
+            Ok(())
+        );
+        assert_eq!(
+            failing.billing.settlements[0].reason,
+            "ai_response_failed_refund"
+        );
+        assert_eq!(failing.billing.settlements[0].actual_credit_units, 0);
+
+        let mut spontaneous_request = youtube_request("what");
+        spontaneous_request.spontaneous = true;
+        let mut unsettled = youtube_conversation(
+            YoutubeOutcome::CaptionFailure,
+            Billing {
+                settlement_failure: true,
+                ..Billing::default()
+            },
+        );
+        assert_eq!(
+            unsettled.prepare(spontaneous_request),
+            Err("synthetic settlement failure".to_owned())
+        );
+    }
+
+    #[test]
+    fn denied_youtube_context_settles_the_admission_before_any_provider_io() {
+        for spontaneous in [false, true] {
+            let mut service = youtube_conversation(
+                YoutubeOutcome::Transcript,
+                Billing {
+                    decisions: VecDeque::from([authorized(), denied()]),
+                    ..Billing::default()
+                },
+            );
+            let mut request = youtube_request("what");
+            request.spontaneous = spontaneous;
+            let preparation = service.prepare(request);
+            if spontaneous {
+                assert_eq!(preparation, Ok(AiPreparation::silent()));
+            } else {
+                let (text, completion_id, _) = reply(preparation);
+                assert!(text.contains("out of AI credits"));
+                assert_eq!(completion_id, None);
+            }
+            assert_eq!(
+                service.billing.settlements[0].reason,
+                "youtube_transcript_reserve_failed"
+            );
+            assert_eq!(service.billing.settlements[0].actual_credit_units, 0);
+            assert!(service.provider.prompts.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn youtube_commands_refund_unused_reservations_and_report_settlement_failures() {
+        let mut denied_command = youtube_conversation(
+            YoutubeOutcome::Transcript,
+            Billing {
+                decisions: VecDeque::from([denied()]),
+                ..Billing::default()
+            },
+        );
+        let (text, completion_id, _) =
+            command_reply(denied_command.prepare_media_command(youtube_request("/transcript")));
+        assert!(text.contains("out of AI credits"));
+        assert_eq!(completion_id, None);
+        assert!(denied_command.billing.settlements.is_empty());
+
+        for (outcome, reason, expected_text) in [
+            (
+                YoutubeOutcome::Unavailable,
+                "youtube_transcript_unavailable_refund",
+                "I could not get captions for that YouTube video. Try again later",
+            ),
+            (
+                YoutubeOutcome::CacheHit,
+                "youtube_transcript_cache_hit_refund",
+                "synthetic transcript",
+            ),
+        ] {
+            let mut service = youtube_conversation(outcome, Billing::default());
+            let (text, completion_id, _) =
+                command_reply(service.prepare_media_command(youtube_request("/transcript")));
+            assert_eq!(text, expected_text);
+            assert_eq!(completion_id, None);
+            assert_eq!(service.billing.settlements[0].reason, reason);
+            assert_eq!(service.billing.settlements[0].actual_credit_units, 0);
+
+            let mut unsettled = youtube_conversation(
+                outcome,
+                Billing {
+                    settlement_failure: true,
+                    ..Billing::default()
+                },
+            );
+            assert_eq!(
+                unsettled.prepare_media_command(youtube_request("/transcript")),
+                Err("synthetic settlement failure".to_owned())
+            );
+            assert_eq!(unsettled.billing.released_operations, ["ai:42:7:88"]);
+        }
+
+        let mut free_failure =
+            conversation(Vec::new(), Billing::default()).with_youtube(Box::new(Youtube {
+                outcome: YoutubeOutcome::CaptionFailure,
+                cached: true,
+            }));
+        let (text, completion_id, diagnostics) =
+            command_reply(free_failure.prepare_media_command(youtube_request("/transcript")));
+        assert_eq!(
+            text,
+            "I could not get captions for that YouTube video. Try again later"
+        );
+        assert_eq!(completion_id, None);
+        assert_eq!(diagnostics, ["synthetic YouTube failure"]);
+        assert!(free_failure.billing.reserves.is_empty());
+        assert!(free_failure.billing.settlements.is_empty());
+    }
+
+    #[test]
+    fn free_automatic_images_skip_the_media_reservation() {
+        let mut service = conversation(
+            vec![Ok(round("synthetic answer", None))],
+            Billing::default(),
+        )
+        .with_media(Box::new(FakeMedia::describer(0)));
+        let mut request = input();
+        request.photo_file_id = Some("synthetic-image".to_owned());
+        let (_, completion_id, _) = pending(reply(service.prepare(request)));
+        assert!(
+            prompt_text(&service.provider.prompts.borrow()[0])
+                .contains("[Image: synthetic media result]")
+        );
+        assert!(
+            service
+                .billing
+                .reserves
+                .iter()
+                .all(|reserve| reserve.metadata["usage_tag"] != "image_context_media")
+        );
+        assert_eq!(
+            service.complete_delivery(deliver(completion_id, true)),
+            Ok(())
+        );
+        assert_eq!(service.billing.segments[0].segment["kind"], "vision");
+        assert_eq!(service.billing.segments[1].segment["kind"], "chat");
+    }
+
+    #[test]
+    fn denied_media_reservations_report_settlement_failures() {
+        let mut service = conversation(
+            vec![Ok(round("must not run", None))],
+            Billing {
+                decisions: VecDeque::from([authorized(), denied()]),
+                settlement_failure: true,
+                ..Billing::default()
+            },
+        )
+        .with_media(Box::new(FakeMedia::describer(5)));
+        let mut request = input();
+        request.photo_file_id = Some("synthetic-image".to_owned());
+        assert_eq!(
+            service.prepare(request),
+            Err("synthetic settlement failure".to_owned())
+        );
+        assert_eq!(
+            service.billing.settlements[0].reason,
+            "ai_response_media_reserve_failed"
+        );
+        assert!(service.provider.prompts.borrow().is_empty());
+
+        let mut spontaneous = conversation(
+            vec![Ok(round("must not run", None))],
+            Billing {
+                decisions: VecDeque::from([authorized(), denied()]),
+                ..Billing::default()
+            },
+        )
+        .with_media(Box::new(FakeMedia::describer(5)));
+        let mut request = input();
+        request.photo_file_id = Some("synthetic-image".to_owned());
+        request.spontaneous = true;
+        assert_eq!(spontaneous.prepare(request), Ok(AiPreparation::silent()));
+        assert_eq!(
+            spontaneous.billing.settlements[0].reason,
+            "ai_response_media_reserve_failed"
+        );
+        assert!(spontaneous.provider.prompts.borrow().is_empty());
+    }
+
+    #[test]
+    fn task_commands_without_a_priced_estimate_are_rejected_before_billing() {
+        let mut service = conversation(vec![Ok(round("must not run", None))], Billing::default())
+            .with_openrouter_pricing(Arc::new(
+                OpenRouterPricingCache::new("", "https://openrouter.invalid").must(),
+            ));
+        let mut task = input();
+        task.command = "/tasks".to_owned();
+        task.message_text = "remind me tomorrow".to_owned();
+        assert_eq!(
+            service.prepare(task),
+            Ok(AiPreparation::reply(
+                "I could not calculate the task cost. Try again",
+                None
+            ))
+        );
+        assert!(service.billing.reserves.is_empty());
+        assert!(service.provider.prompts.borrow().is_empty());
+        assert_eq!(service.state.incoming.len(), 1);
+    }
+
+    #[test]
+    fn outgoing_history_failures_surface_after_settlement() {
+        let mut service = conversation(
+            vec![Ok(round("synthetic answer", None))],
+            Billing::default(),
+        );
+        service.state.outgoing_error = Some("synthetic history failure".to_owned());
+        let (_, completion_id, _) = pending(reply(service.prepare(input())));
+        assert_eq!(
+            service.complete_delivery(deliver(completion_id, true)),
+            Err("synthetic history failure".to_owned())
+        );
+        assert_eq!(service.billing.settlements[0].reason, "ai_response_success");
+        assert_eq!(service.state.outgoing.len(), 1);
+    }
+
+    #[test]
+    fn localized_gif_youtube_and_attachment_copy() {
+        assert!(gif_prompt(Locale::Es).contains("este GIF"));
+        assert_eq!(
+            youtube_context_error(Locale::Es),
+            "No pude conseguir los subtítulos de ese video de YouTube. Probá más tarde"
+        );
+        let download = MediaPipelineError::Download.to_string();
+        assert_eq!(
+            media_command_prepare_error(MediaKind::Image, Some("animation"), Locale::Es, &download),
+            "No pude bajar el GIF. Mandalo de nuevo"
+        );
+        assert_eq!(
+            media_command_prepare_error(MediaKind::Image, Some("animation"), Locale::En, &download),
+            "I could not download the GIF. Send it again"
+        );
+        assert_eq!(
+            media_command_provider_error(MediaKind::Image, Some("animation"), Locale::Es),
+            "No pude sacar qué mierda tiene el GIF. Probá más tarde"
+        );
+        assert_eq!(
+            media_command_provider_error(MediaKind::Image, Some("animation"), Locale::En),
+            "I could not describe the GIF. Try again later"
+        );
+
+        let image = PromptImage {
+            bytes: Arc::from(b"synthetic".to_vec()),
+            mime: "image/png".to_owned(),
+        };
+        let message = |content| PromptMessage {
+            role: PromptRole::User,
+            content,
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+            reasoning: None,
+            reasoning_details: Vec::new(),
+        };
+        let mut none = Vec::new();
+        append_image_context(&mut none, &image, Locale::Es);
+        assert!(none.is_empty());
+
+        let mut messages = vec![
+            message(PromptContent::TextParts(vec!["uno".to_owned()])),
+            message(PromptContent::Empty),
+        ];
+        append_image_context(&mut messages[..1], &image, Locale::Es);
+        append_image_context(&mut messages, &image, Locale::En);
+        assert!(matches!(
+            &messages[0].content,
+            PromptContent::Image { text_parts, .. } if text_parts == &["uno", "[Imagen adjunta]"]
+        ));
+        assert!(matches!(
+            &messages[1].content,
+            PromptContent::Image { text_parts, .. } if text_parts == &["[Attached image]"]
+        ));
+
+        append_image_context(&mut messages[..1], &image, Locale::En);
+        let audio = MediaExecution {
+            kind: MediaKind::Audio,
+            file_id: "synthetic-audio".to_owned(),
+            text: "hola".to_owned(),
+            billing_segment: None,
+            cached: true,
+        };
+        append_media_context(&mut messages[..1], &audio, Locale::En);
+        assert!(matches!(
+            &messages[0].content,
+            PromptContent::Image { text_parts, .. }
+                if text_parts == &[
+                    "uno",
+                    "[Imagen adjunta]",
+                    "[Attached image]",
+                    "[Audio transcription: hola]",
+                ]
+        ));
     }
 
     #[test]

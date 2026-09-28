@@ -337,12 +337,9 @@ mod tests {
                 .windows(2)
                 .all(|pair| pair[0].command < pair[1].command)
         );
-        assert!(!commands.iter().any(|entry| {
-            matches!(
-                entry.command,
-                "printcredits" | "creditlog" | "buscar" | "search"
-            )
-        }));
+        for hidden in ["printcredits", "creditlog", "buscar", "search"] {
+            assert!(!commands.iter().any(|entry| entry.command == hidden));
+        }
         assert!(commands.iter().any(|entry| entry.command == "tldr"));
     }
 
@@ -391,8 +388,14 @@ mod tests {
     fn publication_plans_default_spanish_and_english_menus_and_a_spanish_group_menu() {
         use crate::telegram_actions::{CommandScope, TelegramAction};
         let actions = command_publication_actions();
+        // Unrelated actions are ignored by the filter below.
+        let unrelated = TelegramAction::DeleteMessage {
+            chat_id: ChatId(1),
+            message_id: crate::telegram_input::MessageId(1),
+        };
         let plans = actions
             .iter()
+            .chain(std::iter::once(&unrelated))
             .filter_map(|action| match action {
                 TelegramAction::SetCommands {
                     commands,
@@ -417,17 +420,15 @@ mod tests {
     fn chat_menu_uses_the_chat_scope_and_its_language() {
         use crate::telegram_actions::{CommandScope, TelegramAction};
         for (locale, expected) in [(Locale::Es, "idioma"), (Locale::En, "language")] {
-            let TelegramAction::SetCommands {
-                commands,
-                language_code,
-                scope,
-            } = super::chat_command_menu_action(ChatId(-42), locale)
-            else {
-                unreachable!("chat menu is a SetCommands action");
-            };
-            assert_eq!(scope, CommandScope::Chat(ChatId(-42)));
-            assert_eq!(language_code, None);
-            assert!(commands.iter().any(|entry| entry.command == expected));
+            let action = super::chat_command_menu_action(ChatId(-42), locale);
+            assert!(matches!(
+                &action,
+                TelegramAction::SetCommands {
+                    commands,
+                    language_code: None,
+                    scope: CommandScope::Chat(ChatId(-42)),
+                } if commands.iter().any(|entry| entry.command == expected)
+            ));
         }
     }
 }

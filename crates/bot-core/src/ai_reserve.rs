@@ -177,10 +177,10 @@ pub fn estimate_transcription_reserve_credit_units(
 }
 
 pub fn estimate_firecrawl_reserve_credit_units() -> Result<i64, ReserveEstimateError> {
-    Ok(credit_units_from_usd_micros(
+    credit_units_from_usd_micros(
         FIRECRAWL_SEARCH_MAX_CREDITS * FIRECRAWL_STANDARD_USD_MICROS_PER_CREDIT,
-    )?
-    .max(1))
+    )
+    .map(|units| units.max(1))
 }
 
 pub fn estimate_youtube_transcript_reserve_credit_units() -> Result<i64, ReserveEstimateError> {
@@ -338,6 +338,51 @@ mod tests {
         assert_eq!(
             estimate_vision_reserve_credit_units_with_pricing("", 0, 0, 1, &synthetic_pricing()),
             Ok(1)
+        );
+    }
+
+    #[test]
+    fn images_system_messages_and_extreme_durations_are_estimated_safely() {
+        assert_eq!(
+            estimate_nested_tokens(&TokenEstimateValue::Image(9)),
+            estimate_text_tokens(Some("input_image")) + 9
+        );
+        assert_eq!(
+            estimate_nested_tokens(&TokenEstimateValue::Image(usize::MAX)),
+            i64::MAX
+        );
+        let message = EstimatedMessage {
+            role: text("user"),
+            content: text("abcdefgh"),
+            name: TokenEstimateValue::Empty,
+        };
+        let system = EstimatedMessage {
+            role: text("system"),
+            content: text(&"x".repeat(4_000)),
+            name: TokenEstimateValue::Empty,
+        };
+        let pricing = synthetic_pricing();
+        let without = estimate_chat_reserve_credit_units_with_pricing(
+            None,
+            std::slice::from_ref(&message),
+            Some(0),
+            0,
+            "synthetic/model",
+            &pricing,
+        );
+        let with = estimate_chat_reserve_credit_units_with_pricing(
+            Some(&system),
+            std::slice::from_ref(&message),
+            Some(0),
+            0,
+            "synthetic/model",
+            &pricing,
+        );
+        // The 1,002 system-prompt tokens are reserved on top of the message.
+        assert_eq!((without, with), (Ok(0), Ok(6)));
+        assert_eq!(
+            estimate_transcription_reserve_credit_units(1e308, 111_000),
+            Err(ReserveEstimateError::Overflow)
         );
     }
 }

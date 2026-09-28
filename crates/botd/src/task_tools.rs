@@ -77,7 +77,10 @@ pub struct RandomTaskIdSource;
 
 impl TaskIdSource for RandomTaskIdSource {
     fn next_id(&mut self) -> Result<TaskId, String> {
-        TaskId::new(format!("{:08x}", rand::random::<u32>())).map_err(|error| error.to_string())
+        // Eight hex digits always form a valid ID.
+        TaskId::new(format!("{:08x}", rand::random::<u32>()))
+            .ok()
+            .ok_or(String::from("generated task ID is invalid"))
     }
 }
 
@@ -671,26 +674,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn redis_task_tool_store_round_trips_through_the_public_port() -> Result<(), String> {
-        let Some(port) = std::env::var("TEST_REDIS_PORT")
+    fn redis_task_tool_store_round_trips_through_the_public_port() -> TestResult {
+        std::env::var("TEST_REDIS_PORT")
             .ok()
             .and_then(|value| value.parse().ok())
-        else {
-            return Ok(());
-        };
+            .map_or(Ok(()), round_trip_redis_task_store)
+    }
+
+    fn round_trip_redis_task_store(port: u16) -> TestResult {
         let endpoint = RedisEndpoint {
-            host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+            host: std::env::var("TEST_REDIS_HOST").unwrap_or(String::from("127.0.0.1")),
             port,
-            password: std::env::var("TEST_REDIS_PASSWORD")
-                .ok()
-                .filter(|value| !value.is_empty()),
+            // Empty passwords are ignored by the Redis client.
+            password: std::env::var("TEST_REDIS_PASSWORD").ok(),
         };
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| error.to_string())?
-            .as_nanos();
-        let task_id =
-            TaskId::new(format!("synthetic_{nonce}")).map_err(|error| error.to_string())?;
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let task_id = TaskId::new(format!("synthetic_{nonce}"))?;
         let chat_id = format!("synthetic-chat-{nonce}");
         let document = TaskRecordDocument {
             task: ScheduledTask {
@@ -709,12 +708,60 @@ mod tests {
             run_date: None,
             extra: BTreeMap::new(),
         };
-        let mut store = RedisTaskStore::new(&endpoint).map_err(|error| error.to_string())?;
+        let mut store = RedisTaskStore::new(&endpoint)?;
         TaskToolStore::save(&mut store, &document, 600)?;
         assert_eq!(TaskToolStore::list(&mut store, &chat_id)?, [document.task]);
         assert!(TaskToolStore::cancel(&mut store, &task_id, &chat_id)?);
         assert!(TaskToolStore::list(&mut store, &chat_id)?.is_empty());
         assert!(RandomTaskIdSource.next_id().is_ok());
+        Ok(())
+    }
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn redis_store_failures_are_reported_as_text() -> TestResult {
+        let mut store = RedisTaskStore::new(&RedisEndpoint {
+            host: "127.0.0.1".to_owned(),
+            port: 1,
+            password: None,
+        })?;
+        let task_id = TaskId::new("synthetic")?;
+        let document = TaskRecordDocument {
+            task: ScheduledTask {
+                id: task_id.clone(),
+                chat_id: "-100".to_owned(),
+                text: "synthetic".to_owned(),
+                user_name: "synthetic".to_owned(),
+                user_id: Some(7),
+                schedule: TaskSchedule::Once,
+                timezone_offset: 0,
+                locale: "en".to_owned(),
+                schedule_anchor_at: None,
+                next_run_at: None,
+                last_execution_id: None,
+            },
+            run_date: None,
+            extra: BTreeMap::new(),
+        };
+        let list = TaskToolStore::list(&mut store, "-100");
+        let save = TaskToolStore::save(&mut store, &document, 60);
+        let cancel = TaskToolStore::cancel(&mut store, &task_id, "-100");
+        assert!(matches!(&list, Err(error) if !error.is_empty()), "{list:?}");
+        assert!(matches!(&save, Err(error) if !error.is_empty()), "{save:?}");
+        assert!(
+            matches!(&cancel, Err(error) if !error.is_empty()),
+            "{cancel:?}"
+        );
+        // Random IDs are eight lowercase hex digits.
+        let generated = RandomTaskIdSource.next_id()?;
+        assert_eq!(generated.as_str().len(), 8);
+        assert!(
+            generated
+                .as_str()
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        );
         Ok(())
     }
 
@@ -782,12 +829,23 @@ mod tests {
         }
     }
 
-    struct Ids(Vec<Result<TaskId, String>>);
+    /// Hands out scripted IDs; `Err` entries simulate generator failures.
+    struct Ids(Vec<Result<&'static str, &'static str>>);
 
     impl TaskIdSource for Ids {
         fn next_id(&mut self) -> Result<TaskId, String> {
-            self.0.remove(0)
+            let id = self.0.remove(0).map_err(String::from)?;
+            TaskId::new(id)
+                .ok()
+                .ok_or(String::from("invalid synthetic ID"))
         }
+    }
+
+    /// Every test shares this clock type, so the tool has one instantiation.
+    type Clock = fn() -> i64;
+
+    fn fixed_clock() -> i64 {
+        1_700_000_000
     }
 
     fn context(locale: Locale) -> TaskToolContext {
@@ -804,17 +862,15 @@ mod tests {
         state: Rc<RefCell<StoreState>>,
         balance: Result<i64, String>,
         locale: Locale,
-    ) -> TaskSetTool<Store, Balance, Ids, impl FnMut() -> i64> {
+    ) -> TaskSetTool<Store, Balance, Ids, Clock> {
         TaskSetTool::new(
             Store(state),
             Balance {
                 result: balance,
                 calls: Rc::new(RefCell::new(Vec::new())),
             },
-            Ids(vec![
-                TaskId::new("abc12345").map_err(|error| error.to_string()),
-            ]),
-            || 1_700_000_000,
+            Ids(vec![Ok("abc12345")]),
+            fixed_clock,
             context(locale),
         )
     }
@@ -1093,8 +1149,8 @@ mod tests {
                 result: Ok(i64::MAX),
                 calls: Rc::new(RefCell::new(Vec::new())),
             },
-            Ids(vec![Err("synthetic ID failure".to_owned())]),
-            || 1_700_000_000,
+            Ids(vec![Err("synthetic ID failure")]),
+            fixed_clock as Clock,
             context(Locale::Es),
         );
         let result = id_failure.execute(set_request(Some(60), None, None), "call");
@@ -1107,10 +1163,8 @@ mod tests {
                 result: Ok(i64::MAX),
                 calls: Rc::new(RefCell::new(Vec::new())),
             },
-            Ids(vec![
-                TaskId::new("synthetic").map_err(|error| error.to_string()),
-            ]),
-            || i64::MAX - 60,
+            Ids(vec![Ok("synthetic")]),
+            (|| i64::MAX - 60) as Clock,
             context(Locale::En),
         );
         let result = timestamp_failure.execute(set_request(Some(60), None, None), "call");
@@ -1230,5 +1284,168 @@ mod tests {
             assert!(!localized_weekday(day, Locale::Es).is_empty());
             assert_eq!(localized_weekday(day, Locale::En), day);
         }
+    }
+
+    #[test]
+    fn pricing_estimate_failures_stop_before_the_credit_check_in_both_locales() -> TestResult {
+        let pricing = Arc::new(OpenRouterPricingCache::new("synthetic-key", "not-a-url")?);
+        for (locale, expected) in [
+            (Locale::En, "I could not calculate the task cost. Try again"),
+            (
+                Locale::Es,
+                "No pude calcular el costo de la tarea. Probá de nuevo",
+            ),
+        ] {
+            let state = Rc::new(RefCell::new(StoreState::default()));
+            let calls = Rc::new(RefCell::new(Vec::new()));
+            let mut tool = TaskSetTool::new(
+                Store(Rc::clone(&state)),
+                Balance {
+                    result: Ok(i64::MAX),
+                    calls: Rc::clone(&calls),
+                },
+                Ids(Vec::new()),
+                fixed_clock as Clock,
+                context(locale),
+            )
+            .with_openrouter_pricing(Arc::clone(&pricing));
+            let result = tool.execute(set_request(Some(60), None, None), "call");
+            assert_eq!(result.output, expected);
+            assert_eq!(task_cost_error(locale), expected);
+            assert_eq!(result.diagnostics.len(), 1);
+            assert!(
+                result.diagnostics[0].starts_with("task reserve estimate failed: "),
+                "{:?}",
+                result.diagnostics
+            );
+            assert!(calls.borrow().is_empty());
+            assert!(state.borrow().saved.is_empty());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn next_run_overflow_is_reported_without_consuming_an_id_or_persisting() {
+        let state = Rc::new(RefCell::new(StoreState::default()));
+        let mut tool = TaskSetTool::new(
+            Store(Rc::clone(&state)),
+            Balance {
+                result: Ok(i64::MAX),
+                calls: Rc::new(RefCell::new(Vec::new())),
+            },
+            Ids(vec![Err("the ID source must not be consulted")]),
+            (|| i64::MAX) as Clock,
+            context(Locale::En),
+        );
+        let result = tool.execute(set_request(Some(60), None, None), "call");
+        assert_eq!(result.output, "I could not create the task");
+        assert_eq!(result.diagnostics.len(), 1);
+        assert!(result.diagnostics[0].starts_with("task next run calculation failed: "));
+        assert_eq!(tool.ids.0.len(), 1);
+        assert!(state.borrow().saved.is_empty());
+    }
+
+    #[test]
+    fn spanish_user_and_credit_rejections_are_localized() {
+        let state = Rc::new(RefCell::new(StoreState::default()));
+        let mut missing_user = set_tool(Rc::clone(&state), Ok(i64::MAX), Locale::Es);
+        missing_user.context.user_id = None;
+        assert_eq!(
+            missing_user
+                .execute(set_request(Some(60), None, None), "call")
+                .output,
+            "No pude identificar tu usuario para cobrar la tarea"
+        );
+
+        let mut poor = set_tool(Rc::clone(&state), Ok(0), Locale::Es);
+        let output = poor
+            .execute(set_request(Some(60), None, None), "call")
+            .output;
+        assert!(
+            output.starts_with("No te alcanzan los créditos personales para esa tarea: tenés 0"),
+            "{output}"
+        );
+        assert!(output.ends_with("\nCargá con /topup antes de crearla"));
+        assert_eq!(
+            task_credit_insufficient(0, 1_000_000, Locale::En),
+            format!(
+                "Not enough personal credits for this task: you have {} and need {}\nUse /topup before creating it",
+                display_credit_units(CreditUnits::new(0)),
+                display_credit_units(CreditUnits::new(1_000_000)),
+            )
+        );
+        assert!(state.borrow().saved.is_empty());
+    }
+
+    #[test]
+    fn english_weekday_cron_description_keeps_canonical_day_names() {
+        let state = Rc::new(RefCell::new(StoreState::default()));
+        let mut cron = set_tool(Rc::clone(&state), Ok(i64::MAX), Locale::En);
+        assert_eq!(
+            cron.execute(
+                set_request(
+                    None,
+                    None,
+                    Some(json!({"type":"cron", "hour":7, "minute":30, "day_of_week":"mon,fri"})),
+                ),
+                "call"
+            )
+            .output,
+            "Task scheduled: on mon, fri at 07:30\ncheck the synthetic result"
+        );
+        assert_eq!(state.borrow().saved.len(), 1);
+    }
+
+    #[test]
+    fn empty_task_lists_and_spanish_cancellations_are_localized() {
+        let state = Rc::new(RefCell::new(StoreState::default()));
+        let mut english = TaskListTool::new(Store(Rc::clone(&state)), "-100", Locale::En);
+        assert_eq!(
+            english
+                .execute(ExternalToolRequest::TaskList, "call")
+                .output,
+            "there are no tasks"
+        );
+        let mut spanish = TaskListTool::new(Store(Rc::clone(&state)), "-100", Locale::Es);
+        assert_eq!(
+            spanish
+                .execute(ExternalToolRequest::TaskList, "call")
+                .output,
+            "no hay tareas"
+        );
+
+        {
+            let mut state = state.borrow_mut();
+            state.tasks = task("abc12345", "-100").into_iter().collect();
+            state.cancel_result = Ok(true);
+        }
+        let mut cancel = TaskCancelTool::new(Store(Rc::clone(&state)), "-100", Locale::Es);
+        assert_eq!(
+            cancel
+                .execute(
+                    ExternalToolRequest::TaskCancel {
+                        task_id: "abc12345".to_owned(),
+                    },
+                    "call"
+                )
+                .output,
+            "Tarea abc12345 cancelada"
+        );
+        assert_eq!(
+            state.borrow().canceled,
+            [("abc12345".to_owned(), "-100".to_owned())]
+        );
+    }
+
+    #[test]
+    fn billing_balance_source_surfaces_repository_failures_as_text() {
+        let mut repository = BillingRepository::new(
+            "postgresql://synthetic:synthetic@127.0.0.1:1/synthetic?sslmode=disable",
+        );
+        let error = PersonalBalanceSource::balance(&mut repository, 7);
+        assert!(
+            matches!(&error, Err(message) if !message.is_empty()),
+            "{error:?}"
+        );
     }
 }

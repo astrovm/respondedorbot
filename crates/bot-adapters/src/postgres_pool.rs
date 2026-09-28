@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use postgres::{Client, Config};
@@ -43,23 +43,18 @@ impl PostgresPool {
     pub fn shared(database_url: &str) -> Self {
         static POOLS: OnceLock<Mutex<HashMap<String, Weak<PostgresPoolInner>>>> = OnceLock::new();
         let pools = POOLS.get_or_init(|| Mutex::new(HashMap::new()));
-        if let Ok(mut pools) = pools.lock() {
-            if let Some(inner) = pools.get(database_url).and_then(Weak::upgrade) {
-                return Self { inner };
-            }
-            let inner = Arc::new(PostgresPoolInner {
-                database_url: database_url.to_owned(),
-                idle: Mutex::new(IdleList::new()),
-            });
-            pools.insert(database_url.to_owned(), Arc::downgrade(&inner));
+        // The map is only read and extended while locked, so a poisoned lock
+        // still guards a consistent map.
+        let mut pools = pools.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(inner) = pools.get(database_url).and_then(Weak::upgrade) {
             return Self { inner };
         }
-        Self {
-            inner: Arc::new(PostgresPoolInner {
-                database_url: database_url.to_owned(),
-                idle: Mutex::new(IdleList::new()),
-            }),
-        }
+        let inner = Arc::new(PostgresPoolInner {
+            database_url: database_url.to_owned(),
+            idle: Mutex::new(IdleList::new()),
+        });
+        pools.insert(database_url.to_owned(), Arc::downgrade(&inner));
+        Self { inner }
     }
 
     pub fn get(&self) -> Result<PooledPostgresClient, PostgresPoolError> {
@@ -91,27 +86,33 @@ impl PostgresPool {
 impl Deref for PooledPostgresClient {
     type Target = Client;
 
+    #[allow(
+        clippy::expect_used,
+        reason = "the client is only taken by drop, after which it cannot be dereferenced"
+    )]
     fn deref(&self) -> &Self::Target {
         self.client
             .as_ref()
-            .unwrap_or_else(|| unreachable!("pooled PostgreSQL client is present until drop"))
+            .expect("pooled PostgreSQL client is present until drop")
     }
 }
 
 impl DerefMut for PooledPostgresClient {
+    #[allow(
+        clippy::expect_used,
+        reason = "the client is only taken by drop, after which it cannot be dereferenced"
+    )]
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.client
             .as_mut()
-            .unwrap_or_else(|| unreachable!("pooled PostgreSQL client is present until drop"))
+            .expect("pooled PostgreSQL client is present until drop")
     }
 }
 
 impl Drop for PooledPostgresClient {
     fn drop(&mut self) {
-        let Some(client) = self.client.take() else {
-            return;
-        };
-        if !client.is_closed()
+        if let Some(client) = self.client.take()
+            && !client.is_closed()
             && let Ok(mut idle) = self.pool.idle.lock()
             && idle.len() < MAX_IDLE_CONNECTIONS
         {
@@ -177,50 +178,47 @@ mod tests {
 
     #[test]
     fn returned_connections_are_reused() -> Result<(), Box<dyn std::error::Error>> {
-        let Some(pool) = test_pool("reuse") else {
-            return Ok(());
-        };
-        let first = backend_pid(&pool)?;
-        assert_eq!(backend_pid(&pool)?, first);
+        test_pool("reuse").map_or(Ok(()), |pool| {
+            let first = backend_pid(&pool)?;
+            assert_eq!(backend_pid(&pool)?, first);
 
-        let held = pool.get()?;
-        let concurrent = backend_pid(&pool)?;
-        assert_ne!(concurrent, first);
-        drop(held);
-        Ok(())
+            let held = pool.get()?;
+            let concurrent = backend_pid(&pool)?;
+            assert_ne!(concurrent, first);
+            drop(held);
+            Ok(())
+        })
     }
 
     #[test]
     fn closed_connections_are_discarded_instead_of_returned()
     -> Result<(), Box<dyn std::error::Error>> {
-        let Some(pool) = test_pool("closed") else {
-            return Ok(());
-        };
-        let terminated = backend_pid(&pool)?;
-        let mut client = pool.get()?;
-        let killer = PostgresPool::shared(&format!("{}_killer", pool.inner.database_url));
-        killer
-            .get()?
-            .execute("SELECT pg_terminate_backend($1)", &[&terminated])?;
-        assert!(client.query_one("SELECT 1", &[]).is_err());
-        assert!(client.is_closed());
-        drop(client);
+        test_pool("closed").map_or(Ok(()), |pool| {
+            let terminated = backend_pid(&pool)?;
+            let mut client = pool.get()?;
+            let killer = PostgresPool::shared(&format!("{}_killer", pool.inner.database_url));
+            killer
+                .get()?
+                .execute("SELECT pg_terminate_backend($1)", &[&terminated])?;
+            assert!(client.query_one("SELECT 1", &[]).is_err());
+            assert!(client.is_closed());
+            drop(client);
 
-        assert_ne!(backend_pid(&pool)?, terminated);
-        Ok(())
+            assert_ne!(backend_pid(&pool)?, terminated);
+            Ok(())
+        })
     }
 
     #[test]
     fn idle_connections_are_capped() -> Result<(), Box<dyn std::error::Error>> {
-        let Some(pool) = test_pool("cap") else {
-            return Ok(());
-        };
-        let clients = (0..=MAX_IDLE_CONNECTIONS)
-            .map(|_| pool.get())
-            .collect::<Result<Vec<_>, _>>()?;
-        drop(clients);
-        let idle = pool.inner.idle.lock().map_or(0, |idle| idle.len());
-        assert_eq!(idle, MAX_IDLE_CONNECTIONS);
-        Ok(())
+        test_pool("cap").map_or(Ok(()), |pool| {
+            let clients = (0..=MAX_IDLE_CONNECTIONS)
+                .map(|_| pool.get())
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(clients);
+            let idle = pool.inner.idle.lock().map_or(0, |idle| idle.len());
+            assert_eq!(idle, MAX_IDLE_CONNECTIONS);
+            Ok(())
+        })
     }
 }

@@ -77,4 +77,10 @@ mod tests {
             Err(InvalidBitcoinPrice)
         );
     }
+
+    #[test]
+    fn groups_digit_counts_that_are_multiples_of_three() {
+        assert_eq!(super::group_integer_digits("123456"), "123,456");
+        assert_eq!(super::group_integer_digits("-123"), "-123");
+    }
 }

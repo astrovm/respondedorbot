@@ -122,4 +122,13 @@ mod tests {
             Vec::<usize>::new()
         );
     }
+
+    #[test]
+    fn parsed_object_arguments_keep_their_original_json() {
+        let parsed = parse_tool_arguments("{\"url\": \"https://example.test\"}");
+        assert_eq!(
+            parsed.as_ref().map(|arguments| arguments.object_json()),
+            Ok("{\"url\": \"https://example.test\"}")
+        );
+    }
 }

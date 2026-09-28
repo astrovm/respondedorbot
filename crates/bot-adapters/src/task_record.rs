@@ -287,7 +287,7 @@ pub fn encode_task_record(document: &TaskRecordDocument) -> Result<String, TaskR
     } else {
         None
     };
-    Ok(serde_json::to_string(&CanonicalTaskRecord {
+    serde_json::to_string(&CanonicalTaskRecord {
         schema_version: TASK_SCHEMA_VERSION,
         id: document.task.id.as_str(),
         chat_id: &document.task.chat_id,
@@ -303,7 +303,8 @@ pub fn encode_task_record(document: &TaskRecordDocument) -> Result<String, TaskR
         next_run_at: timestamp_text(document.task.next_run_at)?,
         last_execution_id: document.task.last_execution_id.as_deref(),
         extra: &document.extra,
-    })?)
+    })
+    .map_err(TaskRecordError::from)
 }
 
 #[cfg(test)]
@@ -357,7 +358,8 @@ mod tests {
     -> Result<(), TaskRecordError> {
         let document = decode_task_record(
             r#"{"schema_version":1,"id":"abc12345","chat_id":123,"text":"synthetic task","user_name":null,"interval_seconds":600,"run_date":null,"trigger_config":null}"#,
-        )?;
+        );
+        let document = document?;
         assert_eq!(document.task.chat_id, "123");
         assert_eq!(document.task.timezone_offset, -3);
         assert_eq!(document.task.locale, "es");
@@ -369,9 +371,114 @@ mod tests {
 
         let numeric_name = decode_task_record(
             r#"{"schema_version":1,"id":"abc12346","chat_id":"123","text":"synthetic task","user_name":7,"interval_seconds":300}"#,
-        )?;
+        );
+        let numeric_name = numeric_name?;
         assert_eq!(numeric_name.task.user_name, "7");
         Ok(())
+    }
+
+    #[test]
+    fn encodes_one_shot_dates_and_monthly_cron_without_weekdays() -> Result<(), TaskRecordError> {
+        let once = decode_task_record(
+            r#"{"schema_version":1,"id":"abc12349","chat_id":"1","text":"x","run_date":"2026-08-30T12:00:00Z"}"#,
+        );
+        let once = once?;
+        assert_eq!(once.task.schedule, TaskSchedule::Once);
+        let encoded: Value = serde_json::from_str(&encode_task_record(&once)?)?;
+        assert_eq!(encoded["run_date"], "2026-08-30T12:00:00Z");
+        assert_eq!(encoded["interval_seconds"], Value::Null);
+        assert_eq!(encoded["trigger_config"], Value::Null);
+
+        let monthly = decode_task_record(
+            r#"{"schema_version":1,"id":"abc12350","chat_id":"1","text":"x","run_date":"2026-08-30T12:00:00Z","trigger_config":{"type":"cron","hour":8,"minute":30,"day":15}}"#,
+        );
+        let monthly = monthly?;
+        assert_eq!(
+            monthly.task.schedule,
+            TaskSchedule::Cron {
+                hour: 8,
+                minute: 30,
+                weekdays: Vec::new(),
+                day: Some(15),
+            }
+        );
+        let encoded: Value = serde_json::from_str(&encode_task_record(&monthly)?)?;
+        assert_eq!(
+            encoded["trigger_config"],
+            json!({"type": "cron", "hour": 8, "minute": 30, "day": 15})
+        );
+        assert_eq!(encoded["run_date"], Value::Null);
+        Ok(())
+    }
+
+    #[test]
+    fn round_trips_interval_schedules_in_their_legacy_fields() -> Result<(), TaskRecordError> {
+        let days = decode_task_record(
+            r#"{"schema_version":1,"id":"abc12351","chat_id":"1","text":"x","trigger_config":{"type":"interval","days":7}}"#,
+        );
+        let days = days?;
+        assert_eq!(days.task.schedule, TaskSchedule::IntervalDays { days: 7 });
+        let encoded: Value = serde_json::from_str(&encode_task_record(&days)?)?;
+        assert_eq!(
+            encoded["trigger_config"],
+            json!({"type": "interval", "days": 7})
+        );
+        assert_eq!(encoded["interval_seconds"], Value::Null);
+
+        let seconds = decode_task_record(
+            r#"{"schema_version":1,"id":"abc12352","chat_id":"1","text":"x","interval_seconds":900}"#,
+        );
+        let encoded: Value = serde_json::from_str(&encode_task_record(&seconds?)?)?;
+        assert_eq!(encoded["interval_seconds"], 900);
+        assert_eq!(encoded["trigger_config"], Value::Null);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_out_of_range_triggers_and_mistyped_fields() {
+        for (fields, expected) in [
+            (
+                r#""text":"x","trigger_config":{"type":"interval","days":0}"#,
+                TaskRecordError::InvalidTrigger,
+            ),
+            (
+                r#""text":"x","trigger_config":{"type":"interval","days":91}"#,
+                TaskRecordError::InvalidTrigger,
+            ),
+            (
+                r#""text":"x","trigger_config":{"type":"weekly","hour":1,"minute":1}"#,
+                TaskRecordError::InvalidTrigger,
+            ),
+            (
+                r#""text":"x","interval_seconds":604801"#,
+                TaskRecordError::InvalidTrigger,
+            ),
+            (
+                r#""text":true,"interval_seconds":600"#,
+                TaskRecordError::InvalidField("text"),
+            ),
+            (
+                r#""text":"","interval_seconds":600"#,
+                TaskRecordError::InvalidField("text"),
+            ),
+            (
+                r#""text":"x","user_name":["x"],"interval_seconds":600"#,
+                TaskRecordError::InvalidField("user_name"),
+            ),
+            (
+                r#""text":"x","timezone_offset":15,"interval_seconds":600"#,
+                TaskRecordError::InvalidField("timezone_offset"),
+            ),
+        ] {
+            let payload =
+                format!(r#"{{"schema_version":1,"id":"abc12353","chat_id":"1",{fields}}}"#);
+            let decoded = decode_task_record(&payload);
+            assert_eq!(
+                decoded.map_err(|error| error.to_string()).err(),
+                Some(expected.to_string()),
+                "{fields}"
+            );
+        }
     }
 
     #[test]

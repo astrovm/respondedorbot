@@ -141,8 +141,12 @@ pub struct StderrTaskDiagnostics;
 
 impl TaskDiagnostics for StderrTaskDiagnostics {
     fn record(&mut self, task_id: &str, stage: &'static str, message: &str) {
-        eprintln!("scheduled task {task_id} {stage}: {message}");
+        eprintln!("{}", diagnostic_line(task_id, stage, message));
     }
+}
+
+fn diagnostic_line(task_id: &str, stage: &str, message: &str) -> String {
+    format!("scheduled task {task_id} {stage}: {message}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -557,7 +561,7 @@ fn clean_task_response(response: &str) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
+#[allow(clippy::panic, clippy::expect_used)]
 mod tests {
     use std::collections::{HashMap, VecDeque};
 
@@ -569,7 +573,7 @@ mod tests {
         TaskBilling, TaskDiagnostics, TaskExecutionDisposition, TaskExecutionJournal,
         TaskExecutionKind, TaskExecutionState, TaskMessenger, TaskPromptMessage,
         TaskProviderFailure, TaskProviderReply, TaskReserveOutcome, build_task_messages,
-        clean_task_response,
+        clean_task_response, diagnostic_line,
     };
 
     #[derive(Default)]
@@ -605,6 +609,7 @@ mod tests {
         settlements: Vec<(String, Vec<Value>, &'static str)>,
         refunds: Vec<(String, &'static str)>,
         fail_settlement: bool,
+        fail_refund: bool,
     }
 
     impl TaskBilling for Billing {
@@ -643,6 +648,9 @@ mod tests {
             execution_id: &str,
             reason: &'static str,
         ) -> Result<(), Self::Error> {
+            if self.fail_refund {
+                return Err("refund failed");
+            }
             self.refunds.push((execution_id.to_owned(), reason));
             Ok(())
         }
@@ -668,13 +676,22 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct Journal(HashMap<String, TaskExecutionState>);
+    struct Journal {
+        states: HashMap<String, TaskExecutionState>,
+        fail_load: bool,
+        /// The 1-based save call that fails, if any.
+        failing_save: Option<usize>,
+        saves: usize,
+    }
 
     impl TaskExecutionJournal for Journal {
         type Error = &'static str;
 
         fn load(&mut self, execution_id: &str) -> Result<Option<TaskExecutionState>, Self::Error> {
-            Ok(self.0.get(execution_id).cloned())
+            if self.fail_load {
+                return Err("journal unavailable");
+            }
+            Ok(self.states.get(execution_id).cloned())
         }
 
         fn save(
@@ -682,7 +699,11 @@ mod tests {
             execution_id: &str,
             state: &TaskExecutionState,
         ) -> Result<(), Self::Error> {
-            self.0.insert(execution_id.to_owned(), state.clone());
+            self.saves += 1;
+            if self.failing_save == Some(self.saves) {
+                return Err("journal full");
+            }
+            self.states.insert(execution_id.to_owned(), state.clone());
             Ok(())
         }
     }
@@ -698,7 +719,7 @@ mod tests {
 
     fn task(locale: &str) -> ScheduledTask {
         ScheduledTask {
-            id: TaskId::new("task123").unwrap_or_else(|error| panic!("task id: {error}")),
+            id: TaskId::new("task123").expect("synthetic task id is valid"),
             chat_id: "-100123".to_owned(),
             text: "synthetic task".to_owned(),
             user_name: "synthetic-user".to_owned(),
@@ -798,7 +819,7 @@ mod tests {
     fn saved_result_retries_delivery_without_repeating_provider_or_billing() {
         let execution_id = "task123:1000";
         let mut journal = Journal::default();
-        journal.0.insert(
+        journal.states.insert(
             execution_id.to_owned(),
             TaskExecutionState {
                 response: Some("saved answer".to_owned()),
@@ -1052,5 +1073,262 @@ mod tests {
             clean_task_response("1. noticia\ndetalle\n\n2. noticia\ndetalle"),
             "1. noticia\ndetalle\n\n2. noticia\ndetalle"
         );
+    }
+
+    #[test]
+    fn stderr_diagnostics_use_a_single_task_scoped_line() {
+        assert_eq!(
+            diagnostic_line("task123", "delivery", "synthetic outage"),
+            "scheduled task task123 delivery: synthetic outage"
+        );
+        let mut diagnostics = super::StderrTaskDiagnostics;
+        diagnostics.record("task123", "delivery", "synthetic outage");
+    }
+
+    #[test]
+    fn unidentified_payer_notice_failure_is_recorded_but_not_retried() {
+        let mut executor = executor(
+            Provider::default(),
+            Billing::default(),
+            Messenger {
+                fail: true,
+                ..Messenger::default()
+            },
+        );
+        let mut anonymous = task("es");
+        anonymous.user_id = None;
+        assert_eq!(
+            executor.execute(&anonymous, "task123:1000"),
+            Ok(TaskExecutionDisposition::Complete)
+        );
+        let (provider, billing, messenger, diagnostics) = executor.parts();
+        assert!(provider.prompts.is_empty());
+        assert!(billing.reserve_ids.is_empty());
+        assert_eq!(
+            messenger.messages[0].1,
+            "synthetic-user, no pude ejecutar la tarea «synthetic task»:\nNo pude identificar tu usuario para cobrar la tarea"
+        );
+        assert_eq!(
+            diagnostics.0,
+            [(
+                "task123".to_owned(),
+                "delivery",
+                "delivery failed".to_owned()
+            )]
+        );
+    }
+
+    fn journal_executor(
+        provider: Provider,
+        billing: Billing,
+        messenger: Messenger,
+        journal: Journal,
+    ) -> NativeTaskExecutor<Provider, Billing, Messenger, Journal, Diagnostics> {
+        NativeTaskExecutor::new(
+            provider,
+            billing,
+            messenger,
+            journal,
+            Diagnostics::default(),
+        )
+    }
+
+    fn failing_save(save: usize) -> Journal {
+        Journal {
+            failing_save: Some(save),
+            ..Journal::default()
+        }
+    }
+
+    fn journal_failure(
+        stage: &'static str,
+    ) -> Result<TaskExecutionDisposition, NativeTaskExecutorError> {
+        Err(NativeTaskExecutorError::Journal {
+            stage,
+            message: "journal full".to_owned(),
+        })
+    }
+
+    #[test]
+    fn journal_failures_stop_before_unrecorded_side_effects() {
+        let mut unreadable = journal_executor(
+            Provider::default(),
+            Billing::default(),
+            Messenger::default(),
+            Journal {
+                fail_load: true,
+                ..Journal::default()
+            },
+        );
+        assert_eq!(
+            unreadable.execute(&task("en"), "task123:1000"),
+            Err(NativeTaskExecutorError::Journal {
+                stage: "load",
+                message: "journal unavailable".to_owned(),
+            })
+        );
+        let (provider, billing, _, _) = unreadable.parts();
+        assert!(provider.prompts.is_empty());
+        assert!(billing.reserve_ids.is_empty());
+
+        let mut unwritable = journal_executor(
+            Provider::default(),
+            Billing::default(),
+            Messenger::default(),
+            failing_save(1),
+        );
+        assert_eq!(
+            unwritable.execute(&task("en"), "task123:1000"),
+            journal_failure("save_provider_result")
+        );
+        let (_, billing, messenger, _) = unwritable.parts();
+        assert!(billing.settlements.is_empty());
+        assert!(messenger.messages.is_empty());
+    }
+
+    #[test]
+    fn every_journal_checkpoint_reports_its_own_stage() {
+        let provider_error = || Provider {
+            replies: VecDeque::from([Err(TaskProviderFailure::new("provider down", Vec::new()))]),
+            ..Provider::default()
+        };
+        let empty = || Provider {
+            replies: VecDeque::from([
+                Ok(TaskProviderReply {
+                    text: " ".to_owned(),
+                    fallback: false,
+                    billing_segments: Vec::new(),
+                }),
+                Ok(TaskProviderReply {
+                    text: String::new(),
+                    fallback: false,
+                    billing_segments: Vec::new(),
+                }),
+            ]),
+            ..Provider::default()
+        };
+        let failing_messenger = || Messenger {
+            fail: true,
+            ..Messenger::default()
+        };
+        let cases = [
+            (
+                provider_error(),
+                Messenger::default(),
+                1,
+                "save_provider_failure",
+            ),
+            (empty(), Messenger::default(), 1, "save_empty_result"),
+            (Provider::default(), Messenger::default(), 2, "save_billing"),
+            (
+                Provider::default(),
+                Messenger::default(),
+                3,
+                "save_delivery",
+            ),
+            (
+                Provider::default(),
+                failing_messenger(),
+                3,
+                "save_delivery_failure",
+            ),
+        ];
+        for (provider, messenger, save, stage) in cases {
+            let mut executor =
+                journal_executor(provider, Billing::default(), messenger, failing_save(save));
+            assert_eq!(
+                executor.execute(&task("en"), "task123:1000"),
+                journal_failure(stage)
+            );
+        }
+    }
+
+    #[test]
+    fn reservation_and_refund_failures_are_billing_errors() {
+        let mut unreserved = journal_executor(
+            Provider::default(),
+            Billing {
+                reserve: VecDeque::from([Err("ledger offline")]),
+                ..Billing::default()
+            },
+            Messenger::default(),
+            Journal::default(),
+        );
+        assert_eq!(
+            unreserved.execute(&task("en"), "task123:1000"),
+            Err(NativeTaskExecutorError::Billing {
+                stage: "reserve",
+                message: "ledger offline".to_owned(),
+            })
+        );
+        assert!(unreserved.parts().0.prompts.is_empty());
+
+        let mut unrefunded = journal_executor(
+            Provider {
+                replies: VecDeque::from([Err(TaskProviderFailure::new(
+                    "provider down",
+                    Vec::new(),
+                ))]),
+                ..Provider::default()
+            },
+            Billing {
+                fail_refund: true,
+                ..Billing::default()
+            },
+            Messenger::default(),
+            Journal::default(),
+        );
+        assert_eq!(
+            unrefunded.execute(&task("en"), "task123:1000"),
+            Err(NativeTaskExecutorError::Billing {
+                stage: "refund",
+                message: "refund failed".to_owned(),
+            })
+        );
+        let saved = unrefunded.journal.states.get("task123:1000");
+        assert!(saved.is_some_and(|state| !state.billing_finalized));
+    }
+
+    #[test]
+    fn saved_unsuccessful_results_with_usage_surface_settlement_failures() {
+        for kind in [
+            TaskExecutionKind::Fallback,
+            TaskExecutionKind::ProviderError,
+            TaskExecutionKind::Empty,
+        ] {
+            let saved = TaskExecutionState {
+                response: None,
+                billing_segments: vec![json!({"kind": "chat"})],
+                kind,
+                billing_finalized: false,
+                delivered: true,
+                delivery_attempts: 0,
+            };
+            let mut executor = NativeTaskExecutor::new(
+                Provider::default(),
+                Billing {
+                    fail_settlement: true,
+                    ..Billing::default()
+                },
+                Messenger::default(),
+                Journal {
+                    states: HashMap::from([("task123:1000".to_owned(), saved.clone())]),
+                    ..Journal::default()
+                },
+                Diagnostics::default(),
+            );
+            assert_eq!(
+                executor.execute(&task("en"), "task123:1000"),
+                Err(NativeTaskExecutorError::Billing {
+                    stage: "settle",
+                    message: "settlement failed".to_owned(),
+                }),
+                "{kind:?}"
+            );
+            assert_eq!(executor.journal.states.get("task123:1000"), Some(&saved));
+            let (provider, billing, _, _) = executor.parts();
+            assert!(provider.prompts.is_empty());
+            assert!(billing.refunds.is_empty());
+        }
     }
 }

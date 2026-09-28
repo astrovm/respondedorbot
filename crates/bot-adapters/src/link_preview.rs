@@ -332,22 +332,17 @@ fn request_retry<T: LinkPreviewTransport>(
     request: &PreviewRequest,
     retry: bool,
 ) -> Result<PreviewResponse, PreviewFailure> {
-    let attempts = if retry { 3 } else { 1 };
-    let mut last_failure = PreviewFailure::Request;
-    for attempt in 0..attempts {
-        match transport.request(request) {
-            Ok(response) if !transient(response.status_code) || attempt + 1 == attempts => {
-                return Ok(response);
-            }
-            Ok(_) => {}
-            Err(failure) if attempt + 1 == attempts => return Err(failure),
-            Err(failure) => last_failure = failure,
+    let retries = if retry { RETRY_DELAYS.len() } else { 0 };
+    for delay in &RETRY_DELAYS[..retries] {
+        if let Ok(response) = transport.request(request)
+            && !transient(response.status_code)
+        {
+            return Ok(response);
         }
-        if let Some(delay) = RETRY_DELAYS.get(attempt) {
-            thread::sleep(*delay);
-        }
+        thread::sleep(*delay);
     }
-    Err(last_failure)
+    // The final attempt is returned as-is, transient status or failure included.
+    transport.request(request)
 }
 
 /// The first `META_SCAN_BYTES` of `html`, cut on a character boundary so
@@ -361,10 +356,20 @@ fn scan_prefix(html: &str) -> &str {
 }
 
 fn meta_tags(html: &str) -> HashMap<String, String> {
-    let (Some(tag_pattern), Some(attribute_pattern)) = (META_TAG.as_ref(), META_ATTRIBUTE.as_ref())
-    else {
-        return HashMap::new();
-    };
+    META_TAG
+        .as_ref()
+        .zip(META_ATTRIBUTE.as_ref())
+        .map(|(tag_pattern, attribute_pattern)| {
+            meta_tags_with(html, tag_pattern, attribute_pattern)
+        })
+        .unwrap_or_default()
+}
+
+fn meta_tags_with(
+    html: &str,
+    tag_pattern: &Regex,
+    attribute_pattern: &Regex,
+) -> HashMap<String, String> {
     let mut tags = HashMap::new();
     for tag in tag_pattern.find_iter(scan_prefix(html)) {
         let attributes = attribute_pattern
@@ -467,15 +472,7 @@ pub fn inspect_with<T: LinkPreviewTransport>(transport: &T, url: &str) -> Previe
     );
     let response = match response {
         Ok(response) => response,
-        Err(failure) => {
-            return PreviewInspection {
-                embeddable: false,
-                status_code: None,
-                final_url: url.to_owned(),
-                metadata: empty_metadata(),
-                failure: Some(failure),
-            };
-        }
+        Err(failure) => return failed_inspection(url, failure),
     };
     if response.status_code >= 400 {
         return PreviewInspection {
@@ -555,22 +552,20 @@ pub fn inspect_with<T: LinkPreviewTransport>(transport: &T, url: &str) -> Previe
     }
 }
 
-#[must_use]
-pub fn inspect(url: &str) -> PreviewInspection {
-    match ReqwestLinkPreviewTransport::new() {
-        Ok(transport) => inspect_with(&transport, url),
-        Err(failure) => PreviewInspection {
-            embeddable: false,
-            status_code: None,
-            final_url: url.to_owned(),
-            metadata: empty_metadata(),
-            failure: Some(failure),
-        },
+fn failed_inspection(url: &str, failure: PreviewFailure) -> PreviewInspection {
+    PreviewInspection {
+        embeddable: false,
+        status_code: None,
+        final_url: url.to_owned(),
+        metadata: empty_metadata(),
+        failure: Some(failure),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
     use std::cell::RefCell;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -581,6 +576,67 @@ mod tests {
         PreviewRequest, PreviewResponse, ReqwestLinkPreviewTransport, download_oversized_video,
         inspect_with, meta_tags, scan_prefix,
     };
+
+    #[test]
+    fn meta_tags_keep_only_non_empty_open_graph_and_twitter_values() {
+        let tags = meta_tags(concat!(
+            "<meta name=\"description\" content=\"ignored\">",
+            "<meta property=\"og:title\" content=\"\">",
+            "<meta property=\"og:description\" content=\"kept\">"
+        ));
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags.get("og:description").map(String::as_str), Some("kept"));
+        assert_eq!(super::resolve_url("not a url", "/media.jpg"), "/media.jpg");
+        assert_eq!(
+            super::resolve_url("https://example.test/page", "/media.jpg"),
+            "https://example.test/media.jpg"
+        );
+    }
+
+    #[test]
+    fn instagram_head_success_falls_through_to_the_page_request() {
+        let transport = FakeTransport {
+            responses: RefCell::new(vec![
+                Ok(response(200, "text/html", "")),
+                Ok(response(404, "text/html", "missing")),
+            ]),
+            requests: RefCell::new(Vec::new()),
+        };
+        let inspection = inspect_with(&transport, "https://eeinstagram.com/p/abc");
+        assert!(!inspection.embeddable);
+        assert_eq!(inspection.status_code, Some(404));
+        let requests = transport.requests.borrow();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method, PreviewMethod::Head);
+        assert_eq!(requests[1].method, PreviewMethod::Get);
+    }
+
+    #[test]
+    fn reqwest_transport_reports_redirect_locations_without_following() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
+            let (mut stream, _) = listener.accept()?;
+            let mut request = [0_u8; 4_096];
+            let _ = stream.read(&mut request)?;
+            let redirect = b"HTTP/1.1 302 Found\r\nLocation: /media.mp4\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(redirect)?;
+            Ok(())
+        });
+        let transport = ReqwestLinkPreviewTransport::new().ok().ok_or("transport")?;
+        let head = transport
+            .request(&PreviewRequest {
+                url: format!("http://{address}/p/abc"),
+                method: PreviewMethod::Head,
+                follow_redirects: false,
+            })
+            .ok()
+            .ok_or("redirect response")?;
+        assert_eq!(head.status_code, 302);
+        assert_eq!(head.location.as_deref(), Some("/media.mp4"));
+        assert!(matches!(server.join(), Ok(Ok(()))));
+        Ok(())
+    }
 
     #[test]
     fn page_bodies_decode_with_their_declared_charset() {
@@ -615,12 +671,12 @@ mod tests {
     }
 
     #[test]
-    fn reqwest_preview_transport_handles_redirect_policy_head_get_and_video_bounds() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
-        let server = thread::spawn(move || {
+    fn reqwest_preview_transport_handles_redirect_policy_head_get_and_video_bounds() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
             for body in [b"preview".as_slice(), b"".as_slice(), b"video".as_slice()] {
-                let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+                let (mut stream, _) = listener.accept()?;
                 let mut request = [0_u8; 4_096];
                 let _ = stream.read(&mut request);
                 let content_type = if body == b"video" {
@@ -632,13 +688,14 @@ mod tests {
                     "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
-                stream
-                    .write_all(response.as_bytes())
-                    .unwrap_or_else(|_| unreachable!());
-                stream.write_all(body).unwrap_or_else(|_| unreachable!());
+                stream.write_all(response.as_bytes())?;
+                stream.write_all(body)?;
             }
+            Ok(())
         });
-        let transport = ReqwestLinkPreviewTransport::new().unwrap_or_else(|_| unreachable!());
+        let transport = ReqwestLinkPreviewTransport::new()
+            .ok()
+            .ok_or("unexpected error")?;
         let url = format!("http://{address}/resource");
         let get = transport
             .request(&PreviewRequest {
@@ -646,7 +703,8 @@ mod tests {
                 method: PreviewMethod::Get,
                 follow_redirects: true,
             })
-            .unwrap_or_else(|_| unreachable!());
+            .ok()
+            .ok_or("unexpected error")?;
         assert_eq!(get.body, "preview");
         let head = transport
             .request(&PreviewRequest {
@@ -654,10 +712,50 @@ mod tests {
                 method: PreviewMethod::Head,
                 follow_redirects: false,
             })
-            .unwrap_or_else(|_| unreachable!());
+            .ok()
+            .ok_or("unexpected error")?;
         assert!(head.body.is_empty());
         assert_eq!(transport.download_video(&url, 5), Ok(b"video".to_vec()));
-        assert!(server.join().is_ok());
+        assert!(matches!(server.join(), Ok(Ok(()))));
+        Ok(())
+    }
+
+    #[test]
+    fn video_downloads_reject_errors_non_video_types_and_oversized_bodies() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
+            for (status, content_type, body) in [
+                ("404 Not Found", "video/mp4", b"missing".as_slice()),
+                ("200 OK", "text/html", b"<html>".as_slice()),
+                ("200 OK", "video/mp4", b"too-large".as_slice()),
+            ] {
+                let (mut stream, _) = listener.accept()?;
+                let mut request = [0_u8; 4_096];
+                let _ = stream.read(&mut request);
+                let mut response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .into_bytes();
+                response.extend_from_slice(body);
+                // The client may hang up before reading a rejected body.
+                let _ = stream.write_all(&response);
+            }
+            Ok(())
+        });
+        let transport = ReqwestLinkPreviewTransport::new()
+            .ok()
+            .ok_or("unexpected error")?;
+        let url = format!("http://{address}/video");
+        for _ in 0..3 {
+            assert_eq!(
+                transport.download_video(&url, 5),
+                Err(PreviewFailure::Request)
+            );
+        }
+        assert!(matches!(server.join(), Ok(Ok(()))));
+        Ok(())
     }
 
     struct FakeTransport {
@@ -818,6 +916,20 @@ mod tests {
         too_large.metadata.media_size = Some(50_000_001);
         assert_eq!(download_oversized_video(&transport, &too_large), None);
         assert_eq!(transport.calls.borrow().len(), 1);
+        // Page requests failing does not fall back to a video download.
+        assert_eq!(
+            super::request_retry(
+                &transport,
+                &PreviewRequest {
+                    url: "https://cdn.test/video.mp4".to_owned(),
+                    method: PreviewMethod::Head,
+                    follow_redirects: false,
+                },
+                false,
+            ),
+            Err(PreviewFailure::Request)
+        );
+        assert_eq!(transport.calls.borrow().len(), 1);
     }
 
     #[test]
@@ -834,6 +946,19 @@ mod tests {
         assert_eq!(
             RequestOnly.download_video("https://example.test/video", 10),
             Err(PreviewFailure::Request)
+        );
+        // Without retries the single attempt's failure is surfaced unchanged.
+        assert_eq!(
+            super::request_retry(
+                &RequestOnly,
+                &PreviewRequest {
+                    url: "https://example.test/page".to_owned(),
+                    method: PreviewMethod::Get,
+                    follow_redirects: true,
+                },
+                false,
+            ),
+            Err(PreviewFailure::Connection)
         );
 
         let invalid = FakeTransport {
@@ -868,5 +993,22 @@ mod tests {
         let result = inspect_with(&retries, "https://eeinstagram.com/reel/unavailable");
         assert_eq!(result.failure, Some(PreviewFailure::Request));
         assert_eq!(retries.requests.borrow().len(), 6);
+    }
+
+    #[test]
+    fn reqwest_failures_are_classified_by_cause() {
+        use crate::web_fetch::reqwest_error_fixtures as fixtures;
+        assert_eq!(
+            fixtures::timeout().map(super::classify_error),
+            Some(super::PreviewFailure::Timeout)
+        );
+        assert_eq!(
+            fixtures::connection().map(super::classify_error),
+            Some(super::PreviewFailure::Connection)
+        );
+        assert_eq!(
+            fixtures::request().map(super::classify_error),
+            Some(super::PreviewFailure::Request)
+        );
     }
 }

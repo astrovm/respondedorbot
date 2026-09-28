@@ -96,29 +96,26 @@ fn classify_error(error: reqwest::Error) -> TransportFailureKind {
 
 #[must_use]
 pub fn parse_symbols(html: &str) -> Vec<String> {
-    let Some(regex) = COMPANY_REGEX
+    COMPANY_REGEX
         .get_or_init(|| {
             Regex::new(r#"data-boxover-ticker="([A-Z.]+)"\s+data-boxover-company="([^"]+)""#)
         })
         .as_ref()
-        .ok()
-    else {
-        return Vec::new();
-    };
-    let mut companies = HashSet::new();
-    let mut symbols = Vec::new();
-    for captures in regex.captures_iter(html) {
-        let (Some(symbol), Some(company)) = (captures.get(1), captures.get(2)) else {
-            continue;
-        };
-        if companies.insert(company.as_str().to_owned()) {
-            symbols.push(symbol.as_str().to_owned());
-            if symbols.len() == MAX_SYMBOLS {
-                break;
+        .map(|regex| {
+            let mut companies = HashSet::new();
+            let mut symbols = Vec::new();
+            for captures in regex.captures_iter(html) {
+                let (_, [symbol, company]) = captures.extract();
+                if companies.insert(company.to_owned()) {
+                    symbols.push(symbol.to_owned());
+                    if symbols.len() == MAX_SYMBOLS {
+                        break;
+                    }
+                }
             }
-        }
-    }
-    symbols
+            symbols
+        })
+        .unwrap_or_default()
 }
 
 #[must_use]
@@ -134,16 +131,10 @@ pub fn fetch_with<T: FinvizTransport>(transport: &T) -> ScreenerOutcome {
     }
 }
 
-#[must_use]
-pub fn fetch() -> ScreenerOutcome {
-    match ReqwestFinvizTransport::new() {
-        Ok(transport) => fetch_with(&transport),
-        Err(kind) => ScreenerOutcome::TransportError { kind },
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
     use std::cell::RefCell;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -222,11 +213,11 @@ mod tests {
     }
 
     #[test]
-    fn reqwest_transport_sends_the_mega_cap_screener_contract() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+    fn reqwest_transport_sends_the_mega_cap_screener_contract() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
+            let (mut stream, _) = listener.accept()?;
             let mut request = [0_u8; 2_048];
             let bytes = stream.read(&mut request).unwrap_or_default();
             let request = String::from_utf8_lossy(&request[..bytes]);
@@ -237,22 +228,43 @@ mod tests {
                     .contains("user-agent: mozilla/5.0")
             );
             let body = "synthetic screener";
-            write!(
+            let written = write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
-            )
-            .unwrap_or_else(|_| unreachable!());
+            );
+            written?;
+            Ok(())
         });
         let transport =
             ReqwestFinvizTransport::with_screener_url(&format!("http://{address}/screener"))
-                .unwrap_or_else(|_| unreachable!());
-        let response = transport.fetch().unwrap_or_else(|_| unreachable!());
+                .ok()
+                .ok_or("unexpected error")?;
+        let response = transport.fetch().ok().ok_or("unexpected error")?;
         assert_eq!(response.status_code, 200);
         assert_eq!(response.body, "synthetic screener");
-        assert!(server.join().is_ok());
+        assert!(matches!(server.join(), Ok(Ok(()))));
         let unavailable = ReqwestFinvizTransport::with_screener_url("http://127.0.0.1:1/screener")
-            .unwrap_or_else(|_| unreachable!());
+            .ok()
+            .ok_or("unexpected error")?;
         assert!(unavailable.fetch().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn reqwest_failures_are_classified_by_cause() {
+        use crate::web_fetch::reqwest_error_fixtures as fixtures;
+        assert_eq!(
+            fixtures::timeout().map(super::classify_error),
+            Some(super::TransportFailureKind::Timeout)
+        );
+        assert_eq!(
+            fixtures::connection().map(super::classify_error),
+            Some(super::TransportFailureKind::Connection)
+        );
+        assert_eq!(
+            fixtures::request().map(super::classify_error),
+            Some(super::TransportFailureKind::Request)
+        );
     }
 }

@@ -665,7 +665,8 @@ mod tests {
     }
 
     #[test]
-    fn only_validated_read_only_executors_prepare_concurrent_calls() {
+    fn only_validated_read_only_executors_prepare_concurrent_calls() -> crate::test_env::TestResult
+    {
         use crate::chat_tool_loop::NativeToolRuntime;
 
         let toolbox = ExternalToolbox::new(Locale::En)
@@ -684,8 +685,18 @@ mod tests {
                 &json!({"url": "https://example.com"}),
                 "call-1",
             )
-            .unwrap_or_else(|| unreachable!());
+            .ok_or("read-only fetch runs concurrently")?;
         assert_eq!(run().output, "concurrent web_fetch:call-1");
+        assert_eq!(
+            registry
+                .execute(
+                    "web_fetch",
+                    &json!({"url": "https://example.com"}),
+                    "call-0"
+                )
+                .output,
+            "web_fetch:call-0"
+        );
         // Invalid arguments, side-effecting executors, missing executors and
         // unknown names all fall back to sequential execution.
         assert!(
@@ -716,5 +727,55 @@ mod tests {
                 .is_none()
         );
         assert!(ports.services().calls.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn argument_free_tools_and_crypto_defaults_validate_without_io() {
+        assert_eq!(
+            super::validate_request(
+                NativeTool::CryptoPrices,
+                &json!({"assets": ["btc"]}),
+                Locale::En
+            ),
+            Ok(ExternalToolRequest::CryptoPrices {
+                query: "btc in USD 24h".to_owned(),
+            })
+        );
+        assert_eq!(
+            super::validate_request(
+                NativeTool::GetChatMembers,
+                &json!({"ignored": 1}),
+                Locale::Es
+            ),
+            Ok(ExternalToolRequest::GetChatMembers)
+        );
+        assert_eq!(
+            ExternalToolRequest::GetChatMembers.tool(),
+            NativeTool::GetChatMembers
+        );
+        assert_eq!(
+            super::validate_request(NativeTool::BotCapabilities, &json!({}), Locale::En),
+            Ok(ExternalToolRequest::BotCapabilities)
+        );
+        assert_eq!(
+            super::validate_request(
+                NativeTool::Calculate,
+                &json!({"expression": "1+1"}),
+                Locale::En
+            ),
+            Err("calculate is handled by bot-core".to_owned())
+        );
+        let mut ports = ports(Locale::En);
+        assert_eq!(
+            ports
+                .execute_external(NativeTool::GetChatMembers, &json!({}), "members-1")
+                .output,
+            "synthetic result"
+        );
+        assert_eq!(
+            ports.services().calls,
+            [(ExternalToolRequest::GetChatMembers, "members-1".to_owned())]
+        );
     }
 }

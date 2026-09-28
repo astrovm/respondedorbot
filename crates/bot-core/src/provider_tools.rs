@@ -134,7 +134,7 @@ fn is_http_url(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{PseudoToolCall, parse_pseudo_web_fetch};
+    use super::{PseudoToolCall, parse_pseudo_web_fetch, parse_single_quoted_string};
 
     fn advertised() -> Vec<String> {
         vec!["web_fetch".to_owned()]
@@ -209,5 +209,63 @@ mod tests {
         ] {
             assert_eq!(parse_pseudo_web_fetch(text, 0, &tools, registered), None);
         }
+    }
+
+    fn dsml(name: &str, url: &str, closing: &str) -> String {
+        format!(
+            "<｜｜DSML｜｜invoke name=\"{name}\">\n<｜｜DSML｜｜parameter name=\"url\" string=\"true\">{url}</｜｜DSML｜｜parameter>\n{closing}"
+        )
+    }
+
+    #[test]
+    fn malformed_dsml_invocations_are_rejected() {
+        for text in [
+            dsml("web-fetch", "https://example.com", "</｜｜DSML｜｜invoke>"),
+            dsml("web_fetch", "", "</｜｜DSML｜｜invoke>"),
+            dsml(
+                "web_fetch",
+                "https://example.com/a b",
+                "</｜｜DSML｜｜invoke>",
+            ),
+            dsml("web_fetch", "https://example.com", "trailing prose"),
+        ] {
+            assert_eq!(
+                parse_pseudo_web_fetch(&text, 0, &advertised(), true),
+                None,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_last_line_calls_are_rejected() {
+        for text in [
+            "web_fetch(\"https://example.com\"",
+            "(\"https://example.com\")",
+            "web fetch(\"https://example.com\")",
+            "9fetch(\"https://example.com\")",
+            "web_fetch(')",
+            "web_fetch('https://example.com/\\q')",
+            "web_fetch('https://example.com/\\')",
+            "web_fetch('https://example.com/\")",
+        ] {
+            assert_eq!(
+                parse_pseudo_web_fetch(text, 0, &advertised(), true),
+                None,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn single_quoted_arguments_decode_every_supported_escape() {
+        assert_eq!(
+            parse_single_quoted_string(r#"'a\\b\'c\"d\ne\rf\tg'"#),
+            Some("a\\b'c\"d\ne\rf\tg".to_owned())
+        );
+        assert_eq!(parse_single_quoted_string("'"), None);
+        assert_eq!(parse_single_quoted_string("'abc"), None);
+        assert_eq!(parse_single_quoted_string(r"'bad\x'"), None);
+        assert_eq!(parse_single_quoted_string(r"'dangling\'"), None);
     }
 }

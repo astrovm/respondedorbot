@@ -2,13 +2,13 @@
 
 use std::fmt::Display;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 
-use crate::compaction_adapters::production_compaction_worker;
+use crate::compaction_adapters::{ProductionCompactionWorker, production_compaction_worker};
 use crate::compaction_worker::{
     CompactionBilling, CompactionProvider, CompactionQueue, CompactionState, CompactionWorker,
 };
@@ -75,15 +75,7 @@ pub fn build_production_background_specs(
             Box::new(scheduler),
         ));
     }
-    let compaction = production_compaction_worker(
-        options.redis_endpoint,
-        options.database_url,
-        options.openrouter_api_key,
-        options.openrouter_base_url,
-        Arc::clone(&options.openrouter_pricing),
-        options.system_prompt,
-        options.owner_token,
-    )?;
+    let compaction = compaction_worker(&options)?;
     let reconciliation = production_reconciler(
         options.database_url,
         options.openrouter_api_key,
@@ -111,6 +103,20 @@ pub fn build_production_background_specs(
         ),
     ]);
     Ok(task_workers)
+}
+
+fn compaction_worker(
+    options: &ProductionBackgroundOptions<'_>,
+) -> Result<ProductionCompactionWorker, String> {
+    production_compaction_worker(
+        options.redis_endpoint,
+        options.database_url,
+        options.openrouter_api_key,
+        options.openrouter_base_url,
+        Arc::clone(&options.openrouter_pricing),
+        options.system_prompt,
+        options.owner_token,
+    )
 }
 
 pub trait BackgroundWorker: Send + 'static {
@@ -171,6 +177,12 @@ impl BackgroundError {
     }
 }
 
+type WorkerBody = Box<dyn FnOnce() + Send + 'static>;
+
+fn spawn_named_thread(name: String, body: WorkerBody) -> std::io::Result<JoinHandle<()>> {
+    thread::Builder::new().name(name).spawn(body)
+}
+
 struct WorkerHandle {
     name: String,
     handle: JoinHandle<()>,
@@ -188,6 +200,14 @@ impl BackgroundSupervisor {
     pub fn start(
         specs: Vec<BackgroundWorkerSpec>,
         reporter: Arc<dyn OperationalReporter>,
+    ) -> Result<Self, BackgroundError> {
+        Self::start_with_spawner(specs, reporter, &mut spawn_named_thread)
+    }
+
+    fn start_with_spawner(
+        specs: Vec<BackgroundWorkerSpec>,
+        reporter: Arc<dyn OperationalReporter>,
+        spawn: &mut dyn FnMut(String, WorkerBody) -> std::io::Result<JoinHandle<()>>,
     ) -> Result<Self, BackgroundError> {
         let stopping = Arc::new(AtomicBool::new(false));
         let wake = Arc::new((Mutex::new(()), Condvar::new()));
@@ -213,9 +233,9 @@ impl BackgroundSupervisor {
             let failure = supervisor.failure.clone();
             let mut worker = spec.worker;
             let interval = spec.interval;
-            let handle = thread::Builder::new()
-                .name(thread_name)
-                .spawn(move || {
+            let handle = spawn(
+                thread_name,
+                Box::new(move || {
                     let mut last_reported_failure: Option<(String, Instant)> = None;
                     while !stopping.load(Ordering::Acquire) {
                         let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -244,9 +264,7 @@ impl BackgroundSupervisor {
                             Ok(()) => last_reported_failure = None,
                             Err(error) => {
                                 let report = OperationalReport::new(
-                                    format!(
-                                        "falló el proceso en segundo plano {name}: {error}"
-                                    ),
+                                    format!("falló el proceso en segundo plano {name}: {error}"),
                                     format!("background worker {name} failed: {error}"),
                                 );
                                 let message = report.english().to_owned();
@@ -269,16 +287,14 @@ impl BackgroundSupervisor {
                                 }
                             }
                         }
+                        // The wake mutex guards no data, so a poisoned lock
+                        // carries no inconsistent state to protect.
                         let (lock, changed) = &*wake;
-                        let Ok(guard) = lock.lock() else {
-                            break;
-                        };
+                        let guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
                         if stopping.load(Ordering::Acquire) {
                             break;
                         }
-                        if changed.wait_timeout(guard, interval).is_err() {
-                            break;
-                        }
+                        let _woken = changed.wait_timeout(guard, interval);
                     }
                     if let Err(error) = worker.shutdown() {
                         let report = OperationalReport::new(
@@ -294,7 +310,8 @@ impl BackgroundSupervisor {
                             );
                         }
                     }
-                });
+                }),
+            );
             let handle = match handle {
                 Ok(handle) => handle,
                 Err(error) => {
@@ -464,7 +481,7 @@ fn now_epoch_seconds() -> i64 {
 #[allow(clippy::panic)]
 mod tests {
     use std::sync::mpsc::{self, RecvTimeoutError};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, PoisonError};
 
     use bot_adapters::openrouter_chat::OpenRouterPricingCache;
     use bot_adapters::redis_connection::RedisEndpoint;
@@ -472,7 +489,7 @@ mod tests {
 
     use super::{
         BackgroundError, BackgroundSupervisor, BackgroundWorker, BackgroundWorkerSpec,
-        ProductionBackgroundOptions, build_production_background_specs,
+        ProductionBackgroundOptions, build_production_background_specs, spawn_named_thread,
     };
     use crate::composition::TelegramDeliveryCoordinator;
     use crate::operational_reporting::{OperationalReport, OperationalReporter};
@@ -495,7 +512,7 @@ mod tests {
         fn report(&self, report: &OperationalReport) -> Result<(), String> {
             self.messages
                 .lock()
-                .map_err(|_| "report lock poisoned".to_owned())?
+                .unwrap_or_else(PoisonError::into_inner)
                 .push(report.clone());
             Ok(())
         }
@@ -503,9 +520,7 @@ mod tests {
 
     impl BackgroundWorker for Worker {
         fn run_once(&mut self, now_epoch_seconds: i64) -> Result<(), String> {
-            self.ran
-                .send(now_epoch_seconds)
-                .map_err(|error| error.to_string())?;
+            let _ = self.ran.send(now_epoch_seconds);
             if self.fail {
                 Err("synthetic run failure".to_owned())
             } else {
@@ -514,16 +529,17 @@ mod tests {
         }
 
         fn shutdown(&mut self) -> Result<(), String> {
-            self.stopped.send(()).map_err(|error| error.to_string())
+            let _ = self.stopped.send(());
+            Ok(())
         }
     }
 
     #[test]
-    fn starts_immediately_repeats_failures_and_stops_interruptibly() {
+    fn starts_immediately_repeats_failures_and_stops_interruptibly() -> TestResult {
         let (ran_tx, ran_rx) = mpsc::channel();
         let (stopped_tx, stopped_rx) = mpsc::channel();
         let reporter = Arc::new(Reporter::default());
-        let mut supervisor = BackgroundSupervisor::start(
+        let started = BackgroundSupervisor::start(
             vec![BackgroundWorkerSpec::new(
                 "synthetic-worker",
                 Duration::from_millis(20),
@@ -535,10 +551,7 @@ mod tests {
             )],
             reporter.clone(),
         );
-        assert!(supervisor.is_ok());
-        let Some(supervisor) = supervisor.as_mut().ok() else {
-            return;
-        };
+        let mut supervisor = started?;
         assert!(ran_rx.recv_timeout(Duration::from_secs(1)).is_ok());
         assert!(ran_rx.recv_timeout(Duration::from_secs(1)).is_ok());
         assert!(supervisor.stop().is_ok());
@@ -555,10 +568,11 @@ mod tests {
                     .starts_with("falló el proceso en segundo plano synthetic-worker")
         }));
         assert!(supervisor.stop().is_ok());
+        Ok(())
     }
 
     #[test]
-    fn worker_panics_fail_the_live_supervisor_immediately() {
+    fn worker_panics_fail_the_live_supervisor_immediately() -> TestResult {
         struct PanicWorker;
         impl BackgroundWorker for PanicWorker {
             fn run_once(&mut self, _now_epoch_seconds: i64) -> Result<(), String> {
@@ -567,21 +581,25 @@ mod tests {
         }
 
         let reporter = Arc::new(Reporter::default());
-        let mut supervisor = BackgroundSupervisor::start(
+        let started = BackgroundSupervisor::start(
             vec![BackgroundWorkerSpec::new(
                 "panic-worker",
                 Duration::from_secs(60),
                 Box::new(PanicWorker),
             )],
             reporter,
-        )
-        .unwrap_or_else(|error| panic!("supervisor startup: {error}"));
+        );
+        let mut supervisor = started?;
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        while !supervisor.has_failed() && std::time::Instant::now() < deadline {
+        let mut failed = false;
+        while !failed {
+            assert!(std::time::Instant::now() < deadline);
             std::thread::yield_now();
+            failed = supervisor.has_failed();
         }
         assert!(supervisor.has_failed());
         assert!(supervisor.stop().is_err());
+        Ok(())
     }
 
     #[test]
@@ -626,14 +644,12 @@ mod tests {
     }
 
     #[test]
-    fn production_background_composition_does_not_start_or_contact_services() {
-        let pricing = Arc::new(
-            OpenRouterPricingCache::new(
-                "synthetic-openrouter-key",
-                "https://openrouter.example.test/api/v1",
-            )
-            .unwrap_or_else(|_| unreachable!("pricing cache construction")),
+    fn production_background_composition_does_not_start_or_contact_services() -> TestResult {
+        let pricing = OpenRouterPricingCache::new(
+            "synthetic-openrouter-key",
+            "https://openrouter.example.test/api/v1",
         );
+        let pricing = Arc::new(pricing?);
         let build = |openrouter_base_url| {
             build_production_background_specs(ProductionBackgroundOptions {
                 redis_endpoint: &RedisEndpoint {
@@ -661,28 +677,321 @@ mod tests {
         let result = build("https://openrouter.example.test/api/v1");
         assert!(result.is_ok());
         assert_eq!(result.map(|specs| specs.len()), Ok(7));
+        Ok(())
     }
 
     #[test]
-    fn task_verifier_runs_through_the_background_worker_boundary() -> Result<(), String> {
-        let Some(port) = std::env::var("TEST_REDIS_PORT")
+    fn task_verifier_runs_through_the_background_worker_boundary() -> TestResult {
+        std::env::var("TEST_REDIS_PORT")
             .ok()
             .and_then(|value| value.parse().ok())
-        else {
-            return Ok(());
-        };
+            .map_or(Ok(()), run_task_verifier)
+    }
+
+    fn run_task_verifier(port: u16) -> TestResult {
         let endpoint = RedisEndpoint {
-            host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+            host: std::env::var("TEST_REDIS_HOST").unwrap_or(String::from("127.0.0.1")),
             port,
-            password: std::env::var("TEST_REDIS_PASSWORD")
-                .ok()
-                .filter(|value| !value.is_empty()),
+            // Empty passwords are ignored by the Redis client.
+            password: std::env::var("TEST_REDIS_PASSWORD").ok(),
         };
         let mut verifier =
-            crate::task_service::build_task_verifier(&endpoint, "synthetic-background-verifier")
-                .map_err(|error| error.to_string())?;
+            crate::task_service::build_task_verifier(&endpoint, "synthetic-background-verifier")?;
         BackgroundWorker::run_once(&mut verifier, 1_700_000_000)?;
         BackgroundWorker::shutdown(&mut verifier)?;
+        Ok(())
+    }
+
+    struct FailingReporter {
+        attempts: Mutex<usize>,
+    }
+
+    impl OperationalReporter for FailingReporter {
+        fn report(&self, _report: &OperationalReport) -> Result<(), String> {
+            if let Ok(mut attempts) = self.attempts.lock() {
+                *attempts += 1;
+            }
+            Err("synthetic admin chat outage".to_owned())
+        }
+    }
+
+    #[test]
+    fn undeliverable_failure_reports_do_not_stop_the_worker() -> TestResult {
+        let (ran_tx, ran_rx) = mpsc::channel();
+        let (stopped_tx, stopped_rx) = mpsc::channel();
+        let reporter = Arc::new(FailingReporter {
+            attempts: Mutex::new(0),
+        });
+        let started = BackgroundSupervisor::start(
+            vec![BackgroundWorkerSpec::new(
+                "unreported-worker",
+                Duration::from_millis(5),
+                Box::new(Worker {
+                    ran: ran_tx,
+                    stopped: stopped_tx,
+                    fail: true,
+                }),
+            )],
+            reporter.clone(),
+        );
+        let mut supervisor = started?;
+        for _ in 0..3 {
+            assert!(ran_rx.recv_timeout(Duration::from_secs(1)).is_ok());
+        }
+        assert!(!supervisor.has_failed());
+        assert!(supervisor.stop().is_ok());
+        assert!(stopped_rx.recv_timeout(Duration::from_secs(1)).is_ok());
+        // Identical failures are only reported once per repeat interval.
+        assert!(
+            reporter
+                .attempts
+                .lock()
+                .is_ok_and(|attempts| *attempts == 1)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn spawn_failures_stop_started_workers_and_report_the_failed_worker() {
+        let (ran_tx, ran_rx) = mpsc::channel();
+        let (stopped_tx, stopped_rx) = mpsc::channel();
+        let (unused_ran_tx, _unused_ran_rx) = mpsc::channel();
+        let (unused_stopped_tx, _unused_stopped_rx) = mpsc::channel();
+        let reporter = Arc::new(Reporter::default());
+        let mut spawned = Vec::new();
+        let result = BackgroundSupervisor::start_with_spawner(
+            vec![
+                BackgroundWorkerSpec::new(
+                    "healthy-worker",
+                    Duration::from_secs(60),
+                    Box::new(Worker {
+                        ran: ran_tx,
+                        stopped: stopped_tx,
+                        fail: false,
+                    }),
+                ),
+                BackgroundWorkerSpec::new(
+                    "unspawnable-worker",
+                    Duration::from_secs(60),
+                    Box::new(Worker {
+                        ran: unused_ran_tx,
+                        stopped: unused_stopped_tx,
+                        fail: false,
+                    }),
+                ),
+            ],
+            reporter.clone(),
+            &mut |name, body| {
+                spawned.push(name.clone());
+                if spawned.len() == 1 {
+                    return spawn_named_thread(name, body);
+                }
+                // Let the first worker complete a run before the second spawn fails.
+                assert!(ran_rx.recv_timeout(Duration::from_secs(1)).is_ok());
+                Err(std::io::Error::other("synthetic thread exhaustion"))
+            },
+        );
+        assert!(matches!(
+            &result,
+            Err(BackgroundError::Spawn { name, error })
+                if name == "unspawnable-worker" && error == "synthetic thread exhaustion"
+        ));
+        assert_eq!(spawned, ["healthy-worker", "unspawnable-worker"]);
+        // The healthy worker was shut down before start returned.
+        assert_eq!(stopped_rx.try_recv(), Ok(()));
+        let messages = reporter
+            .messages
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].for_locale(Locale::Es),
+            "no se pudo iniciar el proceso en segundo plano unspawnable-worker: synthetic thread exhaustion"
+        );
+    }
+
+    struct PanickingShutdownWorker {
+        ran: mpsc::Sender<()>,
+    }
+
+    impl BackgroundWorker for PanickingShutdownWorker {
+        fn run_once(&mut self, _now_epoch_seconds: i64) -> Result<(), String> {
+            let _ = self.ran.send(());
+            Ok(())
+        }
+
+        fn shutdown(&mut self) -> Result<(), String> {
+            panic!("synthetic shutdown panic")
+        }
+    }
+
+    #[test]
+    fn worker_threads_that_panic_during_shutdown_fail_the_stop() -> TestResult {
+        let reporter = Arc::new(Reporter::default());
+        let (ran_tx, ran_rx) = mpsc::channel();
+        let started = BackgroundSupervisor::start(
+            vec![BackgroundWorkerSpec::new(
+                "shutdown-panic-worker",
+                Duration::from_secs(60),
+                Box::new(PanickingShutdownWorker { ran: ran_tx }),
+            )],
+            reporter.clone(),
+        );
+        let mut supervisor = started?;
+        assert_eq!(ran_rx.recv_timeout(Duration::from_secs(1)), Ok(()));
+        assert!(!supervisor.has_failed());
+        assert!(matches!(
+            supervisor.stop(),
+            Err(BackgroundError::Panicked { name }) if name == "shutdown-panic-worker"
+        ));
+        let messages = reporter
+            .messages
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].english(),
+            "background worker shutdown-panic-worker panicked"
+        );
+        assert_eq!(
+            messages[0].for_locale(Locale::Es),
+            "el proceso en segundo plano shutdown-panic-worker entró en pánico"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn aborted_startup_reports_workers_that_panic_while_being_stopped() {
+        let reporter = Arc::new(Reporter::default());
+        let (ran_tx, _ran_rx) = mpsc::channel();
+        let (stopped_tx, _stopped_rx) = mpsc::channel();
+        let (panicking_ran_tx, _panicking_ran_rx) = mpsc::channel();
+        let result = BackgroundSupervisor::start(
+            vec![
+                BackgroundWorkerSpec::new(
+                    "shutdown-panic-worker",
+                    Duration::from_secs(60),
+                    Box::new(PanickingShutdownWorker {
+                        ran: panicking_ran_tx,
+                    }),
+                ),
+                BackgroundWorkerSpec::new(
+                    "zero-interval-worker",
+                    Duration::ZERO,
+                    Box::new(Worker {
+                        ran: ran_tx,
+                        stopped: stopped_tx,
+                        fail: false,
+                    }),
+                ),
+            ],
+            reporter.clone(),
+        );
+        assert!(matches!(
+            result,
+            Err(BackgroundError::InvalidInterval { name }) if name == "zero-interval-worker"
+        ));
+        let messages = reporter
+            .messages
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let english = messages
+            .iter()
+            .map(|message| message.english().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            english,
+            [
+                "background worker shutdown-panic-worker panicked",
+                "background worker zero-interval-worker has a zero interval",
+            ]
+        );
+    }
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    struct FailingPanicReporter {
+        attempts: Mutex<usize>,
+    }
+
+    impl OperationalReporter for FailingPanicReporter {
+        fn report(&self, _report: &OperationalReport) -> Result<(), String> {
+            *self.attempts.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+            Err("synthetic admin chat outage".to_owned())
+        }
+    }
+
+    #[test]
+    fn worker_panics_fail_the_supervisor_even_when_the_report_is_lost() -> TestResult {
+        struct PanicWorker;
+        impl BackgroundWorker for PanicWorker {
+            fn run_once(&mut self, _now_epoch_seconds: i64) -> Result<(), String> {
+                panic!("synthetic worker panic")
+            }
+        }
+
+        let reporter = Arc::new(FailingPanicReporter {
+            attempts: Mutex::new(0),
+        });
+        let started = BackgroundSupervisor::start(
+            vec![BackgroundWorkerSpec::new(
+                "unreported-panic-worker",
+                Duration::from_secs(60),
+                Box::new(PanicWorker),
+            )],
+            reporter.clone(),
+        );
+        let mut supervisor = started?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let mut failed = false;
+        while !failed {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+            failed = supervisor.has_failed();
+        }
+        assert!(matches!(
+            supervisor.stop(),
+            Err(BackgroundError::Panicked { name }) if name == "unreported-panic-worker"
+        ));
+        assert_eq!(
+            *reporter
+                .attempts
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_composition_rejects_an_empty_owner_token() -> TestResult {
+        let pricing = OpenRouterPricingCache::new(
+            "synthetic-openrouter-key",
+            "https://openrouter.example.test/api/v1",
+        );
+        let pricing = Arc::new(pricing?);
+        let result = build_production_background_specs(ProductionBackgroundOptions {
+            redis_endpoint: &RedisEndpoint {
+                host: "synthetic.invalid".to_owned(),
+                port: 6379,
+                password: None,
+            },
+            database_url: "postgresql://synthetic.invalid/database",
+            telegram_token: "synthetic-telegram-token",
+            openrouter_api_key: "synthetic-openrouter-key",
+            openrouter_base_url: "https://openrouter.example.test/api/v1",
+            openrouter_pricing: pricing,
+            firecrawl_api_key: None,
+            system_prompt: "synthetic persona",
+            owner_token: "",
+            scheduler_mode: SchedulerMode::Authoritative,
+            reconciliation_interval: Duration::from_secs(60),
+            reconciliation_settings: ReconciliationSettings::default(),
+            active_operations: ActiveOperationRegistry::default(),
+            coinmarketcap_key: None,
+            telegram_delivery: TelegramDeliveryCoordinator::default(),
+        });
+        assert!(matches!(&result, Err(error) if error.contains("owner token")));
         Ok(())
     }
 }

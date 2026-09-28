@@ -174,7 +174,8 @@ mod tests {
         fn get(&self, _url: &str) -> Result<WebFetchResponse, WebFetchTransportError> {
             self.0
                 .lock()
-                .map_err(|_| WebFetchTransportError::Other("poisoned".to_owned()))?
+                .map_err(crate::error_text)
+                .map_err(WebFetchTransportError::Other)?
                 .remove(0)
         }
     }
@@ -316,7 +317,8 @@ mod tests {
         );
     }
     #[test]
-    fn concurrent_fetch_owns_its_transport_and_matches_sequential_output() {
+    fn concurrent_fetch_owns_its_transport_and_matches_sequential_output()
+    -> crate::test_env::TestResult {
         let page = response(
             "text/html",
             "<html><head><title>Example</title></head><body>Hello</body></html>",
@@ -324,12 +326,57 @@ mod tests {
         let mut tool = make_tool(vec![Ok(page.clone()), Ok(page)], Locale::En);
         let run = tool
             .concurrent(request("https://example.com"), "call")
-            .unwrap_or_else(|| unreachable!());
+            .ok_or("web fetch runs concurrently")?;
         let concurrent = std::thread::spawn(run)
             .join()
-            .unwrap_or_else(|_| unreachable!());
+            .ok()
+            .ok_or("concurrent fetch panicked")?;
         let sequential = tool.execute(request("https://example.com"), "call");
         assert_eq!(concurrent, sequential);
         assert_eq!(concurrent.output, "Title: Example\nHello");
+        Ok(())
+    }
+
+    #[test]
+    fn spanish_tweets_and_errors_plus_english_tweet_failures_are_localized() {
+        let payload = serde_json::json!({
+            "author_name": "Usuario Sintético",
+            "html": "<blockquote><p>Hola.</p></blockquote>"
+        })
+        .to_string();
+        let mut tool = make_tool(vec![Ok(response("application/json", &payload))], Locale::Es);
+        assert_eq!(
+            tool.execute(request("https://x.com/user/status/123"), "call")
+                .output,
+            "Tweet de Usuario Sintético\nHola."
+        );
+
+        let blocked = tool.execute(request("http://127.0.0.1/secret"), "call");
+        assert!(
+            blocked
+                .output
+                .starts_with("error obteniendo http://127.0.0.1/secret: "),
+            "{}",
+            blocked.output
+        );
+        assert_eq!(
+            blocked.diagnostics,
+            ["web_fetch blocked URL http://127.0.0.1/secret"]
+        );
+
+        let mut tool = make_tool(
+            vec![Ok(WebFetchResponse {
+                status_code: 404,
+                content_type: "application/json".to_owned(),
+                location: None,
+                body: Vec::new(),
+                truncated: false,
+            })],
+            Locale::En,
+        );
+        let failed = tool.execute(request("https://x.com/user/status/123"), "call");
+        assert_eq!(failed.output, "could not read the tweet");
+        assert_eq!(failed.diagnostics.len(), 1);
+        assert!(failed.diagnostics[0].starts_with("Twitter oEmbed failed for "));
     }
 }

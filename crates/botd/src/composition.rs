@@ -148,7 +148,7 @@ impl AdminCreditSink for BillingRepository {
         let amount = i32::try_from(amount)
             .map_err(|_| "admin credit amount exceeds the persistent range".to_owned())?;
         self.mint_user_credits(user_id, amount, Some(user_id))
-            .map_err(|error| error.to_string())
+            .map_err(error_text)
     }
 }
 
@@ -170,7 +170,7 @@ impl AdminCreditLogSource for BillingRepository {
                     })
                     .collect()
             })
-            .map_err(|error| error.to_string())
+            .map_err(error_text)
     }
 }
 
@@ -567,29 +567,27 @@ where
     }
 
     fn save_selection(&mut self, key: &str, value: &str, ttl_seconds: i64) -> Result<(), String> {
-        self.cache
-            .set(key, value, ttl_seconds)
-            .map_err(|error| error.to_string())
+        self.cache.set(key, value, ttl_seconds).map_err(error_text)
     }
 
     fn load_selection(&mut self, key: &str) -> Result<Option<String>, String> {
-        self.cache.get(key).map_err(|error| error.to_string())
+        self.cache.get(key).map_err(error_text)
     }
 
     fn take_selection(&mut self, key: &str) -> Result<Option<String>, String> {
-        self.cache.take(key).map_err(|error| error.to_string())
+        self.cache.take(key).map_err(error_text)
     }
 
     fn claim(&mut self, key: &str, value: &str, ttl_seconds: i64) -> Result<bool, String> {
         self.cache
             .claim(key, value, ttl_seconds)
-            .map_err(|error| error.to_string())
+            .map_err(error_text)
     }
 
     fn clear_selection(&mut self, key: &str) -> Result<(), String> {
         self.cache
             .set(key, &Value::Null.to_string(), 1)
-            .map_err(|error| error.to_string())
+            .map_err(error_text)
     }
     fn render_chart(
         &mut self,
@@ -711,15 +709,20 @@ struct CriptoYaRuloSource<T, C> {
     cache: C,
 }
 
-fn exchange_failure(label: &str, outcome: ExchangeQuotesOutcome) -> String {
+fn exchange_quotes(
+    label: &str,
+    outcome: ExchangeQuotesOutcome,
+) -> Result<Vec<bot_core::rulo::ExchangeQuote>, String> {
     match outcome {
-        ExchangeQuotesOutcome::Quotes(_) => format!("{label} unexpectedly succeeded"),
-        ExchangeQuotesOutcome::InvalidJson => format!("CriptoYa {label} returned invalid JSON"),
+        ExchangeQuotesOutcome::Quotes(quotes) => Ok(quotes),
+        ExchangeQuotesOutcome::InvalidJson => {
+            Err(format!("CriptoYa {label} returned invalid JSON"))
+        }
         ExchangeQuotesOutcome::HttpError { status_code } => {
-            format!("CriptoYa {label} returned HTTP {status_code}")
+            Err(format!("CriptoYa {label} returned HTTP {status_code}"))
         }
         ExchangeQuotesOutcome::TransportError(kind) => {
-            format!("CriptoYa {label} transport failed: {kind:?}")
+            Err(format!("CriptoYa {label} transport failed: {kind:?}"))
         }
     }
 }
@@ -768,13 +771,13 @@ impl<T: CriptoYaTransport + Sync, C: RequestCache> RuloSource for CriptoYaRuloSo
             }
         };
         let mut diagnostics = load.diagnostics;
-        match usd_to_usdt {
-            ExchangeQuotesOutcome::Quotes(quotes) => input.usd_to_usdt = quotes,
-            failure => diagnostics.push(exchange_failure("USDT/USD", failure)),
+        match exchange_quotes("USDT/USD", usd_to_usdt) {
+            Ok(quotes) => input.usd_to_usdt = quotes,
+            Err(failure) => diagnostics.push(failure),
         }
-        match usdt_to_ars {
-            ExchangeQuotesOutcome::Quotes(quotes) => input.usdt_to_ars = quotes,
-            failure => diagnostics.push(exchange_failure("USDT/ARS", failure)),
+        match exchange_quotes("USDT/ARS", usdt_to_ars) {
+            Ok(quotes) => input.usdt_to_ars = quotes,
+            Err(failure) => diagnostics.push(failure),
         }
         Ok(RuloInputLoad { input, diagnostics })
     }
@@ -1045,14 +1048,10 @@ fn is_qualified_symbol_query(query: &str) -> bool {
             && is_ascii_symbol_component(base)
             && is_ascii_symbol_component(suffix);
     }
-    let mut parts = normalized.split('-');
-    let Some(base) = parts.next() else {
+    let Some((base, suffix)) = normalized.split_once('-') else {
         return false;
     };
-    let Some(suffix) = parts.next() else {
-        return false;
-    };
-    parts.next().is_none()
+    !suffix.contains('-')
         && base.chars().count() <= 4
         && suffix.chars().count() <= 4
         && is_ascii_symbol_component(base)
@@ -1203,12 +1202,10 @@ where
                     resolved.push((plan.raw_query.clone(), Some(quote)));
                 }
             }
-            if !resolved.is_empty() {
-                return StockQuotesLoad {
-                    quotes: Some(resolved),
-                    diagnostics,
-                };
-            }
+            return StockQuotesLoad {
+                quotes: Some(resolved),
+                diagnostics,
+            };
         }
         if direct_quotes.is_empty() {
             return StockQuotesLoad {
@@ -1294,7 +1291,7 @@ impl StarPaymentSink for BillingRepository {
             inserted: result.inserted,
             user_balance: result.user_balance,
         })
-        .map_err(|error| error.to_string())
+        .map_err(error_text)
     }
 }
 
@@ -1306,13 +1303,11 @@ impl BillingBalanceSource for BillingRepository {
                 "billing onboarding grant user_id={user_id}: {error}"
             ));
         }
-        let user_balance = self
-            .get_balance("user", user_id)
-            .map_err(|error| error.to_string())?;
+        let user_balance = self.get_balance("user", user_id).map_err(error_text)?;
         let chat_balance = chat_id
             .map(|chat_id| self.get_balance("chat", chat_id))
             .transpose()
-            .map_err(|error| error.to_string())?;
+            .map_err(error_text)?;
         Ok(BillingBalances {
             user_balance,
             chat_balance,
@@ -1332,7 +1327,7 @@ impl BillingTransferSink for BillingRepository {
             .map_err(|_| "credit transfer amount exceeds the persistent range".to_owned())?;
         let result = self
             .transfer_user_to_chat(user_id, chat_id, amount)
-            .map_err(|error| error.to_string())?;
+            .map_err(error_text)?;
         Ok(bot_core::billing_commands::TransferResult {
             transferred: result.transferred,
             user_balance: result.user_balance,
@@ -1401,7 +1396,7 @@ impl ChargeHistorySource for BillingRepository {
             .map_err(|_| "charge history limit exceeds the query range".to_owned())?;
         let rows = self
             .list_user_ai_charge_rows(user_id, cursor_id, direction, query_limit)
-            .map_err(|error| error.to_string())?;
+            .map_err(error_text)?;
         Ok(build_charge_history_page(rows, limit, cursor_id, direction))
     }
 }
@@ -1576,11 +1571,9 @@ impl TelegramStreamDeliveryState {
         if let Some(wait) = self.next_final_retry_wait(now) {
             next_wait = Some(next_wait.map_or(wait, |current: Duration| current.min(wait)));
         }
-        let order_length = self.order.len();
-        for _ in 0..order_length {
-            let Some(key) = self.order.pop_front() else {
-                break;
-            };
+        let keys = self.order.iter().copied().collect::<Vec<_>>();
+        for key in keys {
+            self.order.pop_front();
             if !self.pending.contains_key(&key) {
                 continue;
             }
@@ -1590,14 +1583,13 @@ impl TelegramStreamDeliveryState {
                 continue;
             }
             let wait = self.intermediate_edit_wait(key.chat_id, now);
-            if wait.is_zero() {
-                if let Some(pending) = self.pending.remove(&key) {
-                    return TelegramStreamDeliveryDecision::Ready(pending);
-                }
-            } else {
-                self.order.push_back(key);
-                next_wait = Some(next_wait.map_or(wait, |current: Duration| current.min(wait)));
+            if wait.is_zero()
+                && let Some(pending) = self.pending.remove(&key)
+            {
+                return TelegramStreamDeliveryDecision::Ready(pending);
             }
+            self.order.push_back(key);
+            next_wait = Some(next_wait.map_or(wait, |current: Duration| current.min(wait)));
         }
 
         if self.pending.is_empty() {
@@ -1809,9 +1801,10 @@ impl TelegramStreamDelivery {
     }
 
     fn enqueue(&self, action: TelegramAction) -> bool {
-        telegram_stream_key(&action)
-            .and_then(|key| self.shard(key.chat_id))
-            .is_some_and(|shard| shard.enqueue(action))
+        telegram_stream_key(&action).is_some_and(|key| {
+            self.shard(key.chat_id)
+                .is_some_and(|shard| shard.enqueue(key, action))
+        })
     }
 
     fn start_thinking(&self, chat_id: ChatId, message_id: MessageId, text: &str) {
@@ -1832,7 +1825,7 @@ impl TelegramStreamDelivery {
         };
         self.shard(key.chat_id)
             .ok_or_else(telegram_stream_delivery_unavailable)
-            .and_then(|shard| shard.finalize(action))
+            .and_then(|shard| shard.finalize(key, action))
     }
 
     fn cancel(&self, chat_id: ChatId, message_id: MessageId) {
@@ -1850,10 +1843,7 @@ struct TelegramStreamDeliveryShard {
 }
 
 impl TelegramStreamDeliveryShard {
-    fn enqueue(&self, action: TelegramAction) -> bool {
-        let Some(key) = telegram_stream_key(&action) else {
-            return false;
-        };
+    fn enqueue(&self, key: TelegramStreamKey, action: TelegramAction) -> bool {
         {
             let mut state = lock_unpoisoned(&self.state);
             if state
@@ -1916,10 +1906,11 @@ impl TelegramStreamDeliveryShard {
         let _ = self.wake.try_send(());
     }
 
-    fn finalize(&self, action: TelegramAction) -> Result<bool, TelegramActionSinkError> {
-        let Some(key) = telegram_stream_key(&action) else {
-            return Err(TelegramActionSinkError::Adapter(ActionError::InvalidAction));
-        };
+    fn finalize(
+        &self,
+        key: TelegramStreamKey,
+        action: TelegramAction,
+    ) -> Result<bool, TelegramActionSinkError> {
         let (response_sender, response_receiver) = mpsc::channel();
         let superseded_response = {
             let mut state = lock_unpoisoned(&self.state);
@@ -2242,7 +2233,7 @@ impl ScheduledTaskSource for RedisScheduledTaskSource {
                     .map(|document| document.task)
                     .collect()
             })
-            .map_err(|error| error.to_string())
+            .map_err(error_text)
     }
 
     fn cancel(
@@ -2252,7 +2243,7 @@ impl ScheduledTaskSource for RedisScheduledTaskSource {
     ) -> Result<bool, String> {
         self.store
             .cancel_task(task_id.as_str(), chat_id)
-            .map_err(|error| error.to_string())
+            .map_err(error_text)
     }
 }
 
@@ -2287,22 +2278,12 @@ impl<Transport: TelegramTransport> GroupAuthorizer for TelegramGroupAuthorizer<T
             Err(error) => diagnostics.push(format!("chat-admin cache read: {error}")),
         }
         let lookup = lookup_chat_admin_with(&self.transport, &self.token, chat_id, user_id);
-        let is_admin = match lookup {
-            Ok(lookup) => {
-                if let Some(diagnostic) = lookup.diagnostic {
-                    diagnostics.push(diagnostic);
-                }
-                lookup.is_admin
-            }
-            Err(error) => {
-                diagnostics.push(format!("chat-admin lookup: {error}"));
-                false
-            }
-        };
-        if let Err(error) = cache_chat_admin(&self.redis_endpoint, chat_id, user_id, is_admin, 300)
-        {
-            diagnostics.push(format!("chat-admin cache write: {error}"));
-        }
+        diagnostics.extend(labeled_error("chat-admin lookup", lookup.as_ref().err()));
+        let lookup = lookup.ok();
+        let is_admin = lookup.as_ref().is_some_and(|lookup| lookup.is_admin);
+        diagnostics.extend(lookup.and_then(|lookup| lookup.diagnostic));
+        let cached = cache_chat_admin(&self.redis_endpoint, chat_id, user_id, is_admin, 300);
+        diagnostics.extend(labeled_error("chat-admin cache write", cached.err()));
         GroupAuthorizationDecision {
             is_admin,
             diagnostics,
@@ -2830,18 +2811,13 @@ impl ConversationToolFactory for ProductionToolFactory {
 
         if let Some(api_key) = self.coinmarketcap_key.clone().filter(|key| !key.is_empty()) {
             let market = NativeMarketPriceSource {
-                transport: ReqwestCoinMarketCapTransport::new()
-                    .map_err(|error| format!("CoinMarketCap tool transport: {error:?}"))?,
-                cache: RedisJsonCache::new(&self.redis_endpoint)
-                    .map_err(|error| error.to_string())?,
+                transport: tool_transport("CoinMarketCap", ReqwestCoinMarketCapTransport::new())?,
+                cache: RedisJsonCache::new(&self.redis_endpoint).map_err(error_text)?,
                 api_key,
                 stocks: YahooStockPriceSource {
-                    yahoo_transport: ReqwestYahooFinanceTransport::new()
-                        .map_err(|error| format!("Yahoo tool transport: {error:?}"))?,
-                    finviz_transport: ReqwestFinvizTransport::new()
-                        .map_err(|error| format!("Finviz tool transport: {error:?}"))?,
-                    cache: RedisJsonCache::new(&self.redis_endpoint)
-                        .map_err(|error| error.to_string())?,
+                    yahoo_transport: tool_transport("Yahoo", ReqwestYahooFinanceTransport::new())?,
+                    finviz_transport: tool_transport("Finviz", ReqwestFinvizTransport::new())?,
+                    cache: RedisJsonCache::new(&self.redis_endpoint).map_err(error_text)?,
                 },
             };
             toolbox = toolbox.with_executor(
@@ -2854,32 +2830,23 @@ impl ConversationToolFactory for ProductionToolFactory {
             );
         }
 
+        let stocks = YahooStockPriceSource {
+            yahoo_transport: tool_transport("Yahoo", ReqwestYahooFinanceTransport::new())?,
+            finviz_transport: tool_transport("Finviz", ReqwestFinvizTransport::new())?,
+            cache: RedisJsonCache::new(&self.redis_endpoint).map_err(error_text)?,
+        };
         toolbox = toolbox
             .with_executor(
                 NativeTool::StockPrices,
-                Box::new(StockPricesTool::new(
-                    YahooStockPriceSource {
-                        yahoo_transport: ReqwestYahooFinanceTransport::new()
-                            .map_err(|error| format!("Yahoo tool transport: {error:?}"))?,
-                        finviz_transport: ReqwestFinvizTransport::new()
-                            .map_err(|error| format!("Finviz tool transport: {error:?}"))?,
-                        cache: RedisJsonCache::new(&self.redis_endpoint)
-                            .map_err(|error| error.to_string())?,
-                    },
-                    current_unix_timestamp,
-                    locale,
-                )),
+                Box::new(StockPricesTool::new(stocks, current_unix_timestamp, locale)),
             )
             .with_executor(
                 NativeTool::DollarRates,
                 Box::new(DollarRatesTool::new(
                     CriptoYaDollarMarketSource {
-                        transport: ReqwestDollarTransport::new()
-                            .map_err(|error| format!("dollar tool transport: {error:?}"))?,
-                        bcra_transport: ReqwestBcraTransport::new()
-                            .map_err(|error| format!("BCRA tool transport: {error:?}"))?,
-                        cache: RedisJsonCache::new(&self.redis_endpoint)
-                            .map_err(|error| error.to_string())?,
+                        transport: tool_transport("dollar", ReqwestDollarTransport::new())?,
+                        bcra_transport: tool_transport("BCRA", ReqwestBcraTransport::new())?,
+                        cache: RedisJsonCache::new(&self.redis_endpoint).map_err(error_text)?,
                     },
                     current_unix_timestamp,
                     locale,
@@ -2889,10 +2856,8 @@ impl ConversationToolFactory for ProductionToolFactory {
                 NativeTool::Weather,
                 Box::new(WeatherTool::new(
                     OpenMeteoWeatherSource {
-                        transport: ReqwestWeatherTransport::new()
-                            .map_err(|error| format!("weather tool transport: {error:?}"))?,
-                        cache: RedisJsonCache::new(&self.redis_endpoint)
-                            .map_err(|error| error.to_string())?,
+                        transport: tool_transport("weather", ReqwestWeatherTransport::new())?,
+                        cache: RedisJsonCache::new(&self.redis_endpoint).map_err(error_text)?,
                     },
                     current_unix_timestamp,
                     locale,
@@ -2901,7 +2866,7 @@ impl ConversationToolFactory for ProductionToolFactory {
             .with_executor(
                 NativeTool::WebFetch,
                 Box::new(WebFetchTool::new(
-                    ReqwestWebFetchTransport::new().map_err(|error| error.to_string())?,
+                    ReqwestWebFetchTransport::new().map_err(error_text)?,
                     SystemHostResolver,
                     locale,
                 )),
@@ -2914,8 +2879,7 @@ impl ConversationToolFactory for ProductionToolFactory {
                 NativeTool::TaskSet,
                 Box::new({
                     let tool = TaskSetTool::new(
-                        RedisTaskStore::new(&self.redis_endpoint)
-                            .map_err(|error| error.to_string())?,
+                        RedisTaskStore::new(&self.redis_endpoint).map_err(error_text)?,
                         BillingRepository::new(&self.database_url),
                         RandomTaskIdSource,
                         current_unix_timestamp,
@@ -2942,7 +2906,7 @@ impl ConversationToolFactory for ProductionToolFactory {
             .with_executor(
                 NativeTool::TaskList,
                 Box::new(TaskListTool::new(
-                    RedisTaskStore::new(&self.redis_endpoint).map_err(|error| error.to_string())?,
+                    RedisTaskStore::new(&self.redis_endpoint).map_err(error_text)?,
                     &chat_id,
                     locale,
                 )),
@@ -2950,7 +2914,7 @@ impl ConversationToolFactory for ProductionToolFactory {
             .with_executor(
                 NativeTool::TaskCancel,
                 Box::new(TaskCancelTool::new(
-                    RedisTaskStore::new(&self.redis_endpoint).map_err(|error| error.to_string())?,
+                    RedisTaskStore::new(&self.redis_endpoint).map_err(error_text)?,
                     &chat_id,
                     locale,
                 )),
@@ -2958,8 +2922,7 @@ impl ConversationToolFactory for ProductionToolFactory {
             .with_executor(
                 NativeTool::GetChatMembers,
                 Box::new(ChatMembersTool::new(
-                    RedisMessageState::new(&self.redis_endpoint)
-                        .map_err(|error| error.to_string())?,
+                    RedisMessageState::new(&self.redis_endpoint).map_err(error_text)?,
                     current_unix_timestamp,
                     &chat_id,
                     locale,
@@ -2968,8 +2931,8 @@ impl ConversationToolFactory for ProductionToolFactory {
             .with_executor(
                 NativeTool::HackerNews,
                 Box::new(HackerNewsTool::new(
-                    ReqwestHackerNewsTransport::new().map_err(|error| error.to_string())?,
-                    RedisJsonCache::new(&self.redis_endpoint).map_err(|error| error.to_string())?,
+                    ReqwestHackerNewsTransport::new().map_err(error_text)?,
+                    RedisJsonCache::new(&self.redis_endpoint).map_err(error_text)?,
                     locale,
                 )),
             );
@@ -2978,7 +2941,7 @@ impl ConversationToolFactory for ProductionToolFactory {
             toolbox = toolbox.with_executor(
                 NativeTool::WebSearch,
                 Box::new(FirecrawlTool::new(
-                    ReqwestFirecrawlTransport::new().map_err(|error| error.to_string())?,
+                    ReqwestFirecrawlTransport::new().map_err(error_text)?,
                     std::thread::sleep,
                     &api_key,
                     locale,
@@ -2991,6 +2954,21 @@ impl ConversationToolFactory for ProductionToolFactory {
             locale,
         ))
     }
+}
+
+fn labeled_error(label: &str, error: Option<impl std::fmt::Display>) -> Option<String> {
+    error.map(|error| format!("{label}: {error}"))
+}
+
+fn error_text(error: impl std::fmt::Display) -> String {
+    error.to_string()
+}
+
+fn tool_transport<T, E: std::fmt::Debug>(
+    label: &str,
+    transport: Result<T, E>,
+) -> Result<T, String> {
+    transport.map_err(|error| format!("{label} tool transport: {error:?}"))
 }
 
 fn current_unix_timestamp() -> i64 {
@@ -3201,18 +3179,25 @@ fn build_native_dispatcher_with_stream_delivery(
             .with_openrouter_pricing(Arc::clone(&openrouter_pricing));
             let youtube: Box<dyn YoutubeContextRuntime> = Box::new(NativeYoutubeContext::new(
                 ReqwestYoutubeTranscriptTransport::new()
-                    .map_err(|error| CompositionError::MediaProviderTransport(error.to_string()))?,
+                    .map_err(error_text)
+                    .map_err(CompositionError::MediaProviderTransport)?,
                 RedisMediaCache::new(options.redis_endpoint.clone()),
                 options.supadata_api_key.clone(),
                 options.apify_api_key.clone(),
             ));
             let compaction_scheduler = production_compaction_scheduler(
                 RedisCompactionQueue::new(options.redis_endpoint)
-                    .map_err(|error| CompositionError::ConversationState(error.to_string()))?,
+                    .map_err(error_text)
+                    .map_err(CompositionError::ConversationState)?,
                 options.database_url,
                 &system_prompt,
                 Some(Arc::clone(&openrouter_pricing)),
             );
+            let conversation_state = RedisConversationState::new(options.redis_endpoint)
+                .map_err(CompositionError::ConversationState)?;
+            let creditless_cap = RedisCreditlessCap::new(options.redis_endpoint)
+                .map_err(error_text)
+                .map_err(CompositionError::ConversationBillingPolicy)?;
             let mut conversation = NativeConversation::new(
                 provider,
                 ProductionToolFactory::new(
@@ -3222,12 +3207,9 @@ fn build_native_dispatcher_with_stream_delivery(
                     conversation_firecrawl_key,
                 )
                 .with_openrouter_pricing(Arc::clone(&openrouter_pricing)),
-                RedisConversationState::new(options.redis_endpoint)
-                    .map_err(CompositionError::ConversationState)?,
+                conversation_state,
                 PostgresConversationBilling::new(options.database_url)
-                    .with_creditless_cap(RedisCreditlessCap::new(options.redis_endpoint).map_err(
-                        |error| CompositionError::ConversationBillingPolicy(error.to_string()),
-                    )?)
+                    .with_creditless_cap(creditless_cap)
                     .with_active_operations(options.active_operations.clone()),
                 &system_prompt,
                 crate::native_ai::PRIMARY_CHAT_MODEL,
@@ -3307,7 +3289,8 @@ pub fn build_native_runtime(
         TelegramUpdateSource::new(polling_transport, &options.token, options.long_poll_timeout);
     let worker_options = options.clone();
     let update_queue = RedisUpdateQueue::new(&options.redis_endpoint)
-        .map_err(|error| CompositionError::UpdateWorkers(error.to_string()))?;
+        .map_err(error_text)
+        .map_err(CompositionError::UpdateWorkers)?;
     let handler = DurableParallelUpdateHandler::start(
         UPDATE_WORKER_COUNT,
         UPDATE_QUEUE_CAPACITY,
@@ -3319,7 +3302,8 @@ pub fn build_native_runtime(
             )
         },
     )
-    .map_err(|error| CompositionError::UpdateWorkers(error.to_string()))?;
+    .map_err(error_text)
+    .map_err(CompositionError::UpdateWorkers)?;
     Ok(PollingRuntime::new(source, handler))
 }
 
@@ -3374,8 +3358,8 @@ mod tests {
     };
     use bot_adapters::telegram_polling::{PollFailure, PollOutcome};
     use bot_adapters::token_signal::{
-        BinaryResponse as TokenBinaryResponse, JsonResponse as TokenJsonResponse,
-        TokenSignalAdapter, TokenSignalCache, TokenSignalTransport,
+        JsonResponse as TokenJsonResponse, TokenSignalAdapter, TokenSignalCache,
+        TokenSignalTransport,
     };
     use bot_adapters::weather::{
         HttpResponse as WeatherHttpResponse, TransportFailureKind as WeatherFailure,
@@ -3425,25 +3409,70 @@ mod tests {
     use crate::conversation::ConversationToolFactory;
     use crate::dispatcher::RuloSource;
 
-    fn integration_redis_endpoint() -> Option<RedisEndpoint> {
+    fn ready_edit(
+        decision: super::TelegramStreamDeliveryDecision,
+    ) -> Option<super::PendingTelegramStreamEdit> {
+        match decision {
+            super::TelegramStreamDeliveryDecision::Ready(pending) => Some(pending),
+            super::TelegramStreamDeliveryDecision::Idle
+            | super::TelegramStreamDeliveryDecision::Wait(_) => None,
+        }
+    }
+
+    fn db_env() -> Option<String> {
+        std::env::var("TEST_DATABASE_URL").ok()
+    }
+
+    fn redis_env() -> Option<RedisEndpoint> {
         let port = std::env::var("TEST_REDIS_PORT").ok()?.parse().ok()?;
+        let host = std::env::var("TEST_REDIS_HOST").unwrap_or(String::from("127.0.0.1"));
+        let password = std::env::var("TEST_REDIS_PASSWORD").unwrap_or_default();
         Some(RedisEndpoint {
-            host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+            host,
             port,
-            password: std::env::var("TEST_REDIS_PASSWORD")
-                .ok()
-                .filter(|value| !value.is_empty()),
+            password: (!password.is_empty()).then_some(password),
         })
     }
 
+    /// Unwraps values a test has already established, without a separate
+    /// failure branch.
+    trait Must<T> {
+        fn must(self) -> T;
+    }
+
+    impl<T, E> Must<T> for Result<T, E> {
+        fn must(self) -> T {
+            let Ok(value) = self else { unreachable!() };
+            value
+        }
+    }
+
+    impl<T> Must<T> for Option<T> {
+        fn must(self) -> T {
+            let Some(value) = self else { unreachable!() };
+            value
+        }
+    }
+
     struct Transport {
-        response: RefCell<Option<Result<HttpResponse, TransportFailureKind>>>,
+        responses: RefCell<std::collections::VecDeque<Result<HttpResponse, TransportFailureKind>>>,
         requests: RefCell<Vec<TelegramRequest>>,
     }
 
-    struct SequenceTransport {
-        responses: RefCell<Vec<Result<HttpResponse, TransportFailureKind>>>,
-        requests: RefCell<Vec<TelegramRequest>>,
+    impl Transport {
+        fn with(responses: Vec<Result<HttpResponse, TransportFailureKind>>) -> Self {
+            Self {
+                responses: RefCell::new(responses.into()),
+                requests: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn next_response(&self) -> Result<HttpResponse, TransportFailureKind> {
+            self.responses
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or(Err(TransportFailureKind::Request))
+        }
     }
 
     #[derive(Clone)]
@@ -3483,11 +3512,6 @@ mod tests {
         response: RefCell<Option<Result<WeatherHttpResponse, WeatherFailure>>>,
     }
 
-    struct YahooTransportStub {
-        responses: RefCell<Vec<Result<YahooHttpResponse, YahooFailure>>>,
-        requests: RefCell<Vec<YahooChartRequest>>,
-    }
-
     struct StockYahooTransportStub {
         chart_responses: RefCell<Vec<Result<YahooHttpResponse, YahooFailure>>>,
         search_responses: RefCell<Vec<Result<YahooHttpResponse, YahooFailure>>>,
@@ -3498,18 +3522,16 @@ mod tests {
     impl YahooFinanceTransport for StockYahooTransportStub {
         fn chart(&self, request: &YahooChartRequest) -> Result<YahooHttpResponse, YahooFailure> {
             self.charts.borrow_mut().push(request.clone());
-            if self.chart_responses.borrow().is_empty() {
-                return Err(YahooFailure::Request);
-            }
-            self.chart_responses.borrow_mut().remove(0)
+            let mut responses = self.chart_responses.borrow_mut();
+            let next = (!responses.is_empty()).then(|| responses.remove(0));
+            next.unwrap_or(Err(YahooFailure::Request))
         }
 
         fn search(&self, request: &YahooSearchRequest) -> Result<YahooHttpResponse, YahooFailure> {
             self.searches.borrow_mut().push(request.clone());
-            if self.search_responses.borrow().is_empty() {
-                return Err(YahooFailure::Request);
-            }
-            self.search_responses.borrow_mut().remove(0)
+            let mut responses = self.search_responses.borrow_mut();
+            let next = (!responses.is_empty()).then(|| responses.remove(0));
+            next.unwrap_or(Err(YahooFailure::Request))
         }
     }
 
@@ -3546,10 +3568,9 @@ mod tests {
             request: &MarketRequest,
         ) -> Result<CoinMarketCapHttpResponse, CoinMarketCapFailure> {
             self.requests.borrow_mut().push(request.clone());
-            if self.responses.borrow().is_empty() {
-                return Err(CoinMarketCapFailure::Request);
-            }
-            self.responses.borrow_mut().remove(0)
+            let mut responses = self.responses.borrow_mut();
+            let next = (!responses.is_empty()).then(|| responses.remove(0));
+            next.unwrap_or(Err(CoinMarketCapFailure::Request))
         }
     }
 
@@ -3619,6 +3640,11 @@ mod tests {
 
     impl LinkPreviewTransport for LinkPreviewTransportStub {
         fn request(&self, request: &PreviewRequest) -> Result<PreviewResponse, PreviewFailure> {
+            let media = if request.url.contains("plain") {
+                String::new()
+            } else {
+                "<meta property='og:video' content='https://cdn.example.test/video.mp4'>".to_owned()
+            };
             if request.url.contains("cdn.example.test") {
                 return Ok(PreviewResponse {
                     status_code: 200,
@@ -3636,7 +3662,7 @@ mod tests {
                 content_length: None,
                 location: None,
                 body: format!(
-                    "<meta property='og:title' content='{}'><meta property='og:description' content='{}'><meta property='og:video' content='https://cdn.example.test/video.mp4'>",
+                    "<meta property='og:title' content='{}'><meta property='og:description' content='{}'>{media}",
                     "title ".repeat(40),
                     "description ".repeat(40)
                 ),
@@ -3674,20 +3700,6 @@ mod tests {
                 .borrow_mut()
                 .take()
                 .unwrap_or(Err(FinvizFailure::Request))
-        }
-    }
-
-    impl YahooFinanceTransport for YahooTransportStub {
-        fn chart(&self, request: &YahooChartRequest) -> Result<YahooHttpResponse, YahooFailure> {
-            self.requests.borrow_mut().push(request.clone());
-            if self.responses.borrow().is_empty() {
-                return Err(YahooFailure::Request);
-            }
-            self.responses.borrow_mut().remove(0)
-        }
-
-        fn search(&self, _request: &YahooSearchRequest) -> Result<YahooHttpResponse, YahooFailure> {
-            Err(YahooFailure::Request)
         }
     }
 
@@ -3784,30 +3796,14 @@ mod tests {
     impl TelegramTransport for Transport {
         fn send(&self, request: &TelegramRequest) -> Result<HttpResponse, TransportFailureKind> {
             self.requests.borrow_mut().push(request.clone());
-            self.response
-                .borrow_mut()
-                .take()
-                .unwrap_or(Err(TransportFailureKind::Request))
+            self.next_response()
         }
 
         fn send_action_multipart(
             &self,
             _request: &TelegramMultipartRequest,
         ) -> Result<HttpResponse, TransportFailureKind> {
-            self.response
-                .borrow_mut()
-                .take()
-                .unwrap_or(Err(TransportFailureKind::Request))
-        }
-    }
-
-    impl TelegramTransport for SequenceTransport {
-        fn send(&self, request: &TelegramRequest) -> Result<HttpResponse, TransportFailureKind> {
-            self.requests.borrow_mut().push(request.clone());
-            if self.responses.borrow().is_empty() {
-                return Err(TransportFailureKind::Request);
-            }
-            self.responses.borrow_mut().remove(0)
+            self.next_response()
         }
     }
 
@@ -3817,9 +3813,10 @@ mod tests {
             self.maximum.fetch_max(active, Ordering::SeqCst);
             let _ = self.entered.send(());
             let (released, wake) = &*self.release;
-            if let Ok(guard) = released.lock() {
-                let _guard = wake.wait_while(guard, |released| !*released);
-            }
+            let guard = released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            drop(wake.wait_while(guard, |released| !*released));
             self.active.fetch_sub(1, Ordering::SeqCst);
             Ok(HttpResponse {
                 status_code: 200,
@@ -3832,12 +3829,12 @@ mod tests {
         fn send(&self, request: &TelegramRequest) -> Result<HttpResponse, TransportFailureKind> {
             self.requests
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(request.clone());
             let response = self
                 .responses
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .pop()
                 .unwrap_or(Err(TransportFailureKind::Request));
             let _ = self.completed.send(());
@@ -3846,13 +3843,7 @@ mod tests {
     }
 
     fn transport(status_code: u16, body: &str) -> Transport {
-        Transport {
-            response: RefCell::new(Some(Ok(HttpResponse {
-                status_code,
-                body: body.to_owned(),
-            }))),
-            requests: RefCell::new(Vec::new()),
-        }
+        Transport::with(vec![telegram_response(status_code, body)])
     }
 
     fn telegram_response(
@@ -3910,10 +3901,7 @@ mod tests {
 
     #[test]
     fn polling_transport_failure_is_retryable_not_an_invalid_update() {
-        let transport = Transport {
-            response: RefCell::new(Some(Err(TransportFailureKind::Timeout))),
-            requests: RefCell::new(Vec::new()),
-        };
+        let transport = Transport::with(vec![Err(TransportFailureKind::Timeout)]);
         let mut source = TelegramUpdateSource::new(transport, "token", Duration::from_secs(30));
         assert_eq!(
             source.poll(None),
@@ -3940,14 +3928,11 @@ mod tests {
         );
 
         let rate_limit = r#"{"ok":false,"error_code":429,"parameters":{"retry_after":4}}"#;
-        let transport = SequenceTransport {
-            responses: RefCell::new(vec![
-                telegram_response(429, rate_limit),
-                telegram_response(429, rate_limit),
-                telegram_response(429, rate_limit),
-            ]),
-            requests: RefCell::new(Vec::new()),
-        };
+        let transport = Transport::with(vec![
+            telegram_response(429, rate_limit),
+            telegram_response(429, rate_limit),
+            telegram_response(429, rate_limit),
+        ]);
         let waits = Arc::new(Mutex::new(Vec::new()));
         let recorded_waits = waits.clone();
         let mut sink = TelegramActionSink::new(transport, "token").with_wait(move |duration| {
@@ -3972,16 +3957,13 @@ mod tests {
 
     #[test]
     fn action_sink_retries_rate_limits_and_delivers_the_original_action() {
-        let transport = SequenceTransport {
-            responses: RefCell::new(vec![
-                telegram_response(
-                    429,
-                    r#"{"ok":false,"error_code":429,"parameters":{"retry_after":2}}"#,
-                ),
-                telegram_response(200, r#"{"ok":true,"result":{"message_id":9}}"#),
-            ]),
-            requests: RefCell::new(Vec::new()),
-        };
+        let transport = Transport::with(vec![
+            telegram_response(
+                429,
+                r#"{"ok":false,"error_code":429,"parameters":{"retry_after":2}}"#,
+            ),
+            telegram_response(200, r#"{"ok":true,"result":{"message_id":9}}"#),
+        ]);
         let waits = Arc::new(Mutex::new(Vec::new()));
         let recorded_waits = waits.clone();
         let mut sink = TelegramActionSink::new(transport, "token").with_wait(move |duration| {
@@ -4111,16 +4093,14 @@ mod tests {
 
         let decision = super::lock_unpoisoned(&state).take_next();
         assert!(matches!(
-            &decision,
-            super::TelegramStreamDeliveryDecision::Ready(_)
+            decision,
+            super::TelegramStreamDeliveryDecision::Ready(pending)
+                if pending.final_response.is_none()
+                    && matches!(
+                        &pending.action,
+                        TelegramAction::EditMessageNoPreview { text, .. } if text == "latest"
+                    )
         ));
-        if let super::TelegramStreamDeliveryDecision::Ready(pending) = decision {
-            assert!(matches!(
-                pending.action,
-                TelegramAction::EditMessageNoPreview { text, .. } if text == "latest"
-            ));
-            assert!(pending.final_response.is_none());
-        }
         assert!(matches!(
             super::lock_unpoisoned(&state).take_next(),
             super::TelegramStreamDeliveryDecision::Idle
@@ -4150,20 +4130,16 @@ mod tests {
         };
 
         for expected in ["Pensando..", "Pensando...", "Pensando."] {
-            state
-                .thinking
-                .get_mut(&key)
-                .unwrap_or_else(|| unreachable!())
-                .next_frame_at = Instant::now();
-            let decision = state.take_next();
-            let super::TelegramStreamDeliveryDecision::Ready(pending) = decision else {
-                unreachable!();
-            };
+            state.thinking.get_mut(&key).must().next_frame_at = Instant::now();
             assert!(matches!(
-                pending.action,
-                TelegramAction::EditMessageNoPreview { text, .. } if text == expected
+                state.take_next(),
+                super::TelegramStreamDeliveryDecision::Ready(pending)
+                    if pending.final_response.is_none()
+                        && matches!(
+                            &pending.action,
+                            TelegramAction::EditMessageNoPreview { text, .. } if text == expected
+                        )
             ));
-            assert!(pending.final_response.is_none());
         }
     }
 
@@ -4184,7 +4160,7 @@ mod tests {
         assert!(receiver.recv_timeout(Duration::from_secs(1)).is_ok());
         {
             let mut state = super::lock_unpoisoned(&state);
-            let animation = state.thinking.get(&key).unwrap_or_else(|| unreachable!());
+            let animation = state.thinking.get(&key).must();
             assert_eq!(animation.text, "Pensando");
             assert_eq!(animation.frame, 1);
             assert!(matches!(
@@ -4287,19 +4263,16 @@ mod tests {
             },
         );
 
-        let decision = state.take_next();
         assert!(matches!(
-            &decision,
-            super::TelegramStreamDeliveryDecision::Ready(_)
+            state.take_next(),
+            super::TelegramStreamDeliveryDecision::Ready(pending)
+                if pending.key == final_key
+                    && pending.final_response.is_some()
+                    && matches!(
+                        &pending.action,
+                        TelegramAction::EditMessage { text, .. } if text == "final answer"
+                    )
         ));
-        if let super::TelegramStreamDeliveryDecision::Ready(pending) = decision {
-            assert_eq!(pending.key, final_key);
-            assert!(pending.final_response.is_some());
-            assert!(matches!(
-                pending.action,
-                TelegramAction::EditMessage { text, .. } if text == "final answer"
-            ));
-        }
         assert!(state.pending.contains_key(&intermediate_key));
     }
 
@@ -4338,14 +4311,10 @@ mod tests {
             },
         );
 
-        let decision = state.take_next();
         assert!(matches!(
-            &decision,
-            super::TelegramStreamDeliveryDecision::Ready(_)
+            state.take_next(),
+            super::TelegramStreamDeliveryDecision::Ready(pending) if pending.key == ready_key
         ));
-        if let super::TelegramStreamDeliveryDecision::Ready(pending) = decision {
-            assert_eq!(pending.key, ready_key);
-        }
         assert!(state.pending.contains_key(&limited_key));
     }
 
@@ -4520,21 +4489,17 @@ mod tests {
             })
         });
         assert!(wake_receiver.recv_timeout(Duration::from_secs(1)).is_ok());
-        let decision = super::lock_unpoisoned(&state).take_next();
+        let pending = ready_edit(super::lock_unpoisoned(&state).take_next()).must();
+        assert_eq!(pending.key, key);
         assert!(matches!(
-            &decision,
-            super::TelegramStreamDeliveryDecision::Ready(_)
+            &pending.action,
+            TelegramAction::EditMessage { text, .. } if text == "final"
         ));
-        if let super::TelegramStreamDeliveryDecision::Ready(mut pending) = decision {
-            assert_eq!(pending.key, key);
-            assert!(matches!(
-                pending.action,
-                TelegramAction::EditMessage { text, .. } if text == "final"
-            ));
-            if let Some(response) = pending.final_response.take() {
-                assert!(response.send(Ok(true)).is_ok());
-            }
-        }
+        assert!(
+            pending
+                .final_response
+                .is_some_and(|response| response.send(Ok(true)).is_ok())
+        );
         assert_eq!(
             old_receiver.recv_timeout(Duration::from_secs(1)),
             Ok(Ok(false))
@@ -4597,14 +4562,11 @@ mod tests {
             final_retries: std::collections::HashMap::new(),
             thinking: std::collections::HashMap::new(),
         };
-        let decision = state.take_next();
         assert!(matches!(
-            &decision,
-            super::TelegramStreamDeliveryDecision::Wait(_)
+            state.take_next(),
+            super::TelegramStreamDeliveryDecision::Wait(wait) if wait > Duration::ZERO
         ));
-        if let super::TelegramStreamDeliveryDecision::Wait(wait) = decision {
-            assert!(wait > Duration::ZERO);
-        }
+        assert!(ready_edit(state.take_next()).is_none());
         assert!(state.pending.contains_key(&key));
     }
 
@@ -4692,7 +4654,7 @@ mod tests {
         );
         let requests = requests
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let texts = requests
             .iter()
             .filter_map(|request| {
@@ -4761,7 +4723,7 @@ mod tests {
         );
         let requests = requests
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(matches!(
             requests.first().and_then(|request| request.json_payload.as_ref()),
             Some(payload) if payload.get("text").and_then(serde_json::Value::as_str)
@@ -5352,10 +5314,7 @@ mod tests {
             })
         );
 
-        let transport = Transport {
-            response: RefCell::new(Some(Err(TransportFailureKind::Connection))),
-            requests: RefCell::new(Vec::new()),
-        };
+        let transport = Transport::with(vec![Err(TransportFailureKind::Connection)]);
         let mut sink = TelegramActionSink::new(transport, "token");
         assert_eq!(
             sink.execute(TelegramAction::SendMessage(SendMessage::new(
@@ -5518,10 +5477,6 @@ mod tests {
             ) -> Result<TokenJsonResponse, String> {
                 Err("synthetic POST failure".to_owned())
             }
-
-            fn get_binary(&self, _url: &str) -> Result<TokenBinaryResponse, String> {
-                Err("synthetic image failure".to_owned())
-            }
         }
 
         #[derive(Default)]
@@ -5558,6 +5513,45 @@ mod tests {
         let token = TokenSignalSource::load_token(&mut adapter, &address);
         assert!(token.signal.is_none());
         assert!(!token.diagnostics.is_empty());
+        let candidates = TokenSignalSource::load_candidates(
+            &mut adapter,
+            &SignalQuery::Symbol("SYNTHETIC".to_owned()),
+        );
+        assert!(candidates.signals.is_empty());
+        assert!(
+            candidates
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("HTTP 503"))
+        );
+
+        // A cached Solana pair still loads when the on-chain supply lookup fails.
+        let mint = TokenAddress {
+            chain_id: "solana".to_owned(),
+            network: "solana".to_owned(),
+            tag: "SOL".to_owned(),
+            address: "SynthMint111".to_owned(),
+        };
+        let mut solana = TokenSignalAdapter::new(
+            TokenTransport,
+            TokenCache(std::collections::HashMap::from([(
+                "token_signal:pairs:solana:SynthMint111".to_owned(),
+                r#"[{"chainId":"solana","baseToken":{"address":"SynthMint111","symbol":"SYN"}}]"#
+                    .to_owned(),
+            )])),
+        );
+        let loaded = TokenSignalSource::load_token(&mut solana, &mint);
+        assert!(
+            loaded
+                .signal
+                .is_some_and(|signal| signal.token == mint && signal.supply.is_none())
+        );
+        assert!(
+            loaded
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("synthetic POST failure"))
+        );
 
         let signal = TokenSignal {
             token: address.clone(),
@@ -5661,16 +5655,23 @@ mod tests {
 
         let mut published = Published::default();
         assert_eq!(publish_telegram_commands(&mut published), Ok(()));
-        let languages = published
-            .0
-            .iter()
-            .filter_map(|action| match action {
-                TelegramAction::SetCommands { language_code, .. } => language_code.as_deref(),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(languages, ["es", "en"]);
-        assert_eq!(published.0.len(), 4);
+        assert_eq!(
+            published.0,
+            bot_core::telegram_commands::command_publication_actions()
+        );
+        assert!(matches!(
+            published.0.as_slice(),
+            [
+                TelegramAction::SetCommands { language_code: None, .. },
+                TelegramAction::SetCommands { language_code: Some(spanish), .. },
+                TelegramAction::SetCommands { language_code: Some(english), .. },
+                TelegramAction::SetCommands {
+                    language_code: None,
+                    scope: bot_core::telegram_actions::CommandScope::AllGroupChats,
+                    ..
+                },
+            ] if spanish == "es" && english == "en"
+        ));
     }
 
     #[test]
@@ -5708,6 +5709,17 @@ mod tests {
             Some(42)
         );
         assert_eq!(
+            super::telegram_action_chat_id(&TelegramAction::EditMessagePhoto {
+                chat_id: ChatId(43),
+                message_id: MessageId(5),
+                photo: Arc::from(b"synthetic chart".as_slice()),
+                caption: "synthetic caption".to_owned(),
+                parse_mode: None,
+                reply_markup: None,
+            }),
+            Some(43)
+        );
+        assert_eq!(
             super::telegram_action_chat_id(&TelegramAction::AnswerCallback {
                 callback_id: "synthetic-callback".to_owned(),
                 text: None,
@@ -5726,11 +5738,8 @@ mod tests {
         }
         assert_eq!(random.choice_index(0), Err(SystemRandomError::EmptyRange));
 
-        let start = BigInt::parse_bytes(b"100000000000000000000", 10);
-        let end = BigInt::parse_bytes(b"100000000000000000002", 10);
-        let (Some(start), Some(end)) = (start, end) else {
-            return;
-        };
+        let start = BigInt::parse_bytes(b"100000000000000000000", 10).must();
+        let end = BigInt::parse_bytes(b"100000000000000000002", 10).must();
         for _ in 0..32 {
             let sampled = random.inclusive_integer(&start, &end);
             assert!(sampled.is_ok_and(|value| value >= start && value <= end));
@@ -5760,10 +5769,7 @@ mod tests {
             );
             assert!(reader.get_mut().write_all(b"$4\r\ntrue\r\n").is_ok());
         });
-        let transport = Transport {
-            response: RefCell::new(None),
-            requests: RefCell::new(Vec::new()),
-        };
+        let transport = Transport::with(Vec::new());
         let mut authorizer = TelegramGroupAuthorizer::new(
             transport,
             "token",
@@ -5911,10 +5917,7 @@ mod tests {
         })?;
         state.record_outgoing(&outgoing)?;
 
-        match server.join() {
-            Ok(result) => result?,
-            Err(_) => return Err("synthetic Redis server panicked".into()),
-        }
+        server.join().must()?;
         Ok(())
     }
 
@@ -5941,7 +5944,7 @@ mod tests {
             transport,
             cache: WeatherCacheStub,
         };
-        let load = source.rulo_input().unwrap_or_else(|_| unreachable!());
+        let load = source.rulo_input().must();
         assert_eq!(load.input.official, Some(1440.0));
         assert!(load.input.usd_to_usdt.is_empty());
         assert_eq!(load.input.usdt_to_ars[0].exchange, "buenbit");
@@ -6043,7 +6046,7 @@ mod tests {
                     "synthetic-openrouter-key",
                     "https://openrouter.example.test/v1",
                 )
-                .unwrap_or_else(|_| unreachable!("pricing cache construction")),
+                .must(),
             )),
             firecrawl_api_key: Some("synthetic-firecrawl-key".to_owned()),
             supadata_api_key: Some("synthetic-supadata-key".to_owned()),
@@ -6058,12 +6061,8 @@ mod tests {
 
     #[test]
     fn production_dispatcher_composes_every_optional_feature_with_real_local_stores() {
-        let Some(endpoint) = integration_redis_endpoint() else {
-            return;
-        };
-        let Some(database_url) = std::env::var("TEST_DATABASE_URL").ok() else {
-            return;
-        };
+        let Some(endpoint) = redis_env() else { return };
+        let Some(database_url) = db_env() else { return };
         let result = super::build_native_dispatcher(NativeRuntimeOptions {
             token: "synthetic-token",
             database_url: &database_url,
@@ -6090,12 +6089,8 @@ mod tests {
 
     #[test]
     fn production_tool_factory_exposes_all_configured_tools_with_local_stores() {
-        let Some(endpoint) = integration_redis_endpoint() else {
-            return;
-        };
-        let Some(database_url) = std::env::var("TEST_DATABASE_URL").ok() else {
-            return;
-        };
+        let Some(endpoint) = redis_env() else { return };
+        let Some(database_url) = db_env() else { return };
         let mut factory = super::ProductionToolFactory::new(
             &endpoint,
             &database_url,
@@ -6439,7 +6434,7 @@ mod tests {
             },
             cache: WeatherCacheStub,
         };
-        let input = rulo.rulo_input().unwrap_or_else(|_| unreachable!());
+        let input = rulo.rulo_input().must();
         assert_eq!(input.input.official, Some(100.0));
         assert_eq!(input.input.usd_to_usdt.len(), 1);
         assert_eq!(input.input.usdt_to_ars.len(), 1);
@@ -6489,7 +6484,7 @@ mod tests {
             },
             cache: WeatherCacheStub,
         };
-        let input = partial_rulo.rulo_input().unwrap_or_else(|_| unreachable!());
+        let input = partial_rulo.rulo_input().must();
         assert_eq!(input.diagnostics.len(), 2);
     }
 
@@ -6869,15 +6864,14 @@ mod tests {
         assert!(stocks.lookup("Synthetic Corporation")?.is_some());
         assert!(!stocks.diagnostics.is_empty());
 
-        let Some(endpoint) = integration_redis_endpoint() else {
-            return Ok(());
-        };
+        let Some(ep) = redis_env() else { return Ok(()) };
+        let endpoint = ep;
         let mut tasks = super::RedisScheduledTaskSource {
-            store: RedisTaskStore::new(&endpoint).map_err(|error| error.to_string())?,
+            store: RedisTaskStore::new(&endpoint).map_err(super::error_text)?,
         };
         let chat_id = format!("synthetic-wrapper-{}", std::process::id());
         assert!(tasks.list(&chat_id)?.is_empty());
-        let task_id = TaskId::new("synthetic-missing-task").map_err(|error| error.to_string())?;
+        let task_id = TaskId::new("synthetic-missing-task").map_err(super::error_text)?;
         assert!(!tasks.cancel(&task_id, &chat_id)?);
         Ok(())
     }
@@ -6890,17 +6884,16 @@ mod tests {
             ChargeHistorySource, ChatConfigSource, StarPaymentSink,
         };
 
-        let Some(database_url) = std::env::var("TEST_DATABASE_URL").ok() else {
-            return Ok(());
-        };
+        let Some(db) = db_env() else { return Ok(()) };
+        let database_url = db;
         bot_adapters::billing_schema::BillingSchemaRepository::new(&database_url)
             .ensure_schema()
-            .map_err(|error| error.to_string())?;
+            .map_err(super::error_text)?;
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|error| error.to_string())?
+            .map_err(super::error_text)?
             .as_nanos();
-        let suffix = i64::try_from(nonce % 100_000_000).map_err(|error| error.to_string())?;
+        let suffix = i64::try_from(nonce % 100_000_000).map_err(super::error_text)?;
         let user_id = 7_300_000_000_000_i64 + suffix;
         let chat_id = -7_400_000_000_000_i64 - suffix;
         let mut billing = BillingRepository::new(&database_url);
@@ -6945,30 +6938,39 @@ mod tests {
                 Some(&operation_id),
                 &operation_id,
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(super::error_text)?;
         assert!(reserve.ok);
         billing
             .settle_ai_operation_once(user_id, None, &operation_id, 2, &metadata)
-            .map_err(|error| error.to_string())?;
+            .map_err(super::error_text)?;
 
         let history = ChargeHistorySource::load(&mut billing, user_id, 10, None, "older")?;
         assert!(!history.groups.is_empty());
         assert!(!AdminCreditLogSource::load(&mut billing, 10)?.is_empty());
 
         let mut configs = ChatConfigRepository::new(&database_url);
-        let previous = ChatConfigSource::get(&mut configs, &chat_id.to_string())
-            .map_err(|error| error.to_string())?;
+        let previous =
+            ChatConfigSource::get(&mut configs, &chat_id.to_string()).map_err(super::error_text)?;
         let mut changed = previous.clone();
         changed.language = "en".to_owned();
         let stored =
             ChatConfigSource::set_changed(&mut configs, &chat_id.to_string(), &previous, &changed)
-                .map_err(|error| error.to_string())?;
+                .map_err(super::error_text)?;
         assert_eq!(stored.language, "en");
         assert_eq!(
             ChatConfigSource::get(&mut configs, &chat_id.to_string())
-                .map_err(|error| error.to_string())?
+                .map_err(super::error_text)?
                 .language,
             "en"
+        );
+        let mut restored = stored;
+        restored.language = previous.language.clone();
+        let restored = ChatConfigSource::set(&mut configs, &chat_id.to_string(), &restored)
+            .map_err(super::error_text)?;
+        assert_eq!(restored.language, previous.language);
+        assert_eq!(
+            ChatConfigSource::get(&mut configs, &chat_id.to_string()).map_err(super::error_text)?,
+            restored
         );
         Ok(())
     }
@@ -7001,9 +7003,11 @@ mod tests {
                 r#"{{"chart":{{"result":[{{"meta":{{"symbol":"{symbol}","regularMarketPrice":{price},"chartPreviousClose":100,"currency":"USD"}}}}]}}}}"#
             ),
         };
-        let transport = YahooTransportStub {
-            responses: RefCell::new(vec![Ok(chart("BZ=F", 98.15)), Ok(chart("CL=F", 95.45))]),
-            requests: RefCell::default(),
+        let transport = StockYahooTransportStub {
+            chart_responses: RefCell::new(vec![Ok(chart("BZ=F", 98.15)), Ok(chart("CL=F", 95.45))]),
+            search_responses: RefCell::default(),
+            charts: RefCell::default(),
+            searches: RefCell::default(),
         };
         let mut source = YahooOilPriceSource {
             transport,
@@ -7016,13 +7020,14 @@ mod tests {
         assert_eq!(
             source
                 .transport
-                .requests
+                .charts
                 .borrow()
                 .iter()
                 .map(|request| request.symbol.as_str())
                 .collect::<Vec<_>>(),
             vec!["BZ=F", "CL=F"]
         );
+        assert!(source.transport.searches.borrow().is_empty());
     }
 
     #[test]
@@ -7214,9 +7219,7 @@ mod tests {
             &mut crypto,
             &mut unified_stocks,
         );
-        let selection = unified
-            .selection
-            .unwrap_or_else(|| unreachable!("hyphenated company selection"));
+        let selection = unified.selection.must();
         assert_eq!(
             selection
                 .candidates
@@ -7539,5 +7542,872 @@ mod tests {
         assert_eq!(quotes.len(), 2);
         assert!(quotes.iter().all(|(_, quote)| quote.is_some()));
         assert!(source.yahoo_transport.searches.borrow().is_empty());
+    }
+
+    fn stock_source(
+        charts: Vec<Result<YahooHttpResponse, YahooFailure>>,
+        searches: Vec<Result<YahooHttpResponse, YahooFailure>>,
+    ) -> YahooStockPriceSource<StockYahooTransportStub, FinvizTransportStub, WeatherCacheStub> {
+        YahooStockPriceSource {
+            yahoo_transport: StockYahooTransportStub {
+                chart_responses: RefCell::new(charts),
+                search_responses: RefCell::new(searches),
+                charts: RefCell::default(),
+                searches: RefCell::default(),
+            },
+            finviz_transport: FinvizTransportStub {
+                response: RefCell::new(None),
+            },
+            cache: WeatherCacheStub,
+        }
+    }
+
+    fn yahoo_chart(symbol: &str) -> Result<YahooHttpResponse, YahooFailure> {
+        Ok(YahooHttpResponse {
+            status_code: 200,
+            body: serde_json::json!({
+                "chart": {"result": [{"meta": {
+                    "symbol": symbol,
+                    "regularMarketPrice": 12.5,
+                    "chartPreviousClose": 10,
+                    "currency": "USD"
+                }}]}
+            })
+            .to_string(),
+        })
+    }
+
+    fn quote_symbols(load: &crate::dispatcher::StockQuotesLoad) -> Vec<(String, Option<String>)> {
+        load.quotes
+            .iter()
+            .flatten()
+            .map(|(query, quote)| {
+                (
+                    query.clone(),
+                    quote.as_ref().map(|quote| quote.symbol.clone()),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn stock_source_rejects_empty_pools_blank_symbols_and_mismatched_charts() {
+        let mut empty_pool = stock_source(Vec::new(), Vec::new());
+        let load = empty_pool.load("  ", 100);
+        assert_eq!(load.quotes, None);
+        assert!(!load.diagnostics.is_empty());
+        assert!(empty_pool.yahoo_transport.charts.borrow().is_empty());
+
+        let mut blank = stock_source(Vec::new(), Vec::new());
+        let load = blank.load_exact_with_timeframe(" $ ", Some("1m"), 100);
+        assert_eq!(quote_symbols(&load), [(String::new(), None)]);
+        assert!(load.diagnostics.is_empty());
+        assert!(blank.yahoo_transport.charts.borrow().is_empty());
+
+        let mut qualified = stock_source(vec![yahoo_chart("RKHNF")], Vec::new());
+        let load = qualified.load_with_timeframe("RKH.L", Some("1m"), 100);
+        assert_eq!(quote_symbols(&load), [("RKH.L".to_owned(), None)]);
+        assert!(
+            load.diagnostics
+                .contains(&"Yahoo chart symbol mismatch requested=RKH.L returned=RKHNF".to_owned())
+        );
+
+        let mut candidate = stock_source(
+            vec![
+                Ok(YahooHttpResponse {
+                    status_code: 200,
+                    body: r#"{"chart":{"result":[]}}"#.to_owned(),
+                }),
+                yahoo_chart("OTHER"),
+            ],
+            vec![Ok(YahooHttpResponse {
+                status_code: 200,
+                body: r#"{"quotes":[{"quoteType":"EQUITY","symbol":"RKHNF","longname":"Rockhaven Resources Ltd."}]}"#.to_owned(),
+            })],
+        );
+        let load = candidate.load_with_timeframe("rkh", Some("1m"), 100);
+        assert_eq!(quote_symbols(&load), [("rkh".to_owned(), None)]);
+        assert!(
+            load.diagnostics
+                .contains(&"Yahoo chart symbol mismatch requested=RKHNF returned=OTHER".to_owned())
+        );
+    }
+
+    #[test]
+    fn stock_source_keeps_direct_quotes_when_the_full_query_finds_nothing() {
+        let mut source = stock_source(
+            vec![
+                yahoo_chart("AAPL"),
+                Ok(YahooHttpResponse {
+                    status_code: 200,
+                    body: r#"{"chart":{"result":[]}}"#.to_owned(),
+                }),
+            ],
+            Vec::new(),
+        );
+        let load = source.load_with_timeframe("AAPL zzzz", Some("1m"), 100);
+        assert_eq!(
+            quote_symbols(&load),
+            [
+                ("AAPL".to_owned(), Some("AAPL".to_owned())),
+                ("zzzz".to_owned(), None)
+            ]
+        );
+        assert_eq!(
+            source
+                .yahoo_transport
+                .charts
+                .borrow()
+                .iter()
+                .map(|request| request.symbol.as_str())
+                .collect::<Vec<_>>(),
+            ["AAPL", "ZZZZ"]
+        );
+        assert_eq!(
+            source.yahoo_transport.searches.borrow()[0].query,
+            "AAPL zzzz"
+        );
+    }
+
+    #[test]
+    fn provider_symbol_shapes_and_listing_identity_are_classified_exactly() {
+        for (query, qualified) in [
+            ("^GSPC", true),
+            ("^", false),
+            ("EURUSD=X", true),
+            ("EUR=USD=X", false),
+            ("=X", false),
+            ("BRK-B", true),
+            ("BRK-B-C", false),
+            ("BERKSHIRE-B", false),
+            ("RKH.L", true),
+            ("$ ", false),
+        ] {
+            assert_eq!(
+                super::is_qualified_symbol_query(query),
+                qualified,
+                "{query}"
+            );
+        }
+
+        let quote = |symbol: &str, exchange: &str, asset_type: &str| bot_core::stocks::StockQuote {
+            symbol: symbol.to_owned(),
+            name: "Synthetic".to_owned(),
+            price: 1.0,
+            currency: "USD".to_owned(),
+            exchange: exchange.to_owned(),
+            asset_type: asset_type.to_owned(),
+            variation: 0.0,
+        };
+        let unique = super::unique_discovered_quotes(vec![
+            quote("EXM", "NASDAQ", "Equity"),
+            quote("exm", "nasdaq", "equity"),
+            quote("EXM", "XETRA", "Equity"),
+            quote("EXM", "NASDAQ", "ETF"),
+        ]);
+        assert_eq!(
+            unique
+                .iter()
+                .map(|quote| (quote.exchange.as_str(), quote.asset_type.as_str()))
+                .collect::<Vec<_>>(),
+            [("NASDAQ", "Equity"), ("XETRA", "Equity"), ("NASDAQ", "ETF")]
+        );
+    }
+
+    #[test]
+    fn market_charts_require_a_verified_target_and_price_history() {
+        use crate::dispatcher::MarketPriceSource;
+
+        let mut source = super::NativeMarketPriceSource {
+            transport: MarketTransportStub {
+                responses: RefCell::new(Vec::new()),
+                requests: RefCell::new(Vec::new()),
+            },
+            cache: WeatherCacheStub,
+            api_key: "synthetic-key".to_owned(),
+            stocks: stock_source(vec![yahoo_chart("EXM-USD")], Vec::new()),
+        };
+        let mut chart = bot_core::market_prices::MarketChart {
+            timeframe: None,
+            symbol: "EXM".to_owned(),
+            name: "Synthetic Asset".to_owned(),
+            yahoo_symbol: "  ".to_owned(),
+            token: None,
+            candidate: None,
+        };
+        assert_eq!(
+            source.render_chart(&chart, 1_700_000_000).err().as_deref(),
+            Some("no verified market chart target")
+        );
+        assert!(source.stocks.yahoo_transport.charts.borrow().is_empty());
+
+        chart.yahoo_symbol = "EXM-USD".to_owned();
+        assert_eq!(
+            source.render_chart(&chart, 1_700_000_000).err().as_deref(),
+            Some("historical chart data unavailable")
+        );
+        assert_eq!(source.stocks.yahoo_transport.charts.borrow().len(), 1);
+    }
+
+    #[test]
+    fn link_replacement_keeps_links_without_embeddable_previews() {
+        let mut source = super::NativeLinkReplacementSource {
+            transport: LinkPreviewTransportStub,
+            context_transport: LinkPreviewTransportStub,
+            context_resolver: PublicResolverStub,
+        };
+        let text = "see https://www.instagram.com/p/plain/";
+        let load = crate::dispatcher::LinkReplacementSource::load(&mut source, text, 1_700_000_000);
+        assert!(!load.replacement.changed);
+        assert_eq!(load.replacement.text, text);
+        assert_eq!(load.context, None);
+        assert_eq!(load.oversized_video, None);
+    }
+
+    #[test]
+    fn dollar_market_wrapper_renders_quotes_and_stores_the_hourly_snapshot() {
+        use crate::dispatcher::DollarMarketSource;
+
+        struct DollarQuotes;
+        impl bot_adapters::dollar::DollarTransport for DollarQuotes {
+            fn get(
+                &self,
+            ) -> Result<
+                bot_adapters::dollar::HttpResponse,
+                bot_adapters::dollar::TransportFailureKind,
+            > {
+                Ok(bot_adapters::dollar::HttpResponse {
+                    status_code: 200,
+                    body: r#"{"oficial":{"price":1420,"variation":2},"blue":{"ask":1430,"variation":6}}"#
+                        .to_owned(),
+                })
+            }
+        }
+
+        let mut source = super::CriptoYaDollarMarketSource {
+            transport: DollarQuotes,
+            bcra_transport: BcraTransportStub,
+            cache: WeatherCacheStub,
+        };
+        let load = source.load(6, Locale::En, 1_700_000_000);
+        let text = load.text.unwrap_or_default();
+        assert!(text.contains("Official: 1,420"), "{text}");
+        assert!(text.contains("Blue: 1,430"), "{text}");
+        assert!(
+            load.diagnostics
+                .iter()
+                .all(|item| !item.contains("dollar history"))
+        );
+    }
+
+    #[test]
+    fn telegram_action_sink_routes_stream_edits_to_delivery_or_direct_edits() {
+        let mut direct = TelegramActionSink::new(
+            transport(200, r#"{"ok":true,"result":true}"#),
+            "synthetic-token",
+        );
+        assert_eq!(
+            direct.enqueue_stream_edit(stream_edit(7, 80, "draft")),
+            Ok(true)
+        );
+        assert_eq!(
+            direct.finalize_stream_edit(stream_edit(7, 80, "final")),
+            Ok(false)
+        );
+        direct.cancel_stream_edits(ChatId(7), MessageId(80));
+        assert_eq!(
+            direct
+                .transport
+                .requests
+                .borrow()
+                .iter()
+                .map(|request| request.endpoint.as_str())
+                .collect::<Vec<_>>(),
+            ["editMessageText", "editMessageText"]
+        );
+
+        let (delivery, state, receiver) = stream_delivery_fixture();
+        let mut streamed = TelegramActionSink::new(
+            transport(200, r#"{"ok":true,"result":true}"#),
+            "synthetic-token",
+        )
+        .with_stream_delivery(delivery);
+        let key = super::TelegramStreamKey {
+            chat_id: 7,
+            message_id: 80,
+        };
+        assert_eq!(
+            streamed.enqueue_stream_edit(stream_edit(7, 80, "draft")),
+            Ok(true)
+        );
+        assert!(super::lock_unpoisoned(&state).pending.contains_key(&key));
+        streamed.cancel_stream_edits(ChatId(7), MessageId(80));
+        assert!(!super::lock_unpoisoned(&state).pending.contains_key(&key));
+
+        drop(receiver);
+        assert_eq!(
+            streamed.finalize_stream_edit(stream_edit(7, 80, "final")),
+            Err(TelegramActionSinkError::Transport(
+                TransportFailureKind::Request
+            ))
+        );
+        assert!(super::lock_unpoisoned(&state).pending.is_empty());
+        assert!(streamed.transport.requests.borrow().is_empty());
+    }
+
+    #[test]
+    fn telegram_stream_delivery_worker_reports_malformed_edit_responses() {
+        let (completed, completed_receiver) = mpsc::channel();
+        let malformed = || {
+            Ok(HttpResponse {
+                status_code: 200,
+                body: "not json".to_owned(),
+            })
+        };
+        let transport = StreamDeliveryTransport {
+            responses: Arc::new(Mutex::new(vec![malformed(), malformed()])),
+            requests: Arc::new(Mutex::new(Vec::new())),
+            completed,
+        };
+        let requests = Arc::clone(&transport.requests);
+        let draft_key = super::TelegramStreamKey {
+            chat_id: 7,
+            message_id: 80,
+        };
+        let final_key = super::TelegramStreamKey {
+            chat_id: 8,
+            message_id: 81,
+        };
+        let (final_sender, final_receiver) =
+            mpsc::channel::<Result<bool, TelegramActionSinkError>>();
+        let state = Arc::new(Mutex::new(super::TelegramStreamDeliveryState {
+            pending: std::collections::HashMap::from([
+                (
+                    draft_key,
+                    super::PendingTelegramStreamEdit {
+                        key: draft_key,
+                        action: stream_edit(7, 80, "draft"),
+                        final_response: None,
+                    },
+                ),
+                (
+                    final_key,
+                    super::PendingTelegramStreamEdit {
+                        key: final_key,
+                        action: stream_edit(8, 81, "final"),
+                        final_response: Some(final_sender),
+                    },
+                ),
+            ]),
+            order: std::collections::VecDeque::from([draft_key, final_key]),
+            last_intermediate_edit: std::collections::HashMap::new(),
+            rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::new(),
+            thinking: std::collections::HashMap::new(),
+        }));
+        let (wake, receiver) = mpsc::channel();
+        let worker_state = Arc::clone(&state);
+        let worker = thread::spawn(move || {
+            super::run_telegram_stream_delivery_worker(
+                transport,
+                "synthetic-token".to_owned(),
+                TelegramDeliveryCoordinator::default(),
+                receiver,
+                worker_state,
+            );
+        });
+
+        assert!(wake.send(()).is_ok());
+        assert_eq!(
+            final_receiver.recv_timeout(Duration::from_secs(1)),
+            Ok(Err(TelegramActionSinkError::Adapter(
+                bot_adapters::telegram_actions::ActionError::InvalidResponse
+            )))
+        );
+        for _ in 0..2 {
+            assert!(
+                completed_receiver
+                    .recv_timeout(Duration::from_secs(1))
+                    .is_ok()
+            );
+        }
+        drop(wake);
+        assert!(worker.join().is_ok());
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            2
+        );
+        assert!(super::lock_unpoisoned(&state).pending.is_empty());
+    }
+
+    #[test]
+    fn telegram_delivery_locks_are_shared_per_chat_and_pruned_once_released() {
+        let coordinator = TelegramDeliveryCoordinator::default();
+        let held = coordinator.delivery_lock(1);
+        assert!(Arc::ptr_eq(&held, &coordinator.delivery_lock(1)));
+        for chat_id in
+            2..=i64::try_from(super::TELEGRAM_DELIVERY_LOCK_CLEANUP_THRESHOLD).unwrap_or(i64::MAX)
+        {
+            drop(coordinator.delivery_lock(chat_id));
+        }
+        assert_eq!(
+            super::lock_unpoisoned(&coordinator.locks).len(),
+            super::TELEGRAM_DELIVERY_LOCK_CLEANUP_THRESHOLD
+        );
+        let fresh = coordinator.delivery_lock(-5);
+        let locks = super::lock_unpoisoned(&coordinator.locks);
+        assert_eq!(locks.len(), 2);
+        assert!(locks.contains_key(&1) && locks.contains_key(&-5));
+        drop(locks);
+        drop((held, fresh));
+    }
+
+    #[test]
+    fn poisoned_delivery_state_stays_usable() {
+        let state = Arc::new(Mutex::new(7));
+        assert_eq!(*super::lock_unpoisoned(&state), 7);
+        let poisoner = Arc::clone(&state);
+        let joined = thread::spawn(move || {
+            let _guard = poisoner.lock();
+            std::panic::resume_unwind(Box::new("synthetic delivery panic"));
+        })
+        .join();
+        assert!(joined.is_err());
+        assert!(state.is_poisoned());
+        assert_eq!(*super::lock_unpoisoned(&state), 7);
+    }
+
+    #[test]
+    fn system_random_source_covers_whole_byte_ranges_and_rejects_inverted_ones() {
+        let mut random = SystemRandomSource;
+        for _ in 0..64 {
+            assert!(
+                random
+                    .inclusive_integer(&BigInt::from(0_u8), &BigInt::from(199_u8))
+                    .is_ok_and(|value| value >= BigInt::from(0_u8) && value <= BigInt::from(199_u8))
+            );
+        }
+        assert_eq!(
+            random.inclusive_integer(&BigInt::from(3_u8), &BigInt::from(1_u8)),
+            Err(SystemRandomError::EmptyRange)
+        );
+    }
+
+    type ScriptedRedisServer = thread::JoinHandle<Result<Vec<Vec<String>>, String>>;
+
+    /// Serves one scripted Redis conversation per accepted connection and
+    /// returns every command it received.
+    fn scripted_redis_server(
+        connections: Vec<Vec<(&'static str, &'static [u8])>>,
+    ) -> std::io::Result<(u16, ScriptedRedisServer)> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        let server = thread::spawn(move || -> Result<Vec<Vec<String>>, String> {
+            let mut commands = Vec::new();
+            for script in connections {
+                let (stream, _) = listener.accept().map_err(super::error_text)?;
+                let mut reader = BufReader::new(stream);
+                for (expected, reply) in script {
+                    let command = read_command(&mut reader).map_err(super::error_text)?;
+                    assert_eq!(command.first().map(String::as_str), Some(expected));
+                    reader
+                        .get_mut()
+                        .write_all(reply)
+                        .map_err(super::error_text)?;
+                    commands.push(command);
+                }
+            }
+            Ok(commands)
+        });
+        Ok((port, server))
+    }
+
+    #[test]
+    fn group_authorizer_keeps_cache_and_lookup_failures_as_diagnostics()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let servers = scripted_redis_server(vec![
+            vec![("GET", b"-ERR synthetic read failure\r\n")],
+            vec![("SETEX", b"-ERR synthetic write failure\r\n")],
+        ]);
+        let (port, server) = servers?;
+        let mut authorizer = TelegramGroupAuthorizer::new(
+            transport(
+                400,
+                r#"{"ok":false,"description":"synthetic lookup refusal"}"#,
+            ),
+            "token",
+            &RedisEndpoint {
+                host: "127.0.0.1".to_owned(),
+                port,
+                password: None,
+            },
+        );
+        let decision = authorizer.authorize("-42", "7");
+        assert!(!decision.is_admin);
+        assert_eq!(decision.diagnostics.len(), 3);
+        assert!(decision.diagnostics[0].starts_with("chat-admin cache read:"));
+        assert!(decision.diagnostics[0].contains("synthetic read failure"));
+        assert_eq!(decision.diagnostics[1], "synthetic lookup refusal");
+        assert!(decision.diagnostics[2].starts_with("chat-admin cache write:"));
+        assert!(decision.diagnostics[2].contains("synthetic write failure"));
+        let commands = server.join().must()?;
+        assert_eq!(
+            commands[1].get(3).map(String::as_str),
+            Some(r#"{"is_admin":false}"#)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn redis_command_state_surfaces_each_write_failure_and_skips_absent_plans()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let servers = scripted_redis_server(vec![vec![
+            ("FT.CREATE", b"-Index already exists\r\n"),
+            ("EVAL", b"-ERR synthetic history failure\r\n"),
+            ("EVAL", b":1\r\n"),
+            ("MULTI", b"+OK\r\n"),
+            ("HSET", b"-ERR synthetic member failure\r\n"),
+            ("EXPIRE", b"+QUEUED\r\n"),
+            ("EXEC", b"-EXECABORT Transaction discarded\r\n"),
+            ("EVAL", b":1\r\n"),
+            ("EVAL", b"-ERR synthetic outgoing failure\r\n"),
+            ("EVAL", b":1\r\n"),
+            ("SETEX", b"-ERR synthetic metadata failure\r\n"),
+            ("EVAL", b":1\r\n"),
+        ]]);
+        let (port, server) = servers?;
+        let mut state = RedisCommandState::new(&RedisEndpoint {
+            host: "127.0.0.1".to_owned(),
+            port,
+            password: None,
+        })?;
+        let incoming = |is_group| {
+            prepare_incoming_command_state(IncomingCommandState {
+                chat_id: ChatId(-42),
+                message_id: MessageId(7),
+                user_id: UserId(88),
+                first_name: Some("Synthetic"),
+                username: Some("tester"),
+                text: "/time",
+                is_group,
+                timestamp: 1_672_531_200,
+            })
+        };
+        let outgoing = |sent_message_id| {
+            prepare_outgoing_command_state(OutgoingCommandState {
+                chat_id: ChatId(-42),
+                incoming_message_id: MessageId(7),
+                sent_message_id,
+                text: "1672531200",
+                command: "/time",
+                timestamp: 1_672_531_200,
+            })
+        };
+
+        let group = incoming(true)?;
+        assert!(
+            state
+                .record_incoming(&group)
+                .is_err_and(|error| error.to_string().contains("synthetic history failure"))
+        );
+        assert!(state.record_incoming(&group).is_err());
+        let private = incoming(false)?;
+        assert!(private.member.is_none());
+        state.record_incoming(&private)?;
+
+        let answered = outgoing(Some(MessageId(99)))?;
+        assert!(
+            state
+                .record_outgoing(&answered)
+                .is_err_and(|error| error.to_string().contains("synthetic outgoing failure"))
+        );
+        assert!(
+            state
+                .record_outgoing(&answered)
+                .is_err_and(|error| error.to_string().contains("synthetic metadata failure"))
+        );
+        let unsent = outgoing(None)?;
+        assert!(unsent.metadata.is_none());
+        state.record_outgoing(&unsent)?;
+
+        let commands = server.join().must()?;
+        assert_eq!(commands.len(), 12);
+        assert_eq!(
+            commands[4].get(1).map(String::as_str),
+            Some("chat_members:-42")
+        );
+        assert_eq!(
+            commands[10].get(1).map(String::as_str),
+            Some("bot_message_meta:-42:99")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_billing_still_loads_balances_and_reports_the_onboarding_grant()
+    -> Result<(), String> {
+        use crate::dispatcher::BillingBalanceSource;
+
+        let Some(db) = db_env() else { return Ok(()) };
+        bot_adapters::billing_schema::BillingSchemaRepository::new(&db)
+            .ensure_schema()
+            .map_err(super::error_text)?;
+        let separator = if db.contains('?') { '&' } else { '?' };
+        let read_only = format!("{db}{separator}options=-c%20default_transaction_read_only%3Don");
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(super::error_text)?
+            .as_nanos();
+        let suffix = i64::try_from(nonce % 100_000_000).map_err(super::error_text)?;
+        let user_id = 7_310_000_000_000_i64 + suffix;
+        let mut billing = BillingRepository::new(&read_only);
+        let balances = BillingBalanceSource::load(&mut billing, user_id, None)?;
+        assert_eq!(balances.user_balance, 0);
+        assert_eq!(balances.chat_balance, None);
+        assert_eq!(balances.diagnostics.len(), 1);
+        assert!(
+            balances.diagnostics[0]
+                .starts_with(&format!("billing onboarding grant user_id={user_id}:"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_task_tool_uses_configured_pricing_and_falls_back_to_first_names()
+    -> Result<(), String> {
+        use crate::chat_tool_loop::NativeToolRuntime;
+        use crate::dispatcher::AdminCreditSink;
+
+        let Some(ep) = redis_env() else { return Ok(()) };
+        let Some(db) = db_env() else { return Ok(()) };
+        bot_adapters::billing_schema::BillingSchemaRepository::new(&db)
+            .ensure_schema()
+            .map_err(super::error_text)?;
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(super::error_text)?
+            .as_nanos();
+        let suffix = i64::try_from(nonce % 100_000_000).map_err(super::error_text)?;
+        let user_id = 7_320_000_000_000_i64 + suffix;
+        let chat_id = -7_330_000_000_000_i64 - suffix;
+        AdminCreditSink::mint(&mut BillingRepository::new(&db), user_id, 1_000_000)?;
+        let input = AiConversationInput {
+            chat_id: ChatId(chat_id),
+            message_id: MessageId(7),
+            chat_type: "supergroup".to_owned(),
+            chat_title: "Synthetic chat".to_owned(),
+            sender_id: UserId(user_id),
+            sender_first_name: "Synthetic First".to_owned(),
+            sender_username: String::new(),
+            message_text: "remind me".to_owned(),
+            command: String::new(),
+            reply_to_message_id: None,
+            reply_context: None,
+            has_reply: false,
+            visual_media_kind: None,
+            audio_media_kind: None,
+            photo_file_id: None,
+            audio_file_id: None,
+            audio_duration_seconds: None,
+            locale: Locale::En,
+            timezone_offset_hours: -3,
+            creditless_user_hourly_limit: 10,
+            timestamp: 1_700_000_000,
+            spontaneous: false,
+            link_context: None,
+        };
+        let arguments = serde_json::json!({"text": "synthetic reminder", "delay_seconds": 3600});
+
+        let pricing = OpenRouterPricingCache::new("", "https://openrouter.invalid")
+            .map_err(super::error_text)?;
+        let mut priced = super::ProductionToolFactory::new(&ep, &db, None, None)
+            .with_openrouter_pricing(Arc::new(pricing));
+        let result = priced
+            .create(&input)?
+            .execute("task_set", &arguments, "synthetic-call");
+        assert_eq!(
+            result.output,
+            "I could not calculate the task cost. Try again"
+        );
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("OpenRouter pricing lookup failed"))
+        );
+
+        let mut factory = super::ProductionToolFactory::new(&ep, &db, None, None);
+        let result = factory
+            .create(&input)?
+            .execute("task_set", &arguments, "synthetic-call");
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let store =
+            bot_adapters::redis_task_store::RedisTaskStore::new(&ep).map_err(super::error_text)?;
+        let tasks = store
+            .list_chat_tasks(&chat_id.to_string())
+            .map_err(super::error_text)?;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].task.user_name, "Synthetic First");
+        assert_eq!(tasks[0].task.user_id, Some(user_id));
+        assert!(
+            store
+                .cancel_task(tasks[0].task.id.as_str(), &chat_id.to_string())
+                .map_err(super::error_text)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tool_transport_failures_name_the_tool() {
+        assert_eq!(super::tool_transport("Synthetic", Ok::<u8, ()>(7)), Ok(7));
+        assert_eq!(
+            super::tool_transport("Synthetic", Err::<u8, _>("no TLS backend")),
+            Err(r#"Synthetic tool transport: "no TLS backend""#.to_owned())
+        );
+    }
+
+    #[test]
+    fn billing_ports_reject_values_outside_the_persistent_ranges_before_querying() {
+        use crate::dispatcher::{AdminCreditLogSource, AdminCreditSink, ChargeHistorySource};
+
+        // Nothing listens here: every rejection happens before a connection.
+        let mut billing = BillingRepository::new("postgresql://synthetic@127.0.0.1:1/unused");
+        assert_eq!(
+            AdminCreditSink::mint(&mut billing, 7, i64::MAX),
+            Err("admin credit amount exceeds the persistent range".to_owned())
+        );
+        assert_eq!(
+            AdminCreditLogSource::load(&mut billing, usize::MAX).err(),
+            Some("creditlog limit is too large".to_owned())
+        );
+        assert_eq!(
+            ChargeHistorySource::load(&mut billing, 7, usize::MAX, None, "older").err(),
+            Some("charge history limit exceeds the query range".to_owned())
+        );
+    }
+
+    #[test]
+    fn stock_source_adds_full_query_listings_without_repeating_direct_quotes() {
+        let mut source = stock_source(
+            vec![
+                yahoo_chart("AAPL"),
+                Ok(YahooHttpResponse {
+                    status_code: 200,
+                    body: r#"{"chart":{"result":[]}}"#.to_owned(),
+                }),
+                yahoo_chart("AAPL"),
+            ],
+            vec![Ok(YahooHttpResponse {
+                status_code: 200,
+                body:
+                    r#"{"quotes":[{"quoteType":"EQUITY","symbol":"AAPL","longname":"Apple Inc."}]}"#
+                        .to_owned(),
+            })],
+        );
+        let load = source.load_with_timeframe("AAPL Inc", Some("1m"), 100);
+        assert_eq!(
+            quote_symbols(&load),
+            [("AAPL".to_owned(), Some("AAPL".to_owned()))]
+        );
+        assert_eq!(
+            source.yahoo_transport.searches.borrow()[0].query,
+            "AAPL Inc"
+        );
+        assert_eq!(source.yahoo_transport.charts.borrow().len(), 3);
+    }
+
+    #[test]
+    fn telegram_stream_delivery_waits_for_the_earliest_final_retry_or_throttled_chat() {
+        let final_key = super::TelegramStreamKey {
+            chat_id: 7,
+            message_id: 80,
+        };
+        let (final_sender, _final_receiver) =
+            mpsc::channel::<Result<bool, TelegramActionSinkError>>();
+        let mut state = super::TelegramStreamDeliveryState {
+            pending: std::collections::HashMap::from([(
+                final_key,
+                super::PendingTelegramStreamEdit {
+                    key: final_key,
+                    action: stream_edit(7, 80, "final"),
+                    final_response: Some(final_sender),
+                },
+            )]),
+            order: std::collections::VecDeque::from([final_key]),
+            last_intermediate_edit: std::collections::HashMap::new(),
+            rate_limited_until: std::collections::HashMap::new(),
+            final_retries: std::collections::HashMap::from([(
+                final_key,
+                super::TelegramStreamFinalRetry {
+                    attempts: 1,
+                    retry_at: Instant::now() + Duration::from_secs(5),
+                },
+            )]),
+            thinking: std::collections::HashMap::from([(
+                super::TelegramStreamKey {
+                    chat_id: 8,
+                    message_id: 81,
+                },
+                super::TelegramStreamThinkingAnimation {
+                    text: "Pensando".to_owned(),
+                    frame: 1,
+                    next_frame_at: Instant::now() + Duration::from_secs(30),
+                },
+            )]),
+        };
+        assert!(matches!(
+            state.take_next(),
+            super::TelegramStreamDeliveryDecision::Wait(wait)
+                if wait > Duration::from_secs(4) && wait <= Duration::from_secs(5)
+        ));
+        assert_eq!(state.order, [final_key]);
+
+        let first = super::TelegramStreamKey {
+            chat_id: 9,
+            message_id: 1,
+        };
+        let second = super::TelegramStreamKey {
+            chat_id: 10,
+            message_id: 2,
+        };
+        let mut throttled = super::TelegramStreamDeliveryState::default();
+        for key in [first, second] {
+            throttled.order.push_back(key);
+            throttled.pending.insert(
+                key,
+                super::PendingTelegramStreamEdit {
+                    key,
+                    action: stream_edit(key.chat_id, key.message_id, "draft"),
+                    final_response: None,
+                },
+            );
+        }
+        throttled.pause_intermediate_edits(9, Duration::from_secs(20));
+        throttled.pause_intermediate_edits(10, Duration::from_secs(3));
+        assert_eq!(throttled.rate_limited_until.len(), 2);
+        assert!(matches!(
+            throttled.take_next(),
+            super::TelegramStreamDeliveryDecision::Wait(wait)
+                if wait > Duration::from_secs(2) && wait <= Duration::from_secs(3)
+        ));
+        assert_eq!(throttled.order, [first, second]);
+    }
+
+    #[test]
+    fn telegram_stream_finalize_reports_a_discarded_final_as_undeliverable() {
+        let (delivery, state, wake_receiver) = stream_delivery_fixture();
+        let final_delivery = delivery.clone();
+        let finalize = thread::spawn(move || final_delivery.finalize(stream_edit(7, 80, "final")));
+        assert!(wake_receiver.recv_timeout(Duration::from_secs(1)).is_ok());
+        super::lock_unpoisoned(&state).pending.clear();
+        assert_eq!(
+            finalize.join().must(),
+            Err(TelegramActionSinkError::Transport(
+                TransportFailureKind::Request
+            ))
+        );
     }
 }

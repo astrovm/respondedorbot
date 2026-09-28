@@ -335,10 +335,20 @@ pub fn build_conversation_prompt(input: &ConversationPromptInput) -> Vec<PromptM
 mod tests {
     use crate::locale::Locale;
 
+    use serde_json::json;
+
     use super::{
         ConversationPromptInput, HistoryMessage, PromptContent, PromptMessage, PromptRole,
-        RetrievedMessage, build_conversation_prompt, build_system_prompt,
+        PromptToolCall, RetrievedMessage, build_conversation_prompt, build_system_prompt,
     };
+
+    /// Text of a plain-text prompt message; any other content reads as empty.
+    fn text_of(message: &PromptMessage) -> &str {
+        match &message.content {
+            PromptContent::Text(text) => text,
+            _ => "",
+        }
+    }
 
     fn input(locale: Locale) -> ConversationPromptInput {
         ConversationPromptInput {
@@ -416,9 +426,7 @@ mod tests {
                 ),
             ]
         );
-        let PromptContent::Text(final_prompt) = &messages[3].content else {
-            return;
-        };
+        let final_prompt = text_of(&messages[3]);
         assert!(final_prompt.starts_with("CONTEXT:\n- Chat: group (Synthetic Chat)"));
         assert!(final_prompt.contains("- User: Synthetic (tester)\n- Time: 12:34"));
         assert!(final_prompt.contains("MESSAGE BEING REPLIED TO:\nearlier message"));
@@ -439,13 +447,7 @@ mod tests {
         let messages = build_conversation_prompt(&value);
         assert_eq!(messages.len(), 4);
         assert_eq!(messages[2].role, PromptRole::System);
-        let Some(PromptMessage {
-            content: PromptContent::Text(prompt),
-            ..
-        }) = messages.last()
-        else {
-            return;
-        };
+        let prompt = messages.last().map(text_of).unwrap_or_default();
         assert!(!prompt.contains("MESSAGE BEING REPLIED TO"));
     }
 
@@ -454,13 +456,7 @@ mod tests {
         let mut value = input(Locale::Es);
         value.message_text = "cuando es boca river".to_owned();
         let messages = build_conversation_prompt(&value);
-        let Some(PromptMessage {
-            content: PromptContent::Text(prompt),
-            ..
-        }) = messages.last()
-        else {
-            return;
-        };
+        let prompt = messages.last().map(text_of).unwrap_or_default();
         assert!(prompt.contains(
             "- para fechas y horarios, buscá con el año y la fecha actual; si aparece una fecha pasada o fuentes contradictorias, usá web_fetch sobre una fuente oficial antes de responder; si el conflicto sigue, decilo y no elijas una fecha al azar"
         ));
@@ -479,9 +475,7 @@ mod tests {
         value.link_context = None;
         value.enable_web_search = false;
         let messages = build_conversation_prompt(&value);
-        let PromptContent::Text(prompt) = &messages[1].content else {
-            return;
-        };
+        let prompt = text_of(&messages[1]);
         assert!(prompt.contains("- Chat: private\n"));
         assert!(!prompt.contains("Synthetic Chat"));
         assert!(!prompt.contains("MENSAJE AL QUE RESPONDE"));
@@ -494,10 +488,63 @@ mod tests {
         value.message_text = "á".repeat(4_100);
         value.reply_context = Some("β".repeat(4_100));
         let messages = build_conversation_prompt(&value);
-        let PromptContent::Text(prompt) = &messages[3].content else {
-            return;
-        };
+        let prompt = text_of(&messages[3]);
         assert!(prompt.contains(&format!("{}...", "á".repeat(4_093))));
         assert!(prompt.contains(&format!("{}...", "β".repeat(4_093))));
+    }
+
+    #[test]
+    fn assistant_tool_calls_and_tool_results_keep_their_roles_and_payloads() {
+        let call = PromptToolCall {
+            id: "call-1".to_owned(),
+            call_type: "function".to_owned(),
+            name: "calculate".to_owned(),
+            arguments: "{\"expression\":\"1+1\"}".to_owned(),
+        };
+        let with_text = PromptMessage::assistant_tool_calls(Some("checking"), vec![call.clone()]);
+        assert_eq!(with_text.role, PromptRole::Assistant);
+        assert_eq!(text_of(&with_text), "checking");
+        assert_eq!(with_text.tool_calls, vec![call.clone()]);
+        assert_eq!(with_text.reasoning, None);
+
+        let silent = PromptMessage::assistant_tool_calls_with_reasoning(
+            None,
+            vec![call],
+            Some("thinking".to_owned()),
+            vec![json!({"type": "reasoning.text"})],
+        );
+        assert_eq!(silent.content, PromptContent::Empty);
+        assert_eq!(text_of(&silent), "");
+        assert_eq!(silent.reasoning.as_deref(), Some("thinking"));
+        assert_eq!(silent.reasoning_details.len(), 1);
+
+        let result = PromptMessage::tool_result("call-1", "2");
+        assert_eq!(result.role, PromptRole::Tool);
+        assert_eq!(result.tool_call_id.as_deref(), Some("call-1"));
+        assert_eq!(text_of(&result), "2");
+        assert!(result.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn english_task_prompts_include_the_task_and_tool_contract() {
+        let prompt = build_system_prompt("persona", Locale::En, "today", true, true);
+        assert!(prompt.starts_with("RUNNING SCHEDULED TASK:\nAnswer the following instruction"));
+        assert!(prompt.contains("persona\n\n\nTOOLS:\nCall them directly"));
+        assert!(prompt.contains("Use calculate for all arithmetic"));
+    }
+
+    #[test]
+    fn anonymous_users_without_usernames_get_a_generic_label() {
+        for (locale, expected) in [
+            (Locale::En, "- User: User\n"),
+            (Locale::Es, "- Usuario: Usuario\n"),
+        ] {
+            let mut value = input(locale);
+            value.first_name.clear();
+            value.username.clear();
+            let messages = build_conversation_prompt(&value);
+            let prompt = messages.last().map(text_of).unwrap_or_default();
+            assert!(prompt.contains(expected), "{prompt}");
+        }
     }
 }

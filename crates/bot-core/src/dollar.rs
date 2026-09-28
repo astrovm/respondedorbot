@@ -254,4 +254,23 @@ mod tests {
         );
         assert_eq!(render_dollar_rates(&[], None, 24, Locale::Es), None);
     }
+
+    #[test]
+    fn spanish_guards_and_rates_without_bands() {
+        assert_eq!(
+            invalid_timeframe_message("/dolar 2h", Locale::Es),
+            "No conozco el período '2h'. Usá uno de estos: 1h, 6h, 12h, 24h, 48h"
+        );
+        let rates = [DollarRate {
+            name: "Oficial",
+            price: 1000.0,
+            change: None,
+        }];
+        assert_eq!(
+            render_dollar_rates(&rates, None, 12, Locale::Es).as_deref(),
+            Some(
+                "Dólar en pesos, variación 12h\n\nOficial: $1,000 (sin datos)\n\nTodavía no tengo historial de 12h. Probá más tarde"
+            )
+        );
+    }
 }

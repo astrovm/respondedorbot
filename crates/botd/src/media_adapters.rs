@@ -1,6 +1,6 @@
 //! Production adapters for the native media pipeline.
 
-use std::io::{Read, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
@@ -64,7 +64,7 @@ where
             None,
             TELEGRAM_FILE_TIMEOUT_SECONDS,
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(error_text)?;
         let TelegramHttpOutcome::Response { status_code, body } = outcome else {
             eprintln!(
                 "Media trace: {}",
@@ -127,7 +127,7 @@ where
             file_path,
             TELEGRAM_FILE_TIMEOUT_SECONDS,
         )
-        .map_err(|error| error.to_string())?
+        .map_err(error_text)?
         {
             TelegramFileOutcome::Downloaded(bytes) => {
                 eprintln!(
@@ -181,7 +181,7 @@ impl RedisMediaCache {
 
 impl MediaCache for RedisMediaCache {
     fn get(&mut self, prefix: &str, file_id: &str) -> Result<Option<String>, String> {
-        get_cached_media(&self.endpoint, prefix, file_id).map_err(|error| error.to_string())
+        get_cached_media(&self.endpoint, prefix, file_id).map_err(error_text)
     }
 
     fn set(&mut self, prefix: &str, file_id: &str, text: &str) -> Result<(), String> {
@@ -192,9 +192,15 @@ impl MediaCache for RedisMediaCache {
             text,
             MEDIA_CACHE_TTL_SECONDS,
         )
-        .map_err(|error| error.to_string())
+        .map_err(error_text)
     }
 }
+
+fn error_text(error: impl std::fmt::Display) -> String {
+    error.to_string()
+}
+
+const MEDIA_PIPES_UNAVAILABLE: &str = "media process pipes are unavailable";
 
 #[derive(Debug, Clone)]
 pub struct FfmpegMediaProcessor {
@@ -248,27 +254,27 @@ impl FfmpegMediaProcessor {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|error| error.to_string())?;
-        let Some(mut stdin) = child.stdin.take() else {
-            Self::terminate(&mut child);
-            return Err("media process did not expose stdin".to_owned());
-        };
-        let Some(stdout) = child.stdout.take() else {
-            Self::terminate(&mut child);
-            return Err("media process did not expose stdout".to_owned());
-        };
+            .map_err(error_text)?;
+        // Both pipes are requested above, so a missing one is reported through
+        // the same write and read failures as a broken pipe.
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take();
         thread::scope(|scope| {
             let writer = scope.spawn(move || {
-                let result = stdin.write_all(input);
-                drop(stdin);
-                result
+                stdin
+                    .ok_or(io::Error::other(MEDIA_PIPES_UNAVAILABLE))
+                    .and_then(|mut stdin| stdin.write_all(input))
             });
             let reader = scope.spawn(move || {
                 let mut output = Vec::new();
                 stdout
-                    .take(max_output_bytes.saturating_add(1))
-                    .read_to_end(&mut output)
-                    .map_err(|error| error.to_string())?;
+                    .ok_or(io::Error::other(MEDIA_PIPES_UNAVAILABLE))
+                    .and_then(|stdout| {
+                        stdout
+                            .take(max_output_bytes.saturating_add(1))
+                            .read_to_end(&mut output)
+                    })
+                    .map_err(error_text)?;
                 if output.len() as u64 > max_output_bytes {
                     return Err("media process output exceeds the size limit".to_owned());
                 }
@@ -281,32 +287,27 @@ impl FfmpegMediaProcessor {
                     Ok(None) if Instant::now() < deadline => {
                         thread::sleep(MEDIA_PROCESS_POLL_INTERVAL);
                     }
-                    Ok(None) => {
-                        Self::terminate(&mut child);
-                        break Err(format!("{program} timed out while processing media"));
-                    }
-                    Err(error) => {
-                        Self::terminate(&mut child);
-                        break Err(error.to_string());
+                    unfinished => {
+                        let failure = unfinished.err().map(error_text);
+                        let timeout = || format!("{program} timed out while processing media");
+                        break Err(Self::abandon(&mut child, failure.unwrap_or_else(timeout)));
                     }
                 }
             };
 
             let write_result = writer
                 .join()
-                .map_err(|_| "media input writer panicked".to_owned())?;
+                .or(Err(String::from("media input writer panicked")))?;
             let output = reader
                 .join()
-                .map_err(|_| "media output reader panicked".to_owned())??;
+                .or(Err(String::from("media output reader panicked")))??;
             let status = status?;
             if status.success() && !output.is_empty() {
                 // Frame extraction can finish before the entire animation is consumed.
-                if let Err(error) = write_result
-                    && error.kind() != std::io::ErrorKind::BrokenPipe
-                {
-                    return Err(error.to_string());
+                match write_result {
+                    Err(error) if error.kind() != ErrorKind::BrokenPipe => Err(error.to_string()),
+                    _ => Ok(output),
                 }
-                Ok(output)
             } else {
                 Err(format!("{program} could not process media"))
             }
@@ -316,6 +317,11 @@ impl FfmpegMediaProcessor {
     fn terminate(child: &mut std::process::Child) {
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    fn abandon(child: &mut std::process::Child, error: String) -> String {
+        Self::terminate(child);
+        error
     }
 
     fn duration(&self, input: &[u8]) -> Option<f64> {
@@ -539,7 +545,7 @@ impl<Transport: OpenRouterTransport> VisionProvider for OpenRouterVisionProvider
             .as_ref()
             .map(|pricing| pricing.price_ceiling(&self.model))
             .transpose()
-            .map_err(|error| error.to_string())?;
+            .map_err(error_text)?;
         describe_image_with(
             &self.transport,
             VisionRequest {
@@ -556,7 +562,7 @@ impl<Transport: OpenRouterTransport> VisionProvider for OpenRouterVisionProvider
             },
         )
         .map(Some)
-        .map_err(|error| error.to_string())
+        .map_err(error_text)
     }
 }
 
@@ -612,7 +618,7 @@ where
                 Some(&result)
             )
         );
-        result.map(Some).map_err(|error| error.to_string())
+        result.map(Some).map_err(error_text)
     }
 }
 
@@ -995,24 +1001,21 @@ mod tests {
     }
 
     #[test]
-    fn redis_media_cache_round_trips_text_against_local_redis() -> Result<(), String> {
-        let Some(port) = std::env::var("TEST_REDIS_PORT")
+    fn redis_media_cache_round_trips_text_against_local_redis() -> TestResult {
+        std::env::var("TEST_REDIS_PORT")
             .ok()
             .and_then(|value| value.parse().ok())
-        else {
-            return Ok(());
-        };
+            .map_or(Ok(()), round_trip_redis_media_cache)
+    }
+
+    fn round_trip_redis_media_cache(port: u16) -> TestResult {
         let endpoint = RedisEndpoint {
-            host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+            host: std::env::var("TEST_REDIS_HOST").unwrap_or(String::from("127.0.0.1")),
             port,
-            password: std::env::var("TEST_REDIS_PASSWORD")
-                .ok()
-                .filter(|value| !value.is_empty()),
+            // Empty passwords are ignored by the Redis client.
+            password: std::env::var("TEST_REDIS_PASSWORD").ok(),
         };
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| error.to_string())?
-            .as_nanos();
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let file_id = format!("synthetic-media-{nonce}");
         let mut cache = RedisMediaCache::new(endpoint);
         assert_eq!(cache.get("synthetic", &file_id)?, None);
@@ -1082,7 +1085,7 @@ mod tests {
     }
 
     #[test]
-    fn vision_provider_selects_the_prompt_language_and_preserves_media_metadata() {
+    fn vision_provider_selects_the_prompt_language_and_preserves_media_metadata() -> TestResult {
         for (prompt, expected_system_prompt) in [
             (
                 "Describe the synthetic image",
@@ -1103,17 +1106,15 @@ mod tests {
                 "synthetic/vision-model",
                 321,
             );
-            let result = provider
-                .describe(
-                    &PreparedImage {
-                        bytes: vec![1, 2, 3],
-                        mime: "image/png".to_owned(),
-                    },
-                    prompt,
-                    "synthetic-file",
-                )
-                .unwrap_or_else(|_| unreachable!())
-                .unwrap_or_else(|| unreachable!());
+            let described = provider.describe(
+                &PreparedImage {
+                    bytes: vec![1, 2, 3],
+                    mime: "image/png".to_owned(),
+                },
+                prompt,
+                "synthetic-file",
+            );
+            let result = described?.ok_or("no media was produced")?;
             assert_eq!(result.text, "synthetic description");
 
             let requests = provider.transport.requests.borrow();
@@ -1131,6 +1132,7 @@ mod tests {
                 "synthetic-file"
             );
         }
+        Ok(())
     }
 
     #[test]
@@ -1217,7 +1219,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn media_process_drains_output_while_writing_input() -> Result<(), String> {
+    fn media_process_drains_output_while_writing_input() -> TestResult {
         let size = 2 * 1024 * 1024;
         let output = FfmpegMediaProcessor::run_bounded(
             "sh",
@@ -1229,8 +1231,8 @@ mod tests {
             Duration::from_secs(5),
             size as u64,
             size as u64,
-        )?;
-        assert_eq!(output.len(), size);
+        );
+        assert_eq!(output.map(|output| output.len()), Ok(size));
         Ok(())
     }
 
@@ -1248,6 +1250,66 @@ mod tests {
             );
             assert_eq!(result, Err("sh could not process media".to_owned()));
         }
+    }
+
+    #[test]
+    fn media_process_rejects_a_zero_timeout_before_spawning() {
+        assert_eq!(
+            FfmpegMediaProcessor::run_bounded(
+                "synthetic-program-that-does-not-exist",
+                &[],
+                &[1, 2, 3],
+                Duration::ZERO,
+                16,
+                16,
+            ),
+            Err("media process timeout must be positive".to_owned())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_output_tolerates_a_process_that_stops_reading_input() {
+        // The pipe buffer is far smaller than the input, so the writer hits a
+        // closed pipe once `head` exits after reading its first byte.
+        let result = FfmpegMediaProcessor::run_bounded(
+            "head",
+            &["-c".to_owned(), "1".to_owned()],
+            &vec![7; 4 * 1024 * 1024],
+            Duration::from_secs(5),
+            4 * 1024 * 1024,
+            16,
+        );
+        assert_eq!(result, Ok(vec![7]));
+    }
+
+    #[test]
+    fn duration_prefers_the_container_duration_when_ffprobe_reports_one() -> TestResult {
+        // A seekable output lets ffmpeg record the total length in the FLAC
+        // header, which ffprobe then reports as the container duration.
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let path = std::env::temp_dir().join(format!("botd-duration-{nonce}.flac"));
+        let generated = Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=2",
+            ])
+            .arg(&path)
+            .status();
+        let flac = std::fs::read(&path).unwrap_or_default();
+        let _ = std::fs::remove_file(&path);
+        assert!(generated.is_ok_and(|status| status.success()));
+        assert!(flac.starts_with(b"fLaC"));
+        let duration = FfmpegMediaProcessor::default().duration(&flac);
+        assert!(
+            duration.is_some_and(|seconds| (seconds - 2.0).abs() < 0.05),
+            "{duration:?}"
+        );
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -1294,7 +1356,7 @@ mod tests {
     }
 
     #[test]
-    fn extracts_one_frame_from_a_large_animation() -> Result<(), String> {
+    fn extracts_one_frame_from_a_large_animation() -> TestResult {
         let generated = Command::new("ffmpeg")
             .args([
                 "-v",
@@ -1307,8 +1369,7 @@ mod tests {
                 "gif",
                 "pipe:1",
             ])
-            .output()
-            .map_err(|error| error.to_string())?;
+            .output()?;
         assert!(generated.status.success());
         assert!(generated.stdout.len() > 256 * 1024);
         let frame = FfmpegMediaProcessor::default()
@@ -1322,44 +1383,124 @@ mod tests {
             ]
             .map(str::to_owned),
             &frame.bytes,
-        )?;
-        assert_eq!(pixels.len(), 320 * 240 * 3);
+        );
+        assert_eq!(pixels.map(|pixels| pixels.len()), Ok(320 * 240 * 3));
         Ok(())
     }
 
     #[test]
-    fn installed_ffmpeg_normalizes_real_image_and_audio_payloads() -> Result<(), String> {
-        let version = Command::new("ffmpeg")
-            .arg("-version")
-            .output()
-            .map_err(|error| format!("ffmpeg must be installed for media tests: {error}"))?;
+    fn installed_ffmpeg_normalizes_real_image_and_audio_payloads() -> TestResult {
+        let version = Command::new("ffmpeg").arg("-version").output()?;
         assert!(version.status.success());
         let mut processor = FfmpegMediaProcessor::default();
         let image = processor
-            .prepare_image(b"P6\n2 1\n255\n\xff\x00\x00\x00\xff\x00")
-            .unwrap_or_else(|_| unreachable!())
-            .unwrap_or_else(|| unreachable!());
+            .prepare_image(b"P6\n2 1\n255\n\xff\x00\x00\x00\xff\x00")?
+            .ok_or("no media was produced")?;
         assert_eq!(image.mime, "image/webp");
         assert!(image.bytes.starts_with(b"RIFF"));
         assert_eq!(image.bytes.get(8..12), Some(b"WEBP".as_slice()));
 
         let gif = b"GIF89a\x01\0\x01\0\x80\0\0\0\0\0\xff\xff\xff!\xf9\x04\x01\0\0\0\0,\0\0\0\0\x01\0\x01\0\0\x02\x02D\x01\0;";
         let gif_frame = processor
-            .prepare_image(gif)
-            .unwrap_or_else(|_| unreachable!())
-            .unwrap_or_else(|| unreachable!());
+            .prepare_image(gif)?
+            .ok_or("no media was produced")?;
         assert_eq!(gif_frame.mime, "image/webp");
         assert!(gif_frame.bytes.starts_with(b"RIFF"));
         assert_eq!(gif_frame.bytes.get(8..12), Some(b"WEBP".as_slice()));
 
         let wav = pcm_wav(8_000, &[0; 800]);
         let audio = processor
-            .prepare_audio(&wav, None)
-            .unwrap_or_else(|_| unreachable!())
-            .unwrap_or_else(|| unreachable!());
+            .prepare_audio(&wav, None)?
+            .ok_or("no media was produced")?;
         assert_eq!(audio.bytes.get(..4), Some(b"RIFF".as_slice()));
         assert_eq!(audio.bytes.get(8..12), Some(b"WAVE".as_slice()));
         assert!((0.08..=0.2).contains(&audio.duration_seconds));
+        Ok(())
+    }
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn redis_media_cache_reports_unreachable_redis() {
+        let mut cache = RedisMediaCache::new(RedisEndpoint {
+            host: "127.0.0.1".to_owned(),
+            port: 1,
+            password: None,
+        });
+        let read = cache.get("image_description", "file-1");
+        let write = cache.set("image_description", "file-1", "description");
+        assert!(matches!(&read, Err(error) if !error.is_empty()), "{read:?}");
+        assert!(
+            matches!(&write, Err(error) if !error.is_empty()),
+            "{write:?}"
+        );
+    }
+
+    #[test]
+    fn media_process_rejects_unrepresentable_timeouts_and_missing_programs() {
+        assert_eq!(
+            FfmpegMediaProcessor::run_bounded("unused", &[], &[], Duration::MAX, 16, 16),
+            Err("media process timeout is too large".to_owned())
+        );
+        let missing = FfmpegMediaProcessor::run_bounded(
+            "synthetic-program-that-does-not-exist",
+            &[],
+            &[],
+            Duration::from_secs(1),
+            16,
+            16,
+        );
+        assert!(
+            matches!(&missing, Err(error) if !error.is_empty()),
+            "{missing:?}"
+        );
+    }
+
+    #[test]
+    fn a_valid_duration_hint_measures_audio_that_ffprobe_cannot() {
+        let mut processor = FfmpegMediaProcessor::default();
+        assert_eq!(
+            processor.prepare_audio(b"not media", Some(2.5)),
+            Ok(Some(PreparedAudio {
+                bytes: b"not media".to_vec(),
+                duration_seconds: 2.5,
+            }))
+        );
+        // Unusable hints are ignored rather than trusted.
+        assert_eq!(
+            processor.prepare_audio(b"not media", Some(f64::NAN)),
+            Ok(None)
+        );
+        assert_eq!(processor.prepare_audio(b"not media", Some(-1.0)), Ok(None));
+    }
+
+    #[test]
+    fn vision_pricing_failures_stop_before_the_provider_request() -> TestResult {
+        let pricing = Arc::new(OpenRouterPricingCache::new("synthetic-key", "not-a-url")?);
+        let mut provider = OpenRouterVisionProvider::new(
+            VisionTransport {
+                requests: RefCell::new(Vec::new()),
+                responses: RefCell::new(Vec::new()),
+            },
+            "synthetic-key",
+            "https://example.test/api/v1",
+            "synthetic/vision-model",
+            321,
+        )
+        .with_openrouter_pricing(pricing);
+        let result = provider.describe(
+            &PreparedImage {
+                bytes: vec![1, 2, 3],
+                mime: "image/png".to_owned(),
+            },
+            "describe",
+            "synthetic-file",
+        );
+        assert!(
+            matches!(&result, Err(error) if !error.is_empty()),
+            "{result:?}"
+        );
+        assert!(provider.transport.requests.borrow().is_empty());
         Ok(())
     }
 }

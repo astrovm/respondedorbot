@@ -3,6 +3,9 @@
 //! This module owns the untrusted JSON boundary. Callers receive an update id
 //! and one of the update kinds supported by the bot runtime.
 
+use std::time::Duration;
+
+use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use thiserror::Error;
@@ -12,7 +15,8 @@ use bot_core::telegram_input::{
 };
 
 use crate::telegram_http::{
-    TelegramHttpError, TelegramHttpOutcome, TelegramTransport, TransportFailureKind, request_with,
+    TelegramHttpError, TelegramHttpOutcome, TelegramRequest, TelegramTransport,
+    TransportFailureKind, send_with,
 };
 
 pub const DEFAULT_LONG_POLL_SECONDS: u64 = 30;
@@ -132,8 +136,7 @@ fn parse_event(object: &mut Map<String, Value>) -> Result<IncomingEvent, Polling
         }
         "message" => IncomingEvent::Message(Box::new(parse_message(&payload))),
         "callback_query" => IncomingEvent::CallbackQuery(payload),
-        "pre_checkout_query" => IncomingEvent::PreCheckoutQuery(payload),
-        _ => IncomingEvent::Unsupported,
+        _ => IncomingEvent::PreCheckoutQuery(payload),
     })
 }
 
@@ -320,15 +323,15 @@ pub fn poll_once_with<T: TelegramTransport>(
     let mut batch_limit = POLL_BATCH_LIMIT;
     loop {
         params["limit"] = json!(batch_limit);
-        match request_with(
-            transport,
-            token,
-            "getUpdates",
-            "POST",
-            None,
-            Some(params.clone()),
-            request_timeout,
-        )? {
+        let request = TelegramRequest {
+            token: token.to_owned(),
+            endpoint: "getUpdates".to_owned(),
+            method: Method::POST,
+            params: None,
+            json_payload: Some(params.clone()),
+            timeout: Duration::from_secs(request_timeout),
+        };
+        match send_with(transport, &request) {
             TelegramHttpOutcome::Response { status_code, body } => {
                 return parse_response(status_code, &body);
             }
@@ -348,6 +351,8 @@ pub fn poll_once_with<T: TelegramTransport>(
 
 #[cfg(test)]
 mod tests {
+    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
     use std::cell::RefCell;
 
     use bot_core::telegram_input::{MessageContent, MessageId};
@@ -355,21 +360,29 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        IncomingEvent, PollFailure, PollOutcome, PollingError, next_offset, parse_response,
-        poll_once_with,
+        IncomingEvent, IncomingMessage, IncomingUpdate, PollFailure, PollOutcome, PollingError,
+        next_offset, parse_response, poll_once_with,
     };
     use crate::telegram_http::{
         HttpResponse, TelegramRequest, TelegramTransport, TransportFailureKind,
     };
 
+    type Responder = Box<dyn Fn(&TelegramRequest) -> Result<HttpResponse, TransportFailureKind>>;
+
+    /// One transport type for every polling scenario: either a single scripted
+    /// result or a responder computing each reply from the request.
     struct FakeTransport {
         result: RefCell<Option<Result<HttpResponse, TransportFailureKind>>>,
+        responder: Option<Responder>,
         requests: RefCell<Vec<TelegramRequest>>,
     }
 
     impl TelegramTransport for FakeTransport {
         fn send(&self, request: &TelegramRequest) -> Result<HttpResponse, TransportFailureKind> {
             self.requests.borrow_mut().push(request.clone());
+            if let Some(responder) = &self.responder {
+                return responder(request);
+            }
             self.result
                 .borrow_mut()
                 .take()
@@ -380,8 +393,21 @@ mod tests {
     fn transport(result: Result<HttpResponse, TransportFailureKind>) -> FakeTransport {
         FakeTransport {
             result: RefCell::new(Some(result)),
+            responder: None,
             requests: RefCell::new(Vec::new()),
         }
+    }
+
+    fn responding(responder: Responder) -> FakeTransport {
+        FakeTransport {
+            result: RefCell::new(None),
+            responder: Some(responder),
+            requests: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn batch_limit(request: &TelegramRequest) -> Option<u64> {
+        request.json_payload.as_ref()?["limit"].as_u64()
     }
 
     #[test]
@@ -414,51 +440,35 @@ mod tests {
     #[test]
     fn oversized_multibyte_batches_shrink_without_acknowledging_updates()
     -> Result<(), Box<dyn std::error::Error>> {
-        struct LargeBatchTransport(RefCell<Vec<TelegramRequest>>);
-        impl TelegramTransport for LargeBatchTransport {
-            fn send(
-                &self,
-                request: &TelegramRequest,
-            ) -> Result<HttpResponse, TransportFailureKind> {
-                self.0.borrow_mut().push(request.clone());
-                let params = request
-                    .json_payload
-                    .as_ref()
-                    .ok_or(TransportFailureKind::Request)?;
-                let limit = params["limit"]
-                    .as_u64()
-                    .ok_or(TransportFailureKind::Request)?;
-                let offset = params["offset"]
-                    .as_i64()
-                    .ok_or(TransportFailureKind::Request)?;
-                let updates = (0..limit)
-                    .map(|index| {
-                        json!({
-                            "update_id": offset + index as i64,
-                            "message": {"message_id": index, "text": "🦀".repeat(4096),
-                                "chat": {"id": 1, "type": "private"}}
-                        })
+        let transport = responding(Box::new(|request| {
+            let limit = batch_limit(request).unwrap_or_default();
+            let offset = request
+                .json_payload
+                .as_ref()
+                .and_then(|params| params["offset"].as_i64())
+                .unwrap_or_default();
+            let updates = (0..limit)
+                .map(|index| {
+                    json!({
+                        "update_id": offset + index as i64,
+                        "message": {"message_id": index, "text": "🦀".repeat(4096),
+                            "chat": {"id": 1, "type": "private"}}
                     })
-                    .collect::<Vec<_>>();
-                let body = json!({"ok": true, "result": updates}).to_string();
-                if body.len() > 1_048_576 {
-                    return Err(TransportFailureKind::ResponseTooLarge);
-                }
-                Ok(HttpResponse {
+                })
+                .collect::<Vec<_>>();
+            let body = json!({"ok": true, "result": updates}).to_string();
+            (body.len() <= 1_048_576)
+                .then_some(HttpResponse {
                     status_code: 200,
                     body,
                 })
-            }
-        }
-        let transport = LargeBatchTransport(RefCell::new(Vec::new()));
-        let PollOutcome::Updates(updates) = poll_once_with(&transport, "token", Some(42), 30)?
-        else {
-            return Err("the smaller batch should be readable".into());
-        };
+                .ok_or(TransportFailureKind::ResponseTooLarge)
+        }));
+        let updates = parsed_updates(poll_once_with(&transport, "token", Some(42), 30));
         assert_eq!(updates.len(), 50);
         assert_eq!(updates.first().ok_or("nonempty batch")?.update_id, 42);
         assert_eq!(next_offset(&updates, Some(42)), Some(92));
-        let requests = transport.0.borrow();
+        let requests = transport.requests.borrow();
         assert_eq!(requests.len(), 2);
         assert_eq!(
             requests[0]
@@ -488,37 +498,49 @@ mod tests {
 
     #[test]
     fn an_oversized_single_update_stops_the_bounded_retry() {
-        struct OversizedTransport(RefCell<Vec<u64>>);
-        impl TelegramTransport for OversizedTransport {
-            fn send(
-                &self,
-                request: &TelegramRequest,
-            ) -> Result<HttpResponse, TransportFailureKind> {
-                let params = request
-                    .json_payload
-                    .as_ref()
-                    .ok_or(TransportFailureKind::Request)?;
-                assert_eq!(params["offset"], 42);
-                self.0.borrow_mut().push(
-                    params["limit"]
-                        .as_u64()
-                        .ok_or(TransportFailureKind::Request)?,
-                );
-                Err(TransportFailureKind::ResponseTooLarge)
-            }
-        }
-        let transport = OversizedTransport(RefCell::new(Vec::new()));
+        let transport = responding(Box::new(|_| Err(TransportFailureKind::ResponseTooLarge)));
         assert_eq!(
             poll_once_with(&transport, "token", Some(42), 30),
             Ok(PollOutcome::Retry(PollFailure::Transport {
                 failure: TransportFailureKind::ResponseTooLarge
             }))
         );
-        assert_eq!(*transport.0.borrow(), vec![100, 50, 25, 12, 6, 3, 1]);
+        let requests = transport.requests.borrow();
+        assert_eq!(
+            requests.iter().map(batch_limit).collect::<Vec<_>>(),
+            [100, 50, 25, 12, 6, 3, 1].map(Some)
+        );
+        assert!(requests.iter().all(|request| {
+            request
+                .json_payload
+                .as_ref()
+                .is_some_and(|params| params["offset"] == 42)
+        }));
+    }
+
+    fn parsed_updates(result: Result<PollOutcome, PollingError>) -> Vec<IncomingUpdate> {
+        match result {
+            Ok(PollOutcome::Updates(updates)) => updates,
+            Ok(PollOutcome::Retry(_)) | Err(_) => Vec::new(),
+        }
+    }
+
+    fn message_event(event: &IncomingEvent) -> Option<&IncomingMessage> {
+        match event {
+            IncomingEvent::Message(message) => Some(message),
+            _ => None,
+        }
     }
 
     #[test]
-    fn response_decodes_supported_and_unsupported_updates() {
+    fn test_helpers_reject_retries_errors_and_non_message_events() {
+        assert!(parsed_updates(Err(PollingError::InvalidResponse)).is_empty());
+        assert!(parsed_updates(Ok(PollOutcome::Retry(PollFailure::Conflict))).is_empty());
+        assert_eq!(message_event(&IncomingEvent::Unsupported), None);
+    }
+
+    #[test]
+    fn response_decodes_supported_and_unsupported_updates() -> TestResult {
         let actual = parse_response(
             200,
             r#"{"ok":true,"result":[
@@ -530,15 +552,9 @@ mod tests {
             ]}"#,
         );
         assert!(matches!(&actual, Ok(PollOutcome::Updates(_))));
-        let updates = match actual {
-            Ok(PollOutcome::Updates(updates)) => updates,
-            Ok(PollOutcome::Retry(_)) | Err(_) => Vec::new(),
-        };
+        let updates = parsed_updates(actual);
         assert_eq!(updates.len(), 5);
-        assert!(matches!(updates[0].event, IncomingEvent::Message(_)));
-        let IncomingEvent::Message(message) = &updates[0].event else {
-            return;
-        };
+        let message = message_event(&updates[0].event).ok_or("unexpected missing value")?;
         assert_eq!(
             message.message_id,
             Some(bot_core::telegram_input::MessageId(1))
@@ -565,22 +581,21 @@ mod tests {
             updates[2].event,
             IncomingEvent::PreCheckoutQuery(_)
         ));
-        let IncomingEvent::SuccessfulPayment(payment) = &updates[3].event else {
-            return;
-        };
-        assert_eq!(
-            payment
+        assert!(matches!(
+            &updates[3].event,
+            IncomingEvent::SuccessfulPayment(payment) if payment
                 .get("successful_payment")
                 .and_then(Value::as_object)
-                .and_then(|payment| payment.get("telegram_payment_charge_id")),
-            Some(&json!("charge-1"))
-        );
+                .and_then(|payment| payment.get("telegram_payment_charge_id"))
+                == Some(&json!("charge-1"))
+        ));
         assert_eq!(updates[4].event, IncomingEvent::Unsupported);
         assert_eq!(next_offset(&updates, None), Some(15));
+        Ok(())
     }
 
     #[test]
-    fn message_envelope_normalizes_identity_locale_and_content_fields() {
+    fn message_envelope_normalizes_identity_locale_and_content_fields() -> TestResult {
         let actual = parse_response(
             200,
             r#"{"ok":true,"result":[
@@ -600,12 +615,8 @@ mod tests {
                 }}
             ]}"#,
         );
-        let Ok(PollOutcome::Updates(updates)) = actual else {
-            return;
-        };
-        let IncomingEvent::Message(first) = &updates[0].event else {
-            return;
-        };
+        let updates = parsed_updates(actual);
+        let first = message_event(&updates[0].event).ok_or("unexpected missing value")?;
         assert_eq!(
             first.message_id,
             Some(bot_core::telegram_input::MessageId(7))
@@ -628,26 +639,21 @@ mod tests {
             )),
             Some(("/convertbase 101, 2, 10", Some("large"), Some("voice-1")))
         );
-        let IncomingEvent::Message(second) = &updates[1].event else {
-            return;
-        };
+        let second = message_event(&updates[1].event).ok_or("unexpected missing value")?;
         assert_eq!(second.sender_language_code, None);
         assert!(!second.has_reply);
         assert_eq!(second.content, None);
+        Ok(())
     }
 
     #[test]
-    fn captioned_media_command_keeps_direct_audio_without_a_reply() {
+    fn captioned_media_command_keeps_direct_audio_without_a_reply() -> TestResult {
         let actual = parse_response(
             200,
             r#"{"ok":true,"result":[{"update_id":30,"message":{"message_id":9,"chat":{"id":42,"type":"private"},"from":{"id":88},"caption":" /transcribe ","voice":{"file_id":"direct-voice","duration":"4"}}}]}"#,
         );
-        let Ok(PollOutcome::Updates(updates)) = actual else {
-            return;
-        };
-        let IncomingEvent::Message(message) = &updates[0].event else {
-            return;
-        };
+        let updates = parsed_updates(actual);
+        let message = message_event(&updates[0].event).ok_or("unexpected missing value")?;
 
         assert!(!message.has_reply);
         assert_eq!(message.audio_media_kind.as_deref(), Some("voice"));
@@ -659,20 +665,17 @@ mod tests {
                 .map(|content| (content.text.as_str(), content.audio_file_id.as_deref())),
             Some(("/transcribe", Some("direct-voice")))
         );
+        Ok(())
     }
 
     #[test]
-    fn telegram_animation_is_exposed_as_visual_media() {
+    fn telegram_animation_is_exposed_as_visual_media() -> TestResult {
         let actual = parse_response(
             200,
             r#"{"ok":true,"result":[{"update_id":31,"message":{"message_id":10,"chat":{"id":42,"type":"private"},"from":{"id":88},"caption":"/transcript","animation":{"file_id":"synthetic-animation"}}}]}"#,
         );
-        let Ok(PollOutcome::Updates(updates)) = actual else {
-            return;
-        };
-        let IncomingEvent::Message(message) = &updates[0].event else {
-            return;
-        };
+        let updates = parsed_updates(actual);
+        let message = message_event(&updates[0].event).ok_or("unexpected missing value")?;
 
         assert_eq!(message.visual_media_kind.as_deref(), Some("animation"));
         assert_eq!(
@@ -682,20 +685,17 @@ mod tests {
                 .and_then(|content| content.photo_file_id.as_deref()),
             Some("synthetic-animation")
         );
+        Ok(())
     }
 
     #[test]
-    fn replied_animations_preserve_file_identity_without_audio() {
+    fn replied_animations_preserve_file_identity_without_audio() -> TestResult {
         let result = parse_response(
             200,
             r#"{"ok":true,"result":[{"update_id":32,"message":{"message_id":11,"chat":{"id":42,"type":"private"},"from":{"id":88},"text":"/transcript","reply_to_message":{"message_id":10,"caption":"synthetic GIF","animation":{"file_id":"synthetic-animation","duration":5}}}}]}"#,
         );
-        let Ok(PollOutcome::Updates(updates)) = result else {
-            unreachable!("expected a parsed animation reply");
-        };
-        let IncomingEvent::Message(message) = &updates[0].event else {
-            unreachable!("expected a message event");
-        };
+        let updates = parsed_updates(result);
+        let message = message_event(&updates[0].event).ok_or("unexpected missing value")?;
         assert!(message.has_reply);
         assert_eq!(message.replied_message_id, Some(MessageId(10)));
         assert_eq!(message.replied_text.as_deref(), Some("synthetic GIF"));
@@ -710,10 +710,11 @@ mod tests {
                 audio_file_id: None,
             })
         );
+        Ok(())
     }
 
     #[test]
-    fn media_duration_accepts_numbers_and_strings_and_ignores_invalid_types() {
+    fn media_duration_accepts_numbers_and_strings_and_ignores_invalid_types() -> TestResult {
         for (duration, expected) in [
             (serde_json::json!(4), Some(4)),
             (serde_json::json!(4.75), Some(4)),
@@ -730,16 +731,12 @@ mod tests {
                     "caption": "/transcribe", "voice": {"file_id": "synthetic-voice", "duration": duration}
                 }}]
             });
-            let Ok(PollOutcome::Updates(updates)) = parse_response(200, &payload.to_string())
-            else {
-                unreachable!("expected a parsed media update");
-            };
-            let IncomingEvent::Message(message) = &updates[0].event else {
-                unreachable!("expected a media message");
-            };
+            let updates = parsed_updates(parse_response(200, &payload.to_string()));
+            let message = message_event(&updates[0].event).ok_or("unexpected missing value")?;
             assert_eq!(message.audio_duration_seconds, expected);
             assert_eq!(message.audio_media_kind.as_deref(), Some("voice"));
         }
+        Ok(())
     }
 
     #[test]
@@ -815,10 +812,7 @@ mod tests {
             r#"{"ok":true,"result":[{"update_id":8},{"update_id":3}]}"#,
         );
         assert!(matches!(&first, Ok(PollOutcome::Updates(_))));
-        let updates = match first {
-            Ok(PollOutcome::Updates(updates)) => updates,
-            Ok(PollOutcome::Retry(_)) | Err(_) => Vec::new(),
-        };
+        let updates = parsed_updates(first);
         assert_eq!(next_offset(&updates, Some(2)), Some(9));
 
         let overflow = parse_response(
@@ -826,10 +820,7 @@ mod tests {
             &format!(r#"{{"ok":true,"result":[{{"update_id":{}}}]}}"#, i64::MAX),
         );
         assert!(matches!(&overflow, Ok(PollOutcome::Updates(_))));
-        let updates = match overflow {
-            Ok(PollOutcome::Updates(updates)) => updates,
-            Ok(PollOutcome::Retry(_)) | Err(_) => Vec::new(),
-        };
+        let updates = parsed_updates(overflow);
         assert_eq!(next_offset(&updates, Some(5)), Some(5));
     }
 }

@@ -109,20 +109,19 @@ pub fn is_social_frontend(host: &str) -> bool {
 
 #[must_use]
 pub fn has_replaceable_link(text: &str) -> bool {
-    let Some(pattern) = HTTP_URL.as_ref() else {
-        return false;
-    };
-    pattern.find_iter(text).any(|matched| {
-        let raw = matched.as_str().trim_matches(
-            &[
-                '(', ')', '[', ']', '{', '}', '<', '>', '"', '\'', '.', ',', ';', '!', '?',
-            ][..],
-        );
-        Url::parse(raw).is_ok_and(|url| {
-            let host = normalized_host(&url);
-            REPLACEABLE_HOSTS
-                .iter()
-                .any(|domain| host_matches(&host, domain))
+    HTTP_URL.as_ref().is_some_and(|pattern| {
+        pattern.find_iter(text).any(|matched| {
+            let raw = matched.as_str().trim_matches(
+                &[
+                    '(', ')', '[', ']', '{', '}', '<', '>', '"', '\'', '.', ',', ';', '!', '?',
+                ][..],
+            );
+            Url::parse(raw).is_ok_and(|url| {
+                let host = normalized_host(&url);
+                REPLACEABLE_HOSTS
+                    .iter()
+                    .any(|domain| host_matches(&host, domain))
+            })
         })
     })
 }
@@ -182,11 +181,7 @@ fn clean_original(mut url: Url) -> String {
     url.to_string()
 }
 
-fn candidate_urls(url: &Url) -> Vec<Url> {
-    let host = normalized_host(url);
-    let Some(hosts) = replacement_hosts(&host) else {
-        return Vec::new();
-    };
+fn candidate_urls(url: &Url, host: &str, hosts: &[&str]) -> Vec<Url> {
     hosts
         .iter()
         .filter_map(|replacement_host| {
@@ -196,7 +191,7 @@ fn candidate_urls(url: &Url) -> Vec<Url> {
                 |prefix| format!("{prefix}.{replacement_host}"),
             );
             candidate.set_host(Some(&candidate_host)).ok()?;
-            if matches!(host.as_str(), "x.com" | "xcancel.com" | "twitter.com") {
+            if matches!(host, "x.com" | "xcancel.com" | "twitter.com") {
                 let normalized = X_STATUS_PATH
                     .as_ref()?
                     .replace(candidate.path(), "/status/")
@@ -218,25 +213,18 @@ pub fn replace_social_links(
     unix_timestamp: i64,
     mut can_embed: impl FnMut(&str) -> bool,
 ) -> LinkReplacement {
-    let Some(pattern) = HTTP_URL_CASELESS.as_ref() else {
-        return LinkReplacement {
-            text: text.to_owned(),
-            changed: false,
-            original_links: Vec::new(),
-        };
-    };
     let mut changed = false;
     let mut originals = Vec::new();
-    let rewritten = pattern.replace_all(text, |captures: &regex::Captures<'_>| {
+    let mut rewrite = |captures: &regex::Captures<'_>| {
         let original = captures.get(0).map_or("", |value| value.as_str());
         let Ok(url) = Url::parse(original) else {
             return original.to_owned();
         };
         let host = normalized_host(&url);
-        if is_twitter_profile(&url) || replacement_hosts(&host).is_none() {
-            return clean_social_tracking(original);
-        }
-        for mut candidate in candidate_urls(&url) {
+        let Some(hosts) = replacement_hosts(&host).filter(|_| !is_twitter_profile(&url)) else {
+            return clean_social_tracking(url, original);
+        };
+        for mut candidate in candidate_urls(&url, &host, hosts) {
             let probe = candidate.to_string();
             if !can_embed(&probe) {
                 continue;
@@ -252,7 +240,12 @@ pub fn replace_social_links(
             return candidate.to_string();
         }
         original.to_owned()
-    });
+    };
+    let rewritten = HTTP_URL_CASELESS
+        .as_ref()
+        .map_or(std::borrow::Cow::Borrowed(text), |pattern| {
+            pattern.replace_all(text, &mut rewrite)
+        });
     LinkReplacement {
         text: rewritten.into_owned(),
         changed,
@@ -260,10 +253,7 @@ pub fn replace_social_links(
     }
 }
 
-fn clean_social_tracking(raw: &str) -> String {
-    let Ok(mut url) = Url::parse(raw) else {
-        return raw.to_owned();
-    };
+fn clean_social_tracking(mut url: Url, raw: &str) -> String {
     if !is_social_frontend(url.host_str().unwrap_or_default()) {
         return raw.to_owned();
     }
@@ -404,8 +394,40 @@ mod tests {
         replace_social_links, select_unique_urls, trim_detected_url, utf16_slice,
     };
     use crate::locale::Locale;
-    use crate::telegram_actions::TelegramAction;
+    use crate::telegram_actions::{SendMessage, TelegramAction};
     use crate::telegram_input::{ChatId, MessageId};
+
+    /// Every test probes through this one closure type, so `replace_social_links`
+    /// has a single instantiation that the tests cover together.
+    fn replace(
+        text: &str,
+        unix_timestamp: i64,
+        accept: fn(&str) -> bool,
+        probes: &mut Vec<String>,
+    ) -> LinkReplacement {
+        replace_social_links(text, unix_timestamp, |candidate| {
+            probes.push(candidate.to_owned());
+            accept(candidate)
+        })
+    }
+
+    fn sent(action: &TelegramAction) -> Option<&SendMessage> {
+        match action {
+            TelegramAction::SendMessage(message) => Some(message),
+            _ => None,
+        }
+    }
+
+    fn context(shared_by: Option<&str>) -> LinkActionContext<'_> {
+        LinkActionContext {
+            chat_id: ChatId(42),
+            incoming_message_id: MessageId(7),
+            replied_message_id: None,
+            shared_by,
+            locale: Locale::En,
+            link_context: Some(""),
+        }
+    }
 
     #[test]
     fn slices_telegram_utf16_offsets_across_emoji() {
@@ -467,10 +489,7 @@ mod tests {
             "https://old.reddit.com/r/rust/comments/6?x=1"
         );
         let mut probed = Vec::new();
-        let result = replace_social_links(input, 7_200, |candidate| {
-            probed.push(candidate.to_owned());
-            true
-        });
+        let result = replace(input, 7_200, |_| true, &mut probed);
         assert!(result.changed);
         assert_eq!(
             result.text,
@@ -490,13 +509,11 @@ mod tests {
     #[test]
     fn falls_back_between_instagram_frontends_and_keeps_failed_links() {
         let mut probes = Vec::new();
-        let result = replace_social_links(
+        let result = replace(
             "https://instagram.com/p/one https://x.com/a/status/2",
             0,
-            |candidate| {
-                probes.push(candidate.to_owned());
-                candidate.contains("kkinstagram")
-            },
+            |candidate| candidate.contains("kkinstagram"),
+            &mut probes,
         );
         assert_eq!(
             result.text,
@@ -508,25 +525,24 @@ mod tests {
 
     #[test]
     fn skips_twitter_profiles_and_preserves_non_social_urls() {
-        let mut calls = 0;
-        let result = replace_social_links(
-            "https://twitter.com/alice/media?x=1 https://example.com/?x=1",
+        let mut probes = Vec::new();
+        let result = replace(
+            "https://twitter.com/alice/media?x=1 https://example.com/?x=1 https://bsky.app/profile/a/post/1",
             0,
-            |_| {
-                calls += 1;
-                true
-            },
+            |_| false,
+            &mut probes,
         );
         assert_eq!(
             result.text,
-            "https://twitter.com/alice/media https://example.com/?x=1"
+            "https://twitter.com/alice/media https://example.com/?x=1 https://bsky.app/profile/a/post/1"
         );
         assert!(!result.changed);
-        assert_eq!(calls, 0);
+        // Only the post link is probed; the profile and the non-social URL are not.
+        assert_eq!(probes, vec!["https://fxbsky.app/profile/a/post/1"]);
     }
 
     #[test]
-    fn plans_reply_and_delete_side_effects_with_localized_identity() {
+    fn plans_reply_and_delete_side_effects_with_localized_identity() -> Result<(), String> {
         let replacement = LinkReplacement {
             text: "https://fixupx.com/a/status/1".to_owned(),
             changed: true,
@@ -544,12 +560,8 @@ mod tests {
                 link_context: Some("LINKS DEL MENSAJE"),
             },
         );
-        let Some(reply) = reply else {
-            return;
-        };
-        let TelegramAction::SendMessage(message) = reply.send else {
-            return;
-        };
+        let reply = reply.ok_or("reply plan")?;
+        let message = sent(&reply.send).ok_or("reply message")?;
         assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
         assert_eq!(
             message.text,
@@ -578,12 +590,8 @@ mod tests {
                 link_context: None,
             },
         );
-        let Some(delete) = delete else {
-            return;
-        };
-        let TelegramAction::SendMessage(message) = delete.send else {
-            return;
-        };
+        let delete = delete.ok_or("delete plan")?;
+        let message = sent(&delete.send).ok_or("delete message")?;
         assert_eq!(message.reply_to_message_id, Some(MessageId(3)));
         assert_eq!(
             message.text,
@@ -603,6 +611,7 @@ mod tests {
                 message_id: MessageId(7),
             })
         );
+        Ok(())
     }
 
     #[test]
@@ -646,5 +655,87 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn link_modes_parse_with_reply_as_the_default() {
+        assert_eq!(LinkMode::parse("off"), LinkMode::Off);
+        assert_eq!(LinkMode::parse("delete"), LinkMode::Delete);
+        assert_eq!(LinkMode::parse("reply"), LinkMode::Reply);
+        assert_eq!(LinkMode::parse("anything"), LinkMode::Reply);
+    }
+
+    #[test]
+    fn reserved_x_paths_invalid_urls_and_frontend_buckets_are_handled() {
+        let result = replace(
+            "https://x.com/search?q=rust http://[broken https://kkinstagram.com/p/a?tg=5 https://vxinstagram.com/p/b?igsh=1#top",
+            0,
+            |_| true,
+            &mut Vec::new(),
+        );
+        assert_eq!(
+            result.text,
+            "https://fixupx.com/search http://[broken https://kkinstagram.com/p/a?tg=5 https://vxinstagram.com/p/b"
+        );
+        assert_eq!(result.original_links, vec!["https://x.com/search"]);
+    }
+
+    #[test]
+    fn buttons_name_each_site_and_number_multiple_links() -> Result<(), String> {
+        let replacement = LinkReplacement {
+            text: "rewritten".to_owned(),
+            changed: true,
+            original_links: vec![
+                "https://bsky.app/profile/a/post/1".to_owned(),
+                "https://www.instagram.com/p/2".to_owned(),
+                "https://old.reddit.com/r/rust".to_owned(),
+                "https://news.example/story".to_owned(),
+            ],
+        };
+        for shared_by in [None, Some("")] {
+            let plan = plan_link_actions(&replacement, LinkMode::Delete, context(shared_by))
+                .ok_or("delete plan")?;
+            let message = sent(&plan.send).ok_or("message")?;
+            assert_eq!(message.text, "rewritten");
+            assert_eq!(message.reply_to_message_id, None);
+            assert_eq!(plan.stored_text, "rewritten");
+            let labels = message
+                .reply_markup
+                .as_ref()
+                .map(|markup| {
+                    markup
+                        .inline_keyboard
+                        .iter()
+                        .map(|row| row[0].text.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            assert_eq!(
+                labels,
+                vec![
+                    "Open Bluesky (1)",
+                    "Open Instagram (2)",
+                    "Open Reddit (3)",
+                    "Open news.example (4)"
+                ]
+            );
+        }
+        let no_buttons = LinkReplacement {
+            original_links: Vec::new(),
+            ..replacement
+        };
+        let plan =
+            plan_link_actions(&no_buttons, LinkMode::Reply, context(None)).ok_or("reply plan")?;
+        let message = sent(&plan.send).ok_or("message")?;
+        assert!(message.reply_markup.is_none());
+        assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
+        assert_eq!(
+            sent(&TelegramAction::DeleteMessage {
+                chat_id: ChatId(1),
+                message_id: MessageId(2),
+            }),
+            None
+        );
+        Ok(())
     }
 }

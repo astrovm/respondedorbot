@@ -270,4 +270,81 @@ mod tests {
             "No te alcanza el saldo personal: tenés 0.70 créditos\nProbá con un monto menor o cargá con /topup"
         );
     }
+
+    #[test]
+    fn transfer_guards_are_localized_in_the_other_language() {
+        let private = TransferCommandContext {
+            is_group: false,
+            ..context(Locale::En)
+        };
+        assert_eq!(
+            reply_text(plan_transfer_command("/transfer 1", "", private)),
+            "This command is for groups. Use it there: /transfer <amount>"
+        );
+        let anonymous = TransferCommandContext {
+            user_id: None,
+            ..context(Locale::Es)
+        };
+        assert_eq!(
+            reply_text(plan_transfer_command("/transfer 1", "", anonymous)),
+            "No pude identificar tu usuario o el grupo para transferir"
+        );
+        assert_eq!(
+            reply_text(plan_transfer_command("/transfer", "", context(Locale::En))),
+            "Usage: /transfer <amount>\nExample: /transfer 1.5"
+        );
+        assert_eq!(
+            reply_text(plan_transfer_command(
+                "/transfer 0",
+                "",
+                context(Locale::En)
+            )),
+            "The amount must be greater than 0"
+        );
+        // A transfer plan carries no reply text.
+        assert_eq!(
+            reply_text(plan_transfer_command(
+                "/transfer 1",
+                "",
+                context(Locale::En)
+            )),
+            ""
+        );
+        assert_eq!(
+            transfer_result_reply(
+                100,
+                TransferResult {
+                    transferred: false,
+                    user_balance: 50,
+                    chat_balance: 0,
+                },
+                Locale::Es
+            ),
+            "No te alcanza el saldo personal: tenés 0.50 créditos\nProbá con un monto menor o cargá con /topup"
+        );
+    }
+
+    #[test]
+    fn remaining_transfer_messages_are_localized() {
+        assert_eq!(
+            reply_text(plan_transfer_command(
+                "/transfer 0",
+                "",
+                context(Locale::Es)
+            )),
+            "El monto tiene que ser mayor a 0, no me rompas las bolas"
+        );
+        assert_eq!(
+            transfer_result_reply(
+                100,
+                TransferResult {
+                    transferred: false,
+                    user_balance: 50,
+                    chat_balance: 0,
+                },
+                Locale::En
+            ),
+            "Not enough personal balance: you have 0.50 credits\nTry a smaller amount or add credits with /topup"
+        );
+    }
 }

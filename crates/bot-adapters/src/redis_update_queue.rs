@@ -187,10 +187,41 @@ mod tests {
         assert_eq!(queue.delete_updates(&[10, 11])?, 2);
         queue.quarantine_update(11, "failed")?;
 
-        match server.join() {
-            Ok(result) => result?,
-            Err(_) => return Err("synthetic Redis server panicked".into()),
-        }
+        server
+            .join()
+            .ok()
+            .ok_or("synthetic Redis server panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn non_numeric_update_ids_are_reported_instead_of_dropped()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+            let command = read_command(&mut stream)?;
+            assert_eq!(command, ["HGETALL", "telegram:updates:pending"]);
+            stream.write_all(b"*2\r\n$6\r\nupdate\r\n$7\r\npayload\r\n")?;
+            Ok(())
+        });
+        let queue = RedisUpdateQueue::new(&RedisEndpoint {
+            host: "127.0.0.1".to_owned(),
+            port,
+            password: None,
+        })?;
+
+        let listed = queue.list_updates();
+        assert!(matches!(
+            listed,
+            Err(super::RedisUpdateQueueError::InvalidUpdateId(id)) if id == "update"
+        ));
+        server
+            .join()
+            .ok()
+            .ok_or("synthetic Redis server panicked")??;
         Ok(())
     }
 }

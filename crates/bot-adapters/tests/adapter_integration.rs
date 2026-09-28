@@ -30,8 +30,8 @@ use bot_adapters::telegram_http::{
     self, MultipartUpload, ReqwestTelegramTransport, TelegramHttpError,
 };
 use bot_adapters::token_signal::{
-    BinaryResponse, JsonResponse, ReqwestTokenSignalTransport, TokenSignalAdapter,
-    TokenSignalCache, TokenSignalTransport, render_signal_chart,
+    JsonResponse, ReqwestTokenSignalTransport, TokenSignalAdapter, TokenSignalCache,
+    TokenSignalTransport, render_signal_chart,
 };
 use bot_adapters::weather::ReqwestWeatherTransport;
 use bot_adapters::web_fetch::{HostResolver, ReqwestWebFetchTransport, SystemHostResolver};
@@ -259,7 +259,6 @@ impl TokenSignalCache for Cache {
 struct TransportState {
     json: VecDeque<Result<JsonResponse, String>>,
     post: VecDeque<Result<JsonResponse, String>>,
-    binary: VecDeque<Result<BinaryResponse, String>>,
 }
 
 #[derive(Clone, Default)]
@@ -282,15 +281,6 @@ impl TokenSignalTransport for Transport {
             .post
             .pop_front()
             .unwrap_or_else(|| Err("synthetic POST failure".to_owned()))
-    }
-
-    fn get_binary(&self, _url: &str) -> Result<BinaryResponse, String> {
-        self.0
-            .lock()
-            .map_err(|_| "synthetic transport lock failure".to_owned())?
-            .binary
-            .pop_front()
-            .unwrap_or_else(|| Err("synthetic image failure".to_owned()))
     }
 }
 
@@ -460,16 +450,6 @@ fn token_signal_fallbacks_cover_cached_pairs_symbols_and_image_failures() {
     );
 
     let transport = Transport::default();
-    transport
-        .0
-        .lock()
-        .unwrap_or_else(|_| unreachable!())
-        .binary
-        .push_back(Ok(BinaryResponse {
-            status_code: 200,
-            content_type: "text/plain".to_owned(),
-            body: b"not an image".to_vec(),
-        }));
     let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
     let mut without_chart = signal();
     without_chart.token_image_url = Some("https://example.test/image".to_owned());
@@ -745,29 +725,46 @@ fn public_network_entrypoints_validate_requests_before_provider_io() {
         Err(OpenRouterChatError::MissingApiKey)
     );
 
+    let Ok(telegram) = ReqwestTelegramTransport::new() else {
+        panic!("reqwest Telegram transport should build");
+    };
     assert_eq!(
-        telegram_http::request("synthetic-token", "sendMessage", "POST", None, None, 0),
+        telegram_http::request_with(
+            &telegram,
+            "synthetic-token",
+            "sendMessage",
+            "POST",
+            None,
+            None,
+            0
+        ),
         Err(TelegramHttpError::InvalidTimeout)
     );
     assert_eq!(
-        telegram_http::multipart_request(MultipartUpload {
-            token: "synthetic-token".to_owned(),
-            endpoint: "sendPhoto".to_owned(),
-            data_payload: json!({}),
-            file_field: "photo".to_owned(),
-            file_name: "synthetic.png".to_owned(),
-            file_bytes: vec![1, 2, 3],
-            content_type: "image/png".to_owned(),
-            timeout: Duration::ZERO,
-        }),
+        telegram_http::multipart_request_with(
+            &telegram,
+            MultipartUpload {
+                token: "synthetic-token".to_owned(),
+                endpoint: "sendPhoto".to_owned(),
+                data_payload: json!({}),
+                file_field: "photo".to_owned(),
+                file_name: "synthetic.png".to_owned(),
+                file_bytes: vec![1, 2, 3],
+                content_type: "image/png".to_owned(),
+                timeout: Duration::ZERO,
+            }
+        ),
         Err(TelegramHttpError::InvalidTimeout)
     );
     assert_eq!(
-        telegram_http::download_file("synthetic-token", "synthetic-file", 0),
+        telegram_http::download_file_with(&telegram, "synthetic-token", "synthetic-file", 0),
         Err(TelegramHttpError::InvalidTimeout)
     );
 
-    let inspection = link_preview::inspect("not a URL");
+    let Ok(previews) = ReqwestLinkPreviewTransport::new() else {
+        panic!("reqwest link preview transport should build");
+    };
+    let inspection = link_preview::inspect_with(&previews, "not a URL");
     assert!(!inspection.embeddable);
     assert!(inspection.failure.is_some());
 

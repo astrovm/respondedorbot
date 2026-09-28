@@ -224,10 +224,10 @@ mod tests {
         assert!(queue.release_lock("chat-a", "token")?);
         assert!(queue.quarantine_job("chat-a", "dead-id", "dead-payload")?);
 
-        match server.join() {
-            Ok(result) => result?,
-            Err(_) => return Err("synthetic Redis server panicked".into()),
-        }
+        server
+            .join()
+            .ok()
+            .ok_or("synthetic Redis server panicked")??;
         Ok(())
     }
 

@@ -246,6 +246,8 @@ pub fn load_elections<T: PolymarketTransport, C: RequestCache>(
 
 #[cfg(test)]
 mod tests {
+    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::io::{Read, Write};
@@ -416,12 +418,12 @@ mod tests {
     }
 
     #[test]
-    fn reqwest_transport_preserves_event_query_and_midpoint_batch() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
-        let server = thread::spawn(move || {
+    fn reqwest_transport_preserves_event_query_and_midpoint_batch() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
             for method in ["GET", "POST"] {
-                let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+                let (mut stream, _) = listener.accept()?;
                 let mut request = [0_u8; 8_192];
                 let bytes = stream.read(&mut request).unwrap_or_default();
                 let request = String::from_utf8_lossy(&request[..bytes]);
@@ -445,20 +447,22 @@ mod tests {
                     );
                 }
                 let body = r#"{"synthetic":true}"#;
-                write!(
+                let written = write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
-                )
-                .unwrap_or_else(|_| unreachable!());
+                );
+                written?;
             }
+            Ok(())
         });
         let base = format!("http://{address}");
         let transport = ReqwestPolymarketTransport::with_urls(
             &format!("{base}/events"),
             &format!("{base}/midpoints"),
         )
-        .unwrap_or_else(|_| unreachable!());
+        .ok()
+        .ok_or("unexpected error")?;
         assert!(transport.events().is_ok());
         assert!(
             transport
@@ -467,12 +471,31 @@ mod tests {
                 })
                 .is_ok()
         );
-        assert!(server.join().is_ok());
+        assert!(matches!(server.join(), Ok(Ok(()))));
         let unavailable = ReqwestPolymarketTransport::with_urls(
             "http://127.0.0.1:1/events",
             "http://127.0.0.1:1/midpoints",
         )
-        .unwrap_or_else(|_| unreachable!());
+        .ok()
+        .ok_or("unexpected error")?;
         assert!(unavailable.events().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn reqwest_failures_are_classified_by_cause() {
+        use crate::web_fetch::reqwest_error_fixtures as fixtures;
+        assert_eq!(
+            fixtures::timeout().map(super::classify_error),
+            Some(super::TransportFailureKind::Timeout)
+        );
+        assert_eq!(
+            fixtures::connection().map(super::classify_error),
+            Some(super::TransportFailureKind::Connection)
+        );
+        assert_eq!(
+            fixtures::request().map(super::classify_error),
+            Some(super::TransportFailureKind::Request)
+        );
     }
 }

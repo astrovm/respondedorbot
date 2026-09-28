@@ -182,10 +182,12 @@ pub fn strip_markdown_formatting(text: &str) -> String {
 }
 
 fn regex_replace_all(pattern: &Option<Regex>, text: &str, replacement: &str) -> String {
-    pattern.as_ref().map_or_else(
-        || text.to_owned(),
-        |pattern| pattern.replace_all(text, replacement).into_owned(),
-    )
+    pattern
+        .as_ref()
+        .map_or(std::borrow::Cow::Borrowed(text), |pattern| {
+            pattern.replace_all(text, replacement)
+        })
+        .into_owned()
 }
 
 fn replace_until_stable(pattern: &Option<Regex>, text: &str, replacement: &str) -> String {
@@ -289,5 +291,25 @@ mod tests {
         assert_eq!(strip_markdown_formatting(""), "");
         assert_eq!(strip_leading_context("answer", &[]), "answer");
         assert_eq!(strip_user_identity_prefix("answer", None), "answer");
+    }
+
+    #[test]
+    fn context_and_identity_stripping_stop_at_the_first_non_match() {
+        assert_eq!(
+            strip_leading_context("hola", &[None, Some("  ".to_owned())]),
+            "hola"
+        );
+        assert_eq!(
+            strip_leading_context(
+                "Contexto: resto contexto",
+                &[Some("contexto".to_owned()), Some("otro".to_owned())]
+            ),
+            "resto contexto"
+        );
+        assert_eq!(strip_user_identity_prefix("", Some("Ana")), "");
+        assert_eq!(
+            strip_user_identity_prefix("Beto: hola", Some("Ana")),
+            "Beto: hola"
+        );
     }
 }

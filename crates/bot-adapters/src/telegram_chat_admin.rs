@@ -1,11 +1,14 @@
 //! Telegram `getChatMember` adapter for group-configuration authorization.
 
+use std::time::Duration;
+
+use reqwest::Method;
 use serde::Deserialize;
 use serde_json::json;
 use thiserror::Error;
 
 use crate::telegram_http::{
-    TelegramHttpError, TelegramHttpOutcome, TelegramTransport, request_with,
+    TelegramHttpError, TelegramHttpOutcome, TelegramRequest, TelegramTransport, send_with,
 };
 
 const ADMIN_LOOKUP_TIMEOUT_SECONDS: u64 = 5;
@@ -42,15 +45,17 @@ pub fn lookup_chat_admin_with<Transport: TelegramTransport>(
     chat_id: &str,
     user_id: &str,
 ) -> Result<ChatAdminLookup, ChatAdminLookupError> {
-    let outcome = request_with(
+    let outcome = send_with(
         transport,
-        token,
-        "getChatMember",
-        "GET",
-        Some(json!({"chat_id":chat_id,"user_id":user_id})),
-        None,
-        ADMIN_LOOKUP_TIMEOUT_SECONDS,
-    )?;
+        &TelegramRequest {
+            token: token.to_owned(),
+            endpoint: "getChatMember".to_owned(),
+            method: Method::GET,
+            params: Some(json!({"chat_id":chat_id,"user_id":user_id})),
+            json_payload: None,
+            timeout: Duration::from_secs(ADMIN_LOOKUP_TIMEOUT_SECONDS),
+        },
+    );
     let TelegramHttpOutcome::Response { status_code, body } = outcome else {
         return Ok(ChatAdminLookup {
             is_admin: false,
@@ -143,6 +148,10 @@ mod tests {
             );
             let requests = transport.requests.borrow();
             assert_eq!(requests[0].endpoint, "getChatMember");
+            assert_eq!(requests[0].token, "token");
+            assert_eq!(requests[0].method, reqwest::Method::GET);
+            assert_eq!(requests[0].timeout, std::time::Duration::from_secs(5));
+            assert_eq!(requests[0].json_payload, None);
             assert_eq!(
                 requests[0].params,
                 Some(serde_json::json!({"chat_id":"-42","user_id":"7"}))

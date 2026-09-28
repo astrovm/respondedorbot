@@ -65,7 +65,7 @@ impl ReqwestHackerNewsTransport {
             Client::builder().timeout(Duration::from_secs(10)).build()
         })
         .map(|client| Self { client })
-        .map_err(|error| HackerNewsTransportError::Other(error.to_string()))
+        .map_err(classify_error)
     }
 }
 
@@ -121,15 +121,11 @@ pub fn load_hacker_news<T: HackerNewsTransport, C: HackerNewsCache>(
     };
     match parse_feed(&response.body, MAX_ITEMS) {
         Ok(items) if !items.is_empty() => {
-            match serde_json::to_string(&items) {
-                Ok(payload) => {
-                    if let Err(error) = cache.set(CACHE_KEY, &payload, CACHE_TTL_SECONDS) {
-                        diagnostics.push(format!("could not write Hacker News cache: {error}"));
-                    }
-                }
-                Err(error) => {
-                    diagnostics.push(format!("could not encode Hacker News cache: {error}"))
-                }
+            // Plain string/number items always serialize.
+            if let Ok(payload) = serde_json::to_string(&items)
+                && let Err(error) = cache.set(CACHE_KEY, &payload, CACHE_TTL_SECONDS)
+            {
+                diagnostics.push(format!("could not write Hacker News cache: {error}"));
             }
             HackerNewsLoad {
                 items: items.into_iter().take(limit).collect(),
@@ -212,11 +208,12 @@ pub fn parse_feed(body: &str, max_items: usize) -> Result<Vec<HackerNewsItem>, S
                 _ => {}
             },
             Ok(Event::Text(text)) if in_item => {
-                let decoded =
-                    quick_xml::escape::unescape(&text).map_err(|error| error.to_string())?;
+                // The reader reports entity and character references as separate
+                // `GeneralRef` events, so text events carry no escapes.
+                let decoded: &str = &text;
                 append_field(
                     field.as_deref(),
-                    &decoded,
+                    decoded,
                     &mut title,
                     &mut link,
                     &mut description,
@@ -292,6 +289,8 @@ fn append_field(
 
 #[cfg(test)]
 mod tests {
+    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::io::{Read, Write};
@@ -375,29 +374,29 @@ mod tests {
     }
 
     #[test]
-    fn reqwest_transport_reads_status_and_body_from_an_injected_url() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+    fn reqwest_transport_reads_status_and_body_from_an_injected_url() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
+            let (mut stream, _) = listener.accept()?;
             let mut request = [0_u8; 1_024];
             let bytes = stream.read(&mut request).unwrap_or_default();
             assert!(String::from_utf8_lossy(&request[..bytes]).starts_with("GET /feed HTTP/1.1"));
             let body = "synthetic feed";
-            write!(
+            let written = write!(
                 stream,
                 "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
-            )
-            .unwrap_or_else(|_| unreachable!());
+            );
+            written?;
+            Ok(())
         });
-        let transport = ReqwestHackerNewsTransport::new().unwrap_or_else(|_| unreachable!());
-        let response = transport
-            .get(&format!("http://{address}/feed"))
-            .unwrap_or_else(|_| unreachable!());
+        let transport = ReqwestHackerNewsTransport::new()?;
+        let response = transport.get(&format!("http://{address}/feed"))?;
         assert_eq!(response.status_code, 206);
         assert_eq!(response.body, "synthetic feed");
-        assert!(server.join().is_ok());
+        assert!(matches!(server.join(), Ok(Ok(()))));
+        Ok(())
     }
 
     #[test]
@@ -486,9 +485,139 @@ mod tests {
         );
 
         assert!(parse_feed("<rss><item><title>&unknown;</title></item></rss>", 1).is_err());
+        assert!(parse_feed("<rss><item><title>&#xZZ;</title></item></rss>", 1).is_err());
+        assert_eq!(
+            parse_feed(
+                "<rss><item><title>t</title><link>https://example.test/a</link><description>Points: 99999999999999999999</description></item></rss>",
+                1
+            ),
+            Err("feed metadata integer is outside the supported range".to_owned())
+        );
+        assert_eq!(
+            parse_feed(
+                "<rss><item><title>Caf&#233; &#x41;PI</title><link>https://example.test/a</link></item></rss>",
+                1
+            )
+            .map(|items| items.into_iter().map(|item| item.title).collect::<Vec<_>>()),
+            Ok(vec!["Caf\u{e9} API".to_owned()])
+        );
         assert!(
             parse_feed("<rss><item><title></title></item></rss>", 1)
                 .is_ok_and(|items| items.is_empty())
         );
+    }
+
+    #[test]
+    fn exhausted_feeds_keep_the_previous_cache_and_report_each_url() {
+        let transport = Transport {
+            responses: RefCell::new(vec![
+                Ok(HackerNewsResponse {
+                    status_code: 503,
+                    body: String::new(),
+                }),
+                Err(HackerNewsTransportError::Timeout),
+            ]),
+            urls: RefCell::new(Vec::new()),
+        };
+        let mut cache = Cache::default();
+        cache.values.insert(CACHE_KEY.to_owned(), "[]".to_owned());
+        let load = load_hacker_news(&transport, &mut cache, 5);
+        assert!(load.items.is_empty());
+        assert_eq!(load.diagnostics.len(), 2);
+        assert!(load.diagnostics[0].contains("returned HTTP 503"));
+        assert!(load.diagnostics[1].contains("timed out"));
+        assert_eq!(*transport.urls.borrow(), [PRIMARY_URL, FALLBACK_URL]);
+        assert!(cache.writes.is_empty());
+    }
+
+    #[test]
+    fn reqwest_transport_reports_truncated_feed_bodies()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(
+            move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                let (mut stream, _) = listener.accept()?;
+                let mut request = [0_u8; 1_024];
+                let _ = stream.read(&mut request)?;
+                let truncated =
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n<rss>";
+                stream.write_all(truncated)?;
+                Ok(())
+            },
+        );
+        let transport = ReqwestHackerNewsTransport::new()?;
+        assert!(matches!(
+            transport.get(&format!("http://{address}/rss")),
+            Err(HackerNewsTransportError::Other(detail)) if !detail.is_empty()
+        ));
+        assert!(matches!(server.join(), Ok(Ok(()))));
+        Ok(())
+    }
+
+    #[test]
+    fn redis_json_cache_implements_the_hacker_news_cache_contract()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use crate::redis_connection::{RedisEndpoint, test_support::read_command};
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        let server = thread::spawn(
+            move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                let (mut stream, _) = listener.accept()?;
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
+                for (expected, response) in [
+                    (vec!["GET", CACHE_KEY], b"$2\r\n[]\r\n".as_slice()),
+                    (vec!["SETEX", CACHE_KEY, "60", "[1]"], b"+OK\r\n".as_slice()),
+                ] {
+                    assert_eq!(read_command(&mut stream)?, expected);
+                    stream.write_all(response)?;
+                }
+                Ok(())
+            },
+        );
+        let endpoint = |port| RedisEndpoint {
+            host: "127.0.0.1".to_owned(),
+            port,
+            password: None,
+        };
+        let mut cache = RedisJsonCache::new(&endpoint(port))?;
+        assert_eq!(
+            HackerNewsCache::get(&mut cache, CACHE_KEY),
+            Ok(Some("[]".to_owned()))
+        );
+        assert_eq!(
+            HackerNewsCache::set(&mut cache, CACHE_KEY, "[1]", 60),
+            Ok(())
+        );
+        assert!(
+            HackerNewsCache::set(&mut cache, CACHE_KEY, "[1]", -1)
+                .is_err_and(|error| error.contains("non-negative"))
+        );
+        assert!(server.join().is_ok_and(|result| result.is_ok()));
+
+        let closed_port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
+        let mut offline = RedisJsonCache::new(&endpoint(closed_port))?;
+        assert!(
+            HackerNewsCache::get(&mut offline, CACHE_KEY)
+                .is_err_and(|error| error.contains("Redis JSON-cache operation failed"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reqwest_failures_are_classified_by_cause() {
+        use crate::web_fetch::reqwest_error_fixtures as fixtures;
+        assert_eq!(
+            fixtures::timeout().map(super::classify_error),
+            Some(super::HackerNewsTransportError::Timeout)
+        );
+        assert_eq!(
+            fixtures::connection().map(super::classify_error),
+            Some(super::HackerNewsTransportError::Connection)
+        );
+        assert!(matches!(
+            fixtures::request().map(super::classify_error),
+            Some(super::HackerNewsTransportError::Other(detail)) if detail.contains("builder error")
+        ));
     }
 }

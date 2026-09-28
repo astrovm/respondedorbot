@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use bot_adapters::billing_schema::BillingSchemaRepository;
 use bot_adapters::openrouter_chat::{DEFAULT_OPENROUTER_BASE_URL, OpenRouterPricingCache};
-use bot_adapters::telegram_http::ReqwestTelegramTransport;
+use bot_adapters::telegram_http::{ReqwestTelegramTransport, TransportFailureKind};
 use bot_adapters::telegram_polling::PollFailure;
 use bot_core::locale::Locale;
 use bot_core::telegram_commands::command_publication_actions;
@@ -104,10 +104,65 @@ where
                 }
             }
             Ok(StepOutcome::Idle | StepOutcome::Dispatched { .. }) => last_poll_failure = None,
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(error_text(error)),
         }
     }
     Ok(())
+}
+
+/// Polls until a shutdown signal or `failed` asks to stop, reporting poll
+/// retries and update failures to the admin in the background.
+fn poll_until_stopped<Source, Handler>(
+    runtime: &mut PollingRuntime<Source, Handler>,
+    stopping: &AtomicBool,
+    failed: impl Fn() -> bool,
+    reports: &BackgroundReports,
+) -> Result<(), String>
+where
+    Source: UpdateSource,
+    Handler: UpdateHandler,
+    Handler::Error: Display,
+{
+    run_polling_until(
+        runtime,
+        || stopping.load(Ordering::Acquire) || failed(),
+        |duration| interruptible_wait(stopping, duration),
+        |failure| log_and_queue(reports, poll_retry_report(failure)),
+        |update_id, error| log_and_queue(reports, update_failure_report(update_id, error)),
+    )
+}
+
+fn error_text(error: impl Display) -> String {
+    error.to_string()
+}
+
+fn telegram_transport(
+    built: Result<ReqwestTelegramTransport, TransportFailureKind>,
+    purpose: &str,
+) -> Result<ReqwestTelegramTransport, String> {
+    match built {
+        Ok(transport) => Ok(transport),
+        Err(error) => Err(format!(
+            "could not construct {purpose} transport: {error:?}"
+        )),
+    }
+}
+
+type ShutdownHandler = Box<dyn FnMut() + Send>;
+type ShutdownInstaller = fn(ShutdownHandler) -> Result<(), ctrlc::Error>;
+
+fn install_shutdown_handler(
+    stopping: &Arc<AtomicBool>,
+    install: ShutdownInstaller,
+) -> Result<(), String> {
+    let signal_stopping = Arc::clone(stopping);
+    let handler: ShutdownHandler = Box::new(move || signal_stopping.store(true, Ordering::Release));
+    match install(handler) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(format!(
+            "could not install shutdown signal handler: {error}"
+        )),
+    }
 }
 
 fn interruptible_wait(stopping: &AtomicBool, duration: Duration) {
@@ -127,8 +182,7 @@ fn build_operational_reporter(
     let Some(admin_chat_id) = config.admin_user_id else {
         return Ok(Arc::new(NoopOperationalReporter));
     };
-    let transport = ReqwestTelegramTransport::new()
-        .map_err(|error| format!("could not construct admin reporting transport: {error:?}"))?;
+    let transport = telegram_transport(ReqwestTelegramTransport::new(), "admin reporting")?;
     let secrets = [
         Some(config.runtime.telegram_token()),
         Some(config.database_url()),
@@ -152,6 +206,25 @@ fn build_operational_reporter(
         secrets,
         Locale::Es,
     )))
+}
+
+fn poll_retry_report(failure: &PollFailure) -> OperationalReport {
+    OperationalReport::new(
+        format!("reintento del sondeo de Telegram: {failure:?}"),
+        format!("Telegram polling retry: {failure:?}"),
+    )
+}
+
+fn update_failure_report(update_id: i64, error: &str) -> OperationalReport {
+    OperationalReport::new(
+        format!("falló la actualización {update_id} de Telegram: {error}"),
+        format!("Telegram update {update_id} failed: {error}"),
+    )
+}
+
+fn log_and_queue(reports: &BackgroundReports, report: OperationalReport) {
+    eprintln!("{}", report.english());
+    reports.report(report);
 }
 
 fn report_best_effort(reporter: &dyn OperationalReporter, report: &OperationalReport) {
@@ -226,7 +299,7 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
         .unwrap_or(DEFAULT_OPENROUTER_BASE_URL);
     let openrouter_pricing = Arc::new(
         OpenRouterPricingCache::new(config.openrouter_api_key(), openrouter_base_url)
-            .map_err(|error| error.to_string())?,
+            .map_err(error_text)?,
     );
     let mut runtime = build_native_runtime(NativeRuntimeOptions {
         token: config.runtime.telegram_token(),
@@ -249,7 +322,7 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
         active_operations: active_operations.clone(),
         telegram_delivery: telegram_delivery.clone(),
     })
-    .map_err(|error| error.to_string())?;
+    .map_err(error_text)?;
     let specs = build_production_background_specs(ProductionBackgroundOptions {
         redis_endpoint: &config.redis_endpoint,
         database_url: config.database_url(),
@@ -268,43 +341,25 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
         telegram_delivery: telegram_delivery.clone(),
     })?;
     let mut supervisor =
-        BackgroundSupervisor::start(specs, reporter.clone()).map_err(|error| error.to_string())?;
+        BackgroundSupervisor::start(specs, reporter.clone()).map_err(error_text)?;
     let mut reports = BackgroundReports::start(reporter, OPERATIONAL_REPORT_QUEUE_CAPACITY);
 
-    let command_transport = ReqwestTelegramTransport::new()
-        .map_err(|error| format!("could not construct command publication transport: {error:?}"))?;
+    let command_transport =
+        telegram_transport(ReqwestTelegramTransport::new(), "command publication")?;
     let mut command_sink =
         TelegramActionSink::new(command_transport, config.runtime.telegram_token())
             .with_delivery_coordinator(telegram_delivery);
     for diagnostic in publish_commands(&mut command_sink) {
-        eprintln!("{}", diagnostic.english());
-        reports.report(diagnostic);
+        log_and_queue(&reports, diagnostic);
     }
 
     let stopping = Arc::new(AtomicBool::new(false));
-    let signal_stopping = stopping.clone();
-    ctrlc::set_handler(move || signal_stopping.store(true, Ordering::Release))
-        .map_err(|error| format!("could not install shutdown signal handler: {error}"))?;
-    let polling_result = run_polling_until(
+    install_shutdown_handler(&stopping, ctrlc::set_handler::<ShutdownHandler>)?;
+    let polling_result = poll_until_stopped(
         &mut runtime,
-        || stopping.load(Ordering::Acquire) || supervisor.has_failed(),
-        |duration| interruptible_wait(&stopping, duration),
-        |failure| {
-            let report = OperationalReport::new(
-                format!("reintento del sondeo de Telegram: {failure:?}"),
-                format!("Telegram polling retry: {failure:?}"),
-            );
-            eprintln!("{}", report.english());
-            reports.report(report);
-        },
-        |update_id, error| {
-            let report = OperationalReport::new(
-                format!("falló la actualización {update_id} de Telegram: {error}"),
-                format!("Telegram update {update_id} failed: {error}"),
-            );
-            eprintln!("{}", report.english());
-            reports.report(report);
-        },
+        &stopping,
+        || supervisor.has_failed(),
+        &reports,
     );
     if let Err(error) = &polling_result {
         let report = OperationalReport::new(
@@ -314,7 +369,7 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
         reports.report(report);
     }
     runtime.shutdown();
-    let shutdown_result = supervisor.stop().map_err(|error| error.to_string());
+    let shutdown_result = supervisor.stop().map_err(error_text);
     reports.shutdown();
     polling_result.and(shutdown_result)
 }
@@ -327,7 +382,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    use bot_adapters::telegram_http::TransportFailureKind;
+    use bot_adapters::telegram_http::{ReqwestTelegramTransport, TransportFailureKind};
     use bot_adapters::telegram_polling::{
         IncomingEvent, IncomingUpdate, PollFailure, PollOutcome, PollingError,
     };
@@ -335,8 +390,10 @@ mod tests {
     use bot_core::telegram_actions::TelegramAction;
 
     use super::{
-        BackgroundReports, build_operational_reporter, interruptible_wait, publish_commands,
-        report_best_effort, retry_delay, run_polling_until,
+        BackgroundReports, ShutdownHandler, build_operational_reporter, install_shutdown_handler,
+        interruptible_wait, log_and_queue, poll_retry_report, poll_until_stopped, publish_commands,
+        report_best_effort, retry_delay, run_polling_until, telegram_transport,
+        update_failure_report,
     };
     use crate::config::ProductionConfig;
     use crate::dispatcher::{ActionReceipt, ActionSink};
@@ -445,136 +502,159 @@ mod tests {
         );
     }
 
-    #[test]
-    fn handler_failures_are_reported_unacknowledged_and_do_not_stop_polling() {
-        struct Source {
-            outcomes: VecDeque<Result<PollOutcome, PollingError>>,
-            offsets: Rc<RefCell<Vec<Option<i64>>>>,
+    struct ScriptedSource {
+        outcomes: VecDeque<Result<PollOutcome, PollingError>>,
+        offsets: Rc<RefCell<Vec<Option<i64>>>>,
+    }
+
+    impl UpdateSource for ScriptedSource {
+        fn poll(&mut self, offset: Option<i64>) -> Result<PollOutcome, PollingError> {
+            self.offsets.borrow_mut().push(offset);
+            self.outcomes
+                .pop_front()
+                .unwrap_or(Ok(PollOutcome::Updates(Vec::new())))
         }
-        impl UpdateSource for Source {
-            fn poll(&mut self, offset: Option<i64>) -> Result<PollOutcome, PollingError> {
-                self.offsets.borrow_mut().push(offset);
-                self.outcomes
-                    .pop_front()
-                    .unwrap_or(Ok(PollOutcome::Updates(Vec::new())))
+    }
+
+    struct ScriptedHandler {
+        failing: Vec<i64>,
+        handled: Rc<RefCell<Vec<i64>>>,
+    }
+
+    impl UpdateHandler for ScriptedHandler {
+        type Error = &'static str;
+        fn handle(&mut self, update: IncomingUpdate) -> Result<(), Self::Error> {
+            if self.failing.contains(&update.update_id) {
+                return Err("synthetic handler failure");
             }
+            self.handled.borrow_mut().push(update.update_id);
+            Ok(())
         }
-        struct Handler {
-            handled: Rc<RefCell<Vec<i64>>>,
-        }
-        impl UpdateHandler for Handler {
-            type Error = &'static str;
-            fn handle(&mut self, update: IncomingUpdate) -> Result<(), Self::Error> {
-                if update.update_id == 11 {
-                    return Err("synthetic action failure");
-                }
-                self.handled.borrow_mut().push(update.update_id);
-                Ok(())
-            }
-        }
-        let update = |update_id| IncomingUpdate {
-            update_id,
-            event: IncomingEvent::Unsupported,
-        };
+    }
+
+    type ScriptedRuntime = PollingRuntime<ScriptedSource, ScriptedHandler>;
+    type SharedOffsets = Rc<RefCell<Vec<Option<i64>>>>;
+    type SharedHandled = Rc<RefCell<Vec<i64>>>;
+
+    fn scripted_runtime(
+        outcomes: Vec<Result<PollOutcome, PollingError>>,
+        failing: Vec<i64>,
+    ) -> (ScriptedRuntime, SharedOffsets, SharedHandled) {
         let offsets = Rc::new(RefCell::new(Vec::new()));
         let handled = Rc::new(RefCell::new(Vec::new()));
-        let source = Source {
-            outcomes: VecDeque::from([
-                Ok(PollOutcome::Updates(vec![update(10), update(11)])),
-                Ok(PollOutcome::Updates(vec![update(10), update(11)])),
-                Ok(PollOutcome::Updates(vec![update(10), update(11)])),
-                Ok(PollOutcome::Updates(vec![update(12)])),
-            ]),
-            offsets: offsets.clone(),
-        };
-        let mut runtime = PollingRuntime::new(
-            source,
-            Handler {
-                handled: handled.clone(),
+        let runtime = PollingRuntime::new(
+            ScriptedSource {
+                outcomes: VecDeque::from(outcomes),
+                offsets: Rc::clone(&offsets),
+            },
+            ScriptedHandler {
+                failing,
+                handled: Rc::clone(&handled),
             },
         );
+        (runtime, offsets, handled)
+    }
+
+    #[derive(Debug, Default, PartialEq)]
+    struct PollingLog {
+        waits: Vec<Duration>,
+        retries: Vec<PollFailure>,
+        failures: Vec<(i64, String)>,
+    }
+
+    /// Runs `steps` polling iterations, recording every callback.
+    fn poll_steps(runtime: &mut ScriptedRuntime, steps: usize) -> (Result<(), String>, PollingLog) {
+        let log = RefCell::new(PollingLog::default());
         let iterations = Cell::new(0);
-        let failures = RefCell::new(Vec::new());
         let result = run_polling_until(
-            &mut runtime,
+            runtime,
             || {
                 let current = iterations.get();
                 iterations.set(current + 1);
-                current >= 4
+                current >= steps
             },
-            |_| {},
-            |_| {},
-            |update_id, error| failures.borrow_mut().push((update_id, error.to_owned())),
+            |duration| log.borrow_mut().waits.push(duration),
+            |failure| log.borrow_mut().retries.push(failure.clone()),
+            |update_id, error| {
+                log.borrow_mut()
+                    .failures
+                    .push((update_id, error.to_owned()))
+            },
         );
+        (result, log.into_inner())
+    }
+
+    fn update(update_id: i64) -> IncomingUpdate {
+        IncomingUpdate {
+            update_id,
+            event: IncomingEvent::Unsupported,
+        }
+    }
+
+    #[test]
+    fn handler_failures_are_reported_unacknowledged_and_do_not_stop_polling() {
+        let (mut runtime, offsets, handled) = scripted_runtime(
+            vec![
+                Ok(PollOutcome::Updates(vec![update(10), update(11)])),
+                Ok(PollOutcome::Retry(PollFailure::Conflict)),
+                Ok(PollOutcome::Updates(vec![update(10), update(11)])),
+                Ok(PollOutcome::Updates(vec![update(10), update(11)])),
+                Ok(PollOutcome::Updates(vec![update(12)])),
+            ],
+            vec![11],
+        );
+        let (result, log) = poll_steps(&mut runtime, 5);
         assert_eq!(result, Ok(()));
+        // A conflicting poller between attempts is waited out and reported.
+        assert_eq!(log.waits, [Duration::from_secs(1)]);
+        assert_eq!(log.retries, [PollFailure::Conflict]);
         assert_eq!(*handled.borrow(), [10, 12]);
         assert_eq!(
-            *failures.borrow(),
+            log.failures,
             [
-                (11, "synthetic action failure".to_owned()),
-                (11, "synthetic action failure".to_owned()),
+                (11, "synthetic handler failure".to_owned()),
+                (11, "synthetic handler failure".to_owned()),
                 (
                     11,
-                    "quarantined after repeated failures: synthetic action failure".to_owned()
+                    "quarantined after repeated failures: synthetic handler failure".to_owned()
                 ),
             ]
         );
-        assert_eq!(*offsets.borrow(), [None, None, None, Some(12)]);
+        assert_eq!(*offsets.borrow(), [None, None, None, None, Some(12)]);
         assert_eq!(runtime.offset(), Some(13));
     }
 
     #[test]
     fn polling_retries_are_reported_once_until_a_success_resets_the_failure() {
-        struct Source {
-            outcomes: VecDeque<Result<PollOutcome, PollingError>>,
-        }
-        impl UpdateSource for Source {
-            fn poll(&mut self, _: Option<i64>) -> Result<PollOutcome, PollingError> {
-                self.outcomes
-                    .pop_front()
-                    .unwrap_or(Ok(PollOutcome::Updates(Vec::new())))
-            }
-        }
-        struct Handler;
-        impl UpdateHandler for Handler {
-            type Error = &'static str;
-            fn handle(&mut self, _: IncomingUpdate) -> Result<(), Self::Error> {
-                Ok(())
-            }
-        }
-
         let failure = PollFailure::Transport {
             failure: TransportFailureKind::Request,
         };
-        let source = Source {
-            outcomes: VecDeque::from([
+        let (mut runtime, _, _) = scripted_runtime(
+            vec![
                 Ok(PollOutcome::Updates(Vec::new())),
                 Ok(PollOutcome::Retry(failure.clone())),
                 Ok(PollOutcome::Retry(failure.clone())),
-                Ok(PollOutcome::Updates(Vec::new())),
+                Ok(PollOutcome::Updates(vec![update(5)])),
                 Ok(PollOutcome::Retry(failure.clone())),
-            ]),
-        };
-        let mut runtime = PollingRuntime::new(source, Handler);
-        let iterations = Cell::new(0);
-        let reports = RefCell::new(Vec::new());
-        let waits = Cell::new(0);
-        assert_eq!(
-            run_polling_until(
-                &mut runtime,
-                || {
-                    let current = iterations.get();
-                    iterations.set(current + 1);
-                    current >= 5
-                },
-                |_| waits.set(waits.get() + 1),
-                |failure| reports.borrow_mut().push(failure.clone()),
-                |_, _| {},
-            ),
-            Ok(())
+            ],
+            vec![5],
         );
-        assert_eq!(*reports.borrow(), [failure.clone(), failure]);
-        assert_eq!(waits.get(), 3);
+        let (result, log) = poll_steps(&mut runtime, 5);
+        assert_eq!(result, Ok(()));
+        // A handler-failure step also resets the retry deduplication.
+        assert_eq!(log.retries, [failure.clone(), failure]);
+        assert_eq!(log.waits.len(), 3);
+        assert_eq!(log.failures, [(5, "synthetic handler failure".to_owned())]);
+    }
+
+    #[test]
+    fn polling_errors_stop_the_loop_with_their_message() {
+        let (mut runtime, offsets, _) =
+            scripted_runtime(vec![Err(PollingError::InvalidResponse)], Vec::new());
+        let (result, log) = poll_steps(&mut runtime, 5);
+        assert_eq!(result, Err(PollingError::InvalidResponse.to_string()));
+        assert_eq!(log, PollingLog::default());
+        assert_eq!(*offsets.borrow(), [None]);
     }
 
     #[test]
@@ -592,13 +672,20 @@ mod tests {
                 "ADMIN_CHAT_ID" => admin.map(str::to_owned),
                 _ => None,
             };
-            ProductionConfig::from_lookup_and_prompt(lookup, || {
+            let config = ProductionConfig::from_lookup_and_prompt(lookup, || {
                 Ok(Some("synthetic system prompt".to_owned()))
-            })
-            .unwrap_or_else(|_| unreachable!())
+            });
+            let Ok(config) = config else { unreachable!() };
+            config
         }
 
         assert!(build_operational_reporter(&config(None)).is_ok());
+        assert!(telegram_transport(ReqwestTelegramTransport::new(), "admin reporting").is_ok());
+        let refused = telegram_transport(Err(TransportFailureKind::Request), "admin reporting");
+        assert_eq!(
+            refused.err().as_deref(),
+            Some("could not construct admin reporting transport: Request")
+        );
         assert!(build_operational_reporter(&config(Some("42"))).is_ok());
 
         struct FailingReporter;
@@ -687,5 +774,155 @@ mod tests {
         interruptible_wait(&stopping, Duration::from_secs(1));
         assert!(started.elapsed() < Duration::from_millis(500));
         assert!(thread.join().is_ok());
+    }
+
+    #[test]
+    fn polling_diagnostics_are_localized_and_queued_for_the_admin() {
+        #[derive(Default)]
+        struct Recorder(std::sync::Mutex<Vec<OperationalReport>>);
+        impl OperationalReporter for Recorder {
+            fn report(&self, report: &OperationalReport) -> Result<(), String> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(report.clone());
+                Ok(())
+            }
+        }
+
+        let retry = poll_retry_report(&PollFailure::Conflict);
+        assert_eq!(retry.english(), "Telegram polling retry: Conflict");
+        assert_eq!(
+            retry.for_locale(Locale::Es),
+            "reintento del sondeo de Telegram: Conflict"
+        );
+        let update = update_failure_report(42, "synthetic failure");
+        assert_eq!(
+            update.english(),
+            "Telegram update 42 failed: synthetic failure"
+        );
+        assert_eq!(
+            update.for_locale(Locale::Es),
+            "falló la actualización 42 de Telegram: synthetic failure"
+        );
+
+        let recorder = std::sync::Arc::new(Recorder::default());
+        let mut reports = BackgroundReports::start(recorder.clone(), 4);
+        log_and_queue(&reports, retry.clone());
+        log_and_queue(&reports, update.clone());
+        reports.shutdown();
+        assert!(
+            recorder
+                .0
+                .lock()
+                .is_ok_and(|delivered| *delivered == [retry, update])
+        );
+    }
+
+    #[test]
+    fn production_polling_reports_update_failures_and_retries_until_stopped() {
+        #[derive(Default)]
+        struct Recorder(std::sync::Mutex<Vec<String>>);
+        impl OperationalReporter for Recorder {
+            fn report(&self, report: &OperationalReport) -> Result<(), String> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(report.english().to_owned());
+                Ok(())
+            }
+        }
+        struct Source {
+            outcomes: VecDeque<PollOutcome>,
+            stopping: std::sync::Arc<AtomicBool>,
+        }
+        impl UpdateSource for Source {
+            fn poll(&mut self, _: Option<i64>) -> Result<PollOutcome, PollingError> {
+                let outcome = self
+                    .outcomes
+                    .pop_front()
+                    .unwrap_or(PollOutcome::Updates(Vec::new()));
+                // A shutdown signal arrives while the retry is pending, so
+                // the retry wait returns at once.
+                self.stopping
+                    .store(self.outcomes.is_empty(), Ordering::Release);
+                Ok(outcome)
+            }
+        }
+        struct Handler;
+        impl UpdateHandler for Handler {
+            type Error = &'static str;
+            fn handle(&mut self, _: IncomingUpdate) -> Result<(), Self::Error> {
+                Err("synthetic delivery failure")
+            }
+        }
+
+        let stopping = std::sync::Arc::new(AtomicBool::new(false));
+        let mut runtime = PollingRuntime::new(
+            Source {
+                outcomes: VecDeque::from([
+                    PollOutcome::Updates(vec![IncomingUpdate {
+                        update_id: 77,
+                        event: IncomingEvent::Unsupported,
+                    }]),
+                    PollOutcome::Retry(PollFailure::Conflict),
+                ]),
+                stopping: stopping.clone(),
+            },
+            Handler,
+        );
+        let recorder = std::sync::Arc::new(Recorder::default());
+        let mut reports = BackgroundReports::start(recorder.clone(), 4);
+        let failure_checks = Cell::new(0);
+        let started = std::time::Instant::now();
+
+        let result = poll_until_stopped(
+            &mut runtime,
+            &stopping,
+            || {
+                failure_checks.set(failure_checks.get() + 1);
+                false
+            },
+            &reports,
+        );
+        reports.shutdown();
+
+        assert_eq!(result, Ok(()));
+        assert!(started.elapsed() < Duration::from_millis(900));
+        assert_eq!(failure_checks.get(), 2);
+        assert!(recorder.0.lock().is_ok_and(|delivered| {
+            *delivered
+                == [
+                    "Telegram update 77 failed: synthetic delivery failure",
+                    "Telegram polling retry: Conflict",
+                ]
+        }));
+    }
+
+    fn signal_now(mut handler: ShutdownHandler) -> Result<(), ctrlc::Error> {
+        handler();
+        Ok(())
+    }
+
+    fn already_registered(_handler: ShutdownHandler) -> Result<(), ctrlc::Error> {
+        Err(ctrlc::Error::MultipleHandlers)
+    }
+
+    #[test]
+    fn shutdown_signal_requests_a_stop_and_install_failures_are_reported() {
+        let stopping = std::sync::Arc::new(AtomicBool::new(false));
+        assert_eq!(install_shutdown_handler(&stopping, signal_now), Ok(()));
+        assert!(stopping.load(Ordering::Acquire));
+
+        let untouched = std::sync::Arc::new(AtomicBool::new(false));
+        let refused = install_shutdown_handler(&untouched, already_registered);
+        assert_eq!(
+            refused.err().as_deref(),
+            Some(
+                "could not install shutdown signal handler: \
+                 Ctrl-C error: Ctrl-C signal handler already registered"
+            )
+        );
+        assert!(!untouched.load(Ordering::Acquire));
     }
 }

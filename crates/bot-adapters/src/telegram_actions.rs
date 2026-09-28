@@ -8,8 +8,8 @@ use thiserror::Error;
 use bot_core::telegram_actions::{CommandScope, ParseMode, TelegramAction, truncate_text};
 
 use crate::telegram_http::{
-    TelegramHttpError, TelegramHttpOutcome, TelegramMultipartRequest, TelegramTransport,
-    TransportFailureKind, request_with,
+    TelegramHttpError, TelegramHttpOutcome, TelegramMultipartRequest, TelegramRequest,
+    TelegramTransport, TransportFailureKind, send_with,
 };
 use std::time::Duration;
 
@@ -95,6 +95,13 @@ fn insert_optional<T: serde::Serialize>(
     Ok(())
 }
 
+/// Insert an optional scalar field; scalar conversions cannot fail.
+fn insert_value(payload: &mut Map<String, Value>, field: &str, value: Option<impl Into<Value>>) {
+    if let Some(value) = value {
+        payload.insert(field.to_owned(), value.into());
+    }
+}
+
 fn disable_link_preview(payload: &mut Map<String, Value>) {
     payload.insert(
         "link_preview_options".to_owned(),
@@ -112,7 +119,7 @@ fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
             let commands =
                 serde_json::to_string(&commands).map_err(|_| ActionError::InvalidAction)?;
             let mut payload = Map::from_iter([("commands".to_owned(), json!(commands))]);
-            insert_optional(&mut payload, "language_code", language_code)?;
+            insert_value(&mut payload, "language_code", language_code);
             match scope {
                 CommandScope::Default => {}
                 CommandScope::AllGroupChats => {
@@ -137,16 +144,16 @@ fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
                 ("chat_id".to_owned(), json!(message.chat_id.0)),
                 ("text".to_owned(), json!(truncate_text(&message.text))),
             ]);
-            insert_optional(
+            insert_value(
                 &mut payload,
                 "reply_to_message_id",
                 message.reply_to_message_id.map(|value| value.0),
-            )?;
-            insert_optional(
+            );
+            insert_value(
                 &mut payload,
                 "parse_mode",
                 message.parse_mode.map(parse_mode),
-            )?;
+            );
             if message.disable_web_page_preview {
                 disable_link_preview(&mut payload);
             }
@@ -168,12 +175,12 @@ fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
                 ("chat_id".to_owned(), json!(chat_id.0)),
                 ("animation".to_owned(), json!(animation)),
             ]);
-            insert_optional(
+            insert_value(
                 &mut payload,
                 "reply_to_message_id",
                 reply_to_message_id.map(|value| value.0),
-            )?;
-            insert_optional(&mut payload, "caption", caption)?;
+            );
+            insert_value(&mut payload, "caption", caption);
             (
                 "sendAnimation",
                 Method::POST,
@@ -269,7 +276,7 @@ fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
                 ("callback_query_id".to_owned(), json!(callback_id)),
                 ("show_alert".to_owned(), json!(show_alert)),
             ]);
-            insert_optional(&mut payload, "text", text)?;
+            insert_value(&mut payload, "text", text);
             (
                 "answerCallbackQuery",
                 Method::POST,
@@ -286,7 +293,7 @@ fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
                 ("pre_checkout_query_id".to_owned(), json!(query_id)),
                 ("ok".to_owned(), json!(ok)),
             ]);
-            insert_optional(&mut payload, "error_message", error_message)?;
+            insert_value(&mut payload, "error_message", error_message);
             (
                 "answerPreCheckoutQuery",
                 Method::POST,
@@ -350,7 +357,7 @@ pub fn execute_with<T: TelegramTransport>(
     token: &str,
     action: TelegramAction,
 ) -> Result<ActionOutcome, ActionError> {
-    let multipart = match action {
+    let request = match action {
         TelegramAction::SendDocument {
             chat_id,
             document,
@@ -371,7 +378,7 @@ pub fn execute_with<T: TelegramTransport>(
                     reply_to_message_id.0.to_string(),
                 ));
             }
-            Some(TelegramMultipartRequest {
+            TelegramMultipartRequest {
                 token: token.to_owned(),
                 endpoint: "sendDocument".to_owned(),
                 fields,
@@ -380,7 +387,7 @@ pub fn execute_with<T: TelegramTransport>(
                 file_bytes: document,
                 content_type: "text/plain; charset=utf-8".to_owned(),
                 timeout: Duration::from_secs(60),
-            })
+            }
         }
         TelegramAction::SendVideo {
             chat_id,
@@ -409,7 +416,7 @@ pub fn execute_with<T: TelegramTransport>(
                     serde_json::to_string(&reply_markup).map_err(|_| ActionError::InvalidAction)?,
                 ));
             }
-            Some(TelegramMultipartRequest {
+            TelegramMultipartRequest {
                 token: token.to_owned(),
                 endpoint: "sendVideo".to_owned(),
                 fields,
@@ -418,7 +425,7 @@ pub fn execute_with<T: TelegramTransport>(
                 file_bytes: video,
                 content_type: "video/mp4".to_owned(),
                 timeout: Duration::from_secs(60),
-            })
+            }
         }
         TelegramAction::SendPhoto {
             chat_id,
@@ -450,7 +457,7 @@ pub fn execute_with<T: TelegramTransport>(
                     serde_json::to_string(&reply_markup).map_err(|_| ActionError::InvalidAction)?,
                 ));
             }
-            Some(TelegramMultipartRequest {
+            TelegramMultipartRequest {
                 token: token.to_owned(),
                 endpoint: "sendPhoto".to_owned(),
                 fields,
@@ -459,7 +466,7 @@ pub fn execute_with<T: TelegramTransport>(
                 file_bytes: photo,
                 content_type: "image/png".to_owned(),
                 timeout: Duration::from_secs(60),
-            })
+            }
         }
         TelegramAction::EditMessagePhoto {
             chat_id,
@@ -495,7 +502,7 @@ pub fn execute_with<T: TelegramTransport>(
                     serde_json::to_string(&reply_markup).map_err(|_| ActionError::InvalidAction)?,
                 ));
             }
-            Some(TelegramMultipartRequest {
+            TelegramMultipartRequest {
                 token: token.to_owned(),
                 endpoint: "editMessageMedia".to_owned(),
                 fields,
@@ -504,19 +511,19 @@ pub fn execute_with<T: TelegramTransport>(
                 file_bytes: photo,
                 content_type: "image/png".to_owned(),
                 timeout: Duration::from_secs(60),
-            })
+            }
         }
         action => {
             let prepared = prepare(action)?;
-            return match request_with(
-                transport,
-                token,
-                prepared.endpoint,
-                prepared.method.as_str(),
-                prepared.params,
-                prepared.json_payload,
-                ACTION_TIMEOUT_SECONDS,
-            )? {
+            let request = TelegramRequest {
+                token: token.to_owned(),
+                endpoint: prepared.endpoint.to_owned(),
+                method: prepared.method,
+                params: prepared.params,
+                json_payload: prepared.json_payload,
+                timeout: Duration::from_secs(ACTION_TIMEOUT_SECONDS),
+            };
+            return match send_with(transport, &request) {
                 TelegramHttpOutcome::Response { status_code, body } => {
                     parse_response(status_code, &body)
                 }
@@ -526,13 +533,10 @@ pub fn execute_with<T: TelegramTransport>(
             };
         }
     };
-    if let Some(request) = multipart {
-        return match transport.send_action_multipart(&request) {
-            Ok(response) => parse_response(response.status_code, &response.body),
-            Err(kind) => Ok(ActionOutcome::TransportFailed(kind)),
-        };
+    match transport.send_action_multipart(&request) {
+        Ok(response) => parse_response(response.status_code, &response.body),
+        Err(kind) => Ok(ActionOutcome::TransportFailed(kind)),
     }
-    Err(ActionError::InvalidAction)
 }
 
 #[cfg(test)]
@@ -596,31 +600,7 @@ mod tests {
 
     #[test]
     fn video_upload_uses_bounded_multipart_contract_and_returns_message_id() {
-        struct VideoTransport {
-            requests: RefCell<Vec<TelegramMultipartRequest>>,
-        }
-        impl TelegramTransport for VideoTransport {
-            fn send(
-                &self,
-                _request: &TelegramRequest,
-            ) -> Result<HttpResponse, TransportFailureKind> {
-                Err(TransportFailureKind::Request)
-            }
-
-            fn send_action_multipart(
-                &self,
-                request: &TelegramMultipartRequest,
-            ) -> Result<HttpResponse, TransportFailureKind> {
-                self.requests.borrow_mut().push(request.clone());
-                Ok(HttpResponse {
-                    status_code: 200,
-                    body: r#"{"ok":true,"result":{"message_id":44}}"#.to_owned(),
-                })
-            }
-        }
-        let transport = VideoTransport {
-            requests: RefCell::new(Vec::new()),
-        };
+        let transport = transport(r#"{"ok":true,"result":{"message_id":44}}"#);
         let markup = InlineKeyboardMarkup {
             inline_keyboard: vec![vec![InlineKeyboardButton {
                 text: "Original".to_owned(),
@@ -657,7 +637,8 @@ mod tests {
                 TransportFailureKind::Request
             ))
         );
-        let requests = transport.requests.borrow();
+        assert_eq!(transport.requests.borrow().len(), 1);
+        let requests = transport.multipart_requests.borrow();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].endpoint, "sendVideo");
         assert_eq!(requests[0].file_field, "video");
@@ -802,31 +783,8 @@ mod tests {
 
     #[test]
     fn photo_send_and_refresh_use_png_multipart_and_typed_media() {
-        struct PhotoTransport {
-            requests: RefCell<Vec<TelegramMultipartRequest>>,
-        }
-        impl TelegramTransport for PhotoTransport {
-            fn send(
-                &self,
-                _request: &TelegramRequest,
-            ) -> Result<HttpResponse, TransportFailureKind> {
-                Err(TransportFailureKind::Request)
-            }
-
-            fn send_action_multipart(
-                &self,
-                request: &TelegramMultipartRequest,
-            ) -> Result<HttpResponse, TransportFailureKind> {
-                self.requests.borrow_mut().push(request.clone());
-                Ok(HttpResponse {
-                    status_code: 200,
-                    body: r#"{"ok":true,"result":{"message_id":55}}"#.to_owned(),
-                })
-            }
-        }
-        let transport = PhotoTransport {
-            requests: RefCell::new(Vec::new()),
-        };
+        let sent = r#"{"ok":true,"result":{"message_id":55}}"#;
+        let transport = transport(sent);
         let markup = InlineKeyboardMarkup {
             inline_keyboard: vec![vec![InlineKeyboardButton {
                 text: "Details".to_owned(),
@@ -852,6 +810,10 @@ mod tests {
                 message_id: Some(55)
             })
         );
+        transport.response.replace(Some(Ok(HttpResponse {
+            status_code: 200,
+            body: sent.to_owned(),
+        })));
         assert_eq!(
             execute_with(
                 &transport,
@@ -881,7 +843,8 @@ mod tests {
                 TransportFailureKind::Request
             ))
         );
-        let requests = transport.requests.borrow();
+        assert_eq!(transport.requests.borrow().len(), 1);
+        let requests = transport.multipart_requests.borrow();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].endpoint, "sendPhoto");
         assert_eq!(requests[0].file_field, "photo");
@@ -1302,5 +1265,80 @@ mod tests {
             }),
             Err(ActionError::InvalidAction)
         ));
+    }
+
+    #[test]
+    fn failures_without_a_description_use_a_generic_message() {
+        let transport = transport_with_status(400, r#"{"ok":false}"#);
+        assert_eq!(
+            execute_with(
+                &transport,
+                "synthetic-token",
+                TelegramAction::SendTyping {
+                    chat_id: ChatId(42)
+                },
+            ),
+            Ok(ActionOutcome::Failed {
+                status_code: Some(400),
+                description: "telegram request failed".to_owned(),
+            })
+        );
+        assert_eq!(transport.requests.borrow()[0].endpoint, "sendChatAction");
+    }
+
+    #[test]
+    fn media_uploads_without_keyboards_omit_reply_markup() {
+        let sent = r#"{"ok":true,"result":{"message_id":56}}"#;
+        let transport = transport(sent);
+        assert_eq!(
+            execute_with(
+                &transport,
+                "synthetic-token",
+                TelegramAction::SendVideo {
+                    chat_id: ChatId(42),
+                    video: vec![1].into(),
+                    reply_to_message_id: None,
+                    caption: "plain".to_owned(),
+                    reply_markup: None,
+                },
+            ),
+            Ok(ActionOutcome::Completed {
+                message_id: Some(56)
+            })
+        );
+        transport.response.replace(Some(Ok(HttpResponse {
+            status_code: 200,
+            body: sent.to_owned(),
+        })));
+        assert_eq!(
+            execute_with(
+                &transport,
+                "synthetic-token",
+                TelegramAction::EditMessagePhoto {
+                    chat_id: ChatId(42),
+                    message_id: MessageId(56),
+                    photo: vec![2].into(),
+                    caption: "plain".to_owned(),
+                    parse_mode: None,
+                    reply_markup: None,
+                },
+            ),
+            Ok(ActionOutcome::Completed {
+                message_id: Some(56)
+            })
+        );
+        let requests = transport.multipart_requests.borrow();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.fields.iter().any(|(key, _)| key == "reply_markup"))
+        );
+        assert!(
+            !requests[0]
+                .fields
+                .iter()
+                .any(|(key, _)| key == "reply_to_message_id")
+        );
     }
 }

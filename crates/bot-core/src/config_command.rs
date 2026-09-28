@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn command_aliases_reply_to_original_message() {
         for command in ["/config", "/configs", "/settings@mybot"] {
-            let Some(TelegramAction::SendMessage(message)) = plan_config_command(
+            let plan = plan_config_command(
                 ChatId(1),
                 MessageId(2),
                 command,
@@ -409,11 +409,16 @@ mod tests {
                 Locale::Es,
                 &ChatConfig::default(),
                 true,
-            ) else {
-                unreachable!("missing config")
-            };
-            assert_eq!(message.reply_to_message_id, Some(MessageId(2)));
-            assert!(message.reply_markup.is_some());
+            );
+            assert!(
+                matches!(
+                    &plan,
+                    Some(TelegramAction::SendMessage(message))
+                        if message.reply_to_message_id == Some(MessageId(2))
+                            && message.reply_markup.is_some()
+                ),
+                "{plan:?}"
+            );
         }
         assert!(
             plan_config_command(
@@ -427,5 +432,37 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn help_page_explains_saving_and_links_back_home() {
+        let config = ChatConfig::default();
+        for (locale, heading, back_label) in [
+            (
+                Locale::Es,
+                "Cómo funciona\n\nCada cambio se guarda al instante.",
+                "‹ Volver",
+            ),
+            (
+                Locale::En,
+                "How it works\n\nEvery change is saved right away.",
+                "‹ Back",
+            ),
+        ] {
+            let (text, keyboard) = render_config_page(&config, locale, true, "help");
+            assert!(text.starts_with(heading), "{text}");
+            let buttons = keyboard
+                .inline_keyboard
+                .concat()
+                .into_iter()
+                .map(|button| (button.text, button.callback_data))
+                .collect::<Vec<_>>();
+            assert_eq!(buttons.len(), 2);
+            assert_eq!(
+                buttons[0],
+                (back_label.to_owned(), Some("cfg:page:home".to_owned()))
+            );
+            assert_eq!(buttons[1].1.as_deref(), Some("cfg:page:close"));
+        }
     }
 }
