@@ -51,7 +51,7 @@ impl OpenRouterPricingCache {
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
             .build()
-            .map_err(|error| OpenRouterChatError::Transport(error.to_string()))?;
+            .map_err(transport_error)?;
         Ok(Self {
             client,
             api_key: api_key.to_owned(),
@@ -100,7 +100,7 @@ impl OpenRouterPricingCache {
             .get(models_url(&self.base_url)?)
             .bearer_auth(api_key)
             .send()
-            .map_err(|error| OpenRouterChatError::Transport(error.to_string()))?;
+            .map_err(transport_error)?;
         let status_code = response.status().as_u16();
         let headers = response
             .headers()
@@ -116,8 +116,7 @@ impl OpenRouterPricingCache {
         if status_code >= 400 {
             return Err(http_error(status_code, &body, &headers));
         }
-        let payload = serde_json::from_str::<Value>(&body)
-            .map_err(|error| OpenRouterChatError::InvalidJson(error.to_string()))?;
+        let payload = serde_json::from_str::<Value>(&body).map_err(invalid_json)?;
         let models = payload
             .get("data")
             .and_then(Value::as_array)
@@ -242,9 +241,9 @@ impl OpenRouterPricingCache {
                 }
                 cache.refreshing.store(false, Ordering::Release);
             });
-        if spawned.is_err() {
-            self.refreshing.store(false, Ordering::Release);
-        }
+        // Without a worker thread nothing will clear the flag, so release it
+        // here; a running worker keeps (or has already cleared) its own flag.
+        self.refreshing.fetch_and(spawned.is_ok(), Ordering::AcqRel);
     }
 
     fn record_refresh_success(&self) -> Result<(), OpenRouterChatError> {
@@ -657,7 +656,7 @@ impl ReqwestOpenRouterTransport {
                 .build()
         })
         .map(|client| Self { client })
-        .map_err(|error| OpenRouterChatError::Transport(error.to_string()))
+        .map_err(transport_error)
     }
 }
 
@@ -670,7 +669,7 @@ impl OpenRouterTransport for ReqwestOpenRouterTransport {
             .header("Content-Type", "application/json")
             .body(request.body.clone())
             .send()
-            .map_err(|error| OpenRouterChatError::Transport(error.to_string()))?;
+            .map_err(transport_error)?;
         let status_code = response.status().as_u16();
         let headers = response
             .headers()
@@ -704,7 +703,7 @@ impl OpenRouterStreamTransport for ReqwestOpenRouterTransport {
             .header("Content-Type", "application/json")
             .body(request.body.clone())
             .send()
-            .map_err(|error| OpenRouterChatError::Transport(error.to_string()))?;
+            .map_err(transport_error)?;
         let status_code = response.status().as_u16();
         let headers = response
             .headers()
@@ -722,9 +721,7 @@ impl OpenRouterStreamTransport for ReqwestOpenRouterTransport {
         }
         let mut buffer = [0_u8; 8_192];
         loop {
-            let count = response
-                .read(&mut buffer)
-                .map_err(|error| OpenRouterChatError::Transport(error.to_string()))?;
+            let count = response.read(&mut buffer).map_err(transport_error)?;
             if count == 0 {
                 return Ok(());
             }
@@ -893,6 +890,18 @@ fn retry_after_seconds(headers: &BTreeMap<String, String>) -> Option<u64> {
         .and_then(|value| value.trim().parse::<u64>().ok())
 }
 
+fn transport_error(error: impl std::fmt::Display) -> OpenRouterChatError {
+    OpenRouterChatError::Transport(error.to_string())
+}
+
+fn invalid_json(error: serde_json::Error) -> OpenRouterChatError {
+    OpenRouterChatError::InvalidJson(error.to_string())
+}
+
+fn request_json_error(error: serde_json::Error) -> OpenRouterChatError {
+    OpenRouterChatError::RequestJson(error.to_string())
+}
+
 fn http_error(
     status_code: u16,
     body: &str,
@@ -919,7 +928,7 @@ fn read_bounded_body(
         .by_ref()
         .take(OPENROUTER_MAX_RESPONSE_BYTES + 1)
         .read_to_end(&mut body)
-        .map_err(|error| OpenRouterChatError::Transport(error.to_string()))?;
+        .map_err(transport_error)?;
     if body.len() as u64 > OPENROUTER_MAX_RESPONSE_BYTES {
         return Err(OpenRouterChatError::ResponseTooLarge);
     }
@@ -955,8 +964,7 @@ pub fn parse_chat_completion(
             &response.headers,
         ));
     }
-    let envelope = serde_json::from_str::<RawEnvelope>(&response.body)
-        .map_err(|error| OpenRouterChatError::InvalidJson(error.to_string()))?;
+    let envelope = serde_json::from_str::<RawEnvelope>(&response.body).map_err(invalid_json)?;
     let choice = envelope
         .choices
         .into_iter()
@@ -1001,8 +1009,7 @@ pub fn complete_with<T: OpenRouterTransport>(
     if request.stream {
         return Err(OpenRouterChatError::MalformedResponse);
     }
-    let body = serde_json::to_string(request)
-        .map_err(|error| OpenRouterChatError::RequestJson(error.to_string()))?;
+    let body = serde_json::to_string(request).map_err(request_json_error)?;
     parse_chat_completion(
         transport.post(&HttpRequest {
             url: completion_url(base_url)?,
@@ -1102,8 +1109,7 @@ fn parse_sse_frame(frame: &[u8]) -> Result<Option<ChatStreamEvent>, OpenRouterCh
     if data.trim() == "[DONE]" {
         return Ok(Some(ChatStreamEvent::Done));
     }
-    let envelope = serde_json::from_str::<RawStreamEnvelope>(&data)
-        .map_err(|error| OpenRouterChatError::InvalidJson(error.to_string()))?;
+    let envelope = serde_json::from_str::<RawStreamEnvelope>(&data).map_err(invalid_json)?;
     if let Some(error) = envelope.error.as_ref() {
         return Err(OpenRouterChatError::Stream(stream_error_message(error)));
     }
@@ -1210,8 +1216,7 @@ where
     if !request.stream {
         return Err(OpenRouterChatError::MalformedResponse);
     }
-    let body = serde_json::to_string(request)
-        .map_err(|error| OpenRouterChatError::RequestJson(error.to_string()))?;
+    let body = serde_json::to_string(request).map_err(request_json_error)?;
     let mut decoder = SseDecoder::default();
     transport.post_stream(
         &HttpRequest {
@@ -1243,6 +1248,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
     use std::cell::RefCell;
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
@@ -1255,57 +1262,58 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        ChatCompletionRequest, ChatMessage, ChatRole, ChatStreamEvent, HttpRequest, HttpResponse,
-        OPENROUTER_MAX_RESPONSE_BYTES, OpenRouterChatError, OpenRouterPricingCache,
-        OpenRouterStreamTransport, OpenRouterTransport, ReqwestOpenRouterTransport, ToolCall,
-        ToolFunctionCall, complete_with, parse_catalog_model, parse_chat_completion, stream_with,
+        ChatCompletionRequest, ChatMessage, ChatRole, ChatStreamChunk, ChatStreamEvent,
+        HttpRequest, HttpResponse, OPENROUTER_MAX_RESPONSE_BYTES, OpenRouterChatError,
+        OpenRouterPricingCache, OpenRouterStreamTransport, OpenRouterTransport,
+        ReqwestOpenRouterTransport, ToolCall, ToolFunctionCall, complete_with, parse_catalog_model,
+        parse_chat_completion, stream_with,
     };
 
     fn serve_once(
         status: &str,
         content_type: &str,
         body: &str,
-    ) -> (String, thread::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
+    ) -> Result<(String, thread::JoinHandle<TestResult>), Box<dyn std::error::Error + Send + Sync>>
+    {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
         let status = status.to_owned();
         let content_type = content_type.to_owned();
         let body = body.to_owned();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+        let server = thread::spawn(move || -> TestResult {
+            let (mut stream, _) = listener.accept()?;
             let mut request = [0_u8; 8_192];
             let _ = stream.read(&mut request);
             let response = format!(
                 "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nX-Synthetic: yes\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
-            stream
-                .write_all(response.as_bytes())
-                .unwrap_or_else(|_| unreachable!());
+            stream.write_all(response.as_bytes())?;
+            Ok(())
         });
-        (format!("http://{address}"), server)
+        Ok((format!("http://{address}"), server))
     }
 
     fn serve_sequence(
         responses: Vec<(String, String, String)>,
-    ) -> (String, thread::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
-        let server = thread::spawn(move || {
+    ) -> Result<(String, thread::JoinHandle<TestResult>), Box<dyn std::error::Error + Send + Sync>>
+    {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
             for (status, content_type, body) in responses {
-                let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+                let (mut stream, _) = listener.accept()?;
                 let mut request = [0_u8; 8_192];
                 let _ = stream.read(&mut request);
                 let response = format!(
                     "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
-                stream
-                    .write_all(response.as_bytes())
-                    .unwrap_or_else(|_| unreachable!());
+                stream.write_all(response.as_bytes())?;
             }
+            Ok(())
         });
-        (format!("http://{address}"), server)
+        Ok((format!("http://{address}"), server))
     }
 
     struct Transport {
@@ -1319,7 +1327,9 @@ mod tests {
             self.response
                 .borrow_mut()
                 .take()
-                .unwrap_or_else(|| Err(OpenRouterChatError::Transport("missing response".into())))
+                .unwrap_or(Err(OpenRouterChatError::Transport(
+                    "missing response".to_owned(),
+                )))
         }
     }
 
@@ -1348,6 +1358,34 @@ mod tests {
             status_code,
             body: body.to_string(),
             headers: BTreeMap::new(),
+        }
+    }
+
+    /// Every streaming scenario shares one `stream_with` instantiation per
+    /// transport type: events are collected, and the consumer can be told to
+    /// fail on the first event.
+    fn stream_events<T: OpenRouterStreamTransport>(
+        transport: &T,
+        api_key: &str,
+        base_url: &str,
+        request: &ChatCompletionRequest,
+        consumer_failure: Option<OpenRouterChatError>,
+    ) -> (Result<(), OpenRouterChatError>, Vec<ChatStreamEvent>) {
+        let mut events = Vec::new();
+        let mut collect = |event| {
+            events.push(event);
+            consumer_failure.clone().map_or(Ok(()), Err)
+        };
+        let on_event: &mut dyn FnMut(ChatStreamEvent) -> Result<(), OpenRouterChatError> =
+            &mut collect;
+        let result = stream_with(transport, api_key, base_url, request, on_event);
+        (result, events)
+    }
+
+    fn stream_chunk(event: &ChatStreamEvent) -> Option<&ChatStreamChunk> {
+        match event {
+            ChatStreamEvent::Chunk(chunk) => Some(chunk),
+            ChatStreamEvent::Done => None,
         }
     }
 
@@ -1382,7 +1420,7 @@ mod tests {
     }
 
     #[test]
-    fn loads_catalog_pricing_and_uses_the_highest_override_rate() {
+    fn loads_catalog_pricing_and_uses_the_highest_override_rate() -> TestResult {
         let body = json!({
             "data": [{
                 "id": DEEPSEEK_MODEL,
@@ -1402,13 +1440,12 @@ mod tests {
             }]
         })
         .to_string();
-        let (base_url, server) = serve_once("200", "application/json", &body);
-        let cache = OpenRouterPricingCache::new("synthetic-key", &base_url)
-            .unwrap_or_else(|_| unreachable!("cache construction"));
+        let served = serve_once("200", "application/json", &body);
+        let (base_url, server) = served?;
+        let cache = OpenRouterPricingCache::new("synthetic-key", &base_url)?;
         let pricing = cache
-            .pricing(&format!("{DEEPSEEK_MODEL}:free"))
-            .unwrap_or_else(|_| unreachable!("catalog lookup"))
-            .unwrap_or_else(|| unreachable!("catalog model"));
+            .pricing(&format!("{DEEPSEEK_MODEL}:free"))?
+            .ok_or("unexpected missing value")?;
         assert_eq!(pricing.input_per_million, 300_000);
         assert_eq!(pricing.cached_input_per_million, Some(6_000));
         assert_eq!(pricing.output_per_million, 1_200_000);
@@ -1420,20 +1457,18 @@ mod tests {
         );
 
         let mut request = ChatCompletionRequest::new(format!("{DEEPSEEK_MODEL}:free"), Vec::new());
-        cache
-            .apply_to_request(&mut request)
-            .unwrap_or_else(|_| unreachable!("apply catalog pricing"));
+        cache.apply_to_request(&mut request)?;
         let request_body = serde_json::to_value(request).unwrap_or(Value::Null);
         assert_eq!(request_body["provider"]["max_price"]["prompt"], 0.3);
         assert_eq!(request_body["provider"]["max_price"]["completion"], 1.2);
 
-        server
-            .join()
-            .unwrap_or_else(|_| unreachable!("catalog server"));
+        server.join().ok().ok_or("server thread panicked")??;
+        Ok(())
     }
 
     #[test]
-    fn transcription_pricing_uses_the_catalog_and_keeps_the_last_cache_on_refresh_failure() {
+    fn transcription_pricing_uses_the_catalog_and_keeps_the_last_cache_on_refresh_failure()
+    -> TestResult {
         let catalog = json!({
             "data": [{
                 "id": OPENROUTER_TRANSCRIPTION_MODEL,
@@ -1445,7 +1480,7 @@ mod tests {
             }]
         })
         .to_string();
-        let (base_url, server) = serve_sequence(vec![
+        let served = serve_sequence(vec![
             ("200 OK".to_owned(), "application/json".to_owned(), catalog),
             (
                 "200 OK".to_owned(),
@@ -1463,83 +1498,84 @@ mod tests {
                 "{\"error\":{\"message\":\"synthetic outage\"}}".to_owned(),
             ),
         ]);
-        let cache = OpenRouterPricingCache::new("synthetic-key", &base_url)
-            .unwrap_or_else(|_| unreachable!("cache construction"));
+        let (base_url, server) = served?;
+        let cache = OpenRouterPricingCache::new("synthetic-key", &base_url)?;
         let first = cache
-            .transcription_pricing(OPENROUTER_TRANSCRIPTION_MODEL)
-            .unwrap_or_else(|_| unreachable!("catalog lookup"))
-            .unwrap_or_else(|| unreachable!("transcription model"));
+            .transcription_pricing(OPENROUTER_TRANSCRIPTION_MODEL)?
+            .ok_or("unexpected missing value")?;
         assert_eq!(first.usd_micros_per_hour, 100_000);
 
         cache
             .state
             .lock()
-            .unwrap_or_else(|_| unreachable!("pricing state"))
+            .ok()
+            .ok_or("unexpected error")?
             .fetched_at = Some(Instant::now() - Duration::from_secs(301));
         let cached = cache
-            .transcription_pricing(OPENROUTER_TRANSCRIPTION_MODEL)
-            .unwrap_or_else(|_| unreachable!("cached lookup"))
-            .unwrap_or_else(|| unreachable!("cached transcription model"));
+            .transcription_pricing(OPENROUTER_TRANSCRIPTION_MODEL)?
+            .ok_or("unexpected missing value")?;
         assert_eq!(cached, first);
         wait_for_background_refresh(&cache);
         cache
             .state
             .lock()
-            .unwrap_or_else(|_| unreachable!("pricing state"))
+            .ok()
+            .ok_or("unexpected error")?
             .fetched_at = Some(Instant::now() - Duration::from_secs(301));
         let outage_fallback = cache
-            .transcription_pricing(OPENROUTER_TRANSCRIPTION_MODEL)
-            .unwrap_or_else(|_| unreachable!("outage fallback"))
-            .unwrap_or_else(|| unreachable!("cached transcription model"));
+            .transcription_pricing(OPENROUTER_TRANSCRIPTION_MODEL)?
+            .ok_or("unexpected missing value")?;
         wait_for_background_refresh(&cache);
         assert_eq!(outage_fallback, first);
         cache
             .state
             .lock()
-            .unwrap_or_else(|_| unreachable!("pricing state"))
+            .ok()
+            .ok_or("unexpected error")?
             .fetched_at = Some(Instant::now() - Duration::from_secs(301));
         cache
             .state
             .lock()
-            .unwrap_or_else(|_| unreachable!("pricing state"))
+            .ok()
+            .ok_or("unexpected error")?
             .refresh_retry_at = Some(Instant::now() - Duration::from_secs(1));
         let second_outage_fallback = cache
-            .transcription_pricing(OPENROUTER_TRANSCRIPTION_MODEL)
-            .unwrap_or_else(|_| unreachable!("second outage fallback"))
-            .unwrap_or_else(|| unreachable!("cached transcription model"));
+            .transcription_pricing(OPENROUTER_TRANSCRIPTION_MODEL)?
+            .ok_or("unexpected missing value")?;
         wait_for_background_refresh(&cache);
         assert_eq!(second_outage_fallback, first);
         assert_eq!(
             cache
                 .state
                 .lock()
-                .unwrap_or_else(|_| unreachable!("pricing state"))
+                .ok()
+                .ok_or("unexpected error")?
                 .refresh_retry_delay,
             Duration::from_secs(60)
         );
         let retry_at = cache
             .state
             .lock()
-            .unwrap_or_else(|_| unreachable!("pricing state"))
+            .ok()
+            .ok_or("unexpected error")?
             .refresh_retry_at
-            .unwrap_or_else(|| unreachable!("refresh retry deadline"));
+            .ok_or("unexpected missing value")?;
         assert!(retry_at > Instant::now());
         let repeated_fallback = cache
-            .transcription_pricing(OPENROUTER_TRANSCRIPTION_MODEL)
-            .unwrap_or_else(|_| unreachable!("backoff fallback"))
-            .unwrap_or_else(|| unreachable!("cached transcription model"));
+            .transcription_pricing(OPENROUTER_TRANSCRIPTION_MODEL)?
+            .ok_or("unexpected missing value")?;
         assert_eq!(repeated_fallback, first);
         assert_eq!(
             cache
                 .state
                 .lock()
-                .unwrap_or_else(|_| unreachable!("pricing state"))
+                .ok()
+                .ok_or("unexpected error")?
                 .refresh_retry_at,
             Some(retry_at)
         );
-        server
-            .join()
-            .unwrap_or_else(|_| unreachable!("catalog server"));
+        server.join().ok().ok_or("server thread panicked")??;
+        Ok(())
     }
 
     fn wait_for_background_refresh(cache: &OpenRouterPricingCache) {
@@ -1551,32 +1587,29 @@ mod tests {
     }
 
     #[test]
-    fn fails_closed_when_catalog_has_no_model_pricing() {
-        let (base_url, server) = serve_once("200", "application/json", r#"{"data":[]}"#);
-        let cache = OpenRouterPricingCache::new("synthetic-key", &base_url)
-            .unwrap_or_else(|_| unreachable!("cache construction"));
+    fn fails_closed_when_catalog_has_no_model_pricing() -> TestResult {
+        let served = serve_once("200", "application/json", r#"{"data":[]}"#);
+        let (base_url, server) = served?;
+        let cache = OpenRouterPricingCache::new("synthetic-key", &base_url)?;
         let mut request = ChatCompletionRequest::new(DEEPSEEK_MODEL, Vec::new());
         assert!(matches!(
             cache.apply_to_request(&mut request),
             Err(OpenRouterChatError::InvalidJson(message))
                 if message == "models response has no usable pricing entries"
         ));
-        server
-            .join()
-            .unwrap_or_else(|_| unreachable!("catalog server"));
+        server.join().ok().ok_or("server thread panicked")??;
+        Ok(())
     }
 
     #[test]
-    fn rejects_missing_keys_and_invalid_catalog_urls() {
-        let missing_key = OpenRouterPricingCache::new("", "https://openrouter.ai/api/v1")
-            .unwrap_or_else(|_| unreachable!("cache construction"));
+    fn rejects_missing_keys_and_invalid_catalog_urls() -> TestResult {
+        let missing_key = OpenRouterPricingCache::new("", "https://openrouter.ai/api/v1")?;
         assert_eq!(
             missing_key.pricing(DEEPSEEK_MODEL),
             Err(OpenRouterChatError::MissingApiKey)
         );
 
-        let invalid_url = OpenRouterPricingCache::new("synthetic-key", "not-a-url")
-            .unwrap_or_else(|_| unreachable!("cache construction"));
+        let invalid_url = OpenRouterPricingCache::new("synthetic-key", "not-a-url")?;
         assert_eq!(
             invalid_url.pricing(DEEPSEEK_MODEL),
             Err(OpenRouterChatError::InvalidBaseUrl)
@@ -1584,23 +1617,24 @@ mod tests {
         assert_eq!(invalid_url.pricing(" "), Ok(None));
 
         let invalid_scheme =
-            OpenRouterPricingCache::new("synthetic-key", "ftp://openrouter.example.test/api/v1")
-                .unwrap_or_else(|_| unreachable!("cache construction"));
+            OpenRouterPricingCache::new("synthetic-key", "ftp://openrouter.example.test/api/v1")?;
         assert_eq!(
             invalid_scheme.pricing(DEEPSEEK_MODEL),
             Err(OpenRouterChatError::InvalidBaseUrl)
         );
+        Ok(())
     }
 
     #[test]
-    fn refresh_failures_without_a_cached_catalog_are_backed_off_and_remain_fail_closed() {
-        let (base_url, server) = serve_once(
+    fn refresh_failures_without_a_cached_catalog_are_backed_off_and_remain_fail_closed()
+    -> TestResult {
+        let served = serve_once(
             "503 Service Unavailable",
             "application/json",
             "{\"error\":{\"message\":\"synthetic outage\"}}",
         );
-        let cache = OpenRouterPricingCache::new("synthetic-key", &base_url)
-            .unwrap_or_else(|_| unreachable!("cache construction"));
+        let (base_url, server) = served?;
+        let cache = OpenRouterPricingCache::new("synthetic-key", &base_url)?;
         assert_eq!(
             cache.pricing(DEEPSEEK_MODEL),
             Err(OpenRouterChatError::Http {
@@ -1615,14 +1649,13 @@ mod tests {
                 message: "synthetic outage".to_owned(),
             })
         );
-        server
-            .join()
-            .unwrap_or_else(|_| unreachable!("catalog server"));
+        server.join().ok().ok_or("server thread panicked")??;
+        Ok(())
     }
 
     #[test]
-    fn refresh_rejects_malformed_and_unusable_catalog_entries() {
-        let (base_url, server) = serve_sequence(vec![
+    fn refresh_rejects_malformed_and_unusable_catalog_entries() -> TestResult {
+        let served = serve_sequence(vec![
             (
                 "200 OK".to_owned(),
                 "application/json".to_owned(),
@@ -1634,8 +1667,8 @@ mod tests {
                 r#"{"data":[{"id":"synthetic/model"}]}"#.to_owned(),
             ),
         ]);
-        let cache = OpenRouterPricingCache::new("synthetic-key", &base_url)
-            .unwrap_or_else(|_| unreachable!("cache construction"));
+        let (base_url, server) = served?;
+        let cache = OpenRouterPricingCache::new("synthetic-key", &base_url)?;
         assert_eq!(
             cache.refresh(),
             Err(OpenRouterChatError::InvalidJson(
@@ -1648,9 +1681,8 @@ mod tests {
                 "models response has no usable pricing entries".to_owned()
             ))
         );
-        server
-            .join()
-            .unwrap_or_else(|_| unreachable!("catalog server"));
+        server.join().ok().ok_or("server thread panicked")??;
+        Ok(())
     }
 
     #[test]
@@ -1679,13 +1711,13 @@ mod tests {
     }
 
     #[test]
-    fn only_converts_the_known_hourly_transcription_model() {
+    fn only_converts_the_known_hourly_transcription_model() -> TestResult {
         let mai = parse_catalog_model(&json!({
             "id": OPENROUTER_TRANSCRIPTION_MODEL,
             "architecture": {"modality": "audio->transcription"},
             "pricing": {"prompt": "0.1", "completion": "0"}
         }))
-        .unwrap_or_else(|| unreachable!("MAI catalog entry"));
+        .ok_or("unexpected missing value")?;
         assert_eq!(
             mai.2.map(|pricing| pricing.usd_micros_per_hour),
             Some(100_000)
@@ -1696,23 +1728,23 @@ mod tests {
             "architecture": {"modality": "audio->transcription"},
             "pricing": {"prompt": "0.0045", "completion": "0"}
         }))
-        .unwrap_or_else(|| unreachable!("token-priced catalog entry"));
+        .ok_or("unexpected missing value")?;
         assert_eq!(token_priced.2, None);
+        Ok(())
     }
 
     #[test]
-    fn rejects_oversized_buffered_responses() {
+    fn rejects_oversized_buffered_responses() -> TestResult {
         let body = "x".repeat((OPENROUTER_MAX_RESPONSE_BYTES + 1) as usize);
-        let (base_url, server) = serve_once("200", "text/plain", &body);
-        let transport =
-            ReqwestOpenRouterTransport::new().unwrap_or_else(|_| unreachable!("transport"));
+        let served = serve_once("200", "text/plain", &body);
+        let (base_url, server) = served?;
+        let transport = ReqwestOpenRouterTransport::new()?;
         assert_eq!(
             complete_with(&transport, "synthetic-key", &base_url, &request()),
             Err(OpenRouterChatError::ResponseTooLarge)
         );
-        server
-            .join()
-            .unwrap_or_else(|_| unreachable!("response server"));
+        server.join().ok().ok_or("server thread panicked")??;
+        Ok(())
     }
 
     #[test]
@@ -1781,34 +1813,32 @@ mod tests {
     }
 
     #[test]
-    fn reqwest_transport_reads_blocking_and_streaming_http_responses() {
+    fn reqwest_transport_reads_blocking_and_streaming_http_responses() -> TestResult {
         let completion_body = json!({
             "choices":[{"message":{"content":"synthetic response"}}]
         })
         .to_string();
-        let (base_url, server) = serve_once("200 OK", "application/json", &completion_body);
-        let transport = ReqwestOpenRouterTransport::new().unwrap_or_else(|_| unreachable!());
+        let served = serve_once("200 OK", "application/json", &completion_body);
+        let (base_url, server) = served?;
+        let transport = ReqwestOpenRouterTransport::new()?;
         let completion = complete_with(&transport, "synthetic-key", &base_url, &request());
         assert!(matches!(completion, Ok(ref value) if value.text == "synthetic response"));
-        assert!(server.join().is_ok());
+        assert!(matches!(server.join(), Ok(Ok(()))));
 
         let stream_body = concat!(
             "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
             "data: [DONE]\n\n"
         );
-        let (base_url, server) = serve_once("200 OK", "text/event-stream", stream_body);
+        let served = serve_once("200 OK", "text/event-stream", stream_body);
+        let (base_url, server) = served?;
         let mut streaming_request = request();
         streaming_request.stream = true;
-        let mut events = Vec::new();
-        let streamed = stream_with(
+        let (streamed, events) = stream_events(
             &transport,
             "synthetic-key",
             &base_url,
             &streaming_request,
-            &mut |event| {
-                events.push(event);
-                Ok(())
-            },
+            None,
         );
         assert!(streamed.is_ok());
         assert!(
@@ -1816,7 +1846,8 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, ChatStreamEvent::Done))
         );
-        assert!(server.join().is_ok());
+        assert!(matches!(server.join(), Ok(Ok(()))));
+        Ok(())
     }
 
     #[test]
@@ -1995,7 +2026,7 @@ mod tests {
     }
 
     #[test]
-    fn incremental_sse_preserves_text_tool_fragments_usage_and_metadata() {
+    fn incremental_sse_preserves_text_tool_fragments_usage_and_metadata() -> TestResult {
         let body = [
             ": keepalive\r\n\r\n".to_owned(),
             format!(
@@ -2059,35 +2090,25 @@ mod tests {
         };
         let mut request = request();
         request.stream = true;
-        let mut events = Vec::new();
-        let result = stream_with(
+        let (result, events) = stream_events(
             &transport,
             " synthetic-key ",
             "https://openrouter.example/api/v1/",
             &request,
-            |event| {
-                events.push(event);
-                Ok(())
-            },
+            None,
         );
         assert_eq!(result, Ok(()));
         assert_eq!(events.len(), 5);
-        let ChatStreamEvent::Chunk(first) = &events[0] else {
-            return;
-        };
+        let first = stream_chunk(&events[0]).ok_or("unexpected missing value")?;
         assert_eq!(first.text, "holá ");
         assert_eq!(first.reasoning, "thinking");
         assert_eq!(first.generation_id.as_deref(), Some("gen-1"));
         assert_eq!(first.model.as_deref(), Some("resolved/model"));
-        let ChatStreamEvent::Chunk(second) = &events[1] else {
-            return;
-        };
+        let second = stream_chunk(&events[1]).ok_or("unexpected missing value")?;
         assert_eq!(second.text, "mundo");
         assert_eq!(second.reasoning, "legacy");
         assert_eq!(second.tool_call_fragments[0].name.as_deref(), Some("wea"));
-        let ChatStreamEvent::Chunk(final_chunk) = &events[2] else {
-            return;
-        };
+        let final_chunk = stream_chunk(&events[2]).ok_or("unexpected missing value")?;
         assert_eq!(
             final_chunk.tool_call_fragments[0].arguments.as_deref(),
             Some("\"Synthetic\"}")
@@ -2110,6 +2131,7 @@ mod tests {
         assert_eq!(requests[0].bearer_token, "synthetic-key");
         let request_body: Value = serde_json::from_str(&requests[0].body).unwrap_or(Value::Null);
         assert_eq!(request_body["stream"], true);
+        Ok(())
     }
 
     #[test]
@@ -2132,13 +2154,7 @@ mod tests {
                 requests: RefCell::new(Vec::new()),
             };
             assert_eq!(
-                stream_with(
-                    &transport,
-                    "key",
-                    "https://example.com",
-                    &request,
-                    |_event| Ok(())
-                ),
+                stream_events(&transport, "key", "https://example.com", &request, None).0,
                 Err(expected)
             );
         }
@@ -2148,16 +2164,18 @@ mod tests {
             failure: None,
             requests: RefCell::new(Vec::new()),
         };
+        let (result, events) = stream_events(
+            &transport,
+            "key",
+            "https://example.com",
+            &request,
+            Some(OpenRouterChatError::Stream("consumer stopped".to_owned())),
+        );
         assert_eq!(
-            stream_with(
-                &transport,
-                "key",
-                "https://example.com",
-                &request,
-                |_event| Err(OpenRouterChatError::Stream("consumer stopped".to_owned()))
-            ),
+            result,
             Err(OpenRouterChatError::Stream("consumer stopped".to_owned()))
         );
+        assert_eq!(events, [ChatStreamEvent::Done]);
     }
 
     #[test]
@@ -2168,26 +2186,275 @@ mod tests {
             requests: RefCell::new(Vec::new()),
         };
         assert_eq!(
-            stream_with(
-                &transport,
-                "key",
-                "https://example.com",
-                &request(),
-                |_event| Ok(())
-            ),
+            stream_events(&transport, "key", "https://example.com", &request(), None).0,
             Err(OpenRouterChatError::MalformedResponse)
         );
         let mut streaming = request();
         streaming.stream = true;
         assert_eq!(
-            stream_with(
-                &transport,
-                "key",
-                "https://example.com",
-                &streaming,
-                |_event| Ok(())
-            ),
+            stream_events(&transport, "key", "https://example.com", &streaming, None).0,
             Err(OpenRouterChatError::Transport("timeout".to_owned()))
         );
+        let mut unnamed = streaming.clone();
+        unnamed.model = "  ".to_owned();
+        assert_eq!(
+            stream_events(&transport, "key", "https://example.com", &unnamed, None).0,
+            Err(OpenRouterChatError::MissingModel)
+        );
+        assert_eq!(
+            stream_events(&transport, "  ", "https://example.com", &streaming, None).0,
+            Err(OpenRouterChatError::MissingApiKey)
+        );
+        assert_eq!(transport.requests.borrow().len(), 1);
+        assert_eq!(stream_chunk(&ChatStreamEvent::Done), None);
+    }
+
+    #[test]
+    fn stream_parses_an_unterminated_final_frame_and_rejects_choice_errors() {
+        let mut streaming = request();
+        streaming.stream = true;
+        let transport = StreamTransport {
+            chunks: vec![
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"tail\"}}]}\n\n".to_vec(),
+                b"data: [DONE]".to_vec(),
+            ],
+            failure: None,
+            requests: RefCell::new(Vec::new()),
+        };
+        let (result, events) =
+            stream_events(&transport, "key", "https://example.com", &streaming, None);
+        assert_eq!(result, Ok(()));
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            stream_chunk(&events[0]).map(|chunk| chunk.text.as_str()),
+            Some("tail")
+        );
+        assert_eq!(events[1], ChatStreamEvent::Done);
+
+        for (body, expected) in [
+            (
+                "data: {\"choices\":[{\"error\":{\"message\":\"choice exploded\"}}]}\n\n",
+                OpenRouterChatError::Stream("choice exploded".to_owned()),
+            ),
+            (
+                "data: {\"choices\":[{\"delta\":{\"content\":5}}]}\n\n",
+                OpenRouterChatError::MalformedResponse,
+            ),
+            (
+                "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\ndata: {\"error\":\"late failure\"}",
+                OpenRouterChatError::Stream("late failure".to_owned()),
+            ),
+        ] {
+            let transport = StreamTransport {
+                chunks: vec![body.as_bytes().to_vec()],
+                failure: None,
+                requests: RefCell::new(Vec::new()),
+            };
+            let (result, events) =
+                stream_events(&transport, "key", "https://example.com", &streaming, None);
+            assert_eq!(result, Err(expected));
+            assert!(events.iter().all(|event| event != &ChatStreamEvent::Done));
+        }
+
+        // A trailing frame after [DONE] without a terminating blank line is
+        // still delivered to the consumer.
+        let transport = StreamTransport {
+            chunks: vec![
+                b"data: [DONE]\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"late\"}}]}"
+                    .to_vec(),
+            ],
+            failure: None,
+            requests: RefCell::new(Vec::new()),
+        };
+        let (result, events) =
+            stream_events(&transport, "key", "https://example.com", &streaming, None);
+        assert_eq!(result, Ok(()));
+        assert_eq!(events[0], ChatStreamEvent::Done);
+        assert_eq!(
+            events
+                .get(1)
+                .and_then(stream_chunk)
+                .map(|chunk| chunk.text.as_str()),
+            Some("late")
+        );
+
+        // An unterminated trailing comment carries no event.
+        let transport = StreamTransport {
+            chunks: vec![b"data: [DONE]\n\n: keepalive".to_vec()],
+            failure: None,
+            requests: RefCell::new(Vec::new()),
+        };
+        let (result, events) =
+            stream_events(&transport, "key", "https://example.com", &streaming, None);
+        assert_eq!(result, Ok(()));
+        assert_eq!(events, [ChatStreamEvent::Done]);
+    }
+
+    #[test]
+    fn reqwest_stream_transport_reports_http_failures_with_the_provider_message() -> TestResult {
+        let served = serve_once(
+            "503 Service Unavailable",
+            "application/json",
+            r#"{"error":{"message":"synthetic overload"}}"#,
+        );
+        let (base_url, server) = served?;
+        let transport = ReqwestOpenRouterTransport::new()?;
+        let mut streaming = request();
+        streaming.stream = true;
+        let (result, events) =
+            stream_events(&transport, "synthetic-key", &base_url, &streaming, None);
+        assert!(
+            matches!(
+                &result,
+                Err(OpenRouterChatError::Http { status_code: 503, message })
+                    if message.contains("synthetic overload")
+            ),
+            "{result:?}"
+        );
+        assert!(events.is_empty());
+        assert!(matches!(server.join(), Ok(Ok(()))));
+        Ok(())
+    }
+
+    #[test]
+    fn catalog_parsing_skips_malformed_overrides_and_detects_transcription_outputs() -> TestResult {
+        let model = json!({
+            "id": OPENROUTER_TRANSCRIPTION_MODEL,
+            "architecture": {"output_modalities": ["text", "transcription"]},
+            "pricing": {
+                "prompt": "0.1",
+                "completion": "0",
+                "overrides": ["malformed", {"prompt": "0.2"}]
+            }
+        });
+        let (id, pricing, transcription) =
+            parse_catalog_model(&model).ok_or("unexpected missing value")?;
+        assert_eq!(id, OPENROUTER_TRANSCRIPTION_MODEL);
+        assert_eq!(pricing.input_per_million, 200_000_000_000);
+        assert!(transcription.is_some());
+
+        let text_only = json!({
+            "id": OPENROUTER_TRANSCRIPTION_MODEL,
+            "architecture": {"output_modalities": ["text"]},
+            "pricing": {"prompt": "0.1", "completion": "0"}
+        });
+        assert!(
+            parse_catalog_model(&text_only)
+                .is_some_and(|(_, _, transcription)| transcription.is_none())
+        );
+        for invalid in ["1.2.3", "abc", ".", "1a.5"] {
+            assert_eq!(
+                super::decimal_rate_to_usd_micros_per_million(invalid),
+                None,
+                "{invalid}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cached_prices_answer_immediately_and_refresh_in_the_background() -> TestResult {
+        let closed = TcpListener::bind("127.0.0.1:0")?.local_addr()?;
+        let cache = OpenRouterPricingCache::new("synthetic-key", &format!("http://{closed}"))?;
+        let cached = super::TokenPricing {
+            input_per_million: 1_000_000,
+            cached_input_per_million: None,
+            cache_write_per_million: None,
+            audio_input_per_million: None,
+            output_per_million: 2_000_000,
+        };
+        cache
+            .state
+            .lock()
+            .ok()
+            .ok_or("pricing state")?
+            .models
+            .insert("synthetic/model".to_owned(), cached);
+        assert_eq!(cache.pricing("synthetic/model")?, Some(cached));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while cache.refreshing.load(Ordering::Acquire) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!cache.refreshing.load(Ordering::Acquire));
+        let state = cache.state.lock().ok().ok_or("pricing state")?;
+        assert!(matches!(
+            state.last_refresh_error,
+            Some(OpenRouterChatError::Transport(_))
+        ));
+        assert!(state.refresh_retry_at.is_some());
+        assert_eq!(state.models.get("synthetic/model"), Some(&cached));
+        Ok(())
+    }
+
+    #[test]
+    fn numeric_catalog_rates_and_request_encoding_errors_are_typed() {
+        assert_eq!(
+            super::parse_catalog_rate(&json!(0.000_000_3)),
+            Some(300_000)
+        );
+        assert_eq!(super::parse_catalog_rate(&json!(true)), None);
+        let encoding = serde_json::from_str::<Value>("{")
+            .err()
+            .map(super::request_json_error);
+        assert!(matches!(
+            encoding,
+            Some(OpenRouterChatError::RequestJson(detail)) if detail.contains("EOF")
+        ));
+    }
+
+    #[test]
+    fn reqwest_transports_report_unreachable_providers_as_transport_errors() -> TestResult {
+        let closed = TcpListener::bind("127.0.0.1:0")?.local_addr()?;
+        let transport = ReqwestOpenRouterTransport::new()?;
+        assert!(matches!(
+            complete_with(
+                &transport,
+                "synthetic-key",
+                &format!("http://{closed}"),
+                &request()
+            ),
+            Err(OpenRouterChatError::Transport(_))
+        ));
+        let mut streaming = request();
+        streaming.stream = true;
+        let (result, events) = stream_events(
+            &transport,
+            "synthetic-key",
+            &format!("http://{closed}"),
+            &streaming,
+            None,
+        );
+        assert!(matches!(result, Err(OpenRouterChatError::Transport(_))));
+        assert!(events.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn background_refresh_is_single_flight_and_a_poisoned_cache_fails_closed() -> TestResult {
+        let cache = OpenRouterPricingCache::new("synthetic-key", "http://127.0.0.1:1")?;
+        cache.refreshing.store(true, Ordering::Release);
+        cache.refresh_in_background();
+        assert!(cache.refreshing.load(Ordering::Acquire));
+        assert!(
+            cache
+                .state
+                .lock()
+                .is_ok_and(|state| state.last_refresh_error.is_none() && state.fetched_at.is_none())
+        );
+
+        let poisoner = cache.clone();
+        let poisoned = thread::spawn(move || {
+            let _guard = poisoner.state.lock();
+            unreachable!("synthetic failure while holding the pricing lock");
+        })
+        .join();
+        assert!(poisoned.is_err());
+        assert_eq!(
+            cache.pricing("synthetic/model"),
+            Err(OpenRouterChatError::Transport(
+                "OpenRouter pricing cache was poisoned".to_owned()
+            ))
+        );
+        Ok(())
     }
 }

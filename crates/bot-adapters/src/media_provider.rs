@@ -144,16 +144,14 @@ pub fn transcribe_audio_openrouter_with<T: OpenRouterTransport>(
     let response = transport.post(&HttpRequest {
         url: transcription_url(base_url)?,
         bearer_token: api_key.to_owned(),
-        body: serde_json::to_string(&json!({
+        body: json!({
             "model": model,
             "input_audio": {
                 "format": audio_format,
                 "data": BASE64.encode(audio_bytes),
             }
-        }))
-        .map_err(|error| {
-            MediaProviderError::OpenRouter(OpenRouterChatError::RequestJson(error.to_string()))
-        })?,
+        })
+        .to_string(),
     })?;
     transcription_result(response, model, audio_seconds, file_id)
 }
@@ -326,6 +324,8 @@ fn retry_after(headers: &BTreeMap<String, String>) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
     use std::cell::RefCell;
 
     use crate::openrouter_chat::{HttpRequest, HttpResponse};
@@ -334,13 +334,16 @@ mod tests {
 
     struct OpenRouter {
         request: RefCell<Option<HttpRequest>>,
+        failure: Option<OpenRouterChatError>,
         response: HttpResponse,
     }
 
     impl OpenRouterTransport for OpenRouter {
         fn post(&self, request: &HttpRequest) -> Result<HttpResponse, OpenRouterChatError> {
             self.request.replace(Some(request.clone()));
-            Ok(self.response.clone())
+            self.failure
+                .clone()
+                .map_or_else(|| Ok(self.response.clone()), Err)
         }
     }
 
@@ -360,9 +363,10 @@ mod tests {
     }
 
     #[test]
-    fn vision_request_uses_typed_multimodal_content_and_normalizes_usage() {
+    fn vision_request_uses_typed_multimodal_content_and_normalizes_usage() -> TestResult {
         let transport = OpenRouter {
             request: RefCell::new(None),
+            failure: None,
             response: chat_response("a synthetic image"),
         };
         let result = describe_image_with(
@@ -380,10 +384,7 @@ mod tests {
                 file_id: Some("file-1"),
             },
         );
-        assert!(result.is_ok());
-        let Some(result) = result.ok() else {
-            return;
-        };
+        let result = result?;
         assert_eq!(result.text, "a synthetic image");
         assert_eq!(result.billing_segment["kind"], "vision");
         assert_eq!(result.billing_segment["model"], "resolved/model");
@@ -401,12 +402,14 @@ mod tests {
                 .as_str()
                 .is_some_and(|value| value.starts_with("data:image/webp;base64,"))
         );
+        Ok(())
     }
 
     #[test]
-    fn openrouter_audio_detects_container_and_preserves_provider_usage() {
+    fn openrouter_audio_detects_container_and_preserves_provider_usage() -> TestResult {
         let transport = OpenRouter {
             request: RefCell::new(None),
+            failure: None,
             response: HttpResponse {
                 status_code: 200,
                 headers: BTreeMap::from([(
@@ -430,10 +433,7 @@ mod tests {
             4.5,
             Some("audio-1"),
         );
-        assert!(result.is_ok());
-        let Some(result) = result.ok() else {
-            return;
-        };
+        let result = result?;
         assert_eq!(result.text, "spoken words");
         assert_eq!(result.billing_segment["kind"], "transcribe");
         assert_eq!(result.billing_segment["model"], "resolved/model");
@@ -475,6 +475,7 @@ mod tests {
                 .map(|request| request.bearer_token.as_str()),
             Some("key")
         );
+        Ok(())
     }
 
     #[test]
@@ -515,6 +516,7 @@ mod tests {
         };
         let invalid_json = OpenRouter {
             request: RefCell::new(None),
+            failure: None,
             response: response.clone(),
         };
         assert_eq!(
@@ -534,6 +536,7 @@ mod tests {
 
         let missing_text = OpenRouter {
             request: RefCell::new(None),
+            failure: None,
             response: HttpResponse {
                 status_code: 200,
                 headers: BTreeMap::new(),
@@ -556,6 +559,7 @@ mod tests {
 
         let missing_key = OpenRouter {
             request: RefCell::new(None),
+            failure: None,
             response,
         };
         assert_eq!(
@@ -574,6 +578,7 @@ mod tests {
 
         let limited = OpenRouter {
             request: RefCell::new(None),
+            failure: None,
             response: HttpResponse {
                 status_code: 429,
                 headers: BTreeMap::from([("retry-after".to_owned(), "12".to_owned())]),
@@ -600,6 +605,7 @@ mod tests {
 
         let numeric_code = OpenRouter {
             request: RefCell::new(None),
+            failure: None,
             response: HttpResponse {
                 status_code: 400,
                 headers: BTreeMap::new(),
@@ -626,6 +632,7 @@ mod tests {
 
         let malformed_url = OpenRouter {
             request: RefCell::new(None),
+            failure: None,
             response: HttpResponse {
                 status_code: 200,
                 headers: BTreeMap::new(),
@@ -664,7 +671,139 @@ mod tests {
     }
 
     #[test]
-    fn completion_metadata_preserves_optional_provider_fields() {
+    fn vision_price_ceilings_are_forwarded_to_the_provider() {
+        let transport = OpenRouter {
+            request: RefCell::new(None),
+            failure: None,
+            response: chat_response("a priced image"),
+        };
+        let result = describe_image_with(
+            &transport,
+            VisionRequest {
+                api_key: "key",
+                base_url: "https://synthetic.invalid/api/v1",
+                model: "requested/model",
+                system_prompt: "system",
+                user_prompt: "describe",
+                image_bytes: b"image",
+                image_mime: "image/png",
+                max_tokens: 100,
+                price_ceiling: Some((0.5, 1.5)),
+                file_id: None,
+            },
+        );
+        assert_eq!(
+            result.map(|result| result.text),
+            Ok("a priced image".to_owned())
+        );
+        let body: Value = serde_json::from_str(
+            &transport
+                .request
+                .borrow()
+                .as_ref()
+                .map_or_else(String::new, |request| request.body.clone()),
+        )
+        .unwrap_or(Value::Null);
+        assert_eq!(
+            body["provider"]["max_price"],
+            json!({"prompt": 0.5, "completion": 1.5})
+        );
+        assert_eq!(body["max_tokens"], 100);
+    }
+
+    #[test]
+    fn transcription_rejects_blank_models_non_http_urls_and_codeless_errors() {
+        let transport = |status_code: u16, body: Value| OpenRouter {
+            request: RefCell::new(None),
+            failure: None,
+            response: HttpResponse {
+                status_code,
+                headers: BTreeMap::new(),
+                body: body.to_string(),
+            },
+        };
+        let ok = transport(200, json!({"text": "synthetic"}));
+        assert_eq!(
+            transcribe_audio_openrouter_with(
+                &ok,
+                "synthetic-key",
+                "https://synthetic.invalid/api/v1",
+                "  ",
+                b"synthetic audio",
+                3.0,
+                None,
+            )
+            .err(),
+            Some(MediaProviderError::OpenRouter(
+                OpenRouterChatError::MissingModel
+            ))
+        );
+        for base_url in ["ftp://synthetic.invalid/api/v1", "file:///synthetic"] {
+            assert_eq!(
+                transcribe_audio_openrouter_with(
+                    &ok,
+                    "synthetic-key",
+                    base_url,
+                    "synthetic-model",
+                    b"synthetic audio",
+                    3.0,
+                    None,
+                )
+                .err(),
+                Some(MediaProviderError::OpenRouter(
+                    OpenRouterChatError::InvalidBaseUrl
+                )),
+                "{base_url}"
+            );
+        }
+        assert!(ok.request.borrow().is_none());
+
+        let offline = OpenRouter {
+            failure: Some(OpenRouterChatError::Transport(
+                "synthetic outage".to_owned(),
+            )),
+            ..transport(200, json!({"text": "unused"}))
+        };
+        assert_eq!(
+            transcribe_audio_openrouter_with(
+                &offline,
+                "synthetic-key",
+                "https://synthetic.invalid/api/v1",
+                "synthetic-model",
+                b"synthetic audio",
+                3.0,
+                None,
+            )
+            .err(),
+            Some(MediaProviderError::OpenRouter(
+                OpenRouterChatError::Transport("synthetic outage".to_owned())
+            ))
+        );
+        assert!(offline.request.borrow().is_some());
+
+        let failed = transport(500, json!({"error": {"code": true}}));
+        assert_eq!(
+            transcribe_audio_openrouter_with(
+                &failed,
+                "synthetic-key",
+                "https://synthetic.invalid/api/v1",
+                "synthetic-model",
+                b"synthetic audio",
+                3.0,
+                None,
+            )
+            .err(),
+            Some(MediaProviderError::Http {
+                status_code: 500,
+                code: String::new(),
+                message: "provider request failed".to_owned(),
+                retry_after_seconds: None,
+            })
+        );
+    }
+
+    #[test]
+    fn completion_metadata_preserves_optional_provider_fields() -> TestResult {
         let result = result_from_completion(
             "synthetic-kind",
             ChatCompletion {
@@ -681,8 +820,8 @@ mod tests {
             "synthetic-source",
             Some("synthetic-file"),
             Some(-1.0),
-        )
-        .unwrap_or_else(|_| unreachable!());
+        );
+        let result = result?;
         assert_eq!(
             result.billing_segment["metadata"]["provider_generation_id"],
             "synthetic-generation"
@@ -696,5 +835,25 @@ mod tests {
             "synthetic-tier"
         );
         assert_eq!(result.billing_segment["audio_seconds"], 0.0);
+
+        let empty = result_from_completion(
+            "vision",
+            ChatCompletion {
+                generation_id: None,
+                text: String::new(),
+                tool_calls: Vec::new(),
+                finish_reason: Some("stop".to_owned()),
+                model: "synthetic-model".to_owned(),
+                upstream_provider: None,
+                service_tier: None,
+                annotations: Vec::new(),
+                usage: Map::new(),
+            },
+            "openrouter",
+            None,
+            None,
+        );
+        assert_eq!(empty.err(), Some(MediaProviderError::MissingText));
+        Ok(())
     }
 }

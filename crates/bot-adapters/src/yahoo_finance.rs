@@ -436,6 +436,8 @@ pub fn load_symbol<T: YahooFinanceTransport, C: RequestCache>(
 
 #[cfg(test)]
 mod tests {
+    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::io::{Read, Write};
@@ -612,6 +614,52 @@ mod tests {
     }
 
     #[test]
+    fn candle_parser_rejects_missing_quotes_and_non_positive_prices() {
+        let without_quotes = serde_json::json!({"chart":{"result":[{
+            "timestamp":[100], "indicators":{"quote":[]}
+        }]}});
+        assert!(super::parse_candles(&without_quotes).is_empty());
+        let payload = serde_json::json!({"chart":{"result":[{
+            "timestamp":[100,200], "indicators":{"quote":[{
+                "open":[0,20],"high":[12,22],"low":[9,19],"close":[11,21]
+            }]}
+        }]}});
+        assert_eq!(
+            super::parse_candles(&payload),
+            vec![vec![200.0, 20.0, 22.0, 19.0, 21.0, 0.0]]
+        );
+    }
+
+    #[test]
+    fn expanded_search_retries_a_failed_page_before_using_its_candidates() {
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::from([
+                response(
+                    r#"{"quotes":[
+                        {"quoteType":"EQUITY","symbol":"A1"},
+                        {"quoteType":"EQUITY","symbol":"A2"},
+                        {"quoteType":"EQUITY","symbol":"A3"},
+                        {"quoteType":"EQUITY","symbol":"A4"},
+                        {"quoteType":"EQUITY","symbol":"A5"}
+                    ]}"#,
+                ),
+                Err(TransportFailureKind::Timeout),
+                response(
+                    r#"{"quotes":[{"quoteType":"EQUITY","symbol":"RKH.L","exchDisp":"London"}]}"#,
+                ),
+            ])),
+            requests: RefCell::default(),
+            searches: RefCell::default(),
+        };
+        let load = load_symbol(&transport, &mut Cache::default(), "rkh", 100);
+        assert_eq!(transport.searches.borrow().len(), 3);
+        assert_eq!(load.symbol.as_deref(), Some("RKH.L"));
+        assert_eq!(load.candidates.len(), 6);
+        assert_eq!(load.diagnostics.len(), 1);
+        assert!(load.diagnostics[0].contains("Yahoo expanded search request"));
+    }
+
+    #[test]
     fn cache_key_exactly_matches_python_sorted_json() {
         assert_eq!(
             cache_key("BZ=F"),
@@ -774,15 +822,17 @@ mod tests {
     }
 
     #[test]
-    fn reqwest_transport_preserves_chart_and_search_http_contracts() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
-        let server = thread::spawn(move || {
+    fn reqwest_transport_preserves_chart_and_search_http_contracts() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
             for expected in [
                 "/chart/EXM?range=5d&interval=1d",
                 "/search?q=Synthetic+Company&quotesCount=5&newsCount=0",
+                "/chart/EXM?period1=100&period2=200&interval=1h",
+                "/search?q=Synthetic+Company&quotesCount=20&newsCount=0",
             ] {
-                let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+                let (mut stream, _) = listener.accept()?;
                 let mut request = [0_u8; 2_048];
                 let bytes = stream.read(&mut request).unwrap_or_default();
                 let request = String::from_utf8_lossy(&request[..bytes]);
@@ -793,20 +843,22 @@ mod tests {
                         .contains("user-agent: mozilla/5.0")
                 );
                 let body = r#"{"synthetic":true}"#;
-                write!(
+                let written = write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
-                )
-                .unwrap_or_else(|_| unreachable!());
+                );
+                written?;
             }
+            Ok(())
         });
         let base = format!("http://{address}");
         let transport = ReqwestYahooFinanceTransport::with_urls(
             &format!("{base}/chart"),
             &format!("{base}/search"),
         )
-        .unwrap_or_else(|_| unreachable!());
+        .ok()
+        .ok_or("unexpected error")?;
         assert_eq!(
             transport
                 .chart(&YahooChartRequest {
@@ -824,13 +876,34 @@ mod tests {
                 .map(|response| response.body),
             Ok(r#"{"synthetic":true}"#.to_owned())
         );
+        assert_eq!(
+            transport
+                .chart(&YahooChartRequest {
+                    symbol: "EXM".to_owned(),
+                    window: Some((100, 200, "1h".to_owned())),
+                })
+                .map(|response| response.status_code),
+            Ok(200)
+        );
+        assert_eq!(
+            transport
+                .search_with_limit(
+                    &YahooSearchRequest {
+                        query: "Synthetic Company".to_owned(),
+                    },
+                    20,
+                )
+                .map(|response| response.status_code),
+            Ok(200)
+        );
         transport.before_retry();
-        assert!(server.join().is_ok());
+        assert!(matches!(server.join(), Ok(Ok(()))));
         let unavailable = ReqwestYahooFinanceTransport::with_urls(
             "http://127.0.0.1:1/chart",
             "http://127.0.0.1:1/search",
         )
-        .unwrap_or_else(|_| unreachable!());
+        .ok()
+        .ok_or("unexpected error")?;
         assert!(
             unavailable
                 .chart(&YahooChartRequest {
@@ -838,6 +911,24 @@ mod tests {
                     window: None,
                 })
                 .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reqwest_failures_are_classified_by_cause() {
+        use crate::web_fetch::reqwest_error_fixtures as fixtures;
+        assert_eq!(
+            fixtures::timeout().map(super::classify_error),
+            Some(super::TransportFailureKind::Timeout)
+        );
+        assert_eq!(
+            fixtures::connection().map(super::classify_error),
+            Some(super::TransportFailureKind::Connection)
+        );
+        assert_eq!(
+            fixtures::request().map(super::classify_error),
+            Some(super::TransportFailureKind::Request)
         );
     }
 }

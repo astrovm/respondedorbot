@@ -53,7 +53,7 @@ impl ReqwestTokenSignalTransport {
                 .build()
         })
         .map(|client| Self { client })
-        .map_err(|error| format!("could not build token-signal HTTP client: {error}"))
+        .map_err(failure("could not build token-signal HTTP client"))
     }
 }
 
@@ -64,12 +64,12 @@ impl TokenSignalTransport for ReqwestTokenSignalTransport {
             .get(url)
             .query(query)
             .send()
-            .map_err(|error| format!("token-signal GET failed: {error}"))?;
+            .map_err(failure("token-signal GET failed"))?;
         let status_code = response.status().as_u16();
         response
             .text()
             .map(|body| JsonResponse { status_code, body })
-            .map_err(|error| format!("token-signal response read failed: {error}"))
+            .map_err(failure("token-signal response read failed"))
     }
 
     fn post_json(&self, url: &str, body: &Value) -> Result<JsonResponse, String> {
@@ -78,12 +78,12 @@ impl TokenSignalTransport for ReqwestTokenSignalTransport {
             .post(url)
             .json(body)
             .send()
-            .map_err(|error| format!("token-signal POST failed: {error}"))?;
+            .map_err(failure("token-signal POST failed"))?;
         let status_code = response.status().as_u16();
         response
             .text()
             .map(|body| JsonResponse { status_code, body })
-            .map_err(|error| format!("token-signal response read failed: {error}"))
+            .map_err(failure("token-signal response read failed"))
     }
 
     fn get_binary(&self, url: &str) -> Result<BinaryResponse, String> {
@@ -91,7 +91,7 @@ impl TokenSignalTransport for ReqwestTokenSignalTransport {
             .client
             .get(url)
             .send()
-            .map_err(|error| format!("token image GET failed: {error}"))?;
+            .map_err(failure("token image GET failed"))?;
         let status_code = response.status().as_u16();
         let content_type = response
             .headers()
@@ -106,8 +106,13 @@ impl TokenSignalTransport for ReqwestTokenSignalTransport {
                 content_type,
                 body: body.to_vec(),
             })
-            .map_err(|error| format!("token image response read failed: {error}"))
+            .map_err(failure("token image response read failed"))
     }
+}
+
+/// Prefix an error with the operation that failed.
+fn failure<E: std::fmt::Display>(context: &'static str) -> impl FnOnce(E) -> String {
+    move |error| format!("{context}: {error}")
 }
 
 pub trait TokenSignalCache {
@@ -164,6 +169,25 @@ fn same_token_identity(left: &TokenAddress, right: &TokenAddress) -> bool {
         }
 }
 
+fn identified_pair(pair: &TokenPair) -> Option<(TokenAddress, TokenPair)> {
+    token_from_pair(pair).map(|token| (token, pair.clone()))
+}
+
+/// Keep the first (best-ranked) pair of every distinct token identity from
+/// pairs already sorted by [`compare_symbol_pairs`].
+fn unique_identities(pairs: Vec<TokenPair>) -> Vec<(TokenAddress, TokenPair)> {
+    let mut unique = Vec::<(TokenAddress, TokenPair)>::new();
+    for (token, pair) in pairs.iter().filter_map(identified_pair) {
+        if !unique
+            .iter()
+            .any(|(known, _)| same_token_identity(known, &token))
+        {
+            unique.push((token, pair));
+        }
+    }
+    unique
+}
+
 fn preview_signal(token: TokenAddress, pair: TokenPair) -> TokenSignal {
     let token_image_url = token_image_url(&pair, None);
     let socials = token_socials(&pair, None);
@@ -195,8 +219,8 @@ where
         key: &str,
         ttl_seconds: i64,
         label: &str,
-        fetch: impl FnOnce(&Transport) -> Result<JsonResponse, String>,
-        extract: impl FnOnce(Value) -> Option<Value>,
+        fetch: &dyn Fn(&Transport) -> Result<JsonResponse, String>,
+        extract: &dyn Fn(Value) -> Option<Value>,
         diagnostics: &mut Vec<String>,
     ) -> Option<Value> {
         match self.cache.get(key) {
@@ -231,13 +255,9 @@ where
             ));
             return None;
         };
-        match serde_json::to_string(&value) {
-            Ok(encoded) => {
-                if let Err(error) = self.cache.set(key, &encoded, ttl_seconds) {
-                    diagnostics.push(format!("could not write {label} cache {key}: {error}"));
-                }
-            }
-            Err(error) => diagnostics.push(format!("could not encode {label}: {error}")),
+        // A JSON value always encodes; only the cache write can fail.
+        if let Err(error) = self.cache.set(key, &value.to_string(), ttl_seconds) {
+            diagnostics.push(format!("could not write {label} cache {key}: {error}"));
         }
         Some(value)
     }
@@ -252,8 +272,8 @@ where
             &key,
             30,
             "DexScreener pairs",
-            |transport| transport.get_json(&url, &[]),
-            Some,
+            &|transport| transport.get_json(&url, &[]),
+            &Some,
             diagnostics,
         )
         .and_then(|value| serde_json::from_value(value).ok())
@@ -267,13 +287,13 @@ where
             &key,
             30,
             "DexScreener search",
-            |transport| {
+            &|transport| {
                 transport.get_json(
                     "https://api.dexscreener.com/latest/dex/search",
                     &[("q", normalized.clone())],
                 )
             },
-            |value| value.get("pairs").cloned(),
+            &|value| value.get("pairs").cloned(),
             diagnostics,
         )
         .and_then(|value| serde_json::from_value(value).ok())
@@ -295,7 +315,7 @@ where
             &key,
             60,
             "GeckoTerminal OHLCV",
-            |transport| {
+            &|transport| {
                 transport.get_json(
                     &url,
                     &[
@@ -305,7 +325,7 @@ where
                     ],
                 )
             },
-            |value| value.pointer("/data/attributes/ohlcv_list").cloned(),
+            &|value| value.pointer("/data/attributes/ohlcv_list").cloned(),
             diagnostics,
         );
         raw.and_then(|candles| candles.as_array().cloned())
@@ -342,8 +362,8 @@ where
             &key,
             60,
             "pump.fun metadata",
-            |transport| transport.get_json(&url, &[]),
-            Some,
+            &|transport| transport.get_json(&url, &[]),
+            &Some,
             diagnostics,
         )
     }
@@ -401,7 +421,7 @@ where
             &key,
             30,
             "pump.fun search",
-            |transport| {
+            &|transport| {
                 transport.get_json(
                     "https://frontend-api-v3.pump.fun/coins/search-unrestricted",
                     &[
@@ -414,7 +434,7 @@ where
                     ],
                 )
             },
-            Some,
+            &Some,
             diagnostics,
         )?;
         let mut matches = value
@@ -456,8 +476,8 @@ where
             &key,
             300,
             "Solana token supply",
-            |transport| transport.post_json("https://api.mainnet-beta.solana.com", &body),
-            |value| {
+            &|transport| transport.post_json("https://api.mainnet-beta.solana.com", &body),
+            &|value| {
                 value
                     .pointer("/result/value/uiAmountString")
                     .or_else(|| value.pointer("/result/value/uiAmount"))
@@ -511,20 +531,18 @@ where
                         &key,
                         30,
                         "DexScreener address",
-                        |transport| transport.get_json(&url, &[]),
-                        |value| value.get("pairs").cloned(),
+                        &|transport| transport.get_json(&url, &[]),
+                        &|value| value.get("pairs").cloned(),
                         &mut diagnostics,
                     )
                     .and_then(|value| serde_json::from_value(value).ok())
                     .unwrap_or_default();
                 let pairs = pairs
-                    .into_iter()
-                    .filter(|pair| {
-                        pair.base_token.address.eq_ignore_ascii_case(&token.address)
-                            && token_from_pair(pair).is_some()
-                    })
+                    .iter()
+                    .filter(|pair| pair.base_token.address.eq_ignore_ascii_case(&token.address))
+                    .filter_map(identified_pair)
                     .collect();
-                self.load_pairs(token, pairs, diagnostics)
+                self.load_pairs(pairs, diagnostics)
             }
             SignalQuery::Address(token) => self.load_token(token),
             SignalQuery::Symbol(symbol) => self.load_symbol(symbol),
@@ -536,19 +554,9 @@ where
         let mut diagnostics = Vec::new();
         let pairs = self
             .pairs(token, &mut diagnostics)
-            .into_iter()
-            .filter(|pair| {
-                token_from_pair(pair).is_some_and(|resolved| {
-                    resolved.chain_id.eq_ignore_ascii_case(&token.chain_id)
-                        && resolved.network.eq_ignore_ascii_case(&token.network)
-                        && if resolved.address.starts_with("0x") && token.address.starts_with("0x")
-                        {
-                            resolved.address.eq_ignore_ascii_case(&token.address)
-                        } else {
-                            resolved.address == token.address
-                        }
-                })
-            })
+            .iter()
+            .filter_map(identified_pair)
+            .filter(|(resolved, _)| same_token_identity(resolved, token))
             .collect::<Vec<_>>();
         if pairs.is_empty() {
             let signal = self
@@ -562,7 +570,7 @@ where
                 diagnostics,
             };
         }
-        self.load_pairs(token, pairs, diagnostics)
+        self.load_pairs(pairs, diagnostics)
     }
 
     fn pair_candles(
@@ -580,11 +588,10 @@ where
 
     fn load_pairs(
         &mut self,
-        token: &TokenAddress,
-        mut pairs: Vec<TokenPair>,
+        mut pairs: Vec<(TokenAddress, TokenPair)>,
         mut diagnostics: Vec<String>,
     ) -> TokenSignalLoad {
-        pairs.sort_by(|left, right| {
+        pairs.sort_by(|(_, left), (_, right)| {
             let left = pair_rank(left);
             let right = pair_rank(right);
             right
@@ -593,11 +600,10 @@ where
                 .then_with(|| right.1.total_cmp(&left.1))
         });
         let fallback = pairs.first().cloned();
-        for pair in pairs {
+        for (resolved, pair) in pairs {
             if pair.pair_address.is_empty() {
                 continue;
             }
-            let resolved = token_from_pair(&pair).unwrap_or_else(|| token.clone());
             let candles = self.pair_candles(&resolved, &pair, &mut diagnostics);
             if !candles.is_empty() {
                 return TokenSignalLoad {
@@ -607,10 +613,8 @@ where
             }
         }
         TokenSignalLoad {
-            signal: fallback.map(|pair| {
-                let resolved = token_from_pair(&pair).unwrap_or_else(|| token.clone());
-                self.enrich(resolved, pair, Vec::new(), &mut diagnostics)
-            }),
+            signal: fallback
+                .map(|(resolved, pair)| self.enrich(resolved, pair, Vec::new(), &mut diagnostics)),
             diagnostics,
         }
     }
@@ -675,22 +679,13 @@ where
                 .cmp(&left_exact)
                 .then_with(|| compare_symbol_pairs(left, right))
         });
-        let Some(initial_pair) = pairs
+        let Some((initial_token, initial_pair)) = pairs
             .iter()
-            .find(|pair| {
-                token_from_pair(pair).is_some()
-                    && pair.base_token.symbol.eq_ignore_ascii_case(&normalized)
-            })
-            .cloned()
+            .filter(|pair| pair.base_token.symbol.eq_ignore_ascii_case(&normalized))
+            .find_map(identified_pair)
         else {
             return TokenSignalLoad {
                 signal: self.search_pump_signal(symbol, &mut diagnostics),
-                diagnostics,
-            };
-        };
-        let Some(initial_token) = token_from_pair(&initial_pair) else {
-            return TokenSignalLoad {
-                signal: None,
                 diagnostics,
             };
         };
@@ -717,14 +712,8 @@ where
             })
             .collect::<Vec<_>>();
         pairs.sort_by(compare_symbol_pairs);
-        let Some(initial_pair) = pairs.first().cloned() else {
+        let Some((initial_token, initial_pair)) = pairs.first().and_then(identified_pair) else {
             diagnostics.push(format!("no DexScreener token matched slug {slug}"));
-            return TokenSignalLoad {
-                signal: None,
-                diagnostics,
-            };
-        };
-        let Some(initial_token) = token_from_pair(&initial_pair) else {
             return TokenSignalLoad {
                 signal: None,
                 diagnostics,
@@ -746,22 +735,7 @@ where
         });
         pairs.sort_by(compare_symbol_pairs);
         let exact_pairs = pairs.clone();
-        let mut unique = Vec::<(TokenAddress, TokenPair)>::new();
-        for pair in pairs {
-            let Some(token) = token_from_pair(&pair) else {
-                continue;
-            };
-            if let Some((_, known_pair)) = unique
-                .iter_mut()
-                .find(|(known, _)| same_token_identity(known, &token))
-            {
-                if compare_symbol_pairs(&pair, known_pair).is_lt() {
-                    *known_pair = pair;
-                }
-            } else {
-                unique.push((token, pair));
-            }
-        }
+        let unique = unique_identities(pairs);
         if unique.len() <= 1 {
             let load = self.load_symbol_pairs(exact_pairs, symbol, diagnostics);
             return TokenSignalCandidates {
@@ -802,22 +776,7 @@ where
         let mut pairs = pairs;
         pairs.sort_by(compare_symbol_pairs);
         let exact_pairs = pairs.clone();
-        let mut unique = Vec::<(TokenAddress, TokenPair)>::new();
-        for pair in pairs {
-            let Some(token) = token_from_pair(&pair) else {
-                continue;
-            };
-            if let Some((_, known_pair)) = unique
-                .iter_mut()
-                .find(|(known, _)| same_token_identity(known, &token))
-            {
-                if compare_symbol_pairs(&pair, known_pair).is_lt() {
-                    *known_pair = pair;
-                }
-            } else {
-                unique.push((token, pair));
-            }
-        }
+        let unique = unique_identities(pairs);
         if unique.len() <= 1 {
             let Some((token, pair)) = unique.first().cloned() else {
                 return TokenSignalCandidates {
@@ -890,7 +849,7 @@ where
             &key,
             60,
             "pump.fun chart history",
-            |transport| {
+            &|transport| {
                 transport.get_json(
                     &url,
                     &[
@@ -902,7 +861,7 @@ where
                     ],
                 )
             },
-            Some,
+            &Some,
             &mut Vec::new(),
         )
         .and_then(|value| value.as_array().cloned())
@@ -1013,7 +972,7 @@ where
                 &key,
                 60,
                 "token chart history",
-                |transport| {
+                &|transport| {
                     transport.get_json(
                         &url,
                         &[
@@ -1024,7 +983,7 @@ where
                         ],
                     )
                 },
-                |value| value.pointer("/data/attributes/ohlcv_list").cloned(),
+                &|value| value.pointer("/data/attributes/ohlcv_list").cloned(),
                 &mut Vec::new(),
             );
             raw.and_then(|value| serde_json::from_value::<Vec<Vec<f64>>>(value).ok())
@@ -1070,8 +1029,8 @@ where
 
     pub fn save_state(&mut self, signal_id: &str, state: &SignalState) -> Result<(), String> {
         let key = signal_state_key(signal_id);
-        let encoded = serde_json::to_string(state)
-            .map_err(|error| format!("could not encode token-signal state: {error}"))?;
+        let encoded =
+            serde_json::to_string(state).map_err(failure("could not encode token-signal state"))?;
         self.cache
             .set(&key, &encoded, SIGNAL_STATE_TTL_SECONDS)
             .map_err(|error| error.to_string())
@@ -1309,6 +1268,28 @@ fn render_price_chart(
     width: u32,
     height: u32,
 ) -> Result<Vec<u8>, String> {
+    let fonts = ChartFonts {
+        bold: chart_font(true),
+        regular: chart_font(false),
+    };
+    render_price_chart_with_fonts(pair, candles, heading, currency, (width, height), &fonts)
+}
+
+/// Fonts are optional: without system fonts the chart still renders, only
+/// without text labels.
+struct ChartFonts {
+    bold: Option<FontArc>,
+    regular: Option<FontArc>,
+}
+
+fn render_price_chart_with_fonts(
+    pair: &TokenPair,
+    candles: &[Vec<f64>],
+    heading: Option<&str>,
+    currency: Option<&str>,
+    (width, height): (u32, u32),
+    fonts: &ChartFonts,
+) -> Result<Vec<u8>, String> {
     if width < 320 || height < 240 {
         return Err("token chart dimensions are too small".to_owned());
     }
@@ -1331,7 +1312,7 @@ fn render_price_chart(
         None => format_money(value, true),
     };
     let price_text = price_label(price);
-    if let Some(font) = chart_font(true) {
+    if let Some(font) = &fonts.bold {
         let title = format!("{symbol}\n{price_text}");
         for (index, line) in heading.unwrap_or(&title).lines().take(2).enumerate() {
             let font_size = if index == 0 { 38.0 } else { 28.0 };
@@ -1428,7 +1409,7 @@ fn render_price_chart(
             current_y,
             Rgb([0, 184, 148]),
         );
-        if let Some(font) = chart_font(false) {
+        if let Some(font) = &fonts.regular {
             for index in 0..6 {
                 let value = maximum - span * f64::from(index) / 5.0;
                 let y = top + (bottom - top) * index / 5;
@@ -1439,7 +1420,7 @@ fn render_price_chart(
                         right + 12,
                         y - 12,
                         chart_label_size(
-                            &font,
+                            font,
                             &price_label(value),
                             24.0,
                             width.saturating_sub((right + 24) as u32),
@@ -1455,7 +1436,7 @@ fn render_price_chart(
                 right + 12,
                 current_y - 12,
                 chart_label_size(
-                    &font,
+                    font,
                     &price_text,
                     26.0,
                     width.saturating_sub((right + 24) as u32),
@@ -1465,7 +1446,7 @@ fn render_price_chart(
             );
         }
     }
-    if let Some(font) = chart_font(false) {
+    if let Some(font) = &fonts.regular {
         for (candle, x) in [
             (candles.first(), left),
             (candles.last(), right.saturating_sub(250)),
@@ -1497,25 +1478,27 @@ fn encode_png(image: RgbImage) -> Result<Vec<u8>, String> {
     let mut output = Cursor::new(Vec::new());
     DynamicImage::ImageRgb8(image)
         .write_to(&mut output, ImageFormat::Png)
-        .map_err(|error| format!("token chart PNG encode failed: {error}"))?;
+        .map_err(failure("token chart PNG encode failed"))?;
     Ok(output.into_inner())
 }
 
 #[cfg(test)]
 mod tests {
+    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
     #[test]
     fn chart_price_labels_fit_without_losing_currency_or_precision() {
-        let Some(font) = super::chart_font(false) else {
-            return;
-        };
-        for label in ["123456.789 USD", "1500000.123 ARS", "0.00000679 USD"] {
-            for preferred in [24.0, 26.0] {
-                let size = super::chart_label_size(&font, label, preferred, 176);
-                assert!(imageproc::drawing::text_size(size, &font, label).0 <= 176);
-                assert!(size <= preferred);
+        // Label sizing only applies when a system font is installed.
+        super::chart_font(false).into_iter().for_each(|font| {
+            for label in ["123456.789 USD", "1500000.123 ARS", "0.00000679 USD"] {
+                for preferred in [24.0, 26.0] {
+                    let size = super::chart_label_size(&font, label, preferred, 176);
+                    assert!(imageproc::drawing::text_size(size, &font, label).0 <= 176);
+                    assert!(size <= preferred);
+                }
             }
-        }
-        assert_eq!(super::chart_label_size(&font, "$1", 26.0, 176), 26.0);
+            assert_eq!(super::chart_label_size(&font, "$1", 26.0, 176), 26.0);
+        });
     }
 
     #[test]
@@ -1570,8 +1553,7 @@ mod tests {
         };
         assert!(super::render_market_chart(&quote, &[]).is_err());
         let png =
-            super::render_market_chart(&quote, &[vec![1.0, 99.0, 102.0, 98.0, 100.0, 1000.0]])
-                .map_err(|error| error.to_string())?;
+            super::render_market_chart(&quote, &[vec![1.0, 99.0, 102.0, 98.0, 100.0, 1000.0]])?;
         assert!(png.starts_with(b"\x89PNG"));
         Ok(())
     }
@@ -1634,60 +1616,62 @@ mod tests {
     }
 
     #[test]
-    fn reqwest_transport_supports_json_get_post_and_binary_downloads() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
-        let server = thread::spawn(move || {
+    fn reqwest_transport_supports_json_get_post_and_binary_downloads() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
             for (content_type, body) in [
                 ("application/json", br#"{"method":"get"}"#.as_slice()),
                 ("application/json", br#"{"method":"post"}"#.as_slice()),
                 ("image/png", &[1_u8, 2, 3][..]),
             ] {
-                let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+                let (mut stream, _) = listener.accept()?;
                 let mut request = [0_u8; 8_192];
                 let _ = stream.read(&mut request);
                 let headers = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
-                stream
-                    .write_all(headers.as_bytes())
-                    .unwrap_or_else(|_| unreachable!());
-                stream.write_all(body).unwrap_or_else(|_| unreachable!());
+                stream.write_all(headers.as_bytes())?;
+                stream.write_all(body)?;
             }
+            Ok(())
         });
-        let transport = ReqwestTokenSignalTransport::new().unwrap_or_else(|_| unreachable!());
+        let transport = ReqwestTokenSignalTransport::new()?;
         let base_url = format!("http://{address}");
-        let get = transport
-            .get_json(&base_url, &[("query", "synthetic".to_owned())])
-            .unwrap_or_else(|_| unreachable!());
+        let get = transport.get_json(&base_url, &[("query", "synthetic".to_owned())])?;
         assert!(get.body.contains("get"));
-        let post = transport
-            .post_json(&base_url, &json!({"value":"synthetic"}))
-            .unwrap_or_else(|_| unreachable!());
+        let post = transport.post_json(&base_url, &json!({"value":"synthetic"}))?;
         assert!(post.body.contains("post"));
-        let binary = transport
-            .get_binary(&base_url)
-            .unwrap_or_else(|_| unreachable!());
+        let binary = transport.get_binary(&base_url)?;
         assert_eq!(binary.content_type, "image/png");
         assert_eq!(binary.body, [1, 2, 3]);
-        assert!(server.join().is_ok());
+        assert!(matches!(server.join(), Ok(Ok(()))));
+        Ok(())
     }
 
     #[derive(Default)]
     struct Cache {
         values: BTreeMap<String, String>,
         writes: Vec<(String, i64)>,
+        fail_get: bool,
+        fail_set: bool,
     }
 
     impl TokenSignalCache for Cache {
         type Error = &'static str;
 
         fn get(&mut self, key: &str) -> Result<Option<String>, Self::Error> {
+            if self.fail_get {
+                return Err("synthetic cache read failure");
+            }
             Ok(self.values.get(key).cloned())
         }
 
         fn set(&mut self, key: &str, value: &str, ttl_seconds: i64) -> Result<(), Self::Error> {
+            if self.fail_set {
+                return Err("synthetic cache write failure");
+            }
             self.values.insert(key.to_owned(), value.to_owned());
             self.writes.push((key.to_owned(), ttl_seconds));
             Ok(())
@@ -1723,32 +1707,93 @@ mod tests {
         }
     }
 
+    /// A transport whose JSON GETs are answered by a closure; POST and binary
+    /// downloads are not part of the scenarios that use it.
+    struct JsonOnly<F>(F);
+
+    impl<F> TokenSignalTransport for JsonOnly<F>
+    where
+        F: Fn(&str, &[(&str, String)]) -> Result<JsonResponse, String>,
+    {
+        fn get_json(&self, url: &str, query: &[(&str, String)]) -> Result<JsonResponse, String> {
+            (self.0)(url, query)
+        }
+
+        fn post_json(&self, _: &str, _: &serde_json::Value) -> Result<JsonResponse, String> {
+            Err("unused".into())
+        }
+
+        fn get_binary(&self, _: &str) -> Result<BinaryResponse, String> {
+            Err("unused".into())
+        }
+    }
+
+    type JsonHandler = Box<dyn Fn(&str, &[(&str, String)]) -> Result<JsonResponse, String>>;
+
+    fn pump_history(body: serde_json::Value, interval: &'static str) -> JsonOnly<JsonHandler> {
+        JsonOnly(Box::new(move |url: &str, query: &[(&str, String)]| {
+            assert_eq!(url, "https://swap-api.pump.fun/v2/coins/timba-mint/candles");
+            assert!(query.contains(&("interval", interval.to_owned())));
+            assert!(query.contains(&("currency", "USD".to_owned())));
+            assert!(query.contains(&("createdTs", "1700000000000".to_owned())));
+            assert!(query.contains(&("beforeTs", "1800000000".to_owned())));
+            Ok(JsonResponse {
+                status_code: 200,
+                body: body.to_string(),
+            })
+        }))
+    }
+
+    #[test]
+    fn scripted_transports_reject_requests_outside_their_scenario() {
+        let json_only: JsonOnly<JsonHandler> = JsonOnly(Box::new(|_, _| Err("no json".into())));
+        assert_eq!(
+            json_only
+                .get_json("https://example.test", &[])
+                .err()
+                .as_deref(),
+            Some("no json")
+        );
+        assert_eq!(
+            json_only
+                .post_json("https://example.test", &json!({}))
+                .err()
+                .as_deref(),
+            Some("unused")
+        );
+        assert_eq!(
+            json_only
+                .get_binary("https://example.test")
+                .err()
+                .as_deref(),
+            Some("unused")
+        );
+        let transport = Transport {
+            json: Default::default(),
+            post: Default::default(),
+            binary: std::cell::RefCell::new(VecDeque::from([BinaryResponse {
+                status_code: 200,
+                content_type: "image/png".to_owned(),
+                body: vec![1],
+            }])),
+        };
+        assert_eq!(
+            transport
+                .get_binary("https://example.test")
+                .map(|image| image.body),
+            Ok(vec![1])
+        );
+        assert_eq!(
+            transport
+                .get_binary("https://example.test")
+                .err()
+                .as_deref(),
+            Some("synthetic image unavailable")
+        );
+    }
+
     #[test]
     fn pump_history_renders_recent_and_idle_tokens_without_a_dex_pool() -> Result<(), String> {
-        struct PumpHistory(serde_json::Value, &'static str);
-        impl TokenSignalTransport for PumpHistory {
-            fn get_json(
-                &self,
-                url: &str,
-                query: &[(&str, String)],
-            ) -> Result<JsonResponse, String> {
-                assert_eq!(url, "https://swap-api.pump.fun/v2/coins/timba-mint/candles");
-                assert!(query.contains(&("interval", self.1.to_owned())));
-                assert!(query.contains(&("currency", "USD".to_owned())));
-                assert!(query.contains(&("createdTs", "1700000000000".to_owned())));
-                assert!(query.contains(&("beforeTs", "1800000000".to_owned())));
-                Ok(JsonResponse {
-                    status_code: 200,
-                    body: self.0.to_string(),
-                })
-            }
-            fn post_json(&self, _: &str, _: &serde_json::Value) -> Result<JsonResponse, String> {
-                Err("unused".into())
-            }
-            fn get_binary(&self, _: &str) -> Result<BinaryResponse, String> {
-                Err("unused".into())
-            }
-        }
         let signal = TokenSignal {
             token: TokenAddress {
                 chain_id: "solana".into(),
@@ -1763,13 +1808,14 @@ mod tests {
             socials: BTreeMap::new(),
             pump: Some(
                 serde_json::from_value(json!({"created_timestamp":1700000000000_i64}))
-                    .map_err(|e| e.to_string())?,
+                    .ok()
+                    .ok_or("pump metadata")?,
             ),
         };
         let candle = |timestamp| json!({"timestamp": timestamp, "open":"0.000005", "high":"0.000006", "low":"0.000004", "close":"0.00000525", "volume":"3.97"});
         for timestamp in [1799999970000_i64, 1799900000000] {
             let mut adapter = TokenSignalAdapter::new(
-                PumpHistory(json!([candle(timestamp)]), "1m"),
+                pump_history(json!([candle(timestamp)]), "1m"),
                 Cache::default(),
             );
             let parsed = adapter.pump_period_candles(&signal, "1m", 61, "1h", 1800000000);
@@ -1791,7 +1837,7 @@ mod tests {
             );
         }
         let mut idle = TokenSignalAdapter::new(
-            PumpHistory(json!([candle(1_799_900_000_000_i64)]), "1m"),
+            pump_history(json!([candle(1_799_900_000_000_i64)]), "1m"),
             Cache::default(),
         );
         let idle_candles = idle.period_candles(&signal, "1h", 1_800_000_000)?;
@@ -1815,6 +1861,8 @@ mod tests {
         assert_eq!(near_complete.shown_period("30d"), Some("30d".to_owned()));
         let empty = PeriodHistory::for_test(Vec::new(), 86_400);
         assert_eq!(empty.shown_period("24h"), None);
+        let undated = PeriodHistory::for_test(vec![vec![f64::NAN, 1.0, 1.0, 1.0, 1.0]], 86_400);
+        assert_eq!(undated.shown_period("24h"), None);
         for (period, interval) in [
             ("1h", "1m"),
             ("1d", "5m"),
@@ -1826,7 +1874,7 @@ mod tests {
             ("5y", "24h"),
         ] {
             let mut adapter = TokenSignalAdapter::new(
-                PumpHistory(json!([candle(1799999970000_i64)]), interval),
+                pump_history(json!([candle(1799999970000_i64)]), interval),
                 Cache::default(),
             );
             assert!(
@@ -1839,8 +1887,10 @@ mod tests {
             json!([]),
             json!([candle(1800000060000_i64)]),
             json!([{"timestamp":1799999970000_i64,"open":"bad"}]),
+            json!([{"timestamp":1799999970000_i64,"open":"0","high":"1","low":"1","close":"1"}]),
         ] {
-            let mut adapter = TokenSignalAdapter::new(PumpHistory(missing, "1m"), Cache::default());
+            let mut adapter =
+                TokenSignalAdapter::new(pump_history(missing, "1m"), Cache::default());
             assert!(
                 adapter
                     .render_period_photo(&signal, "1h", 1800000000)
@@ -1852,24 +1902,13 @@ mod tests {
 
     #[test]
     fn token_history_ranges_choose_granularity_and_keep_identity() -> Result<(), String> {
-        struct History(std::cell::RefCell<Vec<String>>);
-        impl TokenSignalTransport for History {
-            fn get_json(
-                &self,
-                url: &str,
-                query: &[(&str, String)],
-            ) -> Result<JsonResponse, String> {
-                self.0.borrow_mut().push(format!("{url} {query:?}"));
-                Ok(JsonResponse { status_code: 200, body: json!({"data":{"attributes":{"ohlcv_list":[[1799999970,1,2,0.5,1.5,100],[1,1,2,0.5,1.5,100]]}}}).to_string() })
-            }
-            fn post_json(&self, _: &str, _: &serde_json::Value) -> Result<JsonResponse, String> {
-                Err("unused".into())
-            }
-            fn get_binary(&self, _: &str) -> Result<BinaryResponse, String> {
-                Err("unused".into())
-            }
-        }
-        let mut adapter = TokenSignalAdapter::new(History(Default::default()), Cache::default());
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let recorded = calls.clone();
+        let history: JsonHandler = Box::new(move |url: &str, query: &[(&str, String)]| {
+            recorded.borrow_mut().push(format!("{url} {query:?}"));
+            Ok(JsonResponse { status_code: 200, body: json!({"data":{"attributes":{"ohlcv_list":[[1799999970,1,2,0.5,1.5,100],[1,1,2,0.5,1.5,100]]}}}).to_string() })
+        });
+        let mut adapter = TokenSignalAdapter::new(JsonOnly(history), Cache::default());
         let signal = TokenSignal {
             token: TokenAddress {
                 chain_id: "solana".into(),
@@ -1900,7 +1939,7 @@ mod tests {
                 "{period}"
             );
         }
-        let calls = adapter.transport.0.borrow();
+        let calls = calls.borrow();
         assert!(calls[0].contains("fixed-pool/ohlcv/minute"));
         assert!(calls[2].contains("fixed-pool/ohlcv/hour"));
         assert!(calls[4].contains("fixed-pool/ohlcv/day"));
@@ -1991,6 +2030,21 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    #[test]
+    fn unavailable_pump_search_leaves_symbols_unresolved() {
+        let transport = scripted(vec![
+            json(json!({"pairs": []})),
+            JsonResponse {
+                status_code: 500,
+                body: String::new(),
+            },
+        ]);
+        let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
+        let load = adapter.load_symbol("timba");
+        assert!(load.signal.is_none());
+        assert_eq!(load.diagnostics, ["pump.fun search HTTP 500"]);
     }
 
     #[test]
@@ -2613,5 +2667,495 @@ mod tests {
         let chart = render_signal_chart(&signal, 420, 300);
         assert!(chart.as_ref().is_ok_and(|png| png.starts_with(b"\x89PNG")));
         assert_ne!(blank, chart);
+    }
+
+    fn json(body: serde_json::Value) -> JsonResponse {
+        JsonResponse {
+            status_code: 200,
+            body: body.to_string(),
+        }
+    }
+
+    fn scripted(responses: Vec<JsonResponse>) -> Transport {
+        Transport {
+            json: std::cell::RefCell::new(VecDeque::from(responses)),
+            post: Default::default(),
+            binary: Default::default(),
+        }
+    }
+
+    #[test]
+    fn evm_identities_ignore_address_case_but_other_chains_do_not() {
+        let token = |chain: &str, address: &str| TokenAddress {
+            chain_id: chain.to_owned(),
+            network: chain.to_owned(),
+            tag: String::new(),
+            address: address.to_owned(),
+        };
+        assert!(super::same_token_identity(
+            &token("base", "0xAbC0000000000000000000000000000000000001"),
+            &token("BASE", "0xabc0000000000000000000000000000000000001"),
+        ));
+        assert!(!super::same_token_identity(
+            &token("solana", "MintAbc"),
+            &token("solana", "mintabc"),
+        ));
+        assert!(!super::same_token_identity(
+            &token("base", "0xabc0000000000000000000000000000000000001"),
+            &token("robinhood", "0xabc0000000000000000000000000000000000001"),
+        ));
+    }
+
+    #[test]
+    fn solana_address_loads_match_the_exact_case_sensitive_mint() -> Result<(), String> {
+        let mint = "So1anaSyntheticMint11111111111111111111111";
+        let pair = |address: &str, pool: &str| {
+            json!({
+                "chainId": "solana", "pairAddress": pool,
+                "baseToken": {"address": address, "symbol": "SYN"},
+                "liquidity": {"usd": 1000}, "priceUsd": "1"
+            })
+        };
+        let transport = scripted(vec![
+            json(json!([
+                pair(&mint.to_ascii_lowercase(), "lowercase"),
+                pair(mint, "exact")
+            ])),
+            JsonResponse {
+                status_code: 404,
+                body: "{}".to_owned(),
+            },
+        ]);
+        let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
+        let token = TokenAddress {
+            chain_id: "solana".to_owned(),
+            network: "solana".to_owned(),
+            tag: "SOL".to_owned(),
+            address: mint.to_owned(),
+        };
+        let load = adapter.load_token(&token);
+        let signal = load.signal.ok_or("missing signal")?;
+        assert_eq!(signal.token.address, mint);
+        assert_eq!(signal.pair.pair_address, "exact");
+        assert!(signal.candles.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn pump_metadata_without_a_solana_mint_or_symbol_is_not_a_signal() {
+        let mint = "F3A1baCgv4TF79TSjdMTvpMDtNv8DJvHZwNc9DG8pump";
+        let token = TokenAddress {
+            chain_id: "solana".to_owned(),
+            network: "solana".to_owned(),
+            tag: "SOL".to_owned(),
+            address: mint.to_owned(),
+        };
+        let transport = scripted(vec![
+            json(json!([])),
+            json(json!({"mint": mint, "symbol": "  ", "usd_market_cap": 5140.0})),
+        ]);
+        let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
+        assert!(adapter.load_token(&token).signal.is_none());
+
+        for coin_mint in ["$TIMBA", "0x0000000000000000000000000000000000000001"] {
+            let transport = scripted(vec![
+                json(json!({"pairs": []})),
+                json(json!([{"symbol": "TIMBA", "mint": coin_mint, "usd_market_cap": 1}])),
+            ]);
+            let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
+            assert!(adapter.load_symbol("timba").signal.is_none(), "{coin_mint}");
+        }
+    }
+
+    #[test]
+    fn ranked_fallbacks_skip_same_token_pairs_without_a_pool_address() -> Result<(), String> {
+        let pair = |pool: &str, volume: u64| {
+            json!({
+                "chainId": "solana", "pairAddress": pool,
+                "baseToken": {"address": "synthetic-mint", "symbol": "SYN"},
+                "liquidity": {"usd": 1000}, "volume": {"h24": volume}, "priceUsd": "1"
+            })
+        };
+        let transport = scripted(vec![
+            json(json!({"pairs": [pair("primary", 20), pair("", 10)]})),
+            JsonResponse {
+                status_code: 404,
+                body: "{}".to_owned(),
+            },
+        ]);
+        let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
+        let signal = adapter.load_symbol("syn").signal.ok_or("missing signal")?;
+        assert_eq!(signal.pair.pair_address, "primary");
+        assert!(signal.candles.is_empty());
+        assert!(adapter.transport.json.borrow().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn slug_candidates_match_symbols_and_report_no_match_as_empty() {
+        let address = "0x0000000000000000000000000000000000000001";
+        let transport = scripted(vec![
+            json(json!({"pairs": [{
+                "chainId": "base", "pairAddress": "pool",
+                "baseToken": {"address": address, "name": "Unrelated Name", "symbol": "LAPTOP"},
+                "liquidity": {"usd": 1000}, "volume": {"h24": 10}, "priceUsd": "1"
+            }]})),
+            json(json!({"data": {"attributes": {"ohlcv_list": [[1, 1, 2, 0.8, 1.5]]}}})),
+        ]);
+        let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
+        let candidates = adapter.load_candidates(&SignalQuery::Slug("laptop".to_owned()));
+        assert_eq!(candidates.signals.len(), 1);
+        assert_eq!(candidates.signals[0].token.address, address);
+        assert!(!candidates.signals[0].candles.is_empty());
+
+        let transport = scripted(vec![json(json!({"pairs": [{
+            "chainId": "base", "pairAddress": "pool",
+            "baseToken": {"address": address, "name": "Other", "symbol": "OTHER"}
+        }]}))]);
+        let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
+        let candidates = adapter.load_candidates(&SignalQuery::Slug("laptop".to_owned()));
+        assert!(candidates.signals.is_empty());
+    }
+
+    #[test]
+    fn charts_render_without_text_when_no_system_font_is_available() {
+        let pair = bot_core::token_signals::TokenPair {
+            price_usd: json!("1.5"),
+            ..bot_core::token_signals::TokenPair::default()
+        };
+        let candles = vec![vec![1.0, 1.0, 2.0, 0.8, 1.5], vec![2.0, 1.5, 2.5, 1.2, 1.3]];
+        let no_fonts = super::ChartFonts {
+            bold: None,
+            regular: None,
+        };
+        let plain = super::render_price_chart_with_fonts(
+            &pair,
+            &candles,
+            Some("SYN (1d)"),
+            Some("USD"),
+            (640, 480),
+            &no_fonts,
+        );
+        assert!(plain.as_ref().is_ok_and(|png| png.starts_with(b"\x89PNG")));
+        let decoded = plain
+            .as_deref()
+            .ok()
+            .and_then(|png| image::load_from_memory(png).ok())
+            .map(|image| (image.width(), image.height()));
+        assert_eq!(decoded, Some((640, 480)));
+    }
+
+    #[test]
+    fn redis_json_cache_reads_token_signal_values()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use crate::redis_connection::{RedisEndpoint, test_support::read_command};
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        let server = thread::spawn(
+            move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                let (mut stream, _) = listener.accept()?;
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
+                assert_eq!(
+                    read_command(&mut stream)?,
+                    ["GET", "token_signal:state:synthetic"]
+                );
+                stream.write_all(b"$4\r\ncard\r\n")?;
+                assert_eq!(
+                    read_command(&mut stream)?,
+                    ["GET", "token_signal:state:missing"]
+                );
+                stream.write_all(b"$-1\r\n")?;
+                Ok(())
+            },
+        );
+        let mut cache = crate::redis_json_cache::RedisJsonCache::new(&RedisEndpoint {
+            host: "127.0.0.1".to_owned(),
+            port,
+            password: None,
+        })?;
+        assert_eq!(
+            TokenSignalCache::get(&mut cache, "token_signal:state:synthetic")?,
+            Some("card".to_owned())
+        );
+        assert_eq!(
+            TokenSignalCache::get(&mut cache, "token_signal:state:missing")?,
+            None
+        );
+        assert!(server.join().is_ok_and(|result| result.is_ok()));
+        Ok(())
+    }
+
+    fn solana(address: &str) -> TokenAddress {
+        TokenAddress {
+            chain_id: "solana".to_owned(),
+            network: "solana".to_owned(),
+            tag: "SOL".to_owned(),
+            address: address.to_owned(),
+        }
+    }
+
+    fn not_found() -> JsonResponse {
+        JsonResponse {
+            status_code: 404,
+            body: "{}".to_owned(),
+        }
+    }
+
+    #[test]
+    fn provider_cache_and_response_failures_are_diagnostic() {
+        let token = solana("So1anaSyntheticMint11111111111111111111111");
+        let key = format!("token_signal:pairs:solana:{}", token.address);
+        let scenarios: Vec<(Cache, Vec<JsonResponse>, &str)> = vec![
+            (
+                Cache {
+                    values: BTreeMap::from([(key.clone(), "not json".to_owned())]),
+                    ..Cache::default()
+                },
+                vec![json(json!([]))],
+                "invalid DexScreener pairs cache",
+            ),
+            (
+                Cache {
+                    fail_get: true,
+                    ..Cache::default()
+                },
+                vec![json(json!([]))],
+                "could not read DexScreener pairs cache",
+            ),
+            (
+                Cache {
+                    fail_set: true,
+                    ..Cache::default()
+                },
+                vec![json(json!([]))],
+                "could not write DexScreener pairs cache",
+            ),
+            (
+                Cache::default(),
+                vec![JsonResponse {
+                    status_code: 500,
+                    body: String::new(),
+                }],
+                "DexScreener pairs HTTP 500",
+            ),
+            (
+                Cache::default(),
+                Vec::new(),
+                "DexScreener pairs: unexpected request",
+            ),
+            (
+                Cache::default(),
+                vec![JsonResponse {
+                    status_code: 200,
+                    body: "not json".to_owned(),
+                }],
+                "invalid DexScreener pairs response",
+            ),
+        ];
+        for (cache, responses, expected) in scenarios {
+            let mut adapter = TokenSignalAdapter::new(scripted(responses), cache);
+            let load = adapter.load_token(&token);
+            assert!(load.signal.is_none());
+            assert!(
+                load.diagnostics
+                    .iter()
+                    .any(|entry| entry.starts_with(expected)),
+                "{expected}: {:?}",
+                load.diagnostics
+            );
+        }
+
+        let mut adapter =
+            TokenSignalAdapter::new(scripted(vec![json(json!({}))]), Cache::default());
+        let query = bot_core::token_signals::detect_signal_query(
+            "0x0000000000000000000000000000000000000001",
+        );
+        let load = adapter.load_query(&query.unwrap_or(SignalQuery::Symbol(String::new())));
+        assert!(load.signal.is_none());
+        assert_eq!(
+            load.diagnostics,
+            ["DexScreener address response did not contain the expected value"]
+        );
+    }
+
+    #[test]
+    fn pump_market_caps_and_supply_accept_alternate_provider_fields() -> Result<(), String> {
+        let mint = "F3A1baCgv4TF79TSjdMTvpMDtNv8DJvHZwNc9DG8pump";
+        let other = "J8PSdNP3QewKq2Z1JJJFDMaqF7KcaiJhR7gbr5KZpump";
+        let coin = |mint: &str, cap: u64| json!({"mint": mint, "name": "TIMBA", "symbol": "TIMBA", "market_cap_usd": cap});
+        let transport = Transport {
+            json: std::cell::RefCell::new(VecDeque::from([
+                json(json!({"pairs": []})),
+                json(json!([coin(other, 100), coin(mint, 5000)])),
+            ])),
+            post: std::cell::RefCell::new(VecDeque::from([json(
+                json!({"result": {"value": {"uiAmount": 1000}}}),
+            )])),
+            binary: Default::default(),
+        };
+        let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
+        let signal = adapter.load_symbol("timba").signal.ok_or("pump signal")?;
+        assert_eq!(signal.token.address, mint);
+        assert_eq!(signal.pair.market_cap, json!(5000.0));
+        assert_eq!(signal.supply, Some(1000.0));
+        assert_eq!(signal.pair.price_usd, json!(5.0));
+        Ok(())
+    }
+
+    #[test]
+    fn listed_pump_tokens_fall_back_to_pump_supply_when_rpc_fails() -> Result<(), String> {
+        let mint = "F3A1baCgv4TF79TSjdMTvpMDtNv8DJvHZwNc9DG8pump";
+        let transport = scripted(vec![
+            json(json!([{
+                "chainId": "solana", "pairAddress": "pool",
+                "baseToken": {"address": mint, "symbol": "TIMBA"},
+                "liquidity": {"usd": 1000}, "priceUsd": "1"
+            }])),
+            not_found(),
+            json(json!({"mint": mint, "symbol": "TIMBA", "total_supply": 2_000_000_000_u64})),
+        ]);
+        let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
+        let load = adapter.load_token(&solana(mint));
+        let signal = load.signal.ok_or("listed signal")?;
+        assert_eq!(signal.supply, Some(2_000.0));
+        assert!(signal.pump.is_some());
+        assert!(
+            load.diagnostics
+                .iter()
+                .any(|entry| entry.contains("synthetic supply unavailable"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn address_pairs_rank_by_liquidity_then_volume_and_skip_poolless_pairs() -> Result<(), String> {
+        let mint = "So1anaSyntheticMint11111111111111111111111";
+        let pair = |pool: &str, volume: u64| {
+            json!({
+                "chainId": "solana", "pairAddress": pool,
+                "baseToken": {"address": mint, "symbol": "SYN"},
+                "liquidity": {"usd": 1000}, "volume": {"h24": volume}, "priceUsd": "1"
+            })
+        };
+        let transport = scripted(vec![
+            json(json!([pair("", 50), pair("quiet", 10), pair("busy", 30)])),
+            not_found(),
+            json(json!({"data": {"attributes": {"ohlcv_list": [[1, 1, 2, 0.5, 1.5]]}}})),
+        ]);
+        let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
+        let signal = adapter.load_token(&solana(mint)).signal.ok_or("signal")?;
+        assert_eq!(signal.pair.pair_address, "quiet");
+        assert!(!signal.candles.is_empty());
+        assert!(
+            adapter
+                .cache
+                .writes
+                .iter()
+                .any(|(key, _)| key.contains(":quiet:"))
+        );
+        // The busier pool was tried first and had no history.
+        assert!(adapter.transport.json.borrow().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn symbol_ranking_skips_unsupported_chains_and_poolless_initial_pairs() -> Result<(), String> {
+        let transport = scripted(vec![json(json!({"pairs": [
+            {"chainId": "solana", "pairAddress": "",
+             "baseToken": {"address": "synthetic-mint", "symbol": "SYN"},
+             "liquidity": {"usd": 1000}, "volume": {"h24": 20}, "priceUsd": "1"},
+            {"chainId": "unsupported", "pairAddress": "elsewhere",
+             "baseToken": {"address": "not-evm", "symbol": "SYN"},
+             "liquidity": {"usd": 1000}, "volume": {"h24": 10}, "priceUsd": "1"}
+        ]}))]);
+        let mut adapter = TokenSignalAdapter::new(transport, Cache::default());
+        let signal = adapter.load_symbol("syn").signal.ok_or("signal")?;
+        assert_eq!(signal.token.address, "synthetic-mint");
+        assert!(signal.pair.pair_address.is_empty());
+        assert!(signal.candles.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn signal_state_round_trips_clears_and_reports_cache_failures() {
+        let state = bot_core::token_signals::SignalState {
+            chart_period: None,
+            chat_id: "synthetic-chat".to_owned(),
+            message_id: 2,
+            source_message_id: 1,
+            requester_id: "synthetic-user".to_owned(),
+            chain_id: "solana".to_owned(),
+            network: "solana".to_owned(),
+            tag: "SOL".to_owned(),
+            address: "synthetic-mint".to_owned(),
+            last_refresh_at: Some(1_800_000_000),
+        };
+        let mut adapter = TokenSignalAdapter::new(scripted(Vec::new()), Cache::default());
+        assert_eq!(adapter.save_state("synthetic", &state), Ok(()));
+        assert_eq!(adapter.load_state("synthetic"), Ok(Some(state.clone())));
+        assert_eq!(adapter.clear_state("synthetic"), Ok(()));
+        assert_eq!(adapter.load_state("synthetic"), Ok(None));
+        assert_eq!(adapter.cache.writes.last().map(|write| write.1), Some(1));
+
+        adapter.cache.fail_set = true;
+        assert_eq!(
+            adapter.clear_state("synthetic"),
+            Err("synthetic cache write failure".to_owned())
+        );
+        assert_eq!(
+            adapter.save_state("synthetic", &state),
+            Err("synthetic cache write failure".to_owned())
+        );
+    }
+
+    #[test]
+    fn charts_reject_tiny_canvases_and_sort_reversed_candles() -> Result<(), String> {
+        let mut signal = TokenSignal {
+            token: solana("synthetic-mint"),
+            pair: Default::default(),
+            candles: vec![
+                vec![3.0, 1.3, 1.8, 1.0, 1.7],
+                vec![2.0, 1.5, 2.5, 1.2, 1.3],
+                vec![1.0, 1.0, 2.0, 0.8, 1.5],
+            ],
+            supply: None,
+            token_image_url: None,
+            socials: BTreeMap::new(),
+            pump: None,
+        };
+        assert_eq!(
+            render_signal_chart(&signal, 100, 100),
+            Err("token chart dimensions are too small".to_owned())
+        );
+        let reversed = render_signal_chart(&signal, 420, 300)?;
+        signal.candles.reverse();
+        assert_eq!(render_signal_chart(&signal, 420, 300)?, reversed);
+        Ok(())
+    }
+
+    #[test]
+    fn reqwest_transport_prefixes_connection_failures_with_the_operation() -> Result<(), String> {
+        let closed = TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .ok()
+            .ok_or("closed port")?;
+        let transport = ReqwestTokenSignalTransport::new()?;
+        let url = format!("http://{closed}/token");
+        assert!(
+            transport
+                .get_json(&url, &[])
+                .is_err_and(|error| error.starts_with("token-signal GET failed: "))
+        );
+        assert!(
+            transport
+                .post_json(&url, &json!({}))
+                .is_err_and(|error| error.starts_with("token-signal POST failed: "))
+        );
+        assert!(
+            transport
+                .get_binary(&url)
+                .is_err_and(|error| error.starts_with("token image GET failed: "))
+        );
+        Ok(())
     }
 }

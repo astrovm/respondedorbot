@@ -514,6 +514,8 @@ pub fn load_dollar_market_with_references<T: DollarTransport, C: DollarCache>(
 
 #[cfg(test)]
 mod tests {
+    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
     use std::cell::RefCell;
     use std::collections::{HashMap, VecDeque};
     use std::io::{Read, Write};
@@ -658,6 +660,139 @@ mod tests {
         assert_eq!(cache.take("synthetic"), Ok(None));
         cache.fail_get = true;
         assert_eq!(cache.take("synthetic"), Err("synthetic cache read failure"));
+    }
+
+    #[test]
+    fn cache_claim_is_first_writer_wins_and_propagates_write_failures() {
+        let mut cache = Cache::default();
+        assert_eq!(cache.claim("synthetic", "first", 60), Ok(true));
+        assert_eq!(cache.claim("synthetic", "second", 60), Ok(false));
+        assert_eq!(
+            cache.values.get("synthetic").map(String::as_str),
+            Some("first")
+        );
+        cache.fail_set = true;
+        assert_eq!(
+            cache.claim("other", "value", 60),
+            Err("synthetic cache write failure")
+        );
+    }
+
+    #[test]
+    fn tcrm_changes_use_the_cached_hourly_history_and_ignore_zero_baselines() {
+        let now = 1_725_000_000;
+        let history_key = bot_core::cache_policy::request_cache_history_key(
+            &hour_key(now - 24 * 3_600),
+            "tcrm_100",
+        );
+        for (historical, expected) in [(1_000.0, Some(10.0)), (0.0, None)] {
+            let mut cache = Cache::default();
+            cache.values.insert(
+                history_key.clone(),
+                serde_json::json!({"timestamp": now - 24 * 3_600, "data": historical}).to_string(),
+            );
+            let rate = super::tcrm(&mut cache, Some(1_100.0), 24, now, &mut Vec::new());
+            assert_eq!(rate.as_ref().map(|rate| rate.price), Some(1_100.0));
+            assert_eq!(
+                rate.and_then(|rate| rate.change)
+                    .map(|change| (change * 1_000.0).round() / 1_000.0),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn provider_payloads_without_rates_render_nothing_and_history_write_failures_are_reported() {
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::from([Ok(HttpResponse {
+                status_code: 200,
+                body: "{}".to_owned(),
+            })])),
+            calls: RefCell::new(0),
+        };
+        let mut cache = Cache::default();
+        let load = load_dollar_market(&transport, &mut cache, 24, Locale::Es, 1_725_000_000);
+        assert_eq!(load.text, None);
+        assert!(
+            !cache
+                .values
+                .keys()
+                .any(|key| key.starts_with("market:dolar:formatted"))
+        );
+
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::from([Ok(HttpResponse {
+                status_code: 200,
+                body: body(),
+            })])),
+            calls: RefCell::new(0),
+        };
+        let mut cache = Cache {
+            fail_set_if_absent: true,
+            ..Cache::default()
+        };
+        let diagnostics = refresh_dollar_snapshot(&transport, &mut cache, 1_725_000_000);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].starts_with("could not write dollar history key"));
+        assert!(diagnostics[0].ends_with("synthetic history write failure"));
+    }
+
+    #[test]
+    fn redis_json_cache_writes_dollar_history_only_when_absent() -> TestResult {
+        use crate::redis_connection::{RedisEndpoint, test_support::read_command};
+        use std::io::Write as _;
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        let server = thread::spawn(move || -> TestResult {
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
+            for response in [b"+OK\r\n".as_slice(), b"$-1\r\n".as_slice()] {
+                assert_eq!(
+                    read_command(&mut stream)?,
+                    ["SET", "history:synthetic", "value", "NX", "EX", "60"]
+                );
+                stream.write_all(response)?;
+            }
+            Ok(())
+        });
+        let mut cache = crate::redis_json_cache::RedisJsonCache::new(&RedisEndpoint {
+            host: "127.0.0.1".to_owned(),
+            port,
+            password: None,
+        })?;
+        let first = DollarCache::set_if_absent(&mut cache, "history:synthetic", "value", 60);
+        let second = DollarCache::set_if_absent(&mut cache, "history:synthetic", "value", 60);
+        assert!(first?);
+        assert!(!second?);
+        assert!(matches!(server.join(), Ok(Ok(()))));
+        Ok(())
+    }
+
+    #[test]
+    fn dedicated_refresh_retries_a_transient_provider_failure() {
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::from([
+                Err(TransportFailureKind::Timeout),
+                Ok(HttpResponse {
+                    status_code: 200,
+                    body: body(),
+                }),
+            ])),
+            calls: RefCell::new(0),
+        };
+        let mut cache = Cache::default();
+        let diagnostics = refresh_dollar_snapshot(&transport, &mut cache, 1_725_000_000);
+        assert_eq!(*transport.calls.borrow(), 2);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert!(diagnostics[0].contains("Timeout"));
+        assert!(
+            cache
+                .writes
+                .iter()
+                .any(
+                    |write| write.0.starts_with("request_cache_history:2024-08-30-06:") && write.3
+                )
+        );
     }
 
     impl DollarCache for Cache {
@@ -964,31 +1099,52 @@ mod tests {
     }
 
     #[test]
-    fn reqwest_transport_reads_the_configured_dollar_endpoint() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let address = listener.local_addr().unwrap_or_else(|_| unreachable!());
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap_or_else(|_| unreachable!());
+    fn reqwest_transport_reads_the_configured_dollar_endpoint() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
+            let (mut stream, _) = listener.accept()?;
             let mut request = [0_u8; 1_024];
             let bytes = stream.read(&mut request).unwrap_or_default();
             assert!(String::from_utf8_lossy(&request[..bytes]).starts_with("GET /dollar HTTP/1.1"));
             let body = r#"{"oficial":{"price":100}}"#;
-            write!(
+            let written = write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
-            )
-            .unwrap_or_else(|_| unreachable!());
+            );
+            written?;
+            Ok(())
         });
         let transport = ReqwestDollarTransport::with_url(&format!("http://{address}/dollar"))
-            .unwrap_or_else(|_| unreachable!());
-        let response = transport.get().unwrap_or_else(|_| unreachable!());
+            .ok()
+            .ok_or("unexpected error")?;
+        let response = transport.get().ok().ok_or("unexpected error")?;
         assert_eq!(response.status_code, 200);
         assert_eq!(response.body, r#"{"oficial":{"price":100}}"#);
         transport.before_retry();
-        assert!(server.join().is_ok());
+        assert!(matches!(server.join(), Ok(Ok(()))));
         let unavailable = ReqwestDollarTransport::with_url("http://127.0.0.1:1/dollar")
-            .unwrap_or_else(|_| unreachable!());
+            .ok()
+            .ok_or("unexpected error")?;
         assert!(unavailable.get().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn reqwest_failures_are_classified_by_cause() {
+        use crate::web_fetch::reqwest_error_fixtures as fixtures;
+        assert_eq!(
+            fixtures::timeout().map(super::classify_error),
+            Some(super::TransportFailureKind::Timeout)
+        );
+        assert_eq!(
+            fixtures::connection().map(super::classify_error),
+            Some(super::TransportFailureKind::Connection)
+        );
+        assert_eq!(
+            fixtures::request().map(super::classify_error),
+            Some(super::TransportFailureKind::Request)
+        );
     }
 }
