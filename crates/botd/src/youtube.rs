@@ -566,4 +566,67 @@ mod tests {
         assert!(context.ends_with('…'));
         assert!(context.chars().count() < 60_200);
     }
+
+    #[test]
+    fn reservations_ignore_plain_text_and_are_free_without_providers() {
+        let mut configured = runtime(Transport::default(), Cache::default(), true, true);
+        assert_eq!(
+            configured.reserve_credit_units("no video here", Some("nor here")),
+            Ok(None)
+        );
+        assert_eq!(configured.prepare("no video here", None), Ok(None));
+
+        let mut unconfigured = runtime(Transport::default(), Cache::default(), false, false);
+        assert_eq!(
+            unconfigured.reserve_credit_units("https://youtu.be/abc123def45", None),
+            Ok(Some(0))
+        );
+        assert!(unconfigured.transport.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn apify_transport_errors_are_reported_as_failed_preparation() {
+        let transport = Transport {
+            apify: RefCell::new(vec![Err(TranscriptTransportError::Timeout)]),
+            ..Transport::default()
+        };
+        let mut runtime = runtime(transport, Cache::default(), false, true);
+        let prepared = runtime
+            .prepare("https://youtu.be/abc123def45", None)
+            .ok()
+            .flatten();
+        assert!(prepared.as_ref().is_some_and(|value| value.failed));
+        let diagnostics = prepared.map(|value| value.diagnostics).unwrap_or_default();
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].starts_with("Apify transcript failed: "));
+        assert_eq!(*runtime.transport.calls.borrow(), ["apify"]);
+    }
+
+    #[test]
+    fn asynchronous_supadata_jobs_are_polled_until_the_transcript_is_ready() {
+        let transport = Transport {
+            supadata: RefCell::new(vec![
+                Ok(HttpResponse {
+                    status_code: 202,
+                    body: json!({"jobId": "synthetic-job"}).to_string(),
+                }),
+                response(
+                    json!({"status": "completed", "content": "polled transcript", "lang": "es"}),
+                ),
+            ]),
+            ..Transport::default()
+        };
+        let mut runtime = runtime(transport, Cache::default(), true, false);
+        let prepared = runtime
+            .prepare("https://youtu.be/abc123def45", None)
+            .ok()
+            .flatten();
+        assert!(prepared.as_ref().is_some_and(|value| {
+            !value.failed && value.transcript.as_deref() == Some("polled transcript")
+        }));
+        assert_eq!(
+            *runtime.transport.calls.borrow(),
+            ["supadata", "supadata_job"]
+        );
+    }
 }

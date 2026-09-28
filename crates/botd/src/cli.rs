@@ -90,25 +90,25 @@ fn maintenance() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match run_maintenance(MaintenanceOptions {
+    let outcome = run_maintenance(MaintenanceOptions {
         redis_endpoint: &config.redis_endpoint,
         database_url: config.database_url(),
         redis_maxmemory: &config.redis_maxmemory,
         redis_maxmemory_policy: &config.redis_maxmemory_policy,
         ai_ledger_retention_days: config.ai_ledger_retention_days,
-    }) {
-        Ok(report) => match serde_json::to_string(&report) {
-            Ok(encoded) => {
-                println!("{encoded}");
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                eprintln!("maintenance report encoding failed: {error}");
-                ExitCode::FAILURE
-            }
-        },
-        Err(error) => {
-            eprintln!("maintenance failed: {error}");
+    })
+    .map_err(|error| format!("maintenance failed: {error}"))
+    .and_then(|report| {
+        serde_json::to_string(&report)
+            .map_err(|error| format!("maintenance report encoding failed: {error}"))
+    });
+    match outcome {
+        Ok(encoded) => {
+            println!("{encoded}");
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("{message}");
             ExitCode::FAILURE
         }
     }

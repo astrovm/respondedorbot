@@ -240,9 +240,10 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
         } else {
             plan.action
         };
-        match action {
-            StreamAction::None => {}
-            StreamAction::Send => {
+        // The planner only edits an existing message and sends when there is none.
+        match (action, self.message_id) {
+            (StreamAction::None, _) => {}
+            (StreamAction::Send, _) | (StreamAction::Edit, None) => {
                 let receipt = self
                     .actions
                     .execute(self.send_action(&plan.text, false))
@@ -251,10 +252,7 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
                 self.message_id = receipt.message_id;
                 self.sent_text = plan.text;
             }
-            StreamAction::Edit => {
-                let Some(message_id) = self.message_id else {
-                    unreachable!("stream planner only edits an existing message")
-                };
+            (StreamAction::Edit, Some(message_id)) => {
                 match self
                     .actions
                     .finalize_stream_edit(self.edit_action(message_id, &plan.text, false))
@@ -887,16 +885,7 @@ mod tests {
         }
         assert!(stream.finalize("answer").is_ok());
         drop(stream);
-        let texts = actions
-            .actions
-            .iter()
-            .filter_map(|action| match action {
-                TelegramAction::SendMessage(message) => Some(message.text.as_str()),
-                TelegramAction::EditMessage { text, .. } => Some(text.as_str()),
-                TelegramAction::EditMessageNoPreview { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+        let texts = rendered_texts(&actions.actions);
         assert_eq!(
             texts,
             [
@@ -938,8 +927,12 @@ mod tests {
             assert_eq!(stream.feed(event), Ok(()));
         }
         drop(stream);
-        let texts = actions
-            .actions
+        let texts = rendered_texts(&actions.actions);
+        assert_eq!(texts, ["Thinking.", "🔧 calculate()", "Thinking."]);
+    }
+
+    fn rendered_texts(actions: &[TelegramAction]) -> Vec<&str> {
+        actions
             .iter()
             .filter_map(|action| match action {
                 TelegramAction::SendMessage(message) => Some(message.text.as_str()),
@@ -947,7 +940,30 @@ mod tests {
                 TelegramAction::EditMessageNoPreview { text, .. } => Some(text.as_str()),
                 _ => None,
             })
-            .collect::<Vec<_>>();
-        assert_eq!(texts, ["Thinking.", "🔧 calculate()", "Thinking."]);
+            .collect()
+    }
+
+    #[test]
+    fn cancelled_answer_stream_deletes_its_partial_message() {
+        let mut actions = Actions {
+            next_message_id: Some(MessageId(81)),
+            ..Actions::default()
+        };
+        let mut stream =
+            TelegramAiStream::with_policy(&mut actions, ChatId(7), MessageId(4), 0.0, 1);
+        assert_eq!(
+            stream.feed(AiStreamEvent::FinalText("partial answer".to_owned())),
+            Ok(())
+        );
+        stream.cancel();
+        drop(stream);
+        assert_eq!(rendered_texts(&actions.actions), ["partial answer"]);
+        assert!(matches!(
+            actions.actions.last(),
+            Some(TelegramAction::DeleteMessage {
+                chat_id: ChatId(7),
+                message_id: MessageId(81),
+            })
+        ));
     }
 }

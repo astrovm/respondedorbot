@@ -427,4 +427,43 @@ mod tests {
             "la herramienta 'web_search' recibió una solicitud incompatible"
         );
     }
+
+    #[test]
+    fn scheduled_search_reports_transport_failures_and_spanish_rejections() {
+        let transport = Transport {
+            responses: RefCell::new(vec![
+                Err(TransportError::Other("synthetic socket reset".to_owned())),
+                Ok(HttpResponse {
+                    status_code: 402,
+                    body: json!({"error": "payment required"}).to_string(),
+                }),
+            ]),
+        };
+        let mut search = FirecrawlScheduledWebSearch::new(transport, |_| {}, "synthetic-key");
+        let request = || ExternalToolRequest::WebSearch {
+            query: "synthetic scheduled query".to_owned(),
+        };
+
+        let failed = ScheduledWebSearch::execute(&mut search, request(), "call-1", Locale::Es);
+        assert_eq!(failed.output, "falló la herramienta 'web_search'");
+        assert_eq!(
+            failed.diagnostics,
+            vec![
+                "web_search transport failed: Firecrawl transport failed: synthetic socket reset"
+                    .to_owned()
+            ]
+        );
+        assert!(failed.billing_segment.is_none());
+
+        let rejected = ScheduledWebSearch::execute(&mut search, request(), "call-2", Locale::Es);
+        assert_eq!(
+            rejected.output,
+            "Error de búsqueda: Firecrawl rechazó la solicitud."
+        );
+        assert_eq!(
+            rejected.diagnostics,
+            vec!["Firecrawl HTTP 402: payment required".to_owned()]
+        );
+        assert!(!rejected.output.contains("payment required"));
+    }
 }

@@ -242,6 +242,9 @@ pub enum SchedulerError {
     Store(String),
 }
 
+/// A due occurrence: its execution id and the next run it advances to.
+type Occurrence = (String, Option<i64>);
+
 pub struct TaskScheduler<Store, Executor> {
     store: Store,
     executor: Executor,
@@ -311,47 +314,49 @@ where
         Ok(self.owns_lease)
     }
 
-    fn observation_for(document: &TaskRecordDocument, now: i64) -> Result<TaskObservation, String> {
+    /// Evaluates the task once. A due task also yields its occurrence: the
+    /// execution id and the next run it advances to (`None` removes the task).
+    fn observation_for(
+        document: &TaskRecordDocument,
+        now: i64,
+    ) -> Result<(TaskObservation, Option<Occurrence>), String> {
         match evaluate_due(&document.task, now).map_err(|error| error.to_string())? {
-            DueDecision::Wait => Ok(TaskObservation::Wait),
-            DueDecision::Skip { .. } => {
+            DueDecision::Wait => Ok((TaskObservation::Wait, None)),
+            DueDecision::Skip { next_run_at, .. } => {
                 let scheduled_for = document
                     .task
                     .next_run_at
                     .ok_or_else(|| "due task has no next-run timestamp".to_owned())?;
-                Ok(TaskObservation::Skip {
-                    execution_id: format!("{}:{scheduled_for}", document.task.id.as_str()),
-                })
+                let execution_id = format!("{}:{scheduled_for}", document.task.id.as_str());
+                let occurrence = (execution_id.clone(), next_run_at);
+                Ok((TaskObservation::Skip { execution_id }, Some(occurrence)))
             }
-            DueDecision::Execute { execution_id, .. } => {
-                if document.task.last_execution_id.as_deref() == Some(&execution_id) {
-                    Ok(TaskObservation::AlreadyCompleted { execution_id })
-                } else {
-                    Ok(TaskObservation::Execute { execution_id })
-                }
+            DueDecision::Execute {
+                execution_id,
+                next_run_at,
+                ..
+            } => {
+                let occurrence = (execution_id.clone(), next_run_at);
+                let observation =
+                    if document.task.last_execution_id.as_deref() == Some(&execution_id) {
+                        TaskObservation::AlreadyCompleted { execution_id }
+                    } else {
+                        TaskObservation::Execute { execution_id }
+                    };
+                Ok((observation, Some(occurrence)))
             }
         }
     }
 
     fn next_document(
         document: &TaskRecordDocument,
-        now: i64,
+        next_run_at: Option<i64>,
         execution_id: &str,
-    ) -> Result<Option<TaskRecordDocument>, String> {
-        let decision = evaluate_due(&document.task, now).map_err(|error| error.to_string())?;
-        let next_run_at = match decision {
-            DueDecision::Wait => return Ok(Some(document.clone())),
-            DueDecision::Skip { next_run_at, .. } | DueDecision::Execute { next_run_at, .. } => {
-                next_run_at
-            }
-        };
-        let Some(next_run_at) = next_run_at else {
-            return Ok(None);
-        };
+    ) -> Option<TaskRecordDocument> {
         let mut next = document.clone();
-        next.task.next_run_at = Some(next_run_at);
+        next.task.next_run_at = Some(next_run_at?);
         next.task.last_execution_id = Some(execution_id.to_owned());
-        Ok(Some(next))
+        Some(next)
     }
 
     pub fn step(&mut self, now: i64) -> Result<SchedulerStep, SchedulerError> {
@@ -393,8 +398,8 @@ where
                     continue;
                 }
             };
-            let observation = match Self::observation_for(&document, now) {
-                Ok(observation) => observation,
+            let (observation, occurrence) = match Self::observation_for(&document, now) {
+                Ok(evaluated) => evaluated,
                 Err(error) => {
                     failures.push(TaskFailure {
                         task_id,
@@ -411,7 +416,8 @@ where
                 });
                 continue;
             }
-            if observation == TaskObservation::Wait {
+            let Some((execution_id, next_run_at)) = occurrence else {
+                // A waiting task only needs its due-index entry repaired.
                 if let Err(error) = self
                     .store
                     .save_task(&document, self.settings.record_ttl_seconds)
@@ -428,18 +434,6 @@ where
                     observation,
                 });
                 continue;
-            }
-
-            let execution_id = match &observation {
-                TaskObservation::Execute { execution_id }
-                | TaskObservation::Skip { execution_id }
-                | TaskObservation::AlreadyCompleted { execution_id } => execution_id.clone(),
-                TaskObservation::Wait
-                | TaskObservation::Missing
-                | TaskObservation::ClaimedElsewhere { .. }
-                | TaskObservation::Executed { .. }
-                | TaskObservation::RetryRequested { .. }
-                | TaskObservation::Advanced { .. } => continue,
             };
             let claimed = match self.store.claim_occurrence(
                 document.task.id.as_str(),
@@ -508,17 +502,7 @@ where
                 }
             }
 
-            let next_document = match Self::next_document(&document, now, &execution_id) {
-                Ok(next_document) => next_document,
-                Err(error) => {
-                    failures.push(TaskFailure {
-                        task_id,
-                        stage: "advance",
-                        error,
-                    });
-                    continue;
-                }
-            };
+            let next_document = Self::next_document(&document, next_run_at, &execution_id);
             match self.store.complete_occurrence(&SchedulerCompletion {
                 task_id: document.task.id.as_str(),
                 chat_id: &document.task.chat_id,
@@ -1188,6 +1172,44 @@ mod tests {
         assert_eq!(
             release.shutdown(),
             Err(SchedulerError::Store("owner release failed".to_owned()))
+        );
+    }
+
+    #[test]
+    fn an_occurrence_already_recorded_as_executed_only_advances() {
+        let mut completed = document(
+            "done1",
+            TaskSchedule::IntervalSeconds { seconds: 600 },
+            1_000,
+        );
+        completed.task.last_execution_id = Some("done1:1000".to_owned());
+        let mut store = Store {
+            due: vec!["done1".to_owned()],
+            ..Store::default()
+        };
+        store.documents.insert("done1".to_owned(), completed);
+        let mut scheduler = scheduler(store, Executor::default(), SchedulerMode::Authoritative);
+        assert_eq!(
+            scheduler.step(1_100),
+            Ok(SchedulerStep::Observed {
+                tasks: vec![ObservedTask {
+                    task_id: "done1".to_owned(),
+                    observation: TaskObservation::Advanced {
+                        execution_id: "done1:1000".to_owned(),
+                    },
+                }],
+                failures: Vec::new(),
+            })
+        );
+        let (store, executor) = scheduler.parts();
+        assert!(executor.calls.is_empty());
+        assert_eq!(store.completed.len(), 1);
+        assert_eq!(
+            store.completed[0]
+                .next
+                .as_ref()
+                .and_then(|next| next.task.next_run_at),
+            Some(1_600)
         );
     }
 }

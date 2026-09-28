@@ -539,9 +539,7 @@ mod tests {
         let config = reasoning_config(&conversation);
         assert!(config.enabled);
         assert_eq!(config.effort.as_deref(), Some("low"));
-        let Ok(body) = serde_json::to_value(&config) else {
-            return;
-        };
+        let body = serde_json::to_value(&config).unwrap_or_default();
         assert_eq!(body, json!({"enabled": true, "effort": "low"}));
 
         conversation.push(PromptMessage::text(PromptRole::User, "follow-up"));
@@ -566,10 +564,7 @@ mod tests {
             emitted.push(text.to_owned());
             Ok(())
         });
-        assert!(result.is_ok());
-        let Some(result) = result.ok() else {
-            return;
-        };
+        let result = result.unwrap_or_else(|_| unreachable!("complete stream round succeeds"));
         assert_eq!(result.text, "hello world");
         assert_eq!(result.reasoning, "checking ");
         assert_eq!(
@@ -621,9 +616,9 @@ mod tests {
         .with_openrouter_pricing(pricing);
 
         let result = provider.stream_round(&messages(), &[], |_| Ok(()));
-        let Some(error) = result.err() else {
-            unreachable!();
-        };
+        let error = result
+            .err()
+            .unwrap_or_else(|| unreachable!("invalid pricing URL fails"));
         assert_eq!(error.source, OpenRouterChatError::InvalidBaseUrl);
         assert!(error.partial.text.is_empty());
         assert!(provider.transport.requests.borrow().is_empty());
@@ -720,10 +715,9 @@ mod tests {
             "requested/model",
         );
         let result = provider.stream_round(&messages(), &[], |_text| Ok(()));
-        assert!(result.is_err());
-        let Some(error) = result.err() else {
-            return;
-        };
+        let error = result
+            .err()
+            .unwrap_or_else(|| unreachable!("interrupted round fails"));
         assert_eq!(error.source, OpenRouterChatError::IncompleteStream);
         assert_eq!(error.partial.text, "hello world");
         let segment = error.partial.billing_segment.unwrap_or(Value::Null);
@@ -747,9 +741,13 @@ mod tests {
         let result = provider.stream_round(&messages(), &[], |_text| {
             Err(OpenRouterChatError::Stream("delivery stopped".to_owned()))
         });
-        let Some(error) = result.err() else {
-            return;
-        };
+        let error = result
+            .err()
+            .unwrap_or_else(|| unreachable!("consumer failure stops round"));
+        assert_eq!(
+            error.source,
+            OpenRouterChatError::Stream("delivery stopped".to_owned())
+        );
         assert_eq!(error.partial.text, "");
         assert!(error.partial.billing_segment.is_none());
     }

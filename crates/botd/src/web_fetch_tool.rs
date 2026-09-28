@@ -332,4 +332,47 @@ mod tests {
         assert_eq!(concurrent, sequential);
         assert_eq!(concurrent.output, "Title: Example\nHello");
     }
+
+    #[test]
+    fn spanish_tweets_and_errors_plus_english_tweet_failures_are_localized() {
+        let payload = serde_json::json!({
+            "author_name": "Usuario Sintético",
+            "html": "<blockquote><p>Hola.</p></blockquote>"
+        })
+        .to_string();
+        let mut tool = make_tool(vec![Ok(response("application/json", &payload))], Locale::Es);
+        assert_eq!(
+            tool.execute(request("https://x.com/user/status/123"), "call")
+                .output,
+            "Tweet de Usuario Sintético\nHola."
+        );
+
+        let blocked = tool.execute(request("http://127.0.0.1/secret"), "call");
+        assert!(
+            blocked
+                .output
+                .starts_with("error obteniendo http://127.0.0.1/secret: "),
+            "{}",
+            blocked.output
+        );
+        assert_eq!(
+            blocked.diagnostics,
+            ["web_fetch blocked URL http://127.0.0.1/secret"]
+        );
+
+        let mut tool = make_tool(
+            vec![Ok(WebFetchResponse {
+                status_code: 404,
+                content_type: "application/json".to_owned(),
+                location: None,
+                body: Vec::new(),
+                truncated: false,
+            })],
+            Locale::En,
+        );
+        let failed = tool.execute(request("https://x.com/user/status/123"), "call");
+        assert_eq!(failed.output, "could not read the tweet");
+        assert_eq!(failed.diagnostics.len(), 1);
+        assert!(failed.diagnostics[0].starts_with("Twitter oEmbed failed for "));
+    }
 }

@@ -596,15 +596,16 @@ mod tests {
 
     #[test]
     fn redis_compaction_state_round_trips_summary_and_marker_atomically() -> Result<(), String> {
-        let Some(endpoint) = integration_redis_endpoint() else {
-            return Ok(());
-        };
+        integration_redis_endpoint().map_or(Ok(()), |endpoint| assert_state_round_trip(&endpoint))
+    }
+
+    fn assert_state_round_trip(endpoint: &RedisEndpoint) -> Result<(), String> {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|error| error.to_string())?
             .as_nanos();
         let chat_id = format!("synthetic-compaction-{nonce}");
-        let mut state = RedisCompactionState::new(&endpoint)?;
+        let mut state = RedisCompactionState::new(endpoint)?;
         assert_eq!(state.load(&chat_id)?, (None, None));
         state.save(&chat_id, "synthetic summary", "message-7")?;
         assert_eq!(
@@ -619,10 +620,15 @@ mod tests {
 
     #[test]
     fn postgres_compaction_billing_records_provider_usage_and_settles_once() -> Result<(), String> {
-        let Some(database_url) = std::env::var("TEST_DATABASE_URL").ok() else {
-            return Ok(());
-        };
-        BillingSchemaRepository::new(&database_url)
+        std::env::var("TEST_DATABASE_URL")
+            .ok()
+            .map_or(Ok(()), |database_url| {
+                assert_billing_settles_once(&database_url)
+            })
+    }
+
+    fn assert_billing_settles_once(database_url: &str) -> Result<(), String> {
+        BillingSchemaRepository::new(database_url)
             .ensure_schema()
             .map_err(|error| error.to_string())?;
         let nonce = SystemTime::now()
@@ -633,7 +639,7 @@ mod tests {
         let user_id = 7_200_000_000_000_i64 + suffix;
         let operation_id = format!("synthetic-compaction-billing-{nonce}");
         let usage_tag = format!("synthetic-usage-{nonce}");
-        let repository = BillingRepository::new(&database_url);
+        let repository = BillingRepository::new(database_url);
         repository
             .mint_user_credits(user_id, 100, None)
             .map_err(|error| error.to_string())?;
@@ -687,7 +693,7 @@ mod tests {
             "source":"openrouter",
             "metadata":{"provider_generation_id":format!("synthetic-generation-{nonce}")},
         });
-        let mut billing = PostgresCompactionBilling::new(&database_url);
+        let mut billing = PostgresCompactionBilling::new(database_url);
         assert!(!billing.is_settled(&job)?);
         billing.record_provider_segment(&job, &operation_id, &segment)?;
         let segments = billing.list_provider_segments(user_id, &operation_id)?;
@@ -747,22 +753,23 @@ mod tests {
             !billing
                 .settle_incompatible("synthetic", &json!({"user_id":user_id,"reservation":{}}),)?
         );
-        assert!(billing.settle_incompatible(
-            &job.chat_id,
-            &json!({
-                "user_id": user_id,
-                "reservation": {
-                    "reserved_credit_units": 10,
-                    "source": "user",
-                    "usage_tag": usage_tag,
-                    "credit_scale": 100,
-                    "metadata": {
-                        "settlement_id": operation_id,
-                        "operation_id": operation_id,
-                    }
+        let incompatible = json!({
+            "user_id": user_id,
+            "reservation": {
+                "reserved_credit_units": 10,
+                "source": "user",
+                "usage_tag": usage_tag,
+                "credit_scale": 100,
+                "metadata": {
+                    "settlement_id": operation_id,
+                    "operation_id": operation_id,
                 }
-            }),
-        )?);
+            }
+        });
+        assert_eq!(
+            billing.settle_incompatible(&job.chat_id, &incompatible),
+            Ok(true)
+        );
         Ok(())
     }
 
@@ -787,10 +794,7 @@ mod tests {
             "synthetic persona",
             "synthetic-owner",
         );
-        assert!(result.is_ok());
-        let Some(worker) = result.ok() else {
-            return;
-        };
+        let worker = result.unwrap_or_else(|_| unreachable!("worker composition is lazy"));
         let (_queue, _state, _provider, _billing, mut token) = worker.into_parts();
         assert_eq!(token(), "synthetic-owner:compaction:0");
         assert_eq!(token(), "synthetic-owner:compaction:1");
@@ -826,11 +830,8 @@ mod tests {
             "requested/model",
             "persona",
         );
-        let result = provider.compact(
-            &[json!({"role":"user","text":"hello"})],
-            Some("old context"),
-            "en",
-        )?;
+        let messages = [json!({"role":"user","text":"hello"})];
+        let result = provider.compact(&messages, Some("old context"), "en")?;
         assert_eq!(result.summary, "[previous context: fact\n\npending]");
         let segment = result.billing_segment.unwrap_or(Value::Null);
         assert_eq!(segment["kind"], "summary");
@@ -844,15 +845,16 @@ mod tests {
             bot_core::ai_usage::stable_provider_segment_id(&segment),
             "openrouter:generation-1"
         );
-        let body: Value = serde_json::from_str(
-            &provider
+        let sent_body = |provider: &OpenRouterCompactionProvider<Transport>| {
+            provider
                 .transport
                 .request
                 .borrow()
                 .as_ref()
                 .map(|request| request.body.clone())
-                .unwrap_or_default(),
-        )?;
+                .unwrap_or_default()
+        };
+        let body: Value = serde_json::from_str(&sent_body(&provider))?;
         assert_eq!(body["messages"][0]["content"], "persona");
         assert_eq!(body["messages"][1]["content"], "old context");
         assert_eq!(body["messages"][2]["content"], "hello");
@@ -861,6 +863,17 @@ mod tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("NEVER use markdown")
+        );
+
+        let spanish = provider.compact(&messages, None, "es-AR")?;
+        assert_eq!(spanish.summary, "[contexto anterior: fact\n\npending]");
+        let body: Value = serde_json::from_str(&sent_body(&provider))?;
+        assert_eq!(body["messages"][1]["content"], "hello");
+        assert!(
+            body["messages"][2]["content"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("NUNCA uses markdown")
         );
         Ok(())
     }
@@ -974,5 +987,24 @@ mod tests {
             super::reservation_nested_string(&reservation, "missing"),
             ""
         );
+    }
+
+    #[test]
+    fn incompatible_jobs_without_a_billable_reservation_are_left_untouched() {
+        let mut billing = PostgresCompactionBilling::new("postgresql://synthetic.invalid/database");
+        for decoded in [
+            json!({}),
+            json!({"user_id": "not-a-number", "reservation": {"usage_tag": "tag"}}),
+            json!({"user_id": 7}),
+            json!({"user_id": 7, "reservation": "legacy-string"}),
+            json!({"user_id": 7, "reservation": {"reserved_credit_units": 10}}),
+            json!({"user_id": 7, "reservation": {"usage_tag": ""}}),
+        ] {
+            assert_eq!(
+                billing.settle_incompatible("synthetic-chat", &decoded),
+                Ok(false),
+                "{decoded}"
+            );
+        }
     }
 }

@@ -115,13 +115,13 @@ impl ActiveOperationRegistry {
         if operation_id.is_empty() {
             return;
         }
-        if let Ok(mut counts) = self.counts.lock() {
-            match counts.get_mut(operation_id) {
-                Some(count) if *count > 1 => *count -= 1,
-                Some(_) => {
-                    counts.remove(operation_id);
-                }
-                None => {}
+        if let Ok(mut counts) = self.counts.lock()
+            && let Some(count) = counts.get_mut(operation_id)
+        {
+            if *count > 1 {
+                *count -= 1;
+            } else {
+                counts.remove(operation_id);
             }
         }
     }
@@ -720,10 +720,16 @@ mod tests {
                 |generation| generation.is_some_and(|value| value["total_cost"] == "0.001")
             )
         );
+    }
 
-        let Some(database_url) = std::env::var("TEST_DATABASE_URL").ok() else {
-            return;
-        };
+    #[test]
+    fn billing_repository_port_propagates_database_failures() {
+        std::env::var("TEST_DATABASE_URL")
+            .into_iter()
+            .for_each(|database_url| assert_missing_schema_fails(&database_url));
+    }
+
+    fn assert_missing_schema_fails(database_url: &str) {
         let separator = if database_url.contains('?') { '&' } else { '?' };
         let missing_schema =
             format!("{database_url}{separator}options=-csearch_path%3Dmissing_billing_schema");
@@ -1096,5 +1102,113 @@ mod tests {
         active.mark_active("");
         active.mark_inactive("");
         assert!(!active.is_active(""));
+    }
+
+    #[test]
+    fn inactive_marks_for_unknown_or_blank_operations_are_ignored() {
+        let active = ActiveOperationRegistry::default();
+        active.mark_active("known");
+        active.mark_inactive("unknown");
+        active.mark_inactive("   ");
+        active.mark_active("   ");
+        assert!(active.is_active("known"));
+        assert!(!active.is_active("unknown"));
+        assert!(!active.is_active(""));
+        active.mark_inactive(" known ");
+        assert!(!active.is_active("known"));
+    }
+
+    fn generation(value: Value) -> Option<Map<String, Value>> {
+        value.as_object().cloned()
+    }
+
+    #[test]
+    fn unrecoverable_segments_are_skipped_until_the_retry_window_expires() {
+        let mut reconciled = pending_segment();
+        reconciled["metadata"]["provider_generation_id"] = json!("already-reconciled");
+        reconciled["metadata"]["usage_reconciled"] = json!(true);
+        let mut anonymous = pending_segment();
+        anonymous["metadata"]["provider_generation_id"] = json!("");
+        let mut unpriced = pending_segment();
+        unpriced["metadata"]["provider_generation_id"] = json!("unpriced");
+        let mut unidentified = pending_segment();
+        unidentified["metadata"]["provider_generation_id"] = json!("unidentified");
+        let mut operation = operation("mixed", "2026-08-31T00:00:00Z", None);
+        operation.segments = vec![
+            json!({"segment_id": "openrouter:already-reconciled", "segment": reconciled}),
+            json!({"segment_id": "openrouter:anonymous", "segment": anonymous}),
+            json!({"segment_id": "openrouter:unpriced", "segment": unpriced}),
+            json!({"segment_id": "", "segment": unidentified}),
+        ];
+        let priced = json!({"upstream_inference_cost": 0.00005, "total_cost": 0.00006});
+        let generations = Generations {
+            values: HashMap::from([
+                (
+                    "already-reconciled".to_owned(),
+                    VecDeque::from([generation(priced.clone())]),
+                ),
+                (
+                    "unpriced".to_owned(),
+                    VecDeque::from([generation(json!({"total_cost": 0.00006}))]),
+                ),
+                (
+                    "unidentified".to_owned(),
+                    VecDeque::from([generation(priced)]),
+                ),
+            ]),
+        };
+        let mut reconciler = AiBillingReconciler::new(
+            Store {
+                operations: vec![operation],
+                ..Store::default()
+            },
+            generations,
+            ActiveOperationRegistry::default(),
+            ReconciliationSettings::default(),
+        );
+
+        let report = reconciler.run_once(1_788_138_000).unwrap_or_default();
+
+        assert_eq!(report.unresolved, 1);
+        let (store, generations, _) = reconciler.into_parts();
+        assert!(store.updates.is_empty());
+        assert_eq!(store.settlements.len(), 1);
+        assert_eq!(
+            store.settlements[0].2["reason"],
+            json!("reconciliation_timeout")
+        );
+        assert_eq!(generations.values["already-reconciled"].len(), 1);
+        assert!(generations.values["unpriced"].is_empty());
+        assert!(generations.values["unidentified"].is_empty());
+    }
+
+    #[test]
+    fn incomplete_local_pricing_settles_the_full_authorization_as_unresolved() {
+        let store = Store {
+            operations: vec![operation(
+                "unknown-model",
+                "2026-08-31T00:00:00Z",
+                Some(json!({"kind": "chat", "model": "unknown/model"})),
+            )],
+            ..Store::default()
+        };
+        let mut reconciler = AiBillingReconciler::new(
+            store,
+            Generations::default(),
+            ActiveOperationRegistry::default(),
+            ReconciliationSettings::default(),
+        );
+
+        let report = reconciler.run_once(1_788_134_700).unwrap_or_default();
+
+        assert_eq!(report.unresolved, 1);
+        let (store, _, _) = reconciler.into_parts();
+        assert_eq!(store.settlements.len(), 1);
+        assert_eq!(store.settlements[0].1, 100);
+        assert_eq!(
+            store.settlements[0].2["reason"],
+            json!("reconciliation_incomplete_pricing")
+        );
+        assert_eq!(store.settlements[0].2["pricing_complete"], json!(false));
     }
 }

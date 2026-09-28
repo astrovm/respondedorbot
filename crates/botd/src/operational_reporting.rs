@@ -203,11 +203,13 @@ mod tests {
                 ))
                 .is_ok()
         );
-        let requests = reporter.transport.requests.lock();
-        assert!(requests.is_ok());
-        let Some(request) = requests.ok().and_then(|requests| requests.first().cloned()) else {
-            return;
-        };
+        let request = reporter
+            .transport
+            .requests
+            .lock()
+            .ok()
+            .and_then(|requests| requests.first().cloned())
+            .unwrap_or_else(|| unreachable!("one admin report was sent"));
         assert_eq!(request.endpoint, "sendMessage");
         let text = request
             .json_payload

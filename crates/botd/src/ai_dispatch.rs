@@ -192,8 +192,38 @@ mod tests {
 
     use super::{
         AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, AiReplyMetadata,
-        reply_context,
+        AiStreamEvent, reply_context,
     };
+
+    struct TokenStreamingSource;
+
+    impl AiConversationSource for TokenStreamingSource {
+        fn reply_metadata(
+            &mut self,
+            _chat_id: &str,
+            _message_id: &str,
+        ) -> Result<Option<AiReplyMetadata>, String> {
+            Ok(None)
+        }
+
+        fn prepare(&mut self, _input: AiConversationInput) -> Result<AiPreparation, String> {
+            Err("streaming source must not use the blocking path".to_owned())
+        }
+
+        fn prepare_streaming(
+            &mut self,
+            _input: AiConversationInput,
+            on_token: &mut dyn FnMut(&str) -> Result<(), String>,
+        ) -> Result<AiPreparation, String> {
+            on_token("hola ")?;
+            on_token("mundo")?;
+            Ok(AiPreparation::reply("hola mundo", Some("gen-1".to_owned())))
+        }
+
+        fn complete_delivery(&mut self, _delivery: AiDelivery) -> Result<(), String> {
+            Ok(())
+        }
+    }
 
     struct MinimalSource {
         prepared: usize,
@@ -343,6 +373,49 @@ mod tests {
             AiPreparation::Silent {
                 diagnostics: Vec::new()
             }
+        );
+    }
+
+    #[test]
+    fn default_event_stream_wraps_each_token_as_final_text() {
+        let mut source = TokenStreamingSource;
+        let mut events = Vec::new();
+        let prepared = source.prepare_streaming_events(input(), &mut |event| {
+            events.push(event);
+            Ok(())
+        });
+        assert_eq!(
+            prepared,
+            Ok(AiPreparation::reply("hola mundo", Some("gen-1".to_owned())))
+        );
+        assert_eq!(
+            events,
+            vec![
+                AiStreamEvent::FinalText("hola ".to_owned()),
+                AiStreamEvent::FinalText("mundo".to_owned()),
+            ]
+        );
+
+        assert_eq!(source.reply_metadata("1", "2"), Ok(None));
+        assert_eq!(
+            source.prepare(input()),
+            Err("streaming source must not use the blocking path".to_owned())
+        );
+        assert_eq!(
+            source.complete_delivery(AiDelivery {
+                completion_id: "gen-1".to_owned(),
+                delivered: true,
+                sent_message_id: Some(MessageId(5)),
+            }),
+            Ok(())
+        );
+
+        let stopped = source.prepare_streaming_events(input(), &mut |event| {
+            Err(format!("delivery rejected {event:?}"))
+        });
+        assert_eq!(
+            stopped,
+            Err("delivery rejected FinalText(\"hola \")".to_owned())
         );
     }
 }

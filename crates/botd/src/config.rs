@@ -272,10 +272,6 @@ impl MaintenanceConfig {
 }
 
 impl RuntimeConfig {
-    pub fn from_env() -> Result<Self, ConfigError> {
-        Self::from_lookup(|name| std::env::var(name).ok())
-    }
-
     pub fn from_lookup<F>(lookup: F) -> Result<Self, ConfigError>
     where
         F: Fn(&str) -> Option<String>,
@@ -570,10 +566,7 @@ mod tests {
         ]);
         let config = TaskVerificationConfig::from_lookup(|name| values.get(name).cloned())
             .map_err(|error| error.to_string());
-        assert!(config.is_ok());
-        let Some(config) = config.ok() else {
-            return;
-        };
+        let config = config.unwrap_or_else(|error| unreachable!("valid configuration: {error}"));
         assert_eq!(config.redis_endpoint.host, "redis.internal");
         assert_eq!(config.redis_endpoint.port, 6380);
         assert_eq!(config.owner_token, "worker-a:verify");
@@ -612,10 +605,7 @@ mod tests {
             ("AI_LEDGER_RETENTION_DAYS".to_owned(), "45".to_owned()),
         ]);
         let config = MaintenanceConfig::from_lookup(|name| values.get(name).cloned());
-        assert!(config.is_ok());
-        let Some(config) = config.ok() else {
-            return;
-        };
+        let config = config.unwrap_or_else(|error| unreachable!("valid configuration: {error}"));
         assert_eq!(config.redis_endpoint.host, "redis.internal");
         assert_eq!(config.redis_endpoint.port, 6380);
         assert_eq!(config.database_url(), Some(SYNTHETIC_DATABASE_URL));
@@ -631,10 +621,7 @@ mod tests {
     #[test]
     fn maintenance_defaults_and_retention_validation_match_python() {
         let config = MaintenanceConfig::from_lookup(|_| None);
-        assert!(config.is_ok());
-        let Some(config) = config.ok() else {
-            return;
-        };
+        let config = config.unwrap_or_else(|error| unreachable!("valid configuration: {error}"));
         assert_eq!(config.redis_endpoint.host, "localhost");
         assert_eq!(config.redis_endpoint.port, 6379);
         assert_eq!(config.database_url(), None);
@@ -694,10 +681,7 @@ mod tests {
             Err(ConfigError::MissingSystemPrompt)
         );
         let config = production(&base, Some("soul\n\nrules"));
-        assert!(config.is_ok());
-        let Some(config) = config.ok() else {
-            return;
-        };
+        let config = config.unwrap_or_else(|error| unreachable!("valid configuration: {error}"));
         assert_eq!(config.bot_name, "test_bot");
         assert_eq!(config.system_prompt, "soul\n\nrules");
         assert_eq!(config.trigger_words.len(), 6);
@@ -775,10 +759,7 @@ mod tests {
             ],
             Some("prompt-secret"),
         );
-        assert!(config.is_ok());
-        let Some(config) = config.ok() else {
-            return;
-        };
+        let config = config.unwrap_or_else(|error| unreachable!("valid configuration: {error}"));
         assert_eq!(config.admin_user_id, Some(99));
         assert_eq!(config.trigger_words, ["gordo", "test", "bot"]);
         assert_eq!(config.owner_token(), "VPS");

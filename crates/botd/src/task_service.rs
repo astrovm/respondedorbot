@@ -177,11 +177,13 @@ mod tests {
     use bot_core::scheduled_tasks::{ScheduledTask, TaskId, TaskSchedule};
 
     use super::{
-        TaskServiceOptions, VerificationExecutor, build_task_scheduler, build_task_verifier,
-        verify_tasks_once,
+        TaskServiceError, TaskServiceOptions, VerificationExecutor, build_task_scheduler,
+        build_task_verifier, verify_tasks_once,
     };
     use crate::composition::TelegramDeliveryCoordinator;
-    use crate::scheduler::{ScheduledTaskExecutor, SchedulerMode, TaskExecutionDisposition};
+    use crate::scheduler::{
+        ScheduledTaskExecutor, SchedulerError, SchedulerMode, TaskExecutionDisposition,
+    };
     use crate::task_executor::{TaskExecutionJournal, TaskExecutionState};
 
     #[test]
@@ -214,19 +216,22 @@ mod tests {
 
     #[test]
     fn verification_service_composes_and_steps_against_local_redis() -> Result<(), String> {
-        let Some(port) = std::env::var("TEST_REDIS_PORT")
-            .ok()
-            .and_then(|value| value.parse().ok())
-        else {
-            return Ok(());
-        };
-        let endpoint = RedisEndpoint {
+        test_redis_endpoint().map_or(Ok(()), |endpoint| assert_verification_service(&endpoint))
+    }
+
+    fn test_redis_endpoint() -> Option<RedisEndpoint> {
+        let port = std::env::var("TEST_REDIS_PORT").ok()?.parse().ok()?;
+        Some(RedisEndpoint {
             host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
             port,
             password: std::env::var("TEST_REDIS_PASSWORD")
                 .ok()
                 .filter(|value| !value.is_empty()),
-        };
+        })
+    }
+
+    fn assert_verification_service(endpoint: &RedisEndpoint) -> Result<(), String> {
+        let endpoint = endpoint.clone();
         assert!(build_task_verifier(&endpoint, "synthetic-verifier").is_ok());
         assert!(verify_tasks_once(&endpoint, "synthetic-verifier", 1_700_000_000).is_ok());
 
@@ -266,5 +271,39 @@ mod tests {
             Ok(TaskExecutionDisposition::Retry)
         );
         Ok(())
+    }
+
+    #[test]
+    fn empty_owner_tokens_are_rejected_by_both_service_builders() {
+        let endpoint = RedisEndpoint {
+            host: "synthetic.invalid".to_owned(),
+            port: 6379,
+            password: None,
+        };
+        assert!(matches!(
+            build_task_verifier(&endpoint, ""),
+            Err(TaskServiceError::Scheduler(SchedulerError::EmptyOwnerToken))
+        ));
+        let pricing = Arc::new(
+            OpenRouterPricingCache::new("synthetic-key", "https://synthetic.invalid/api/v1")
+                .unwrap_or_else(|_| unreachable!("pricing cache construction")),
+        );
+        let result = build_task_scheduler(TaskServiceOptions {
+            redis_endpoint: &endpoint,
+            database_url: "postgresql://synthetic.invalid/database",
+            telegram_token: "synthetic-token",
+            openrouter_api_key: "synthetic-key",
+            openrouter_base_url: "https://synthetic.invalid/api/v1",
+            openrouter_pricing: pricing,
+            firecrawl_api_key: None,
+            system_prompt: "synthetic persona",
+            owner_token: "",
+            mode: SchedulerMode::Authoritative,
+            telegram_delivery: TelegramDeliveryCoordinator::default(),
+        });
+        assert!(matches!(
+            result,
+            Err(TaskServiceError::Scheduler(SchedulerError::EmptyOwnerToken))
+        ));
     }
 }

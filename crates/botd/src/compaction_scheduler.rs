@@ -501,6 +501,10 @@ mod tests {
         }
     }
 
+    fn token() -> String {
+        "nonce".to_owned()
+    }
+
     fn plan() -> MemoryCompactionPlan {
         MemoryCompactionPlan {
             chat_id: "123".to_owned(),
@@ -525,16 +529,28 @@ mod tests {
     #[test]
     fn production_reservation_and_queue_ports_round_trip_against_local_stores() -> Result<(), String>
     {
-        let Some(database_url) = std::env::var("TEST_DATABASE_URL").ok() else {
-            return Ok(());
-        };
-        let Some(port) = std::env::var("TEST_REDIS_PORT")
-            .ok()
-            .and_then(|value| value.parse().ok())
-        else {
-            return Ok(());
-        };
-        BillingSchemaRepository::new(&database_url)
+        local_stores().map_or(Ok(()), |(database_url, endpoint)| {
+            assert_ports_round_trip(&database_url, &endpoint)
+        })
+    }
+
+    fn local_stores() -> Option<(String, RedisEndpoint)> {
+        let database_url = std::env::var("TEST_DATABASE_URL").ok()?;
+        let port = std::env::var("TEST_REDIS_PORT").ok()?.parse().ok()?;
+        Some((
+            database_url,
+            RedisEndpoint {
+                host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+                port,
+                password: std::env::var("TEST_REDIS_PASSWORD")
+                    .ok()
+                    .filter(|value| !value.is_empty()),
+            },
+        ))
+    }
+
+    fn synthetic_user(database_url: &str, base: i64) -> Result<(u128, i64), String> {
+        BillingSchemaRepository::new(database_url)
             .ensure_schema()
             .map_err(|error| error.to_string())?;
         let nonce = SystemTime::now()
@@ -542,11 +558,16 @@ mod tests {
             .map_err(|error| error.to_string())?
             .as_nanos();
         let suffix = i64::try_from(nonce % 100_000_000).map_err(|error| error.to_string())?;
-        let user_id = 7_100_000_000_000_i64 + suffix;
-        let repository = BillingRepository::new(&database_url);
-        repository
+        let user_id = base + suffix;
+        BillingRepository::new(database_url)
             .mint_user_credits(user_id, 100, None)
             .map_err(|error| error.to_string())?;
+        Ok((nonce, user_id))
+    }
+
+    fn assert_ports_round_trip(database_url: &str, endpoint: &RedisEndpoint) -> Result<(), String> {
+        let (nonce, user_id) = synthetic_user(database_url, 7_100_000_000_000)?;
+        let repository = BillingRepository::new(database_url);
         let context = CompactionScheduleContext {
             user_id,
             group_chat_id: None,
@@ -556,7 +577,7 @@ mod tests {
             payer_source: Some(super::PayerSource::User),
         };
         let usage_tag = format!("synthetic-compaction-{nonce}");
-        let mut billing = PostgresCompactionReservations::new(&database_url);
+        let mut billing = PostgresCompactionReservations::new(database_url);
         let reservation = billing
             .reserve(context, &usage_tag, 10, "message-7", 3)?
             .ok_or_else(|| "synthetic reservation was denied".to_owned())?;
@@ -575,14 +596,24 @@ mod tests {
             100
         );
 
-        let endpoint = RedisEndpoint {
-            host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
-            port,
-            password: std::env::var("TEST_REDIS_PASSWORD")
-                .ok()
-                .filter(|value| !value.is_empty()),
+        let chat_payer = CompactionScheduleContext {
+            group_chat_id: Some(-user_id),
+            payer_source: Some(super::PayerSource::Chat),
+            ..context
         };
-        let mut queue = RedisCompactionQueue::new(&endpoint).map_err(|error| error.to_string())?;
+        let chat_tag = format!("synthetic-compaction-chat-{nonce}");
+        assert_eq!(
+            billing.reserve(chat_payer, &chat_tag, 10, "message-8", 3),
+            Ok(None)
+        );
+        assert_eq!(
+            repository
+                .get_balance("user", user_id)
+                .map_err(|error| error.to_string())?,
+            100
+        );
+
+        let mut queue = RedisCompactionQueue::new(endpoint).map_err(|error| error.to_string())?;
         let chat_id = format!("synthetic-scheduler-{nonce}");
         assert!(
             !CompactionEnqueueStore::job_exists(&mut queue, &chat_id)
@@ -607,7 +638,7 @@ mod tests {
                 ..Queue::default()
             },
             Billing::default(),
-            || "nonce".to_owned(),
+            token,
             COMPACTION_MODEL,
             "persona",
         );
@@ -634,7 +665,7 @@ mod tests {
                 ..Queue::default()
             },
             Billing::default(),
-            || "nonce".to_owned(),
+            token,
             COMPACTION_MODEL,
             "persona",
         );
@@ -644,7 +675,7 @@ mod tests {
         let mut lost = NativeCompactionScheduler::new(
             Queue::default(),
             Billing::default(),
-            || "nonce".to_owned(),
+            token,
             COMPACTION_MODEL,
             "persona",
         );
@@ -659,7 +690,7 @@ mod tests {
                 ..Queue::default()
             },
             Billing::default(),
-            || "nonce".to_owned(),
+            token,
             COMPACTION_MODEL,
             "persona",
         );
@@ -668,5 +699,75 @@ mod tests {
             Err("synthetic Redis failure".to_owned())
         );
         assert_eq!(failed.into_parts().1.refunds, 1);
+    }
+
+    #[test]
+    fn spanish_context_persists_the_spanish_summary_locale() {
+        let mut scheduler = NativeCompactionScheduler::new(
+            Queue {
+                insert: true,
+                ..Queue::default()
+            },
+            Billing::default(),
+            token,
+            COMPACTION_MODEL,
+            "persona",
+        );
+        let spanish = CompactionScheduleContext {
+            locale: Locale::Es,
+            ..context()
+        };
+        assert_eq!(scheduler.schedule(plan(), spanish), Ok(true));
+        let (queue, _, _) = scheduler.into_parts();
+        assert_eq!(queue.payloads[0]["locale"], "es");
+        assert_eq!(queue.payloads[0]["message_id"], "9");
+    }
+
+    #[test]
+    fn production_scheduler_reserves_with_a_random_usage_tag_and_enqueues() -> Result<(), String> {
+        local_stores().map_or(Ok(()), |(database_url, endpoint)| {
+            assert_production_scheduler_enqueues(&database_url, &endpoint)
+        })
+    }
+
+    fn assert_production_scheduler_enqueues(
+        database_url: &str,
+        endpoint: &RedisEndpoint,
+    ) -> Result<(), String> {
+        let (nonce, user_id) = synthetic_user(database_url, 7_150_000_000_000)?;
+        let queue = RedisCompactionQueue::new(endpoint).map_err(|error| error.to_string())?;
+        let mut scheduler =
+            super::production_compaction_scheduler(queue, database_url, "persona", None);
+        let chat_id = format!("synthetic-production-scheduler-{nonce}");
+        let production_plan = MemoryCompactionPlan {
+            chat_id: chat_id.clone(),
+            ..plan()
+        };
+        let context = CompactionScheduleContext {
+            user_id,
+            group_chat_id: None,
+            origin_chat_id: user_id,
+            payer_source: None,
+            ..context()
+        };
+        assert_eq!(
+            scheduler.schedule(production_plan.clone(), context),
+            Ok(true)
+        );
+        assert_eq!(scheduler.schedule(production_plan, context), Ok(false));
+        let (mut queue, _, mut next_token) = scheduler.into_parts();
+        assert!(
+            CompactionEnqueueStore::job_exists(&mut queue, &chat_id)
+                .map_err(|error| error.to_string())?
+        );
+        let (first, second) = (next_token(), next_token());
+        assert_eq!(first.len(), 32);
+        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(first, second);
+        let balance = BillingRepository::new(database_url)
+            .get_balance("user", user_id)
+            .map_err(|error| error.to_string())?;
+        assert!(balance < 100, "reservation was not charged: {balance}");
+        Ok(())
     }
 }

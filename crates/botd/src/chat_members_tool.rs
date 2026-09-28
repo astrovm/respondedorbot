@@ -143,20 +143,22 @@ mod tests {
 
     #[test]
     fn redis_member_source_reads_the_persistent_member_shape() -> Result<(), String> {
-        let Some(port) = std::env::var("TEST_REDIS_PORT")
-            .ok()
-            .and_then(|value| value.parse().ok())
-        else {
-            return Ok(());
-        };
-        let endpoint = RedisEndpoint {
+        test_redis_endpoint().map_or(Ok(()), |endpoint| assert_member_round_trip(&endpoint))
+    }
+
+    fn test_redis_endpoint() -> Option<RedisEndpoint> {
+        let port = std::env::var("TEST_REDIS_PORT").ok()?.parse().ok()?;
+        Some(RedisEndpoint {
             host: std::env::var("TEST_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
             port,
             password: std::env::var("TEST_REDIS_PASSWORD")
                 .ok()
                 .filter(|value| !value.is_empty()),
-        };
-        let mut state = RedisMessageState::new(&endpoint).map_err(|error| error.to_string())?;
+        })
+    }
+
+    fn assert_member_round_trip(endpoint: &RedisEndpoint) -> Result<(), String> {
+        let mut state = RedisMessageState::new(endpoint).map_err(|error| error.to_string())?;
         let chat_id = format!("synthetic-members-{}", std::process::id());
         let payload = prepare_chat_member_payload("Synthetic", "synthetic_user", 1_700_000_000)
             .map_err(|error| error.to_string())?;

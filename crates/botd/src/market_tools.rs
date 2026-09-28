@@ -427,4 +427,130 @@ mod tests {
             "tool 'crypto_prices' received an incompatible request"
         );
     }
+
+    fn empty_market_source(
+        selection: Option<bot_core::market_prices::MarketSelection>,
+    ) -> MarketSource {
+        MarketSource {
+            load: MarketPriceLoad {
+                chart: None,
+                selection,
+                no_assets_found: false,
+                text: " \n".to_owned(),
+                diagnostics: vec!["synthetic quote miss".to_owned()],
+            },
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+
+    #[test]
+    fn empty_crypto_text_falls_back_to_localized_errors_or_the_ambiguity_picker() {
+        let request = || ExternalToolRequest::CryptoPrices {
+            query: "ABC".to_owned(),
+        };
+        for (locale, expected) in [
+            (
+                Locale::Es,
+                "No pude conseguir una cotización. Probá más tarde",
+            ),
+            (Locale::En, "I could not get a quote. Try again later"),
+        ] {
+            let mut tool = CryptoPricesTool::new(empty_market_source(None), || 0, locale);
+            let result = tool.execute(request(), "call");
+            assert_eq!(result.output, expected);
+            assert_eq!(result.diagnostics, ["synthetic quote miss"]);
+        }
+
+        let candidate = |id: &str, name: &str| bot_core::market_prices::MarketCandidate {
+            id: id.to_owned(),
+            symbol: "ABC".to_owned(),
+            name: name.to_owned(),
+            slug: name.to_lowercase(),
+            price: "1.5".to_owned(),
+            change: "2.0".to_owned(),
+            currency: String::new(),
+            exchange: String::new(),
+            asset_type: String::new(),
+            contracts: Vec::new(),
+        };
+        let selection = bot_core::market_prices::MarketSelection {
+            query: "ABC".to_owned(),
+            timeframe: None,
+            target_symbol: "USD".to_owned(),
+            target_parameter: "USD".to_owned(),
+            conversion: None,
+            candidates: vec![
+                candidate("crypto:1", "Alpha"),
+                candidate("crypto:2", "Beta"),
+            ],
+        };
+        let mut tool = CryptoPricesTool::new(
+            empty_market_source(Some(selection.clone())),
+            || 0,
+            Locale::En,
+        );
+        let output = tool.execute(request(), "call").output;
+        assert_eq!(output, format_market_selection(&selection, Locale::En));
+        assert!(output.starts_with("I found several coins with that ticker:"));
+        assert!(output.contains("Alpha") && output.contains("Beta"));
+    }
+
+    #[test]
+    fn english_dollar_failures_and_every_incompatible_market_request_are_explicit() {
+        let mut dollar = DollarRatesTool::new(
+            DollarSource {
+                calls: Rc::new(RefCell::new(Vec::new())),
+                load: DollarMarketLoad {
+                    text: None,
+                    diagnostics: Vec::new(),
+                },
+            },
+            || 0,
+            Locale::En,
+        );
+        assert_eq!(
+            dollar
+                .execute(
+                    ExternalToolRequest::DollarRates {
+                        timeframe: "1h".to_owned()
+                    },
+                    "call"
+                )
+                .output,
+            "I could not load the dollar rates"
+        );
+        assert_eq!(
+            dollar.execute(ExternalToolRequest::TaskList, "call").output,
+            "tool 'dollar_rates' received an incompatible request"
+        );
+        assert_eq!(*dollar.source.calls.borrow(), [(1, Locale::En, 0)]);
+
+        let mut stocks = StockPricesTool::new(
+            StockSource(StockQuotesLoad {
+                quotes: None,
+                diagnostics: Vec::new(),
+            }),
+            || 42,
+            Locale::En,
+        );
+        assert_eq!(
+            stocks.execute(ExternalToolRequest::TaskList, "call").output,
+            "tool 'stock_prices' received an incompatible request"
+        );
+
+        let mut weather = WeatherTool::new(
+            WeatherSourceImpl(WeatherObservationLoad {
+                observation: None,
+                diagnostics: Vec::new(),
+            }),
+            || 123,
+            Locale::Es,
+        );
+        assert_eq!(
+            weather
+                .execute(ExternalToolRequest::TaskList, "call")
+                .output,
+            "la herramienta 'weather' recibió una solicitud incompatible"
+        );
+    }
 }
