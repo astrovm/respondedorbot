@@ -2402,6 +2402,19 @@ impl<Transport: TelegramTransport> TelegramActionSink<Transport> {
 impl<Transport: TelegramTransport> ActionSink for TelegramActionSink<Transport> {
     type Error = TelegramActionSinkError;
 
+    /// Telegram rejects the request itself with 400 (for example a message
+    /// that no longer exists) or 403 (the bot was blocked or removed), so
+    /// sending it again would fail the same way.
+    fn is_permanent_failure(&self, error: &Self::Error) -> bool {
+        matches!(
+            error,
+            TelegramActionSinkError::Failed {
+                status_code: Some(400 | 403),
+                ..
+            }
+        )
+    }
+
     fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
         match self.execute_with_retry(action)? {
             ActionOutcome::Completed { message_id } => Ok(ActionReceipt {
@@ -5325,6 +5338,28 @@ mod tests {
                 TransportFailureKind::Connection
             ))
         );
+    }
+
+    #[test]
+    fn only_rejected_requests_are_permanent_action_failures() {
+        let sink = TelegramActionSink::new(Transport::with(Vec::new()), "token");
+        let failed = |status_code| TelegramActionSinkError::Failed {
+            status_code,
+            description: "synthetic".to_owned(),
+        };
+        assert!(sink.is_permanent_failure(&failed(Some(400))));
+        assert!(sink.is_permanent_failure(&failed(Some(403))));
+        for retryable in [
+            failed(Some(500)),
+            failed(Some(401)),
+            failed(None),
+            TelegramActionSinkError::RateLimited {
+                retry_after_seconds: Some(1),
+            },
+            TelegramActionSinkError::Transport(TransportFailureKind::Timeout),
+        ] {
+            assert!(!sink.is_permanent_failure(&retryable), "{retryable:?}");
+        }
     }
 
     #[test]

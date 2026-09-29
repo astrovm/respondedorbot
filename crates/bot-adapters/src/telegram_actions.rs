@@ -6,6 +6,7 @@ use serde_json::{Map, Value, json};
 use thiserror::Error;
 
 use bot_core::telegram_actions::{CommandScope, ParseMode, TelegramAction, truncate_text};
+use bot_core::telegram_input::MessageId;
 
 use crate::telegram_http::{
     TelegramHttpError, TelegramHttpOutcome, TelegramMultipartRequest, TelegramRequest,
@@ -102,6 +103,27 @@ fn insert_value(payload: &mut Map<String, Value>, field: &str, value: Option<imp
     }
 }
 
+/// Replies must still be delivered when the original message was deleted
+/// before the bot answered, so Telegram falls back to a plain message.
+fn reply_parameters(message_id: MessageId) -> Value {
+    json!({"message_id": message_id.0, "allow_sending_without_reply": true})
+}
+
+fn insert_reply(payload: &mut Map<String, Value>, reply_to_message_id: Option<MessageId>) {
+    if let Some(message_id) = reply_to_message_id {
+        payload.insert("reply_parameters".to_owned(), reply_parameters(message_id));
+    }
+}
+
+fn push_reply_field(fields: &mut Vec<(String, String)>, reply_to_message_id: Option<MessageId>) {
+    if let Some(message_id) = reply_to_message_id {
+        fields.push((
+            "reply_parameters".to_owned(),
+            reply_parameters(message_id).to_string(),
+        ));
+    }
+}
+
 fn disable_link_preview(payload: &mut Map<String, Value>) {
     payload.insert(
         "link_preview_options".to_owned(),
@@ -144,11 +166,7 @@ fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
                 ("chat_id".to_owned(), json!(message.chat_id.0)),
                 ("text".to_owned(), json!(truncate_text(&message.text))),
             ]);
-            insert_value(
-                &mut payload,
-                "reply_to_message_id",
-                message.reply_to_message_id.map(|value| value.0),
-            );
+            insert_reply(&mut payload, message.reply_to_message_id);
             insert_value(
                 &mut payload,
                 "parse_mode",
@@ -175,11 +193,7 @@ fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
                 ("chat_id".to_owned(), json!(chat_id.0)),
                 ("animation".to_owned(), json!(animation)),
             ]);
-            insert_value(
-                &mut payload,
-                "reply_to_message_id",
-                reply_to_message_id.map(|value| value.0),
-            );
+            insert_reply(&mut payload, reply_to_message_id);
             insert_value(&mut payload, "caption", caption);
             (
                 "sendAnimation",
@@ -372,12 +386,7 @@ pub fn execute_with<T: TelegramTransport>(
                     caption.chars().take(1024).collect::<String>(),
                 ),
             ];
-            if let Some(reply_to_message_id) = reply_to_message_id {
-                fields.push((
-                    "reply_to_message_id".to_owned(),
-                    reply_to_message_id.0.to_string(),
-                ));
-            }
+            push_reply_field(&mut fields, reply_to_message_id);
             TelegramMultipartRequest {
                 token: token.to_owned(),
                 endpoint: "sendDocument".to_owned(),
@@ -404,12 +413,7 @@ pub fn execute_with<T: TelegramTransport>(
                 ),
                 ("supports_streaming".to_owned(), "true".to_owned()),
             ];
-            if let Some(reply_to_message_id) = reply_to_message_id {
-                fields.push((
-                    "reply_to_message_id".to_owned(),
-                    reply_to_message_id.0.to_string(),
-                ));
-            }
+            push_reply_field(&mut fields, reply_to_message_id);
             if let Some(reply_markup) = reply_markup {
                 fields.push((
                     "reply_markup".to_owned(),
@@ -442,12 +446,7 @@ pub fn execute_with<T: TelegramTransport>(
                     multipart_caption(caption, caption_parse_mode),
                 ),
             ];
-            if let Some(reply_to_message_id) = reply_to_message_id {
-                fields.push((
-                    "reply_to_message_id".to_owned(),
-                    reply_to_message_id.0.to_string(),
-                ));
-            }
+            push_reply_field(&mut fields, reply_to_message_id);
             if let Some(mode) = caption_parse_mode {
                 fields.push(("parse_mode".to_owned(), parse_mode(mode).to_owned()));
             }
@@ -557,6 +556,8 @@ mod tests {
         TransportFailureKind,
     };
 
+    const REPLY_TO_7: &str = r#"{"allow_sending_without_reply":true,"message_id":7}"#;
+
     struct Transport {
         response: RefCell<Option<Result<HttpResponse, TransportFailureKind>>>,
         requests: RefCell<Vec<TelegramRequest>>,
@@ -653,7 +654,7 @@ mod tests {
         assert!(
             requests[0]
                 .fields
-                .contains(&("reply_to_message_id".to_owned(), "7".to_owned()))
+                .contains(&("reply_parameters".to_owned(), REPLY_TO_7.to_owned()))
         );
         assert!(
             requests[0]
@@ -706,7 +707,7 @@ mod tests {
         assert!(
             requests[0]
                 .fields
-                .contains(&("reply_to_message_id".to_owned(), "7".to_owned()))
+                .contains(&("reply_parameters".to_owned(), REPLY_TO_7.to_owned()))
         );
     }
 
@@ -760,7 +761,7 @@ mod tests {
                 !requests[0]
                     .fields
                     .iter()
-                    .any(|(key, _)| key == "reply_to_message_id")
+                    .any(|(key, _)| key == "reply_parameters")
             );
             assert!(
                 requests[0]
@@ -948,7 +949,7 @@ mod tests {
             Some(serde_json::json!({
                 "chat_id":-10042,
                 "text":"hello",
-                "reply_to_message_id":7,
+                "reply_parameters":{"message_id":7,"allow_sending_without_reply":true},
                 "parse_mode":"HTML",
                 "link_preview_options":{"is_disabled":true},
                 "reply_markup":{"inline_keyboard":[[{"text":"Open","url":"https://example.test"}]]}
@@ -1131,7 +1132,7 @@ mod tests {
             Some(serde_json::json!({
                 "chat_id":42,
                 "animation":"https://example.test/greeting.gif",
-                "reply_to_message_id":7,
+                "reply_parameters":{"message_id":7,"allow_sending_without_reply":true},
                 "caption":"hello",
             }))
         );
@@ -1338,7 +1339,7 @@ mod tests {
             !requests[0]
                 .fields
                 .iter()
-                .any(|(key, _)| key == "reply_to_message_id")
+                .any(|(key, _)| key == "reply_parameters")
         );
     }
 }
