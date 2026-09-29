@@ -98,9 +98,9 @@ jobs:
           rustup component add llvm-tools-preview
           cargo llvm-cov clean --workspace
           cargo llvm-cov --locked --workspace --all-features --no-report
-          cargo llvm-cov report -p bot-core --fail-under-lines 95
-          cargo llvm-cov report -p bot-adapters --fail-under-lines 95
-          cargo llvm-cov report -p botd --fail-under-lines 95
+          cargo llvm-cov report -p bot-core --fail-under-lines 100
+          cargo llvm-cov report -p bot-adapters --fail-under-lines 100
+          cargo llvm-cov report -p botd --fail-under-lines 100
 
   image:
     if: github.event_name == 'pull_request'

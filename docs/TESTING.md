@@ -13,9 +13,9 @@ CI supplies PostgreSQL and Redis Stack and sets `TEST_DATABASE_URL`, `TEST_REDIS
 
 ## Coverage gates
 
-- `bot-core`: at least 95% line coverage.
-- `bot-adapters`: at least 95% line coverage.
-- `botd`: at least 95% line coverage.
+- `bot-core`: 100% line coverage.
+- `bot-adapters`: 100% line coverage.
+- `botd`: 100% line coverage.
 - Routing, billing, and scheduling require state-transition and failure-path assertions regardless of percentages.
 
 ## Test layers

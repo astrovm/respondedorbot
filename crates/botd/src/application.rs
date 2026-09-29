@@ -99,7 +99,7 @@ where
                 for failure in quarantined {
                     report_handler_failure(
                         failure.update_id,
-                        &format!("quarantined after repeated failures: {}", failure.error),
+                        &format!("quarantined without further retries: {}", failure.error),
                     );
                 }
             }
@@ -616,7 +616,7 @@ mod tests {
                 (11, "synthetic handler failure".to_owned()),
                 (
                     11,
-                    "quarantined after repeated failures: synthetic handler failure".to_owned()
+                    "quarantined without further retries: synthetic handler failure".to_owned()
                 ),
             ]
         );

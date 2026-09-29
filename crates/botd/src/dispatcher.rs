@@ -98,7 +98,7 @@ use crate::ai_dispatch::{
     AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, AiStreamEvent,
     reply_context,
 };
-use crate::runtime::UpdateHandler;
+use crate::runtime::{HandlerErrorDisposition, UpdateHandler};
 use crate::telegram_stream::{StreamFinalizeError, TelegramAiStream};
 
 fn text_without_links(text: &str) -> String {
@@ -138,6 +138,12 @@ pub trait ActionSink {
     type Error: std::fmt::Display;
 
     fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error>;
+
+    /// Whether `error` would repeat if the same action were sent again, so
+    /// retrying the whole update cannot help.
+    fn is_permanent_failure(&self, _error: &Self::Error) -> bool {
+        false
+    }
 
     fn try_edit(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
         self.execute(action).map(|_receipt| true)
@@ -5644,6 +5650,15 @@ where
     fn handle(&mut self, update: IncomingUpdate) -> Result<(), Self::Error> {
         self.dispatch(update).map(|_outcome| ())
     }
+
+    fn error_disposition(&self, error: &Self::Error) -> HandlerErrorDisposition {
+        match error {
+            DispatchError::Action(error) if self.actions.is_permanent_failure(error) => {
+                HandlerErrorDisposition::DiscardUpdate
+            }
+            _ => HandlerErrorDisposition::RetryUpdate,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -5685,6 +5700,7 @@ mod tests {
         market_contracts_match, market_selection_command, market_selection_id,
         market_selection_key, market_selection_text, provider_query_text, short_market_address,
     };
+    use crate::runtime::{HandlerErrorDisposition, UpdateHandler as _};
     use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup};
     use bot_core::devo::DevoQuotes;
     use bot_core::greeting_commands::GreetingCategory;
@@ -5877,6 +5893,10 @@ mod tests {
 
     impl ActionSink for Actions {
         type Error = &'static str;
+
+        fn is_permanent_failure(&self, error: &Self::Error) -> bool {
+            *error == "synthetic permanent failure"
+        }
 
         fn execute(&mut self, action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
             if let Some(failure) = self.1.failure.as_mut()
@@ -8031,6 +8051,23 @@ mod tests {
         assert_eq!(
             result.err().map(|error| error.to_string()),
             Some("could not execute Telegram action: synthetic action failure".to_owned())
+        );
+    }
+
+    #[test]
+    fn only_permanent_action_failures_skip_update_retries() {
+        let dispatcher = dispatcher();
+        assert_eq!(
+            dispatcher.error_disposition(&DispatchError::Action("synthetic permanent failure")),
+            HandlerErrorDisposition::DiscardUpdate
+        );
+        assert_eq!(
+            dispatcher.error_disposition(&DispatchError::Action("synthetic action failure")),
+            HandlerErrorDisposition::RetryUpdate
+        );
+        assert_eq!(
+            dispatcher.error_disposition(&DispatchError::MissingService("synthetic")),
+            HandlerErrorDisposition::RetryUpdate
         );
     }
 
@@ -19825,6 +19862,7 @@ mod tests {
         assert_eq!(sink.try_video(message()), Ok(confirmed));
         assert_eq!(sink.try_photo(message()), Ok(confirmed));
         assert_eq!(sink.0.len(), 5);
+        assert!(!sink.is_permanent_failure(&"synthetic failure"));
     }
 
     fn configured(

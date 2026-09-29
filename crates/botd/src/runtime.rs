@@ -54,6 +54,9 @@ pub trait UpdateHandler {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandlerErrorDisposition {
     RetryUpdate,
+    /// The failure would repeat on every attempt, so quarantine the update
+    /// right away instead of retrying it.
+    DiscardUpdate,
     StopRuntime,
 }
 
@@ -312,6 +315,8 @@ struct DeadUpdateRecord<'a> {
 struct DurableUpdateCompletion {
     record: DurableUpdateRecord,
     error: Option<String>,
+    // Retrying cannot help, so the update is quarantined on this attempt.
+    permanent: bool,
     // The worker already put the retry back on the update queue, so the
     // polling thread only persists the attempt instead of resubmitting it.
     resubmitted: bool,
@@ -332,6 +337,7 @@ fn report_durable_completion(
     let sender = updates.lock().unwrap_or_else(PoisonError::into_inner);
     let next_attempts = completion.record.attempts.saturating_add(1);
     if completion.error.is_some()
+        && !completion.permanent
         && next_attempts < MAX_UPDATE_ATTEMPTS
         && let Some(sender) = sender.as_ref()
     {
@@ -429,9 +435,15 @@ where
                     let result = panic::catch_unwind(AssertUnwindSafe(|| {
                         handler.handle(record.update.clone())
                     }));
-                    let (error, panicked) = match result {
-                        Ok(result) => (result.err().map(|error| error.to_string()), false),
-                        Err(_) => (Some("update handler panicked".to_owned()), true),
+                    let (error, permanent, panicked) = match result {
+                        Ok(Ok(())) => (None, false, false),
+                        Ok(Err(error)) => (
+                            Some(error.to_string()),
+                            handler.error_disposition(&error)
+                                == HandlerErrorDisposition::DiscardUpdate,
+                            false,
+                        ),
+                        Err(_) => (Some("update handler panicked".to_owned()), false, true),
                     };
                     report_durable_completion(
                         &updates,
@@ -439,6 +451,7 @@ where
                         DurableUpdateCompletion {
                             record,
                             error,
+                            permanent,
                             resubmitted: false,
                         },
                     );
@@ -564,7 +577,7 @@ where
             self.active.remove(&update_id);
         }
         record.attempts = record.attempts.saturating_add(1);
-        if record.attempts >= MAX_UPDATE_ATTEMPTS {
+        if completion.permanent || record.attempts >= MAX_UPDATE_ATTEMPTS {
             let payload = encode_record(
                 &DeadUpdateRecord {
                     schema_version: DURABLE_UPDATE_SCHEMA_VERSION,
@@ -852,6 +865,7 @@ where
                 let mut count = 0;
                 let mut attempted = Vec::new();
                 let mut failures = Vec::new();
+                let mut discarded = HashSet::new();
                 for update in updates {
                     let update_id = update.update_id;
                     if self.completed_updates.contains(&update_id) {
@@ -861,10 +875,14 @@ where
                     match self.handler.handle(update) {
                         Ok(()) => count += 1,
                         Err(handler_error) => {
-                            if self.handler.error_disposition(&handler_error)
-                                == HandlerErrorDisposition::StopRuntime
-                            {
-                                return Err(RuntimeError::Handler(handler_error.to_string()));
+                            match self.handler.error_disposition(&handler_error) {
+                                HandlerErrorDisposition::StopRuntime => {
+                                    return Err(RuntimeError::Handler(handler_error.to_string()));
+                                }
+                                HandlerErrorDisposition::DiscardUpdate => {
+                                    discarded.insert(update_id);
+                                }
+                                HandlerErrorDisposition::RetryUpdate => {}
                             }
                             failures.push(UpdateFailure {
                                 update_id,
@@ -894,7 +912,7 @@ where
                 for failure in failures {
                     let attempts = self.failure_attempts.entry(failure.update_id).or_default();
                     *attempts = attempts.saturating_add(1);
-                    if *attempts >= MAX_UPDATE_ATTEMPTS {
+                    if discarded.contains(&failure.update_id) || *attempts >= MAX_UPDATE_ATTEMPTS {
                         self.failure_attempts.remove(&failure.update_id);
                         self.completed_updates.insert(failure.update_id);
                         quarantined.push(failure);
@@ -1076,6 +1094,7 @@ mod tests {
     struct Script {
         started: Mutex<Option<mpsc::Sender<(i64, i64)>>>,
         failing: AtomicUsize,
+        failing_permanently: AtomicUsize,
         panicking: AtomicUsize,
         gate_first: Option<Mutex<mpsc::Receiver<()>>>,
         release: Option<(Mutex<bool>, Condvar)>,
@@ -1133,7 +1152,18 @@ mod tests {
             if spend(&script.failing) {
                 return Err("synthetic handler failure");
             }
+            if spend(&script.failing_permanently) {
+                return Err("synthetic permanent failure");
+            }
             Ok(())
+        }
+
+        fn error_disposition(&self, error: &Self::Error) -> HandlerErrorDisposition {
+            if *error == "synthetic permanent failure" {
+                HandlerErrorDisposition::DiscardUpdate
+            } else {
+                HandlerErrorDisposition::RetryUpdate
+            }
         }
     }
 
@@ -1232,6 +1262,7 @@ mod tests {
         DurableUpdateCompletion {
             record: record(update_id, attempts),
             error: error.map(str::to_owned),
+            permanent: false,
             resubmitted: false,
         }
     }
@@ -1269,6 +1300,7 @@ mod tests {
         handled: Vec<i64>,
         events: Vec<String>,
         fail_on: Option<i64>,
+        discard_on: Option<i64>,
         stop_on: Option<i64>,
         prepare_error: Option<&'static str>,
         confirm_error: Option<&'static str>,
@@ -1290,15 +1322,18 @@ mod tests {
             if self.fail_on == Some(update.update_id) {
                 return Err("synthetic handler failure");
             }
+            if self.discard_on == Some(update.update_id) {
+                return Err("synthetic permanent failure");
+            }
             self.handled.push(update.update_id);
             Ok(())
         }
 
         fn error_disposition(&self, error: &Self::Error) -> HandlerErrorDisposition {
-            if *error == "synthetic fatal failure" {
-                HandlerErrorDisposition::StopRuntime
-            } else {
-                HandlerErrorDisposition::RetryUpdate
+            match *error {
+                "synthetic fatal failure" => HandlerErrorDisposition::StopRuntime,
+                "synthetic permanent failure" => HandlerErrorDisposition::DiscardUpdate,
+                _ => HandlerErrorDisposition::RetryUpdate,
             }
         }
 
@@ -1374,6 +1409,31 @@ mod tests {
         assert_eq!(runtime.step(), Ok(StepOutcome::Dispatched { count: 1 }));
         assert_eq!(runtime.handler.handled, vec![10, 12, 13]);
         assert_eq!(runtime.source.offsets, [None, None, None, Some(13)]);
+    }
+
+    #[test]
+    fn permanently_failing_update_is_quarantined_without_retries() {
+        let mut runtime = runtime(
+            vec![updates(&[20, 21]), updates(&[22])],
+            Handler {
+                discard_on: Some(20),
+                ..Handler::default()
+            },
+        );
+        assert_eq!(
+            runtime.step(),
+            Ok(StepOutcome::HandlerFailures {
+                retrying: Vec::new(),
+                quarantined: vec![UpdateFailure {
+                    update_id: 20,
+                    error: "synthetic permanent failure".to_owned(),
+                }],
+            })
+        );
+        assert_eq!(runtime.offset(), Some(22));
+        assert_eq!(runtime.step(), Ok(StepOutcome::Dispatched { count: 1 }));
+        assert_eq!(runtime.handler.handled, vec![21, 22]);
+        assert_eq!(runtime.source.offsets, [None, Some(22)]);
     }
 
     #[test]
@@ -2096,6 +2156,44 @@ mod tests {
         assert!(matches!(record, Some(record) if record.completed && record.attempts == 1));
         assert_eq!(script.calls.load(Ordering::SeqCst), 2);
         handler.stop();
+        Ok(())
+    }
+
+    #[test]
+    fn permanently_failing_durable_update_is_quarantined_on_its_first_attempt() -> TestResult {
+        let queue = MemoryDurableQueue::default();
+        let script = Arc::new(Script {
+            failing_permanently: AtomicUsize::new(1),
+            ..Script::default()
+        });
+        let mut handler = durable(2, 4, &queue, &script)?;
+        assert_eq!(handler.handle(update(511)), Ok(()));
+
+        let mut quarantined = Vec::new();
+        wait_until(|| {
+            let failures = handler.take_background_failures();
+            assert!(failures.retrying.is_empty() && failures.fatal.is_none());
+            quarantined.extend(failures.quarantined);
+            !quarantined.is_empty()
+        });
+        handler.stop();
+        assert_eq!(
+            quarantined,
+            [UpdateFailure {
+                update_id: 511,
+                error: "synthetic permanent failure".to_owned(),
+            }]
+        );
+        assert_eq!(script.calls.load(Ordering::SeqCst), 1);
+        assert!(!queue.stored().contains_key(&511));
+        let dead = queue
+            .dead
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&511)
+            .cloned()
+            .unwrap_or_default();
+        assert!(dead.contains(r#""attempts":1"#), "{dead}");
         Ok(())
     }
 

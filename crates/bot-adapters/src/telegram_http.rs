@@ -815,7 +815,9 @@ mod tests {
             assert!(request.contains("name=\"document\"; filename=\"transcript.txt\""));
             assert!(request.contains("text/plain; charset=utf-8"));
             assert!(request.contains(&expected));
-            assert!(request.contains("name=\"reply_to_message_id\"\r\n\r\n7"));
+            assert!(request.contains(
+                "name=\"reply_parameters\"\r\n\r\n{\"allow_sending_without_reply\":true,\"message_id\":7}"
+            ));
             let body = r#"{"ok":true,"result":{"message_id":45}}"#;
             let written = write!(
                 stream,
