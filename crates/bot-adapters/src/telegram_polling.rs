@@ -20,7 +20,7 @@ use crate::telegram_http::{
 };
 
 pub const DEFAULT_LONG_POLL_SECONDS: u64 = 30;
-const HTTP_TIMEOUT_MARGIN_SECONDS: u64 = 5;
+const HTTP_TIMEOUT_MARGIN_SECONDS: u64 = 15;
 const POLL_BATCH_LIMIT: u8 = 100;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -424,7 +424,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].endpoint, "getUpdates");
         assert_eq!(requests[0].method, Method::POST);
-        assert_eq!(requests[0].timeout.as_secs(), 35);
+        assert_eq!(requests[0].timeout.as_secs(), 45);
         assert_eq!(requests[0].params, None);
         assert_eq!(
             requests[0].json_payload,

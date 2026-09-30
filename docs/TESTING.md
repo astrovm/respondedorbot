@@ -18,6 +18,19 @@ CI supplies PostgreSQL and Redis Stack and sets `TEST_DATABASE_URL`, `TEST_REDIS
 - `botd`: 100% line coverage.
 - Routing, billing, and scheduling require state-transition and failure-path assertions regardless of percentages.
 
+CI requires zero uncovered executable source lines in each crate:
+
+```bash
+cargo llvm-cov --locked --workspace --all-features --no-report
+cargo llvm-cov report -p bot-core --fail-uncovered-lines 0 --show-missing-lines
+cargo llvm-cov report -p bot-adapters --fail-uncovered-lines 0 --show-missing-lines
+cargo llvm-cov report -p botd --fail-uncovered-lines 0 --show-missing-lines
+```
+
+The source-line check avoids a [Rust/LLVM reporting bug](https://github.com/rust-lang/rust/issues/137524)
+that can count uncovered generic instantiations in the summary even when all
+exported source lines are covered. It still rejects any uncovered source line.
+
 ## Test layers
 
 1. Unit and property tests cover parsing, formatting, routing, accounting, idempotency, and state machines.

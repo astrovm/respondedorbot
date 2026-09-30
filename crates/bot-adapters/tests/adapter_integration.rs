@@ -44,6 +44,24 @@ use serde_json::json;
 use std::time::Duration;
 
 #[test]
+fn postgres_authentication_failures_report_sqlstate_without_credentials()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let Ok(database_url) = std::env::var("TEST_DATABASE_URL") else {
+        return Ok(());
+    };
+    let mut url = url::Url::parse(&database_url)?;
+    let wrong_password = "synthetic-incorrect-password";
+    assert!(url.set_password(Some(wrong_password)).is_ok());
+    let result = bot_adapters::postgres_pool::PostgresPool::shared(url.as_str()).get();
+    let error = result.err().ok_or("invalid credentials must be rejected")?;
+    let message = error.to_string();
+    assert!(message.contains("SQLSTATE 28P01"), "{message}");
+    assert!(!message.contains(wrong_password));
+    assert!(!message.contains(url.as_str()));
+    Ok(())
+}
+
+#[test]
 fn ci_configures_the_services_that_integration_tests_skip_without() {
     // PostgreSQL and Redis tests return early when their variables are
     // missing, so a renamed variable in CI would silently drop them.

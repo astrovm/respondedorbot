@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS chat_configs (
 pub enum ChatConfigRepositoryError {
     #[error("could not initialize PostgreSQL TLS: {0}")]
     Tls(#[from] native_tls::Error),
-    #[error("PostgreSQL chat configuration operation failed: {0}")]
+    #[error("PostgreSQL chat configuration operation failed: {0}{code}", code = crate::postgres_pool::sqlstate_suffix(.0))]
     Postgres(#[from] postgres::Error),
     #[error(transparent)]
     InvalidConfig(#[from] ChatConfigError),
