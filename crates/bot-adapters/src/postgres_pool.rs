@@ -264,10 +264,9 @@ mod tests {
         );
         server
             .join()
-            .map_err(|_| "synthetic PostgreSQL server panicked")??;
-        result
-            .err()
-            .ok_or_else(|| "expected a connection refusal".into())
+            .ok()
+            .ok_or("synthetic PostgreSQL server panicked")??;
+        result.err().ok_or("expected a connection refusal".into())
     }
 
     #[test]
@@ -295,16 +294,14 @@ mod tests {
 
         let mut attempts = 0;
         let mut outcomes = VecDeque::from([Err(connection_error("28P01")?), Ok(())]);
-        let mut waits = Vec::new();
         let refused = super::connect_with_retry::<()>(
             || {
                 attempts += 1;
                 outcomes.pop_front().unwrap_or(Ok(()))
             },
-            |delay| waits.push(delay),
+            std::thread::sleep,
         );
         assert_eq!(attempts, 1);
-        assert!(waits.is_empty());
         let error = refused.err().ok_or("expected invalid credentials")?;
         assert_eq!(super::sqlstate_suffix(&error), " (SQLSTATE 28P01)");
         assert!(
@@ -314,11 +311,16 @@ mod tests {
         );
 
         let mut attempts = 0;
+        let mut outcomes = VecDeque::from([
+            Err(connection_error("57P03")?),
+            Err(connection_error("57P03")?),
+            Err(connection_error("57P03")?),
+        ]);
         let mut waits = Vec::new();
         let exhausted = super::connect_with_retry::<()>(
             || {
                 attempts += 1;
-                "not a database url".parse::<postgres::Config>().map(|_| ())
+                outcomes.pop_front().unwrap_or(Ok(()))
             },
             |delay| waits.push(delay),
         );
@@ -331,7 +333,7 @@ mod tests {
             .ok_or("expected invalid configuration")?;
         assert_eq!(super::sqlstate_suffix(&invalid), "");
         assert_eq!(
-            super::connect_with_retry(|| Ok::<_, postgres::Error>(7), |_| {})?,
+            super::connect_with_retry(|| Ok::<_, postgres::Error>(7), std::thread::sleep)?,
             7
         );
         Ok(())

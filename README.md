@@ -177,9 +177,9 @@ tests.
 
 Coverage requirements:
 
-- `bot-core`: 95%
-- `bot-adapters`: 95%
-- `botd`: 95%
+- `bot-core`: 100%
+- `bot-adapters`: 100%
+- `botd`: 100%
 
 More detail: [Testing](docs/TESTING.md)
 
