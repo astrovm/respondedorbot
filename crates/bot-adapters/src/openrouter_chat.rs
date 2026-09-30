@@ -70,18 +70,21 @@ impl OpenRouterPricingCache {
     }
 
     pub fn pricing(&self, model: &str) -> Result<Option<TokenPricing>, OpenRouterChatError> {
-        // A price already in memory has to be returned without waiting on the
-        // network. The cold load waits for provider prices so the cap and the
-        // reserve include fallback providers on the first request.
-        let had_floor = {
+        let model = model.trim();
+        // A catalog floor alone cannot cover fallback providers. Every model's
+        // first endpoint lookup waits, even when another model already loaded
+        // the catalog. Later lookups use cached prices and refresh off-thread.
+        let had_endpoint_check = {
             let state = self.lock_state()?;
-            cached_model_pricing(&state.models, model).is_some()
+            let base_model = catalog_base_model(model);
+            state.endpoint_checked_at.contains_key(base_model)
+                || state.endpoint_retry_at.contains_key(base_model)
         };
         let floor = self.lookup(model, |state, model| {
             cached_model_pricing(&state.models, model)
         })?;
         if floor.is_some() {
-            if had_floor {
+            if had_endpoint_check {
                 self.spawn_endpoint_refresh(model);
             } else {
                 let _ = self.refresh_endpoint_ceiling(model);
@@ -1925,6 +1928,72 @@ mod tests {
             .join()
             .ok()
             .ok_or("server thread panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn warmed_catalog_waits_for_the_first_endpoint_ceiling_and_keeps_it_after_an_outage()
+    -> TestResult {
+        let catalog = json!({"data": [{
+            "id": "synthetic/chat",
+            "pricing": {"prompt": "0.0000000198", "completion": "0.000000396"}
+        }]})
+        .to_string();
+        let endpoints = json!({"data": {"endpoints": [
+            {"status": -5, "pricing": {"prompt": "0.0000000198", "completion": "0.000000396"}},
+            {"status": 0, "pricing": {"prompt": "0.0000003", "completion": "0.0000012"}}
+        ]}})
+        .to_string();
+        let (base_url, server) = serve_sequence(vec![
+            ("200 OK".to_owned(), "application/json".to_owned(), catalog),
+            (
+                "200 OK".to_owned(),
+                "application/json".to_owned(),
+                endpoints,
+            ),
+            (
+                "503 Service Unavailable".to_owned(),
+                "application/json".to_owned(),
+                "{}".to_owned(),
+            ),
+        ])?;
+        let cache = OpenRouterPricingCache::new("synthetic-key", &base_url)?;
+        // Transcription or a different model may have warmed the shared catalog.
+        cache.refresh()?;
+        let pricing = cache.pricing("synthetic/chat")?.ok_or("missing price")?;
+        assert_eq!(pricing.input_per_million, 300_000);
+        assert_eq!(pricing.output_per_million, 1_200_000);
+        assert_eq!(cache.pricing("  synthetic/chat  ")?, Some(pricing));
+        let mut request = ChatCompletionRequest::new("synthetic/chat", Vec::new());
+        cache.apply_to_request(&mut request)?;
+        let body = serde_json::to_value(request)?;
+        assert_eq!(body["provider"]["max_price"]["prompt"], 0.3);
+        assert_eq!(body["provider"]["max_price"]["completion"], 1.2);
+        cache
+            .state
+            .lock()
+            .ok()
+            .ok_or("pricing state")?
+            .endpoint_checked_at
+            .insert(
+                "synthetic/chat".to_owned(),
+                Instant::now() - Duration::from_secs(301),
+            );
+        assert_eq!(cache.pricing("synthetic/chat")?, Some(pricing));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !cache
+            .state
+            .lock()
+            .ok()
+            .ok_or("pricing state")?
+            .endpoint_retry_at
+            .contains_key("synthetic/chat")
+        {
+            assert!(Instant::now() < deadline, "endpoint refresh did not finish");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(cache.pricing("synthetic/chat")?, Some(pricing));
+        server.join().ok().ok_or("server thread panicked")??;
         Ok(())
     }
 
