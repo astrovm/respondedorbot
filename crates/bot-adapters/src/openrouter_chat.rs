@@ -26,6 +26,12 @@ struct OpenRouterPricingState {
     fetched_at: Option<Instant>,
     models: BTreeMap<String, TokenPricing>,
     transcription_models: BTreeMap<String, TranscriptionPricing>,
+    // Highest price among providers OpenRouter can still route to. The models
+    // catalog publishes only the cheapest provider, which is too low to use as
+    // both the routing cap and the credit reserve.
+    endpoint_ceilings: BTreeMap<String, TokenPricing>,
+    endpoint_checked_at: BTreeMap<String, Instant>,
+    endpoint_retry_at: BTreeMap<String, Instant>,
     refresh_retry_at: Option<Instant>,
     refresh_retry_delay: Duration,
     last_refresh_error: Option<OpenRouterChatError>,
@@ -43,6 +49,7 @@ pub struct OpenRouterPricingCache {
     base_url: String,
     state: Arc<Mutex<OpenRouterPricingState>>,
     refreshing: Arc<AtomicBool>,
+    endpoint_refreshing: Arc<AtomicBool>,
 }
 
 impl OpenRouterPricingCache {
@@ -58,13 +65,33 @@ impl OpenRouterPricingCache {
             base_url: base_url.to_owned(),
             state: Arc::new(Mutex::new(OpenRouterPricingState::default())),
             refreshing: Arc::new(AtomicBool::new(false)),
+            endpoint_refreshing: Arc::new(AtomicBool::new(false)),
         })
     }
 
     pub fn pricing(&self, model: &str) -> Result<Option<TokenPricing>, OpenRouterChatError> {
-        self.lookup(model, |state, model| {
+        let model = model.trim();
+        // A catalog floor alone cannot cover fallback providers. Every model's
+        // first endpoint lookup waits, even when another model already loaded
+        // the catalog. Later lookups use cached prices and refresh off-thread.
+        let had_endpoint_check = {
+            let state = self.lock_state()?;
+            let base_model = catalog_base_model(model);
+            state.endpoint_checked_at.contains_key(base_model)
+                || state.endpoint_retry_at.contains_key(base_model)
+        };
+        let floor = self.lookup(model, |state, model| {
             cached_model_pricing(&state.models, model)
-        })
+        })?;
+        if floor.is_some() {
+            if had_endpoint_check {
+                self.spawn_endpoint_refresh(model);
+            } else {
+                let _ = self.refresh_endpoint_ceiling(model);
+            }
+        }
+        let state = self.lock_state()?;
+        Ok(effective_model_pricing(&state, model))
     }
 
     pub fn transcription_pricing(
@@ -180,6 +207,115 @@ impl OpenRouterPricingCache {
         Ok(())
     }
 
+    fn spawn_endpoint_refresh(&self, model: &str) {
+        let base_model = catalog_base_model(model.trim()).to_owned();
+        let Ok(true) = self.endpoint_refresh_due(&base_model) else {
+            return;
+        };
+        if self
+            .endpoint_refreshing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let cache = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("openrouter-endpoints".to_owned())
+            .spawn(move || {
+                let _ = cache.refresh_endpoint_ceiling(&base_model);
+                cache.endpoint_refreshing.store(false, Ordering::Release);
+            });
+        self.endpoint_refreshing
+            .fetch_and(spawned.is_ok(), Ordering::AcqRel);
+    }
+
+    fn refresh_endpoint_ceiling(&self, model: &str) -> Result<(), OpenRouterChatError> {
+        let base_model = catalog_base_model(model.trim());
+        if !self.endpoint_refresh_due(base_model)? {
+            return Ok(());
+        }
+        match self.load_endpoint_ceiling(base_model) {
+            Ok(ceiling) => {
+                let mut state = self.lock_state()?;
+                match ceiling {
+                    Some(pricing) => {
+                        state
+                            .endpoint_ceilings
+                            .insert(base_model.to_owned(), pricing);
+                    }
+                    None => {
+                        state.endpoint_ceilings.remove(base_model);
+                    }
+                }
+                state
+                    .endpoint_checked_at
+                    .insert(base_model.to_owned(), Instant::now());
+                state.endpoint_retry_at.remove(base_model);
+            }
+            Err(error) => {
+                eprintln!("could not load OpenRouter endpoint prices for {base_model}: {error}");
+                let mut state = self.lock_state()?;
+                state.endpoint_retry_at.insert(
+                    base_model.to_owned(),
+                    Instant::now() + OPENROUTER_PRICING_RETRY_INITIAL,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn endpoint_refresh_due(&self, model: &str) -> Result<bool, OpenRouterChatError> {
+        let state = self.lock_state()?;
+        if cached_model_pricing(&state.models, model).is_none() {
+            return Ok(false);
+        }
+        if state
+            .endpoint_retry_at
+            .get(model)
+            .is_some_and(|retry_at| *retry_at > Instant::now())
+        {
+            return Ok(false);
+        }
+        Ok(state
+            .endpoint_checked_at
+            .get(model)
+            .is_none_or(|checked_at| checked_at.elapsed() >= OPENROUTER_PRICING_TTL))
+    }
+
+    fn load_endpoint_ceiling(
+        &self,
+        model: &str,
+    ) -> Result<Option<TokenPricing>, OpenRouterChatError> {
+        let api_key = self.api_key.trim();
+        if api_key.is_empty() {
+            return Err(OpenRouterChatError::MissingApiKey);
+        }
+        let mut response = self
+            .client
+            .get(endpoints_url(&self.base_url, model)?)
+            .bearer_auth(api_key)
+            .send()
+            .map_err(transport_error)?;
+        let status_code = response.status().as_u16();
+        let headers = response
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|value| (name.as_str().to_ascii_lowercase(), value.to_owned()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let body = read_bounded_body(&mut response)?;
+        if status_code >= 400 {
+            return Err(http_error(status_code, &body, &headers));
+        }
+        let payload = serde_json::from_str::<Value>(&body).map_err(invalid_json)?;
+        endpoint_ceiling_from_payload(&payload)
+    }
+
     fn refresh_is_due(&self) -> Result<bool, OpenRouterChatError> {
         let state = self.lock_state()?;
         let stale = state
@@ -282,13 +418,33 @@ impl OpenRouterPricingCache {
     }
 }
 
-fn models_url(base_url: &str) -> Result<String, OpenRouterChatError> {
+fn openrouter_base_url(base_url: &str) -> Result<&str, OpenRouterChatError> {
     let trimmed = base_url.trim().trim_end_matches('/');
     let parsed = reqwest::Url::parse(trimmed).map_err(|_| OpenRouterChatError::InvalidBaseUrl)?;
     if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
         return Err(OpenRouterChatError::InvalidBaseUrl);
     }
-    Ok(format!("{trimmed}/models?output_modalities=all"))
+    Ok(trimmed)
+}
+
+fn models_url(base_url: &str) -> Result<String, OpenRouterChatError> {
+    Ok(format!(
+        "{}/models?output_modalities=all",
+        openrouter_base_url(base_url)?
+    ))
+}
+
+fn endpoints_url(base_url: &str, model: &str) -> Result<String, OpenRouterChatError> {
+    let model = catalog_base_model(model.trim());
+    if model.is_empty() {
+        return Err(OpenRouterChatError::MissingModelPricing {
+            model: model.to_owned(),
+        });
+    }
+    Ok(format!(
+        "{}/models/{model}/endpoints",
+        openrouter_base_url(base_url)?
+    ))
 }
 
 fn catalog_base_model(model: &str) -> &str {
@@ -312,6 +468,31 @@ fn parse_catalog_model(
         .map(str::trim)
         .filter(|id| !id.is_empty())?;
     let pricing = value.get("pricing").and_then(Value::as_object)?;
+    let pricing = token_pricing_from_object(pricing)?;
+    let is_transcription = value
+        .get("architecture")
+        .and_then(Value::as_object)
+        .is_some_and(|architecture| {
+            architecture
+                .get("modality")
+                .and_then(Value::as_str)
+                .is_some_and(|modality| modality == "audio->transcription")
+                || architecture
+                    .get("output_modalities")
+                    .and_then(Value::as_array)
+                    .is_some_and(|modalities| {
+                        modalities
+                            .iter()
+                            .any(|modality| modality.as_str() == Some("transcription"))
+                    })
+        });
+    let transcription_pricing = is_transcription
+        .then(|| transcription_rate_from_input(id, pricing.input_per_million))
+        .flatten();
+    Some((id.to_owned(), pricing, transcription_pricing))
+}
+
+fn token_pricing_from_object(pricing: &Map<String, Value>) -> Option<TokenPricing> {
     let mut input = pricing.get("prompt").and_then(parse_catalog_rate);
     let mut cached_input = pricing.get("input_cache_read").and_then(parse_catalog_rate);
     let mut cache_write = pricing
@@ -331,37 +512,89 @@ fn parse_catalog_model(
             update_max(&mut output, override_pricing.get("completion"));
         }
     }
-    let is_transcription = value
-        .get("architecture")
-        .and_then(Value::as_object)
-        .is_some_and(|architecture| {
-            architecture
-                .get("modality")
-                .and_then(Value::as_str)
-                .is_some_and(|modality| modality == "audio->transcription")
-                || architecture
-                    .get("output_modalities")
-                    .and_then(Value::as_array)
-                    .is_some_and(|modalities| {
-                        modalities
-                            .iter()
-                            .any(|modality| modality.as_str() == Some("transcription"))
-                    })
+    Some(TokenPricing {
+        input_per_million: input?,
+        cached_input_per_million: cached_input,
+        cache_write_per_million: cache_write,
+        audio_input_per_million: audio_input,
+        output_per_million: output?,
+    })
+}
+
+fn max_optional_rate(left: Option<i128>, right: Option<i128>) -> Option<i128> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(rate), None) | (None, Some(rate)) => Some(rate),
+        (None, None) => None,
+    }
+}
+
+fn max_token_pricing(left: TokenPricing, right: TokenPricing) -> TokenPricing {
+    TokenPricing {
+        input_per_million: left.input_per_million.max(right.input_per_million),
+        cached_input_per_million: max_optional_rate(
+            left.cached_input_per_million,
+            right.cached_input_per_million,
+        ),
+        cache_write_per_million: max_optional_rate(
+            left.cache_write_per_million,
+            right.cache_write_per_million,
+        ),
+        audio_input_per_million: max_optional_rate(
+            left.audio_input_per_million,
+            right.audio_input_per_million,
+        ),
+        output_per_million: left.output_per_million.max(right.output_per_million),
+    }
+}
+
+fn endpoint_is_routable(endpoint: &Value) -> bool {
+    let Some(endpoint) = endpoint.as_object() else {
+        return false;
+    };
+    match endpoint.get("status") {
+        None => true,
+        Some(status) => status.as_i64() == Some(0),
+    }
+}
+
+fn endpoint_ceiling_from_payload(
+    payload: &Value,
+) -> Result<Option<TokenPricing>, OpenRouterChatError> {
+    let endpoints = payload
+        .get("data")
+        .and_then(|data| data.get("endpoints"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            OpenRouterChatError::InvalidJson("endpoint response has no endpoints array".to_owned())
+        })?;
+    let mut ceiling = None;
+    for endpoint in endpoints {
+        if !endpoint_is_routable(endpoint) {
+            continue;
+        }
+        let Some(pricing) = endpoint
+            .get("pricing")
+            .and_then(Value::as_object)
+            .and_then(token_pricing_from_object)
+        else {
+            continue;
+        };
+        ceiling = Some(match ceiling {
+            Some(current) => max_token_pricing(current, pricing),
+            None => pricing,
         });
-    let transcription_pricing = is_transcription
-        .then(|| input.and_then(|input| transcription_rate_from_input(id, input)))
-        .flatten();
-    Some((
-        id.to_owned(),
-        TokenPricing {
-            input_per_million: input?,
-            cached_input_per_million: cached_input,
-            cache_write_per_million: cache_write,
-            audio_input_per_million: audio_input,
-            output_per_million: output?,
-        },
-        transcription_pricing,
-    ))
+    }
+    Ok(ceiling)
+}
+
+fn effective_model_pricing(state: &OpenRouterPricingState, model: &str) -> Option<TokenPricing> {
+    let catalog = cached_model_pricing(&state.models, model)?;
+    let base_model = catalog_base_model(model);
+    match state.endpoint_ceilings.get(base_model).copied() {
+        Some(endpoint) => Some(max_token_pricing(catalog, endpoint)),
+        None => Some(catalog),
+    }
 }
 
 fn transcription_rate_from_input(
@@ -1467,6 +1700,305 @@ mod tests {
     }
 
     #[test]
+    fn price_ceiling_uses_the_highest_routable_endpoint_and_keeps_the_catalog_when_lookup_fails()
+    -> TestResult {
+        assert_eq!(
+            super::endpoints_url("not-a-url", DEEPSEEK_MODEL),
+            Err(OpenRouterChatError::InvalidBaseUrl)
+        );
+        assert_eq!(
+            super::endpoints_url("ftp://openrouter.example.test/api/v1", DEEPSEEK_MODEL),
+            Err(OpenRouterChatError::InvalidBaseUrl)
+        );
+        assert_eq!(
+            super::endpoints_url("https://openrouter.example.test/api/v1/", " "),
+            Err(OpenRouterChatError::MissingModelPricing {
+                model: String::new(),
+            })
+        );
+        assert_eq!(
+            super::endpoints_url(
+                "https://openrouter.example.test/api/v1/",
+                &format!("{DEEPSEEK_MODEL}:free")
+            ),
+            Ok(format!(
+                "https://openrouter.example.test/api/v1/models/{DEEPSEEK_MODEL}/endpoints"
+            ))
+        );
+        assert_eq!(
+            super::endpoint_ceiling_from_payload(&json!({"data": {}})),
+            Err(OpenRouterChatError::InvalidJson(
+                "endpoint response has no endpoints array".to_owned()
+            ))
+        );
+
+        let catalog = json!({
+            "data": [{
+                "id": DEEPSEEK_MODEL,
+                "pricing": {
+                    "prompt": "0.0000000198",
+                    "completion": "0.000000396",
+                    "input_cache_read": "0.000000003",
+                    "overrides": [{
+                        "prompt": "0.0000004",
+                        "completion": "0.0000005"
+                    }]
+                }
+            }]
+        })
+        .to_string();
+        let endpoints = json!({
+            "data": {
+                "endpoints": [
+                    "malformed",
+                    {"status": 0, "pricing": {"completion": "0.000001"}},
+                    {"status": "up", "pricing": {"prompt": "0.0000009", "completion": "0.000009"}},
+                    {"status": -2, "pricing": {"prompt": "0.0000009", "completion": "0.000009"}},
+                    {
+                        "status": 0,
+                        "pricing": {"prompt": "0.00000015", "completion": "0.0000006"}
+                    },
+                    {
+                        "status": 0,
+                        "pricing": {
+                            "prompt": "0.0000002",
+                            "completion": "0.0000008",
+                            "input_cache_read": "0.000000006"
+                        }
+                    },
+                    {
+                        "pricing": {
+                            "prompt": "0.0000002",
+                            "completion": "0.0000008",
+                            "input_cache_read": "0.000000006",
+                            "input_cache_write": "0.000000007",
+                            "audio": "0.000000008"
+                        }
+                    },
+                    {
+                        "status": 0,
+                        "pricing": {
+                            "prompt": "0.0000003",
+                            "completion": "0.0000012",
+                            "overrides": [{
+                                "prompt": "0.0000003",
+                                "completion": "0.0000015",
+                                "input_cache_read": "0.000000004"
+                            }]
+                        }
+                    }
+                ]
+            }
+        })
+        .to_string();
+        let cleared = json!({"data": {"endpoints": [{"status": -1}]}}).to_string();
+        let served = serve_sequence(vec![
+            ("200 OK".to_owned(), "application/json".to_owned(), catalog),
+            (
+                "200 OK".to_owned(),
+                "application/json".to_owned(),
+                endpoints,
+            ),
+            ("200 OK".to_owned(), "application/json".to_owned(), cleared),
+        ]);
+        let (base_url, server) = served?;
+        let cache = OpenRouterPricingCache::new("synthetic-key", &base_url)?;
+        let priced = cache
+            .pricing(&format!("{DEEPSEEK_MODEL}:free"))?
+            .ok_or("unexpected missing value")?;
+        assert_eq!(priced.input_per_million, 400_000);
+        assert_eq!(priced.output_per_million, 1_500_000);
+        assert_eq!(priced.cached_input_per_million, Some(6_000));
+        assert_eq!(priced.cache_write_per_million, Some(7_000));
+        assert_eq!(priced.audio_input_per_million, Some(8_000));
+        assert_eq!(
+            cache.price_ceiling(&format!("{DEEPSEEK_MODEL}:free"))?,
+            (400_000.0 / 1_000_000.0, 1_500_000.0 / 1_000_000.0)
+        );
+        let repeated = cache
+            .pricing(DEEPSEEK_MODEL)?
+            .ok_or("unexpected missing value")?;
+        assert_eq!(repeated, priced);
+
+        cache
+            .state
+            .lock()
+            .ok()
+            .ok_or("pricing state")?
+            .endpoint_checked_at
+            .insert(
+                DEEPSEEK_MODEL.to_owned(),
+                Instant::now() - Duration::from_secs(301),
+            );
+        // The stale ceiling is replaced off the request path. Wait until that
+        // refresh lands, then the catalog floor is the price again.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let cleared_price = loop {
+            let current = cache
+                .pricing(DEEPSEEK_MODEL)?
+                .ok_or("unexpected missing value")?;
+            if current.output_per_million == 500_000 || Instant::now() >= deadline {
+                break current;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(cleared_price.input_per_million, 400_000);
+        assert_eq!(cleared_price.output_per_million, 500_000);
+        assert_eq!(cleared_price.cached_input_per_million, Some(3_000));
+        assert_eq!(cleared_price.cache_write_per_million, None);
+        assert_eq!(cleared_price.audio_input_per_million, None);
+
+        let unavailable = serve_sequence(vec![
+            (
+                "200 OK".to_owned(),
+                "application/json".to_owned(),
+                json!({
+                    "data": [{
+                        "id": DEEPSEEK_MODEL,
+                        "pricing": {"prompt": "0.00000015", "completion": "0.0000006"}
+                    }]
+                })
+                .to_string(),
+            ),
+            (
+                "503 Service Unavailable".to_owned(),
+                "application/json".to_owned(),
+                "{\"error\":{\"message\":\"synthetic outage\"}}".to_owned(),
+            ),
+        ]);
+        let (base_url, unavailable_server) = unavailable?;
+        let unavailable_cache = OpenRouterPricingCache::new("synthetic-key", &base_url)?;
+        let fallback = unavailable_cache
+            .pricing(DEEPSEEK_MODEL)?
+            .ok_or("unexpected missing value")?;
+        assert_eq!(fallback.input_per_million, 150_000);
+        assert_eq!(fallback.output_per_million, 600_000);
+        assert_eq!(
+            unavailable_cache
+                .pricing(DEEPSEEK_MODEL)?
+                .ok_or("unexpected missing value")?,
+            fallback
+        );
+
+        let cached_only =
+            OpenRouterPricingCache::new("", "https://openrouter.example.test/api/v1")?;
+        cached_only
+            .state
+            .lock()
+            .ok()
+            .ok_or("pricing state")?
+            .models
+            .insert(DEEPSEEK_MODEL.to_owned(), fallback);
+        assert_eq!(cached_only.pricing(DEEPSEEK_MODEL)?, Some(fallback));
+        cached_only.refresh_endpoint_ceiling("synthetic/missing")?;
+
+        let malformed = serve_sequence(vec![
+            (
+                "200 OK".to_owned(),
+                "application/json".to_owned(),
+                json!({
+                    "data": [{
+                        "id": DEEPSEEK_MODEL,
+                        "pricing": {"prompt": "0.00000015", "completion": "0.0000006"}
+                    }]
+                })
+                .to_string(),
+            ),
+            (
+                "200 OK".to_owned(),
+                "application/json".to_owned(),
+                "not-json".to_owned(),
+            ),
+        ]);
+        let (base_url, malformed_server) = malformed?;
+        let malformed_cache = OpenRouterPricingCache::new("synthetic-key", &base_url)?;
+        assert_eq!(
+            malformed_cache
+                .pricing(DEEPSEEK_MODEL)?
+                .ok_or("unexpected missing value")?,
+            fallback
+        );
+
+        server.join().ok().ok_or("server thread panicked")??;
+        unavailable_server
+            .join()
+            .ok()
+            .ok_or("server thread panicked")??;
+        malformed_server
+            .join()
+            .ok()
+            .ok_or("server thread panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn warmed_catalog_waits_for_the_first_endpoint_ceiling_and_keeps_it_after_an_outage()
+    -> TestResult {
+        let catalog = json!({"data": [{
+            "id": "synthetic/chat",
+            "pricing": {"prompt": "0.0000000198", "completion": "0.000000396"}
+        }]})
+        .to_string();
+        let endpoints = json!({"data": {"endpoints": [
+            {"status": -5, "pricing": {"prompt": "0.0000000198", "completion": "0.000000396"}},
+            {"status": 0, "pricing": {"prompt": "0.0000003", "completion": "0.0000012"}}
+        ]}})
+        .to_string();
+        let served = serve_sequence(vec![
+            ("200 OK".to_owned(), "application/json".to_owned(), catalog),
+            (
+                "200 OK".to_owned(),
+                "application/json".to_owned(),
+                endpoints,
+            ),
+            (
+                "503 Service Unavailable".to_owned(),
+                "application/json".to_owned(),
+                "{}".to_owned(),
+            ),
+        ]);
+        let (base_url, server) = served?;
+        let cache = OpenRouterPricingCache::new("synthetic-key", &base_url)?;
+        // Transcription or a different model may have warmed the shared catalog.
+        cache.refresh()?;
+        let pricing = cache.pricing("synthetic/chat")?.ok_or("missing price")?;
+        assert_eq!(pricing.input_per_million, 300_000);
+        assert_eq!(pricing.output_per_million, 1_200_000);
+        assert_eq!(cache.pricing("  synthetic/chat  ")?, Some(pricing));
+        let mut request = ChatCompletionRequest::new("synthetic/chat", Vec::new());
+        cache.apply_to_request(&mut request)?;
+        let body = serde_json::to_value(request)?;
+        assert_eq!(body["provider"]["max_price"]["prompt"], 0.3);
+        assert_eq!(body["provider"]["max_price"]["completion"], 1.2);
+        cache
+            .state
+            .lock()
+            .ok()
+            .ok_or("pricing state")?
+            .endpoint_checked_at
+            .insert(
+                "synthetic/chat".to_owned(),
+                Instant::now() - Duration::from_secs(301),
+            );
+        assert_eq!(cache.pricing("synthetic/chat")?, Some(pricing));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !cache
+            .state
+            .lock()
+            .ok()
+            .ok_or("pricing state")?
+            .endpoint_retry_at
+            .contains_key("synthetic/chat")
+        {
+            assert!(Instant::now() < deadline, "endpoint refresh did not finish");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(cache.pricing("synthetic/chat")?, Some(pricing));
+        server.join().ok().ok_or("server thread panicked")??;
+        Ok(())
+    }
+
+    #[test]
     fn transcription_pricing_uses_the_catalog_and_keeps_the_last_cache_on_refresh_failure()
     -> TestResult {
         let catalog = json!({
@@ -2354,8 +2886,15 @@ mod tests {
 
     #[test]
     fn cached_prices_answer_immediately_and_refresh_in_the_background() -> TestResult {
-        let closed = TcpListener::bind("127.0.0.1:0")?.local_addr()?;
-        let cache = OpenRouterPricingCache::new("synthetic-key", &format!("http://{closed}"))?;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
+            let (mut stream, _) = listener.accept()?;
+            thread::sleep(Duration::from_millis(80));
+            let _ = stream.read(&mut [0_u8; 1_024]);
+            Ok(())
+        });
+        let cache = OpenRouterPricingCache::new("synthetic-key", &format!("http://{address}"))?;
         let cached = super::TokenPricing {
             input_per_million: 1_000_000,
             cached_input_per_million: None,
@@ -2363,13 +2902,15 @@ mod tests {
             audio_input_per_million: None,
             output_per_million: 2_000_000,
         };
-        cache
-            .state
-            .lock()
-            .ok()
-            .ok_or("pricing state")?
-            .models
-            .insert("synthetic/model".to_owned(), cached);
+        {
+            let mut state = cache.state.lock().ok().ok_or("pricing state")?;
+            state.models.insert("synthetic/model".to_owned(), cached);
+            // The catalog refresh owns the one accepted connection. A fresh
+            // endpoint check would race it and finish the refresh too soon.
+            state
+                .endpoint_checked_at
+                .insert("synthetic/model".to_owned(), Instant::now());
+        }
         assert_eq!(cache.pricing("synthetic/model")?, Some(cached));
         let deadline = Instant::now() + Duration::from_secs(10);
         while cache.refreshing.load(Ordering::Acquire) && Instant::now() < deadline {
@@ -2383,6 +2924,8 @@ mod tests {
         ));
         assert!(state.refresh_retry_at.is_some());
         assert_eq!(state.models.get("synthetic/model"), Some(&cached));
+        drop(state);
+        server.join().ok().ok_or("server thread panicked")??;
         Ok(())
     }
 
@@ -2441,6 +2984,25 @@ mod tests {
                 .lock()
                 .is_ok_and(|state| state.last_refresh_error.is_none() && state.fetched_at.is_none())
         );
+        cache
+            .state
+            .lock()
+            .ok()
+            .ok_or("pricing state")?
+            .models
+            .insert(
+                "synthetic/model".to_owned(),
+                super::TokenPricing {
+                    input_per_million: 1,
+                    cached_input_per_million: None,
+                    cache_write_per_million: None,
+                    audio_input_per_million: None,
+                    output_per_million: 1,
+                },
+            );
+        cache.endpoint_refreshing.store(true, Ordering::Release);
+        cache.spawn_endpoint_refresh("synthetic/model");
+        assert!(cache.endpoint_refreshing.load(Ordering::Acquire));
 
         let poisoner = cache.clone();
         let poisoned = thread::spawn(move || {
