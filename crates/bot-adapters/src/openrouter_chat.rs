@@ -1944,7 +1944,7 @@ mod tests {
             {"status": 0, "pricing": {"prompt": "0.0000003", "completion": "0.0000012"}}
         ]}})
         .to_string();
-        let (base_url, server) = serve_sequence(vec![
+        let served = serve_sequence(vec![
             ("200 OK".to_owned(), "application/json".to_owned(), catalog),
             (
                 "200 OK".to_owned(),
@@ -1956,7 +1956,8 @@ mod tests {
                 "application/json".to_owned(),
                 "{}".to_owned(),
             ),
-        ])?;
+        ]);
+        let (base_url, server) = served?;
         let cache = OpenRouterPricingCache::new("synthetic-key", &base_url)?;
         // Transcription or a different model may have warmed the shared catalog.
         cache.refresh()?;
