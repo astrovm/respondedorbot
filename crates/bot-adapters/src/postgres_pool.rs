@@ -12,12 +12,13 @@ use crate::idle_pool::{IdleList, MAX_IDLE_AGE};
 use crate::postgres_connection::postgres_tls_connector;
 
 const MAX_IDLE_CONNECTIONS: usize = 16;
+const CONNECTION_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(2)];
 
 #[derive(Debug, Error)]
 pub enum PostgresPoolError {
     #[error("could not initialize PostgreSQL TLS: {0}")]
     Tls(#[from] native_tls::Error),
-    #[error("could not open PostgreSQL connection: {0}")]
+    #[error("could not open PostgreSQL connection: {0}{code}", code = sqlstate_suffix(.0))]
     Postgres(#[from] postgres::Error),
 }
 
@@ -58,29 +59,59 @@ impl PostgresPool {
     }
 
     pub fn get(&self) -> Result<PooledPostgresClient, PostgresPoolError> {
-        let client = self
+        let idle_client = self
             .inner
             .idle
             .lock()
             .ok()
             .and_then(|mut idle| idle.pop_fresh(Instant::now(), MAX_IDLE_AGE))
-            .map_or_else(
-                || -> Result<Client, PostgresPoolError> {
-                    let mut config = self.inner.database_url.parse::<Config>()?;
-                    // Fail fast when the database is unreachable instead of
-                    // blocking a worker for the operating system's TCP timeout.
-                    if config.get_connect_timeout().is_none() {
-                        config.connect_timeout(CONNECT_TIMEOUT);
-                    }
-                    Ok(config.connect(postgres_tls_connector(&self.inner.database_url)?)?)
-                },
-                Ok,
-            )?;
+            .and_then(|mut client| client.is_valid(CONNECT_TIMEOUT).is_ok().then_some(client));
+        let client = match idle_client {
+            // The blocking client may not notice a pooler disconnect until it
+            // drives I/O again. Validate before handing it to a business query;
+            // failed writes and billing transactions must never be replayed here.
+            Some(client) => client,
+            _ => {
+                let mut config = self.inner.database_url.parse::<Config>()?;
+                if config.get_connect_timeout().is_none() {
+                    config.connect_timeout(CONNECT_TIMEOUT);
+                }
+                let tls = postgres_tls_connector(&self.inner.database_url)?;
+                connect_with_retry(|| config.connect(tls.clone()), std::thread::sleep)?
+            }
+        };
         Ok(PooledPostgresClient {
             client: Some(client),
             pool: self.inner.clone(),
         })
     }
+}
+
+pub(crate) fn sqlstate_suffix(error: &postgres::Error) -> String {
+    error
+        .code()
+        .map_or_else(String::new, |code| format!(" (SQLSTATE {})", code.code()))
+}
+
+fn connect_with_retry<T>(
+    mut connect: impl FnMut() -> Result<T, postgres::Error>,
+    mut wait: impl FnMut(Duration),
+) -> Result<T, postgres::Error> {
+    for delay in CONNECTION_RETRY_DELAYS {
+        match connect() {
+            Ok(client) => return Ok(client),
+            Err(error) if retryable_connection_error(&error) => wait(delay),
+            Err(error) => return Err(error),
+        }
+    }
+    connect()
+}
+
+fn retryable_connection_error(error: &postgres::Error) -> bool {
+    error.code().is_none_or(|code| {
+        code.code().starts_with("08")
+            || matches!(code.code(), "53300" | "57P01" | "57P02" | "57P03")
+    })
 }
 
 impl Deref for PooledPostgresClient {
@@ -123,8 +154,12 @@ impl Drop for PooledPostgresClient {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::sync::Arc;
-    use std::time::Instant;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     use super::{MAX_IDLE_CONNECTIONS, PostgresPool, PostgresPoolError};
 
@@ -191,6 +226,118 @@ mod tests {
     }
 
     #[test]
+    fn checkout_replaces_connections_terminated_while_idle()
+    -> Result<(), Box<dyn std::error::Error>> {
+        test_pool("idle_disconnect").map_or(Ok(()), |pool| {
+            let terminated = backend_pid(&pool)?;
+            let killer = PostgresPool::shared(&format!("{}_killer", pool.inner.database_url));
+            let row = killer
+                .get()?
+                .query_one("SELECT pg_terminate_backend($1, 5000)", &[&terminated])?;
+            assert!(row.get::<_, bool>(0));
+            // The first business query succeeds on a new connection, without
+            // making the caller retry its operation.
+            assert_ne!(backend_pid(&pool)?, terminated);
+            Ok(())
+        })
+    }
+
+    fn connection_error(code: &str) -> Result<postgres::Error, Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        let mut body = format!("SFATAL\0C{code}\0Msynthetic connection refusal\0").into_bytes();
+        body.push(0);
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+            let mut size = [0; 4];
+            stream.read_exact(&mut size)?;
+            let mut startup = vec![0; u32::from_be_bytes(size) as usize - 4];
+            stream.read_exact(&mut startup)?;
+            stream.write_all(b"E")?;
+            stream.write_all(&((body.len() + 4) as u32).to_be_bytes())?;
+            stream.write_all(&body)
+        });
+        let result = postgres::Client::connect(
+            &format!("host=127.0.0.1 port={port} user=synthetic sslmode=disable"),
+            postgres::NoTls,
+        );
+        server
+            .join()
+            .map_err(|_| "synthetic PostgreSQL server panicked")??;
+        result
+            .err()
+            .ok_or_else(|| "expected a connection refusal".into())
+    }
+
+    #[test]
+    fn connection_retries_recover_transient_failures_and_stop_on_bad_credentials()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for code in ["08006", "53300", "57P01", "57P02", "57P03"] {
+            let mut outcomes = VecDeque::from([
+                Err(connection_error(code)?),
+                Err(connection_error(code)?),
+                Ok("connected"),
+            ]);
+            let mut waits = Vec::new();
+            let recovered = super::connect_with_retry(
+                || {
+                    outcomes
+                        .pop_front()
+                        .unwrap_or(Ok("unexpected extra attempt"))
+                },
+                |delay| waits.push(delay),
+            );
+            assert_eq!(recovered?, "connected");
+            assert_eq!(waits, [Duration::from_secs(1), Duration::from_secs(2)]);
+            assert!(outcomes.is_empty());
+        }
+
+        let mut attempts = 0;
+        let mut outcomes = VecDeque::from([Err(connection_error("28P01")?), Ok(())]);
+        let mut waits = Vec::new();
+        let refused = super::connect_with_retry::<()>(
+            || {
+                attempts += 1;
+                outcomes.pop_front().unwrap_or(Ok(()))
+            },
+            |delay| waits.push(delay),
+        );
+        assert_eq!(attempts, 1);
+        assert!(waits.is_empty());
+        let error = refused.err().ok_or("expected invalid credentials")?;
+        assert_eq!(super::sqlstate_suffix(&error), " (SQLSTATE 28P01)");
+        assert!(
+            PostgresPoolError::Postgres(error)
+                .to_string()
+                .contains("SQLSTATE 28P01")
+        );
+
+        let mut attempts = 0;
+        let mut waits = Vec::new();
+        let exhausted = super::connect_with_retry::<()>(
+            || {
+                attempts += 1;
+                "not a database url".parse::<postgres::Config>().map(|_| ())
+            },
+            |delay| waits.push(delay),
+        );
+        assert!(exhausted.is_err());
+        assert_eq!(attempts, 3);
+        assert_eq!(waits.len(), 2);
+        let invalid = "not a database url"
+            .parse::<postgres::Config>()
+            .err()
+            .ok_or("expected invalid configuration")?;
+        assert_eq!(super::sqlstate_suffix(&invalid), "");
+        assert_eq!(
+            super::connect_with_retry(|| Ok::<_, postgres::Error>(7), |_| {})?,
+            7
+        );
+        Ok(())
+    }
+
+    #[test]
     fn closed_connections_are_discarded_instead_of_returned()
     -> Result<(), Box<dyn std::error::Error>> {
         test_pool("closed").map_or(Ok(()), |pool| {
@@ -199,8 +346,11 @@ mod tests {
             let killer = PostgresPool::shared(&format!("{}_killer", pool.inner.database_url));
             killer
                 .get()?
-                .execute("SELECT pg_terminate_backend($1)", &[&terminated])?;
+                .execute("SELECT pg_terminate_backend($1, 5000)", &[&terminated])?;
             assert!(client.query_one("SELECT 1", &[]).is_err());
+            // A fatal server response can arrive before the driver's closed
+            // flag observes EOF. Drive it once more before checking that flag.
+            assert!(client.is_valid(Duration::from_secs(1)).is_err());
             assert!(client.is_closed());
             drop(client);
 

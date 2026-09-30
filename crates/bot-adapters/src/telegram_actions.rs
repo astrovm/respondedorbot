@@ -14,7 +14,8 @@ use crate::telegram_http::{
 };
 use std::time::Duration;
 
-const ACTION_TIMEOUT_SECONDS: u64 = 5;
+const ACTION_TIMEOUT_SECONDS: u64 = 10;
+const EDIT_TIMEOUT_SECONDS: u64 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionOutcome {
@@ -324,7 +325,11 @@ fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
     })
 }
 
-fn parse_response(status_code: u16, body: &str) -> Result<ActionOutcome, ActionError> {
+fn parse_response(
+    status_code: u16,
+    body: &str,
+    edited_message_id: Option<i64>,
+) -> Result<ActionOutcome, ActionError> {
     let envelope = serde_json::from_str::<ApiEnvelope>(body);
     if status_code == 429 {
         return Ok(ActionOutcome::RateLimited {
@@ -358,6 +363,18 @@ fn parse_response(status_code: u16, body: &str) -> Result<ActionOutcome, ActionE
             retry_after_seconds: envelope.parameters.and_then(|value| value.retry_after),
         });
     }
+    // A timed-out edit may already have reached Telegram. Its retry is a
+    // success when the requested content is already present.
+    if status_code == 400
+        && edited_message_id.is_some()
+        && envelope.description.as_deref().is_some_and(|description| {
+            description.starts_with("Bad Request: message is not modified")
+        })
+    {
+        return Ok(ActionOutcome::Completed {
+            message_id: edited_message_id,
+        });
+    }
     Ok(ActionOutcome::Failed {
         status_code: Some(status_code),
         description: envelope
@@ -371,6 +388,12 @@ pub fn execute_with<T: TelegramTransport>(
     token: &str,
     action: TelegramAction,
 ) -> Result<ActionOutcome, ActionError> {
+    let edited_message_id = match &action {
+        TelegramAction::EditMessage { message_id, .. }
+        | TelegramAction::EditMessageNoPreview { message_id, .. }
+        | TelegramAction::EditMessagePhoto { message_id, .. } => Some(message_id.0),
+        _ => None,
+    };
     let request = match action {
         TelegramAction::SendDocument {
             chat_id,
@@ -520,11 +543,15 @@ pub fn execute_with<T: TelegramTransport>(
                 method: prepared.method,
                 params: prepared.params,
                 json_payload: prepared.json_payload,
-                timeout: Duration::from_secs(ACTION_TIMEOUT_SECONDS),
+                timeout: Duration::from_secs(if edited_message_id.is_some() {
+                    EDIT_TIMEOUT_SECONDS
+                } else {
+                    ACTION_TIMEOUT_SECONDS
+                }),
             };
             return match send_with(transport, &request) {
                 TelegramHttpOutcome::Response { status_code, body } => {
-                    parse_response(status_code, &body)
+                    parse_response(status_code, &body, edited_message_id)
                 }
                 TelegramHttpOutcome::TransportError { kind } => {
                     Ok(ActionOutcome::TransportFailed(kind))
@@ -533,7 +560,7 @@ pub fn execute_with<T: TelegramTransport>(
         }
     };
     match transport.send_action_multipart(&request) {
-        Ok(response) => parse_response(response.status_code, &response.body),
+        Ok(response) => parse_response(response.status_code, &response.body, edited_message_id),
         Err(kind) => Ok(ActionOutcome::TransportFailed(kind)),
     }
 }
@@ -557,6 +584,72 @@ mod tests {
     };
 
     const REPLY_TO_7: &str = r#"{"allow_sending_without_reply":true,"message_id":7}"#;
+
+    #[test]
+    fn unchanged_edits_are_successful_without_hiding_other_rejections() {
+        let unchanged = r#"{"ok":false,"error_code":400,"description":"Bad Request: message is not modified: specified new message content and reply markup are exactly the same"}"#;
+        for action in [
+            TelegramAction::EditMessage {
+                chat_id: ChatId(-42),
+                message_id: MessageId(7),
+                text: "final".to_owned(),
+                reply_markup: None,
+            },
+            TelegramAction::EditMessageNoPreview {
+                chat_id: ChatId(-42),
+                message_id: MessageId(7),
+                text: "final".to_owned(),
+                reply_markup: None,
+            },
+            TelegramAction::EditMessagePhoto {
+                chat_id: ChatId(-42),
+                message_id: MessageId(7),
+                photo: Vec::new().into(),
+                caption: "final".to_owned(),
+                parse_mode: None,
+                reply_markup: None,
+            },
+        ] {
+            assert_eq!(
+                execute_with(&transport_with_status(400, unchanged), "synthetic", action),
+                Ok(ActionOutcome::Completed {
+                    message_id: Some(7)
+                })
+            );
+        }
+        for (status, body, action) in [
+            (
+                400,
+                unchanged,
+                TelegramAction::SendMessage(SendMessage::new(ChatId(-42), "final")),
+            ),
+            (
+                500,
+                unchanged,
+                TelegramAction::EditMessage {
+                    chat_id: ChatId(-42),
+                    message_id: MessageId(7),
+                    text: "final".to_owned(),
+                    reply_markup: None,
+                },
+            ),
+            (
+                400,
+                r#"{"ok":false,"description":"Bad Request: message to edit not found"}"#,
+                TelegramAction::EditMessage {
+                    chat_id: ChatId(-42),
+                    message_id: MessageId(7),
+                    text: "final".to_owned(),
+                    reply_markup: None,
+                },
+            ),
+        ] {
+            assert!(matches!(
+                execute_with(&transport_with_status(status, body), "synthetic", action),
+                Ok(ActionOutcome::Failed { .. })
+            ));
+        }
+    }
 
     struct Transport {
         response: RefCell<Option<Result<HttpResponse, TransportFailureKind>>>,

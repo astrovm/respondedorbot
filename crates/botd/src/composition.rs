@@ -1502,12 +1502,22 @@ pub struct SystemRuntimeValues {
 }
 
 const TELEGRAM_STREAM_MIN_DELIVERY_INTERVAL: Duration = Duration::from_secs(1);
+// Leave room under Telegram's group limit for replies and final answers.
+const TELEGRAM_STREAM_GROUP_DELIVERY_INTERVAL: Duration = Duration::from_secs(4);
 const TELEGRAM_STREAM_MAX_RATE_LIMIT_PAUSE: Duration = Duration::from_secs(300);
 const TELEGRAM_STREAM_THINKING_DOT_FRAMES: [&str; 3] = [".", "..", "..."];
 // Each chat always maps to the same delivery thread, which keeps its edits in
 // order, while a slow or rate-limited chat only shares its thread with the
 // chats hashed next to it instead of every chat of the bot.
 const TELEGRAM_STREAM_DELIVERY_SHARDS: usize = 4;
+
+fn telegram_stream_delivery_interval(chat_id: i64) -> Duration {
+    if chat_id < 0 {
+        TELEGRAM_STREAM_GROUP_DELIVERY_INTERVAL
+    } else {
+        TELEGRAM_STREAM_MIN_DELIVERY_INTERVAL
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct TelegramStreamKey {
@@ -1618,7 +1628,7 @@ impl TelegramStreamDeliveryState {
                     animation.text, TELEGRAM_STREAM_THINKING_DOT_FRAMES[animation.frame]
                 );
                 animation.frame = (animation.frame + 1) % TELEGRAM_STREAM_THINKING_DOT_FRAMES.len();
-                animation.next_frame_at = now + TELEGRAM_STREAM_MIN_DELIVERY_INTERVAL;
+                animation.next_frame_at = now + telegram_stream_delivery_interval(key.chat_id);
                 Some((*key, text))
             })
             .collect::<Vec<_>>();
@@ -1711,7 +1721,7 @@ impl TelegramStreamDeliveryState {
             .last_intermediate_edit
             .get(&chat_id)
             .map_or(Duration::ZERO, |last| {
-                TELEGRAM_STREAM_MIN_DELIVERY_INTERVAL
+                telegram_stream_delivery_interval(chat_id)
                     .saturating_sub(now.saturating_duration_since(*last))
             });
         let rate_limit = self
@@ -1733,16 +1743,28 @@ impl TelegramStreamDeliveryState {
     }
 
     fn mark_intermediate_edit_started(&mut self, chat_id: i64) {
-        self.last_intermediate_edit
-            .insert(chat_id, std::time::Instant::now());
+        let now = std::time::Instant::now();
+        self.last_intermediate_edit.retain(|chat_id, last| {
+            now.saturating_duration_since(*last) < telegram_stream_delivery_interval(*chat_id)
+        });
+        self.last_intermediate_edit.insert(chat_id, now);
     }
 
     fn prune_inactive_intermediate_edit(&mut self, chat_id: i64) {
         let chat_is_active = self.pending.keys().any(|key| key.chat_id == chat_id)
             || self.thinking.keys().any(|key| key.chat_id == chat_id);
         if !chat_is_active {
-            self.last_intermediate_edit.remove(&chat_id);
             let now = std::time::Instant::now();
+            if self
+                .last_intermediate_edit
+                .get(&chat_id)
+                .is_some_and(|last| {
+                    now.saturating_duration_since(*last)
+                        >= telegram_stream_delivery_interval(chat_id)
+                })
+            {
+                self.last_intermediate_edit.remove(&chat_id);
+            }
             self.rate_limited_until.retain(|_, until| *until > now);
         }
     }
@@ -1881,7 +1903,7 @@ impl TelegramStreamDeliveryShard {
                     text: text.to_owned(),
                     frame: 1,
                     next_frame_at: std::time::Instant::now()
-                        + TELEGRAM_STREAM_MIN_DELIVERY_INTERVAL,
+                        + telegram_stream_delivery_interval(chat_id.0),
                 },
             );
         }
@@ -2072,8 +2094,8 @@ fn telegram_stream_rate_limit_delay(retry_after_seconds: Option<u64>) -> Duratio
     )
 }
 
-/// Delivers a final answer once; a rate limit parks it in the shard queue
-/// until retry_after passes rather than sleeping on the delivery thread.
+/// Delivers a final edit; transient failures park it in the shard queue
+/// until its retry time rather than sleeping on the delivery thread.
 fn deliver_telegram_stream_final<Transport: TelegramTransport>(
     sink: &TelegramActionSink<Transport>,
     state: &Mutex<TelegramStreamDeliveryState>,
@@ -2086,20 +2108,37 @@ fn deliver_telegram_stream_final<Transport: TelegramTransport>(
         .map_or(1, |retry| retry.attempts + 1);
     let result = match sink.execute_once(pending.action.clone()) {
         Ok(ActionOutcome::Completed { .. }) => Ok(true),
-        Ok(ActionOutcome::RateLimited {
-            retry_after_seconds,
-        }) if attempts < TELEGRAM_ACTION_MAX_ATTEMPTS => {
-            let delay = telegram_stream_rate_limit_delay(retry_after_seconds);
-            let mut state = lock_unpoisoned(state);
-            state.pause_intermediate_edits(key.chat_id, delay);
-            state.retry_final(pending, attempts, delay);
-            return;
+        Ok(outcome) => {
+            if attempts < TELEGRAM_ACTION_MAX_ATTEMPTS
+                && let Some(delay) = telegram_stream_final_retry_delay(&outcome)
+            {
+                let mut state = lock_unpoisoned(state);
+                state.pause_intermediate_edits(key.chat_id, delay);
+                state.retry_final(pending, attempts, delay);
+                return;
+            }
+            Ok(false)
         }
-        Ok(_) => Ok(false),
         Err(error) => Err(TelegramActionSinkError::from(error)),
     };
     if let Some(response) = pending.final_response {
         let _ = response.send(result);
+    }
+}
+
+fn telegram_stream_final_retry_delay(outcome: &ActionOutcome) -> Option<Duration> {
+    match outcome {
+        ActionOutcome::RateLimited {
+            retry_after_seconds,
+        } => Some(telegram_stream_rate_limit_delay(*retry_after_seconds)),
+        ActionOutcome::TransportFailed(
+            TransportFailureKind::Timeout | TransportFailureKind::Connection,
+        )
+        | ActionOutcome::Failed {
+            status_code: Some(500..=599),
+            ..
+        } => Some(Duration::from_secs(1)),
+        _ => None,
     }
 }
 
@@ -3902,7 +3941,7 @@ mod tests {
         let requests = source.transport.requests.borrow();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].token, "synthetic-token");
-        assert_eq!(requests[0].timeout, Duration::from_secs(22));
+        assert_eq!(requests[0].timeout, Duration::from_secs(32));
         assert_eq!(
             requests[0]
                 .json_payload
@@ -4418,7 +4457,151 @@ mod tests {
 
         state.pending.clear();
         state.prune_inactive_intermediate_edit(7);
+        assert!(state.last_intermediate_edit.contains_key(&7));
+        state
+            .last_intermediate_edit
+            .insert(7, Instant::now() - Duration::from_secs(5));
+        state.prune_inactive_intermediate_edit(7);
         assert!(!state.last_intermediate_edit.contains_key(&7));
+    }
+
+    #[test]
+    fn group_drafts_remain_throttled_when_the_queue_briefly_empties() {
+        let (delivery, state, _receiver) = stream_delivery_fixture();
+        {
+            let mut state = super::lock_unpoisoned(&state);
+            state.mark_intermediate_edit_started(-7);
+            state.prune_inactive_intermediate_edit(-7);
+        }
+        assert!(delivery.enqueue(stream_edit(-7, 80, "new draft")));
+        assert!(delivery.enqueue(stream_edit(8, 81, "other chat")));
+        let mut state = super::lock_unpoisoned(&state);
+        let next = ready_edit(state.take_next()).must();
+        assert_eq!(next.key.chat_id, 8);
+        assert!(
+            matches!(state.take_next(), super::TelegramStreamDeliveryDecision::Wait(wait)
+            if wait > Duration::from_secs(3))
+        );
+        state
+            .last_intermediate_edit
+            .insert(-7, Instant::now() - Duration::from_secs(5));
+        assert_eq!(ready_edit(state.take_next()).must().key.chat_id, -7);
+        state.mark_intermediate_edit_started(8);
+        assert!(!state.last_intermediate_edit.contains_key(&-7));
+    }
+
+    #[test]
+    fn group_thinking_animation_leaves_capacity_for_replies() {
+        let (delivery, state, _receiver) = stream_delivery_fixture();
+        delivery.start_thinking(ChatId(-7), MessageId(80), "Pensando");
+        let key = super::TelegramStreamKey {
+            chat_id: -7,
+            message_id: 80,
+        };
+        let mut state = super::lock_unpoisoned(&state);
+        let animation = state.thinking.get_mut(&key).must();
+        assert!(
+            animation
+                .next_frame_at
+                .saturating_duration_since(Instant::now())
+                > Duration::from_secs(3)
+        );
+        animation.next_frame_at = Instant::now();
+        assert_eq!(ready_edit(state.take_next()).must().key, key);
+        assert!(
+            state
+                .thinking
+                .get(&key)
+                .must()
+                .next_frame_at
+                .saturating_duration_since(Instant::now())
+                > Duration::from_secs(3)
+        );
+    }
+
+    #[test]
+    fn final_edits_recover_transient_errors_without_replaying_the_update() {
+        for failure in [
+            Err(TransportFailureKind::Timeout),
+            Err(TransportFailureKind::Connection),
+            telegram_response(502, r#"{"ok":false,"description":"Bad Gateway"}"#),
+        ] {
+            let sink = TelegramActionSink::new(
+                Transport::with(vec![
+                    failure,
+                    telegram_response(
+                        400,
+                        r#"{"ok":false,"error_code":400,"description":"Bad Request: message is not modified"}"#,
+                    ),
+                ]),
+                "synthetic-token",
+            );
+            let state = Mutex::new(super::TelegramStreamDeliveryState::default());
+            let key = super::TelegramStreamKey {
+                chat_id: -7,
+                message_id: 80,
+            };
+            let (sender, receiver) = mpsc::channel();
+            super::deliver_telegram_stream_final(
+                &sink,
+                &state,
+                super::PendingTelegramStreamEdit {
+                    key,
+                    action: final_edit(-7, 80, "final"),
+                    final_response: Some(sender),
+                },
+            );
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+            let pending = {
+                let mut state = super::lock_unpoisoned(&state);
+                state.final_retries.get_mut(&key).must().retry_at = Instant::now();
+                ready_edit(state.take_next()).must()
+            };
+            super::deliver_telegram_stream_final(&sink, &state, pending);
+            assert_eq!(receiver.recv_timeout(Duration::from_secs(1)), Ok(Ok(true)));
+            assert_eq!(sink.transport.requests.borrow().len(), 2);
+            assert!(
+                sink.transport
+                    .requests
+                    .borrow()
+                    .iter()
+                    .all(|request| request.endpoint == "editMessageText")
+            );
+        }
+    }
+
+    #[test]
+    fn rejected_final_edits_are_not_retried() {
+        for response in [
+            Err(TransportFailureKind::Request),
+            telegram_response(
+                400,
+                r#"{"ok":false,"description":"Bad Request: message to edit not found"}"#,
+            ),
+        ] {
+            let sink = TelegramActionSink::new(Transport::with(vec![response]), "synthetic-token");
+            let state = Mutex::new(super::TelegramStreamDeliveryState::default());
+            let key = super::TelegramStreamKey {
+                chat_id: -7,
+                message_id: 80,
+            };
+            let (sender, receiver) = mpsc::channel();
+            super::deliver_telegram_stream_final(
+                &sink,
+                &state,
+                super::PendingTelegramStreamEdit {
+                    key,
+                    action: final_edit(-7, 80, "final"),
+                    final_response: Some(sender),
+                },
+            );
+            assert_eq!(receiver.recv_timeout(Duration::from_secs(1)), Ok(Ok(false)));
+            assert!(super::lock_unpoisoned(&state).final_retries.is_empty());
+            assert_eq!(sink.transport.requests.borrow().len(), 1);
+        }
     }
 
     #[test]
