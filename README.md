@@ -1,80 +1,23 @@
 # Respondedorbot
 
-An AI Telegram bot with an Argentine personality.
+**An AI Telegram bot with an Argentine personality.**
 
-It streams replies, remembers conversations, understands media, tracks markets,
-manages AI credits, and runs scheduled tasks.
+It streams replies, remembers conversations, understands media, tracks markets, manages AI credits, and runs scheduled tasks.
 
 **Try it:** [t.me/respondedorbot](https://t.me/respondedorbot)
 
-## What it can do
+## Features
 
-- Chat with AI, memory, web search, tools, and provider fallback
-- Transcribe audio or YouTube captions and describe images or GIFs
-- Summarize YouTube videos from their existing captions
-- Summarize conversations
-- Show crypto, market, dollar, BCRA, weather, and Polymarket data
-- Manage Telegram Stars, AI credits, transfers, and charge history
-- Create recurring or one-time scheduled tasks
-- Repair supported links and handle localized Telegram commands
+- **Chat.** AI chat with memory, web search, tools, and provider fallback.
+- **Media.** Transcribes audio or YouTube captions and describes images or GIFs.
+- **YouTube summaries.** Summarizes YouTube videos from their existing captions.
+- **Conversation summaries.** Catches you up on what the chat said.
+- **Markets and data.** Crypto, market, dollar, BCRA, weather, and Polymarket data.
+- **Credits.** Telegram Stars, AI credits, transfers, and charge history.
+- **Scheduled tasks.** Recurring or one-time.
+- **Links and languages.** Repairs supported links and handles localized Telegram commands.
 
-## Run it locally
-
-### 1. Install the requirements
-
-- Rust 1.98
-- PostgreSQL
-- Redis Stack with RediSearch
-- FFmpeg
-
-### 2. Create the configuration
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` and set these values:
-
-| Variable | What it is for |
-| --- | --- |
-| `TELEGRAM_TOKEN` | Telegram bot token from BotFather |
-| `TELEGRAM_USERNAME` | Bot username, with or without `@` |
-| `SUPABASE_POSTGRES_URL` | PostgreSQL database URL |
-| `COINMARKETCAP_KEY` | Crypto market data |
-| `OPENROUTER_API_KEY` | AI chat, vision, summaries, and audio transcription |
-
-Create both `workspace/SOUL.md` and `workspace/RULES.md` with nonempty text.
-These files are the only source of the bot’s personality and response rules.
-
-Redis uses `localhost:6379` by default. See [.env.example](.env.example) for
-optional providers, monitoring, polling, and maintenance settings.
-
-### 3. Build and check the configuration
-
-```bash
-cargo build --locked --release -p botd
-
-set -a
-. ./.env
-set +a
-
-./target/release/botd --check-config
-```
-
-### 4. Start the bot
-
-```bash
-./target/release/botd
-```
-
-Stop it with `Ctrl+C`. The bot waits for background work to finish before it
-exits.
-
-> [!IMPORTANT]
-> For Supabase, use the session pooler on port `5432` with `sslmode=require`.
-> Do not use the transaction pooler on port `6543`.
-
-## Main commands
+## 🚀 Use
 
 ### AI and media
 
@@ -112,106 +55,117 @@ exits.
 | `/random`, `/convertbase`, `/comando`, `/time` | Utilities |
 | `/gm`, `/gn`, `/help`, `/instance` | Greetings and bot information |
 
-`/p` and its aliases resolve cryptocurrencies, stocks, company names, and tokens.
-`/c` keeps lookup restricted to crypto. Canonical assets take priority over DEX
-namesakes: `/c bitcoin` resolves BTC and `/p apple` resolves AAPL. Use `stock:` or
-`crypto:` to disambiguate. A single asset gets a chart; comma-separated lists
-such as `/p btc,timba` combine market and token quotes. Bare `/c`, `/p`, top-N
-lists, stablecoin lists, and conversion options retain their provider list
-behavior.
+## Prices and charts
 
-Full Solana/EVM addresses, `$ticker` messages, and CoinMarketCap/CoinGecko
-token URLs share the command resolver. Addresses preserve case and pin the
-token identity; symbol searches require an exact match. Ambiguous tickers keep
-their distinct chain and contract identities so the bot can ask which token
-you mean. DexScreener and pump.fun supply token cards. Missing chart history
-or photo delivery falls back to the available quote/card text, and missing
-metrics are shown as N/A. Pump.fun bonding-curve tokens use pump.fun’s candle feed
-for explicit chart ranges. When only an older trade is available, the chart
-shows its price across the window and labels it “last available trade price”.
+### Looking up an asset
 
-Chart ranges use `h` (hours), `d` (days), `w` (weeks),
-`m` or `mo` (30-day months), and `y` (365-day years), for example `/c bitcoin 1m`,
-`/c bitcoin 7d`, `/p apple 1y`, or `/s AAPL 5y`. Candle granularity is
-selected automatically. Charts label the dates actually returned by the
-provider; newly created tokens and unavailable history cannot fill an older
-requested range. For a single cryptocurrency or stock with an explicit range,
-a successful chart caption derives its change from that range and labels it
-with the requested period. If the provider cannot supply usable history,
-delivery falls back to the available quote and says that the chart is
-unavailable. Without an explicit range, the caption keeps the default daily
-change.
+- **`/p` finds anything.** It and its aliases resolve cryptocurrencies, stocks, company names, and tokens.
+- **`/c` is crypto only.** Lookup stays restricted to crypto.
+- **Real assets win.** Canonical assets take priority over DEX namesakes: `/c bitcoin` resolves BTC and `/p apple` resolves AAPL.
+- **Be explicit if needed.** Use `stock:` or `crypto:` to disambiguate.
+- **One asset, one chart.** A single asset gets a chart.
+- **Lists work too.** Comma-separated lists such as `/p btc,timba` combine market and token quotes.
+- **Old behavior kept.** Bare `/c`, `/p`, top-N lists, stablecoin lists, and conversion options retain their provider list behavior.
 
-## Inspect AI tool logs
+### Tokens
 
-Foreground AI conversations emit single-line `AI trace:` JSON records to stderr,
-captured by the container journal. Each record includes the operation ID and
-provider round. Events show available tools, provider generation IDs, requested
-tool calls, execution duration, and the final executed-tool count (including zero).
-Search events include the query, up to five source URLs/titles/snippets, empty
-results or an error, and the provider request ID when available.
+- **Same resolver everywhere.** Full Solana/EVM addresses, `$ticker` messages, and CoinMarketCap/CoinGecko token URLs share the command resolver.
+- **Addresses are exact.** They preserve case and pin the token identity.
+- **Symbols are exact.** Symbol searches require an exact match.
+- **Ambiguous tickers.** They keep their distinct chain and contract identities so the bot can ask which token you mean.
+- **Token cards.** DexScreener and pump.fun supply them.
+- **Fallbacks.** Missing chart history or photo delivery falls back to the available quote/card text, and missing metrics are shown as N/A.
+- **Pump.fun.** Bonding-curve tokens use pump.fun's candle feed for explicit chart ranges. When only an older trade is available, the chart shows its price across the window and labels it "last available trade price".
 
-```bash
-podman logs --since 15m --timestamps systemd-respondedorbot 2>&1 | grep 'AI trace:'
-```
+### Chart ranges
 
-Match `operation_id` across records to follow one conversation turn. Search
-queries and snippets are logged with length limits; URL credentials, query
-parameters, and fragments are omitted. Other tool outputs, chat history, and
-assistant response bodies are not logged. These records are not sent to Telegram.
-
-## Test it
-
-Run the same checks used by pull requests:
-
-```bash
-cargo fmt --all -- --check
-cargo check --locked --workspace --all-targets --all-features
-cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-cargo test --locked --workspace --all-features
-```
-
-Integration tests use synthetic data. Set `TEST_DATABASE_URL`,
-`TEST_REDIS_HOST`, and `TEST_REDIS_PORT` to include PostgreSQL and Redis Stack
-tests.
-
-Coverage requirements:
-
-- `bot-core`: 100%
-- `bot-adapters`: 100%
-- `botd`: 100%
-
-More detail: [Testing](docs/TESTING.md)
-
-## How the code is organized
-
-```text
-botd          Starts the app and connects all services
-  |
-  +-- bot-adapters   Telegram, HTTP, Redis, PostgreSQL, AI, and media
-        |
-        +-- bot-core   Parsing, routing, state machines, and domain rules
-```
-
-Dependencies point toward `bot-core`. External payloads are decoded in
-`bot-adapters`, while deterministic behavior stays in `bot-core`.
-
-| Path | Contents |
+| Suffix | Means |
 | --- | --- |
-| `crates/bot-core` | Domain behavior and state machines |
-| `crates/bot-adapters` | External service implementations |
-| `crates/botd` | Executable and composition root |
-| `docs` | Architecture, persistence, billing, and testing |
-| `quadlets`, `systemd` | Deployment and maintenance units |
-| `Containerfile` | Rust-only production image |
+| `h` | Hours |
+| `d` | Days |
+| `w` | Weeks |
+| `m` or `mo` | 30-day months |
+| `y` | 365-day years |
 
-Read more: [Architecture](docs/ARCHITECTURE.md) ·
-[Billing](docs/BILLING.md) · [Persistence](docs/PERSISTENCE.md)
+Examples: `/c bitcoin 1m`, `/c bitcoin 7d`, `/p apple 1y`, `/s AAPL 5y`.
 
-## Deploy with Podman
+- **Candles.** Granularity is selected automatically.
+- **Real dates only.** Charts label the dates actually returned by the provider. Newly created tokens and unavailable history can't fill an older requested range.
+- **Range change.** For a single cryptocurrency or stock with an explicit range, a successful chart caption derives its change from that range and labels it with the requested period.
+- **No history.** If the provider can't supply usable history, delivery falls back to the available quote and says that the chart is unavailable.
+- **No range.** Without an explicit range, the caption keeps the default daily change.
+
+## ⬇️ Run it yourself
+
+You need:
+
+- Rust 1.98
+- PostgreSQL
+- Redis Stack with RediSearch
+- FFmpeg
+
+> [!WARNING]
+> Never run two pollers with the same Telegram token.
 
 <details>
-<summary>Show deployment commands</summary>
+<summary><b>Run it locally</b></summary>
+
+### 1. Install the requirements
+
+- Rust 1.98
+- PostgreSQL
+- Redis Stack with RediSearch
+- FFmpeg
+
+### 2. Create the configuration
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and set these values:
+
+| Variable | What it is for |
+| --- | --- |
+| `TELEGRAM_TOKEN` | Telegram bot token from BotFather |
+| `TELEGRAM_USERNAME` | Bot username, with or without `@` |
+| `SUPABASE_POSTGRES_URL` | PostgreSQL database URL |
+| `COINMARKETCAP_KEY` | Crypto market data |
+| `OPENROUTER_API_KEY` | AI chat, vision, summaries, and audio transcription |
+
+Create both `workspace/SOUL.md` and `workspace/RULES.md` with nonempty text.
+These files are the only source of the bot's personality and response rules.
+
+Redis uses `localhost:6379` by default. See [.env.example](.env.example) for optional providers, monitoring, polling, and maintenance settings.
+
+### 3. Build and check the configuration
+
+```bash
+cargo build --locked --release -p botd
+
+set -a
+. ./.env
+set +a
+
+./target/release/botd --check-config
+```
+
+### 4. Start the bot
+
+```bash
+./target/release/botd
+```
+
+Stop it with `Ctrl+C`. The bot waits for background work to finish before it exits.
+
+> [!IMPORTANT]
+> For Supabase, use the session pooler on port `5432` with `sslmode=require`.
+> Do not use the transaction pooler on port `6543`.
+
+</details>
+
+<details>
+<summary><b>Deploy with Podman</b></summary>
 
 ```bash
 podman build --tag respondedorbot:local .
@@ -236,16 +190,87 @@ systemctl --user start respondedorbot-redis.service
 systemctl --user start respondedorbot.service
 ```
 
-Before starting, edit `~/respondedorbot/.env` and add the personality files to
-`~/respondedorbot/workspace/SOUL.md` and `~/respondedorbot/workspace/RULES.md`.
+Before starting, edit `~/respondedorbot/.env` and add the personality files to `~/respondedorbot/workspace/SOUL.md` and `~/respondedorbot/workspace/RULES.md`.
 
-</details>
+The runtime image contains `botd`, FFmpeg, and native shared libraries. CI publishes `latest` and immutable `sha-<full-commit-sha>` images.
 
-The runtime image contains `botd`, FFmpeg, and native shared libraries. CI
-publishes `latest` and immutable `sha-<full-commit-sha>` images.
-
-To roll back, pin the Quadlet `Image=` setting to a verified SHA tag, reload
-the user units, and restart the service.
+To roll back, pin the Quadlet `Image=` setting to a verified SHA tag, reload the user units, and restart the service.
 
 > [!WARNING]
 > Never run two pollers with the same Telegram token.
+
+</details>
+
+<details>
+<summary><b>Inspect AI tool logs</b></summary>
+
+Foreground AI conversations emit single-line `AI trace:` JSON records to stderr, captured by the container journal.
+
+- Each record includes the operation ID and provider round.
+- Events show available tools, provider generation IDs, requested tool calls, execution duration, and the final executed-tool count (including zero).
+- Search events include the query, up to five source URLs/titles/snippets, empty results or an error, and the provider request ID when available.
+
+```bash
+podman logs --since 15m --timestamps systemd-respondedorbot 2>&1 | grep 'AI trace:'
+```
+
+Match `operation_id` across records to follow one conversation turn.
+
+- Search queries and snippets are logged with length limits.
+- URL credentials, query parameters, and fragments are omitted.
+- Other tool outputs, chat history, and assistant response bodies are not logged.
+- These records are not sent to Telegram.
+
+</details>
+
+<details>
+<summary><b>Test it</b></summary>
+
+Run the same checks used by pull requests:
+
+```bash
+cargo fmt --all -- --check
+cargo check --locked --workspace --all-targets --all-features
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-features
+```
+
+Integration tests use synthetic data. Set `TEST_DATABASE_URL`, `TEST_REDIS_HOST`, and `TEST_REDIS_PORT` to include PostgreSQL and Redis Stack tests.
+
+Coverage requirements:
+
+| Crate | Coverage |
+| --- | --- |
+| `bot-core` | 100% |
+| `bot-adapters` | 100% |
+| `botd` | 100% |
+
+More detail: [Testing](docs/TESTING.md)
+
+</details>
+
+<details>
+<summary><b>How the code is organized</b></summary>
+
+```text
+botd          Starts the app and connects all services
+  |
+  +-- bot-adapters   Telegram, HTTP, Redis, PostgreSQL, AI, and media
+        |
+        +-- bot-core   Parsing, routing, state machines, and domain rules
+```
+
+Dependencies point toward `bot-core`. External payloads are decoded in `bot-adapters`, while deterministic behavior stays in `bot-core`.
+
+| Path | Contents |
+| --- | --- |
+| `crates/bot-core` | Domain behavior and state machines |
+| `crates/bot-adapters` | External service implementations |
+| `crates/botd` | Executable and composition root |
+| `docs` | Architecture, persistence, billing, and testing |
+| `quadlets`, `systemd` | Deployment and maintenance units |
+| `Containerfile` | Rust-only production image |
+
+Read more: [Architecture](docs/ARCHITECTURE.md), [Billing](docs/BILLING.md), [Persistence](docs/PERSISTENCE.md)
+
+</details>
