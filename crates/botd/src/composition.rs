@@ -133,6 +133,7 @@ use crate::media_adapters::{
     RedisMediaCache, TelegramMediaFiles,
 };
 use crate::native_tools::{NativeTool, NativeToolRegistry, StandardNativeToolBackend};
+use crate::poll_tools::{PollTool, PollToolContext, TelegramPollSender};
 use crate::random_tool::RandomChoiceTool;
 use crate::reconciliation::ActiveOperationRegistry;
 use crate::runtime::{DurableParallelUpdateHandler, PollingRuntime, UpdateSource};
@@ -142,6 +143,7 @@ use crate::task_tools::{
 use crate::tool_requests::{ExternalToolbox, ValidatedNativeToolPorts};
 use crate::web_fetch_tool::WebFetchTool;
 use crate::youtube::{NativeYoutubeContext, YoutubeContextRuntime};
+use bot_adapters::redis_poll_store::RedisPollStore;
 
 impl AdminCreditSink for BillingRepository {
     fn mint(&mut self, user_id: i64, amount: i64) -> Result<i64, String> {
@@ -2703,6 +2705,8 @@ pub enum CompositionError {
     TokenSignalTransport(String),
     #[error("could not construct token-signal Redis cache: {0}")]
     TokenSignalCache(RedisJsonCacheError),
+    #[error("could not construct Redis poll store: {0}")]
+    PollStore(bot_adapters::redis_poll_store::RedisPollStoreError),
     #[error("could not construct Redis command state: {0}")]
     RedisState(#[from] RedisMessageStateError),
     #[error("could not construct Redis scheduled-task state: {0}")]
@@ -2824,6 +2828,7 @@ pub struct ProductionToolFactory {
     coinmarketcap_key: Option<String>,
     firecrawl_key: Option<String>,
     openrouter_pricing: Option<Arc<OpenRouterPricingCache>>,
+    telegram_token: Option<String>,
 }
 
 impl ProductionToolFactory {
@@ -2840,7 +2845,15 @@ impl ProductionToolFactory {
             coinmarketcap_key,
             firecrawl_key,
             openrouter_pricing: None,
+            telegram_token: None,
         }
+    }
+
+    /// Enables `create_poll`, which posts through the Bot API directly.
+    #[must_use]
+    pub fn with_telegram_token(mut self, token: &str) -> Self {
+        self.telegram_token = Some(token.to_owned()).filter(|token| !token.is_empty());
+        self
     }
 
     #[must_use]
@@ -2988,6 +3001,25 @@ impl ConversationToolFactory for ProductionToolFactory {
                     locale,
                 )),
             );
+
+        if let Some(token) = self.telegram_token.as_deref() {
+            let context = PollToolContext {
+                chat_id: input.chat_id.0,
+                reply_to_message_id: Some(input.message_id.0),
+                locale,
+            };
+            for tool in [NativeTool::CreatePoll, NativeTool::GetPolls] {
+                toolbox = toolbox.with_executor(
+                    tool,
+                    Box::new(PollTool::new(
+                        tool_transport("Telegram poll", TelegramPollSender::new(token))?,
+                        RedisPollStore::new(&self.redis_endpoint).map_err(error_text)?,
+                        current_unix_timestamp,
+                        context,
+                    )),
+                );
+            }
+        }
 
         if let Some(api_key) = self.firecrawl_key.clone().filter(|key| !key.is_empty()) {
             toolbox = toolbox.with_executor(
@@ -3171,7 +3203,10 @@ fn build_native_dispatcher_with_stream_delivery(
     .with_token_signal_source(Box::new(TokenSignalAdapter::new(
         token_signal_transport,
         token_signal_cache,
-    )));
+    )))
+    .with_poll_update_sink(Box::new(
+        RedisPollStore::new(options.redis_endpoint).map_err(CompositionError::PollStore)?,
+    ));
     let dispatcher = if let Some(words) = options.trigger_words.filter(|words| !words.is_empty()) {
         dispatcher.with_trigger_words(words)
     } else {
@@ -3258,7 +3293,8 @@ fn build_native_dispatcher_with_stream_delivery(
                     conversation_coinmarketcap_key,
                     conversation_firecrawl_key,
                 )
-                .with_openrouter_pricing(Arc::clone(&openrouter_pricing)),
+                .with_openrouter_pricing(Arc::clone(&openrouter_pricing))
+                .with_telegram_token(options.token),
                 conversation_state,
                 PostgresConversationBilling::new(options.database_url)
                     .with_creditless_cap(creditless_cap)
@@ -6344,6 +6380,24 @@ mod tests {
 
         let mut minimal = super::ProductionToolFactory::new(&endpoint, &database_url, None, None);
         assert!(minimal.create(&input).is_ok());
+
+        use crate::chat_tool_loop::NativeToolRuntime;
+        let mut polls = super::ProductionToolFactory::new(&endpoint, &database_url, None, None)
+            .with_telegram_token("synthetic-token");
+        let tools = polls.create(&input);
+        assert!(
+            tools
+                .as_ref()
+                .is_ok_and(|tools| tools.contains("create_poll", false))
+        );
+        assert!(tools.is_ok_and(|tools| tools.contains("get_polls", true)));
+        let mut no_token = super::ProductionToolFactory::new(&endpoint, &database_url, None, None)
+            .with_telegram_token("");
+        assert!(
+            no_token
+                .create(&input)
+                .is_ok_and(|tools| !tools.contains("create_poll", false))
+        );
     }
 
     #[test]

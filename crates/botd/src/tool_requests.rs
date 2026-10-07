@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use bot_core::locale::Locale;
+use bot_core::polls::{MAX_POLL_OPTIONS, PollRequest};
 use serde_json::Value;
 
 use crate::chat_tool_loop::{ConcurrentToolCall, ToolExecutionResult};
@@ -46,6 +47,8 @@ pub enum ExternalToolRequest {
     HackerNews {
         limit: u8,
     },
+    CreatePoll(PollRequest),
+    GetPolls,
     BotCapabilities,
 }
 
@@ -65,6 +68,8 @@ impl ExternalToolRequest {
             Self::DollarRates { .. } => NativeTool::DollarRates,
             Self::Weather { .. } => NativeTool::Weather,
             Self::HackerNews { .. } => NativeTool::HackerNews,
+            Self::CreatePoll(_) => NativeTool::CreatePoll,
+            Self::GetPolls => NativeTool::GetPolls,
             Self::BotCapabilities => NativeTool::BotCapabilities,
         }
     }
@@ -325,6 +330,21 @@ pub(crate) fn validate_request(
                 limit: u8::try_from(limit).unwrap_or(5),
             })
         }
+        NativeTool::CreatePoll => PollRequest::new(
+            &text(arguments, "question"),
+            &bounded_string_list(arguments.get("options"), MAX_POLL_OPTIONS + 1),
+            arguments
+                .get("anonymous")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            arguments
+                .get("multiple_answers")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        )
+        .map(ExternalToolRequest::CreatePoll)
+        .map_err(|error| error.message(locale).to_owned()),
+        NativeTool::GetPolls => Ok(ExternalToolRequest::GetPolls),
         NativeTool::BotCapabilities => Ok(ExternalToolRequest::BotCapabilities),
     }
 }
@@ -728,6 +748,53 @@ mod tests {
         );
         assert!(ports.services().calls.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn poll_requests_validate_limits_and_default_to_public_single_answer() {
+        assert_eq!(
+            super::validate_request(
+                NativeTool::CreatePoll,
+                &json!({"question": " ¿Asado? ", "options": ["Sí", " No "]}),
+                Locale::Es
+            ),
+            Ok(ExternalToolRequest::CreatePoll(PollRequest {
+                question: "¿Asado?".to_owned(),
+                options: vec!["Sí".to_owned(), "No".to_owned()],
+                anonymous: false,
+                multiple_answers: false,
+            }))
+        );
+        assert_eq!(
+            super::validate_request(
+                NativeTool::CreatePoll,
+                &json!({"question": "q", "options": ["a", "b"], "anonymous": true, "multiple_answers": true}),
+                Locale::En
+            )
+            .map(|request| request.tool()),
+            Ok(NativeTool::CreatePoll)
+        );
+        assert_eq!(
+            super::validate_request(
+                NativeTool::CreatePoll,
+                &json!({"question": "q", "options": (0..13).map(|index| index.to_string()).collect::<Vec<_>>()}),
+                Locale::En
+            ),
+            Err("Telegram accepts up to 12 options".to_owned())
+        );
+        assert_eq!(
+            super::validate_request(
+                NativeTool::CreatePoll,
+                &json!({"options": ["a", "b"]}),
+                Locale::Es
+            ),
+            Err("falta la pregunta de la encuesta".to_owned())
+        );
+        assert_eq!(
+            super::validate_request(NativeTool::GetPolls, &json!({}), Locale::Es),
+            Ok(ExternalToolRequest::GetPolls)
+        );
+        assert_eq!(ExternalToolRequest::GetPolls.tool(), NativeTool::GetPolls);
     }
 
     #[test]

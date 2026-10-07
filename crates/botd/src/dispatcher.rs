@@ -854,6 +854,14 @@ enum TokenSignalPhotoDelivery {
     },
 }
 
+/// Stores votes and state for polls the bot sent. Both return whether the
+/// update belonged to a stored poll.
+pub trait PollUpdateSink {
+    fn record_answer(&mut self, answer: &bot_core::polls::PollAnswer) -> Result<bool, String>;
+
+    fn apply_state(&mut self, state: bot_core::polls::PollState) -> Result<bool, String>;
+}
+
 pub trait TokenSignalSource {
     fn load(&mut self, query: &SignalQuery) -> TokenSignalLoad;
 
@@ -973,6 +981,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     link_replacement_source: Option<Box<dyn LinkReplacementSource>>,
     scheduled_task_source: Option<Box<dyn ScheduledTaskSource>>,
     token_signal_source: Option<Box<dyn TokenSignalSource>>,
+    poll_update_sink: Option<Box<dyn PollUpdateSink>>,
     ai_conversation_source: Option<Box<dyn AiConversationSource>>,
     trigger_words: Vec<String>,
     /// Link preview context already fetched by link replacement for the
@@ -1032,6 +1041,7 @@ where
             link_replacement_source: None,
             scheduled_task_source: None,
             token_signal_source: None,
+            poll_update_sink: None,
             ai_conversation_source: None,
             trigger_words: vec!["bot".to_owned(), "assistant".to_owned()],
             prefetched_link_context: None,
@@ -1172,6 +1182,37 @@ where
     pub fn with_token_signal_source(mut self, source: Box<dyn TokenSignalSource>) -> Self {
         self.token_signal_source = Some(source);
         self
+    }
+
+    #[must_use]
+    pub fn with_poll_update_sink(mut self, sink: Box<dyn PollUpdateSink>) -> Self {
+        self.poll_update_sink = Some(sink);
+        self
+    }
+
+    /// Votes and poll state only reach the bot for polls it sent.
+    fn dispatch_poll_update(
+        &mut self,
+        payload: &Map<String, Value>,
+        answer: bool,
+    ) -> DispatchOutcome {
+        let Some(sink) = self.poll_update_sink.as_mut() else {
+            return DispatchOutcome::Unsupported;
+        };
+        let stored = if answer {
+            bot_core::polls::parse_poll_answer(payload).map(|answer| sink.record_answer(&answer))
+        } else {
+            bot_core::polls::parse_poll_state(payload).map(|state| sink.apply_state(state))
+        };
+        match stored {
+            Some(Ok(true)) => DispatchOutcome::Handled,
+            Some(Ok(false)) | None => DispatchOutcome::Unsupported,
+            Some(Err(error)) => {
+                self.state_diagnostics
+                    .push(format!("poll update not stored: {error}"));
+                DispatchOutcome::Unsupported
+            }
+        }
     }
 
     #[must_use]
@@ -5583,6 +5624,8 @@ where
                 self.dispatch_successful_payment(message)?
             }
             IncomingEvent::CallbackQuery(callback) => self.dispatch_callback(&callback)?,
+            IncomingEvent::Poll(poll) => self.dispatch_poll_update(&poll, false),
+            IncomingEvent::PollAnswer(answer) => self.dispatch_poll_update(&answer, true),
             IncomingEvent::PreCheckoutQuery(query) => {
                 let language_code = query
                     .get("from")
@@ -19322,6 +19365,102 @@ mod tests {
         assert_eq!(
             sent_texts(&missing.actions.0),
             [format!("No encontré datos para {address}")]
+        );
+    }
+
+    struct PollSink {
+        stored: Result<bool, String>,
+        calls: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    }
+
+    impl crate::dispatcher::PollUpdateSink for PollSink {
+        fn record_answer(&mut self, answer: &bot_core::polls::PollAnswer) -> Result<bool, String> {
+            self.calls
+                .borrow_mut()
+                .push(format!("answer:{}", answer.voter_id));
+            self.stored.clone()
+        }
+
+        fn apply_state(&mut self, state: bot_core::polls::PollState) -> Result<bool, String> {
+            self.calls
+                .borrow_mut()
+                .push(format!("state:{}", state.closed));
+            self.stored.clone()
+        }
+    }
+
+    #[test]
+    fn poll_updates_are_stored_only_for_known_polls() {
+        let poll_event = |answer: bool, payload: Value| {
+            let payload = payload.as_object().cloned().unwrap_or_default();
+            IncomingUpdate {
+                update_id: 1,
+                event: if answer {
+                    IncomingEvent::PollAnswer(payload)
+                } else {
+                    IncomingEvent::Poll(payload)
+                },
+            }
+        };
+        let answer =
+            json!({"poll_id": "p1", "user": {"id": 7, "first_name": "Ana"}, "option_ids": [0]});
+        let state = json!({"id": "p1", "options": [], "is_closed": true});
+
+        let mut without_sink = dispatcher();
+        assert_eq!(
+            without_sink.dispatch(poll_event(true, answer.clone())),
+            Ok(DispatchOutcome::Unsupported)
+        );
+
+        for (stored, expected) in [
+            (Ok(true), DispatchOutcome::Handled),
+            (Ok(false), DispatchOutcome::Unsupported),
+            (
+                Err("synthetic Redis failure".to_owned()),
+                DispatchOutcome::Unsupported,
+            ),
+        ] {
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let failed = stored.is_err();
+            let mut dispatcher = dispatcher().with_poll_update_sink(Box::new(PollSink {
+                stored,
+                calls: std::rc::Rc::clone(&calls),
+            }));
+            assert_eq!(
+                dispatcher.dispatch(poll_event(true, answer.clone())),
+                Ok(expected)
+            );
+            assert_eq!(
+                dispatcher.dispatch(poll_event(false, state.clone())),
+                Ok(expected)
+            );
+            assert_eq!(*calls.borrow(), ["answer:7", "state:true"]);
+            assert_eq!(
+                dispatcher
+                    .state_diagnostics
+                    .iter()
+                    .any(|line| line.contains("synthetic Redis failure")),
+                failed
+            );
+            assert_eq!(
+                dispatcher.dispatch(poll_event(true, json!({"poll_id": "p1"}))),
+                Ok(DispatchOutcome::Unsupported)
+            );
+            assert_eq!(calls.borrow().len(), 2);
+        }
+    }
+
+    #[test]
+    fn long_laughs_are_not_treated_as_solana_addresses() {
+        let mut dispatcher =
+            dispatcher().with_token_signal_source(Box::new(ScriptedSignals::new(Vec::new(), None)));
+        let _ = dispatcher.dispatch(update("JAKAJAJJAJAJAJAJAJAJJAJAJAJAJAJAJJAJA", Some("es")));
+        let texts = sent_texts(&dispatcher.actions.0);
+        assert_eq!(
+            texts
+                .iter()
+                .find(|text| text.starts_with("No encontré datos para")),
+            None
         );
     }
 

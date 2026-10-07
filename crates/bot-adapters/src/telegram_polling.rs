@@ -22,6 +22,14 @@ use crate::telegram_http::{
 pub const DEFAULT_LONG_POLL_SECONDS: u64 = 30;
 const HTTP_TIMEOUT_MARGIN_SECONDS: u64 = 15;
 const POLL_BATCH_LIMIT: u8 = 100;
+/// `poll` and `poll_answer` only arrive for polls the bot sent.
+const ALLOWED_UPDATES: [&str; 5] = [
+    "message",
+    "callback_query",
+    "pre_checkout_query",
+    "poll",
+    "poll_answer",
+];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IncomingUpdate {
@@ -35,6 +43,8 @@ pub enum IncomingEvent {
     SuccessfulPayment(Map<String, Value>),
     CallbackQuery(Map<String, Value>),
     PreCheckoutQuery(Map<String, Value>),
+    Poll(Map<String, Value>),
+    PollAnswer(Map<String, Value>),
     Unsupported,
 }
 
@@ -115,7 +125,7 @@ pub fn next_offset(updates: &[IncomingUpdate], current: Option<i64>) -> Option<i
 
 fn parse_event(object: &mut Map<String, Value>) -> Result<IncomingEvent, PollingError> {
     let mut supported = Vec::new();
-    for field in ["message", "callback_query", "pre_checkout_query"] {
+    for field in ALLOWED_UPDATES {
         if object.contains_key(field) {
             supported.push(field);
         }
@@ -136,6 +146,8 @@ fn parse_event(object: &mut Map<String, Value>) -> Result<IncomingEvent, Polling
         }
         "message" => IncomingEvent::Message(Box::new(parse_message(&payload))),
         "callback_query" => IncomingEvent::CallbackQuery(payload),
+        "poll" => IncomingEvent::Poll(payload),
+        "poll_answer" => IncomingEvent::PollAnswer(payload),
         _ => IncomingEvent::PreCheckoutQuery(payload),
     })
 }
@@ -315,7 +327,7 @@ pub fn poll_once_with<T: TelegramTransport>(
     let mut params = json!({
         "timeout": long_poll_seconds,
         "limit": POLL_BATCH_LIMIT,
-        "allowed_updates": ["message", "callback_query", "pre_checkout_query"]
+        "allowed_updates": ALLOWED_UPDATES
     });
     if let Some(offset) = offset {
         params["offset"] = json!(offset);
@@ -432,7 +444,7 @@ mod tests {
                 "offset": 42,
                 "timeout": 30,
                 "limit": 100,
-                "allowed_updates": ["message", "callback_query", "pre_checkout_query"]
+                "allowed_updates": ["message", "callback_query", "pre_checkout_query", "poll", "poll_answer"]
             }))
         );
     }
@@ -537,6 +549,23 @@ mod tests {
         assert!(parsed_updates(Err(PollingError::InvalidResponse)).is_empty());
         assert!(parsed_updates(Ok(PollOutcome::Retry(PollFailure::Conflict))).is_empty());
         assert_eq!(message_event(&IncomingEvent::Unsupported), None);
+    }
+
+    #[test]
+    fn response_decodes_poll_state_and_answers() -> TestResult {
+        let updates = parsed_updates(parse_response(
+            200,
+            r#"{"ok":true,"result":[
+                {"update_id":30,"poll":{"id":"p1","options":[]}},
+                {"update_id":31,"poll_answer":{"poll_id":"p1","option_ids":[0]}}
+            ]}"#,
+        ));
+        assert!(matches!(&updates[0].event, IncomingEvent::Poll(poll) if poll["id"] == "p1"));
+        assert!(matches!(
+            &updates[1].event,
+            IncomingEvent::PollAnswer(answer) if answer["poll_id"] == "p1"
+        ));
+        Ok(())
     }
 
     #[test]

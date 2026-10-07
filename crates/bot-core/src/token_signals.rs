@@ -207,10 +207,7 @@ pub fn detect_signal_query(text: &str) -> Option<SignalQuery> {
             address: candidate.to_ascii_lowercase(),
         }));
     }
-    if SOLANA_ADDRESS
-        .as_ref()
-        .is_some_and(|pattern| pattern.is_match(candidate))
-    {
+    if is_solana_address(candidate) {
         return Some(SignalQuery::Address(TokenAddress {
             chain_id: "solana".to_owned(),
             network: "solana".to_owned(),
@@ -226,6 +223,48 @@ pub fn detect_signal_query(text: &str) -> Option<SignalQuery> {
         .and_then(|pattern| pattern.captures(candidate))
         .and_then(|captures| captures.get(1))
         .map(|symbol| SignalQuery::Symbol(symbol.as_str().to_ascii_lowercase()))
+}
+
+/// A Solana address is base58 for exactly 32 bytes. The regex alone also
+/// matches long laughs like "JAJAJAJA...", so those are rejected too.
+fn is_solana_address(candidate: &str) -> bool {
+    SOLANA_ADDRESS
+        .as_ref()
+        .is_some_and(|pattern| pattern.is_match(candidate))
+        && base58_decoded_len(candidate) == Some(32)
+        && !looks_like_keyboard_laugh(candidate)
+}
+
+/// Random 32-byte keys almost always mix digits and many letters; laughs and
+/// keyboard mashes repeat a handful of letters.
+fn looks_like_keyboard_laugh(candidate: &str) -> bool {
+    !candidate.bytes().any(|byte| byte.is_ascii_digit())
+        && candidate
+            .bytes()
+            .map(|byte| byte.to_ascii_lowercase())
+            .collect::<HashSet<_>>()
+            .len()
+            < 8
+}
+
+fn base58_decoded_len(value: &str) -> Option<usize> {
+    const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    let leading_zeros = value.bytes().take_while(|byte| *byte == b'1').count();
+    // Little-endian base-256 digits of the decoded number.
+    let mut bytes: Vec<u8> = Vec::new();
+    for character in value.bytes() {
+        let mut carry = ALPHABET.iter().position(|digit| *digit == character)?;
+        for byte in &mut bytes {
+            carry += usize::from(*byte) * 58;
+            *byte = (carry & 0xff) as u8;
+            carry >>= 8;
+        }
+        while carry > 0 {
+            bytes.push((carry & 0xff) as u8);
+            carry >>= 8;
+        }
+    }
+    Some(leading_zeros + bytes.len())
 }
 
 fn provider_slug_from_url(candidate: &str) -> Option<String> {
@@ -1350,6 +1389,22 @@ mod tests {
             Some(SignalQuery::Symbol("glorp".to_owned()))
         );
         assert_eq!(detect_signal_query(&format!("buy {SOL_MINT}")), None);
+        assert!(matches!(
+            detect_signal_query("So11111111111111111111111111111111111111112"),
+            Some(SignalQuery::Address(TokenAddress { chain_id, .. })) if chain_id == "solana"
+        ));
+        assert!(matches!(
+            detect_signal_query("F3A1baCgv4TF79TSjdMTvpMDtNv8DJvHZwNc9DG8pump"),
+            Some(SignalQuery::Address(TokenAddress { chain_id, .. })) if chain_id == "solana"
+        ));
+        for laugh in [
+            "JAKAJAJJAJAJAJAJAJAJJAJAJAJAJAJAJJAJA",
+            "jajajajajajajajajajajajajajajajajajajaja",
+            "JAJAJAJAJAJAJAJAJAJAJAJAJAJAJAJAJAJAJAJAJAJA",
+            "asdkjasdkjaskdjaskdjaksjdkasjdkajsd",
+        ] {
+            assert_eq!(detect_signal_query(laugh), None, "{laugh}");
+        }
         assert_eq!(detect_signal_query("buy $glorp"), None);
     }
 
