@@ -199,6 +199,8 @@ Known compatibility key families include:
 - `token_signal:{signal_id}` and `token_signal:*` enrichment caches
 - `chat_admin:{chat_id}:{user_id}`
 - `creditless_cap:{chat_id}:{user_id}`
+- `poll:{poll_id}`, `poll_votes:{poll_id}`, and `chat_polls:{chat_id}` for
+  polls the bot sent, kept for 30 days
 
 Generic JSON cache records and stale-cache records preserve their established
 timestamp/value shapes and TTL semantics.

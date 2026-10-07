@@ -24,6 +24,8 @@ pub enum NativeTool {
     DollarRates,
     Weather,
     HackerNews,
+    CreatePoll,
+    GetPolls,
     BotCapabilities,
 }
 
@@ -44,6 +46,8 @@ impl NativeTool {
             Self::DollarRates => "dollar_rates",
             Self::Weather => "weather",
             Self::HackerNews => "hacker_news",
+            Self::CreatePoll => "create_poll",
+            Self::GetPolls => "get_polls",
             Self::BotCapabilities => "bot_capabilities",
         }
     }
@@ -59,7 +63,7 @@ impl NativeTool {
     }
 }
 
-const ALL_TOOLS: [NativeTool; 14] = [
+const ALL_TOOLS: [NativeTool; 16] = [
     NativeTool::CryptoPrices,
     NativeTool::Calculate,
     NativeTool::WebFetch,
@@ -73,6 +77,8 @@ const ALL_TOOLS: [NativeTool; 14] = [
     NativeTool::DollarRates,
     NativeTool::Weather,
     NativeTool::HackerNews,
+    NativeTool::CreatePoll,
+    NativeTool::GetPolls,
     NativeTool::BotCapabilities,
 ];
 
@@ -327,6 +333,24 @@ pub(crate) fn tool_schema(tool: NativeTool) -> Value {
                 "required": []
             }),
         ),
+        NativeTool::CreatePoll => (
+            "Send a native Telegram poll to the current chat. Use it only when someone asks for a poll or vote. Polls are public by default so get_polls can show who voted; make one anonymous only when asked. After sending, reply briefly without repeating the options.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "maxLength": 300, "description": "The poll question."},
+                    "options": {"type": "array", "items": {"type": "string", "maxLength": 100}, "minItems": 2, "maxItems": 12, "description": "Distinct answer options."},
+                    "anonymous": {"type": "boolean", "default": false, "description": "Hide who voted. Telegram then only reports counts."},
+                    "multiple_answers": {"type": "boolean", "default": false, "description": "Let each person pick more than one option."}
+                },
+                "required": ["question", "options"],
+                "additionalProperties": false
+            }),
+        ),
+        NativeTool::GetPolls => (
+            "Read the polls you sent in this chat, newest first, with vote counts and who voted for each option. Telegram never tells bots who voted in polls that users created.",
+            empty_parameters(),
+        ),
         NativeTool::BotCapabilities => (
             "Get the authoritative list of bot features and commands. Use when a user asks what the bot can do or which command to use.",
             empty_parameters(),
@@ -430,6 +454,8 @@ mod tests {
                 "dollar_rates",
                 "weather",
                 "hacker_news",
+                "create_poll",
+                "get_polls",
                 "bot_capabilities"
             ]
         );

@@ -20,6 +20,7 @@ const CAPABILITIES_ES: &str = r#"CAPACIDADES DEL BOT:
 - /rulo, /devo, /powerlaw, /rainbow, /satoshi, /sat, /sats: rulo desde oficial, arbitraje tarjeta/crypto, power law, rainbow chart y sats
 - /transcribe, /transcript, /describe: transcribo voice/audio/video/video_note o subtítulos de YouTube y describo fotos, stickers o GIF respondiendo al mensaje; también puedo procesar media cuando me hablan
 - links: arreglo links de X/Twitter, Bluesky, Instagram y Reddit según config; leo metadata, tweets y transcripts de YouTube como contexto
+- encuestas: si me lo piden mando una encuesta de Telegram y después puedo leer los votos y quién votó; en encuestas creadas por usuarios solo veo los votos cuando me responden a la encuesta, nunca quién votó
 - /tarea, /tareas, /task, /tasks: agendo recordatorios y tareas recurrentes por lenguaje natural; cualquiera de los comandos lista sin texto y crea con texto
 - /resumen, /summary, /tldr: resumo el chat, guardo resumen acumulado y recupero mensajes relevantes para responder con contexto
 - /convertbase, /random, /time, /comando, /command, /instance: random, conversión de bases, comandos Telegram, timestamp e instancia
@@ -48,6 +49,7 @@ const CAPABILITIES_EN: &str = r#"BOT CAPABILITIES:
 - /rulo, /devo, /powerlaw, /rainbow, /satoshi, /sat, /sats: official-rate, card/crypto, power-law, rainbow-chart, and satoshi tools
 - /transcribe, /transcript, /describe: transcribe audio, video, or YouTube captions; describe images, stickers, or GIFs
 - links: fix supported social links and read linked content as context
+- polls: when asked, I send a Telegram poll and can later read its votes and who voted; for polls users create, I only see counts when someone replies to the poll, never who voted
 - /tarea, /tareas, /task, /tasks: create reminders and recurring tasks with natural language
 - /resumen, /summary, /tldr: summarize chats and retrieve relevant prior messages
 - /convertbase, /random, /time, /comando, /command, /instance: random selection, base conversion, Telegram commands, timestamps, and instance info
