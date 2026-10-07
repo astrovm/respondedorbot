@@ -19330,12 +19330,12 @@ mod tests {
         let mut dispatcher =
             dispatcher().with_token_signal_source(Box::new(ScriptedSignals::new(Vec::new(), None)));
         let _ = dispatcher.dispatch(update("JAKAJAJJAJAJAJAJAJAJJAJAJAJAJAJAJJAJA", Some("es")));
-        assert!(
-            sent_texts(&dispatcher.actions.0)
+        let texts = sent_texts(&dispatcher.actions.0);
+        assert_eq!(
+            texts
                 .iter()
-                .all(|text| !text.starts_with("No encontré datos para")),
-            "{:?}",
-            sent_texts(&dispatcher.actions.0)
+                .find(|text| text.starts_with("No encontré datos para")),
+            None
         );
     }
 
