@@ -52,12 +52,32 @@ pub(crate) fn python_string(value: &Value) -> String {
     }
 }
 
+fn vote_count(value: Option<&Value>) -> Option<u64> {
+    value.and_then(Value::as_u64)
+}
+
+fn votes_label(count: u64) -> String {
+    if count == 1 {
+        "1 voto".to_owned()
+    } else {
+        format!("{count} votos")
+    }
+}
+
+/// Renders a poll for the model. Telegram sends a fresh poll with zero votes,
+/// so counts only show once someone voted or the poll closed; otherwise a
+/// stored copy would claim nobody voted forever. Bots never see who voted in
+/// polls they did not send, so the text says so instead of letting the model
+/// guess.
 fn poll_text(poll: &Map<String, Value>) -> Result<String, TelegramInputError> {
     let question = poll
         .get("question")
         .map_or_else(String::new, python_string)
         .trim()
         .to_owned();
+    let closed = poll.get("is_closed").is_some_and(python_truthy);
+    let total_votes = vote_count(poll.get("total_voter_count"));
+    let show_counts = total_votes.is_some_and(|total| total > 0 || closed);
     let mut options = Vec::new();
     match poll.get("options") {
         Some(Value::Array(raw_options)) => {
@@ -66,7 +86,13 @@ fn poll_text(poll: &Map<String, Value>) -> Result<String, TelegramInputError> {
                     continue;
                 };
                 if let Some(text) = option.get("text").filter(|value| python_truthy(value)) {
-                    options.push(python_string(text).trim().to_owned());
+                    let text = python_string(text).trim().to_owned();
+                    options.push(
+                        match vote_count(option.get("voter_count")).filter(|_| show_counts) {
+                            Some(votes) => format!("- {text} ({})", votes_label(votes)),
+                            None => format!("- {text}"),
+                        },
+                    );
                 }
             }
         }
@@ -76,16 +102,26 @@ fn poll_text(poll: &Map<String, Value>) -> Result<String, TelegramInputError> {
     if options.is_empty() {
         return Ok(question);
     }
-    let options = options
-        .into_iter()
-        .map(|option| format!("- {option}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    Ok(if question.is_empty() {
-        format!("Opciones:\n{options}")
-    } else {
-        format!("{question}\nOpciones:\n{options}")
-    })
+    let mut lines = Vec::new();
+    if !question.is_empty() {
+        lines.push(question);
+    }
+    lines.push("Opciones:".to_owned());
+    lines.extend(options);
+    if let Some(total) = total_votes.filter(|_| show_counts) {
+        lines.push(format!("Total: {}", votes_label(total)));
+    }
+    if closed {
+        lines.push("Encuesta cerrada".to_owned());
+    }
+    match poll.get("is_anonymous") {
+        Some(Value::Bool(true)) => lines.push("Encuesta anónima: nadie ve quién votó".to_owned()),
+        Some(Value::Bool(false)) => {
+            lines.push("Telegram no le muestra al bot quién votó".to_owned());
+        }
+        _ => {}
+    }
+    Ok(lines.join("\n"))
 }
 
 fn message_text(message: &Map<String, Value>) -> Result<String, TelegramInputError> {
@@ -369,6 +405,62 @@ mod tests {
             extract_message_content(&json!({"poll": {"question": " ", "options": []}}))
                 .map(|content| content.text),
             Ok(String::new())
+        );
+    }
+
+    #[test]
+    fn polls_show_votes_only_once_someone_voted_or_it_closed() {
+        let poll = |total: u64, closed: bool, anonymous: bool| {
+            extract_message_content(&json!({
+                "poll": {
+                    "question": "¿Qué hacés?",
+                    "options": [
+                        {"text": "Estoy laburando", "voter_count": total.saturating_sub(1)},
+                        {"text": "Durmiendo", "voter_count": total.min(1)},
+                        {"text": "Nada", "voter_count": 0}
+                    ],
+                    "total_voter_count": total,
+                    "is_closed": closed,
+                    "is_anonymous": anonymous
+                }
+            }))
+            .map(|content| content.text)
+        };
+        assert_eq!(
+            poll(0, false, false),
+            Ok(
+                "¿Qué hacés?\nOpciones:\n- Estoy laburando\n- Durmiendo\n- Nada\n\
+                Telegram no le muestra al bot quién votó"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            poll(3, false, true),
+            Ok(
+                "¿Qué hacés?\nOpciones:\n- Estoy laburando (2 votos)\n- Durmiendo (1 voto)\n\
+                - Nada (0 votos)\nTotal: 3 votos\nEncuesta anónima: nadie ve quién votó"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            poll(0, true, false),
+            Ok(
+                "¿Qué hacés?\nOpciones:\n- Estoy laburando (0 votos)\n- Durmiendo (0 votos)\n\
+                - Nada (0 votos)\nTotal: 0 votos\nEncuesta cerrada\n\
+                Telegram no le muestra al bot quién votó"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            extract_message_content(&json!({
+                "poll": {
+                    "options": [{"text": "Uno", "voter_count": "lots"}],
+                    "total_voter_count": -2,
+                    "is_anonymous": "yes"
+                }
+            }))
+            .map(|content| content.text),
+            Ok("Opciones:\n- Uno".to_owned())
         );
     }
 

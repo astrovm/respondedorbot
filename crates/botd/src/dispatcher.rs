@@ -19326,6 +19326,20 @@ mod tests {
     }
 
     #[test]
+    fn long_laughs_are_not_treated_as_solana_addresses() {
+        let mut dispatcher =
+            dispatcher().with_token_signal_source(Box::new(ScriptedSignals::new(Vec::new(), None)));
+        let _ = dispatcher.dispatch(update("JAKAJAJJAJAJAJAJAJAJJAJAJAJAJAJAJJAJA", Some("es")));
+        assert!(
+            sent_texts(&dispatcher.actions.0)
+                .iter()
+                .all(|text| !text.starts_with("No encontré datos para")),
+            "{:?}",
+            sent_texts(&dispatcher.actions.0)
+        );
+    }
+
+    #[test]
     fn empty_multi_asset_quotes_are_localized_per_request() {
         let mut dispatcher =
             dispatcher().with_market_price_source(market_prices(MarketPriceLoad {
