@@ -752,12 +752,11 @@ mod tests {
             }]}}]}),
         ] {
             let provider = paced_provider(vec![first, reasoning_frame("late")]);
-            let result = provider.stream_round_events(&messages(), &[], ignore_event);
-            assert!(
-                result.is_ok(),
-                "{:?}",
-                result.err().map(|error| error.source)
-            );
+            let failure = provider
+                .stream_round_events(&messages(), &[], ignore_event)
+                .err()
+                .map(|error| error.source);
+            assert_eq!(failure, None);
         }
     }
 
