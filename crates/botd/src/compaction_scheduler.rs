@@ -556,7 +556,12 @@ mod tests {
         let suffix = i64::try_from(nonce % 100_000_000).map_err(crate::error_text)?;
         let user_id = base + suffix;
         BillingRepository::new(database_url)
-            .mint_user_credits(user_id, 100, None)
+            .mint_user_credits(
+                user_id,
+                100,
+                None,
+                &crate::test_env::synthetic_operation_id(),
+            )
             .map_err(crate::error_text)?;
         Ok((nonce, user_id))
     }

@@ -251,12 +251,15 @@ pub trait BillingBalanceSource {
     fn load(&mut self, user_id: i64, chat_id: Option<i64>) -> Result<BillingBalances, String>;
 }
 
+/// Credit-moving commands carry an operation id unique to their Telegram
+/// message, so a retried update can't apply them twice.
 pub trait BillingTransferSink {
     fn transfer(
         &mut self,
         user_id: i64,
         chat_id: i64,
         amount: i64,
+        operation_id: &str,
     ) -> Result<TransferResult, String>;
 }
 
@@ -271,7 +274,7 @@ pub trait ChargeHistorySource {
 }
 
 pub trait AdminCreditSink {
-    fn mint(&mut self, user_id: i64, amount: i64) -> Result<i64, String>;
+    fn mint(&mut self, user_id: i64, amount: i64, operation_id: &str) -> Result<i64, String>;
 }
 
 pub trait AdminCreditLogSource {
@@ -5141,7 +5144,8 @@ where
             let Some(sink) = self.transfer_sink.as_mut() else {
                 return Err(DispatchError::MissingService("credit transfers"));
             };
-            let text = match sink.transfer(user_id, chat_id, amount) {
+            let operation_id = format!("transfer:{chat_id}:{}", message_id.0);
+            let text = match sink.transfer(user_id, chat_id, amount, &operation_id) {
                 Ok(result) => transfer_result_reply(amount, result, locale),
                 Err(error) => {
                     self.state_diagnostics.push(format!(
@@ -5164,7 +5168,8 @@ where
             let Some(sink) = self.admin_credit_sink.as_mut() else {
                 return Err(DispatchError::MissingService("admin credit minting"));
             };
-            let text = match sink.mint(user_id, amount) {
+            let operation_id = format!("printcredits:{}:{}", chat_id.0, message_id.0);
+            let text = match sink.mint(user_id, amount, &operation_id) {
                 Ok(balance) => printcredits_result_reply(amount, balance, locale),
                 Err(error) => {
                     self.state_diagnostics.push(format!(
@@ -6706,7 +6711,13 @@ mod tests {
             user_id: i64,
             chat_id: i64,
             amount: i64,
+            operation_id: &str,
         ) -> Result<TransferResult, String> {
+            // One id per Telegram message: "transfer:<chat>:<message>".
+            assert!(
+                operation_id.starts_with(&format!("transfer:{chat_id}:"))
+                    && operation_id.len() > format!("transfer:{chat_id}:").len()
+            );
             self.calls.borrow_mut().push((user_id, chat_id, amount));
             self.result.clone()
         }
@@ -6720,7 +6731,10 @@ mod tests {
     }
 
     impl AdminCreditSink for AdminCredits {
-        fn mint(&mut self, user_id: i64, amount: i64) -> Result<i64, String> {
+        fn mint(&mut self, user_id: i64, amount: i64, operation_id: &str) -> Result<i64, String> {
+            assert!(
+                operation_id.starts_with("printcredits:") && operation_id.matches(':').count() == 2
+            );
             self.calls.borrow_mut().push((user_id, amount));
             self.result.clone()
         }

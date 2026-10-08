@@ -642,7 +642,12 @@ mod tests {
         let usage_tag = format!("synthetic-usage-{nonce}");
         let repository = BillingRepository::new(database_url);
         repository
-            .mint_user_credits(user_id, 100, None)
+            .mint_user_credits(
+                user_id,
+                100,
+                None,
+                &crate::test_env::synthetic_operation_id(),
+            )
             .map_err(crate::error_text)?;
         let metadata = serde_json::Map::from_iter([
             ("operation_id".to_owned(), json!(&operation_id)),
@@ -711,7 +716,12 @@ mod tests {
         let legacy_usage_tag = format!("synthetic-legacy-usage-{nonce}");
         let legacy_settlement_id = format!("synthetic-legacy-settlement-{nonce}");
         repository
-            .mint_user_credits(legacy_user_id, 100, None)
+            .mint_user_credits(
+                legacy_user_id,
+                100,
+                None,
+                &crate::test_env::synthetic_operation_id(),
+            )
             .map_err(crate::error_text)?;
         let legacy_metadata = serde_json::Map::from_iter([
             ("settlement_id".to_owned(), json!(&legacy_settlement_id)),
