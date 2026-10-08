@@ -1262,11 +1262,13 @@ where
                         eprintln!("{diagnostic}");
                         result.diagnostics.push(diagnostic);
                     }
+                    // The loop already ran an answer round after the
+                    // limit, so only an empty reply needs the fallback.
                     (
                         result.text,
                         result.billing_segments,
                         result.diagnostics,
-                        result.stopped_at_limit,
+                        false,
                         result.failure_fallbacks,
                     )
                 }
@@ -1316,7 +1318,9 @@ where
                 input,
                 text: text.clone(),
                 segments,
-                kind: PendingKind::Conversation { provider_failed },
+                kind: PendingKind::Conversation {
+                    provider_failed: fallback,
+                },
                 compaction_plan,
                 compaction_payer: base.source,
             },
@@ -2842,7 +2846,8 @@ mod tests {
         {
             let mut rounds = vec![Ok(first_round.clone())];
             if empty_success {
-                rounds.push(Ok(round("", None)));
+                // The empty reply and the answer round that follows it.
+                rounds.extend([Ok(round("", None)), Ok(round("", None))]);
             } else {
                 rounds.extend([failed_round(), failed_round(), failed_round()]);
             }
@@ -2875,7 +2880,7 @@ mod tests {
             ));
             assert_eq!(
                 service.provider.prompts.borrow().len(),
-                if empty_success { 2 } else { 4 }
+                if empty_success { 3 } else { 4 }
             );
         }
     }
@@ -5007,7 +5012,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_round_limit_falls_back_and_bills_the_rounds_already_used() {
+    fn tool_round_limit_answers_with_what_the_tools_found() {
         let tool_round = ChatRoundResult {
             tool_calls: vec![StreamToolCall {
                 index: 0,
@@ -5021,7 +5026,10 @@ mod tests {
         };
         let mut service = NativeConversation::new(
             Provider {
-                rounds: RefCell::new(VecDeque::from([Ok(tool_round)])),
+                rounds: RefCell::new(VecDeque::from([
+                    Ok(tool_round),
+                    Ok(round("synthetic answer from the lookup", None)),
+                ])),
                 prompts: RefCell::new(Vec::new()),
             },
             Tools::lookup(),
@@ -5033,9 +5041,9 @@ mod tests {
         );
         let (preparation, events) = prepare_with_events(&mut service, input());
         let (text, completion_id, diagnostics) = pending(reply(preparation));
-        assert_eq!(text, "I could not answer. Try again");
+        assert_eq!(text, "synthetic answer from the lookup");
         assert!(diagnostics.contains(
-            &"AI tool loop limit reached: operation_id=ai:42:7:88 provider_rounds=1 tool_calls_executed=1"
+            &"AI tool loop limit reached: operation_id=ai:42:7:88 provider_rounds=2 tool_calls_executed=1"
                 .to_owned()
         ));
         assert!(events.contains(&AiStreamEvent::ToolResult {
@@ -5043,6 +5051,61 @@ mod tests {
             name: "synthetic_lookup".to_owned(),
             output: "synthetic lookup result".to_owned(),
         }));
+        assert!(events.contains(&AiStreamEvent::FinalText(
+            "synthetic answer from the lookup".to_owned()
+        )));
+        let prompts = service.provider.prompts.borrow();
+        let answer_prompt = prompts.last().map(Vec::as_slice).unwrap_or_default();
+        assert_eq!(
+            answer_prompt.last().map(|message| message.role),
+            Some(PromptRole::System)
+        );
+        assert_eq!(
+            answer_prompt
+                .iter()
+                .rev()
+                .nth(1)
+                .map(|message| message.role),
+            Some(PromptRole::Tool)
+        );
+        drop(prompts);
+        assert_eq!(
+            service.complete_delivery(deliver(completion_id, true)),
+            Ok(())
+        );
+        assert_eq!(service.billing.settlements[0].reason, "ai_response_success");
+        assert!(service.billing.settlements[0].actual_credit_units > 0);
+    }
+
+    #[test]
+    fn tool_round_limit_falls_back_when_the_answer_round_is_empty() {
+        let tool_round = ChatRoundResult {
+            tool_calls: vec![StreamToolCall {
+                index: 0,
+                id: "synthetic-call".to_owned(),
+                call_type: "function".to_owned(),
+                name: "synthetic_lookup".to_owned(),
+                arguments: "{}".to_owned(),
+            }],
+            finish_reason: Some("tool_calls".to_owned()),
+            ..round("", None)
+        };
+        let mut service = NativeConversation::new(
+            Provider {
+                rounds: RefCell::new(VecDeque::from([Ok(tool_round), Ok(round(" ", None))])),
+                prompts: RefCell::new(Vec::new()),
+            },
+            Tools::lookup(),
+            State::default(),
+            Billing::default(),
+            "synthetic persona",
+            DEEPSEEK_MODEL,
+            1,
+        );
+        let (preparation, _events) = prepare_with_events(&mut service, input());
+        let (text, completion_id, _diagnostics) = pending(reply(preparation));
+        assert_eq!(text, "I could not answer. Try again");
+        assert_eq!(service.provider.prompts.borrow().len(), 2);
         assert_eq!(
             service.complete_delivery(deliver(completion_id, true)),
             Ok(())

@@ -202,6 +202,61 @@ fn error_text(error: impl std::fmt::Display) -> String {
 
 const MEDIA_PIPES_UNAVAILABLE: &str = "media process pipes are unavailable";
 
+/// A temporary copy of media input, readable only by this user and removed
+/// when dropped.
+struct MediaInputFile {
+    path: std::path::PathBuf,
+}
+
+impl MediaInputFile {
+    fn create(input: &[u8]) -> io::Result<Self> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // The container may reuse a PID across restarts, so the start time
+        // keeps names from clashing with files a crash left behind.
+        let started = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "botd-media-{}-{started}-{sequence}",
+            std::process::id()
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let file = Self { path };
+        options.open(&file.path)?.write_all(input)?;
+        Ok(file)
+    }
+}
+
+impl Drop for MediaInputFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Whether a RIFF/WAVE payload carries any audio samples. ffmpeg still
+/// writes a valid header when the input has no decodable audio.
+fn wav_has_samples(bytes: &[u8]) -> bool {
+    if bytes.get(..4) != Some(b"RIFF") || bytes.get(8..12) != Some(b"WAVE") {
+        return true;
+    }
+    let mut offset = 12;
+    while let Some(header) = bytes.get(offset..offset + 8) {
+        let size = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
+        if &header[..4] == b"data" {
+            // Piped output can't seek back to fill in the size, so ffmpeg
+            // leaves it unset; what follows the header is the real data.
+            return bytes.len() > offset + 8;
+        }
+        offset = offset.saturating_add(8).saturating_add(size + (size & 1));
+    }
+    false
+}
+
 #[derive(Debug, Clone)]
 pub struct FfmpegMediaProcessor {
     ffmpeg: String,
@@ -248,8 +303,24 @@ impl FfmpegMediaProcessor {
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or_else(|| "media process timeout is too large".to_owned())?;
+        // MP4 files often keep their index at the end, which ffmpeg can only
+        // reach by seeking; from a pipe it decodes nothing. Media read from
+        // `pipe:0` goes through a private temporary file instead.
+        let input_file = if arguments.iter().any(|argument| argument == "pipe:0") {
+            Some(MediaInputFile::create(input).map_err(error_text)?)
+        } else {
+            None
+        };
+        let arguments = arguments
+            .iter()
+            .map(|argument| match &input_file {
+                Some(file) if argument == "pipe:0" => file.path.as_os_str().to_owned(),
+                _ => argument.into(),
+            })
+            .collect::<Vec<std::ffi::OsString>>();
+        let input = if input_file.is_some() { &[] } else { input };
         let mut child = Command::new(program)
-            .args(arguments)
+            .args(&arguments)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -370,6 +441,28 @@ impl FfmpegMediaProcessor {
         (duration.is_finite() && duration > 0.0).then_some(duration)
     }
 
+    /// True only when ffprobe reads the media and finds no audio stream.
+    fn has_no_audio_stream(&self, input: &[u8]) -> bool {
+        Self::run(
+            &self.ffprobe,
+            &[
+                "-v".to_owned(),
+                "error".to_owned(),
+                "-show_entries".to_owned(),
+                "stream=codec_type".to_owned(),
+                "-of".to_owned(),
+                "csv=p=0".to_owned(),
+                "pipe:0".to_owned(),
+            ],
+            input,
+        )
+        .is_ok_and(|output| {
+            !String::from_utf8_lossy(&output)
+                .lines()
+                .any(|line| line.trim() == "audio")
+        })
+    }
+
     fn prepare_audio_bounded(
         &self,
         input: &[u8],
@@ -403,7 +496,7 @@ impl FfmpegMediaProcessor {
             max_input_bytes,
             MEDIA_PROCESS_OUTPUT_MAX_BYTES,
         )
-        .unwrap_or_else(|error| {
+        .or_else(|error| {
             eprintln!(
                 "{}",
                 audio_conversion_failure_diagnostic(
@@ -413,8 +506,31 @@ impl FfmpegMediaProcessor {
                     started.elapsed(),
                 )
             );
-            input.to_vec()
+            // A clip with no audio track has nothing to transcribe; anything
+            // else goes to the provider as it came.
+            if self.has_no_audio_stream(input) {
+                Err(())
+            } else {
+                Ok(input.to_vec())
+            }
         });
+        let extracted = match extracted {
+            Ok(extracted) if wav_has_samples(&extracted) => Some(extracted),
+            Ok(_) | Err(()) => None,
+        };
+        let Some(extracted) = extracted else {
+            eprintln!(
+                "Media trace: {}",
+                json!({
+                    "event": "audio_prepare_invalid",
+                    "error_kind": "NoAudio",
+                    "input_bytes": input.len(),
+                    "duration_hint_seconds": duration_hint_seconds,
+                    "elapsed_ms": started.elapsed().as_millis(),
+                })
+            );
+            return Ok(None);
+        };
         let hinted = duration_hint_seconds.filter(|value| value.is_finite() && *value > 0.0);
         let duration_seconds = hinted
             .or_else(|| self.duration(&extracted))
@@ -1312,6 +1428,32 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn duration_sums_packets_when_the_container_has_none() -> TestResult {
+        // Written to a pipe, FLAC can't record its total length, so ffprobe
+        // reports no container duration and the packets are summed instead.
+        let generated = Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=2",
+                "-f",
+                "flac",
+                "pipe:1",
+            ])
+            .output()?;
+        assert!(generated.status.success());
+        let duration = FfmpegMediaProcessor::default().duration(&generated.stdout);
+        assert!(
+            duration.is_some_and(|seconds| (seconds - 2.0).abs() < 0.05),
+            "{duration:?}"
+        );
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn media_process_kills_timed_out_children() {
@@ -1386,6 +1528,159 @@ mod tests {
         );
         assert_eq!(pixels.map(|pixels| pixels.len()), Ok(320 * 240 * 3));
         Ok(())
+    }
+
+    /// An MP4 with its index after the media data, as phones and Telegram
+    /// often produce: ffmpeg can't decode it from a pipe.
+    fn mp4_with_trailing_index() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let path = std::env::temp_dir().join(format!("botd-trailing-index-{nonce}.mp4"));
+        let generated = Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=duration=2:size=320x240:rate=15",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=duration=2",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-b:v",
+                "2M",
+                "-c:a",
+                "aac",
+                "-shortest",
+            ])
+            .arg(&path)
+            .status();
+        let mp4 = std::fs::read(&path).unwrap_or_default();
+        let _ = std::fs::remove_file(&path);
+        assert!(generated.is_ok_and(|status| status.success()));
+        let index = mp4.windows(4).position(|window| window == b"moov");
+        let data = mp4.windows(4).position(|window| window == b"mdat");
+        assert!(index > data, "the index must follow the media data");
+        Ok(mp4)
+    }
+
+    #[test]
+    fn video_with_a_trailing_index_yields_audio_and_a_frame() -> TestResult {
+        let mp4 = mp4_with_trailing_index()?;
+        let mut processor = FfmpegMediaProcessor::default();
+        let audio = processor
+            .prepare_audio(&mp4, Some(2.0))?
+            .ok_or("no audio was produced")?;
+        assert_eq!(audio.bytes.get(..4), Some(b"RIFF".as_slice()));
+        // Two seconds of 16 kHz mono 16-bit PCM.
+        assert!(audio.bytes.len() > 60_000, "{}", audio.bytes.len());
+        let frame = processor
+            .prepare_image(&mp4)?
+            .ok_or("no frame was produced")?;
+        assert_eq!(frame.mime, "image/webp");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn media_input_files_are_private_and_removed_after_use() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+        let file = MediaInputFile::create(b"synthetic media")?;
+        let path = file.path.clone();
+        assert_eq!(std::fs::read(&path)?, b"synthetic media");
+        assert_eq!(
+            std::fs::metadata(&path)?.permissions().mode() & 0o777,
+            0o600
+        );
+        let second = MediaInputFile::create(b"")?;
+        assert_ne!(second.path, path);
+        drop(file);
+        drop(second);
+        assert!(!path.exists());
+
+        // The process reads the file, not stdin, and the file is gone after.
+        let output = FfmpegMediaProcessor::run_bounded(
+            "sh",
+            &[
+                "-c".to_owned(),
+                "cat \"$0\"; printf '\\n%s' \"$0\"; cat".to_owned(),
+                "pipe:0".to_owned(),
+            ],
+            b"from file",
+            Duration::from_secs(5),
+            16,
+            1024,
+        )
+        .unwrap_or_default();
+        let output = String::from_utf8(output)?;
+        let (content, used) = output.split_once('\n').ok_or("no path echoed")?;
+        assert_eq!(content, "from file");
+        assert!(used.contains("botd-media-"), "{used}");
+        assert!(!std::path::Path::new(used).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn media_without_audio_samples_is_invalid_audio() -> TestResult {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let path = std::env::temp_dir().join(format!("botd-silent-video-{nonce}.mp4"));
+        let generated = Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=duration=1:size=64x64:rate=5",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+            ])
+            .arg(&path)
+            .status();
+        let mp4 = std::fs::read(&path).unwrap_or_default();
+        let _ = std::fs::remove_file(&path);
+        assert!(generated.is_ok_and(|status| status.success()));
+        // A header-only WAV and a clip with no audio track are both
+        // rejected before reaching the transcriber.
+        let header_only = pcm_wav(16_000, &[]);
+        assert!(!wav_has_samples(&header_only));
+        let mut processor = FfmpegMediaProcessor::default();
+        assert_eq!(processor.prepare_audio(&header_only, Some(54.0))?, None);
+        assert!(processor.has_no_audio_stream(&mp4));
+        assert_eq!(processor.prepare_audio(&mp4, Some(1.0))?, None);
+        // Media ffprobe can't read keeps the raw fallback.
+        assert!(!processor.has_no_audio_stream(b"not media"));
+        let wav = pcm_wav(8_000, &[0; 800]);
+        assert!(!processor.has_no_audio_stream(&wav));
+        Ok(())
+    }
+
+    #[test]
+    fn wav_sample_detection_walks_the_chunks() {
+        let mut with_samples = pcm_wav(16_000, &[1, 2]);
+        assert!(wav_has_samples(&with_samples));
+        // ffmpeg's piped output: a LIST chunk, then a data chunk with an
+        // unset size and nothing after it.
+        let mut piped = b"RIFF\xff\xff\xff\xffWAVEfmt \x10\0\0\0".to_vec();
+        piped.extend([0; 16]);
+        piped.extend(b"LIST\x03\0\0\0abc\0");
+        piped.extend(b"data\xff\xff\xff\xff");
+        assert!(!wav_has_samples(&piped));
+        piped.extend([0, 0]);
+        assert!(wav_has_samples(&piped));
+        // Not WAV at all: left to the transcriber.
+        assert!(wav_has_samples(b"OggS"));
+        assert!(wav_has_samples(b""));
+        // A WAV whose chunks end before any data chunk.
+        with_samples.truncate(20);
+        assert!(!wav_has_samples(&with_samples));
+        assert!(!wav_has_samples(b"RIFF\0\0\0\0WAVE"));
     }
 
     #[test]

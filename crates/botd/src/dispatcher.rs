@@ -4361,6 +4361,9 @@ where
         let preparation = match preparation {
             Ok(preparation) => preparation,
             Err(error) => {
+                // Dispatcher diagnostics never reach the log on their own,
+                // and this is the only trace of why the reply failed.
+                eprintln!("AI conversation failed: {error:?}");
                 self.state_diagnostics
                     .push(format!("AI conversation: {error}"));
                 let text = match locale {
