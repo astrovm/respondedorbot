@@ -1047,6 +1047,7 @@ mod tests {
             MediaProviderError::OpenRouter(OpenRouterChatError::MalformedResponse),
             MediaProviderError::OpenRouter(OpenRouterChatError::IncompleteStream),
             MediaProviderError::OpenRouter(OpenRouterChatError::Stream("broken".to_owned())),
+            MediaProviderError::OpenRouter(OpenRouterChatError::ThinkingTimeout),
         ] {
             let failure = Err(error);
             let trace =
