@@ -657,8 +657,11 @@ mod tests {
                 emitted.push(event);
                 Ok(())
             },
-        )?;
-        assert_eq!(result.text, "hello world");
+        );
+        assert_eq!(
+            result.ok().map(|round| round.text).as_deref(),
+            Some("hello world")
+        );
         assert!(emitted.contains(&ProviderStreamEvent::TextDelta("hello ".to_owned())));
         // Without tools the request has nothing to forbid, and a plain round
         // never sends a tool choice.

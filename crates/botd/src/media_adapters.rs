@@ -212,8 +212,16 @@ impl MediaInputFile {
     fn create(input: &[u8]) -> io::Result<Self> {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("botd-media-{}-{sequence}", std::process::id()));
+        // The container may reuse a PID across restarts, so the start time
+        // keeps names from clashing with files a crash left behind.
+        let started = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "botd-media-{}-{started}-{sequence}",
+            std::process::id()
+        ));
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
