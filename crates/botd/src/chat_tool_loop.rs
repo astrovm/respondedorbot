@@ -1426,6 +1426,10 @@ mod tests {
                 source: OpenRouterChatError::ThinkingTimeout,
                 partial: Box::new(slow),
             }),
+            Err(ChatRoundError {
+                source: OpenRouterChatError::IncompleteStream,
+                partial: Box::new(round("", Vec::new(), json!({"pending": true}))),
+            }),
             Ok(round("quick answer", Vec::new(), json!({"round": 2}))),
         ]);
         let result = run_chat_tool_loop(
@@ -1439,11 +1443,18 @@ mod tests {
         )
         .unwrap_or_else(|error| *error.partial);
         assert_eq!(result.text, "quick answer");
-        assert_eq!(result.provider_rounds, 2);
+        assert_eq!(result.provider_rounds, 3);
+        // The answer is the turn's second round, retried once.
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.starts_with("AI provider retry: round=2 attempt=1"))
+        );
         let observed = provider.observed.borrow();
-        assert_eq!(observed.len(), 2);
+        assert_eq!(observed.len(), 3);
         assert_eq!(
-            observed[1].last().map(|message| &message.content),
+            observed[2].last().map(|message| &message.content),
             Some(&PromptContent::Text(SLOW_THINKING_ANSWER_PROMPT.to_owned()))
         );
     }

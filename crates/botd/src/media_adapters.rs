@@ -1661,6 +1661,25 @@ mod tests {
     }
 
     #[test]
+    fn media_provider_errors_have_stable_trace_kinds() {
+        let cases = [
+            (MediaProviderError::MissingCredential, "MissingCredential"),
+            (MediaProviderError::MissingText, "MissingText"),
+            (
+                MediaProviderError::OpenRouter(OpenRouterChatError::ThinkingTimeout),
+                "OpenRouter.ThinkingTimeout",
+            ),
+            (
+                MediaProviderError::OpenRouter(OpenRouterChatError::IncompleteStream),
+                "OpenRouter.IncompleteStream",
+            ),
+        ];
+        for (error, kind) in cases {
+            assert_eq!(media_provider_error_kind(&error), kind);
+        }
+    }
+
+    #[test]
     fn wav_sample_detection_walks_the_chunks() {
         let mut with_samples = pcm_wav(16_000, &[1, 2]);
         assert!(wav_has_samples(&with_samples));
