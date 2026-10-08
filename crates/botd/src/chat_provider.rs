@@ -648,10 +648,12 @@ mod tests {
             "requested/model",
         );
         let mut emitted = Vec::new();
-        let result = provider.stream_answer_round_events(
+        // Through the loop's trait, as the tool loop calls it.
+        let result = crate::chat_tool_loop::ChatRoundStream::stream_answer_round_events(
+            &provider,
             &messages(),
             &[json!({"type": "function"})],
-            |event| {
+            &mut |event| {
                 emitted.push(event);
                 Ok(())
             },
@@ -660,8 +662,10 @@ mod tests {
         assert!(emitted.contains(&ProviderStreamEvent::TextDelta("hello ".to_owned())));
         // Without tools the request has nothing to forbid, and a plain round
         // never sends a tool choice.
-        provider.stream_answer_round_events(&messages(), &[], |_| Ok(()))?;
-        provider.stream_round(&messages(), &[json!({"type": "function"})], ignore_text)?;
+        let without_tools = provider.stream_answer_round_events(&messages(), &[], |_| Ok(()));
+        assert!(without_tools.is_ok());
+        let plain = provider.stream_round(&messages(), &[json!({"type": "function"})], ignore_text);
+        assert!(plain.is_ok());
 
         let requests = provider.transport.requests.borrow();
         let bodies = requests

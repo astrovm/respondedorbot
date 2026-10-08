@@ -1420,6 +1420,32 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn duration_sums_packets_when_the_container_has_none() -> TestResult {
+        // Written to a pipe, FLAC can't record its total length, so ffprobe
+        // reports no container duration and the packets are summed instead.
+        let generated = Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=2",
+                "-f",
+                "flac",
+                "pipe:1",
+            ])
+            .output()?;
+        assert!(generated.status.success());
+        let duration = FfmpegMediaProcessor::default().duration(&generated.stdout);
+        assert!(
+            duration.is_some_and(|seconds| (seconds - 2.0).abs() < 0.05),
+            "{duration:?}"
+        );
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn media_process_kills_timed_out_children() {
@@ -1580,7 +1606,8 @@ mod tests {
             Duration::from_secs(5),
             16,
             1024,
-        )?;
+        )
+        .unwrap_or_default();
         let output = String::from_utf8(output)?;
         let (content, used) = output.split_once('\n').ok_or("no path echoed")?;
         assert_eq!(content, "from file");

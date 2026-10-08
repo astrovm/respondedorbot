@@ -1292,12 +1292,10 @@ mod tests {
         );
     }
 
-    fn system_text(message: Option<&PromptMessage>) -> Option<String> {
-        let message = message.filter(|message| message.role == PromptRole::System)?;
-        match &message.content {
-            PromptContent::Text(text) => Some(text.clone()),
-            _ => None,
-        }
+    fn system_text(message: Option<&PromptMessage>) -> Option<&PromptContent> {
+        message
+            .filter(|message| message.role == PromptRole::System)
+            .map(|message| &message.content)
     }
 
     #[test]
@@ -1340,8 +1338,8 @@ mod tests {
         assert_eq!(observed[1].len(), 4);
         assert_eq!(observed[1][2].role, PromptRole::Tool);
         assert_eq!(
-            system_text(observed[1].last()).as_deref(),
-            Some(TOOL_LIMIT_ANSWER_PROMPT)
+            system_text(observed[1].last()),
+            Some(&PromptContent::Text(TOOL_LIMIT_ANSWER_PROMPT.to_owned()))
         );
         // The instruction is for that round only, never the history.
         assert_eq!(result.messages.len(), 3);
@@ -1378,8 +1376,8 @@ mod tests {
             assert_eq!(*provider.tools_offered.borrow(), [1, 0]);
             let observed = provider.observed.borrow();
             assert_eq!(
-                system_text(observed[1].last()).as_deref(),
-                Some(EMPTY_REPLY_ANSWER_PROMPT)
+                system_text(observed[1].last()),
+                Some(&PromptContent::Text(EMPTY_REPLY_ANSWER_PROMPT.to_owned()))
             );
             assert_eq!(observed[1].len(), 2);
         }
