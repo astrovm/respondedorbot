@@ -782,6 +782,8 @@ pub struct ChatCompletionRequest {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
@@ -806,6 +808,7 @@ impl ChatCompletionRequest {
             model,
             messages,
             tools: Vec::new(),
+            tool_choice: None,
             max_tokens: None,
             temperature: None,
             provider: None,

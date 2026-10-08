@@ -85,6 +85,7 @@ impl<Transport> OpenRouterChatStreamer<Transport> {
         &self,
         messages: &[PromptMessage],
         tools: &[Value],
+        answer_only: bool,
     ) -> Result<ChatCompletionRequest, OpenRouterChatError> {
         let mut request = ChatCompletionRequest::new(
             &self.model,
@@ -96,6 +97,17 @@ impl<Transport> OpenRouterChatStreamer<Transport> {
         request.tools = tools.to_vec();
         request.max_tokens = u64::try_from(chat_output_token_limit(&self.model)).ok();
         request.reasoning = Some(reasoning_config(messages));
+        if answer_only {
+            // The answer round must spend its output on the reply, so it
+            // keeps reasoning short and may not start new tool calls.
+            if !request.tools.is_empty() {
+                request.tool_choice = Some("none".to_owned());
+            }
+            request.reasoning = Some(ReasoningConfig {
+                enabled: true,
+                effort: Some("low".to_owned()),
+            });
+        }
         request.stream = true;
         Ok(request)
     }
@@ -149,7 +161,22 @@ impl<Transport: OpenRouterStreamTransport> OpenRouterChatStreamer<Transport> {
     where
         F: FnMut(ProviderStreamEvent) -> Result<(), OpenRouterChatError>,
     {
-        self.stream_round_dyn(messages, tools, &mut on_event)
+        self.stream_round_dyn(messages, tools, false, &mut on_event)
+    }
+
+    /// Streams a round that must answer in text: the tools stay declared so
+    /// the history's tool calls remain valid, but `tool_choice` forbids new
+    /// ones.
+    pub fn stream_answer_round_events<F>(
+        &self,
+        messages: &[PromptMessage],
+        tools: &[Value],
+        mut on_event: F,
+    ) -> Result<ChatRoundResult, ChatRoundError>
+    where
+        F: FnMut(ProviderStreamEvent) -> Result<(), OpenRouterChatError>,
+    {
+        self.stream_round_dyn(messages, tools, true, &mut on_event)
     }
 
     /// One non-generic streaming implementation shared by every event consumer.
@@ -157,10 +184,11 @@ impl<Transport: OpenRouterStreamTransport> OpenRouterChatStreamer<Transport> {
         &self,
         messages: &[PromptMessage],
         tools: &[Value],
+        answer_only: bool,
         on_event: &mut dyn FnMut(ProviderStreamEvent) -> Result<(), OpenRouterChatError>,
     ) -> Result<ChatRoundResult, ChatRoundError> {
         let mut result = ChatRoundResult::empty();
-        let request = match self.request(messages, tools) {
+        let request = match self.request(messages, tools, answer_only) {
             Ok(request) => request,
             Err(source) => {
                 return Err(ChatRoundError {
@@ -604,6 +632,53 @@ mod tests {
         assert!(body["reasoning"].get("effort").is_none());
         assert_eq!(body["messages"][1]["content"][0]["type"], "text");
         assert_eq!(body["tools"][0]["type"], "function");
+        Ok(())
+    }
+
+    #[test]
+    fn answer_round_keeps_tools_declared_but_forbids_calls() -> crate::test_env::TestResult {
+        let provider = OpenRouterChatStreamer::new(
+            Transport {
+                chunks: stream_body(true),
+                failure: None,
+                requests: RefCell::new(Vec::new()),
+            },
+            "synthetic-key",
+            "https://synthetic.invalid/api/v1",
+            "requested/model",
+        );
+        let mut emitted = Vec::new();
+        let result = provider.stream_answer_round_events(
+            &messages(),
+            &[json!({"type": "function"})],
+            |event| {
+                emitted.push(event);
+                Ok(())
+            },
+        )?;
+        assert_eq!(result.text, "hello world");
+        assert!(emitted.contains(&ProviderStreamEvent::TextDelta("hello ".to_owned())));
+        // Without tools the request has nothing to forbid, and a plain round
+        // never sends a tool choice.
+        provider.stream_answer_round_events(&messages(), &[], |_| Ok(()))?;
+        provider.stream_round(&messages(), &[json!({"type": "function"})], ignore_text)?;
+
+        let requests = provider.transport.requests.borrow();
+        let bodies = requests
+            .iter()
+            .map(|request| serde_json::from_str::<Value>(&request.body).unwrap_or(Value::Null))
+            .collect::<Vec<_>>();
+        assert_eq!(bodies[0]["tool_choice"], "none");
+        assert_eq!(bodies[0]["tools"][0]["type"], "function");
+        assert_eq!(
+            bodies[0]["reasoning"],
+            json!({"enabled": true, "effort": "low"})
+        );
+        assert!(bodies[1].get("tool_choice").is_none());
+        assert!(bodies[1].get("tools").is_none());
+        assert_eq!(bodies[1]["reasoning"]["effort"], "low");
+        assert!(bodies[2].get("tool_choice").is_none());
+        assert!(bodies[2]["reasoning"].get("effort").is_none());
         Ok(())
     }
 

@@ -1,7 +1,7 @@
 //! Bounded native chat/tool orchestration with durable per-round usage.
 
 use bot_adapters::openrouter_chat::{OpenRouterChatError, OpenRouterStreamTransport};
-use bot_core::ai_prompt::{PromptMessage, PromptToolCall};
+use bot_core::ai_prompt::{PromptMessage, PromptRole, PromptToolCall};
 use bot_core::provider_runtime_policy::{
     ProviderExceptionFacts, is_retryable_provider_exception, response_has_billable_usage,
     retry_wait_seconds,
@@ -14,6 +14,11 @@ use thiserror::Error;
 use crate::chat_provider::{ChatRoundError, ChatRoundResult, OpenRouterChatStreamer};
 
 pub const DEFAULT_MAX_TOOL_ROUNDS: usize = 5;
+/// Sent with the answer round once the tool rounds run out.
+const TOOL_LIMIT_ANSWER_PROMPT: &str = "You already used every tool call for this message. Do not call tools. Answer the user now with what you found, and briefly say what you could not confirm.";
+/// Sent with the answer round after a reply came back empty.
+const EMPTY_REPLY_ANSWER_PROMPT: &str =
+    "Your last reply was empty. Do not call tools. Answer the user now, briefly.";
 const MAX_PROVIDER_RETRIES: usize = 2;
 const MAX_RATE_LIMIT_RETRY_SECONDS: u64 = 5;
 
@@ -118,6 +123,18 @@ pub trait ChatRoundStream {
             on_event(ProviderStreamEvent::TextDelta(text.to_owned()))
         })
     }
+
+    /// Streams a round that must answer in text. Providers that support it
+    /// keep the tools declared, so earlier tool calls in the history stay
+    /// valid, but forbid new calls; the default simply offers no tools.
+    fn stream_answer_round_events(
+        &self,
+        messages: &[PromptMessage],
+        _tools: &[Value],
+        on_event: &mut dyn FnMut(ProviderStreamEvent) -> Result<(), OpenRouterChatError>,
+    ) -> Result<ChatRoundResult, ChatRoundError> {
+        self.stream_round_events(messages, &[], on_event)
+    }
 }
 
 impl<Transport: OpenRouterStreamTransport> ChatRoundStream for OpenRouterChatStreamer<Transport> {
@@ -137,6 +154,15 @@ impl<Transport: OpenRouterStreamTransport> ChatRoundStream for OpenRouterChatStr
         on_event: &mut dyn FnMut(ProviderStreamEvent) -> Result<(), OpenRouterChatError>,
     ) -> Result<ChatRoundResult, ChatRoundError> {
         OpenRouterChatStreamer::stream_round_events(self, messages, tools, on_event)
+    }
+
+    fn stream_answer_round_events(
+        &self,
+        messages: &[PromptMessage],
+        tools: &[Value],
+        on_event: &mut dyn FnMut(ProviderStreamEvent) -> Result<(), OpenRouterChatError>,
+    ) -> Result<ChatRoundResult, ChatRoundError> {
+        OpenRouterChatStreamer::stream_answer_round_events(self, messages, tools, on_event)
     }
 }
 
@@ -263,63 +289,14 @@ where
     );
 
     for logical_round in 0..max_rounds {
-        let mut retry = 0;
-        let round =
-            loop {
-                let round =
-                    provider.stream_round_events(&result.messages, &schemas, &mut |event| {
-                        match event {
-                            ProviderStreamEvent::ReasoningDelta(text) => {
-                                on_event(ChatToolLoopEvent::ReasoningDelta(text))
-                            }
-                            ProviderStreamEvent::TextDelta(text) => {
-                                on_event(ChatToolLoopEvent::FinalText(text))
-                            }
-                        }
-                    });
-                match round {
-                    Ok(round) => break round,
-                    Err(error) => {
-                        result.provider_rounds += 1;
-                        trace(
-                            operation_id,
-                            result.provider_rounds,
-                            "provider_error",
-                            json!({
-                                "error_kind": provider_error_kind(&error.source),
-                                "provider": round_trace(&error.partial),
-                            }),
-                        );
-                        record_failed_round(&mut result, &error.partial);
-                        let retry_delay = (retry < MAX_PROVIDER_RETRIES
-                            && retryable_provider_error(&error.source)
-                            && error.partial.text.is_empty()
-                            && error.partial.reasoning.is_empty()
-                            && error.partial.tool_calls.is_empty()
-                            && !round_has_billable_usage(&error.partial))
-                        .then(|| provider_retry_delay(&error.source, retry))
-                        .flatten();
-                        if let Some(delay) = retry_delay {
-                            result.diagnostics.push(format!(
-                                "AI provider retry: round={} attempt={} error_kind={} delay_ms={}",
-                                logical_round + 1,
-                                retry + 1,
-                                provider_error_kind(&error.source),
-                                delay.as_millis(),
-                            ));
-                            wait_before_retry(delay);
-                            retry += 1;
-                            continue;
-                        }
-                        return Err(ChatToolLoopError {
-                            source: error.source,
-                            failed_round: error.partial,
-                            provider_rounds: result.provider_rounds,
-                            partial: Box::new(result),
-                        });
-                    }
-                }
-            };
+        let round = stream_with_retries(
+            operation_id,
+            &mut result,
+            logical_round,
+            &mut |messages, on_event| provider.stream_round_events(messages, &schemas, on_event),
+            None,
+            &mut *on_event,
+        )?;
         result.provider_rounds += 1;
         trace(
             operation_id,
@@ -337,6 +314,18 @@ where
             .collect::<Vec<_>>();
         if known_calls.is_empty() {
             result.text.push_str(&round.text);
+            if result.text.trim().is_empty() {
+                result.text.clear();
+                return answer_round(
+                    operation_id,
+                    provider,
+                    &schemas,
+                    result,
+                    logical_round + 1,
+                    EMPTY_REPLY_ANSWER_PROMPT,
+                    on_event,
+                );
+            }
             trace(
                 operation_id,
                 result.provider_rounds,
@@ -456,16 +445,130 @@ where
     }
 
     result.stopped_at_limit = true;
+    answer_round(
+        operation_id,
+        provider,
+        &schemas,
+        result,
+        max_rounds,
+        TOOL_LIMIT_ANSWER_PROMPT,
+        on_event,
+    )
+}
+
+/// One last round that must answer in text, so a turn that ran out of tool
+/// rounds or came back empty still replies with what it has.
+fn answer_round<Provider: ChatRoundStream>(
+    operation_id: &str,
+    provider: &Provider,
+    schemas: &[Value],
+    mut result: ChatToolLoopResult,
+    logical_round: usize,
+    instruction: &str,
+    on_event: &mut EventCallback<'_>,
+) -> Result<ChatToolLoopResult, ChatToolLoopError> {
+    let round = stream_with_retries(
+        operation_id,
+        &mut result,
+        logical_round,
+        &mut |messages, on_event| provider.stream_answer_round_events(messages, schemas, on_event),
+        Some(instruction),
+        on_event,
+    )?;
+    result.provider_rounds += 1;
+    trace(
+        operation_id,
+        result.provider_rounds,
+        "provider_round",
+        round_trace(&round),
+    );
+    record_round(&mut result, &round);
+    result.text.push_str(&round.text);
     trace(
         operation_id,
         result.provider_rounds,
         "finish",
         json!({
             "tool_calls_executed": result.tool_calls_executed,
-            "stopped_at_limit": true,
+            "stopped_at_limit": result.stopped_at_limit,
+            "answer_round": true,
         }),
     );
     Ok(result)
+}
+
+type RoundStreamer<'a> = dyn FnMut(
+        &[PromptMessage],
+        &mut dyn FnMut(ProviderStreamEvent) -> Result<(), OpenRouterChatError>,
+    ) -> Result<ChatRoundResult, ChatRoundError>
+    + 'a;
+
+/// Streams one logical round, retrying retryable provider failures that
+/// produced nothing yet. `instruction` is sent as a trailing system message
+/// for this round only; it never joins the conversation history.
+fn stream_with_retries(
+    operation_id: &str,
+    result: &mut ChatToolLoopResult,
+    logical_round: usize,
+    stream: &mut RoundStreamer<'_>,
+    instruction: Option<&str>,
+    on_event: &mut EventCallback<'_>,
+) -> Result<ChatRoundResult, ChatToolLoopError> {
+    let mut messages = result.messages.clone();
+    if let Some(instruction) = instruction {
+        messages.push(PromptMessage::text(PromptRole::System, instruction));
+    }
+    let mut retry = 0;
+    loop {
+        let round = stream(&messages, &mut |event| match event {
+            ProviderStreamEvent::ReasoningDelta(text) => {
+                on_event(ChatToolLoopEvent::ReasoningDelta(text))
+            }
+            ProviderStreamEvent::TextDelta(text) => on_event(ChatToolLoopEvent::FinalText(text)),
+        });
+        match round {
+            Ok(round) => return Ok(round),
+            Err(error) => {
+                result.provider_rounds += 1;
+                trace(
+                    operation_id,
+                    result.provider_rounds,
+                    "provider_error",
+                    json!({
+                        "error_kind": provider_error_kind(&error.source),
+                        "provider": round_trace(&error.partial),
+                    }),
+                );
+                record_failed_round(result, &error.partial);
+                let retry_delay = (retry < MAX_PROVIDER_RETRIES
+                    && retryable_provider_error(&error.source)
+                    && error.partial.text.is_empty()
+                    && error.partial.reasoning.is_empty()
+                    && error.partial.tool_calls.is_empty()
+                    && !round_has_billable_usage(&error.partial))
+                .then(|| provider_retry_delay(&error.source, retry))
+                .flatten();
+                if let Some(delay) = retry_delay {
+                    result.diagnostics.push(format!(
+                        "AI provider retry: round={} attempt={} error_kind={} delay_ms={}",
+                        logical_round + 1,
+                        retry + 1,
+                        provider_error_kind(&error.source),
+                        delay.as_millis(),
+                    ));
+                    wait_before_retry(delay);
+                    retry += 1;
+                    continue;
+                }
+                return Err(ChatToolLoopError {
+                    source: error.source,
+                    failed_round: error.partial,
+                    provider_rounds: result.provider_rounds,
+                    partial: Box::new(result.clone()),
+                });
+            }
+        }
+    }
 }
 
 /// Prepared concurrent calls, aligned with `calls`. Concurrency only pays off
@@ -790,20 +893,41 @@ mod tests {
         Ok(())
     }
 
+    /// Replays queued rounds; once they run out, every round answers
+    /// "fallback answer". `tools_offered` records how many tools each round
+    /// declared, so answer rounds (which offer none) are visible.
     struct Provider {
         rounds: RefCell<Vec<Result<ChatRoundResult, ChatRoundError>>>,
         observed: RefCell<Vec<Vec<PromptMessage>>>,
+        tools_offered: RefCell<Vec<usize>>,
+    }
+
+    impl Provider {
+        fn new(rounds: Vec<Result<ChatRoundResult, ChatRoundError>>) -> Self {
+            Self {
+                rounds: RefCell::new(rounds),
+                observed: RefCell::new(Vec::new()),
+                tools_offered: RefCell::new(Vec::new()),
+            }
+        }
     }
 
     impl ChatRoundStream for Provider {
         fn stream_round(
             &self,
             messages: &[PromptMessage],
-            _tools: &[Value],
+            tools: &[Value],
             on_text: &mut dyn FnMut(&str) -> Result<(), OpenRouterChatError>,
         ) -> Result<ChatRoundResult, ChatRoundError> {
             self.observed.borrow_mut().push(messages.to_vec());
-            let round = self.rounds.borrow_mut().remove(0)?;
+            self.tools_offered.borrow_mut().push(tools.len());
+            let mut rounds = self.rounds.borrow_mut();
+            let round = if rounds.is_empty() {
+                round("fallback answer", Vec::new(), json!({"answer": true}))
+            } else {
+                rounds.remove(0)?
+            };
+            drop(rounds);
             if !round.text.is_empty() {
                 on_text(&round.text).map_err(|source| ChatRoundError {
                     source,
@@ -908,17 +1032,14 @@ mod tests {
 
     #[test]
     fn executes_known_calls_and_supplies_typed_results_to_the_next_round() {
-        let provider = Provider {
-            rounds: RefCell::new(vec![
-                Ok(round(
-                    "checking",
-                    vec![call("calculate", r#"{"expression":"2+2"}"#)],
-                    json!({"round": 1}),
-                )),
-                Ok(round("answer", Vec::new(), json!({"round": 2}))),
-            ]),
-            observed: RefCell::new(Vec::new()),
-        };
+        let provider = Provider::new(vec![
+            Ok(round(
+                "checking",
+                vec![call("calculate", r#"{"expression":"2+2"}"#)],
+                json!({"round": 1}),
+            )),
+            Ok(round("answer", Vec::new(), json!({"round": 2}))),
+        ]);
         let mut tools = Tools::default();
         let mut streamed = String::new();
         let result = run_chat_tool_loop(
@@ -951,17 +1072,14 @@ mod tests {
 
     #[test]
     fn event_loop_resets_provisional_text_when_tool_calls_arrive() {
-        let provider = Provider {
-            rounds: RefCell::new(vec![
-                Ok(round(
-                    "checking",
-                    vec![call("calculate", r#"{"expression":"2+2"}"#)],
-                    json!({"round": 1}),
-                )),
-                Ok(round("answer", Vec::new(), json!({"round": 2}))),
-            ]),
-            observed: RefCell::new(Vec::new()),
-        };
+        let provider = Provider::new(vec![
+            Ok(round(
+                "checking",
+                vec![call("calculate", r#"{"expression":"2+2"}"#)],
+                json!({"round": 1}),
+            )),
+            Ok(round("answer", Vec::new(), json!({"round": 2}))),
+        ]);
         let mut tools = Tools::default();
         let mut events = Vec::new();
         let result = run_chat_tool_loop_events(
@@ -1069,14 +1187,11 @@ mod tests {
 
     #[test]
     fn skips_unknown_calls_and_normalizes_malformed_known_arguments() {
-        let provider = Provider {
-            rounds: RefCell::new(vec![Ok(round(
-                "",
-                vec![call("missing", "not-json")],
-                json!({"round": 1}),
-            ))]),
-            observed: RefCell::new(Vec::new()),
-        };
+        let provider = Provider::new(vec![Ok(round(
+            "",
+            vec![call("missing", "not-json")],
+            json!({"round": 1}),
+        ))]);
         let mut tools = Tools::default();
         let result = run_chat_tool_loop(
             "test-operation",
@@ -1090,14 +1205,11 @@ mod tests {
         assert!(result.is_ok());
         assert!(tools.calls.is_empty());
 
-        let provider = Provider {
-            rounds: RefCell::new(vec![Ok(round(
-                "",
-                vec![call("calculate", "not-json")],
-                json!({"round": 1}),
-            ))]),
-            observed: RefCell::new(Vec::new()),
-        };
+        let provider = Provider::new(vec![Ok(round(
+            "",
+            vec![call("calculate", "not-json")],
+            json!({"round": 1}),
+        ))]);
         let result = run_chat_tool_loop(
             "test-operation",
             &provider,
@@ -1114,13 +1226,10 @@ mod tests {
 
     #[test]
     fn preserves_partial_round_usage_and_text_when_streaming_fails() {
-        let provider = Provider {
-            rounds: RefCell::new(vec![Err(ChatRoundError {
-                source: OpenRouterChatError::IncompleteStream,
-                partial: Box::new(round("partial", Vec::new(), json!({"pending": true}))),
-            })]),
-            observed: RefCell::new(Vec::new()),
-        };
+        let provider = Provider::new(vec![Err(ChatRoundError {
+            source: OpenRouterChatError::IncompleteStream,
+            partial: Box::new(round("partial", Vec::new(), json!({"pending": true}))),
+        })]);
         let mut tools = Tools::default();
         let error = run_chat_tool_loop(
             "test-operation",
@@ -1140,21 +1249,18 @@ mod tests {
 
     #[test]
     fn retries_an_empty_transient_round_without_repeating_completed_tools() {
-        let provider = Provider {
-            rounds: RefCell::new(vec![
-                Ok(round(
-                    "",
-                    vec![call("calculate", r#"{"expression":"2+2"}"#)],
-                    json!({"round": 1}),
-                )),
-                Err(ChatRoundError {
-                    source: OpenRouterChatError::IncompleteStream,
-                    partial: Box::new(round("", Vec::new(), json!({"pending": true}))),
-                }),
-                Ok(round("synthetic answer", Vec::new(), json!({"round": 3}))),
-            ]),
-            observed: RefCell::new(Vec::new()),
-        };
+        let provider = Provider::new(vec![
+            Ok(round(
+                "",
+                vec![call("calculate", r#"{"expression":"2+2"}"#)],
+                json!({"round": 1}),
+            )),
+            Err(ChatRoundError {
+                source: OpenRouterChatError::IncompleteStream,
+                partial: Box::new(round("", Vec::new(), json!({"pending": true}))),
+            }),
+            Ok(round("synthetic answer", Vec::new(), json!({"round": 3}))),
+        ]);
         let mut tools = Tools {
             confirm: true,
             ..Tools::default()
@@ -1186,20 +1292,208 @@ mod tests {
         );
     }
 
+    fn system_text(message: Option<&PromptMessage>) -> Option<String> {
+        let message = message.filter(|message| message.role == PromptRole::System)?;
+        match &message.content {
+            PromptContent::Text(text) => Some(text.clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn tool_limit_runs_one_answer_round_without_tools() {
+        let provider = Provider::new(vec![
+            Ok(round(
+                "",
+                vec![call("calculate", r#"{"expression":"2+2"}"#)],
+                json!({"round": 1}),
+            )),
+            Ok(round("it is 4", Vec::new(), json!({"round": 2}))),
+        ]);
+        let mut tools = Tools::default();
+        let mut events = Vec::new();
+        let result = run_chat_tool_loop_events(
+            "test-operation",
+            &provider,
+            &mut tools,
+            &[PromptMessage::text(PromptRole::User, "question")],
+            false,
+            1,
+            |event| {
+                events.push(event);
+                Ok(())
+            },
+        )
+        .unwrap_or_else(|error| *error.partial);
+
+        assert_eq!(result.text, "it is 4");
+        assert!(result.stopped_at_limit);
+        assert_eq!(result.provider_rounds, 2);
+        assert_eq!(result.tool_calls_executed, 1);
+        assert_eq!(result.billing_segments.len(), 3);
+        assert_eq!(
+            events.last(),
+            Some(&ChatToolLoopEvent::FinalText("it is 4".to_owned()))
+        );
+        assert_eq!(*provider.tools_offered.borrow(), [1, 0]);
+        let observed = provider.observed.borrow();
+        assert_eq!(observed[1].len(), 4);
+        assert_eq!(observed[1][2].role, PromptRole::Tool);
+        assert_eq!(
+            system_text(observed[1].last()).as_deref(),
+            Some(TOOL_LIMIT_ANSWER_PROMPT)
+        );
+        // The instruction is for that round only, never the history.
+        assert_eq!(result.messages.len(), 3);
+        assert!(
+            result
+                .messages
+                .iter()
+                .all(|message| message.role != PromptRole::System)
+        );
+    }
+
+    #[test]
+    fn empty_replies_get_one_answer_round() {
+        for empty in ["", " \n\t"] {
+            let provider = Provider::new(vec![
+                Ok(round(empty, Vec::new(), json!({"round": 1}))),
+                Ok(round("now an answer", Vec::new(), json!({"round": 2}))),
+            ]);
+            let result = run_chat_tool_loop(
+                "test-operation",
+                &provider,
+                &mut Tools::default(),
+                &[PromptMessage::text(PromptRole::User, "question")],
+                false,
+                DEFAULT_MAX_TOOL_ROUNDS,
+                ignore_text,
+            )
+            .unwrap_or_else(|error| *error.partial);
+
+            assert_eq!(result.text, "now an answer");
+            assert!(!result.stopped_at_limit);
+            assert_eq!(result.provider_rounds, 2);
+            assert_eq!(result.billing_segments.len(), 2);
+            assert_eq!(*provider.tools_offered.borrow(), [1, 0]);
+            let observed = provider.observed.borrow();
+            assert_eq!(
+                system_text(observed[1].last()).as_deref(),
+                Some(EMPTY_REPLY_ANSWER_PROMPT)
+            );
+            assert_eq!(observed[1].len(), 2);
+        }
+
+        // A reply with text never pays for an answer round.
+        let provider = Provider::new(vec![Ok(round("hi", Vec::new(), json!({"round": 1})))]);
+        let result = run_chat_tool_loop(
+            "test-operation",
+            &provider,
+            &mut Tools::default(),
+            &[],
+            false,
+            DEFAULT_MAX_TOOL_ROUNDS,
+            ignore_text,
+        )
+        .unwrap_or_else(|error| *error.partial);
+        assert_eq!(result.text, "hi");
+        assert_eq!(result.provider_rounds, 1);
+        assert_eq!(*provider.tools_offered.borrow(), [1]);
+    }
+
+    #[test]
+    fn an_empty_answer_round_is_not_retried_again() {
+        let provider = Provider::new(vec![
+            Ok(round("", Vec::new(), json!({"round": 1}))),
+            Ok(round("", Vec::new(), json!({"round": 2}))),
+        ]);
+        let result = run_chat_tool_loop(
+            "test-operation",
+            &provider,
+            &mut Tools::default(),
+            &[],
+            false,
+            DEFAULT_MAX_TOOL_ROUNDS,
+            ignore_text,
+        )
+        .unwrap_or_else(|error| *error.partial);
+        assert_eq!(result.text, "");
+        assert_eq!(result.provider_rounds, 2);
+        assert_eq!(provider.observed.borrow().len(), 2);
+    }
+
+    #[test]
+    fn answer_round_retries_transient_failures_and_reports_permanent_ones() {
+        let tool_round = || {
+            Ok(round(
+                "",
+                vec![call("calculate", r#"{"expression":"2+2"}"#)],
+                json!({"round": 1}),
+            ))
+        };
+        let failure = |source| {
+            Err(ChatRoundError {
+                source,
+                partial: Box::new(round("", Vec::new(), json!({"pending": true}))),
+            })
+        };
+        let provider = Provider::new(vec![
+            tool_round(),
+            failure(OpenRouterChatError::IncompleteStream),
+            Ok(round("recovered", Vec::new(), json!({"round": 3}))),
+        ]);
+        let result = run_chat_tool_loop(
+            "test-operation",
+            &provider,
+            &mut Tools::default(),
+            &[],
+            false,
+            1,
+            ignore_text,
+        )
+        .unwrap_or_else(|error| *error.partial);
+        assert_eq!(result.text, "recovered");
+        assert_eq!(*provider.tools_offered.borrow(), [1, 0, 0]);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.starts_with("AI provider retry: round=2 attempt=1"))
+        );
+
+        let provider = Provider::new(vec![
+            tool_round(),
+            failure(OpenRouterChatError::MalformedResponse),
+        ]);
+        let error = run_chat_tool_loop(
+            "test-operation",
+            &provider,
+            &mut Tools::default(),
+            &[],
+            false,
+            1,
+            ignore_text,
+        )
+        .err();
+        let Some(error) = error else { unreachable!() };
+        assert_eq!(error.source, OpenRouterChatError::MalformedResponse);
+        assert_eq!(error.provider_rounds, 2);
+        assert!(error.partial.stopped_at_limit);
+        assert_eq!(error.partial.tool_calls_executed, 1);
+        assert_eq!(provider.observed.borrow().len(), 2);
+    }
+
     #[test]
     fn does_not_retry_after_a_partial_reasoning_round() {
         let mut partial = round("", Vec::new(), json!({"pending": true}));
         partial.reasoning = "visible reasoning".to_owned();
-        let provider = Provider {
-            rounds: RefCell::new(vec![
-                Err(ChatRoundError {
-                    source: OpenRouterChatError::IncompleteStream,
-                    partial: Box::new(partial),
-                }),
-                Ok(round("unexpected retry", Vec::new(), json!({"round": 2}))),
-            ]),
-            observed: RefCell::new(Vec::new()),
-        };
+        let provider = Provider::new(vec![
+            Err(ChatRoundError {
+                source: OpenRouterChatError::IncompleteStream,
+                partial: Box::new(partial),
+            }),
+            Ok(round("unexpected retry", Vec::new(), json!({"round": 2}))),
+        ]);
         let mut tools = Tools::default();
 
         let error = run_chat_tool_loop(
@@ -1226,19 +1520,16 @@ mod tests {
                 partial: Box::new(round("", Vec::new(), json!({"pending": true}))),
             })
         };
-        let provider = Provider {
-            rounds: RefCell::new(vec![
-                Ok(round(
-                    "",
-                    vec![call("calculate", r#"{"expression":"2+2"}"#)],
-                    json!({"round": 1}),
-                )),
-                failed_round(),
-                failed_round(),
-                failed_round(),
-            ]),
-            observed: RefCell::new(Vec::new()),
-        };
+        let provider = Provider::new(vec![
+            Ok(round(
+                "",
+                vec![call("calculate", r#"{"expression":"2+2"}"#)],
+                json!({"round": 1}),
+            )),
+            failed_round(),
+            failed_round(),
+            failed_round(),
+        ]);
         let mut tools = Tools {
             confirm: true,
             ..Tools::default()
@@ -1273,19 +1564,16 @@ mod tests {
                 partial: Box::new(round("", Vec::new(), json!({"pending": true}))),
             })
         };
-        let provider = Provider {
-            rounds: RefCell::new(vec![
-                Ok(round(
-                    "",
-                    vec![call("calculate", r#"{"expression":"2+2"}"#), second_call],
-                    json!({"round": 1}),
-                )),
-                failed_round(),
-                failed_round(),
-                failed_round(),
-            ]),
-            observed: RefCell::new(Vec::new()),
-        };
+        let provider = Provider::new(vec![
+            Ok(round(
+                "",
+                vec![call("calculate", r#"{"expression":"2+2"}"#), second_call],
+                json!({"round": 1}),
+            )),
+            failed_round(),
+            failed_round(),
+            failed_round(),
+        ]);
         let mut tools = Tools {
             confirm: true,
             ..Tools::default()
@@ -1316,13 +1604,10 @@ mod tests {
             json!({"cost": "0.001"}),
             json!({"cost_details": {"upstream_inference_cost": "0.001"}}),
         ] {
-            let provider = Provider {
-                rounds: RefCell::new(vec![Err(ChatRoundError {
-                    source: OpenRouterChatError::IncompleteStream,
-                    partial: Box::new(round("", Vec::new(), json!({"usage": usage}))),
-                })]),
-                observed: RefCell::new(Vec::new()),
-            };
+            let provider = Provider::new(vec![Err(ChatRoundError {
+                source: OpenRouterChatError::IncompleteStream,
+                partial: Box::new(round("", Vec::new(), json!({"usage": usage}))),
+            })]);
             let mut tools = Tools::default();
 
             let error = run_chat_tool_loop(
@@ -1393,23 +1678,20 @@ mod tests {
 
     #[test]
     fn runs_read_only_calls_concurrently_and_keeps_results_in_call_order() {
-        let provider = Provider {
-            rounds: RefCell::new(vec![
-                Ok(round(
-                    "",
-                    vec![
-                        numbered_call(0, "fetch", "https://a.example"),
-                        numbered_call(1, "record", ""),
-                        numbered_call(2, "fetch", "https://b.example"),
-                        numbered_call(3, "explode", ""),
-                        numbered_call(4, "fetch", "https://c.example"),
-                    ],
-                    json!({"round": 1}),
-                )),
-                Ok(round("done", Vec::new(), json!({"round": 2}))),
-            ]),
-            observed: RefCell::new(Vec::new()),
-        };
+        let provider = Provider::new(vec![
+            Ok(round(
+                "",
+                vec![
+                    numbered_call(0, "fetch", "https://a.example"),
+                    numbered_call(1, "record", ""),
+                    numbered_call(2, "fetch", "https://b.example"),
+                    numbered_call(3, "explode", ""),
+                    numbered_call(4, "fetch", "https://c.example"),
+                ],
+                json!({"round": 1}),
+            )),
+            Ok(round("done", Vec::new(), json!({"round": 2}))),
+        ]);
         let mut tools = Tools {
             barrier: Some(std::sync::Arc::new(std::sync::Barrier::new(4))),
             ..Tools::default()
@@ -1461,17 +1743,14 @@ mod tests {
 
     #[test]
     fn a_single_read_only_call_runs_inline_and_event_failures_stop_the_round() {
-        let provider = Provider {
-            rounds: RefCell::new(vec![Ok(round(
-                "",
-                vec![
-                    numbered_call(0, "fetch", "https://a.example"),
-                    numbered_call(1, "record", ""),
-                ],
-                json!({"round": 1}),
-            ))]),
-            observed: RefCell::new(Vec::new()),
-        };
+        let provider = Provider::new(vec![Ok(round(
+            "",
+            vec![
+                numbered_call(0, "fetch", "https://a.example"),
+                numbered_call(1, "record", ""),
+            ],
+            json!({"round": 1}),
+        ))]);
         // A one-party barrier never blocks, yet the lone fetch still goes
         // through `execute` because concurrency needs two read-only calls.
         let mut tools = Tools {
@@ -1491,17 +1770,14 @@ mod tests {
         assert_eq!(executed_ids(&tools), ["call-0", "call-1"]);
         assert!(result.stopped_at_limit);
 
-        let provider = Provider {
-            rounds: RefCell::new(vec![Ok(round(
-                "",
-                vec![
-                    numbered_call(0, "fetch", "https://a.example"),
-                    numbered_call(1, "fetch", "https://b.example"),
-                ],
-                json!({"round": 1}),
-            ))]),
-            observed: RefCell::new(Vec::new()),
-        };
+        let provider = Provider::new(vec![Ok(round(
+            "",
+            vec![
+                numbered_call(0, "fetch", "https://a.example"),
+                numbered_call(1, "fetch", "https://b.example"),
+            ],
+            json!({"round": 1}),
+        ))]);
         let mut tools = Tools {
             barrier: Some(std::sync::Arc::new(std::sync::Barrier::new(2))),
             ..Tools::default()
@@ -1616,14 +1892,11 @@ mod tests {
     #[test]
     fn trace_and_tool_event_delivery_failures_stop_before_running_tools() {
         for failing in ["reset", "tool_call"] {
-            let provider = Provider {
-                rounds: RefCell::new(vec![Ok(round(
-                    "checking",
-                    vec![call("calculate", r#"{"expression":"2+2"}"#)],
-                    json!({"round": 1}),
-                ))]),
-                observed: RefCell::new(Vec::new()),
-            };
+            let provider = Provider::new(vec![Ok(round(
+                "checking",
+                vec![call("calculate", r#"{"expression":"2+2"}"#)],
+                json!({"round": 1}),
+            ))]);
             let mut tools = Tools::default();
             let error = run_chat_tool_loop_events(
                 "test-operation",
@@ -1719,13 +1992,10 @@ mod tests {
 
     #[test]
     fn streaming_delivery_failures_are_not_retried() {
-        let provider = Provider {
-            rounds: RefCell::new(vec![
-                Ok(round("undeliverable", Vec::new(), json!({"round": 1}))),
-                Ok(round("unexpected retry", Vec::new(), json!({"round": 2}))),
-            ]),
-            observed: RefCell::new(Vec::new()),
-        };
+        let provider = Provider::new(vec![
+            Ok(round("undeliverable", Vec::new(), json!({"round": 1}))),
+            Ok(round("unexpected retry", Vec::new(), json!({"round": 2}))),
+        ]);
         let mut tools = Tools::default();
         let error = run_chat_tool_loop(
             "test-operation",
@@ -1775,20 +2045,17 @@ mod tests {
 
     #[test]
     fn tools_without_concurrency_support_run_every_call_in_order() {
-        let provider = Provider {
-            rounds: RefCell::new(vec![
-                Ok(round(
-                    "",
-                    vec![
-                        numbered_call(0, "fetch", "https://a.example"),
-                        numbered_call(1, "fetch", "https://b.example"),
-                    ],
-                    json!({"round": 1}),
-                )),
-                Ok(round("done", Vec::new(), json!({"round": 2}))),
-            ]),
-            observed: RefCell::new(Vec::new()),
-        };
+        let provider = Provider::new(vec![
+            Ok(round(
+                "",
+                vec![
+                    numbered_call(0, "fetch", "https://a.example"),
+                    numbered_call(1, "fetch", "https://b.example"),
+                ],
+                json!({"round": 1}),
+            )),
+            Ok(round("done", Vec::new(), json!({"round": 2}))),
+        ]);
         let mut tools = SequentialTools::default();
         let result = run_chat_tool_loop(
             "test-operation",
