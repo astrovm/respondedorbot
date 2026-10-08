@@ -801,6 +801,7 @@ fn media_provider_error_kind(error: &MediaProviderError) -> &'static str {
             OpenRouterChatError::MalformedResponse => "OpenRouter.MalformedResponse",
             OpenRouterChatError::IncompleteStream => "OpenRouter.IncompleteStream",
             OpenRouterChatError::Stream(_) => "OpenRouter.Stream",
+            OpenRouterChatError::ThinkingTimeout => "OpenRouter.ThinkingTimeout",
         },
     }
 }

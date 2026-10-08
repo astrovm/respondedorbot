@@ -1,12 +1,14 @@
 //! OpenRouter streaming rounds with partial-usage preservation.
 
+use std::cell::Cell;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use bot_adapters::openrouter_chat::{
-    ChatCompletionRequest, ChatMessage, ChatRole, ChatStreamEvent, OpenRouterChatError,
-    OpenRouterPricingCache, OpenRouterStreamTransport, ReasoningConfig, ToolCall, ToolFunctionCall,
-    stream_with,
+    ChatCompletionRequest, ChatMessage, ChatRole, ChatStreamEvent, HttpRequest,
+    OpenRouterChatError, OpenRouterPricingCache, OpenRouterStreamTransport, ReasoningConfig,
+    ToolCall, ToolFunctionCall, stream_with,
 };
 use bot_core::ai_prompt::{PromptContent, PromptMessage, PromptRole};
 use bot_core::ai_reserve::chat_output_token_limit;
@@ -55,12 +57,18 @@ struct ProviderRoundMetadata {
     annotation_types: Vec<String>,
 }
 
+/// How long a round may reason before it shows any text or tool call. Past
+/// this, the endpoint is usually crawling, and the user is left staring at
+/// "thinking" for minutes; the round is cut so the tool loop can answer.
+const THINKING_TIME_LIMIT: Duration = Duration::from_secs(45);
+
 pub struct OpenRouterChatStreamer<Transport> {
     transport: Transport,
     api_key: String,
     base_url: String,
     model: String,
     pricing: Option<Arc<OpenRouterPricingCache>>,
+    thinking_limit: Duration,
 }
 
 impl<Transport> OpenRouterChatStreamer<Transport> {
@@ -72,7 +80,14 @@ impl<Transport> OpenRouterChatStreamer<Transport> {
             base_url: base_url.to_owned(),
             model: model.to_owned(),
             pricing: None,
+            thinking_limit: THINKING_TIME_LIMIT,
         }
+    }
+
+    #[cfg(test)]
+    fn with_thinking_limit(mut self, limit: Duration) -> Self {
+        self.thinking_limit = limit;
+        self
     }
 
     #[must_use]
@@ -94,6 +109,7 @@ impl<Transport> OpenRouterChatStreamer<Transport> {
         if let Some(pricing) = self.pricing.as_ref() {
             pricing.apply_to_request(&mut request)?;
         }
+        request.prefer_fast_providers();
         request.tools = tools.to_vec();
         request.max_tokens = u64::try_from(chat_output_token_limit(&self.model)).ok();
         request.reasoning = Some(reasoning_config(messages));
@@ -199,8 +215,14 @@ impl<Transport: OpenRouterStreamTransport> OpenRouterChatStreamer<Transport> {
         };
         let mut metadata = ProviderRoundMetadata::default();
         let mut usage = Map::new();
+        let answering = Cell::new(false);
+        let transport = ThinkingDeadline {
+            inner: &self.transport,
+            deadline: Instant::now() + self.thinking_limit,
+            answering: &answering,
+        };
         let stream_result = stream_with(
-            &self.transport,
+            &transport,
             &self.api_key,
             &self.base_url,
             &request,
@@ -216,6 +238,9 @@ impl<Transport: OpenRouterStreamTransport> OpenRouterChatStreamer<Transport> {
                 if !reasoning.is_empty() {
                     on_event(ProviderStreamEvent::ReasoningDelta(reasoning.clone()))?;
                     result.reasoning.push_str(&reasoning);
+                }
+                if !chunk.text.is_empty() || !chunk.tool_call_fragments.is_empty() {
+                    answering.set(true);
                 }
                 if !chunk.text.is_empty() {
                     on_event(ProviderStreamEvent::TextDelta(chunk.text.clone()))?;
@@ -259,6 +284,31 @@ impl<Transport: OpenRouterStreamTransport> OpenRouterChatStreamer<Transport> {
                 partial: Box::new(result),
             }),
         }
+    }
+}
+
+/// Cuts a round that is still only reasoning past its deadline. It checks on
+/// every received chunk, so keep-alive comments count too.
+struct ThinkingDeadline<'a, Transport> {
+    inner: &'a Transport,
+    deadline: Instant,
+    answering: &'a Cell<bool>,
+}
+
+impl<Transport: OpenRouterStreamTransport> OpenRouterStreamTransport
+    for ThinkingDeadline<'_, Transport>
+{
+    fn post_stream(
+        &self,
+        request: &HttpRequest,
+        on_bytes: &mut dyn FnMut(&[u8]) -> Result<(), OpenRouterChatError>,
+    ) -> Result<(), OpenRouterChatError> {
+        self.inner.post_stream(request, &mut |bytes| {
+            if !self.answering.get() && Instant::now() >= self.deadline {
+                return Err(OpenRouterChatError::ThinkingTimeout);
+            }
+            on_bytes(bytes)
+        })
     }
 }
 
@@ -445,6 +495,7 @@ fn openrouter_tool_call(call: &bot_core::ai_prompt::PromptToolCall) -> ToolCall 
 mod tests {
     use std::cell::RefCell;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use bot_adapters::openrouter_chat::{
         HttpRequest, OpenRouterChatError, OpenRouterPricingCache, OpenRouterStreamTransport,
@@ -632,7 +683,79 @@ mod tests {
         assert!(body["reasoning"].get("effort").is_none());
         assert_eq!(body["messages"][1]["content"][0]["type"], "text");
         assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["provider"]["preferred_min_throughput"]["p90"], 30.0);
+        assert_eq!(body["provider"]["preferred_max_latency"]["p90"], 5.0);
         Ok(())
+    }
+
+    /// Sends each SSE frame after a pause, like a slow provider.
+    struct PacedTransport {
+        frames: Vec<Value>,
+        pause: Duration,
+    }
+
+    impl OpenRouterStreamTransport for PacedTransport {
+        fn post_stream(
+            &self,
+            _request: &HttpRequest,
+            on_bytes: &mut dyn FnMut(&[u8]) -> Result<(), OpenRouterChatError>,
+        ) -> Result<(), OpenRouterChatError> {
+            for (index, frame) in self.frames.iter().enumerate() {
+                if index > 0 {
+                    std::thread::sleep(self.pause);
+                }
+                on_bytes(format!("data: {frame}\n\n").as_bytes())?;
+            }
+            on_bytes(b"data: [DONE]\n\n")
+        }
+    }
+
+    fn paced_provider(frames: Vec<Value>) -> OpenRouterChatStreamer<PacedTransport> {
+        OpenRouterChatStreamer::new(
+            PacedTransport {
+                frames,
+                pause: Duration::from_millis(60),
+            },
+            "synthetic-key",
+            "https://synthetic.invalid/api/v1",
+            "requested/model",
+        )
+        .with_thinking_limit(Duration::from_millis(30))
+    }
+
+    fn reasoning_frame(text: &str) -> Value {
+        json!({"choices": [{"delta": {"reasoning": text}}]})
+    }
+
+    #[test]
+    fn a_round_that_only_reasons_past_the_limit_is_cut() {
+        let provider = paced_provider(vec![reasoning_frame("hmm "), reasoning_frame("still")]);
+        let Err(error) = provider.stream_round_events(&messages(), &[], ignore_event) else {
+            panic!("a round still reasoning past its limit must fail");
+        };
+        assert_eq!(error.source, OpenRouterChatError::ThinkingTimeout);
+        assert_eq!(error.partial.reasoning, "hmm ");
+    }
+
+    #[test]
+    fn the_thinking_limit_stops_once_the_round_answers_or_calls_a_tool() {
+        for first in [
+            json!({"choices": [{"delta": {"content": "hola"}}]}),
+            json!({"choices": [{"delta": {"tool_calls": [{
+                "index": 0,
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "weather", "arguments": "{}"}
+            }]}}]}),
+        ] {
+            let provider = paced_provider(vec![first, reasoning_frame("late")]);
+            let result = provider.stream_round_events(&messages(), &[], ignore_event);
+            assert!(
+                result.is_ok(),
+                "{:?}",
+                result.err().map(|error| error.source)
+            );
+        }
     }
 
     #[test]

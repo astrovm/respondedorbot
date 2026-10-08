@@ -10,7 +10,7 @@ use bot_core::provider_pricing::{OPENROUTER_TRANSCRIPTION_MODEL, TokenPricing};
 use bot_core::provider_stream_policy::StreamToolCallFragment;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use thiserror::Error;
 
 pub const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -763,9 +763,20 @@ pub struct ProviderMaxPrice {
     pub completion: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// Soft routing floors for chat replies: OpenRouter moves slower endpoints
+/// down the list instead of excluding them. Measured at p90 over its rolling
+/// five-minute window, in tokens per second and seconds.
+const PREFERRED_MIN_THROUGHPUT_P90: f64 = 30.0;
+const PREFERRED_MAX_LATENCY_P90: f64 = 5.0;
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct ProviderPreferences {
-    pub max_price: ProviderMaxPrice,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_price: Option<ProviderMaxPrice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_min_throughput: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_max_latency: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -796,9 +807,16 @@ pub struct ChatCompletionRequest {
 
 impl ChatCompletionRequest {
     pub fn set_price_ceiling(&mut self, prompt: f64, completion: f64) {
-        self.provider = Some(ProviderPreferences {
-            max_price: ProviderMaxPrice { prompt, completion },
-        });
+        self.provider.get_or_insert_default().max_price =
+            Some(ProviderMaxPrice { prompt, completion });
+    }
+
+    /// Steers routing toward endpoints that have been fast lately, so a slow
+    /// provider does not keep a chat reply waiting for minutes.
+    pub fn prefer_fast_providers(&mut self) {
+        let provider = self.provider.get_or_insert_default();
+        provider.preferred_min_throughput = Some(json!({ "p90": PREFERRED_MIN_THROUGHPUT_P90 }));
+        provider.preferred_max_latency = Some(json!({ "p90": PREFERRED_MAX_LATENCY_P90 }));
     }
 
     #[must_use]
@@ -997,6 +1015,8 @@ pub enum OpenRouterChatError {
     IncompleteStream,
     #[error("OpenRouter stream returned an error: {0}")]
     Stream(String),
+    #[error("OpenRouter spent too long thinking before answering")]
+    ThinkingTimeout,
 }
 
 #[derive(Deserialize)]

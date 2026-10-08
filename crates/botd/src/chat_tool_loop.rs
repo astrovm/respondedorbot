@@ -19,6 +19,9 @@ const TOOL_LIMIT_ANSWER_PROMPT: &str = "You already used every tool call for thi
 /// Sent with the answer round after a reply came back empty.
 const EMPTY_REPLY_ANSWER_PROMPT: &str =
     "Your last reply was empty. Do not call tools. Answer the user now, briefly.";
+/// Sent with the answer round after a round reasoned past its time limit.
+const SLOW_THINKING_ANSWER_PROMPT: &str =
+    "You took too long thinking. Do not call tools. Answer the user now, briefly.";
 const MAX_PROVIDER_RETRIES: usize = 2;
 const MAX_RATE_LIMIT_RETRY_SECONDS: u64 = 5;
 
@@ -289,14 +292,28 @@ where
     );
 
     for logical_round in 0..max_rounds {
-        let round = stream_with_retries(
+        let round = match stream_with_retries(
             operation_id,
             &mut result,
             logical_round,
             &mut |messages, on_event| provider.stream_round_events(messages, &schemas, on_event),
             None,
             &mut *on_event,
-        )?;
+        ) {
+            Ok(round) => round,
+            Err(error) if matches!(error.source, OpenRouterChatError::ThinkingTimeout) => {
+                return answer_round(
+                    operation_id,
+                    provider,
+                    &schemas,
+                    result,
+                    logical_round + 1,
+                    SLOW_THINKING_ANSWER_PROMPT,
+                    on_event,
+                );
+            }
+            Err(error) => return Err(error),
+        };
         result.provider_rounds += 1;
         trace(
             operation_id,
@@ -776,6 +793,7 @@ pub(crate) fn provider_error_kind(error: &OpenRouterChatError) -> String {
         OpenRouterChatError::MalformedResponse => "malformed_response".to_owned(),
         OpenRouterChatError::IncompleteStream => "incomplete_stream".to_owned(),
         OpenRouterChatError::Stream(_) => "stream_consumer_or_provider".to_owned(),
+        OpenRouterChatError::ThinkingTimeout => "thinking_timeout".to_owned(),
     }
 }
 
@@ -1397,6 +1415,37 @@ mod tests {
         assert_eq!(result.text, "hi");
         assert_eq!(result.provider_rounds, 1);
         assert_eq!(*provider.tools_offered.borrow(), [1]);
+    }
+
+    #[test]
+    fn a_round_that_thinks_too_long_is_answered_briefly_instead() {
+        let mut slow = round("", Vec::new(), json!({"slow": true}));
+        slow.reasoning = "still thinking".to_owned();
+        let provider = Provider::new(vec![
+            Err(ChatRoundError {
+                source: OpenRouterChatError::ThinkingTimeout,
+                partial: Box::new(slow),
+            }),
+            Ok(round("quick answer", Vec::new(), json!({"round": 2}))),
+        ]);
+        let result = run_chat_tool_loop(
+            "test-operation",
+            &provider,
+            &mut Tools::default(),
+            &[],
+            false,
+            DEFAULT_MAX_TOOL_ROUNDS,
+            ignore_text,
+        )
+        .unwrap_or_else(|error| *error.partial);
+        assert_eq!(result.text, "quick answer");
+        assert_eq!(result.provider_rounds, 2);
+        let observed = provider.observed.borrow();
+        assert_eq!(observed.len(), 2);
+        assert_eq!(
+            observed[1].last().map(|message| &message.content),
+            Some(&PromptContent::Text(SLOW_THINKING_ANSWER_PROMPT.to_owned()))
+        );
     }
 
     #[test]
