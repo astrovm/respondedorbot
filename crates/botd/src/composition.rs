@@ -124,6 +124,7 @@ use crate::dispatcher::{
     StarPaymentReceipt, StarPaymentSink, StockPriceSource, StockQuotesLoad, TokenSignalLoad,
     TokenSignalSource, WeatherObservationLoad, WeatherSource,
 };
+use crate::error_text;
 use crate::firecrawl_tool::FirecrawlTool;
 use crate::hacker_news_tool::HackerNewsTool;
 use crate::market_tools::{CryptoPricesTool, DollarRatesTool, StockPricesTool, WeatherTool};
@@ -3042,10 +3043,6 @@ impl ConversationToolFactory for ProductionToolFactory {
 
 fn labeled_error(label: &str, error: Option<impl std::fmt::Display>) -> Option<String> {
     error.map(|error| format!("{label}: {error}"))
-}
-
-fn error_text(error: impl std::fmt::Display) -> String {
-    error.to_string()
 }
 
 fn tool_transport<T, E: std::fmt::Debug>(

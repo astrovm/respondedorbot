@@ -730,11 +730,14 @@ mod tests {
     #[test]
     fn a_round_that_only_reasons_past_the_limit_is_cut() {
         let provider = paced_provider(vec![reasoning_frame("hmm "), reasoning_frame("still")]);
-        let Err(error) = provider.stream_round_events(&messages(), &[], ignore_event) else {
-            panic!("a round still reasoning past its limit must fail");
-        };
-        assert_eq!(error.source, OpenRouterChatError::ThinkingTimeout);
-        assert_eq!(error.partial.reasoning, "hmm ");
+        let error = provider
+            .stream_round_events(&messages(), &[], ignore_event)
+            .err()
+            .map(|error| (error.source, error.partial.reasoning));
+        assert_eq!(
+            error,
+            Some((OpenRouterChatError::ThinkingTimeout, "hmm ".to_owned()))
+        );
     }
 
     #[test]

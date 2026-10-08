@@ -21,6 +21,7 @@ use bot_adapters::telegram_http::{
 };
 use serde_json::{Value, json};
 
+use crate::error_text;
 use crate::media::{
     MediaCache, MediaFileSource, MediaProcessor, PreparedAudio, PreparedImage,
     TranscriptionProvider, VisionProvider,
@@ -194,10 +195,6 @@ impl MediaCache for RedisMediaCache {
         )
         .map_err(error_text)
     }
-}
-
-fn error_text(error: impl std::fmt::Display) -> String {
-    error.to_string()
 }
 
 const MEDIA_PIPES_UNAVAILABLE: &str = "media process pipes are unavailable";

@@ -1,5 +1,6 @@
 //! Durable, crash-safe memory-compaction orchestration.
 
+use crate::error_text;
 use std::fmt::Display;
 
 use bot_adapters::compaction_job::{COMPACTION_JOB_SCHEMA_VERSION, CompactionJobRecord};
@@ -534,10 +535,6 @@ where
             })
             .map_err(|error| error.to_string())
     }
-}
-
-fn error_text(error: impl Display) -> String {
-    error.to_string()
 }
 
 type JobFailure = Box<(CompactionJobRecord, &'static str, String)>;

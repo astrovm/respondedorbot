@@ -32,6 +32,7 @@ use crate::chat_tool_loop::{
 use crate::compaction_scheduler::{
     CompactionScheduleContext, MemoryCompactionPlan, MemoryCompactionScheduler, PayerSource,
 };
+use crate::error_text;
 use crate::media::{MediaExecution, MediaKind, MediaPipelineError, MediaRuntime, PreparedMedia};
 use crate::youtube::YoutubeContextRuntime;
 
@@ -1936,10 +1937,6 @@ fn price_segments(segments: &[Value]) -> Result<i64, String> {
         .and_then(Value::as_i64)
         .ok_or("AI pricing output omitted charged_credit_units")
         .map_err(str::to_owned)
-}
-
-fn error_text(error: impl std::fmt::Display) -> String {
-    error.to_string()
 }
 
 #[allow(clippy::too_many_arguments)]

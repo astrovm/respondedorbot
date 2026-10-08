@@ -38,12 +38,8 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransportFailureKind {
-    Timeout,
-    Connection,
-    Request,
-}
+pub use crate::http_client::TransportFailureKind;
+use crate::http_client::classify_error;
 
 pub trait BcraTransport {
     fn get(&self, request: &BcraRequest) -> Result<HttpResponse, TransportFailureKind>;
@@ -109,7 +105,7 @@ impl BcraTransport for ReqwestBcraTransport {
             BcraRequest::CountryRisk => self.client.get(&self.risk_url),
             BcraRequest::Itcrm => self.client.get(&self.itcrm_url),
         };
-        let response = request.send().map_err(classify)?;
+        let response = request.send().map_err(classify_error)?;
         let status_code = response.status().as_u16();
         response
             .bytes()
@@ -117,20 +113,10 @@ impl BcraTransport for ReqwestBcraTransport {
                 status_code,
                 body: body.to_vec(),
             })
-            .map_err(classify)
+            .map_err(classify_error)
     }
     fn before_retry(&self) {
         thread::sleep(Duration::from_millis(500));
-    }
-}
-
-fn classify(error: reqwest::Error) -> TransportFailureKind {
-    if error.is_timeout() {
-        TransportFailureKind::Timeout
-    } else if error.is_connect() {
-        TransportFailureKind::Connection
-    } else {
-        TransportFailureKind::Request
     }
 }
 
@@ -1485,22 +1471,5 @@ mod tests {
             Err("synthetic cache write failure")
         );
         assert!(cache.values.is_empty());
-    }
-
-    #[test]
-    fn reqwest_failures_are_classified_by_cause() {
-        use crate::web_fetch::reqwest_error_fixtures as fixtures;
-        assert_eq!(
-            fixtures::timeout().map(super::classify),
-            Some(super::TransportFailureKind::Timeout)
-        );
-        assert_eq!(
-            fixtures::connection().map(super::classify),
-            Some(super::TransportFailureKind::Connection)
-        );
-        assert_eq!(
-            fixtures::request().map(super::classify),
-            Some(super::TransportFailureKind::Request)
-        );
     }
 }

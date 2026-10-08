@@ -32,12 +32,8 @@ pub struct HttpResponse {
     pub body: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransportFailureKind {
-    Timeout,
-    Connection,
-    Request,
-}
+pub use crate::http_client::TransportFailureKind;
+use crate::http_client::classify_error;
 
 pub trait DollarTransport {
     fn get(&self) -> Result<HttpResponse, TransportFailureKind>;
@@ -108,16 +104,6 @@ impl DollarTransport for ReqwestDollarTransport {
 
     fn before_retry(&self) {
         thread::sleep(Duration::from_millis(500));
-    }
-}
-
-fn classify_error(error: reqwest::Error) -> TransportFailureKind {
-    if error.is_timeout() {
-        TransportFailureKind::Timeout
-    } else if error.is_connect() {
-        TransportFailureKind::Connection
-    } else {
-        TransportFailureKind::Request
     }
 }
 
@@ -1129,22 +1115,5 @@ mod tests {
             .ok_or("unexpected error")?;
         assert!(unavailable.get().is_err());
         Ok(())
-    }
-
-    #[test]
-    fn reqwest_failures_are_classified_by_cause() {
-        use crate::web_fetch::reqwest_error_fixtures as fixtures;
-        assert_eq!(
-            fixtures::timeout().map(super::classify_error),
-            Some(super::TransportFailureKind::Timeout)
-        );
-        assert_eq!(
-            fixtures::connection().map(super::classify_error),
-            Some(super::TransportFailureKind::Connection)
-        );
-        assert_eq!(
-            fixtures::request().map(super::classify_error),
-            Some(super::TransportFailureKind::Request)
-        );
     }
 }
