@@ -984,9 +984,22 @@ impl BillingRepository {
                 });
             }
 
+            // A payer whose holds were fully refunded no longer counts, so an
+            // operation moved from the group to the member settles with the
+            // member alone.
             let hold = transaction.query_one(
-                "SELECT COALESCE(SUM(-amount), 0), \
-                    COUNT(DISTINCT metadata->>'source'), MIN(metadata->>'source'), \
+                "WITH holds AS ( \
+                    SELECT id, event_type, amount, metadata FROM credit_ledger \
+                    WHERE user_id = $1 \
+                      AND event_type IN ('ai_reserve', 'ai_refund') \
+                      AND metadata->>'operation_id' = $2 \
+                 ), payers AS ( \
+                    SELECT metadata->>'source' AS source FROM holds \
+                    GROUP BY metadata->>'source' HAVING SUM(amount) <> 0 \
+                 ) \
+                 SELECT COALESCE(SUM(-amount), 0), \
+                    (SELECT COUNT(*) FROM payers), \
+                    COALESCE((SELECT MIN(source) FROM payers), MIN(metadata->>'source')), \
                     COALESCE( \
                         (ARRAY_AGG(metadata ORDER BY id) FILTER ( \
                             WHERE event_type = 'ai_reserve' \
@@ -994,9 +1007,7 @@ impl BillingRepository {
                     ), COALESCE(TO_JSONB(ARRAY_AGG(DISTINCT metadata->>'settlement_id') \
                         FILTER (WHERE event_type = 'ai_reserve' \
                             AND NULLIF(metadata->>'settlement_id', '') IS NOT NULL)), '[]'::jsonb) \
-                 FROM credit_ledger WHERE user_id = $1 \
-                   AND event_type IN ('ai_reserve', 'ai_refund') \
-                   AND metadata->>'operation_id' = $2",
+                 FROM holds",
                 &[&user_id, &operation_id],
             )?;
             let authorized = hold.get::<_, i64>(0).max(0);
