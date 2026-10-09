@@ -139,6 +139,7 @@ fn topup_keyboard(locale: Locale) -> InlineKeyboardMarkup {
 }
 
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn plan_topup_command(
     chat_id: ChatId,
     message_id: MessageId,

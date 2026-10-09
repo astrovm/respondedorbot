@@ -38,6 +38,10 @@ use bot_core::dollar::{
 };
 use bot_core::greeting_commands::{GreetingCategory, classify_greeting_command, greeting_fallback};
 use bot_core::language_command::{LanguageCommandPlan, plan_language_command};
+use bot_core::lightning_topup::{
+    LightningCallback, LightningInvoice, lightning_invoice_failed, lightning_invoice_message,
+    lightning_invoice_ready, lightning_menu, parse_lightning_callback,
+};
 use bot_core::links::{
     LinkActionContext, LinkMode, LinkReplacement, has_replaceable_link, plan_link_actions,
 };
@@ -74,10 +78,11 @@ use bot_core::telegram_callbacks::{
 use bot_core::telegram_commands::telegram_commands;
 use bot_core::telegram_input::{ChatId, MessageId, is_group_chat_type};
 use bot_core::telegram_payments::{
-    BalanceCommandContext, BalanceCommandPlan, StarPaymentRecord, SuccessfulPaymentDecision,
-    TopupCallbackPlan, balance_reply, evaluate_default_successful_payment, invoice_payload_locale,
-    payment_record, plan_balance_command, plan_pre_checkout, plan_topup_callback,
-    plan_topup_command, successful_payment_reply,
+    BalanceCommandContext, BalanceCommandPlan, BillingPackTerms, StarPaymentRecord,
+    SuccessfulPaymentDecision, TopupCallbackPlan, balance_reply,
+    evaluate_default_successful_payment, invoice_payload_locale, payment_record,
+    plan_balance_command, plan_pre_checkout, plan_topup_callback, plan_topup_command,
+    successful_payment_reply, topup_menu,
 };
 use bot_core::token_signals::{
     SIGNAL_REFRESH_COOLDOWN_SECONDS, SignalQuery, SignalState, TokenAddress, TokenSignal,
@@ -326,6 +331,21 @@ pub trait AdminCreditSink {
 
 pub trait AdminCreditLogSource {
     fn load(&mut self, limit: usize) -> Result<Vec<CreditLogEntry>, String>;
+}
+
+/// Creates Lightning charges at the payment provider and tracks them until
+/// the background poller credits them.
+pub trait LightningCheckout {
+    fn create(
+        &mut self,
+        user_id: i64,
+        chat_id: i64,
+        pack: &BillingPackTerms,
+        locale: bot_core::locale::Locale,
+    ) -> Result<LightningInvoice, String>;
+
+    /// Remembers the invoice message so the payment notice can reply to it.
+    fn attach_message(&mut self, charge_id: &str, message_id: i64) -> Result<(), String>;
 }
 
 pub trait BitcoinPriceSource {
@@ -1020,6 +1040,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     admin_user_id: Option<i64>,
     admin_credit_sink: Option<Box<dyn AdminCreditSink>>,
     admin_creditlog_source: Option<Box<dyn AdminCreditLogSource>>,
+    lightning_checkout: Option<Box<dyn LightningCheckout>>,
     bitcoin_price_source: Option<Box<dyn BitcoinPriceSource>>,
     dollar_quotes_source: Option<Box<dyn DollarQuotesSource>>,
     dollar_market_source: Option<Box<dyn DollarMarketSource>>,
@@ -1080,6 +1101,7 @@ where
             admin_user_id: None,
             admin_credit_sink: None,
             admin_creditlog_source: None,
+            lightning_checkout: None,
             bitcoin_price_source: None,
             dollar_quotes_source: None,
             dollar_market_source: None,
@@ -1150,6 +1172,12 @@ where
     #[must_use]
     pub fn with_admin_creditlog_source(mut self, source: Box<dyn AdminCreditLogSource>) -> Self {
         self.admin_creditlog_source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub fn with_lightning_checkout(mut self, checkout: Box<dyn LightningCheckout>) -> Self {
+        self.lightning_checkout = Some(checkout);
         self
     }
 
@@ -3814,6 +3842,14 @@ where
                 context.user_language_code.as_deref(),
                 &context.chat_type,
             );
+            if let Some(callback) = parse_lightning_callback(&context.data) {
+                return self.dispatch_lightning_callback(
+                    &context,
+                    ChatId(chat_id),
+                    callback,
+                    locale,
+                );
+            }
             return match plan_topup_callback(
                 context.callback_id.as_deref(),
                 &context.data,
@@ -4218,6 +4254,144 @@ where
         fallback.map_err(DispatchError::Action)?;
         if config.language != current_config.language {
             self.sync_chat_command_menu(chat_id, rendered_locale);
+        }
+        Ok(DispatchOutcome::Handled)
+    }
+
+    fn dispatch_lightning_callback(
+        &mut self,
+        context: &CallbackContext,
+        chat_id: ChatId,
+        callback: LightningCallback,
+        locale: bot_core::locale::Locale,
+    ) -> NativeDispatchResult<Config, Actions, Random> {
+        let callback_id = context.callback_id.as_deref();
+        let alert_text = if !self.billing_available {
+            Some(bot_core::billing_commands::billing_unavailable(locale))
+        } else if context.chat_type != "private" {
+            Some(match locale {
+                bot_core::locale::Locale::Es => "Cargá por privado, maestro",
+                bot_core::locale::Locale::En => "Open this in a private chat",
+            })
+        } else if self.lightning_checkout.is_none() {
+            Some(lightning_invoice_failed(locale))
+        } else if callback == LightningCallback::InvalidPack {
+            Some(match locale {
+                bot_core::locale::Locale::Es => "Ese pack es fruta, elegí otro",
+                bot_core::locale::Locale::En => "That credit pack is invalid, choose another one",
+            })
+        } else {
+            None
+        };
+        if let Some(text) = alert_text {
+            return self.answer_callback_alert(callback_id, text);
+        }
+        let message_id = MessageId(context.message_id);
+        let (pack, user_id) = match (callback, context.user_id) {
+            (LightningCallback::Pack(pack), Some(user_id)) => (pack, user_id),
+            (LightningCallback::Pack(_), None) => {
+                self.answer_callback_best_effort(callback_id);
+                return Ok(DispatchOutcome::Handled);
+            }
+            (menu, _) => {
+                self.answer_callback_best_effort(callback_id);
+                let (text, keyboard) = if menu == LightningCallback::Menu {
+                    lightning_menu(locale)
+                } else {
+                    topup_menu(locale, true)
+                };
+                self.actions
+                    .try_edit(TelegramAction::EditMessage {
+                        chat_id,
+                        message_id,
+                        text,
+                        reply_markup: Some(keyboard),
+                    })
+                    .map_err(DispatchError::Action)?;
+                return Ok(DispatchOutcome::Handled);
+            }
+        };
+        // Same single-flight guard as Stars invoices: a double tap must not
+        // create two payable charges.
+        let claim_key = topup_invoice_claim_key(user_id, &format!("ln:{}", pack.id));
+        let claimed = self
+            .market_price_source
+            .as_mut()
+            .map_or(Ok(true), |source| {
+                source.claim(claim_key.as_str(), "1", TOPUP_INVOICE_CLAIM_TTL_SECONDS)
+            })
+            .unwrap_or_else(|error| {
+                self.state_diagnostics.push(format!(
+                    "lightning invoice claim failed user_id={user_id}: {error}"
+                ));
+                true
+            });
+        if !claimed {
+            return self.answer_callback_alert(
+                callback_id,
+                match locale {
+                    bot_core::locale::Locale::Es => "Ya te dejé la factura más arriba",
+                    bot_core::locale::Locale::En => "The invoice is already above",
+                },
+            );
+        }
+        let created = self
+            .lightning_checkout
+            .as_mut()
+            .map(|checkout| checkout.create(user_id, chat_id.0, &pack, locale));
+        let Some(Ok(invoice)) = created else {
+            if let Some(Err(error)) = created {
+                self.state_diagnostics.push(format!(
+                    "lightning invoice user_id={user_id} pack={}: {error}",
+                    pack.id
+                ));
+            }
+            if let Some(source) = self.market_price_source.as_mut()
+                && let Err(error) = source.take_selection(claim_key.as_str())
+            {
+                self.state_diagnostics
+                    .push(format!("lightning invoice claim release failed: {error}"));
+            }
+            return self.answer_callback_alert(callback_id, lightning_invoice_failed(locale));
+        };
+        let message = lightning_invoice_message(chat_id, &pack, &invoice, locale);
+        let receipt = self
+            .actions
+            .execute(TelegramAction::SendMessage(message))
+            .map_err(DispatchError::Action)?;
+        if let (Some(sent), Some(checkout)) = (receipt.message_id, self.lightning_checkout.as_mut())
+            && let Err(error) = checkout.attach_message(&invoice.charge_id, sent.0)
+        {
+            self.state_diagnostics.push(format!(
+                "lightning invoice message charge_id={}: {error}",
+                invoice.charge_id
+            ));
+        }
+        if let Some(callback_id) = callback_id {
+            self.actions
+                .execute(TelegramAction::AnswerCallback {
+                    callback_id: callback_id.to_owned(),
+                    text: Some(lightning_invoice_ready(locale).to_owned()),
+                    show_alert: false,
+                })
+                .map_err(DispatchError::Action)?;
+        }
+        Ok(DispatchOutcome::Handled)
+    }
+
+    fn answer_callback_alert(
+        &mut self,
+        callback_id: Option<&str>,
+        text: &str,
+    ) -> NativeDispatchResult<Config, Actions, Random> {
+        if let Some(callback_id) = callback_id {
+            self.actions
+                .execute(TelegramAction::AnswerCallback {
+                    callback_id: callback_id.to_owned(),
+                    text: Some(text.to_owned()),
+                    show_alert: true,
+                })
+                .map_err(DispatchError::Action)?;
         }
         Ok(DispatchOutcome::Handled)
     }
@@ -5100,7 +5274,7 @@ where
             locale,
             message.chat_type.as_deref().unwrap_or_default(),
             self.billing_available,
-            false,
+            self.lightning_checkout.is_some(),
         ) {
             StatelessCommandPlan::Action(action)
         } else if matches!(

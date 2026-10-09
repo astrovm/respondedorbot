@@ -127,6 +127,7 @@ use crate::dispatcher::{
 use crate::error_text;
 use crate::firecrawl_tool::FirecrawlTool;
 use crate::hacker_news_tool::HackerNewsTool;
+use crate::lightning_payments::{OpenNodeOptions, ProviderCheckout, opennode_provider};
 use crate::market_tools::{CryptoPricesTool, DollarRatesTool, StockPricesTool, WeatherTool};
 use crate::media::NativeMedia;
 use crate::media_adapters::{
@@ -2746,6 +2747,8 @@ pub enum CompositionError {
     ConversationState(String),
     #[error("could not construct Redis AI credit policy: {0}")]
     ConversationBillingPolicy(String),
+    #[error("could not construct Lightning provider: {0}")]
+    LightningProvider(String),
     #[error("could not start parallel update workers: {0}")]
     UpdateWorkers(String),
 }
@@ -2767,6 +2770,7 @@ pub struct NativeRuntimeOptions<'a> {
     pub firecrawl_api_key: Option<String>,
     pub supadata_api_key: Option<String>,
     pub apify_api_key: Option<String>,
+    pub opennode: Option<OpenNodeOptions>,
     pub system_prompt: Option<String>,
     pub trigger_words: Option<Vec<String>>,
     pub active_operations: ActiveOperationRegistry,
@@ -2790,6 +2794,7 @@ struct OwnedNativeRuntimeOptions {
     firecrawl_api_key: Option<String>,
     supadata_api_key: Option<String>,
     apify_api_key: Option<String>,
+    opennode: Option<OpenNodeOptions>,
     system_prompt: Option<String>,
     trigger_words: Option<Vec<String>>,
     active_operations: ActiveOperationRegistry,
@@ -2814,6 +2819,7 @@ impl OwnedNativeRuntimeOptions {
             firecrawl_api_key: options.firecrawl_api_key,
             supadata_api_key: options.supadata_api_key,
             apify_api_key: options.apify_api_key,
+            opennode: options.opennode,
             system_prompt: options.system_prompt,
             trigger_words: options.trigger_words,
             active_operations: options.active_operations,
@@ -2838,6 +2844,7 @@ impl OwnedNativeRuntimeOptions {
             firecrawl_api_key: self.firecrawl_api_key.clone(),
             supadata_api_key: self.supadata_api_key.clone(),
             apify_api_key: self.apify_api_key.clone(),
+            opennode: self.opennode.clone(),
             system_prompt: self.system_prompt.clone(),
             trigger_words: self.trigger_words.clone(),
             active_operations: self.active_operations.clone(),
@@ -3230,6 +3237,14 @@ fn build_native_dispatcher_with_stream_delivery(
     .with_poll_update_sink(Box::new(
         RedisPollStore::new(options.redis_endpoint).map_err(CompositionError::PollStore)?,
     ));
+    let dispatcher = match &options.opennode {
+        Some(opennode) => dispatcher.with_lightning_checkout(Box::new(ProviderCheckout::new(
+            opennode_provider(&opennode.api_url, &opennode.api_key)
+                .map_err(CompositionError::LightningProvider)?,
+            BillingRepository::new(options.database_url),
+        ))),
+        None => dispatcher,
+    };
     let dispatcher = if let Some(words) = options.trigger_words.filter(|words| !words.is_empty()) {
         dispatcher.with_trigger_words(words)
     } else {
@@ -3420,6 +3435,7 @@ pub fn build_native_runtime(
 
 #[cfg(test)]
 mod tests {
+    use crate::lightning_payments::OpenNodeOptions;
     use crate::test_env::fresh_op;
     use std::cell::RefCell;
     use std::io::{BufRead, BufReader, Write};
@@ -6303,6 +6319,7 @@ mod tests {
             firecrawl_api_key: None,
             supadata_api_key: None,
             apify_api_key: None,
+            opennode: None,
             system_prompt: None,
             trigger_words: None,
             active_operations: ActiveOperationRegistry::default(),
@@ -6325,6 +6342,7 @@ mod tests {
             firecrawl_api_key: None,
             supadata_api_key: None,
             apify_api_key: None,
+            opennode: None,
             system_prompt: None,
             trigger_words: None,
             active_operations: ActiveOperationRegistry::default(),
@@ -6353,6 +6371,10 @@ mod tests {
             firecrawl_api_key: Some("synthetic-firecrawl-key".to_owned()),
             supadata_api_key: Some("synthetic-supadata-key".to_owned()),
             apify_api_key: Some("synthetic-apify-key".to_owned()),
+            opennode: Some(OpenNodeOptions {
+                api_key: "synthetic-opennode-key".to_owned(),
+                api_url: "https://opennode.example.test".to_owned(),
+            }),
             system_prompt: Some("synthetic persona".to_owned()),
             trigger_words: Some(vec!["synthetic".to_owned()]),
             active_operations: ActiveOperationRegistry::default(),
@@ -6381,6 +6403,10 @@ mod tests {
             firecrawl_api_key: Some("synthetic-search-key".to_owned()),
             supadata_api_key: Some("synthetic-supadata-key".to_owned()),
             apify_api_key: Some("synthetic-apify-key".to_owned()),
+            opennode: Some(OpenNodeOptions {
+                api_key: "synthetic-opennode-key".to_owned(),
+                api_url: "https://opennode.example.test".to_owned(),
+            }),
             system_prompt: Some("synthetic system prompt".to_owned()),
             trigger_words: Some(vec!["synthetic".to_owned()]),
             active_operations: ActiveOperationRegistry::default(),
