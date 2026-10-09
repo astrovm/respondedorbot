@@ -549,21 +549,16 @@ mod tests {
             ]
         );
         let sent = sent.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        assert_eq!(sent.len(), 2);
-        let TelegramAction::SendMessage(english) = &sent[0] else {
-            panic!("expected a message");
-        };
-        assert_eq!(english.chat_id, ChatId(88));
-        assert_eq!(english.reply_to_message_id, Some(MessageId(5)));
-        assert_eq!(
-            english.text,
-            "Lightning payment received ⚡\n+50.00 credits\nPersonal balance: 75.00 credits"
-        );
-        let TelegramAction::SendMessage(spanish) = &sent[1] else {
-            panic!("expected a message");
-        };
-        assert_eq!(spanish.reply_to_message_id, None);
-        assert!(spanish.text.starts_with("Pago Lightning recibido ⚡"));
+        assert!(matches!(
+            sent.as_slice(),
+            [TelegramAction::SendMessage(english), TelegramAction::SendMessage(spanish)]
+                if english.chat_id == ChatId(88)
+                    && english.reply_to_message_id == Some(MessageId(5))
+                    && english.text
+                        == "Lightning payment received ⚡\n+50.00 credits\nPersonal balance: 75.00 credits"
+                    && spanish.reply_to_message_id.is_none()
+                    && spanish.text.starts_with("Pago Lightning recibido ⚡")
+        ));
     }
 
     #[test]
