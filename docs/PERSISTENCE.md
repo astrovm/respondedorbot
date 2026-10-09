@@ -63,7 +63,7 @@ Known event types that must remain readable include:
 - `transfer_user_to_chat`
 - `transfer_user_to_user`
 - `admin_command`
-- `topup` (Lightning top-ups, with `source: lightning` in the metadata)
+- `topup` (Stars and Lightning; Lightning ones carry `source: lightning`)
 
 Important metadata identifiers include `operation_id`, `settlement_id`,
 `segment_id`, `usage_tag`, provider generation/request identifiers,
