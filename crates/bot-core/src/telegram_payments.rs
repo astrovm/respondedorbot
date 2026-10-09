@@ -121,22 +121,12 @@ const fn topup_step(credits: i64) -> i64 {
     }
 }
 
-const fn more_credits(credits: i64) -> i64 {
-    let next = credits + topup_step(credits);
-    if next > MAX_TOPUP_CREDITS {
-        MAX_TOPUP_CREDITS
-    } else {
-        next
-    }
+fn more_credits(credits: i64) -> i64 {
+    (credits + topup_step(credits)).min(MAX_TOPUP_CREDITS)
 }
 
-const fn fewer_credits(credits: i64) -> i64 {
-    let previous = credits - topup_step(credits - 1);
-    if previous < MIN_TOPUP_CREDITS {
-        MIN_TOPUP_CREDITS
-    } else {
-        previous
-    }
+fn fewer_credits(credits: i64) -> i64 {
+    (credits - topup_step(credits - 1)).max(MIN_TOPUP_CREDITS)
 }
 
 #[must_use]

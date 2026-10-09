@@ -5522,7 +5522,7 @@ where
             // A number sent as a reply to the top-up menu redraws it on that
             // amount, nearest end if out of range.
             let credits = credits.clamp(MIN_TOPUP_CREDITS, MAX_TOPUP_CREDITS);
-            if let Some(action) = plan_topup_command(
+            let menu = plan_topup_command(
                 chat_id,
                 message_id,
                 &format!("/topup {credits}"),
@@ -5531,12 +5531,11 @@ where
                 "private",
                 self.billing_available,
                 self.lightning_checkout.is_some(),
-            ) {
-                let _receipt = self
-                    .actions
-                    .execute(action)
-                    .map_err(DispatchError::Action)?;
-            }
+            );
+            let _receipt = menu
+                .map(|action| self.actions.execute(action))
+                .transpose()
+                .map_err(DispatchError::Action)?;
             return Ok(DispatchOutcome::Handled);
         }
         if message.has_reply && self.ai_conversation_source.is_none() {
