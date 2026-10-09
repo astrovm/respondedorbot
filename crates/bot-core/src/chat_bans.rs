@@ -248,6 +248,7 @@ mod tests {
             plan_ban_command(BanCommand::List, context(Locale::Es, None)),
             BanCommandPlan::List
         );
+        assert_eq!(reply_text(&BanCommandPlan::List), None);
     }
 
     #[test]
