@@ -174,6 +174,16 @@ const COMMAND_GROUPS: &[CommandGroup] = &[
         description_en: "see who is banned in the group",
     },
     CommandGroup {
+        aliases: &["limitar", "limit"],
+        description_es: "admins: cuántos mensajes por hora le paga el grupo a alguien",
+        description_en: "admins: how many messages per hour the group pays for someone",
+    },
+    CommandGroup {
+        aliases: &["limitados", "limited"],
+        description_es: "ver quién tiene límite propio en el grupo",
+        description_en: "see who has their own limit in the group",
+    },
+    CommandGroup {
         aliases: &["gm"],
         description_es: "GIF de buenos días",
         description_en: "good-morning GIF",
@@ -237,6 +247,8 @@ const MENU: &[&str] = &[
     "ban",
     "unban",
     "bans",
+    "limit",
+    "limited",
     "help",
     "bcra",
     "rulo",
@@ -329,15 +341,15 @@ mod tests {
         for (locale, expected_hash) in [
             (
                 Locale::Es,
-                "68961bcbf0257c9b8218308cc164580b2c733f6018e1ca111521f8972dd7379b",
+                "63ad4c7aba17a7adc908c7bbb9a24a3c732ff2589e1f69a6622d4dedeca85762",
             ),
             (
                 Locale::En,
-                "e5ba610326d6ca12f2317bf047cd7d794f344206c36f3d687ad34da8c0044178",
+                "3a77bbac94e38bff8ad42c2f4908919170a49457b93f94ac21fb63304c9eeeab",
             ),
         ] {
             let commands = telegram_commands(locale);
-            assert_eq!(commands.len(), 82);
+            assert_eq!(commands.len(), 86);
             let encoded = serde_json::to_string(&commands);
             assert!(encoded.is_ok());
             let digest = encoded.map(|value| sha256_hex(&value));

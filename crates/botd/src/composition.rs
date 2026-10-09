@@ -13,6 +13,7 @@ use bot_adapters::bcra::{
 use bot_adapters::billing_read::{BillingRepository, ChargeHistoryRow};
 use bot_adapters::chat_bans::ChatBanRepository;
 use bot_adapters::chat_config::{ChatConfigRepository, ChatConfigRepositoryError};
+use bot_adapters::chat_limits::ChatLimitRepository;
 use bot_adapters::coinmarketcap::{
     BitcoinPriceOutcome, CoinMarketCapMarketTransport, CoinMarketCapTransport, MarketRequest,
     MarketRequestKind, ReqwestCoinMarketCapTransport,
@@ -117,13 +118,13 @@ use crate::conversation_adapters::{PostgresConversationBilling, RedisConversatio
 use crate::dispatcher::{
     ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BcraLoad, BcraSource,
     BillingBalanceSource, BillingBalances, BillingTransferSink, BitcoinPriceSource,
-    ChargeHistorySource, ChatBanStore, ChatConfigSource, DollarMarketLoad, DollarMarketSource,
-    DollarQuotesSource, ElectionLoad, ElectionSource, GreetingPoolLoad, GreetingPoolSource,
-    GroupAuthorizationDecision, GroupAuthorizer, LinkReplacementLoad, LinkReplacementSource,
-    MarketPriceLoad, MarketPriceSource, MessageStateSink, NativeDispatcher, OilPriceSource,
-    OilQuoteLoad, RandomSource, RuloInputLoad, RuloSource, RuntimeValues, ScheduledTaskSource,
-    StarPaymentReceipt, StarPaymentSink, StockPriceSource, StockQuotesLoad, TokenSignalLoad,
-    TokenSignalSource, WeatherObservationLoad, WeatherSource,
+    ChargeHistorySource, ChatBanStore, ChatConfigSource, ChatLimitStore, DollarMarketLoad,
+    DollarMarketSource, DollarQuotesSource, ElectionLoad, ElectionSource, GreetingPoolLoad,
+    GreetingPoolSource, GroupAuthorizationDecision, GroupAuthorizer, LinkReplacementLoad,
+    LinkReplacementSource, MarketPriceLoad, MarketPriceSource, MessageStateSink, NativeDispatcher,
+    OilPriceSource, OilQuoteLoad, RandomSource, RuloInputLoad, RuloSource, RuntimeValues,
+    ScheduledTaskSource, StarPaymentReceipt, StarPaymentSink, StockPriceSource, StockQuotesLoad,
+    TokenSignalLoad, TokenSignalSource, WeatherObservationLoad, WeatherSource,
 };
 use crate::error_text;
 use crate::firecrawl_tool::FirecrawlTool;
@@ -154,6 +155,32 @@ impl AdminCreditSink for BillingRepository {
             .map_err(|_| "admin credit amount exceeds the persistent range".to_owned())?;
         self.mint_user_credits(user_id, amount, Some(user_id), operation_id)
             .map_err(error_text)
+    }
+}
+
+impl ChatLimitStore for ChatLimitRepository {
+    fn hourly_limit(&mut self, chat_id: i64, user_id: i64) -> Result<Option<i64>, String> {
+        ChatLimitRepository::hourly_limit(self, chat_id, user_id).map_err(error_text)
+    }
+
+    fn set(
+        &mut self,
+        chat_id: i64,
+        user_id: i64,
+        name: &str,
+        hourly_limit: i64,
+        set_by: i64,
+    ) -> Result<(), String> {
+        ChatLimitRepository::set(self, chat_id, user_id, name, hourly_limit, set_by)
+            .map_err(error_text)
+    }
+
+    fn clear(&mut self, chat_id: i64, user_id: i64) -> Result<bool, String> {
+        ChatLimitRepository::clear(self, chat_id, user_id).map_err(error_text)
+    }
+
+    fn list(&mut self, chat_id: i64) -> Result<Vec<bot_core::chat_limits::LimitedUser>, String> {
+        ChatLimitRepository::list(self, chat_id).map_err(error_text)
     }
 }
 
@@ -3211,6 +3238,7 @@ fn build_native_dispatcher_with_stream_delivery(
     .with_admin_credit_sink(Box::new(BillingRepository::new(options.database_url)))
     .with_admin_creditlog_source(Box::new(BillingRepository::new(options.database_url)))
     .with_ban_store(Box::new(ChatBanRepository::new(options.database_url)))
+    .with_limit_store(Box::new(ChatLimitRepository::new(options.database_url)))
     .with_dollar_quotes_source(Box::new(CriptoYaDollarQuotesSource {
         transport: criptoya_transport,
         cache: criptoya_cache,
@@ -6412,6 +6440,32 @@ mod tests {
             telegram_delivery: TelegramDeliveryCoordinator::default(),
         });
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn chat_limit_repository_backs_the_dispatcher_limit_store() {
+        use crate::dispatcher::ChatLimitStore;
+        let Some(database_url) = db_env() else { return };
+        let mut store = bot_adapters::chat_limits::ChatLimitRepository::new(&database_url);
+        let chat_id = -100_900_211;
+        let _cleared = ChatLimitStore::clear(&mut store, chat_id, 2);
+        assert_eq!(
+            ChatLimitStore::set(&mut store, chat_id, 2, "Ana", 3, 1),
+            Ok(())
+        );
+        assert_eq!(
+            ChatLimitStore::hourly_limit(&mut store, chat_id, 2),
+            Ok(Some(3))
+        );
+        assert_eq!(
+            ChatLimitStore::list(&mut store, chat_id),
+            Ok(vec![bot_core::chat_limits::LimitedUser {
+                user_id: 2,
+                name: "Ana".to_owned(),
+                hourly_limit: 3
+            }])
+        );
+        assert_eq!(ChatLimitStore::clear(&mut store, chat_id, 2), Ok(true));
     }
 
     #[test]

@@ -118,6 +118,22 @@ Primary key: (`chat_id`, `user_id`), both `BIGINT`. Also stores
 - Banning twice keeps the first row. Unbanning deletes it.
 - If the lookup fails, the message is handled as if the member were not banned.
 
+### `chat_user_limits`
+
+Primary key: (`chat_id`, `user_id`), both `BIGINT`. Also stores
+`hourly_limit` (`BIGINT`, never negative), `display_name` (the name shown in
+`/limited`), `set_by`, and `updated_at`.
+
+- A row replaces the group's `creditless_user_hourly_limit` for that member,
+  so it only caps AI messages the group pays for. `0` means the member can
+  only use their own credits. The chat config is never changed.
+- The hourly counter is the same Redis `creditless_cap` key; only the limit
+  it is compared to changes.
+- Group admins always get the group's limit, even with a row.
+- Setting again replaces the row and moves it to the end of `/limited`.
+  `/limit off` deletes it.
+- If the lookup fails, the group's limit applies.
+
 ## Redis database 0
 
 Unless explicitly noted, application Redis state is in the configured default

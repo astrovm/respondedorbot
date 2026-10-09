@@ -276,11 +276,20 @@ impl<Provider, Tools, State, Billing> NativeConversation<Provider, Tools, State,
         decision: &ReserveDecision,
     ) -> String {
         if let Some(ReserveDenial::CreditlessHourlyCap { limit }) = decision.denial {
-            return match locale {
-                Locale::Es => format!(
+            return match (limit, locale) {
+                // A zero limit is no hourly allowance at all, so there is no
+                // limit to reach.
+                (0, Locale::Es) => {
+                    "El grupo no te paga mensajes de IA, boludo. Cargá créditos con /topup si querés seguir"
+                        .to_owned()
+                }
+                (0, Locale::En) => {
+                    "The group doesn't pay for your AI messages. Use /topup to keep going".to_owned()
+                }
+                (_, Locale::Es) => format!(
                     "Llegaste al límite de {limit} mensajes de IA por hora que paga el grupo, boludo. Cargá créditos con /topup si querés seguir"
                 ),
-                Locale::En => format!(
+                (_, Locale::En) => format!(
                     "You reached the limit of {limit} group-funded AI messages per hour. Use /topup to keep going"
                 ),
             };
@@ -4310,6 +4319,43 @@ mod tests {
             ))
         );
         assert!(service.provider.prompts.borrow().is_empty());
+    }
+
+    #[test]
+    fn zero_creditless_limit_denial_says_the_group_does_not_pay() {
+        for (locale, expected) in [
+            (
+                Locale::Es,
+                "El grupo no te paga mensajes de IA, boludo. Cargá créditos con /topup si querés seguir",
+            ),
+            (
+                Locale::En,
+                "The group doesn't pay for your AI messages. Use /topup to keep going",
+            ),
+        ] {
+            let denial = ReserveDecision {
+                authorized: false,
+                user_balance: 0,
+                chat_balance: 5_000,
+                source: Some(PayerSource::Chat),
+                denial: Some(ReserveDenial::CreditlessHourlyCap { limit: 0 }),
+            };
+            let mut service = conversation(
+                vec![Ok(round("must not run", None))],
+                Billing {
+                    decisions: VecDeque::from([denial]),
+                    ..Billing::default()
+                },
+            );
+            let mut request = input();
+            request.chat_type = "supergroup".to_owned();
+            request.locale = locale;
+            assert_eq!(
+                service.prepare(request),
+                Ok(AiPreparation::reply(expected, None))
+            );
+            assert!(service.provider.prompts.borrow().is_empty());
+        }
     }
 
     #[test]
