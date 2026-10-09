@@ -22,6 +22,7 @@ use crate::composition::{
 };
 use crate::config::ProductionConfig;
 use crate::dispatcher::ActionSink;
+use crate::error_text;
 use crate::operational_reporting::{
     NoopOperationalReporter, OperationalReport, OperationalReporter, TelegramOperationalReporter,
 };
@@ -130,10 +131,6 @@ where
         |failure| log_and_queue(reports, poll_retry_report(failure)),
         |update_id, error| log_and_queue(reports, update_failure_report(update_id, error)),
     )
-}
-
-fn error_text(error: impl Display) -> String {
-    error.to_string()
 }
 
 fn telegram_transport(

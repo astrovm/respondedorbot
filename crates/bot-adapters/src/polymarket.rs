@@ -28,12 +28,8 @@ pub struct HttpResponse {
     pub body: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransportFailureKind {
-    Timeout,
-    Connection,
-    Request,
-}
+pub use crate::http_client::TransportFailureKind;
+use crate::http_client::classify_error;
 
 pub trait PolymarketTransport {
     fn events(&self) -> Result<HttpResponse, TransportFailureKind>;
@@ -115,16 +111,6 @@ fn response_body(
         .text()
         .map(|body| HttpResponse { status_code, body })
         .map_err(classify_error)
-}
-
-fn classify_error(error: reqwest::Error) -> TransportFailureKind {
-    if error.is_timeout() {
-        TransportFailureKind::Timeout
-    } else if error.is_connect() {
-        TransportFailureKind::Connection
-    } else {
-        TransportFailureKind::Request
-    }
 }
 
 fn events_cache_key() -> String {
@@ -480,22 +466,5 @@ mod tests {
         .ok_or("unexpected error")?;
         assert!(unavailable.events().is_err());
         Ok(())
-    }
-
-    #[test]
-    fn reqwest_failures_are_classified_by_cause() {
-        use crate::web_fetch::reqwest_error_fixtures as fixtures;
-        assert_eq!(
-            fixtures::timeout().map(super::classify_error),
-            Some(super::TransportFailureKind::Timeout)
-        );
-        assert_eq!(
-            fixtures::connection().map(super::classify_error),
-            Some(super::TransportFailureKind::Connection)
-        );
-        assert_eq!(
-            fixtures::request().map(super::classify_error),
-            Some(super::TransportFailureKind::Request)
-        );
     }
 }

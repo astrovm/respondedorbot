@@ -21,6 +21,7 @@ use bot_adapters::telegram_http::{
 };
 use serde_json::{Value, json};
 
+use crate::error_text;
 use crate::media::{
     MediaCache, MediaFileSource, MediaProcessor, PreparedAudio, PreparedImage,
     TranscriptionProvider, VisionProvider,
@@ -194,10 +195,6 @@ impl MediaCache for RedisMediaCache {
         )
         .map_err(error_text)
     }
-}
-
-fn error_text(error: impl std::fmt::Display) -> String {
-    error.to_string()
 }
 
 const MEDIA_PIPES_UNAVAILABLE: &str = "media process pipes are unavailable";
@@ -801,6 +798,7 @@ fn media_provider_error_kind(error: &MediaProviderError) -> &'static str {
             OpenRouterChatError::MalformedResponse => "OpenRouter.MalformedResponse",
             OpenRouterChatError::IncompleteStream => "OpenRouter.IncompleteStream",
             OpenRouterChatError::Stream(_) => "OpenRouter.Stream",
+            OpenRouterChatError::ThinkingTimeout => "OpenRouter.ThinkingTimeout",
         },
     }
 }
@@ -1046,6 +1044,7 @@ mod tests {
             MediaProviderError::OpenRouter(OpenRouterChatError::MalformedResponse),
             MediaProviderError::OpenRouter(OpenRouterChatError::IncompleteStream),
             MediaProviderError::OpenRouter(OpenRouterChatError::Stream("broken".to_owned())),
+            MediaProviderError::OpenRouter(OpenRouterChatError::ThinkingTimeout),
         ] {
             let failure = Err(error);
             let trace =
@@ -1659,6 +1658,25 @@ mod tests {
         let wav = pcm_wav(8_000, &[0; 800]);
         assert!(!processor.has_no_audio_stream(&wav));
         Ok(())
+    }
+
+    #[test]
+    fn media_provider_errors_have_stable_trace_kinds() {
+        let cases = [
+            (MediaProviderError::MissingCredential, "MissingCredential"),
+            (MediaProviderError::MissingText, "MissingText"),
+            (
+                MediaProviderError::OpenRouter(OpenRouterChatError::ThinkingTimeout),
+                "OpenRouter.ThinkingTimeout",
+            ),
+            (
+                MediaProviderError::OpenRouter(OpenRouterChatError::IncompleteStream),
+                "OpenRouter.IncompleteStream",
+            ),
+        ];
+        for (error, kind) in cases {
+            assert_eq!(media_provider_error_kind(&error), kind);
+        }
     }
 
     #[test]

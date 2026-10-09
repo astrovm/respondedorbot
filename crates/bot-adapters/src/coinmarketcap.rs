@@ -34,12 +34,8 @@ pub struct HttpResponse {
     pub body: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransportFailureKind {
-    Timeout,
-    Connection,
-    Request,
-}
+pub use crate::http_client::TransportFailureKind;
+use crate::http_client::classify_error;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BitcoinPriceOutcome {
@@ -447,16 +443,6 @@ pub fn refresh_market_snapshot<T: CoinMarketCapMarketTransport, C: RequestCache>
         )),
     }
     diagnostics
-}
-
-fn classify_error(error: reqwest::Error) -> TransportFailureKind {
-    if error.is_timeout() {
-        TransportFailureKind::Timeout
-    } else if error.is_connect() {
-        TransportFailureKind::Connection
-    } else {
-        TransportFailureKind::Request
-    }
 }
 
 #[must_use]
@@ -1109,22 +1095,5 @@ mod tests {
         transport.before_retry();
         assert!(matches!(server.join(), Ok(Ok(()))));
         Ok(())
-    }
-
-    #[test]
-    fn reqwest_failures_are_classified_by_cause() {
-        use crate::web_fetch::reqwest_error_fixtures as fixtures;
-        assert_eq!(
-            fixtures::timeout().map(super::classify_error),
-            Some(super::TransportFailureKind::Timeout)
-        );
-        assert_eq!(
-            fixtures::connection().map(super::classify_error),
-            Some(super::TransportFailureKind::Connection)
-        );
-        assert_eq!(
-            fixtures::request().map(super::classify_error),
-            Some(super::TransportFailureKind::Request)
-        );
     }
 }

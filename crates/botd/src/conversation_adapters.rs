@@ -30,6 +30,7 @@ use crate::conversation::{
     ConversationBilling, ConversationMemory, ConversationState, ProviderSegmentRequest,
     ReserveDecision, ReserveDenial, ReserveRequest, SettlementRequest,
 };
+use crate::error_text;
 use crate::reconciliation::ActiveOperationRegistry;
 
 const COMPACTION_THRESHOLD: usize = 40;
@@ -621,10 +622,6 @@ impl ConversationBilling for PostgresConversationBilling {
             .map(Some)
             .map_err(error_text)
     }
-}
-
-fn error_text(error: impl std::fmt::Display) -> String {
-    error.to_string()
 }
 
 fn copy_pricing_metadata(metadata: &mut Map<String, Value>, pricing: &Value) {
