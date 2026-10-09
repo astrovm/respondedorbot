@@ -47,7 +47,7 @@ pub fn plan_language_command(
         (text, None)
     } else if !matches!(requested.as_str(), "es" | "en") {
         let text = match locale {
-            Locale::Es => "Mandalo así: /idioma [es|en]",
+            Locale::Es => "Mandalo así: /language [es|en]",
             Locale::En => "Usage: /language [es|en]",
         };
         (text.to_owned(), None)
@@ -183,7 +183,7 @@ mod tests {
         );
         assert_eq!(
             text(plan("/idioma xx", Locale::Es, false)),
-            "Mandalo así: /idioma [es|en]"
+            "Mandalo así: /language [es|en]"
         );
         assert_eq!(text(plan("/other", Locale::Es, false)), "");
     }

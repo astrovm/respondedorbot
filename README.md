@@ -20,6 +20,8 @@ It streams replies, remembers conversations, understands media, tracks markets, 
 
 ## 🚀 Use
 
+Telegram's `/` menu shows the same command names in every language, the first name in each row below. Only the descriptions follow the user's language. The other names still work.
+
 ### AI and media
 
 | Command | Purpose |
@@ -34,11 +36,11 @@ It streams replies, remembers conversations, understands media, tracks markets, 
 | --- | --- |
 | `/p`, `/prices`, `/precios` | Crypto and traditional markets |
 | `/c`, `/cripto`, `/criptos`, `/crypto`, `/cryptos` | Crypto prices and conversions |
-| `/clima`, `/weather` | Current weather |
+| `/weather`, `/clima` | Current weather |
 | `/dolar`, `/dollar`, `/usd` | Dollar rates |
 | `/s`, `/accion`, `/acciones`, `/stock`, `/stocks` | Stock prices |
-| `/petroleo`, `/oil` | Oil prices |
-| `/eleccion`, `/elections` | Polymarket elections |
+| `/oil`, `/petroleo` | Oil prices |
+| `/elections`, `/eleccion` | Polymarket elections |
 | `/bcra`, `/variables` | BCRA variables |
 | `/devo`, `/rulo` | Arbitrage calculations |
 | `/powerlaw`, `/rainbow`, `/satoshi` | Bitcoin reference models |
@@ -49,13 +51,15 @@ It streams replies, remembers conversations, understands media, tracks markets, 
 | --- | --- |
 | `/config`, `/settings` | Chat settings |
 | `/language`, `/idioma` | Language settings |
-| `/ban`, `/vetar`, `/unban`, `/desvetar` | Group admins: reply to someone to stop or allow them using the bot in that group |
-| `/banned`, `/vetados` | List who is banned in the group |
+| `/ban`, `/unban`, `/vetar`, `/desvetar` | Group admins: reply to someone to stop or allow them using the bot in that group |
+| `/bans`, `/banned`, `/vetados` | List who is banned in the group |
+| `/limit`, `/limitar` | Group admins: reply to someone with how many AI messages per hour the group pays for them, or `off` to go back to the group limit |
+| `/limited`, `/limitados` | List who has their own limit in the group |
 | `/topup`, `/balance` | Add or check AI credits |
 | `/charges`, `/history`, `/gastos` | Credit history |
 | `/transfer` | Move credits to a group, or to someone by replying to them |
 | `/tarea`, `/task`, `/tareas`, `/tasks` | Manage scheduled tasks |
-| `/random`, `/convertbase`, `/comando`, `/time` | Utilities |
+| `/random`, `/convertbase`, `/command`, `/comando`, `/time` | Utilities |
 | `/gm`, `/gn`, `/help`, `/instance` | Greetings and bot information |
 
 ## Prices and charts

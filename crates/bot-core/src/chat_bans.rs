@@ -47,9 +47,9 @@ pub struct BannedUser {
 #[must_use]
 pub fn classify_ban_command(message_text: &str, bot_name: &str) -> Option<BanCommand> {
     match parse_command(message_text, bot_name).command.as_str() {
-        "/vetar" | "/ban" => Some(BanCommand::Ban),
-        "/desvetar" | "/unban" => Some(BanCommand::Unban),
-        "/vetados" | "/banned" => Some(BanCommand::List),
+        "/ban" | "/vetar" => Some(BanCommand::Ban),
+        "/unban" | "/desvetar" => Some(BanCommand::Unban),
+        "/bans" | "/banned" | "/vetados" => Some(BanCommand::List),
         _ => None,
     }
 }
@@ -72,11 +72,9 @@ pub fn plan_ban_command(command: BanCommand, context: BanCommandContext) -> BanC
     }
     let Some(target) = context.target else {
         return reply(match (command, locale) {
-            (BanCommand::Ban, Locale::Es) => {
-                "Respondé al mensaje de quien quieras vetar con /vetar"
-            }
+            (BanCommand::Ban, Locale::Es) => "Respondé al mensaje de quien quieras banear con /ban",
             (BanCommand::Ban, Locale::En) => "Reply to someone's message with /ban to ban them",
-            (_, Locale::Es) => "Respondé al mensaje de quien quieras desvetar con /desvetar",
+            (_, Locale::Es) => "Respondé al mensaje de quien quieras desbanear con /unban",
             (_, Locale::En) => "Reply to someone's message with /unban to unban them",
         });
     };
@@ -88,13 +86,13 @@ pub fn plan_ban_command(command: BanCommand, context: BanCommandContext) -> BanC
     }
     if target.user_id == context.sender_id {
         return reply(match locale {
-            Locale::Es => "No podés vetarte",
+            Locale::Es => "No podés banearte",
             Locale::En => "You can't ban yourself",
         });
     }
     if target.is_bot {
         return reply(match locale {
-            Locale::Es => "A los bots no los puedo vetar",
+            Locale::Es => "A los bots no los puedo banear",
             Locale::En => "I can't ban bots",
         });
     }
@@ -115,7 +113,7 @@ pub const fn bans_group_only(locale: Locale) -> &'static str {
 #[must_use]
 pub const fn ban_admin_target(locale: Locale) -> &'static str {
     match locale {
-        Locale::Es => "A los admins no los puedo vetar",
+        Locale::Es => "A los admins no los puedo banear",
         Locale::En => "I can't ban admins",
     }
 }
@@ -141,7 +139,7 @@ pub fn ban_result_reply(name: &str, inserted: bool, locale: Locale) -> String {
     match (inserted, locale) {
         (true, Locale::Es) => format!("Listo, {name} ya no puede usarme en este grupo"),
         (true, Locale::En) => format!("Done, {name} can't use me in this group anymore"),
-        (false, Locale::Es) => format!("{name} ya tenía veto en este grupo"),
+        (false, Locale::Es) => format!("{name} ya estaba baneado en este grupo"),
         (false, Locale::En) => format!("{name} was already banned in this group"),
     }
 }
@@ -151,7 +149,7 @@ pub fn unban_result_reply(name: &str, removed: bool, locale: Locale) -> String {
     match (removed, locale) {
         (true, Locale::Es) => format!("Listo, {name} puede volver a usarme"),
         (true, Locale::En) => format!("Done, {name} can use me again"),
-        (false, Locale::Es) => format!("{name} no tenía veto"),
+        (false, Locale::Es) => format!("{name} no estaba baneado"),
         (false, Locale::En) => format!("{name} wasn't banned"),
     }
 }
@@ -160,13 +158,13 @@ pub fn unban_result_reply(name: &str, removed: bool, locale: Locale) -> String {
 pub fn render_ban_list(users: &[BannedUser], locale: Locale) -> String {
     if users.is_empty() {
         return match locale {
-            Locale::Es => "No hay nadie vetado en este grupo",
+            Locale::Es => "No hay nadie baneado en este grupo",
             Locale::En => "Nobody is banned in this group",
         }
         .to_owned();
     }
     let header = match locale {
-        Locale::Es => "Vetados en este grupo",
+        Locale::Es => "Baneados en este grupo",
         Locale::En => "Banned in this group",
     };
     let lines = users
@@ -233,6 +231,8 @@ mod tests {
             ("/unban", Some(BanCommand::Unban)),
             ("/vetados", Some(BanCommand::List)),
             ("/banned extra", Some(BanCommand::List)),
+            ("/bans", Some(BanCommand::List)),
+            ("/bans@gordo_bot", Some(BanCommand::List)),
             ("/bann", None),
             ("ban", None),
             ("", None),
@@ -257,7 +257,7 @@ mod tests {
             (
                 BanCommand::Ban,
                 Locale::Es,
-                "Respondé al mensaje de quien quieras vetar con /vetar",
+                "Respondé al mensaje de quien quieras banear con /ban",
             ),
             (
                 BanCommand::Ban,
@@ -267,7 +267,7 @@ mod tests {
             (
                 BanCommand::Unban,
                 Locale::Es,
-                "Respondé al mensaje de quien quieras desvetar con /desvetar",
+                "Respondé al mensaje de quien quieras desbanear con /unban",
             ),
             (
                 BanCommand::Unban,
@@ -283,14 +283,14 @@ mod tests {
     #[test]
     fn ban_refuses_self_and_bots() {
         for (locale, expected) in [
-            (Locale::Es, "No podés vetarte"),
+            (Locale::Es, "No podés banearte"),
             (Locale::En, "You can't ban yourself"),
         ] {
             let plan = plan_ban_command(BanCommand::Ban, context(locale, target(1, false)));
             assert_eq!(reply_text(&plan), Some(expected));
         }
         for (locale, expected) in [
-            (Locale::Es, "A los bots no los puedo vetar"),
+            (Locale::Es, "A los bots no los puedo banear"),
             (Locale::En, "I can't ban bots"),
         ] {
             let plan = plan_ban_command(BanCommand::Ban, context(locale, target(2, true)));
@@ -336,7 +336,7 @@ mod tests {
         assert_eq!(bans_group_only(Locale::En), "This only works in groups");
         assert_eq!(
             ban_admin_target(Locale::Es),
-            "A los admins no los puedo vetar"
+            "A los admins no los puedo banear"
         );
         assert_eq!(ban_admin_target(Locale::En), "I can't ban admins");
         assert_eq!(
@@ -369,7 +369,7 @@ mod tests {
         );
         assert_eq!(
             ban_result_reply("Ana", false, Locale::Es),
-            "Ana ya tenía veto en este grupo"
+            "Ana ya estaba baneado en este grupo"
         );
         assert_eq!(
             ban_result_reply("Ana", false, Locale::En),
@@ -385,7 +385,7 @@ mod tests {
         );
         assert_eq!(
             unban_result_reply("Ana", false, Locale::Es),
-            "Ana no tenía veto"
+            "Ana no estaba baneado"
         );
         assert_eq!(
             unban_result_reply("Ana", false, Locale::En),
@@ -397,7 +397,7 @@ mod tests {
     fn ban_list_names_members_and_falls_back_to_ids() {
         assert_eq!(
             render_ban_list(&[], Locale::Es),
-            "No hay nadie vetado en este grupo"
+            "No hay nadie baneado en este grupo"
         );
         assert_eq!(
             render_ban_list(&[], Locale::En),
@@ -415,7 +415,7 @@ mod tests {
         ];
         assert_eq!(
             render_ban_list(&users, Locale::Es),
-            "Vetados en este grupo\n- Ana\n- 3"
+            "Baneados en este grupo\n- Ana\n- 3"
         );
         assert_eq!(
             render_ban_list(&users, Locale::En),
