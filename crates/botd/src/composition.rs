@@ -6416,9 +6416,14 @@ mod tests {
         let mut store = bot_adapters::chat_bans::ChatBanRepository::new(&database_url);
         let chat_id = -100_900_201;
         let _cleared = ChatBanStore::unban(&mut store, chat_id, 2);
+        assert_eq!(ChatBanStore::is_banned(&mut store, chat_id, 2), Ok(false));
         assert_eq!(
             ChatBanStore::ban(&mut store, chat_id, 2, "Ana", 1),
             Ok(true)
+        );
+        assert_eq!(
+            ChatBanStore::ban(&mut store, chat_id, 2, "Ana", 1),
+            Ok(false)
         );
         assert_eq!(ChatBanStore::is_banned(&mut store, chat_id, 2), Ok(true));
         assert_eq!(
@@ -6429,6 +6434,8 @@ mod tests {
             }])
         );
         assert_eq!(ChatBanStore::unban(&mut store, chat_id, 2), Ok(true));
+        assert_eq!(ChatBanStore::is_banned(&mut store, chat_id, 2), Ok(false));
+        assert_eq!(ChatBanStore::unban(&mut store, chat_id, 2), Ok(false));
     }
 
     #[test]
