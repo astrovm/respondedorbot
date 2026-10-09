@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use bot_adapters::billing_read::BillingRepository;
+use bot_adapters::billing_read::{AiChargeResult, BillingRepository};
 use bot_adapters::redis_connection::RedisEndpoint;
 use bot_adapters::redis_creditless_cap::{
     CREDITLESS_CAP_TTL_SECONDS, RedisCreditlessCap, creditless_cap_key,
@@ -422,6 +422,44 @@ impl PostgresConversationBilling {
         }
     }
 
+    fn charge_reservation(
+        &self,
+        request: &ReserveRequest,
+        amount: i32,
+        source: Option<&str>,
+    ) -> Result<AiChargeResult, String> {
+        self.repository
+            .charge_ai_credits(
+                request.user_id,
+                request.chat_id,
+                amount,
+                "ai_reserve",
+                &request.metadata,
+                source,
+                Some(&request.reservation_id),
+                &request.operation_id,
+            )
+            .map_err(error_text)
+    }
+
+    /// With the group paying first, the group pays until the member reaches
+    /// their hourly limit, then their own credits do.
+    fn group_first_source(
+        &self,
+        request: &ReserveRequest,
+        chat_id: i64,
+    ) -> Result<&'static str, String> {
+        let limit = request.creditless_user_hourly_limit;
+        let Some(creditless_cap) = self.creditless_cap.as_ref().filter(|_| limit >= 0) else {
+            return Ok("chat");
+        };
+        let used = creditless_cap
+            .count(&reservation_cap_key(request, chat_id))
+            .map_err(error_text)?
+            .unwrap_or(0);
+        Ok(if used >= limit { "user" } else { "chat" })
+    }
+
     fn refund_creditless_cap(&self, operation_id: &str) -> Result<(), String> {
         if let Some(cap_key) = self.cap_key_by_operation.get(operation_id)
             && let Some(creditless_cap) = self.creditless_cap.as_ref()
@@ -432,6 +470,15 @@ impl PostgresConversationBilling {
         }
         Ok(())
     }
+}
+
+/// The member's hourly counter in the chat the message came from.
+fn reservation_cap_key(request: &ReserveRequest, chat_id: i64) -> String {
+    let origin_chat_id = request
+        .metadata
+        .get("origin_chat_id")
+        .map_or_else(|| chat_id.to_string(), value_as_key_component);
+    creditless_cap_key(&origin_chat_id, request.user_id)
 }
 
 impl ConversationBilling for PostgresConversationBilling {
@@ -446,7 +493,7 @@ impl ConversationBilling for PostgresConversationBilling {
         }
         let amount = i32::try_from(request.amount)
             .map_err(|_| "AI reservation exceeds the database range".to_owned())?;
-        let requested_source = self
+        let cached_source = self
             .payer_by_operation
             .get(&request.operation_id)
             .copied()
@@ -454,19 +501,32 @@ impl ConversationBilling for PostgresConversationBilling {
                 PayerSource::User => "user",
                 PayerSource::Chat => "chat",
             });
-        let result = self
-            .repository
-            .charge_ai_credits(
-                request.user_id,
-                request.chat_id,
-                amount,
-                "ai_reserve",
-                &request.metadata,
-                requested_source,
-                Some(&request.reservation_id),
-                &request.operation_id,
-            )
-            .map_err(error_text)?;
+        let group_first_chat = request
+            .chat_id
+            .filter(|_| cached_source.is_none() && request.group_pays_first);
+        let requested_source = match group_first_chat {
+            Some(chat_id) => Some(self.group_first_source(&request, chat_id)?),
+            None => cached_source,
+        };
+        let mut result = self.charge_reservation(&request, amount, requested_source)?;
+        if group_first_chat.is_some() && !result.ok {
+            if requested_source == Some("user") {
+                // The member used up what the group pays for this hour and
+                // their own credits don't cover the rest.
+                self.release_operation_state(&request.operation_id);
+                return Ok(ReserveDecision {
+                    authorized: false,
+                    user_balance: result.user_balance,
+                    chat_balance: result.chat_balance,
+                    source: None,
+                    denial: Some(ReserveDenial::CreditlessHourlyCap {
+                        limit: request.creditless_user_hourly_limit,
+                    }),
+                });
+            }
+            // The group's balance ran out, so the member's own credits pay.
+            result = self.charge_reservation(&request, amount, Some("user"))?;
+        }
         let source = match result.source.as_deref() {
             Some("user") => Some(PayerSource::User),
             Some("chat") => Some(PayerSource::Chat),
@@ -482,11 +542,7 @@ impl ConversationBilling for PostgresConversationBilling {
                 .cap_checked_operations
                 .insert(request.operation_id.clone())
         {
-            let origin_chat_id = request
-                .metadata
-                .get("origin_chat_id")
-                .map_or_else(|| chat_id.to_string(), value_as_key_component);
-            let cap_key = creditless_cap_key(&origin_chat_id, request.user_id);
+            let cap_key = reservation_cap_key(&request, chat_id);
             self.cap_key_by_operation
                 .insert(request.operation_id.clone(), cap_key.clone());
             let count = creditless_cap
@@ -823,6 +879,7 @@ mod tests {
             locale,
             timezone_offset_hours: -3,
             creditless_user_hourly_limit: 10,
+            group_pays_first: false,
             timestamp: 1_700_000_000 + message_id,
             spontaneous: false,
             link_context: None,
@@ -1114,6 +1171,7 @@ mod tests {
             reservation_id: format!("{operation_id}:{reservation}"),
             amount,
             creditless_user_hourly_limit: 10,
+            group_pays_first: false,
             metadata: serde_json::Map::from_iter([(
                 "operation_id".to_owned(),
                 json!(operation_id),
@@ -1294,6 +1352,7 @@ mod tests {
             reservation_id: format!("{operation_id}:reserve"),
             amount,
             creditless_user_hourly_limit: 10,
+            group_pays_first: false,
             metadata: serde_json::Map::new(),
         }
     }
@@ -1388,6 +1447,7 @@ mod tests {
                 reservation_id: format!("{operation_id}:{reservation}"),
                 amount,
                 creditless_user_hourly_limit: limit,
+                group_pays_first: false,
                 // Without origin metadata the cap is keyed by the paying chat.
                 metadata: serde_json::Map::new(),
             }
@@ -1434,6 +1494,112 @@ mod tests {
             &format!("synthetic-chat-unreachable:{nonce}"),
             "first",
             400,
+            5,
+        ));
+        assert!(
+            matches!(&failed, Err(error) if !error.is_empty()),
+            "{failed:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn postgres_group_pays_first_until_the_hourly_limit_then_own_credits() -> TestResult {
+        std::env::var("TEST_DATABASE_URL")
+            .ok()
+            .zip(integration_redis_endpoint())
+            .map_or(Ok(()), group_first_scenario)
+    }
+
+    fn group_first_scenario((database_url, endpoint): (String, RedisEndpoint)) -> TestResult {
+        use bot_adapters::redis_creditless_cap::RedisCreditlessCap;
+
+        bot_adapters::billing_schema::BillingSchemaRepository::new(&database_url)
+            .ensure_schema()?;
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let suffix = i64::try_from(nonce % 100_000_000)?;
+        let member = 6_340_000_000_000_i64 + suffix;
+        let broke = 6_350_000_000_000_i64 + suffix;
+        let rich = 6_360_000_000_000_i64 + suffix;
+        let funder = 6_370_000_000_000_i64 + suffix;
+        let chat_id = -6_380_000_000_000_i64 - suffix;
+        let repository = bot_adapters::billing_read::BillingRepository::new(&database_url);
+        repository.mint_user_credits(member, 500, None, &fresh_op())?;
+        repository.mint_user_credits(rich, 1_000, None, &fresh_op())?;
+        repository.mint_user_credits(funder, 1_000, None, &fresh_op())?;
+        assert!(
+            repository
+                .transfer_user_to_chat(funder, chat_id, 1_000, &fresh_op())?
+                .transferred
+        );
+        let request = |user_id: i64, operation_id: &str, amount: i64, limit: i64| ReserveRequest {
+            user_id,
+            chat_id: Some(chat_id),
+            operation_id: operation_id.to_owned(),
+            reservation_id: format!("{operation_id}:first"),
+            amount,
+            creditless_user_hourly_limit: limit,
+            group_pays_first: true,
+            metadata: serde_json::Map::new(),
+        };
+        let mut billing = PostgresConversationBilling::new(&database_url)
+            .with_creditless_cap(RedisCreditlessCap::new(&endpoint)?);
+
+        // Under the hourly limit the group pays even though the member has credits.
+        let first = format!("synthetic-group-first:{nonce}");
+        let paid = billing.reserve(request(member, &first, 100, 1))?;
+        assert!(paid.authorized);
+        assert_eq!(paid.source, Some(PayerSource::Chat));
+        assert_eq!(paid.chat_balance, 900);
+        // The same operation keeps the group as its payer.
+        let again = billing.reserve(ReserveRequest {
+            reservation_id: format!("{first}:second"),
+            ..request(member, &first, 50, 1)
+        })?;
+        assert_eq!(again.source, Some(PayerSource::Chat));
+        assert_eq!(again.chat_balance, 850);
+
+        // At the limit the member's own credits take over.
+        let own = billing.reserve(request(member, &format!("synthetic-own:{nonce}"), 100, 1))?;
+        assert!(own.authorized);
+        assert_eq!(own.source, Some(PayerSource::User));
+        assert_eq!(own.chat_balance, 850);
+
+        // At the limit with too few credits of their own, the limit stops them.
+        let blocked = format!("synthetic-blocked:{nonce}");
+        let denied = billing.reserve(request(broke, &blocked, 400, 0))?;
+        assert!(!denied.authorized);
+        assert_eq!(denied.source, None);
+        assert_eq!(
+            denied.denial,
+            Some(ReserveDenial::CreditlessHourlyCap { limit: 0 })
+        );
+        assert_eq!(denied.chat_balance, 850);
+        assert!(!billing.payer_by_operation.contains_key(&blocked));
+
+        // When the group can't cover it, the member's own credits pay.
+        let big = billing.reserve(request(rich, &format!("synthetic-big:{nonce}"), 900, 5))?;
+        assert!(big.authorized);
+        assert_eq!(big.source, Some(PayerSource::User));
+        assert_eq!(big.chat_balance, 850);
+
+        // Without an hourly limit the group always pays first.
+        let unlimited = billing.reserve(request(
+            rich,
+            &format!("synthetic-unlimited:{nonce}"),
+            10,
+            -1,
+        ))?;
+        assert_eq!(unlimited.source, Some(PayerSource::Chat));
+        assert_eq!(unlimited.chat_balance, 840);
+
+        // A counter that cannot be read fails the reservation.
+        let mut unreachable_cap = PostgresConversationBilling::new(&database_url)
+            .with_creditless_cap(RedisCreditlessCap::new(&unreachable_redis())?);
+        let failed = unreachable_cap.reserve(request(
+            member,
+            &format!("synthetic-group-unreachable:{nonce}"),
+            10,
             5,
         ));
         assert!(

@@ -90,6 +90,7 @@ pub struct ReserveRequest {
     pub reservation_id: String,
     pub amount: i64,
     pub creditless_user_hourly_limit: i64,
+    pub group_pays_first: bool,
     pub metadata: Map<String, Value>,
 }
 
@@ -358,6 +359,7 @@ where
             reservation_id: format!("{operation_id}:{reservation_kind}"),
             amount,
             creditless_user_hourly_limit: input.creditless_user_hourly_limit,
+            group_pays_first: input.group_pays_first,
             metadata,
         })
     }
@@ -2586,6 +2588,7 @@ mod tests {
             locale: Locale::En,
             timezone_offset_hours: -3,
             creditless_user_hourly_limit: 5,
+            group_pays_first: false,
             timestamp: 1_672_531_200,
             spontaneous: false,
             link_context: None,

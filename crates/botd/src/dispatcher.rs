@@ -4849,6 +4849,7 @@ where
             locale,
             timezone_offset_hours: config.timezone_offset,
             creditless_user_hourly_limit,
+            group_pays_first: config.group_pays_first,
             timestamp,
             spontaneous,
             link_context: None,
@@ -5069,6 +5070,7 @@ where
             locale,
             timezone_offset_hours: config.timezone_offset,
             creditless_user_hourly_limit,
+            group_pays_first: config.group_pays_first,
             timestamp,
             spontaneous: false,
             link_context: None,
@@ -5225,6 +5227,7 @@ where
             locale,
             timezone_offset_hours: config.timezone_offset,
             creditless_user_hourly_limit,
+            group_pays_first: config.group_pays_first,
             timestamp,
             spontaneous: false,
             link_context: None,
@@ -10566,7 +10569,7 @@ mod tests {
                 .reply_markup
                 .as_ref()
                 .map(|markup| markup.inline_keyboard.len()),
-            Some(8)
+            Some(9)
         );
         assert_eq!(dispatcher.state.incoming.len(), 1);
         assert_eq!(dispatcher.state.outgoing.len(), 1);

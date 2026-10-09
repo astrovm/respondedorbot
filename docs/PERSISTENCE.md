@@ -103,6 +103,7 @@ Recognized settings and defaults:
 | `timezone_offset` | `-3` | Integer from -12 through 14 |
 | `ai_random_replies` | `true` | Boolean; group setting |
 | `creditless_user_hourly_limit` | `5` | Existing bounded integer choices |
+| `group_pays_first` | `false` | Boolean; group setting. `true` charges the group before the member's own credits until their hourly limit |
 
 Unknown stored fields must not cause existing recognized settings to be lost
 during a read-modify-write operation.
