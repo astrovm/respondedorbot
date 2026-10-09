@@ -512,6 +512,7 @@ mod tests {
         ProductionBackgroundOptions, build_production_background_specs, spawn_named_thread,
     };
     use crate::composition::TelegramDeliveryCoordinator;
+    use crate::lightning_payments::OpenNodeOptions;
     use crate::operational_reporting::{OperationalReport, OperationalReporter};
     use crate::reconciliation::{ActiveOperationRegistry, ReconciliationSettings};
     use crate::scheduler::SchedulerMode;
@@ -690,14 +691,17 @@ mod tests {
                 reconciliation_settings: ReconciliationSettings::default(),
                 active_operations: ActiveOperationRegistry::default(),
                 coinmarketcap_key: Some("synthetic-coinmarketcap-key"),
-                opennode: None,
+                opennode: Some(OpenNodeOptions {
+                    api_key: "synthetic-opennode-key".to_owned(),
+                    api_url: "https://opennode.example.test".to_owned(),
+                }),
                 telegram_delivery: TelegramDeliveryCoordinator::default(),
             })
         };
         assert!(build("not-a-url").is_err());
         let result = build("https://openrouter.example.test/api/v1");
         assert!(result.is_ok());
-        assert_eq!(result.map(|specs| specs.len()), Ok(7));
+        assert_eq!(result.map(|specs| specs.len()), Ok(8));
         Ok(())
     }
 
