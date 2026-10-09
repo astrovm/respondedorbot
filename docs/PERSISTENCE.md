@@ -107,6 +107,17 @@ Recognized settings and defaults:
 Unknown stored fields must not cause existing recognized settings to be lost
 during a read-modify-write operation.
 
+### `chat_bans`
+
+Primary key: (`chat_id`, `user_id`), both `BIGINT`. Also stores
+`display_name` (the name shown in `/banned`), `banned_by`, and `created_at`.
+
+- A row means that member gets no replies in that group. Their messages still
+  go into chat history.
+- Group admins are never treated as banned, even with a row.
+- Banning twice keeps the first row. Unbanning deletes it.
+- If the lookup fails, the message is handled as if the member were not banned.
+
 ## Redis database 0
 
 Unless explicitly noted, application Redis state is in the configured default
