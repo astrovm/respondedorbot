@@ -60,7 +60,7 @@ pub(crate) mod test_env {
 
     /// A credit command operation id that is unique across test runs, so reruns
     /// against the same database never replay an earlier run's operation.
-    pub(crate) fn synthetic_operation_id() -> String {
+    pub(crate) fn fresh_op() -> String {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

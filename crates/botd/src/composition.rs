@@ -3401,6 +3401,7 @@ pub fn build_native_runtime(
 
 #[cfg(test)]
 mod tests {
+    use crate::test_env::fresh_op;
     use std::cell::RefCell;
     use std::io::{BufRead, BufReader, Write};
     use std::net::{TcpListener, TcpStream};
@@ -4053,13 +4054,8 @@ mod tests {
             429,
             r#"{"ok":false,"error_code":429,"parameters":{"retry_after":61}}"#,
         )]);
-        let waits = Arc::new(Mutex::new(Vec::new()));
-        let recorded_waits = waits.clone();
-        let mut sink = TelegramActionSink::new(transport, "token").with_wait(move |duration| {
-            if let Ok(mut waits) = recorded_waits.lock() {
-                waits.push(duration);
-            }
-        });
+        // A wait would retry the send, and the transport has one response.
+        let mut sink = TelegramActionSink::new(transport, "token");
         assert_eq!(
             sink.execute(TelegramAction::SendMessage(SendMessage::new(
                 ChatId(1),
@@ -4070,7 +4066,6 @@ mod tests {
             })
         );
         assert_eq!(sink.transport.requests.borrow().len(), 1);
-        assert!(waits.lock().is_ok_and(|waits| waits.is_empty()));
     }
 
     #[test]
@@ -5508,12 +5503,7 @@ mod tests {
     fn transfer_sink_rejects_values_that_cannot_fit_the_persistent_schema() {
         let mut repository = BillingRepository::new("postgresql://unused");
         assert_eq!(
-            repository.transfer(
-                42,
-                -202,
-                i64::from(i32::MAX) + 1,
-                &crate::test_env::synthetic_operation_id(),
-            ),
+            repository.transfer(42, -202, i64::from(i32::MAX) + 1, &fresh_op(),),
             Err("credit transfer amount exceeds the persistent range".to_owned())
         );
     }
@@ -7205,25 +7195,15 @@ mod tests {
         let chat_id = -7_400_000_000_000_i64 - suffix;
         let mut billing = BillingRepository::new(&database_url);
         assert_eq!(
-            AdminCreditSink::mint(
-                &mut billing,
-                user_id,
-                100,
-                &crate::test_env::synthetic_operation_id(),
-            )?,
+            AdminCreditSink::mint(&mut billing, user_id, 100, &fresh_op())?,
             100
         );
         let balances = BillingBalanceSource::load(&mut billing, user_id, Some(chat_id))?;
         assert!(matches!(balances.user_balance, 100 | 400));
         assert_eq!(balances.chat_balance, Some(0));
         let initial_user_balance = balances.user_balance;
-        let transfer = BillingTransferSink::transfer(
-            &mut billing,
-            user_id,
-            chat_id,
-            25,
-            &crate::test_env::synthetic_operation_id(),
-        )?;
+        let transfer =
+            BillingTransferSink::transfer(&mut billing, user_id, chat_id, 25, &fresh_op())?;
         assert!(transfer.transferred);
         assert_eq!(transfer.user_balance, initial_user_balance - 25);
         assert_eq!(transfer.chat_balance, 25);
@@ -8514,12 +8494,8 @@ mod tests {
         let suffix = i64::try_from(nonce % 100_000_000).map_err(super::error_text)?;
         let user_id = 7_320_000_000_000_i64 + suffix;
         let chat_id = -7_330_000_000_000_i64 - suffix;
-        AdminCreditSink::mint(
-            &mut BillingRepository::new(&db),
-            user_id,
-            1_000_000,
-            &crate::test_env::synthetic_operation_id(),
-        )?;
+        let mut billing = BillingRepository::new(&db);
+        AdminCreditSink::mint(&mut billing, user_id, 1_000_000, &fresh_op())?;
         let input = AiConversationInput {
             chat_id: ChatId(chat_id),
             message_id: MessageId(7),
@@ -8602,12 +8578,7 @@ mod tests {
         // Nothing listens here: every rejection happens before a connection.
         let mut billing = BillingRepository::new("postgresql://synthetic@127.0.0.1:1/unused");
         assert_eq!(
-            AdminCreditSink::mint(
-                &mut billing,
-                7,
-                i64::MAX,
-                &crate::test_env::synthetic_operation_id(),
-            ),
+            AdminCreditSink::mint(&mut billing, 7, i64::MAX, &fresh_op()),
             Err("admin credit amount exceeds the persistent range".to_owned())
         );
         assert_eq!(

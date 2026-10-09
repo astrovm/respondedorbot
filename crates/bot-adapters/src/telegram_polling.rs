@@ -818,8 +818,10 @@ mod tests {
             {"update_id":2,"message":{},"callback_query":{}},
             {"update_id":3,"poll":{"id":"p"}}
         ]}"#;
-        let Ok(PollOutcome::Updates(updates)) = parse_response(200, body) else {
-            unreachable!("a batch with bad updates still parses")
+        let parsed = parse_response(200, body);
+        let updates = match parsed {
+            Ok(PollOutcome::Updates(updates)) => updates,
+            _ => Vec::new(),
         };
         assert_eq!(updates.len(), 3);
         assert_eq!(updates[0], unsupported(1));

@@ -201,12 +201,12 @@ fn billing_operations_report_a_missing_schema_at_each_public_boundary() {
     );
     assert!(
         repository
-            .mint_user_credits(1, 1, None, &synthetic_operation_id())
+            .mint_user_credits(1, 1, None, &fresh_op())
             .is_err()
     );
     assert!(
         repository
-            .transfer_user_to_chat(1, -1, 1, &synthetic_operation_id())
+            .transfer_user_to_chat(1, -1, 1, &fresh_op())
             .is_err()
     );
     assert!(
@@ -800,7 +800,7 @@ fn public_network_entrypoints_validate_requests_before_provider_io() {
 
 /// A credit command operation id that is unique across test runs, so reruns
 /// against the same database never replay an earlier run's operation.
-fn synthetic_operation_id() -> String {
+fn fresh_op() -> String {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

@@ -712,6 +712,7 @@ fn user_identity(input: &AiConversationInput) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_env::fresh_op;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use bot_adapters::redis_connection::RedisEndpoint;
@@ -1112,12 +1113,8 @@ mod tests {
         let mut billing =
             PostgresConversationBilling::new(database_url).with_active_operations(active.clone());
 
-        bot_adapters::billing_read::BillingRepository::new(database_url).mint_user_credits(
-            user_id,
-            1_000,
-            None,
-            &crate::test_env::synthetic_operation_id(),
-        )?;
+        let repository = bot_adapters::billing_read::BillingRepository::new(database_url);
+        repository.mint_user_credits(user_id, 1_000, None, &fresh_op())?;
 
         // More than the minted credits plus any onboarding grant.
         let denied = billing.reserve(user_reserve(user_id, &denied_operation, "reserve", 5_000))?;
@@ -1352,20 +1349,10 @@ mod tests {
         let user_id = 6_320_000_000_000_i64 + suffix;
         let chat_id = -6_330_000_000_000_i64 - suffix;
         let repository = bot_adapters::billing_read::BillingRepository::new(&database_url);
-        repository.mint_user_credits(
-            user_id,
-            1_000,
-            None,
-            &crate::test_env::synthetic_operation_id(),
-        )?;
+        repository.mint_user_credits(user_id, 1_000, None, &fresh_op())?;
         assert!(
             repository
-                .transfer_user_to_chat(
-                    user_id,
-                    chat_id,
-                    1_000,
-                    &crate::test_env::synthetic_operation_id()
-                )?
+                .transfer_user_to_chat(user_id, chat_id, 1_000, &fresh_op())?
                 .transferred
         );
         let request = |operation_id: &str, reservation: &str, amount: i64, limit: i64| {

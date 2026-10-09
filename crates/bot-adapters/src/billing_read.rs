@@ -179,6 +179,11 @@ pub struct ChargeHistoryRow {
     pub group_created_at: String,
 }
 
+const COMMAND_OPERATION_SQL: &str = "SELECT 1 FROM credit_ledger \
+     WHERE metadata ? 'command_operation_id' \
+       AND metadata->>'command_operation_id' = $1 \
+     LIMIT 1";
+
 pub struct BillingRepository {
     pool: PostgresPool,
 }
@@ -1547,13 +1552,7 @@ impl BillingRepository {
         operation_id: &str,
     ) -> Result<bool, BillingError> {
         Ok(transaction
-            .query_opt(
-                "SELECT 1 FROM credit_ledger \
-                 WHERE metadata ? 'command_operation_id' \
-                   AND metadata->>'command_operation_id' = $1 \
-                 LIMIT 1",
-                &[&operation_id],
-            )?
+            .query_opt(COMMAND_OPERATION_SQL, &[&operation_id])?
             .is_some())
     }
 
@@ -1780,7 +1779,7 @@ fn legacy_settlement_metadata(
 mod tests {
     /// A credit command operation id that is unique across test runs, so reruns
     /// against the same database never replay an earlier run's operation.
-    fn synthetic_operation_id() -> String {
+    fn fresh_op() -> String {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2194,21 +2193,13 @@ mod tests {
         assert_eq!(topup_evidence.get::<_, i64>(1), 2);
 
         assert_eq!(
-            repository.mint_user_credits(
-                7_000_000_000_009,
-                500,
-                Some(99),
-                &synthetic_operation_id()
-            )?,
+            repository.mint_user_credits(7_000_000_000_009, 500, Some(99), &fresh_op())?,
             500
         );
+        const MANUAL_USER: i64 = 7_000_000_000_009;
+        const MANUAL_CHAT: i64 = 7_000_000_000_010;
         assert_eq!(
-            repository.transfer_user_to_chat(
-                7_000_000_000_009,
-                7_000_000_000_010,
-                300,
-                &synthetic_operation_id()
-            )?,
+            repository.transfer_user_to_chat(MANUAL_USER, MANUAL_CHAT, 300, &fresh_op())?,
             TransferResult {
                 transferred: true,
                 user_balance: 200,
@@ -2216,12 +2207,7 @@ mod tests {
             }
         );
         assert_eq!(
-            repository.transfer_user_to_chat(
-                7_000_000_000_009,
-                7_000_000_000_010,
-                500,
-                &synthetic_operation_id()
-            )?,
+            repository.transfer_user_to_chat(MANUAL_USER, MANUAL_CHAT, 500, &fresh_op())?,
             TransferResult {
                 transferred: false,
                 user_balance: 200,
@@ -2241,7 +2227,7 @@ mod tests {
 
         // A retried Telegram update replays the same command: it reports the
         // first outcome and moves nothing again.
-        let transfer_operation = synthetic_operation_id();
+        let transfer_operation = fresh_op();
         for _ in 0..2 {
             assert_eq!(
                 repository.transfer_user_to_chat(
@@ -2257,7 +2243,7 @@ mod tests {
                 }
             );
         }
-        let mint_operation = synthetic_operation_id();
+        let mint_operation = fresh_op();
         for _ in 0..2 {
             assert_eq!(
                 repository.mint_user_credits(7_000_000_000_009, 50, None, &mint_operation)?,
@@ -2275,12 +2261,7 @@ mod tests {
         assert_eq!(replay_evidence.get::<_, i64>(1), 1);
 
         assert_eq!(
-            repository.mint_user_credits(
-                7_000_000_000_011,
-                500,
-                None,
-                &synthetic_operation_id()
-            )?,
+            repository.mint_user_credits(7_000_000_000_011, 500, None, &fresh_op())?,
             500
         );
         let first_database_url = database_url.clone();
@@ -2290,7 +2271,7 @@ mod tests {
                 7_000_000_000_011,
                 7_000_000_000_012,
                 300,
-                &synthetic_operation_id(),
+                &fresh_op(),
             )
         });
         let second = std::thread::spawn(move || {
@@ -2298,7 +2279,7 @@ mod tests {
                 7_000_000_000_011,
                 7_000_000_000_012,
                 300,
-                &synthetic_operation_id(),
+                &fresh_op(),
             )
         });
         let concurrent_transfer_results = [
@@ -2332,7 +2313,7 @@ mod tests {
                 7_000_000_000_013,
                 500,
                 Some(99),
-                &synthetic_operation_id(),
+                &fresh_op(),
             )
         });
         let second = std::thread::spawn(move || {
@@ -2340,7 +2321,7 @@ mod tests {
                 7_000_000_000_013,
                 500,
                 Some(99),
-                &synthetic_operation_id(),
+                &fresh_op(),
             )
         });
         let mut concurrent_mint_balances = [
@@ -3952,11 +3933,11 @@ mod tests {
         let operation =
             || repository.record_star_payment("fault-charge", 10, "small", 100, 500, None);
         assert_billing_fault(&mut client, "VALUES ('topup'", 0, operation)?;
-        let operation = || repository.mint_user_credits(10, 5, None, &synthetic_operation_id());
+        let operation = || repository.mint_user_credits(10, 5, None, &fresh_op());
         assert_billing_fault(&mut client, "'printcredits'", 0, operation)?;
-        let operation = || repository.mint_user_credits(10, 5, None, &synthetic_operation_id());
+        let operation = || repository.mint_user_credits(10, 5, None, &fresh_op());
         assert_billing_fault(&mut client, "FOR UPDATE", 0, operation)?;
-        let operation = || repository.mint_user_credits(10, 5, None, &synthetic_operation_id());
+        let operation = || repository.mint_user_credits(10, 5, None, &fresh_op());
         assert_billing_fault(&mut client, "VALUES ($1, $2, 0) ON CONFLICT", 0, operation)?;
         let operation = || repository.record_star_payment("fault-charge", 10, "s", 1, 5, None);
         assert_billing_fault(&mut client, "INSERT INTO star_payments", 0, operation)?;
@@ -3985,8 +3966,7 @@ mod tests {
             ("'transfer_user_to_chat'", 0),
             ("'transfer_user_to_chat'", 1),
         ] {
-            let operation =
-                || repository.transfer_user_to_chat(10, -20, 5, &synthetic_operation_id());
+            let operation = || repository.transfer_user_to_chat(10, -20, 5, &fresh_op());
             assert_billing_fault(&mut client, fragment, skip_hits, operation)?;
         }
         let operation = || repository.charge_chat_ai_credits(-20, 5, "chat_ai_charge", empty);
@@ -4224,7 +4204,7 @@ mod tests {
         // A serialization failure is retried and the retry commits once.
         fault_injection::inject(&mut client, "'printcredits'", 0, Some(1), "40001")?;
         assert_eq!(
-            repository.mint_user_credits(10, 7, None, &synthetic_operation_id())?,
+            repository.mint_user_credits(10, 7, None, &fresh_op())?,
             1007
         );
         assert_eq!(fault_injection::hits(&mut client)?, 2);
@@ -4233,7 +4213,7 @@ mod tests {
 
         // Persistent deadlocks give up after the attempt limit, unchanged.
         fault_injection::inject(&mut client, "'printcredits'", 0, None, "40P01")?;
-        let deadlocked = repository.mint_user_credits(10, 7, None, &synthetic_operation_id());
+        let deadlocked = repository.mint_user_credits(10, 7, None, &fresh_op());
         assert!(matches!(&deadlocked, Err(BillingError::Postgres(error))
             if error.code() == Some(&SqlState::T_R_DEADLOCK_DETECTED)));
         assert_eq!(fault_injection::hits(&mut client)?, 3);
