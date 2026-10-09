@@ -1,5 +1,7 @@
 //! Deterministic message-routing decisions.
 
+use crate::telegram_input::without_poll_notes;
+
 /// Normalized facts needed to decide automatic media processing.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MediaRoutingInput {
@@ -111,11 +113,11 @@ pub fn evaluate_response_routing(input: &ResponseRoutingInput) -> ResponseRoutin
     let Some(trigger_words) = input.trigger_words.as_ref() else {
         return ResponseRoutingEvaluation::NeedsTriggerWords;
     };
-    let message_lower = input.message_text.to_lowercase();
+    let message_lower = without_poll_notes(&input.message_text).to_lowercase();
     let matches_trigger = input.random_replies_enabled
         && trigger_words
             .iter()
-            .any(|word| message_lower.contains(word));
+            .any(|word| mentions_trigger_word(&message_lower, &word.to_lowercase()));
     if matches_trigger && input.random_sample.is_none() {
         return ResponseRoutingEvaluation::NeedsRandomSample;
     }
@@ -130,13 +132,32 @@ pub fn evaluate_response_routing(input: &ResponseRoutingInput) -> ResponseRoutin
     }
 }
 
+/// Whether `text` uses `word` as a word of its own. Plurals ("bots") and
+/// stretched endings ("gordooo") still count; "robot" and "botón" don't.
+fn mentions_trigger_word(text: &str, word: &str) -> bool {
+    let Some(last) = word.chars().last() else {
+        return false;
+    };
+    text.match_indices(word).any(|(start, _)| {
+        let starts_word = text[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|before| !before.is_alphanumeric());
+        let tail = text[start + word.len()..]
+            .chars()
+            .take_while(|after| after.is_alphanumeric())
+            .collect::<String>();
+        starts_word && (tail == "s" || tail == "es" || tail.chars().all(|after| after == last))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
 
     use super::{
         MediaRoutingInput, ResponseRoutingEvaluation, ResponseRoutingInput,
-        evaluate_response_routing, should_auto_process_media,
+        evaluate_response_routing, mentions_trigger_word, should_auto_process_media,
     };
 
     fn input() -> MediaRoutingInput {
@@ -260,6 +281,64 @@ mod tests {
             evaluate_response_routing(&value),
             ResponseRoutingEvaluation::Ignore
         );
+    }
+
+    fn triggers(text: &str, words: &[&str]) -> bool {
+        let mut value = response_input();
+        value.message_text = text.to_owned();
+        value.trigger_words = Some(words.iter().map(|word| (*word).to_owned()).collect());
+        evaluate_response_routing(&value) == ResponseRoutingEvaluation::NeedsRandomSample
+    }
+
+    #[test]
+    fn notes_the_bot_adds_to_polls_are_not_trigger_words() {
+        // A non-anonymous poll as the bot renders it for the model.
+        let poll = "Sabes claramente de donde viene esta referencia?\n\
+            Opciones:\n- Si\n- Me suena\n- No tengo idea\n\
+            Telegram no le muestra al bot quién votó";
+        assert!(!triggers(poll, &["bot"]));
+        let anonymous = "Qué comemos?\nOpciones:\n- Pizza\n\
+            Encuesta cerrada\nEncuesta anónima: nadie ve quién votó";
+        assert!(!triggers(anonymous, &["encuesta", "opciones", "anónima"]));
+        assert!(triggers(
+            "Le preguntamos al bot?\nOpciones:\n- Si",
+            &["bot"]
+        ));
+        assert!(triggers(
+            "Qué comemos?\nOpciones:\n- Lo que diga el bot",
+            &["bot"]
+        ));
+    }
+
+    #[test]
+    fn trigger_words_match_whole_words_plurals_and_stretched_endings() {
+        for text in [
+            "bot",
+            "hola bot",
+            "Bot, vení",
+            "che gordo!",
+            "GORDOOO",
+            "los bots",
+            "qué hacés (gordo)",
+            "gordoo\nbien?",
+        ] {
+            assert!(triggers(text, &["bot", "gordo"]), "{text}");
+        }
+        for text in [
+            "robot",
+            "el botón",
+            "bototo",
+            "abot",
+            "gordos2",
+            "gordura",
+            "",
+        ] {
+            assert!(!triggers(text, &["bot", "gordo"]), "{text}");
+        }
+        assert!(triggers("ya va el gordito", &["Gordito"]));
+        assert!(triggers("che dogores", &["dogor"]));
+        assert!(triggers("robot y bot", &["bot"]));
+        assert!(!mentions_trigger_word("bot", ""));
     }
 
     #[test]

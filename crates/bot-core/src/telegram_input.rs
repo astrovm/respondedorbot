@@ -64,6 +64,29 @@ fn votes_label(count: u64) -> String {
     }
 }
 
+const POLL_OPTIONS_LABEL: &str = "Opciones:";
+const POLL_CLOSED_NOTE: &str = "Encuesta cerrada";
+const POLL_ANONYMOUS_NOTE: &str = "Encuesta anónima: nadie ve quién votó";
+const POLL_HIDDEN_VOTERS_NOTE: &str = "Telegram no le muestra al bot quién votó";
+
+/// Drops the lines the bot adds when rendering a poll, so only what the
+/// sender wrote is checked for trigger words.
+#[must_use]
+pub fn without_poll_notes(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            ![
+                POLL_OPTIONS_LABEL,
+                POLL_CLOSED_NOTE,
+                POLL_ANONYMOUS_NOTE,
+                POLL_HIDDEN_VOTERS_NOTE,
+            ]
+            .contains(line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Renders a poll for the model. Telegram sends a fresh poll with zero votes,
 /// so counts only show once someone voted or the poll closed; otherwise a
 /// stored copy would claim nobody voted forever. Bots never see who voted in
@@ -106,18 +129,18 @@ fn poll_text(poll: &Map<String, Value>) -> Result<String, TelegramInputError> {
     if !question.is_empty() {
         lines.push(question);
     }
-    lines.push("Opciones:".to_owned());
+    lines.push(POLL_OPTIONS_LABEL.to_owned());
     lines.extend(options);
     if let Some(total) = total_votes.filter(|_| show_counts) {
         lines.push(format!("Total: {}", votes_label(total)));
     }
     if closed {
-        lines.push("Encuesta cerrada".to_owned());
+        lines.push(POLL_CLOSED_NOTE.to_owned());
     }
     match poll.get("is_anonymous") {
-        Some(Value::Bool(true)) => lines.push("Encuesta anónima: nadie ve quién votó".to_owned()),
+        Some(Value::Bool(true)) => lines.push(POLL_ANONYMOUS_NOTE.to_owned()),
         Some(Value::Bool(false)) => {
-            lines.push("Telegram no le muestra al bot quién votó".to_owned());
+            lines.push(POLL_HIDDEN_VOTERS_NOTE.to_owned());
         }
         _ => {}
     }
@@ -297,7 +320,7 @@ mod tests {
 
     use super::{
         MessageContent, TelegramInputError, UserId, extract_message_content, extract_user_id,
-        format_user_identity, is_group_chat_type, normalize_numeric_id,
+        format_user_identity, is_group_chat_type, normalize_numeric_id, without_poll_notes,
     };
 
     #[test]
@@ -378,6 +401,20 @@ mod tests {
         assert!(is_group_chat_type(Some("group")));
         assert!(is_group_chat_type(Some("supergroup")));
         assert!(!is_group_chat_type(Some("private")));
+    }
+
+    #[test]
+    fn poll_notes_are_dropped_but_what_people_wrote_stays() {
+        assert_eq!(
+            without_poll_notes(
+                "Vamos?\nOpciones:\n- Si\nTotal: 2 votos\nEncuesta cerrada\n\
+                 Encuesta anónima: nadie ve quién votó\n\
+                 Telegram no le muestra al bot quién votó"
+            ),
+            "Vamos?\n- Si\nTotal: 2 votos"
+        );
+        assert_eq!(without_poll_notes("hola bot"), "hola bot");
+        assert_eq!(without_poll_notes(""), "");
     }
 
     #[test]
