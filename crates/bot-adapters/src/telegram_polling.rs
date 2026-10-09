@@ -63,6 +63,11 @@ pub struct IncomingMessage {
     pub replied_message_id: Option<MessageId>,
     pub replied_sender_first_name: Option<String>,
     pub replied_sender_username: Option<String>,
+    // Defaults let updates queued by an older version still decode.
+    #[serde(default)]
+    pub replied_sender_id: Option<UserId>,
+    #[serde(default)]
+    pub replied_sender_is_bot: bool,
     pub replied_text: Option<String>,
     pub visual_media_kind: Option<String>,
     pub audio_media_kind: Option<String>,
@@ -196,6 +201,20 @@ fn parse_message(payload: &Map<String, Value>) -> IncomingMessage {
         .and_then(|reply| reply.get("message_id"))
         .and_then(normalize_numeric_id)
         .map(MessageId);
+    // In forum groups every topic message "replies" to the topic's creation
+    // message, so that sender is not someone the user chose to reply to.
+    let replied_sender = replied
+        .filter(|reply| !reply.contains_key("forum_topic_created"))
+        .and_then(|reply| reply.get("from"))
+        .and_then(Value::as_object);
+    let replied_sender_id = replied_sender
+        .and_then(|sender| sender.get("id"))
+        .and_then(normalize_numeric_id)
+        .map(UserId);
+    let replied_sender_is_bot = replied_sender
+        .and_then(|sender| sender.get("is_bot"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let replied_sender_username = replied
         .and_then(|reply| reply.get("from"))
         .and_then(Value::as_object)
@@ -237,6 +256,8 @@ fn parse_message(payload: &Map<String, Value>) -> IncomingMessage {
         replied_message_id,
         replied_sender_first_name,
         replied_sender_username,
+        replied_sender_id,
+        replied_sender_is_bot,
         replied_text,
         visual_media_kind,
         audio_media_kind,
@@ -561,6 +582,53 @@ mod tests {
             &updates[1].event,
             IncomingEvent::PollAnswer(answer) if answer["poll_id"] == "p1"
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn replied_sender_identity_skips_forum_topic_roots() -> TestResult {
+        let replied = |reply: Value| {
+            super::parse_message(
+                &json!({
+                    "message_id": 9,
+                    "chat": {"id": -42, "type": "supergroup"},
+                    "from": {"id": 8, "first_name": "Ana"},
+                    "text": "/transfer 1",
+                    "reply_to_message": reply,
+                })
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
+            )
+        };
+        let person = replied(json!({"message_id": 3, "from": {"id": 77, "is_bot": false}}));
+        assert_eq!(
+            person.replied_sender_id,
+            Some(bot_core::telegram_input::UserId(77))
+        );
+        assert!(!person.replied_sender_is_bot);
+        let bot = replied(json!({"message_id": 3, "from": {"id": "78", "is_bot": true}}));
+        assert_eq!(
+            bot.replied_sender_id,
+            Some(bot_core::telegram_input::UserId(78))
+        );
+        assert!(bot.replied_sender_is_bot);
+        let topic = replied(json!({
+            "message_id": 3,
+            "from": {"id": 79, "is_bot": false},
+            "forum_topic_created": {"name": "Synthetic topic"}
+        }));
+        assert_eq!(topic.replied_sender_id, None);
+        assert!(!topic.replied_sender_is_bot);
+        // Messages queued by an older version have neither field.
+        let mut legacy = serde_json::to_value(&person)?;
+        if let Some(object) = legacy.as_object_mut() {
+            object.remove("replied_sender_id");
+            object.remove("replied_sender_is_bot");
+        }
+        let legacy: IncomingMessage = serde_json::from_value(legacy)?;
+        assert_eq!(legacy.replied_sender_id, None);
+        assert!(!legacy.replied_sender_is_bot);
         Ok(())
     }
 

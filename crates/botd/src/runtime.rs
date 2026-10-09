@@ -1263,6 +1263,8 @@ mod tests {
                 replied_message_id: None,
                 replied_sender_first_name: None,
                 replied_sender_username: None,
+                replied_sender_id: None,
+                replied_sender_is_bot: false,
                 replied_text: None,
                 visual_media_kind: None,
                 audio_media_kind: None,

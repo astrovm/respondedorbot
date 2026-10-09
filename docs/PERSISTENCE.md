@@ -52,6 +52,7 @@ Known event types that must remain readable include:
 - `ai_reconciliation_correction`
 - `memory_compaction_settlement`
 - `transfer_user_to_chat`
+- `transfer_user_to_user`
 - `admin_command`
 
 Important metadata identifiers include `operation_id`, `settlement_id`,
