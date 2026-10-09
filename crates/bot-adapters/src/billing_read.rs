@@ -2376,7 +2376,8 @@ mod tests {
              WHERE event_type = 'transfer_user_to_user' \
                AND metadata->>'command_operation_id' = $1",
             &[&user_operation, &RECIPIENT, &sender_text],
-        )?;
+        );
+        let user_evidence = user_evidence?;
         assert_eq!(user_evidence.get::<_, i64>(0), 2);
         assert_eq!(user_evidence.get::<_, i64>(1), 120);
         assert_eq!(user_evidence.get::<_, i64>(2), 1);
