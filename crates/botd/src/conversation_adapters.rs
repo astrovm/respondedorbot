@@ -443,9 +443,10 @@ impl PostgresConversationBilling {
     }
 
     /// With the group paying first, the group pays until the member reaches
-    /// their hourly limit, then their own credits do.
+    /// their hourly limit, then their own credits do. The message is counted
+    /// before anything is charged, so two at once can't both fit under it.
     fn group_first_source(
-        &self,
+        &mut self,
         request: &ReserveRequest,
         chat_id: i64,
     ) -> Result<&'static str, String> {
@@ -453,11 +454,22 @@ impl PostgresConversationBilling {
         let Some(creditless_cap) = self.creditless_cap.as_ref().filter(|_| limit >= 0) else {
             return Ok("chat");
         };
-        let used = creditless_cap
-            .count(&reservation_cap_key(request, chat_id))
-            .map_err(error_text)?
-            .unwrap_or(0);
-        Ok(if used >= limit { "user" } else { "chat" })
+        let cap_key = reservation_cap_key(request, chat_id);
+        let count = creditless_cap
+            .admit_once(&cap_key, &request.operation_id, CREDITLESS_CAP_TTL_SECONDS)
+            .map_err(error_text)?;
+        if count > limit {
+            creditless_cap
+                .refund_once(&cap_key, &request.operation_id)
+                .map_err(error_text)?;
+            return Ok("user");
+        }
+        // Already counted, so the check after charging the group skips it.
+        self.cap_checked_operations
+            .insert(request.operation_id.clone());
+        self.cap_key_by_operation
+            .insert(request.operation_id.clone(), cap_key);
+        Ok("chat")
     }
 
     fn refund_creditless_cap(&self, operation_id: &str) -> Result<(), String> {
@@ -524,7 +536,10 @@ impl ConversationBilling for PostgresConversationBilling {
                     }),
                 });
             }
-            // The group's balance ran out, so the member's own credits pay.
+            // The group's balance ran out, so the member's own credits pay
+            // and the message no longer counts toward the group's hourly limit.
+            self.refund_creditless_cap(&request.operation_id)?;
+            self.cap_key_by_operation.remove(&request.operation_id);
             result = self.charge_reservation(&request, amount, Some("user"))?;
         }
         let source = match result.source.as_deref() {
@@ -1544,6 +1559,13 @@ mod tests {
         };
         let mut billing = PostgresConversationBilling::new(&database_url)
             .with_creditless_cap(RedisCreditlessCap::new(&endpoint)?);
+        let counter = RedisCreditlessCap::new(&endpoint)?;
+        let used = |user_id: i64| {
+            counter.count(&bot_adapters::redis_creditless_cap::creditless_cap_key(
+                &chat_id.to_string(),
+                user_id,
+            ))
+        };
 
         // Under the hourly limit the group pays even though the member has credits.
         let first = format!("synthetic-group-first:{nonce}");
@@ -1551,6 +1573,7 @@ mod tests {
         assert!(paid.authorized);
         assert_eq!(paid.source, Some(PayerSource::Chat));
         assert_eq!(paid.chat_balance, 900);
+        assert_eq!(used(member)?, Some(1));
         // The same operation keeps the group as its payer.
         let again = billing.reserve(ReserveRequest {
             reservation_id: format!("{first}:second"),
@@ -1564,6 +1587,8 @@ mod tests {
         assert!(own.authorized);
         assert_eq!(own.source, Some(PayerSource::User));
         assert_eq!(own.chat_balance, 850);
+        // Paying with their own credits doesn't use up the group's hour.
+        assert_eq!(used(member)?, Some(1));
 
         // At the limit with too few credits of their own, the limit stops them.
         let blocked = format!("synthetic-blocked:{nonce}");
@@ -1582,6 +1607,7 @@ mod tests {
         assert!(big.authorized);
         assert_eq!(big.source, Some(PayerSource::User));
         assert_eq!(big.chat_balance, 850);
+        assert_eq!(used(rich)?, Some(0));
 
         // Without an hourly limit the group always pays first.
         let unlimited = billing.reserve(request(
