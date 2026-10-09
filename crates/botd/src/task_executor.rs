@@ -1073,6 +1073,10 @@ mod tests {
             clean_task_response("1. noticia\ndetalle\n\n2. noticia\ndetalle"),
             "1. noticia\ndetalle\n\n2. noticia\ndetalle"
         );
+        assert_eq!(
+            clean_task_response("intro\n\n1. uno\n2. dos\n1.5 kg\nfin. ok"),
+            "intro\n\n1. uno\n\n2. dos\n1.5 kg\nfin. ok"
+        );
     }
 
     #[test]

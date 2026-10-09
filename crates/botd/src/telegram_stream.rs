@@ -709,6 +709,24 @@ mod tests {
     }
 
     #[test]
+    fn finalize_skips_telegram_when_the_draft_already_shows_the_answer() {
+        let mut actions = Actions {
+            next_message_id: Some(MessageId(80)),
+            ..Actions::default()
+        };
+        let mut stream = TelegramStream::with_policy(&mut actions, ChatId(7), MessageId(4), 0.0, 1);
+        assert_eq!(stream.feed_at("answer", 0.0), Ok(()));
+        assert_eq!(
+            stream.finalize("answer"),
+            Ok(StreamDelivery {
+                message_id: MessageId(80)
+            })
+        );
+        drop(stream);
+        assert_eq!(actions.actions.len(), 1);
+    }
+
+    #[test]
     fn ignores_draft_edit_failures_and_keeps_confirmed_delivery() {
         let mut actions = Actions {
             next_message_id: Some(MessageId(80)),
