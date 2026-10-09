@@ -7238,7 +7238,8 @@ mod tests {
             recipient_id,
             5,
             &operation,
-        )?;
+        );
+        let sent = sent?;
         assert!(sent.transferred);
         assert_eq!(sent.user_balance, initial_user_balance - 30);
         assert_eq!(sent.chat_balance, 5);
