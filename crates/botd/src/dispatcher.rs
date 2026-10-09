@@ -95,8 +95,7 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 
 use crate::ai_dispatch::{
-    AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, AiStreamEvent,
-    reply_context,
+    AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, reply_context,
 };
 use crate::runtime::{HandlerErrorDisposition, UpdateHandler};
 use crate::telegram_stream::{StreamFinalizeError, TelegramAiStream};
