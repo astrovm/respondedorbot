@@ -208,10 +208,10 @@ mod tests {
              WHERE charge_id = 'synthetic-ln-old'";
         client.batch_execute(age)?;
         repository.attach_lightning_message("synthetic-ln-paid", 55)?;
-        let pending = repository.pending_lightning_charges(10, 10)?;
+        let pending = repository.pending_lightning_charges(1_000, 10)?;
         let ours = pending
             .into_iter()
-            .filter(|charge| charge.charge_id.starts_with("synthetic-ln-"))
+            .filter(|charge| charge.chat_id == USER)
             .collect::<Vec<_>>();
         assert_eq!(
             ours,
@@ -249,11 +249,7 @@ mod tests {
         repository.close_lightning_charge("synthetic-ln-old")?;
         repository.close_lightning_charge("synthetic-ln-paid")?;
         let pending = repository.pending_lightning_charges(1_000, 10)?;
-        assert!(
-            pending
-                .iter()
-                .all(|charge| !charge.charge_id.starts_with("synthetic-ln-"))
-        );
+        assert!(pending.iter().all(|charge| charge.chat_id != USER));
         // A late payment on a closed charge is still credited.
         let late = repository.settle_lightning_charge("synthetic-ln-old")?;
         assert_eq!(
@@ -297,6 +293,7 @@ mod tests {
         let repository = BillingRepository::new(url);
         repository.record_lightning_charge(&NewLightningCharge {
             user_id: user,
+            chat_id: user,
             ..charge("synthetic-ln-overflow", 30)
         })?;
         assert!(matches!(

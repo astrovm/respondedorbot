@@ -737,5 +737,28 @@ mod tests {
             }))
         ));
         assert_eq!(LightningLedger::close(&mut ledger, &charge_id), Ok(()));
+
+        let dead_id = format!("synthetic-ledger-{}", crate::test_env::fresh_op());
+        assert_eq!(
+            LightningLedger::record(
+                &mut ledger,
+                &NewLightningCharge {
+                    charge_id: dead_id.clone(),
+                    user_id,
+                    chat_id: user_id,
+                    pack_id: "p50".to_owned(),
+                    usd_cents: 33,
+                    credits_awarded: 5_000,
+                    locale: "en".to_owned(),
+                    ttl_minutes: 30,
+                },
+            ),
+            Ok(())
+        );
+        assert_eq!(LightningLedger::close(&mut ledger, &dead_id), Ok(()));
+        let pending = LightningLedger::pending(&mut ledger);
+        assert!(
+            pending.is_ok_and(|pending| pending.iter().all(|charge| charge.charge_id != dead_id))
+        );
     }
 }
