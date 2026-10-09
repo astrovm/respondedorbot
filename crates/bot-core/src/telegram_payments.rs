@@ -741,6 +741,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn what_a_pack_nets_covers_its_credits_ai_cost_plus_the_markup() {
+        use crate::provider_pricing::{
+            AI_MARKUP_PERCENT, CREDIT_UNIT_USD_MICROS, STAR_PAYOUT_USD_MICROS,
+        };
+        assert_eq!(CREDIT_UNIT_USD_MICROS, 50);
+        for pack in super::billing_packs() {
+            let payout = i128::from(pack.xtr_amount) * STAR_PAYOUT_USD_MICROS;
+            let ai_cost = i128::from(pack.credits_awarded) * CREDIT_UNIT_USD_MICROS;
+            assert_eq!(
+                payout * 100,
+                ai_cost * (100 + AI_MARKUP_PERCENT),
+                "{}",
+                pack.id
+            );
+        }
+    }
+
     fn pack() -> BillingPackTerms {
         BillingPackTerms {
             id: "p50".to_owned(),

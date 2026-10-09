@@ -1,11 +1,13 @@
 //! Lightning top-up menus, pricing, and invoice messages.
 //!
-//! Lightning packs give the same credits as the Stars packs, priced at what
-//! Telegram pays out per Star, so buyers skip Telegram's cut.
+//! Lightning packs give the same credits as the Stars packs. They cost what
+//! Telegram pays out per Star plus OpenNode's fee, so a pack nets the same
+//! either way and buyers skip Telegram's cut.
 
 use crate::credit_units::{CreditUnits, display_credit_units};
 use crate::locale::Locale;
 use crate::menu_ui::{back, button, localized};
+use crate::provider_pricing::STAR_PAYOUT_USD_MICROS;
 use crate::telegram_actions::{
     CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode, SendMessage,
 };
@@ -19,8 +21,8 @@ pub const STARS_MENU_CALLBACK: &str = "topup:stars";
 const LIGHTNING_PACK_PREFIX: &str = "topup:ln:";
 /// How long a Lightning invoice can be paid.
 pub const LIGHTNING_INVOICE_TTL_MINUTES: u32 = 30;
-/// Telegram's payout per Star, in thousandths of a US cent.
-const STAR_PAYOUT_MILLICENTS: i64 = 1_300;
+/// OpenNode's cut of each payment, in hundredths of a percent.
+const OPENNODE_FEE_BASIS_POINTS: i128 = 100;
 /// Telegram copy buttons hold at most this many characters.
 const MAX_COPY_TEXT_LENGTH: usize = 256;
 
@@ -36,10 +38,15 @@ pub enum LightningCallback {
     InvalidPack,
 }
 
-/// Price of a pack paid with Lightning, rounded up to whole cents.
+/// Price of a pack paid with Lightning, rounded up to whole cents, so what
+/// is left after OpenNode's fee matches the Stars payout.
 #[must_use]
-pub const fn lightning_usd_cents(pack: &BillingPackTerms) -> i64 {
-    (pack.xtr_amount * STAR_PAYOUT_MILLICENTS + 999) / 1_000
+pub fn lightning_usd_cents(pack: &BillingPackTerms) -> i64 {
+    let payout = i128::from(pack.xtr_amount) * STAR_PAYOUT_USD_MICROS;
+    // Micro-dollars to cents is / 10_000, and dividing by the share OpenNode
+    // leaves us is * 10_000 / (10_000 - fee), so the two cancel.
+    let kept = 10_000 - OPENNODE_FEE_BASIS_POINTS;
+    i64::try_from((payout + kept - 1) / kept).unwrap_or(i64::MAX)
 }
 
 #[must_use]
@@ -195,7 +202,7 @@ mod tests {
     use crate::telegram_payments::{billing_packs, default_billing_pack};
 
     #[test]
-    fn packs_cost_the_telegram_payout_per_star_rounded_up_to_cents() {
+    fn packs_cost_the_telegram_payout_plus_the_opennode_fee_rounded_up_to_cents() {
         let prices = billing_packs()
             .map(|pack| (pack.id.clone(), lightning_usd_cents(&pack)))
             .collect::<Vec<_>>();
@@ -203,13 +210,21 @@ mod tests {
             prices,
             [
                 ("p50".to_owned(), 33),
-                ("p100".to_owned(), 65),
-                ("p250".to_owned(), 163),
-                ("p500".to_owned(), 325),
-                ("p1000".to_owned(), 650),
-                ("p2500".to_owned(), 1_625),
+                ("p100".to_owned(), 66),
+                ("p250".to_owned(), 165),
+                ("p500".to_owned(), 329),
+                ("p1000".to_owned(), 657),
+                ("p2500".to_owned(), 1_642),
             ]
         );
+        for pack in billing_packs() {
+            // What OpenNode leaves us, in micro-dollars, covers the Stars payout.
+            let kept = i128::from(lightning_usd_cents(&pack)) * 10_000 * 99 / 100;
+            let payout =
+                i128::from(pack.xtr_amount) * crate::provider_pricing::STAR_PAYOUT_USD_MICROS;
+            assert!(kept >= payout, "{}", pack.id);
+            assert!(kept - payout < 10_000, "{}", pack.id);
+        }
         assert_eq!(format_usd(33), "US$0.33");
         assert_eq!(format_usd(1_625), "US$16.25");
         assert_eq!(format_usd(500), "US$5.00");
@@ -255,7 +270,7 @@ mod tests {
         );
         assert_eq!(
             keyboard.inline_keyboard[5][0].text,
-            "2,500 credits for US$16.25 ⚡"
+            "2,500 credits for US$16.42 ⚡"
         );
     }
 

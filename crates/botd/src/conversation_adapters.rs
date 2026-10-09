@@ -628,7 +628,6 @@ fn copy_pricing_metadata(metadata: &mut Map<String, Value>, pricing: &Value) {
     for key in [
         "pricing_version",
         "raw_usd_micros",
-        "markup_multiplier",
         "model_breakdown",
         "tool_breakdown",
         "segment_breakdown",

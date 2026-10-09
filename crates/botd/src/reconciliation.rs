@@ -315,13 +315,6 @@ where
                 breakdown.get("raw_usd_micros").cloned().unwrap_or(json!(0)),
             ),
             (
-                "markup_multiplier".to_owned(),
-                breakdown
-                    .get("markup_multiplier")
-                    .cloned()
-                    .unwrap_or(Value::Null),
-            ),
-            (
                 "model_breakdown".to_owned(),
                 breakdown
                     .get("model_breakdown")

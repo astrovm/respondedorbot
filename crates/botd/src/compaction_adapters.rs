@@ -375,7 +375,6 @@ impl CompactionBilling for PostgresCompactionBilling {
             for key in [
                 "pricing_version",
                 "raw_usd_micros",
-                "markup_multiplier",
                 "model_breakdown",
                 "tool_breakdown",
                 "segment_breakdown",
