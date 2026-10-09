@@ -50,7 +50,7 @@ use bot_core::greeting_commands::{GreetingCategory, classify_greeting_command, g
 use bot_core::language_command::{LanguageCommandPlan, plan_language_command};
 use bot_core::lightning_topup::{
     LightningCallback, LightningInvoice, lightning_invoice_failed, lightning_invoice_message,
-    lightning_invoice_ready, lightning_menu, parse_lightning_callback,
+    lightning_invoice_ready, parse_lightning_callback,
 };
 use bot_core::links::{
     LinkActionContext, LinkMode, LinkReplacement, has_replaceable_link, plan_link_actions,
@@ -88,11 +88,12 @@ use bot_core::telegram_callbacks::{
 use bot_core::telegram_commands::telegram_commands;
 use bot_core::telegram_input::{ChatId, MessageId, UserId, is_group_chat_type};
 use bot_core::telegram_payments::{
-    BalanceCommandContext, BalanceCommandPlan, BillingPackTerms, StarPaymentRecord,
-    SuccessfulPaymentDecision, TopupCallbackPlan, balance_reply,
-    evaluate_default_successful_payment, invoice_payload_locale, payment_record,
-    plan_balance_command, plan_pre_checkout, plan_topup_callback, plan_topup_command,
-    successful_payment_reply, topup_menu,
+    BalanceCommandContext, BalanceCommandPlan, BillingPackTerms, DEFAULT_TOPUP_CREDITS,
+    MAX_TOPUP_CREDITS, MIN_TOPUP_CREDITS, StarPaymentRecord, SuccessfulPaymentDecision,
+    TopupCallbackPlan, balance_reply, evaluate_default_successful_payment, invoice_payload_locale,
+    parse_topup_amount, payment_record, plan_balance_command, plan_pre_checkout,
+    plan_topup_callback, plan_topup_command, successful_payment_reply, topup_menu,
+    topup_menu_title,
 };
 use bot_core::token_signals::{
     SIGNAL_REFRESH_COOLDOWN_SECONDS, SignalQuery, SignalState, TokenAddress, TokenSignal,
@@ -400,6 +401,18 @@ pub trait ChatLimitStore {
 
 /// The member a ban or limit command replies to, bots included so the
 /// planner can refuse them.
+/// A number typed in private as a reply to the bot's top-up menu.
+fn typed_topup_amount(message: &IncomingMessage, text: &str) -> Option<i64> {
+    let replies_to_menu = message.chat_type.as_deref() == Some("private")
+        && message.replied_sender_is_bot
+        && message.replied_text.as_deref().is_some_and(|replied| {
+            [bot_core::locale::Locale::Es, bot_core::locale::Locale::En]
+                .iter()
+                .any(|locale| replied.starts_with(topup_menu_title(*locale)))
+        });
+    replies_to_menu.then(|| parse_topup_amount(text)).flatten()
+}
+
 fn ban_target(message: &IncomingMessage, locale: bot_core::locale::Locale) -> Option<BanTarget> {
     message.replied_sender_id.map(|user_id| BanTarget {
         user_id: user_id.0,
@@ -3955,6 +3968,23 @@ where
                     }
                     Ok(DispatchOutcome::Handled)
                 }
+                TopupCallbackPlan::Menu(credits) => {
+                    self.answer_callback_best_effort(context.callback_id.as_deref());
+                    let (text, keyboard) =
+                        topup_menu(locale, credits, self.lightning_checkout.is_some());
+                    // Tapping the amount already shown changes nothing, and
+                    // Telegram refuses that edit, so its result is ignored.
+                    let _edited = self
+                        .actions
+                        .try_edit(TelegramAction::EditMessage {
+                            chat_id: ChatId(chat_id),
+                            message_id: MessageId(context.message_id),
+                            text,
+                            reply_markup: Some(keyboard),
+                        })
+                        .map_err(DispatchError::Action)?;
+                    Ok(DispatchOutcome::Handled)
+                }
                 TopupCallbackPlan::Invoice(plan) => {
                     // One in-flight invoice per user and pack: a double tap
                     // must not emit two independently payable invoices. The
@@ -4380,13 +4410,10 @@ where
                 self.answer_callback_best_effort(callback_id);
                 return Ok(DispatchOutcome::Handled);
             }
-            (menu, _) => {
+            // The old pack lists' menu buttons open the amount menu.
+            (_, _) => {
                 self.answer_callback_best_effort(callback_id);
-                let (text, keyboard) = if menu == LightningCallback::Menu {
-                    lightning_menu(locale)
-                } else {
-                    topup_menu(locale, true)
-                };
+                let (text, keyboard) = topup_menu(locale, DEFAULT_TOPUP_CREDITS, true);
                 self.actions
                     .try_edit(TelegramAction::EditMessage {
                         chat_id,
@@ -4442,10 +4469,29 @@ where
             return self.answer_callback_alert(callback_id, lightning_invoice_failed(locale));
         };
         let message = lightning_invoice_message(chat_id, &pack, &invoice, locale);
-        let receipt = self
-            .actions
-            .execute(TelegramAction::SendMessage(message))
-            .map_err(DispatchError::Action)?;
+        // A QR code to scan from another device; plain text if Telegram
+        // refuses the photo.
+        let photo_receipt = bot_adapters::qr_code::lightning_invoice_png(&invoice.payreq)
+            .map(|png| {
+                self.actions.try_photo(TelegramAction::SendPhoto {
+                    chat_id,
+                    photo: png.into(),
+                    reply_to_message_id: None,
+                    caption: message.text.clone(),
+                    parse_mode: message.parse_mode,
+                    reply_markup: message.reply_markup.clone(),
+                })
+            })
+            .transpose()
+            .map_err(DispatchError::Action)?
+            .flatten();
+        let receipt = match photo_receipt {
+            Some(receipt) => receipt,
+            None => self
+                .actions
+                .execute(TelegramAction::SendMessage(message))
+                .map_err(DispatchError::Action)?,
+        };
         if let (Some(sent), Some(checkout)) = (receipt.message_id, self.lightning_checkout.as_mut())
             && let Err(error) = checkout.attach_message(&invoice.charge_id, sent.0)
         {
@@ -5472,6 +5518,27 @@ where
                 return Ok(outcome);
             }
         }
+        if let Some(credits) = typed_topup_amount(message, &content.text) {
+            // A number sent as a reply to the top-up menu redraws it on that
+            // amount, nearest end if out of range.
+            let credits = credits.clamp(MIN_TOPUP_CREDITS, MAX_TOPUP_CREDITS);
+            if let Some(action) = plan_topup_command(
+                chat_id,
+                message_id,
+                &format!("/topup {credits}"),
+                &self.bot_name,
+                locale,
+                "private",
+                self.billing_available,
+                self.lightning_checkout.is_some(),
+            ) {
+                let _receipt = self
+                    .actions
+                    .execute(action)
+                    .map_err(DispatchError::Action)?;
+            }
+            return Ok(DispatchOutcome::Handled);
+        }
         if message.has_reply && self.ai_conversation_source.is_none() {
             return Err(DispatchError::MissingService("AI conversation"));
         }
@@ -6409,9 +6476,7 @@ mod tests {
     use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup};
     use bot_core::devo::DevoQuotes;
     use bot_core::greeting_commands::GreetingCategory;
-    use bot_core::lightning_topup::{
-        LIGHTNING_MENU_CALLBACK, LightningInvoice, lightning_invoice_failed,
-    };
+    use bot_core::lightning_topup::{LightningInvoice, lightning_invoice_failed};
     use bot_core::links::LinkReplacement;
     use bot_core::polymarket::parse_election_events;
     use bot_core::rulo::{ExchangeQuote, RuloInput};
@@ -17541,7 +17606,7 @@ mod tests {
                 .reply_markup
                 .as_ref()
                 .map(|markup| markup.inline_keyboard.len()),
-            Some(7)
+            Some(4)
         );
         assert_eq!(dispatcher.state.incoming.len(), 1);
         assert_eq!(dispatcher.state.outgoing.len(), 1);
@@ -17892,9 +17957,11 @@ mod tests {
                 .reply_markup
                 .as_ref()
                 .is_some_and(|markup| {
-                    markup.inline_keyboard.iter().flatten().any(|button| {
-                        button.callback_data.as_deref() == Some(LIGHTNING_MENU_CALLBACK)
-                    })
+                    markup
+                        .inline_keyboard
+                        .iter()
+                        .flatten()
+                        .any(|button| button.callback_data.as_deref() == Some("topup:ln:c100"))
                 })
         };
         assert!(has_lightning_button(Some(FakeLightningCheckout::default())));
@@ -17902,10 +17969,10 @@ mod tests {
     }
 
     #[test]
-    fn lightning_menus_switch_in_place() {
+    fn amount_buttons_and_old_menu_buttons_redraw_the_menu_in_place() {
         let mut dispatcher =
             lightning_dispatcher(Actions::default(), Some(FakeLightningCheckout::default()));
-        for data in ["topup:ln", "topup:stars"] {
+        for data in ["topup:ln", "topup:stars", "topup:amt:500"] {
             assert_eq!(
                 dispatcher.dispatch(callback_update(data, "private", Some("en"))),
                 Ok(DispatchOutcome::Handled)
@@ -17925,10 +17992,15 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(edits.len(), 2);
-        assert!(edits[0].0.starts_with("Pay with Lightning ⚡"));
-        assert_eq!(edits[0].1, 7);
-        assert_eq!(edits[1].0, topup_menu(bot_core::locale::Locale::En, true).0);
+        let menu = |credits| topup_menu(bot_core::locale::Locale::En, credits, true);
+        assert_eq!(
+            edits,
+            [
+                (menu(100).0, 5),
+                (menu(100).0, 5),
+                (menu(500).0, menu(500).1.inline_keyboard.len()),
+            ]
+        );
     }
 
     #[test]
@@ -17949,10 +18021,35 @@ mod tests {
             *log.borrow(),
             ["create 88 -42 p50 En", "attach charge-1 700"]
         );
-        let invoice = first_sent(&dispatcher.actions.0);
-        assert_eq!(invoice.chat_id, ChatId(-42));
-        assert!(invoice.text.starts_with("Lightning invoice ⚡"));
-        assert!(invoice.text.contains("<code>lnbc1synthetic</code>"));
+        let photos = dispatcher
+            .actions
+            .0
+            .iter()
+            .filter_map(|action| match action {
+                TelegramAction::SendPhoto {
+                    chat_id,
+                    photo,
+                    caption,
+                    reply_markup,
+                    ..
+                } => Some((chat_id, photo, caption, reply_markup)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(photos.len(), 1);
+        let (chat_id, photo, caption, reply_markup) = photos[0];
+        assert_eq!(*chat_id, ChatId(-42));
+        assert!(photo.starts_with(&[0x89, b'P', b'N', b'G']));
+        assert!(caption.starts_with("Lightning invoice ⚡"));
+        // The invoice is in the copy button, not the caption.
+        assert!(!caption.contains("lnbc1synthetic"));
+        assert!(reply_markup.as_ref().is_some_and(|markup| {
+            markup.inline_keyboard[0][0]
+                .copy_text
+                .as_ref()
+                .map(|copy| copy.text.as_str())
+                == Some("lnbc1synthetic")
+        }));
         assert_eq!(
             callback_alerts(&dispatcher.actions.0),
             [("Invoice ready".to_owned(), false)]
@@ -17988,8 +18085,97 @@ mod tests {
         assert_eq!(*log.borrow(), ["create 88 88 p50 En"]);
         assert!(matches!(
             dispatcher.actions.0.as_slice(),
-            [TelegramAction::SendMessage(_)]
+            [TelegramAction::SendPhoto { .. }]
         ));
+    }
+
+    #[test]
+    fn lightning_invoice_falls_back_to_text_when_the_photo_is_refused() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut dispatcher = lightning_dispatcher(
+            Actions::scripted(ActionScript::photo(Attempt::Skip)),
+            Some(FakeLightningCheckout {
+                log: Rc::clone(&log),
+                ..FakeLightningCheckout::default()
+            }),
+        );
+        assert_eq!(
+            dispatcher.dispatch(callback_update("topup:ln:c300", "private", Some("es"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            *log.borrow(),
+            ["create 88 -42 c300 En", "attach charge-1 700"]
+        );
+        let invoice = first_sent(&dispatcher.actions.0);
+        assert!(
+            invoice
+                .text
+                .starts_with("Lightning invoice ⚡\n\n300 credits for US$1.97")
+        );
+    }
+
+    #[test]
+    fn a_number_replying_to_the_topup_menu_redraws_it_on_that_amount() {
+        let reply = |text: &str, replied: &str, from_bot: bool, chat_type: &str| {
+            let mut update = update(text, Some("en"));
+            if let IncomingEvent::Message(message) = &mut update.event {
+                message.chat_type = Some(chat_type.to_owned());
+                message.has_reply = true;
+                message.replied_sender_is_bot = from_bot;
+                message.replied_text = Some(replied.to_owned());
+            }
+            update
+        };
+        let menu = topup_menu(bot_core::locale::Locale::En, 100, true).0;
+        for (text, expected) in [
+            ("300", "300 credits"),
+            ("1.500", "1,500 credits"),
+            ("5", "10 credits"),
+            ("999999", "100,000 credits"),
+        ] {
+            let mut dispatcher =
+                lightning_dispatcher(Actions::default(), Some(FakeLightningCheckout::default()));
+            assert_eq!(
+                dispatcher.dispatch(reply(text, &menu, true, "private")),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert!(
+                first_sent(&dispatcher.actions.0)
+                    .text
+                    .starts_with(&format!("Add credits\n\n{expected}")),
+                "{text}"
+            );
+        }
+        // Spanish menus count too.
+        let spanish = topup_menu(bot_core::locale::Locale::Es, 100, true).0;
+        let mut dispatcher =
+            lightning_dispatcher(Actions::default(), Some(FakeLightningCheckout::default()));
+        assert_eq!(
+            dispatcher.dispatch(reply("200", &spanish, true, "private")),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(
+            first_sent(&dispatcher.actions.0)
+                .text
+                .contains("200 credits")
+        );
+        // Not a number, not the menu, not from the bot, or not private: no menu.
+        for update in [
+            reply("hola", &menu, true, "private"),
+            reply("300", "Something else", true, "private"),
+            reply("300", &menu, false, "private"),
+            reply("300", &menu, true, "group"),
+        ] {
+            let mut dispatcher =
+                lightning_dispatcher(Actions::default(), Some(FakeLightningCheckout::default()));
+            let _outcome = dispatcher.dispatch(update);
+            assert!(
+                !sent_messages(&dispatcher.actions.0)
+                    .iter()
+                    .any(|message| message.text.starts_with("Add credits")),
+            );
+        }
     }
 
     #[test]

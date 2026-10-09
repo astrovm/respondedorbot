@@ -38,7 +38,35 @@ pub struct StarPaymentRecord {
     pub payload: String,
 }
 
-/// Return one production Telegram Stars pack using stored hundredth-credit units.
+/// Smallest and largest top-up a buyer can pick, in whole credits.
+pub const MIN_TOPUP_CREDITS: i64 = 10;
+pub const MAX_TOPUP_CREDITS: i64 = 100_000;
+/// What `/topup` starts on.
+pub const DEFAULT_TOPUP_CREDITS: i64 = 100;
+const QUICK_TOPUP_CREDITS: [i64; 4] = [50, 100, 500, 1_000];
+/// A typical AI message costs 0.21 credits with memory upkeep (production,
+/// 30 days); rounded up so the estimate doesn't overpromise.
+const ESTIMATED_CREDIT_UNITS_PER_MESSAGE: i64 = 25;
+
+/// Any whole number of credits in range, at the same 2 credits per Star as
+/// the fixed packs. Odd amounts round the Stars up.
+#[must_use]
+pub fn custom_billing_pack(credits: i64) -> Option<BillingPackTerms> {
+    (MIN_TOPUP_CREDITS..=MAX_TOPUP_CREDITS)
+        .contains(&credits)
+        .then(|| topup_terms(credits))
+}
+
+fn topup_terms(credits: i64) -> BillingPackTerms {
+    BillingPackTerms {
+        id: format!("c{credits}"),
+        xtr_amount: (credits + 1) / 2,
+        credits_awarded: credits * 100,
+    }
+}
+
+/// Return one production Telegram Stars pack using stored hundredth-credit
+/// units: a fixed pack (`p50`) or any amount (`c300`).
 #[must_use]
 pub fn default_billing_pack(pack_id: &str) -> Option<BillingPackTerms> {
     DEFAULT_BILLING_PACKS
@@ -49,9 +77,17 @@ pub fn default_billing_pack(pack_id: &str) -> Option<BillingPackTerms> {
             xtr_amount: *xtr_amount,
             credits_awarded: *credits_awarded,
         })
+        .or_else(|| {
+            pack_id
+                .strip_prefix('c')
+                .and_then(|credits| credits.parse().ok())
+                .and_then(custom_billing_pack)
+                // One id per amount, so "c050" can't stand in for "c50".
+                .filter(|pack| pack.id == pack_id)
+        })
 }
 
-/// Every production pack, smallest first.
+/// Every fixed pack, smallest first.
 pub fn billing_packs() -> impl Iterator<Item = BillingPackTerms> {
     DEFAULT_BILLING_PACKS
         .iter()
@@ -60,6 +96,47 @@ pub fn billing_packs() -> impl Iterator<Item = BillingPackTerms> {
             xtr_amount: *xtr_amount,
             credits_awarded: *credits_awarded,
         })
+}
+
+/// A typed amount: digits, with optional thousands separators.
+#[must_use]
+pub fn parse_topup_amount(text: &str) -> Option<i64> {
+    let digits = text
+        .trim()
+        .chars()
+        .filter(|character| !matches!(character, '.' | ',' | ' '))
+        .collect::<String>();
+    (!digits.is_empty() && digits.chars().all(|character| character.is_ascii_digit()))
+        .then(|| digits.parse().ok())
+        .flatten()
+}
+
+/// Bigger steps for bigger amounts, so a few taps reach any of them.
+const fn topup_step(credits: i64) -> i64 {
+    match credits {
+        ..100 => 10,
+        100..1_000 => 50,
+        1_000..10_000 => 500,
+        _ => 5_000,
+    }
+}
+
+const fn more_credits(credits: i64) -> i64 {
+    let next = credits + topup_step(credits);
+    if next > MAX_TOPUP_CREDITS {
+        MAX_TOPUP_CREDITS
+    } else {
+        next
+    }
+}
+
+const fn fewer_credits(credits: i64) -> i64 {
+    let previous = credits - topup_step(credits - 1);
+    if previous < MIN_TOPUP_CREDITS {
+        MIN_TOPUP_CREDITS
+    } else {
+        previous
+    }
 }
 
 #[must_use]
@@ -82,60 +159,91 @@ pub(crate) fn whole_credits(units: i64) -> String {
         .map_or_else(|| formatted.clone(), ToOwned::to_owned)
 }
 
-/// The Stars pack list, with a way into the Lightning packs when they are
-/// available.
+/// First line of the top-up menu, which also marks a reply to it as a
+/// typed amount.
 #[must_use]
-pub fn topup_menu(locale: Locale, lightning_available: bool) -> (String, InlineKeyboardMarkup) {
-    let mut text = match locale {
-        Locale::Es => "Cargar créditos\n\nElegí un pack. Pagás con Telegram Stars y los créditos van a tu saldo personal.",
-        Locale::En => "Add credits\n\nChoose a pack. You pay with Telegram Stars and the credits go to your personal balance.",
+pub const fn topup_menu_title(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Es => "Cargar créditos",
+        Locale::En => "Add credits",
     }
-    .to_owned();
-    let mut keyboard = topup_keyboard(locale);
-    if lightning_available {
-        text.push_str(match locale {
-            Locale::Es => "\n\nCon Lightning ⚡ te sale más barato.",
-            Locale::En => "\n\nLightning ⚡ is cheaper.",
-        });
-        let close_row = keyboard.inline_keyboard.len() - 1;
-        keyboard.inline_keyboard.insert(
-            close_row,
-            vec![crate::menu_ui::button(
-                crate::menu_ui::localized(
-                    locale,
-                    "⚡ Pagar con Lightning",
-                    "⚡ Pay with Lightning",
-                ),
-                crate::lightning_topup::LIGHTNING_MENU_CALLBACK,
-            )],
-        );
-    }
-    (text, keyboard)
 }
 
-fn topup_keyboard(locale: Locale) -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup {
-        inline_keyboard: DEFAULT_BILLING_PACKS
+/// The top-up menu for one amount: change it with − and +, a quick pick or a
+/// typed number, then pay with Telegram Stars (card, Google Pay, Apple Pay)
+/// or Lightning.
+#[must_use]
+pub fn topup_menu(
+    locale: Locale,
+    credits: i64,
+    lightning_available: bool,
+) -> (String, InlineKeyboardMarkup) {
+    use crate::menu_ui::button;
+    let credits = credits.clamp(MIN_TOPUP_CREDITS, MAX_TOPUP_CREDITS);
+    let pack = topup_terms(credits);
+    let amount = whole_credits(pack.credits_awarded);
+    let messages = crate::output_format::readable_number(
+        &(pack.credits_awarded / ESTIMATED_CREDIT_UNITS_PER_MESSAGE).to_string(),
+    );
+    let text = match locale {
+        Locale::Es => format!(
+            "{}\n\n{amount} créditos ≈ {messages} mensajes de IA\nCambiá el monto o mandame el número",
+            topup_menu_title(locale)
+        ),
+        Locale::En => format!(
+            "{}\n\n{amount} credits ≈ {messages} AI messages\nChange the amount or send me a number",
+            topup_menu_title(locale)
+        ),
+    };
+    let amount_label = match locale {
+        Locale::Es => format!("{amount} créditos"),
+        Locale::En => format!("{amount} credits"),
+    };
+    let stars = crate::output_format::readable_number(&pack.xtr_amount.to_string());
+    let mut rows = vec![
+        vec![
+            button("−", format!("topup:amt:{}", fewer_credits(credits))),
+            button(amount_label, format!("topup:amt:{credits}")),
+            button("+", format!("topup:amt:{}", more_credits(credits))),
+        ],
+        QUICK_TOPUP_CREDITS
             .iter()
-            .map(|(id, xtr_amount, credits_awarded)| {
-                let credits = whole_credits(*credits_awarded);
-                let stars = crate::output_format::readable_number(&xtr_amount.to_string());
-                vec![InlineKeyboardButton {
-                    text: match locale {
-                        Locale::Es => format!("{credits} créditos por {stars} ⭐"),
-                        Locale::En => format!("{credits} credits for {stars} ⭐"),
+            .map(|quick| {
+                let label = whole_credits(quick * 100);
+                button(
+                    if *quick == credits {
+                        format!("✓ {label}")
+                    } else {
+                        label
                     },
-                    url: None,
-                    callback_data: Some(format!("topup:{id}")),
-                    copy_text: None,
-                }]
+                    format!("topup:amt:{quick}"),
+                )
             })
-            .chain(std::iter::once(vec![crate::menu_ui::close(
-                locale,
-                "topup:close",
-            )]))
             .collect(),
+        vec![button(
+            format!("💳 Telegram  {stars} ⭐"),
+            format!("topup:{}", pack.id),
+        )],
+    ];
+    if lightning_available {
+        let price =
+            crate::lightning_topup::format_usd(crate::lightning_topup::lightning_usd_cents(&pack));
+        rows.push(vec![button(
+            format!("⚡ Lightning  {price}"),
+            format!(
+                "{}{}",
+                crate::lightning_topup::LIGHTNING_PACK_PREFIX,
+                pack.id
+            ),
+        )]);
     }
+    rows.push(vec![crate::menu_ui::close(locale, "topup:close")]);
+    (
+        text,
+        InlineKeyboardMarkup {
+            inline_keyboard: rows,
+        },
+    )
 }
 
 #[must_use]
@@ -150,9 +258,14 @@ pub fn plan_topup_command(
     billing_available: bool,
     lightning_available: bool,
 ) -> Option<TelegramAction> {
-    if parse_command(message_text, bot_name).command != "/topup" {
+    let parsed = parse_command(message_text, bot_name);
+    if parsed.command != "/topup" {
         return None;
     }
+    // "/topup 300" opens on that amount; anything else opens on the default.
+    let credits = parse_topup_amount(&parsed.message_text)
+        .filter(|credits| (MIN_TOPUP_CREDITS..=MAX_TOPUP_CREDITS).contains(credits))
+        .unwrap_or(DEFAULT_TOPUP_CREDITS);
     let (text, keyboard) = if !billing_available {
         (
             crate::billing_commands::billing_unavailable(locale).to_owned(),
@@ -184,7 +297,7 @@ pub fn plan_topup_command(
             }),
         )
     } else {
-        let (text, keyboard) = topup_menu(locale, lightning_available);
+        let (text, keyboard) = topup_menu(locale, credits, lightning_available);
         (text, Some(keyboard))
     };
     let mut message = SendMessage::new(chat_id, &text);
@@ -281,6 +394,8 @@ pub fn balance_reply(user_balance: i64, chat_balance: Option<i64>, locale: Local
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TopupCallbackPlan {
     Answer(Option<TelegramAction>),
+    /// Show the menu again on another amount, in place.
+    Menu(i64),
     Invoice(Box<TopupInvoicePlan>),
 }
 
@@ -356,6 +471,13 @@ pub fn plan_topup_callback(
             Locale::Es => "Cargá por privado, maestro",
             Locale::En => "Open this in a private chat",
         });
+    }
+    if let Some(credits) = data
+        .strip_prefix("topup:amt:")
+        .and_then(|credits| credits.parse().ok())
+        .filter(|credits| (MIN_TOPUP_CREDITS..=MAX_TOPUP_CREDITS).contains(credits))
+    {
+        return TopupCallbackPlan::Menu(credits);
     }
     let pack = data
         .split_once(':')
@@ -720,11 +842,12 @@ mod tests {
         PreCheckoutDecision, StarPaymentRecord, SuccessfulPaymentDecision, TopupCallbackPlan,
         balance_reply, default_billing_pack, evaluate_default_successful_payment,
         evaluate_pre_checkout, evaluate_successful_payment, invoice_payload_locale,
-        parse_topup_payload, payment_record, plan_balance_command, plan_pre_checkout,
-        plan_topup_callback, plan_topup_command, successful_payment_reply,
+        parse_topup_amount, parse_topup_payload, payment_record, plan_balance_command,
+        plan_pre_checkout, plan_topup_callback, plan_topup_command, successful_payment_reply,
+        topup_menu, topup_menu_title,
     };
     use crate::locale::Locale;
-    use crate::telegram_actions::{LabeledPrice, TelegramAction};
+    use crate::telegram_actions::{InlineKeyboardButton, LabeledPrice, TelegramAction};
     use crate::telegram_input::{ChatId, MessageId};
 
     fn sent(action: Option<TelegramAction>) -> Option<crate::telegram_actions::SendMessage> {
@@ -763,6 +886,116 @@ mod tests {
     }
 
     #[test]
+    fn any_amount_in_range_is_a_pack_at_two_credits_per_star() {
+        assert_eq!(
+            default_billing_pack("c300"),
+            Some(BillingPackTerms {
+                id: "c300".to_owned(),
+                xtr_amount: 150,
+                credits_awarded: 30_000,
+            })
+        );
+        // Odd amounts round the Stars up.
+        assert_eq!(
+            default_billing_pack("c11").map(|pack| pack.xtr_amount),
+            Some(6)
+        );
+        assert_eq!(
+            default_billing_pack("c100000").map(|pack| pack.xtr_amount),
+            Some(50_000)
+        );
+        assert_eq!(
+            default_billing_pack("c10").map(|pack| pack.xtr_amount),
+            Some(5)
+        );
+        for invalid in ["c9", "c100001", "c050", "c", "c-20", "cabc", "c+20"] {
+            assert_eq!(default_billing_pack(invalid), None, "{invalid}");
+        }
+        for (text, expected) in [
+            ("300", Some(300)),
+            (" 1.500 ", Some(1_500)),
+            ("1,500", Some(1_500)),
+            ("10 000", Some(10_000)),
+            ("", None),
+            ("-5", None),
+            ("3.5k", None),
+            ("💰", None),
+            ("99999999999999999999", None),
+        ] {
+            assert_eq!(parse_topup_amount(text), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn amount_callbacks_redraw_the_menu_only_in_range() {
+        let plan = |data: &str| {
+            plan_topup_callback(
+                Some("cb"),
+                data,
+                ChatId(42),
+                "private",
+                Some(42),
+                true,
+                Locale::En,
+            )
+        };
+        assert_eq!(plan("topup:amt:300"), TopupCallbackPlan::Menu(300));
+        assert_eq!(plan("topup:amt:10"), TopupCallbackPlan::Menu(10));
+        assert_eq!(plan("topup:amt:100000"), TopupCallbackPlan::Menu(100_000));
+        for invalid in ["topup:amt:9", "topup:amt:100001", "topup:amt:x"] {
+            assert!(
+                matches!(plan(invalid), TopupCallbackPlan::Answer(Some(_))),
+                "{invalid}"
+            );
+        }
+        assert!(matches!(plan("topup:c300"), TopupCallbackPlan::Invoice(_)));
+    }
+
+    #[test]
+    fn menu_steps_quick_picks_and_payment_buttons_follow_the_amount() {
+        let rows =
+            |credits, lightning| topup_menu(Locale::En, credits, lightning).1.inline_keyboard;
+        let callbacks = |row: &Vec<InlineKeyboardButton>| {
+            row.iter()
+                .map(|button| button.callback_data.clone().unwrap_or_default())
+                .collect::<Vec<_>>()
+        };
+        for (credits, fewer, more) in [
+            (10, 10, 20),
+            (100, 90, 150),
+            (1_000, 950, 1_500),
+            (10_000, 9_500, 15_000),
+            (100_000, 95_000, 100_000),
+        ] {
+            assert_eq!(
+                callbacks(&rows(credits, false)[0]),
+                [
+                    format!("topup:amt:{fewer}"),
+                    format!("topup:amt:{credits}"),
+                    format!("topup:amt:{more}"),
+                ],
+                "{credits}"
+            );
+        }
+        let menu = rows(500, true);
+        assert_eq!(
+            menu[1]
+                .iter()
+                .map(|button| button.text.as_str())
+                .collect::<Vec<_>>(),
+            ["50", "100", "✓ 500", "1,000"]
+        );
+        assert_eq!(menu[2][0].text, "💳 Telegram  250 ⭐");
+        assert_eq!(menu[3][0].text, "⚡ Lightning  US$3.29");
+        assert_eq!(menu[3][0].callback_data.as_deref(), Some("topup:ln:c500"));
+        assert_eq!(menu[4][0].callback_data.as_deref(), Some("topup:close"));
+        // Out of range clamps to the nearest end.
+        assert_eq!(rows(1, false)[0][1].text, "10 credits");
+        assert_eq!(rows(1_000_000, false)[0][1].text, "100,000 credits");
+        assert_eq!(topup_menu_title(Locale::Es), "Cargar créditos");
+    }
+
+    #[test]
     fn production_pack_catalog_matches_the_python_credit_scale() {
         assert_eq!(default_billing_pack("p50"), Some(pack()));
         assert_eq!(
@@ -793,7 +1026,10 @@ mod tests {
             false,
         );
         let private = sent(private).ok_or("private topup message")?;
-        assert!(private.text.starts_with("Add credits\n\n"));
+        assert_eq!(
+            private.text,
+            "Add credits\n\n100 credits ≈ 400 AI messages\nChange the amount or send me a number"
+        );
         assert_eq!(private.reply_to_message_id, Some(MessageId(7)));
         let keyboard =
             private
@@ -801,12 +1037,41 @@ mod tests {
                 .unwrap_or(crate::telegram_actions::InlineKeyboardMarkup {
                     inline_keyboard: Vec::new(),
                 });
-        assert_eq!(keyboard.inline_keyboard.len(), 7);
+        // Amount, quick picks, Telegram and close: no Lightning row without it.
+        assert_eq!(keyboard.inline_keyboard.len(), 4);
+        assert_eq!(keyboard.inline_keyboard[2][0].text, "💳 Telegram  50 ⭐");
         assert_eq!(
-            keyboard.inline_keyboard[0][0].callback_data.as_deref(),
-            Some("topup:p50")
+            keyboard.inline_keyboard[2][0].callback_data.as_deref(),
+            Some("topup:c100")
         );
-        assert_eq!(keyboard.inline_keyboard[0][0].text, "50 credits for 25 ⭐");
+
+        // A typed amount opens the menu on it; anything else on the default.
+        for (text, expected) in [
+            ("/topup 300", "300 credits ≈ 1,200 AI messages"),
+            ("/topup 1.500", "1,500 credits ≈ 6,000 AI messages"),
+            ("/topup 100000", "100,000 credits ≈ 400,000 AI messages"),
+            ("/topup 9", "100 credits"),
+            ("/topup 100001", "100 credits"),
+            ("/topup lots", "100 credits"),
+        ] {
+            let message = sent(plan_topup_command(
+                ChatId(42),
+                MessageId(7),
+                text,
+                "@mybot",
+                Locale::En,
+                "private",
+                true,
+                false,
+            ))
+            .ok_or("typed topup")?;
+            assert!(
+                message
+                    .text
+                    .starts_with(&format!("Add credits\n\n{expected}")),
+                "{text}"
+            );
+        }
 
         for (chat_type, available, bot_name, locale, expected) in [
             (
@@ -1385,17 +1650,16 @@ mod tests {
             false,
         ))
         .ok_or("spanish catalog")?;
-        assert!(
-            private
-                .text
-                .starts_with("Cargar créditos\n\nElegí un pack.")
+        assert_eq!(
+            private.text,
+            "Cargar créditos\n\n100 créditos ≈ 400 mensajes de IA\nCambiá el monto o mandame el número"
         );
-        let first = private
+        let amount = private
             .reply_markup
             .and_then(|markup| markup.inline_keyboard.into_iter().next())
-            .and_then(|row| row.into_iter().next())
+            .and_then(|row| row.into_iter().nth(1))
             .map(|button| button.text);
-        assert_eq!(first.as_deref(), Some("50 créditos por 25 ⭐"));
+        assert_eq!(amount.as_deref(), Some("100 créditos"));
 
         let group = sent(plan_topup_command(
             ChatId(-42),

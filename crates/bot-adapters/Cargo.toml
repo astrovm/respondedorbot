@@ -16,6 +16,7 @@ chrono.workspace = true
 encoding_rs.workspace = true
 image.workspace = true
 imageproc.workspace = true
+qrcode.workspace = true
 native-tls.workspace = true
 postgres.workspace = true
 postgres-native-tls.workspace = true
