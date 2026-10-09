@@ -32,6 +32,7 @@ pub mod credit_units;
 pub mod devo;
 pub mod dollar;
 pub mod greeting_commands;
+pub mod group_charges;
 pub mod hacker_news;
 pub mod help_catalog;
 pub mod language_command;

@@ -55,6 +55,7 @@ Telegram's `/` menu shows the same command names in every language, the first na
 | `/bans`, `/banned`, `/vetados` | List who is banned in the group |
 | `/limit`, `/limitar` | Group admins: reply to someone with how many AI messages per hour the group pays for them, or `off` to go back to the group limit |
 | `/limited`, `/limitados` | List who has their own limit in the group |
+| `/groupcharges` | Group admins: who spent the group's own credits on AI, in the last day or up to 30 days |
 | `/topup`, `/balance` | Add or check AI credits |
 | `/charges`, `/history`, `/gastos` | Credit history |
 | `/transfer` | Move credits to a group, or to someone by replying to them |
