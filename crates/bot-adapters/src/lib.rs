@@ -5,6 +5,7 @@ pub mod billing_read;
 pub mod billing_schema;
 pub mod chat_bans;
 pub mod chat_config;
+pub mod chat_limits;
 pub mod coinmarketcap;
 pub mod compaction_job;
 pub mod criptoya;

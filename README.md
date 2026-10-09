@@ -51,6 +51,8 @@ It streams replies, remembers conversations, understands media, tracks markets, 
 | `/language`, `/idioma` | Language settings |
 | `/ban`, `/vetar`, `/unban`, `/desvetar` | Group admins: reply to someone to stop or allow them using the bot in that group |
 | `/banned`, `/vetados` | List who is banned in the group |
+| `/limit`, `/limitar` | Group admins: reply to someone with how many AI messages per hour the group pays for them, or `off` to go back to the group limit |
+| `/limited`, `/limitados` | List who has their own limit in the group |
 | `/topup`, `/balance` | Add or check AI credits |
 | `/charges`, `/history`, `/gastos` | Credit history |
 | `/transfer` | Move credits to a group, or to someone by replying to them |

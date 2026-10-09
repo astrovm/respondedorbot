@@ -25,6 +25,11 @@ use bot_core::chat_bans::{
     classify_ban_command, plan_ban_command, render_ban_list, unban_result_reply,
 };
 use bot_core::chat_config::ChatConfig;
+use bot_core::chat_limits::{
+    LimitCommand, LimitCommandContext, LimitCommandPlan, LimitedUser, classify_limit_command,
+    limit_admin_target, limit_result_reply, plan_limit_command, render_limit_list,
+    unlimit_result_reply,
+};
 use bot_core::command_parsing::parse_command;
 use bot_core::command_state::{
     IncomingCommandState, IncomingCommandWritePlan, OutgoingCommandState, OutgoingCommandWritePlan,
@@ -372,8 +377,29 @@ pub trait ChatBanStore {
     fn list(&mut self, chat_id: i64) -> Result<Vec<BannedUser>, String>;
 }
 
-/// The member a ban command replies to, bots included so the planner can
-/// refuse them.
+/// Members a group's admins gave their own hourly limit of AI messages paid
+/// by the group, in place of the group's limit.
+pub trait ChatLimitStore {
+    fn hourly_limit(&mut self, chat_id: i64, user_id: i64) -> Result<Option<i64>, String>;
+
+    /// Setting again replaces the previous limit and name.
+    fn set(
+        &mut self,
+        chat_id: i64,
+        user_id: i64,
+        name: &str,
+        hourly_limit: i64,
+        set_by: i64,
+    ) -> Result<(), String>;
+
+    /// Returns whether a limit was removed.
+    fn clear(&mut self, chat_id: i64, user_id: i64) -> Result<bool, String>;
+
+    fn list(&mut self, chat_id: i64) -> Result<Vec<LimitedUser>, String>;
+}
+
+/// The member a ban or limit command replies to, bots included so the
+/// planner can refuse them.
 fn ban_target(message: &IncomingMessage, locale: bot_core::locale::Locale) -> Option<BanTarget> {
     message.replied_sender_id.map(|user_id| BanTarget {
         user_id: user_id.0,
@@ -1076,6 +1102,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     admin_creditlog_source: Option<Box<dyn AdminCreditLogSource>>,
     lightning_checkout: Option<Box<dyn LightningCheckout>>,
     ban_store: Option<Box<dyn ChatBanStore>>,
+    limit_store: Option<Box<dyn ChatLimitStore>>,
     /// Set while a banned member's message is routed to the AI turn only to
     /// be recorded as ignored.
     sender_banned: bool,
@@ -1141,6 +1168,7 @@ where
             admin_creditlog_source: None,
             lightning_checkout: None,
             ban_store: None,
+            limit_store: None,
             sender_banned: false,
             bitcoin_price_source: None,
             dollar_quotes_source: None,
@@ -1224,6 +1252,12 @@ where
     #[must_use]
     pub fn with_ban_store(mut self, store: Box<dyn ChatBanStore>) -> Self {
         self.ban_store = Some(store);
+        self
+    }
+
+    #[must_use]
+    pub fn with_limit_store(mut self, store: Box<dyn ChatLimitStore>) -> Self {
+        self.limit_store = Some(store);
         self
     }
 
@@ -4567,6 +4601,142 @@ where
         Ok(DispatchOutcome::Handled)
     }
 
+    /// A member's own limit replaces the group's for AI messages the group
+    /// pays for. Admins keep the group's limit, so a limit left from before
+    /// they were promoted can't hold them back, and a failed lookup keeps it
+    /// too rather than blocking the member.
+    fn creditless_user_hourly_limit(
+        &mut self,
+        message: &IncomingMessage,
+        (chat_id, sender_id): (ChatId, UserId),
+        config: &ChatConfig,
+    ) -> i64 {
+        let group_limit = config.creditless_user_hourly_limit;
+        if !is_group_chat_type(message.chat_type.as_deref()) {
+            return group_limit;
+        }
+        let Some(store) = self.limit_store.as_mut() else {
+            return group_limit;
+        };
+        match store.hourly_limit(chat_id.0, sender_id.0) {
+            Ok(None) => group_limit,
+            Ok(Some(own_limit)) => {
+                let authorization = self
+                    .authorization
+                    .authorize(&chat_id.0.to_string(), &sender_id.0.to_string());
+                self.state_diagnostics.extend(authorization.diagnostics);
+                if authorization.is_admin {
+                    group_limit
+                } else {
+                    own_limit
+                }
+            }
+            Err(error) => {
+                self.state_diagnostics.push(format!(
+                    "chat limit check chat_id={} user_id={}: {error}",
+                    chat_id.0, sender_id.0
+                ));
+                group_limit
+            }
+        }
+    }
+
+    fn dispatch_limit_command(
+        &mut self,
+        message: &IncomingMessage,
+        (chat_id, message_id, sender_id): (ChatId, MessageId, UserId),
+        command: LimitCommand,
+        locale: bot_core::locale::Locale,
+        is_group: bool,
+    ) -> NativeDispatchResult<Config, Actions, Random> {
+        let Some(store) = self.limit_store.as_mut() else {
+            return Err(DispatchError::MissingService("chat limits"));
+        };
+        let chat = chat_id.0.to_string();
+        let reply = |text: &str| ban_reply(chat_id, message_id, text);
+        let authorization = if is_group {
+            let authorization = self
+                .authorization
+                .authorize(&chat, &sender_id.0.to_string());
+            self.state_diagnostics.extend(authorization.diagnostics);
+            Some(authorization.is_admin)
+        } else {
+            None
+        };
+        let action = match authorization {
+            None => reply(bans_group_only(locale)),
+            Some(false) => {
+                self.state_diagnostics.push(format!(
+                    "Unauthorized limit attempt chat_id={chat} user_id={}",
+                    sender_id.0
+                ));
+                reply(match locale {
+                    bot_core::locale::Locale::Es => "Este comando es solo para admins del grupo",
+                    bot_core::locale::Locale::En => "Only group admins can use this command",
+                })
+            }
+            Some(true) => {
+                let context = LimitCommandContext {
+                    chat_id,
+                    message_id,
+                    sender_id: sender_id.0,
+                    locale,
+                    target: ban_target(message, locale),
+                };
+                match plan_limit_command(command, context) {
+                    LimitCommandPlan::Reply(action) => action,
+                    LimitCommandPlan::List => match store.list(chat_id.0) {
+                        Ok(users) => reply(&render_limit_list(&users, locale)),
+                        Err(error) => {
+                            self.state_diagnostics
+                                .push(format!("chat limit list chat_id={chat}: {error}"));
+                            reply(ban_list_failed(locale))
+                        }
+                    },
+                    LimitCommandPlan::Set {
+                        user_id,
+                        name,
+                        hourly_limit,
+                    } => {
+                        let target_authorization =
+                            self.authorization.authorize(&chat, &user_id.to_string());
+                        self.state_diagnostics
+                            .extend(target_authorization.diagnostics);
+                        if target_authorization.is_admin {
+                            reply(limit_admin_target(locale))
+                        } else {
+                            match store.set(chat_id.0, user_id, &name, hourly_limit, sender_id.0) {
+                                Ok(()) => reply(&limit_result_reply(&name, hourly_limit, locale)),
+                                Err(error) => {
+                                    self.state_diagnostics.push(format!(
+                                        "chat limit chat_id={chat} user_id={user_id}: {error}"
+                                    ));
+                                    reply(ban_store_failed(locale))
+                                }
+                            }
+                        }
+                    }
+                    LimitCommandPlan::Clear { user_id, name } => {
+                        match store.clear(chat_id.0, user_id) {
+                            Ok(removed) => reply(&unlimit_result_reply(&name, removed, locale)),
+                            Err(error) => {
+                                self.state_diagnostics.push(format!(
+                                    "chat unlimit chat_id={chat} user_id={user_id}: {error}"
+                                ));
+                                reply(ban_store_failed(locale))
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        let _receipt = self
+            .actions
+            .execute(action)
+            .map_err(DispatchError::Action)?;
+        Ok(DispatchOutcome::Handled)
+    }
+
     fn dispatch_ai_message(
         &mut self,
         message: &IncomingMessage,
@@ -4648,6 +4818,12 @@ where
         } else {
             content.text.as_str()
         };
+        // Ignored messages are never charged, so they skip the lookup.
+        let creditless_user_hourly_limit = if evaluation == ResponseRoutingEvaluation::Ignore {
+            config.creditless_user_hourly_limit
+        } else {
+            self.creditless_user_hourly_limit(message, (chat_id, sender_id), config)
+        };
         let input = AiConversationInput {
             chat_id,
             message_id,
@@ -4672,7 +4848,7 @@ where
             audio_duration_seconds: message.audio_duration_seconds.map(|value| value as f64),
             locale,
             timezone_offset_hours: config.timezone_offset,
-            creditless_user_hourly_limit: config.creditless_user_hourly_limit,
+            creditless_user_hourly_limit,
             timestamp,
             spontaneous,
             link_context: None,
@@ -4863,6 +5039,8 @@ where
         ) else {
             return Ok(DispatchOutcome::Unsupported);
         };
+        let creditless_user_hourly_limit =
+            self.creditless_user_hourly_limit(message, (chat_id, sender_id), config);
         let Some(source) = self.ai_conversation_source.as_mut() else {
             return Err(DispatchError::MissingService("AI conversation"));
         };
@@ -4890,7 +5068,7 @@ where
             audio_duration_seconds: message.audio_duration_seconds.map(|value| value as f64),
             locale,
             timezone_offset_hours: config.timezone_offset,
-            creditless_user_hourly_limit: config.creditless_user_hourly_limit,
+            creditless_user_hourly_limit,
             timestamp,
             spontaneous: false,
             link_context: None,
@@ -5020,6 +5198,8 @@ where
         ) else {
             return Ok(DispatchOutcome::Unsupported);
         };
+        let creditless_user_hourly_limit =
+            self.creditless_user_hourly_limit(message, (chat_id, sender_id), config);
         let input = AiConversationInput {
             chat_id,
             message_id,
@@ -5044,7 +5224,7 @@ where
             audio_duration_seconds: message.audio_duration_seconds.map(|value| value as f64),
             locale,
             timezone_offset_hours: config.timezone_offset,
-            creditless_user_hourly_limit: config.creditless_user_hourly_limit,
+            creditless_user_hourly_limit,
             timestamp,
             spontaneous: false,
             link_context: None,
@@ -5334,6 +5514,10 @@ where
         if let Some(command) = classify_ban_command(&content.text, &self.bot_name) {
             let ids = (chat_id, message_id, sender_id);
             return self.dispatch_ban_command(message, ids, command, locale, is_group);
+        }
+        if let Some(command) = classify_limit_command(&content.text, &self.bot_name) {
+            let ids = (chat_id, message_id, sender_id);
+            return self.dispatch_limit_command(message, ids, command, locale, is_group);
         }
         let is_settings_command = matches!(
             parsed.command.as_str(),
@@ -22405,6 +22589,361 @@ mod tests {
                 Ok(DispatchOutcome::Handled)
             );
             assert_eq!(dispatcher.actions.0.len(), 2);
+        }
+    }
+
+    mod chat_limits {
+        use super::*;
+        use crate::dispatcher::ChatLimitStore;
+        use bot_core::chat_limits::LimitedUser;
+
+        type LimitRows = Rc<RefCell<Vec<(i64, LimitedUser, i64)>>>;
+
+        /// In-memory limits keyed like the PostgreSQL table, as (chat, member,
+        /// set by), with an optional failure for every call.
+        #[derive(Default)]
+        struct Limits {
+            rows: LimitRows,
+            error: Option<String>,
+        }
+
+        impl ChatLimitStore for Limits {
+            fn hourly_limit(&mut self, chat_id: i64, user_id: i64) -> Result<Option<i64>, String> {
+                self.error.clone().map_or(Ok(()), Err)?;
+                Ok(self
+                    .rows
+                    .borrow()
+                    .iter()
+                    .find(|(chat, user, _)| *chat == chat_id && user.user_id == user_id)
+                    .map(|(_, user, _)| user.hourly_limit))
+            }
+
+            fn set(
+                &mut self,
+                chat_id: i64,
+                user_id: i64,
+                name: &str,
+                hourly_limit: i64,
+                set_by: i64,
+            ) -> Result<(), String> {
+                self.clear(chat_id, user_id)?;
+                let user = LimitedUser {
+                    user_id,
+                    name: name.to_owned(),
+                    hourly_limit,
+                };
+                self.rows.borrow_mut().push((chat_id, user, set_by));
+                Ok(())
+            }
+
+            fn clear(&mut self, chat_id: i64, user_id: i64) -> Result<bool, String> {
+                self.error.clone().map_or(Ok(()), Err)?;
+                let mut rows = self.rows.borrow_mut();
+                let before = rows.len();
+                rows.retain(|(chat, user, _)| !(*chat == chat_id && user.user_id == user_id));
+                Ok(rows.len() < before)
+            }
+
+            fn list(&mut self, chat_id: i64) -> Result<Vec<LimitedUser>, String> {
+                self.error.clone().map_or(Ok(()), Err)?;
+                Ok(self
+                    .rows
+                    .borrow()
+                    .iter()
+                    .filter(|(chat, _, _)| *chat == chat_id)
+                    .map(|(_, user, _)| user.clone())
+                    .collect())
+            }
+        }
+
+        fn limited(user_id: i64, hourly_limit: i64) -> Limits {
+            let mut limits = Limits::default();
+            assert_eq!(
+                limits.set(-42, user_id, "Synthetic", hourly_limit, 1),
+                Ok(())
+            );
+            limits
+        }
+
+        struct Admins(Vec<i64>);
+
+        impl GroupAuthorizer for Admins {
+            fn authorize(&mut self, _chat_id: &str, user_id: &str) -> GroupAuthorizationDecision {
+                GroupAuthorizationDecision {
+                    is_admin: self.0.iter().any(|admin| admin.to_string() == user_id),
+                    diagnostics: vec![format!("checked {user_id}")],
+                }
+            }
+        }
+
+        /// The group's own limit is unlimited, as most groups leave it.
+        fn build(
+            language: &str,
+            admins: &[i64],
+            limits: Option<Limits>,
+            ai: AiSource,
+        ) -> NativeDispatcher<Config, Actions, State, Values, Samples, Admins> {
+            let dispatcher = NativeDispatcher::new(
+                Config {
+                    value: Ok(ChatConfig {
+                        language: language.to_owned(),
+                        creditless_user_hourly_limit: -1,
+                        ..ChatConfig::default()
+                    }),
+                    chat_ids: Vec::new(),
+                },
+                Actions::default(),
+                State::default(),
+                values(),
+                random(),
+                Admins(admins.to_vec()),
+                "@mybot",
+            )
+            .with_ai_conversation_source(Box::new(ai));
+            match limits {
+                Some(limits) => dispatcher.with_limit_store(Box::new(limits)),
+                None => dispatcher,
+            }
+        }
+
+        fn group(text: &str, edit: impl FnOnce(&mut IncomingMessage)) -> IncomingUpdate {
+            message_update(text, None, |message| {
+                message.chat_type = Some("supergroup".to_owned());
+                edit(message);
+            })
+        }
+
+        /// A group message replying to member 77, named Ana.
+        fn replying(text: &str) -> IncomingUpdate {
+            group(text, |message| {
+                message.has_reply = true;
+                message.replied_sender_id = Some(UserId(77));
+                message.replied_sender_first_name = Some("Ana".to_owned());
+            })
+        }
+
+        fn silent_ai() -> AiSource {
+            ai_source(Ok(AiPreparation::silent())).0
+        }
+
+        fn replies(
+            dispatcher: &mut NativeDispatcher<Config, Actions, State, Values, Samples, Admins>,
+            update: IncomingUpdate,
+        ) -> String {
+            dispatcher.actions.0.clear();
+            assert_eq!(dispatcher.dispatch(update), Ok(DispatchOutcome::Handled));
+            let message = first_sent(&dispatcher.actions.0);
+            assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
+            message.text.clone()
+        }
+
+        #[test]
+        fn admins_set_replace_and_clear_member_limits() {
+            let limits = Limits::default();
+            let rows = Rc::clone(&limits.rows);
+            let mut dispatcher = build("es", &[88], Some(limits), silent_ai());
+
+            let ana = |hourly_limit| {
+                let user = LimitedUser {
+                    user_id: 77,
+                    name: "Ana".to_owned(),
+                    hourly_limit,
+                };
+                vec![(-42, user, 88)]
+            };
+
+            assert_eq!(
+                replies(&mut dispatcher, group("/limitados", |_| {})),
+                "Nadie tiene un límite propio en este grupo"
+            );
+            assert_eq!(
+                replies(&mut dispatcher, replying("/limit 3")),
+                "Listo, el grupo le paga a Ana hasta 3 mensajes por hora"
+            );
+            assert_eq!(*rows.borrow(), ana(3));
+            assert!(
+                dispatcher
+                    .state_diagnostics()
+                    .contains(&"checked 77".to_owned())
+            );
+            assert_eq!(
+                replies(&mut dispatcher, replying("/limitar@mybot 0")),
+                "Listo, Ana ya no puede usar el saldo del grupo, solo el suyo"
+            );
+            assert_eq!(*rows.borrow(), ana(0));
+            assert_eq!(
+                replies(&mut dispatcher, group("/limited", |_| {})),
+                "Límites propios en este grupo\n- Ana: solo sus créditos"
+            );
+            assert_eq!(
+                replies(&mut dispatcher, replying("/limit off")),
+                "Listo, Ana vuelve al límite del grupo"
+            );
+            assert_eq!(
+                replies(&mut dispatcher, replying("/limit off")),
+                "Ana no tenía un límite propio"
+            );
+            assert!(rows.borrow().is_empty());
+        }
+
+        #[test]
+        fn limit_command_refuses_private_chats_non_admins_and_admin_targets() {
+            for (language, group_only, admins_only, admin_target) in [
+                (
+                    "es",
+                    "Esto funciona solo en grupos",
+                    "Este comando es solo para admins del grupo",
+                    "A los admins no los puedo limitar",
+                ),
+                (
+                    "en",
+                    "This only works in groups",
+                    "Only group admins can use this command",
+                    "I can't limit admins",
+                ),
+            ] {
+                let limits = Limits::default();
+                let rows = Rc::clone(&limits.rows);
+                let mut dispatcher = build(language, &[88, 77], Some(limits), silent_ai());
+                assert_eq!(
+                    replies(&mut dispatcher, update("/limit 3", None)),
+                    group_only
+                );
+                assert_eq!(replies(&mut dispatcher, replying("/limit 3")), admin_target);
+                assert!(rows.borrow().is_empty());
+
+                let mut member = build(language, &[], Some(Limits::default()), silent_ai());
+                for command in ["/limit 3", "/limit off", "/limitados"] {
+                    assert_eq!(replies(&mut member, replying(command)), admins_only);
+                }
+                assert!(
+                    member
+                        .state_diagnostics()
+                        .contains(&"Unauthorized limit attempt chat_id=-42 user_id=88".to_owned())
+                );
+            }
+        }
+
+        #[test]
+        fn limit_planner_replies_reach_the_chat() {
+            let mut dispatcher = build("en", &[88], Some(Limits::default()), silent_ai());
+            let usage = "Reply to someone's message with /limit and how many messages per hour the group pays for, or /limit off to remove it";
+            assert_eq!(replies(&mut dispatcher, group("/limit 3", |_| {})), usage);
+            assert_eq!(replies(&mut dispatcher, replying("/limit lots")), usage);
+            let bot = group("/limit 3", |message| {
+                message.has_reply = true;
+                message.replied_sender_id = Some(UserId(5));
+                message.replied_sender_is_bot = true;
+            });
+            assert_eq!(replies(&mut dispatcher, bot), "I can't limit bots");
+            let own = group("/limit 3", |message| {
+                message.has_reply = true;
+                message.replied_sender_id = Some(UserId(88));
+            });
+            assert_eq!(replies(&mut dispatcher, own), "You can't limit yourself");
+        }
+
+        #[test]
+        fn limit_storage_failures_reply_and_leave_a_diagnostic() {
+            for (language, saved, listed) in [
+                (
+                    "es",
+                    "No pude guardar el cambio, probá de nuevo",
+                    "No pude cargar la lista, probá de nuevo",
+                ),
+                (
+                    "en",
+                    "I couldn't save that, try again",
+                    "I couldn't load the list, try again",
+                ),
+            ] {
+                let limits = Limits {
+                    error: Some("synthetic database failure".to_owned()),
+                    ..Limits::default()
+                };
+                let mut dispatcher = build(language, &[88], Some(limits), silent_ai());
+                for (command, expected, diagnostic) in [
+                    ("/limit 3", saved, "chat limit chat_id=-42 user_id=77"),
+                    ("/limit off", saved, "chat unlimit chat_id=-42 user_id=77"),
+                    ("/limited", listed, "chat limit list chat_id=-42"),
+                ] {
+                    assert_eq!(replies(&mut dispatcher, replying(command)), expected);
+                    assert!(
+                        dispatcher
+                            .state_diagnostics()
+                            .contains(&format!("{diagnostic}: synthetic database failure")),
+                        "{command}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn limit_command_needs_the_limit_store() {
+            let mut dispatcher = build("es", &[88], None, silent_ai());
+            assert_eq!(
+                dispatcher.dispatch(replying("/limit 3")),
+                Err(DispatchError::MissingService("chat limits"))
+            );
+            assert!(dispatcher.actions.0.is_empty());
+        }
+
+        #[test]
+        fn own_limit_replaces_the_group_limit_on_every_paid_ai_path() {
+            let (mut ai, (prepared, _, _)) = ai_source(Ok(AiPreparation::silent()));
+            ai.media_preparation = Some(Err("synthetic media failure".to_owned()));
+            ai.summary_preparation = Some(Err("synthetic summary failure".to_owned()));
+            let mut dispatcher = build("es", &[], Some(limited(88, 2)), ai);
+            for text in ["@mybot hola", "/transcribe", "/resumen"] {
+                assert_eq!(
+                    dispatcher.dispatch(group(text, |_| {})),
+                    Ok(DispatchOutcome::Handled),
+                    "{text}"
+                );
+            }
+            let received = prepared
+                .borrow()
+                .iter()
+                .map(|input| input.creditless_user_hourly_limit)
+                .collect::<Vec<_>>();
+            assert_eq!(received, [2, 2, 2]);
+        }
+
+        /// The limit the AI turn receives for one message from member 88,
+        /// with the diagnostics it left.
+        fn received_limit(
+            admins: &[i64],
+            limits: Option<Limits>,
+            update: IncomingUpdate,
+        ) -> (i64, Vec<String>) {
+            let (ai, (prepared, _, _)) = ai_source(Ok(AiPreparation::silent()));
+            let mut dispatcher = build("es", admins, limits, ai);
+            assert_eq!(dispatcher.dispatch(update), Ok(DispatchOutcome::Handled));
+            let limit = prepared.borrow()[0].creditless_user_hourly_limit;
+            (limit, dispatcher.state_diagnostics().to_vec())
+        }
+
+        #[test]
+        fn group_limit_stays_for_admins_other_members_private_chats_and_failed_lookups() {
+            let mention = || group("@mybot hola", |_| {});
+            let (limit, diagnostics) = received_limit(&[88], Some(limited(88, 2)), mention());
+            assert_eq!(limit, -1);
+            assert!(diagnostics.contains(&"checked 88".to_owned()));
+
+            assert_eq!(received_limit(&[], Some(limited(77, 2)), mention()).0, -1);
+            assert_eq!(received_limit(&[], None, mention()).0, -1);
+            let private = update("hola", None);
+            assert_eq!(received_limit(&[], Some(limited(88, 2)), private).0, -1);
+
+            let failing = Limits {
+                error: Some("synthetic database failure".to_owned()),
+                ..limited(88, 2)
+            };
+            let (limit, diagnostics) = received_limit(&[], Some(failing), mention());
+            assert_eq!(limit, -1);
+            assert!(diagnostics.contains(
+                &"chat limit check chat_id=-42 user_id=88: synthetic database failure".to_owned()
+            ));
         }
     }
 }

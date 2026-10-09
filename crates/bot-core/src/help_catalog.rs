@@ -49,8 +49,8 @@ pub fn render_help_page(
             "settings",
             "Configuración",
             "Settings",
-            "/config: ajustes de este chat\n/idioma: cambiar el idioma\n\nAdmins\n/vetar: respondé a alguien para que no me use en el grupo\n/desvetar: sacarle el veto\n/vetados: ver quién tiene veto\n\nArreglo los links de X, Bluesky, Instagram y Reddit para que se vean bien en Telegram. Elegí cómo en /config.",
-            "/config: settings for this chat\n/language: change the language\n\nAdmins\n/ban: reply to someone so they can't use me in the group\n/unban: lift their ban\n/banned: see who is banned\n\nI fix X, Bluesky, Instagram and Reddit links so they preview properly in Telegram. Choose how in /config.",
+            "/config: ajustes de este chat\n/idioma: cambiar el idioma\n\nAdmins\n/vetar: respondé a alguien para que no me use en el grupo\n/desvetar: sacarle el veto\n/vetados: ver quién tiene veto\n/limitar: respondé a alguien con cuántos mensajes por hora le paga el grupo, u off para sacarlo\n/limitados: ver quién tiene límite propio\n\nArreglo los links de X, Bluesky, Instagram y Reddit para que se vean bien en Telegram. Elegí cómo en /config.",
+            "/config: settings for this chat\n/language: change the language\n\nAdmins\n/ban: reply to someone so they can't use me in the group\n/unban: lift their ban\n/banned: see who is banned\n/limit: reply to someone with how many messages per hour the group pays for, or off to remove it\n/limited: see who has their own limit\n\nI fix X, Bluesky, Instagram and Reddit links so they preview properly in Telegram. Choose how in /config.",
         ),
     ];
     if let Some((_, es, en, body_es, body_en)) = entries.iter().find(|entry| entry.0 == page) {

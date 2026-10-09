@@ -174,6 +174,16 @@ const COMMAND_GROUPS: &[CommandGroup] = &[
         description_en: "see who is banned in the group",
     },
     CommandGroup {
+        aliases: &["limitar", "limit"],
+        description_es: "admins: cuántos mensajes por hora le paga el grupo a alguien",
+        description_en: "admins: how many messages per hour the group pays for someone",
+    },
+    CommandGroup {
+        aliases: &["limitados", "limited"],
+        description_es: "ver quién tiene límite propio en el grupo",
+        description_en: "see who has their own limit in the group",
+    },
+    CommandGroup {
         aliases: &["gm"],
         description_es: "GIF de buenos días",
         description_en: "good-morning GIF",
@@ -235,6 +245,8 @@ const MENU_ORDER: &[(&str, &str)] = &[
     ("vetar", "ban"),
     ("desvetar", "unban"),
     ("vetados", "banned"),
+    ("limitar", "limit"),
+    ("limitados", "limited"),
     ("help", "help"),
     ("bcra", "bcra"),
     ("rulo", "rulo"),
@@ -331,15 +343,15 @@ mod tests {
         for (locale, expected_hash) in [
             (
                 Locale::Es,
-                "cb7a8d18b86c0afd13c5ee57c699c1f305d7ab6f69ee2ba6eab36292b5d68725",
+                "91e39f7166534a318b71c4edf09347c0f869fe16c93e026783882881a06610bf",
             ),
             (
                 Locale::En,
-                "ee9b11d63d8d01faf0d55cfbd5e467b5e91941d2e3a076d391e04f0178e69182",
+                "a5a57e7f23fc0918c48453caa0d33c0166f51c37f1d4c5edf275efd846085cbb",
             ),
         ] {
             let commands = telegram_commands(locale);
-            assert_eq!(commands.len(), 81);
+            assert_eq!(commands.len(), 85);
             let encoded = serde_json::to_string(&commands);
             assert!(encoded.is_ok());
             let digest = encoded.map(|value| sha256_hex(&value));
