@@ -2227,15 +2227,10 @@ mod tests {
 
         // A retried Telegram update replays the same command: it reports the
         // first outcome and moves nothing again.
-        let transfer_operation = fresh_op();
+        let replay_op = fresh_op();
         for _ in 0..2 {
             assert_eq!(
-                repository.transfer_user_to_chat(
-                    7_000_000_000_009,
-                    7_000_000_000_010,
-                    100,
-                    &transfer_operation,
-                )?,
+                repository.transfer_user_to_chat(MANUAL_USER, MANUAL_CHAT, 100, &replay_op)?,
                 TransferResult {
                     transferred: true,
                     user_balance: 100,
@@ -2255,8 +2250,9 @@ mod tests {
                 COUNT(*) FILTER (WHERE metadata->>'command_operation_id' = $1), \
                 COUNT(*) FILTER (WHERE metadata->>'command_operation_id' = $2) \
              FROM credit_ledger",
-            &[&transfer_operation, &mint_operation],
-        )?;
+            &[&replay_op, &mint_operation],
+        );
+        let replay_evidence = replay_evidence?;
         assert_eq!(replay_evidence.get::<_, i64>(0), 2);
         assert_eq!(replay_evidence.get::<_, i64>(1), 1);
 

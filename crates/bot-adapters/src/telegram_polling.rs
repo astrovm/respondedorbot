@@ -818,16 +818,20 @@ mod tests {
             {"update_id":2,"message":{},"callback_query":{}},
             {"update_id":3,"poll":{"id":"p"}}
         ]}"#;
-        let parsed = parse_response(200, body);
-        let updates = match parsed {
-            Ok(PollOutcome::Updates(updates)) => updates,
-            _ => Vec::new(),
-        };
-        assert_eq!(updates.len(), 3);
-        assert_eq!(updates[0], unsupported(1));
-        assert_eq!(updates[1], unsupported(2));
-        assert_eq!(updates[2].update_id, 3);
-        assert!(matches!(updates[2].event, IncomingEvent::Poll(_)));
+        let poll = serde_json::from_value::<serde_json::Map<String, Value>>(json!({"id": "p"}))
+            .unwrap_or_default();
+        let updates = vec![
+            unsupported(1),
+            unsupported(2),
+            IncomingUpdate {
+                update_id: 3,
+                event: IncomingEvent::Poll(poll),
+            },
+        ];
+        assert_eq!(
+            parse_response(200, body),
+            Ok(PollOutcome::Updates(updates.clone()))
+        );
         // The offset still moves past every acknowledged update.
         assert_eq!(next_offset(&updates, None), Some(4));
     }
