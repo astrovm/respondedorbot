@@ -18346,7 +18346,7 @@ mod tests {
             Ok(DispatchOutcome::Handled)
         );
         let message = first_sent(&invalid.actions.0);
-        assert_eq!(message.text, "Mandalo así: /gastos [cantidad]");
+        assert_eq!(message.text, "Mandalo así: /charges [cantidad]");
 
         let config = Config {
             value: Ok(ChatConfig::default()),

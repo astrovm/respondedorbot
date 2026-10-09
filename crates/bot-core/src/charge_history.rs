@@ -148,7 +148,7 @@ pub fn plan_charges_command(
 
 const fn charges_usage(locale: Locale) -> &'static str {
     match locale {
-        Locale::Es => "Mandalo así: /gastos [cantidad]",
+        Locale::Es => "Mandalo así: /charges [cantidad]",
         Locale::En => "Usage: /charges [count]",
     }
 }
@@ -1070,7 +1070,7 @@ mod tests {
                 context(Locale::Es)
             ))
             .as_deref(),
-            Some("Mandalo así: /gastos [cantidad]")
+            Some("Mandalo así: /charges [cantidad]")
         );
         // A load plan is not a reply.
         assert_eq!(

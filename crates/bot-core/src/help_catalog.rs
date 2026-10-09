@@ -35,22 +35,22 @@ pub fn render_help_page(
             "credits",
             "Créditos",
             "Credits",
-            "/balance: ver tu saldo\n/topup: cargar con Telegram Stars\n/gastos: ver en qué gastaste\n/transfer 1.5: pasar créditos al grupo, o a alguien si le respondés",
-            "/balance: check your balance\n/topup: add credits with Telegram Stars\n/gastos: see what you spent\n/transfer 1.5: move credits to the group, or to someone if you reply to them",
+            "/balance: ver tu saldo\n/topup: cargar con Telegram Stars\n/charges: ver en qué gastaste\n/transfer 1.5: pasar créditos al grupo, o a alguien si le respondés",
+            "/balance: check your balance\n/topup: add credits with Telegram Stars\n/charges: see what you spent\n/transfer 1.5: move credits to the group, or to someone if you reply to them",
         ),
         (
             "tools",
             "Utilidades",
             "Utilities",
-            "/clima Córdoba: clima actual\n/random pizza, sushi: elijo por vos\n/convertbase 101, 2, 10: convertir entre bases\n/command hola mundo: convertir en /comando\n/time: timestamp Unix\n/gm y /gn: GIF de saludo\n/instance: qué instancia responde",
-            "/clima London: current weather\n/random pizza, sushi: I pick for you\n/convertbase 101, 2, 10: convert between bases\n/command hello world: turn text into a /command\n/time: Unix timestamp\n/gm and /gn: greeting GIF\n/instance: which instance is answering",
+            "/weather Córdoba: clima actual\n/random pizza, sushi: elijo por vos\n/convertbase 101, 2, 10: convertir entre bases\n/command hola mundo: convertir en /comando\n/time: timestamp Unix\n/gm y /gn: GIF de saludo\n/instance: qué instancia responde",
+            "/weather London: current weather\n/random pizza, sushi: I pick for you\n/convertbase 101, 2, 10: convert between bases\n/command hello world: turn text into a /command\n/time: Unix timestamp\n/gm and /gn: greeting GIF\n/instance: which instance is answering",
         ),
         (
             "settings",
             "Configuración",
             "Settings",
-            "/config: ajustes de este chat\n/idioma: cambiar el idioma\n\nAdmins\n/ban: respondé a alguien para que no me use en el grupo\n/unban: desbanearlo\n/bans: ver los baneados\n\nArreglo los links de X, Bluesky, Instagram y Reddit para que se vean bien en Telegram. Elegí cómo en /config.",
-            "/config: settings for this chat\n/idioma: change the language\n\nAdmins\n/ban: reply to someone so they can't use me in the group\n/unban: lift their ban\n/bans: see who is banned\n\nI fix X, Bluesky, Instagram and Reddit links so they preview properly in Telegram. Choose how in /config.",
+            "/config: ajustes de este chat\n/language: cambiar el idioma\n\nAdmins\n/ban: respondé a alguien para que no me use en el grupo\n/unban: desbanearlo\n/bans: ver los baneados\n\nArreglo los links de X, Bluesky, Instagram y Reddit para que se vean bien en Telegram. Elegí cómo en /config.",
+            "/config: settings for this chat\n/language: change the language\n\nAdmins\n/ban: reply to someone so they can't use me in the group\n/unban: lift their ban\n/bans: see who is banned\n\nI fix X, Bluesky, Instagram and Reddit links so they preview properly in Telegram. Choose how in /config.",
         ),
     ];
     if let Some((_, es, en, body_es, body_en)) = entries.iter().find(|entry| entry.0 == page) {

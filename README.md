@@ -36,7 +36,7 @@ Telegram's `/` menu shows the same command names in every language, the first na
 | --- | --- |
 | `/p`, `/prices`, `/precios` | Crypto and traditional markets |
 | `/c`, `/cripto`, `/criptos`, `/crypto`, `/cryptos` | Crypto prices and conversions |
-| `/clima`, `/weather` | Current weather |
+| `/weather`, `/clima` | Current weather |
 | `/dolar`, `/dollar`, `/usd` | Dollar rates |
 | `/s`, `/accion`, `/acciones`, `/stock`, `/stocks` | Stock prices |
 | `/oil`, `/petroleo` | Oil prices |
@@ -50,11 +50,11 @@ Telegram's `/` menu shows the same command names in every language, the first na
 | Command | Purpose |
 | --- | --- |
 | `/config`, `/settings` | Chat settings |
-| `/idioma`, `/language` | Language settings |
+| `/language`, `/idioma` | Language settings |
 | `/ban`, `/unban`, `/vetar`, `/desvetar` | Group admins: reply to someone to stop or allow them using the bot in that group |
 | `/bans`, `/banned`, `/vetados` | List who is banned in the group |
 | `/topup`, `/balance` | Add or check AI credits |
-| `/gastos`, `/charges`, `/history` | Credit history |
+| `/charges`, `/history`, `/gastos` | Credit history |
 | `/transfer` | Move credits to a group, or to someone by replying to them |
 | `/tarea`, `/task`, `/tareas`, `/tasks` | Manage scheduled tasks |
 | `/random`, `/convertbase`, `/command`, `/comando`, `/time` | Utilities |
