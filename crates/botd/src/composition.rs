@@ -11,6 +11,7 @@ use bot_adapters::bcra::{
     load_bcra, load_dollar_references,
 };
 use bot_adapters::billing_read::{BillingRepository, ChargeHistoryRow};
+use bot_adapters::chat_bans::ChatBanRepository;
 use bot_adapters::chat_config::{ChatConfigRepository, ChatConfigRepositoryError};
 use bot_adapters::coinmarketcap::{
     BitcoinPriceOutcome, CoinMarketCapMarketTransport, CoinMarketCapTransport, MarketRequest,
@@ -116,7 +117,7 @@ use crate::conversation_adapters::{PostgresConversationBilling, RedisConversatio
 use crate::dispatcher::{
     ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BcraLoad, BcraSource,
     BillingBalanceSource, BillingBalances, BillingTransferSink, BitcoinPriceSource,
-    ChargeHistorySource, ChatConfigSource, DollarMarketLoad, DollarMarketSource,
+    ChargeHistorySource, ChatBanStore, ChatConfigSource, DollarMarketLoad, DollarMarketSource,
     DollarQuotesSource, ElectionLoad, ElectionSource, GreetingPoolLoad, GreetingPoolSource,
     GroupAuthorizationDecision, GroupAuthorizer, LinkReplacementLoad, LinkReplacementSource,
     MarketPriceLoad, MarketPriceSource, MessageStateSink, NativeDispatcher, OilPriceSource,
@@ -152,6 +153,30 @@ impl AdminCreditSink for BillingRepository {
             .map_err(|_| "admin credit amount exceeds the persistent range".to_owned())?;
         self.mint_user_credits(user_id, amount, Some(user_id), operation_id)
             .map_err(error_text)
+    }
+}
+
+impl ChatBanStore for ChatBanRepository {
+    fn is_banned(&mut self, chat_id: i64, user_id: i64) -> Result<bool, String> {
+        ChatBanRepository::is_banned(self, chat_id, user_id).map_err(error_text)
+    }
+
+    fn ban(
+        &mut self,
+        chat_id: i64,
+        user_id: i64,
+        name: &str,
+        banned_by: i64,
+    ) -> Result<bool, String> {
+        ChatBanRepository::ban(self, chat_id, user_id, name, banned_by).map_err(error_text)
+    }
+
+    fn unban(&mut self, chat_id: i64, user_id: i64) -> Result<bool, String> {
+        ChatBanRepository::unban(self, chat_id, user_id).map_err(error_text)
+    }
+
+    fn list(&mut self, chat_id: i64) -> Result<Vec<bot_core::chat_bans::BannedUser>, String> {
+        ChatBanRepository::list(self, chat_id).map_err(error_text)
     }
 }
 
@@ -3178,6 +3203,7 @@ fn build_native_dispatcher_with_stream_delivery(
     .with_admin_user_id(options.admin_user_id)
     .with_admin_credit_sink(Box::new(BillingRepository::new(options.database_url)))
     .with_admin_creditlog_source(Box::new(BillingRepository::new(options.database_url)))
+    .with_ban_store(Box::new(ChatBanRepository::new(options.database_url)))
     .with_dollar_quotes_source(Box::new(CriptoYaDollarQuotesSource {
         transport: criptoya_transport,
         cache: criptoya_cache,
@@ -6359,6 +6385,28 @@ mod tests {
             telegram_delivery: TelegramDeliveryCoordinator::default(),
         });
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn chat_ban_repository_backs_the_dispatcher_ban_store() {
+        use crate::dispatcher::ChatBanStore;
+        let Some(database_url) = db_env() else { return };
+        let mut store = bot_adapters::chat_bans::ChatBanRepository::new(&database_url);
+        let chat_id = -100_900_201;
+        let _cleared = ChatBanStore::unban(&mut store, chat_id, 2);
+        assert_eq!(
+            ChatBanStore::ban(&mut store, chat_id, 2, "Ana", 1),
+            Ok(true)
+        );
+        assert_eq!(ChatBanStore::is_banned(&mut store, chat_id, 2), Ok(true));
+        assert_eq!(
+            ChatBanStore::list(&mut store, chat_id),
+            Ok(vec![bot_core::chat_bans::BannedUser {
+                user_id: 2,
+                name: "Ana".to_owned()
+            }])
+        );
+        assert_eq!(ChatBanStore::unban(&mut store, chat_id, 2), Ok(true));
     }
 
     #[test]

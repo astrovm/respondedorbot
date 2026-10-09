@@ -19,6 +19,11 @@ use bot_core::charge_history::{
     charge_callback_answer, plan_charge_history_callback, plan_charges_command,
     render_charge_history_page,
 };
+use bot_core::chat_bans::{
+    BanCommand, BanCommandContext, BanCommandPlan, BanTarget, BannedUser, ban_admin_target,
+    ban_list_failed, ban_reply, ban_result_reply, ban_store_failed, bans_group_only,
+    classify_ban_command, plan_ban_command, render_ban_list, unban_result_reply,
+};
 use bot_core::chat_config::ChatConfig;
 use bot_core::command_parsing::parse_command;
 use bot_core::command_state::{
@@ -72,7 +77,7 @@ use bot_core::telegram_callbacks::{
     CallbackContext, CallbackContextOutcome, CallbackRoute, parse_callback_context,
 };
 use bot_core::telegram_commands::telegram_commands;
-use bot_core::telegram_input::{ChatId, MessageId, is_group_chat_type};
+use bot_core::telegram_input::{ChatId, MessageId, UserId, is_group_chat_type};
 use bot_core::telegram_payments::{
     BalanceCommandContext, BalanceCommandPlan, StarPaymentRecord, SuccessfulPaymentDecision,
     TopupCallbackPlan, balance_reply, evaluate_default_successful_payment, invoice_payload_locale,
@@ -326,6 +331,35 @@ pub trait AdminCreditSink {
 
 pub trait AdminCreditLogSource {
     fn load(&mut self, limit: usize) -> Result<Vec<CreditLogEntry>, String>;
+}
+
+/// Members a group's admins banned from using the bot in that group.
+pub trait ChatBanStore {
+    fn is_banned(&mut self, chat_id: i64, user_id: i64) -> Result<bool, String>;
+
+    /// Returns whether the ban is new.
+    fn ban(
+        &mut self,
+        chat_id: i64,
+        user_id: i64,
+        name: &str,
+        banned_by: i64,
+    ) -> Result<bool, String>;
+
+    /// Returns whether a ban was lifted.
+    fn unban(&mut self, chat_id: i64, user_id: i64) -> Result<bool, String>;
+
+    fn list(&mut self, chat_id: i64) -> Result<Vec<BannedUser>, String>;
+}
+
+/// The member a ban command replies to, bots included so the planner can
+/// refuse them.
+fn ban_target(message: &IncomingMessage, locale: bot_core::locale::Locale) -> Option<BanTarget> {
+    message.replied_sender_id.map(|user_id| BanTarget {
+        user_id: user_id.0,
+        is_bot: message.replied_sender_is_bot,
+        name: recipient_display_name(message, locale),
+    })
 }
 
 pub trait BitcoinPriceSource {
@@ -1020,6 +1054,10 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     admin_user_id: Option<i64>,
     admin_credit_sink: Option<Box<dyn AdminCreditSink>>,
     admin_creditlog_source: Option<Box<dyn AdminCreditLogSource>>,
+    ban_store: Option<Box<dyn ChatBanStore>>,
+    /// Set while a banned member's message is routed to the AI turn only to
+    /// be recorded as ignored.
+    sender_banned: bool,
     bitcoin_price_source: Option<Box<dyn BitcoinPriceSource>>,
     dollar_quotes_source: Option<Box<dyn DollarQuotesSource>>,
     dollar_market_source: Option<Box<dyn DollarMarketSource>>,
@@ -1080,6 +1118,8 @@ where
             admin_user_id: None,
             admin_credit_sink: None,
             admin_creditlog_source: None,
+            ban_store: None,
+            sender_banned: false,
             bitcoin_price_source: None,
             dollar_quotes_source: None,
             dollar_market_source: None,
@@ -1150,6 +1190,12 @@ where
     #[must_use]
     pub fn with_admin_creditlog_source(mut self, source: Box<dyn AdminCreditLogSource>) -> Self {
         self.admin_creditlog_source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub fn with_ban_store(mut self, store: Box<dyn ChatBanStore>) -> Self {
+        self.ban_store = Some(store);
         self
     }
 
@@ -3716,6 +3762,13 @@ where
             }
             return Ok(DispatchOutcome::Handled);
         };
+        if is_group_chat_type(Some(&context.chat_type))
+            && let (Ok(chat_id), Some(user_id)) = (context.chat_id.parse::<i64>(), context.user_id)
+            && self.sender_is_banned(ChatId(chat_id), user_id)
+        {
+            self.answer_callback_best_effort(context.callback_id.as_deref());
+            return Ok(DispatchOutcome::Handled);
+        }
         if context.data == "topup:close" || context.data.starts_with("chg:close:") {
             let allowed = if context.data == "topup:close" {
                 context.chat_type == "private"
@@ -4222,6 +4275,124 @@ where
         Ok(DispatchOutcome::Handled)
     }
 
+    /// Admins are never treated as banned, so a ban left from before they
+    /// were promoted can't lock them out. A failed lookup lets the message
+    /// through rather than silencing the group.
+    fn sender_is_banned(&mut self, chat_id: ChatId, user_id: i64) -> bool {
+        let Some(store) = self.ban_store.as_mut() else {
+            return false;
+        };
+        match store.is_banned(chat_id.0, user_id) {
+            Ok(false) => false,
+            Ok(true) => {
+                let authorization = self
+                    .authorization
+                    .authorize(&chat_id.0.to_string(), &user_id.to_string());
+                self.state_diagnostics.extend(authorization.diagnostics);
+                !authorization.is_admin
+            }
+            Err(error) => {
+                self.state_diagnostics.push(format!(
+                    "chat ban check chat_id={} user_id={user_id}: {error}",
+                    chat_id.0
+                ));
+                false
+            }
+        }
+    }
+
+    fn dispatch_ban_command(
+        &mut self,
+        message: &IncomingMessage,
+        (chat_id, message_id, sender_id): (ChatId, MessageId, UserId),
+        command: BanCommand,
+        locale: bot_core::locale::Locale,
+        is_group: bool,
+    ) -> NativeDispatchResult<Config, Actions, Random> {
+        let Some(store) = self.ban_store.as_mut() else {
+            return Err(DispatchError::MissingService("chat bans"));
+        };
+        let chat = chat_id.0.to_string();
+        let reply = |text: &str| ban_reply(chat_id, message_id, text);
+        let authorization = if is_group {
+            let authorization = self
+                .authorization
+                .authorize(&chat, &sender_id.0.to_string());
+            self.state_diagnostics.extend(authorization.diagnostics);
+            Some(authorization.is_admin)
+        } else {
+            None
+        };
+        let action = match authorization {
+            None => reply(bans_group_only(locale)),
+            Some(false) => {
+                self.state_diagnostics.push(format!(
+                    "Unauthorized ban attempt chat_id={chat} user_id={}",
+                    sender_id.0
+                ));
+                reply(match locale {
+                    bot_core::locale::Locale::Es => "Este comando es solo para admins del grupo",
+                    bot_core::locale::Locale::En => "Only group admins can use this command",
+                })
+            }
+            Some(true) => {
+                let context = BanCommandContext {
+                    chat_id,
+                    message_id,
+                    sender_id: sender_id.0,
+                    locale,
+                    target: ban_target(message, locale),
+                };
+                match plan_ban_command(command, context) {
+                    BanCommandPlan::Reply(action) => action,
+                    BanCommandPlan::List => match store.list(chat_id.0) {
+                        Ok(users) => reply(&render_ban_list(&users, locale)),
+                        Err(error) => {
+                            self.state_diagnostics
+                                .push(format!("chat ban list chat_id={chat}: {error}"));
+                            reply(ban_list_failed(locale))
+                        }
+                    },
+                    BanCommandPlan::Ban { user_id, name } => {
+                        let target_authorization =
+                            self.authorization.authorize(&chat, &user_id.to_string());
+                        self.state_diagnostics
+                            .extend(target_authorization.diagnostics);
+                        if target_authorization.is_admin {
+                            reply(ban_admin_target(locale))
+                        } else {
+                            match store.ban(chat_id.0, user_id, &name, sender_id.0) {
+                                Ok(inserted) => reply(&ban_result_reply(&name, inserted, locale)),
+                                Err(error) => {
+                                    self.state_diagnostics.push(format!(
+                                        "chat ban chat_id={chat} user_id={user_id}: {error}"
+                                    ));
+                                    reply(ban_store_failed(locale))
+                                }
+                            }
+                        }
+                    }
+                    BanCommandPlan::Unban { user_id, name } => {
+                        match store.unban(chat_id.0, user_id) {
+                            Ok(removed) => reply(&unban_result_reply(&name, removed, locale)),
+                            Err(error) => {
+                                self.state_diagnostics.push(format!(
+                                    "chat unban chat_id={chat} user_id={user_id}: {error}"
+                                ));
+                                reply(ban_store_failed(locale))
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        let _receipt = self
+            .actions
+            .execute(action)
+            .map_err(DispatchError::Action)?;
+        Ok(DispatchOutcome::Handled)
+    }
+
     fn dispatch_ai_message(
         &mut self,
         message: &IncomingMessage,
@@ -4281,6 +4452,9 @@ where
             random_sample: None,
         };
         let evaluation = loop {
+            if self.sender_banned {
+                break ResponseRoutingEvaluation::Ignore;
+            }
             // Trigger words are provided up front, so routing never asks for
             // them.
             match evaluate_response_routing(&routing) {
@@ -4892,6 +5066,27 @@ where
             message.chat_type.as_deref().unwrap_or_default(),
         );
         let timestamp = self.runtime_values.unix_timestamp();
+        if is_group_chat_type(message.chat_type.as_deref())
+            && self.sender_is_banned(chat_id, sender_id.0)
+        {
+            // Banned members get no reply, but their messages still reach the
+            // chat history so summaries and replies to others keep context.
+            if self.ai_conversation_source.is_none() {
+                return Ok(DispatchOutcome::Handled);
+            }
+            let parsed = parse_command(&content.text, &self.bot_name);
+            self.sender_banned = true;
+            let outcome = self.dispatch_ai_message(
+                message,
+                &config,
+                locale,
+                timestamp,
+                &parsed.command,
+                &parsed.message_text,
+            );
+            self.sender_banned = false;
+            return outcome;
+        }
         let cashtag_with_period = {
             let mut parts = content.text.split_whitespace();
             parts.next().and_then(detect_signal_query).is_some_and(|_| {
@@ -4962,6 +5157,10 @@ where
             );
         }
         let is_group = is_group_chat_type(message.chat_type.as_deref());
+        if let Some(command) = classify_ban_command(&content.text, &self.bot_name) {
+            let ids = (chat_id, message_id, sender_id);
+            return self.dispatch_ban_command(message, ids, command, locale, is_group);
+        }
         let is_settings_command = matches!(
             parsed.command.as_str(),
             "/language" | "/idioma" | "/config" | "/configs" | "/settings"
@@ -21174,5 +21373,399 @@ mod tests {
             [TelegramAction::AnswerPreCheckout { ok: false, error_message: Some(text), .. }]
                 if text == "Ese pago vino raro y no te lo pude validar"
         ));
+    }
+
+    mod chat_bans {
+        use super::*;
+        use crate::dispatcher::ChatBanStore;
+        use bot_core::chat_bans::BannedUser;
+
+        type BanRows = Rc<RefCell<Vec<(i64, BannedUser, i64)>>>;
+
+        /// In-memory bans keyed like the PostgreSQL table, with every lookup
+        /// recorded and an optional failure for all calls.
+        #[derive(Default)]
+        struct Bans {
+            rows: BanRows,
+            checks: Rc<RefCell<Vec<(i64, i64)>>>,
+            error: Option<String>,
+        }
+
+        impl Bans {
+            fn fail(&self) -> Result<(), String> {
+                self.error.clone().map_or(Ok(()), Err)
+            }
+        }
+
+        impl ChatBanStore for Bans {
+            fn is_banned(&mut self, chat_id: i64, user_id: i64) -> Result<bool, String> {
+                self.checks.borrow_mut().push((chat_id, user_id));
+                self.fail()?;
+                Ok(self
+                    .rows
+                    .borrow()
+                    .iter()
+                    .any(|(chat, user, _)| *chat == chat_id && user.user_id == user_id))
+            }
+
+            fn ban(
+                &mut self,
+                chat_id: i64,
+                user_id: i64,
+                name: &str,
+                banned_by: i64,
+            ) -> Result<bool, String> {
+                self.fail()?;
+                if self.is_banned(chat_id, user_id)? {
+                    return Ok(false);
+                }
+                let user = BannedUser {
+                    user_id,
+                    name: name.to_owned(),
+                };
+                self.rows.borrow_mut().push((chat_id, user, banned_by));
+                Ok(true)
+            }
+
+            fn unban(&mut self, chat_id: i64, user_id: i64) -> Result<bool, String> {
+                self.fail()?;
+                let mut rows = self.rows.borrow_mut();
+                let before = rows.len();
+                rows.retain(|(chat, user, _)| !(*chat == chat_id && user.user_id == user_id));
+                Ok(rows.len() < before)
+            }
+
+            fn list(&mut self, chat_id: i64) -> Result<Vec<BannedUser>, String> {
+                self.fail()?;
+                Ok(self
+                    .rows
+                    .borrow()
+                    .iter()
+                    .filter(|(chat, _, _)| *chat == chat_id)
+                    .map(|(_, user, _)| user.clone())
+                    .collect())
+            }
+        }
+
+        struct Admins(Vec<i64>);
+
+        impl GroupAuthorizer for Admins {
+            fn authorize(&mut self, _chat_id: &str, user_id: &str) -> GroupAuthorizationDecision {
+                GroupAuthorizationDecision {
+                    is_admin: self.0.iter().any(|admin| admin.to_string() == user_id),
+                    diagnostics: vec![format!("checked {user_id}")],
+                }
+            }
+        }
+
+        fn build(
+            language: &str,
+            admins: &[i64],
+            bans: Option<Bans>,
+            ai: Option<AiSource>,
+        ) -> NativeDispatcher<Config, Actions, State, Values, Samples, Admins> {
+            let dispatcher = NativeDispatcher::new(
+                Config {
+                    value: Ok(ChatConfig {
+                        language: language.to_owned(),
+                        ..ChatConfig::default()
+                    }),
+                    chat_ids: Vec::new(),
+                },
+                Actions::default(),
+                State::default(),
+                values(),
+                random(),
+                Admins(admins.to_vec()),
+                "@mybot",
+            );
+            let dispatcher = match bans {
+                Some(bans) => dispatcher.with_ban_store(Box::new(bans)),
+                None => dispatcher,
+            };
+            match ai {
+                Some(ai) => dispatcher.with_ai_conversation_source(Box::new(ai)),
+                None => dispatcher,
+            }
+        }
+
+        fn group(text: &str, edit: impl FnOnce(&mut IncomingMessage)) -> IncomingUpdate {
+            message_update(text, None, |message| {
+                message.chat_type = Some("supergroup".to_owned());
+                edit(message);
+            })
+        }
+
+        /// A group message replying to member 77, named Ana.
+        fn replying(text: &str) -> IncomingUpdate {
+            group(text, |message| {
+                message.has_reply = true;
+                message.replied_sender_id = Some(UserId(77));
+                message.replied_sender_first_name = Some("Ana".to_owned());
+            })
+        }
+
+        fn silent_ai() -> AiSource {
+            ai_source(Ok(AiPreparation::silent())).0
+        }
+
+        fn replies(
+            dispatcher: &mut NativeDispatcher<Config, Actions, State, Values, Samples, Admins>,
+            update: IncomingUpdate,
+        ) -> String {
+            dispatcher.actions.0.clear();
+            assert_eq!(dispatcher.dispatch(update), Ok(DispatchOutcome::Handled));
+            let message = first_sent(&dispatcher.actions.0);
+            assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
+            message.text.clone()
+        }
+
+        #[test]
+        fn admins_ban_list_and_unban_replied_members() {
+            let bans = Bans::default();
+            let rows = Rc::clone(&bans.rows);
+            let mut dispatcher = build("es", &[88], Some(bans), Some(silent_ai()));
+
+            assert_eq!(
+                replies(&mut dispatcher, group("/vetados", |_| {})),
+                "No hay nadie vetado en este grupo"
+            );
+            assert_eq!(
+                replies(&mut dispatcher, replying("/vetar")),
+                "Listo, Ana ya no puede usarme en este grupo"
+            );
+            assert_eq!(
+                rows.borrow().as_slice(),
+                [(
+                    -42,
+                    BannedUser {
+                        user_id: 77,
+                        name: "Ana".to_owned()
+                    },
+                    88
+                )]
+            );
+            assert_eq!(
+                replies(&mut dispatcher, replying("/ban@mybot")),
+                "Ana ya tenía veto en este grupo"
+            );
+            assert_eq!(
+                replies(&mut dispatcher, group("/banned", |_| {})),
+                "Vetados en este grupo\n- Ana"
+            );
+            assert_eq!(
+                replies(&mut dispatcher, replying("/desvetar")),
+                "Listo, Ana puede volver a usarme"
+            );
+            assert_eq!(
+                replies(&mut dispatcher, replying("/unban")),
+                "Ana no tenía veto"
+            );
+            assert!(rows.borrow().is_empty());
+            assert!(
+                dispatcher
+                    .state_diagnostics()
+                    .contains(&"checked 88".to_owned())
+            );
+        }
+
+        #[test]
+        fn ban_commands_refuse_private_chats_non_admins_and_admin_targets() {
+            for (language, group_only, admins_only, admin_target) in [
+                (
+                    "es",
+                    "Esto funciona solo en grupos",
+                    "Este comando es solo para admins del grupo",
+                    "A los admins no los puedo vetar",
+                ),
+                (
+                    "en",
+                    "This only works in groups",
+                    "Only group admins can use this command",
+                    "I can't ban admins",
+                ),
+            ] {
+                let bans = Bans::default();
+                let rows = Rc::clone(&bans.rows);
+                let mut dispatcher = build(language, &[88, 77], Some(bans), Some(silent_ai()));
+                assert_eq!(replies(&mut dispatcher, update("/ban", None)), group_only);
+                assert_eq!(replies(&mut dispatcher, replying("/ban")), admin_target);
+                assert!(rows.borrow().is_empty());
+
+                let mut member = build(language, &[], Some(Bans::default()), Some(silent_ai()));
+                for command in ["/ban", "/unban", "/banned"] {
+                    assert_eq!(replies(&mut member, replying(command)), admins_only);
+                }
+                assert!(
+                    member
+                        .state_diagnostics()
+                        .contains(&"Unauthorized ban attempt chat_id=-42 user_id=88".to_owned())
+                );
+            }
+        }
+
+        #[test]
+        fn ban_planner_replies_reach_the_chat() {
+            let mut dispatcher = build("en", &[88], Some(Bans::default()), Some(silent_ai()));
+            assert_eq!(
+                replies(&mut dispatcher, group("/ban", |_| {})),
+                "Reply to someone's message with /ban to ban them"
+            );
+            let bot = group("/ban", |message| {
+                message.has_reply = true;
+                message.replied_sender_id = Some(UserId(5));
+                message.replied_sender_is_bot = true;
+            });
+            assert_eq!(replies(&mut dispatcher, bot), "I can't ban bots");
+        }
+
+        #[test]
+        fn storage_failures_reply_and_leave_a_diagnostic() {
+            for (language, saved, listed) in [
+                (
+                    "es",
+                    "No pude guardar el cambio, probá de nuevo",
+                    "No pude cargar la lista, probá de nuevo",
+                ),
+                (
+                    "en",
+                    "I couldn't save that, try again",
+                    "I couldn't load the list, try again",
+                ),
+            ] {
+                let bans = Bans {
+                    error: Some("synthetic database failure".to_owned()),
+                    ..Bans::default()
+                };
+                let mut dispatcher = build(language, &[88], Some(bans), Some(silent_ai()));
+                for (command, expected, diagnostic) in [
+                    ("/ban", saved, "chat ban chat_id=-42 user_id=77"),
+                    ("/unban", saved, "chat unban chat_id=-42 user_id=77"),
+                    ("/banned", listed, "chat ban list chat_id=-42"),
+                ] {
+                    assert_eq!(replies(&mut dispatcher, replying(command)), expected);
+                    assert!(
+                        dispatcher
+                            .state_diagnostics()
+                            .contains(&format!("{diagnostic}: synthetic database failure")),
+                        "{command}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn ban_commands_need_the_ban_store() {
+            let mut dispatcher = build("es", &[88], None, Some(silent_ai()));
+            assert_eq!(
+                dispatcher.dispatch(group("/vetados", |_| {})),
+                Err(DispatchError::MissingService("chat bans"))
+            );
+            assert!(dispatcher.actions.0.is_empty());
+        }
+
+        fn banned_88() -> Bans {
+            let bans = Bans::default();
+            bans.rows.borrow_mut().push((
+                -42,
+                BannedUser {
+                    user_id: 88,
+                    name: "Synthetic".to_owned(),
+                },
+                1,
+            ));
+            bans
+        }
+
+        #[test]
+        fn banned_members_are_ignored_but_kept_in_chat_history() {
+            let (ai, (prepared, ignored, _)) = ai_source(Ok(AiPreparation::silent()));
+            let bans = banned_88();
+            let checks = Rc::clone(&bans.checks);
+            let mut dispatcher = build("es", &[], Some(bans), Some(ai));
+            for text in ["@mybot hola", "/ask hola", "/time", "/ban", "$btc"] {
+                assert_eq!(
+                    dispatcher.dispatch(group(text, |_| {})),
+                    Ok(DispatchOutcome::Handled),
+                    "{text}"
+                );
+            }
+            assert!(dispatcher.actions.0.is_empty());
+            assert!(prepared.borrow().is_empty());
+            let ignored = ignored.borrow();
+            assert_eq!(ignored.len(), 5);
+            assert_eq!(ignored[0].message_text, "@mybot hola");
+            assert_eq!(ignored[1].message_text, "hola");
+            assert_eq!(checks.borrow()[0], (-42, 88));
+            assert!(!dispatcher.sender_banned);
+
+            // The same member is untouched in private chats and other groups.
+            let other_group = group("/time", |message| message.chat_id = Some(ChatId(-43)));
+            for update in [update("/time", None), other_group] {
+                dispatcher.actions.0.clear();
+                assert_eq!(dispatcher.dispatch(update), Ok(DispatchOutcome::Handled));
+                assert_eq!(dispatcher.actions.0.len(), 1);
+            }
+        }
+
+        #[test]
+        fn banned_members_are_dropped_without_an_ai_service() {
+            let mut dispatcher = build("es", &[], Some(banned_88()), None);
+            assert_eq!(
+                dispatcher.dispatch(group("/time", |_| {})),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert!(dispatcher.actions.0.is_empty());
+        }
+
+        #[test]
+        fn admins_and_failed_lookups_are_never_silenced() {
+            let mut admin = build("es", &[88], Some(banned_88()), Some(silent_ai()));
+            assert_eq!(
+                admin.dispatch(group("/time", |_| {})),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert_eq!(admin.actions.0.len(), 1);
+            assert!(admin.state_diagnostics().contains(&"checked 88".to_owned()));
+
+            let failing = Bans {
+                error: Some("synthetic database failure".to_owned()),
+                ..banned_88()
+            };
+            let mut dispatcher = build("es", &[], Some(failing), Some(silent_ai()));
+            assert_eq!(
+                dispatcher.dispatch(group("/time", |_| {})),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert_eq!(dispatcher.actions.0.len(), 1);
+            assert!(dispatcher.state_diagnostics().contains(
+                &"chat ban check chat_id=-42 user_id=88: synthetic database failure".to_owned()
+            ));
+        }
+
+        #[test]
+        fn banned_members_buttons_only_stop_the_spinner() {
+            let mut dispatcher = build("es", &[], Some(banned_88()), Some(silent_ai()));
+            assert_eq!(
+                dispatcher.dispatch(callback_update("help:home", "supergroup", None)),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert_eq!(
+                dispatcher.actions.0,
+                [TelegramAction::AnswerCallback {
+                    callback_id: "callback-1".to_owned(),
+                    text: None,
+                    show_alert: false,
+                }]
+            );
+
+            // Private buttons skip the lookup and work as usual.
+            dispatcher.actions.0.clear();
+            assert_eq!(
+                dispatcher.dispatch(callback_update("help:home", "private", None)),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert_eq!(dispatcher.actions.0.len(), 2);
+        }
     }
 }

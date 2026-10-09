@@ -18,6 +18,7 @@ pub mod billing_commands;
 pub mod bitcoin_commands;
 pub mod cache_policy;
 pub mod charge_history;
+pub mod chat_bans;
 pub mod chat_config;
 pub mod chat_members;
 pub mod command_normalization;

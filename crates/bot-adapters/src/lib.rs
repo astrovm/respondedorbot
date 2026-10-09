@@ -3,6 +3,7 @@
 pub mod bcra;
 pub mod billing_read;
 pub mod billing_schema;
+pub mod chat_bans;
 pub mod chat_config;
 pub mod coinmarketcap;
 pub mod compaction_job;
