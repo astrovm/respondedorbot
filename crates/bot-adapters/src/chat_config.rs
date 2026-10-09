@@ -78,6 +78,25 @@ impl ChatConfigRepository {
         Ok(Some(ChatConfig::from_json(&value)?))
     }
 
+    /// Chats with a fixed reply language. These are the chats that got their
+    /// own command menu, so their menus need refreshing when the catalog
+    /// changes.
+    pub fn chats_with_language(&self) -> Result<Vec<(i64, String)>, ChatConfigRepositoryError> {
+        let mut client = self.connect_with_schema()?;
+        let rows = client.query(
+            "SELECT chat_id, config->>'language' FROM chat_configs \
+             WHERE config->>'language' IN ('es', 'en') ORDER BY chat_id",
+            &[],
+        )?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                let chat_id: String = row.get(0);
+                chat_id.parse().ok().map(|chat_id| (chat_id, row.get(1)))
+            })
+            .collect())
+    }
+
     pub fn set(
         &self,
         chat_id: &str,
@@ -248,6 +267,51 @@ mod tests {
         assert_eq!(loaded.language, "en");
         assert_eq!(loaded.creditless_user_hourly_limit, 8);
         cleanup(&database_url, chat_id);
+    }
+
+    #[test]
+    fn lists_only_numeric_chats_with_a_fixed_language() {
+        let Some(database_url) = url() else { return };
+        let rows = [
+            ("-100900011", json!({"language":"es"})),
+            ("-100900012", json!({"language":"en", "timezone_offset":2})),
+            ("-100900013", json!({"language":"auto"})),
+            ("-100900014", json!({"timezone_offset":-3})),
+            ("synthetic-chat", json!({"language":"en"})),
+        ];
+        for (chat_id, _) in &rows {
+            cleanup(&database_url, chat_id);
+        }
+        let repository = ChatConfigRepository::new(&database_url);
+        assert!(repository.ensure_schema().is_ok());
+        let connector = native_tls::TlsConnector::builder().build();
+        let Ok(connector) = connector else { return };
+        let client = Client::connect(&database_url, MakeTlsConnector::new(connector));
+        assert!(client.is_ok());
+        let Ok(mut client) = client else { return };
+        for (chat_id, config) in &rows {
+            let inserted = client.execute(
+                "INSERT INTO chat_configs (chat_id, config) VALUES ($1, $2)",
+                &[chat_id, config],
+            );
+            assert_eq!(inserted.ok(), Some(1));
+        }
+        let ours = repository.chats_with_language().map(|chats| {
+            chats
+                .into_iter()
+                .filter(|(chat_id, _)| (-100_900_014..=-100_900_011).contains(chat_id))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            ours.ok(),
+            Some(vec![
+                (-100_900_011, "es".to_owned()),
+                (-100_900_012, "en".to_owned()),
+            ])
+        );
+        for (chat_id, _) in &rows {
+            cleanup(&database_url, chat_id);
+        }
     }
 
     #[test]

@@ -8,11 +8,13 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use bot_adapters::billing_schema::BillingSchemaRepository;
+use bot_adapters::chat_config::ChatConfigRepository;
 use bot_adapters::openrouter_chat::{DEFAULT_OPENROUTER_BASE_URL, OpenRouterPricingCache};
 use bot_adapters::telegram_http::{ReqwestTelegramTransport, TransportFailureKind};
 use bot_adapters::telegram_polling::PollFailure;
 use bot_core::locale::Locale;
-use bot_core::telegram_commands::command_publication_actions;
+use bot_core::telegram_commands::{chat_command_menu_action, command_publication_actions};
+use bot_core::telegram_input::ChatId;
 
 use crate::background::{
     BackgroundSupervisor, ProductionBackgroundOptions, build_production_background_specs,
@@ -62,6 +64,51 @@ where
         }
     }
     diagnostics
+}
+
+/// Rewrites the menu of each chat with a fixed language, so chats that got
+/// their own menu pick up catalog changes without anyone touching `/config`.
+/// One report covers every failed chat.
+pub fn refresh_chat_menus<S, E>(
+    sink: &mut S,
+    chats: Result<Vec<(i64, String)>, E>,
+) -> Vec<OperationalReport>
+where
+    S: ActionSink,
+    S::Error: Display,
+    E: Display,
+{
+    let chats = match chats {
+        Ok(chats) => chats,
+        Err(error) => {
+            return vec![OperationalReport::new(
+                format!("no pude cargar los chats para actualizar sus menús: {error}"),
+                format!("could not load chats to refresh their menus: {error}"),
+            )];
+        }
+    };
+    let mut failed = 0_usize;
+    let mut last_error = String::new();
+    for (chat_id, language) in &chats {
+        let locale = bot_core::locale::normalize_locale(language, Locale::Es);
+        if let Err(error) = sink.execute(chat_command_menu_action(ChatId(*chat_id), locale)) {
+            failed += 1;
+            last_error = error.to_string();
+        }
+    }
+    if failed == 0 {
+        return Vec::new();
+    }
+    vec![OperationalReport::new(
+        format!(
+            "falló la actualización del menú de {failed} de {} chats: {last_error}",
+            chats.len()
+        ),
+        format!(
+            "chat command menu refresh failed for {failed} of {} chats: {last_error}",
+            chats.len()
+        ),
+    )]
 }
 
 pub fn run_polling_until<Source, Handler, Stop, Wait, ReportRetry, ReportHandler>(
@@ -360,6 +407,10 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
     for diagnostic in publish_commands(&mut command_sink) {
         log_and_queue(&reports, diagnostic);
     }
+    let chats = ChatConfigRepository::new(config.database_url()).chats_with_language();
+    for diagnostic in refresh_chat_menus(&mut command_sink, chats) {
+        log_and_queue(&reports, diagnostic);
+    }
 
     let stopping = Arc::new(AtomicBool::new(false));
     install_shutdown_handler(&stopping, ctrlc::set_handler::<ShutdownHandler>)?;
@@ -400,8 +451,8 @@ mod tests {
     use super::{
         BackgroundReports, ShutdownHandler, build_operational_reporter, install_shutdown_handler,
         interruptible_wait, log_and_queue, opennode_options, poll_retry_report, poll_until_stopped,
-        publish_commands, report_best_effort, retry_delay, run_polling_until, telegram_transport,
-        update_failure_report,
+        publish_commands, refresh_chat_menus, report_best_effort, retry_delay, run_polling_until,
+        telegram_transport, update_failure_report,
     };
     use crate::config::ProductionConfig;
     use crate::dispatcher::{ActionReceipt, ActionSink};
@@ -471,6 +522,68 @@ mod tests {
                 ..
             } if language == "en"
         ));
+    }
+
+    #[test]
+    fn chat_menus_are_refreshed_in_each_chat_language() {
+        use bot_core::telegram_actions::CommandScope;
+        use bot_core::telegram_input::ChatId;
+        let mut sink = Sink::default();
+        let chats: Result<_, &str> = Ok(vec![(-42, "en".to_owned()), (7, "es".to_owned())]);
+        assert!(refresh_chat_menus(&mut sink, chats).is_empty());
+        let menus = sink
+            .actions
+            .iter()
+            .filter_map(|action| match action {
+                TelegramAction::SetCommands {
+                    commands,
+                    language_code: None,
+                    scope: CommandScope::Chat(chat_id),
+                } => Some((*chat_id, commands[0].command, commands[0].description)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            menus,
+            [
+                (ChatId(-42), "ask", "ask me anything"),
+                (ChatId(7), "ask", "preguntame lo que quieras"),
+            ]
+        );
+    }
+
+    #[test]
+    fn chat_menu_refresh_reports_failures_once_and_keeps_going() {
+        let mut sink = Sink {
+            fail_call: Some(0),
+            ..Sink::default()
+        };
+        let chats: Result<_, &str> = Ok(vec![(1, "es".to_owned()), (2, "en".to_owned())]);
+        let reports = refresh_chat_menus(&mut sink, chats);
+        assert_eq!(sink.calls, 2);
+        assert_eq!(sink.actions.len(), 1);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(
+            reports[0].english(),
+            "chat command menu refresh failed for 1 of 2 chats: synthetic publication failure"
+        );
+        assert!(
+            reports[0]
+                .for_locale(Locale::Es)
+                .contains("falló la actualización del menú de 1 de 2 chats")
+        );
+
+        let mut untouched = Sink::default();
+        let reports = refresh_chat_menus(&mut untouched, Err::<Vec<(i64, String)>, _>("db down"));
+        assert_eq!(untouched.calls, 0);
+        assert_eq!(
+            reports
+                .iter()
+                .map(OperationalReport::english)
+                .collect::<Vec<_>>(),
+            ["could not load chats to refresh their menus: db down"]
+        );
+        assert!(reports[0].for_locale(Locale::Es).contains("db down"));
     }
 
     #[test]
