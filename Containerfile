@@ -1,4 +1,4 @@
-FROM rust:1.98.1-slim AS chef
+FROM mirror.gcr.io/library/rust:1.98.1-slim AS chef
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -20,7 +20,7 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 RUN cargo build --locked --release -p botd
 
-FROM debian:trixie-slim AS runtime
+FROM mirror.gcr.io/library/debian:trixie-slim AS runtime
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
