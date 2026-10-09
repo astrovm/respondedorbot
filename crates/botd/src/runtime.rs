@@ -23,6 +23,14 @@ const UPDATE_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::fr
 fn retry_delay(failed_attempt: usize) -> Option<Duration> {
     UPDATE_RETRY_DELAYS.get(failed_attempt).copied()
 }
+
+/// Only updates that failed and will be retried wait; a success or a
+/// permanent failure is reported at once.
+fn retry_delay_after(failed: bool, permanent: bool, failed_attempt: usize) -> Option<Duration> {
+    (failed && !permanent)
+        .then(|| retry_delay(failed_attempt))
+        .flatten()
+}
 const DURABLE_UPDATE_SCHEMA_VERSION: u32 = 1;
 const WORKER_STOPPED_DURING_STARTUP: &str = "worker stopped during startup";
 
@@ -454,9 +462,8 @@ where
                         // quarantined at once instead of taking more workers.
                         Err(_) => (Some("update handler panicked".to_owned()), true, true),
                     };
-                    if error.is_some()
-                        && !permanent
-                        && let Some(delay) = retry_delay(record.attempts)
+                    if let Some(delay) =
+                        retry_delay_after(error.is_some(), permanent, record.attempts)
                     {
                         // Give a brief outage (Redis, Postgres, Telegram)
                         // time to pass before the update runs again.
@@ -991,7 +998,7 @@ mod tests {
         DurableUpdateRecord, HandlerErrorDisposition, MAX_UPDATE_ATTEMPTS,
         ParallelHandlerBuildError, ParallelHandlerError, ParallelUpdateHandler, PollingError,
         PollingRuntime, RuntimeError, StepOutcome, UpdateConfirmation, UpdateFailure,
-        UpdateHandler, UpdateSource, retry_delay,
+        UpdateHandler, UpdateSource, retry_delay, retry_delay_after,
     };
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -2329,6 +2336,12 @@ mod tests {
         assert_eq!(retry_delay(0), Some(Duration::from_secs(1)));
         assert_eq!(retry_delay(1), Some(Duration::from_secs(5)));
         assert_eq!(retry_delay(MAX_UPDATE_ATTEMPTS - 1), None);
+        assert_eq!(
+            retry_delay_after(true, false, 0),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(retry_delay_after(true, true, 0), None);
+        assert_eq!(retry_delay_after(false, false, 0), None);
     }
 
     #[test]

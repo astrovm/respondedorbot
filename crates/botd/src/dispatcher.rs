@@ -95,8 +95,7 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 
 use crate::ai_dispatch::{
-    AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, AiStreamEvent,
-    reply_context,
+    AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, reply_context,
 };
 use crate::runtime::{HandlerErrorDisposition, UpdateHandler};
 use crate::telegram_stream::{StreamFinalizeError, TelegramAiStream};
@@ -4359,15 +4358,13 @@ where
                 .with_thinking_text(thinking_text(locale));
             // The thinking status waits for the source to admit the turn, so
             // denied or spontaneous turns that end silently never flash it.
+            // Live updates are best effort: a failed send or edit must not
+            // abort a model call that is already running. `finalize` still
+            // delivers the reply.
             let mut thinking_status_failed = false;
             let preparation = source.prepare_streaming_events(input, &mut |event| {
-                if event == AiStreamEvent::Admitted {
-                    thinking_status_failed |= stream.feed(event).is_err();
-                    return Ok(());
-                }
-                stream
-                    .feed(event)
-                    .map_err(|error| format!("Telegram rejected the streamed response: {error}"))
+                thinking_status_failed |= stream.feed(event).is_err();
+                Ok(())
             });
             match preparation {
                 Err(error) => {
@@ -4407,7 +4404,7 @@ where
         };
         if thinking_status_failed {
             self.state_diagnostics.push(
-                "AI Telegram thinking status send failed; continuing so response delivery can retry"
+                "AI Telegram live update failed; continuing so response delivery can retry"
                     .to_owned(),
             );
         }
@@ -4550,6 +4547,12 @@ where
             spontaneous: false,
             link_context: None,
         };
+        // Downloading and converting media can take a while; show that the
+        // bot is working. Best effort: the reply does not depend on it.
+        if let Err(error) = self.actions.execute(TelegramAction::SendTyping { chat_id }) {
+            self.state_diagnostics
+                .push(format!("media command typing status: {error}"));
+        }
         let preparation = match source.prepare_media_command(input) {
             Ok(Some(preparation)) => preparation,
             result => {
@@ -4558,10 +4561,12 @@ where
                         .push(format!("media command: {error}"));
                 }
                 let text = match locale {
-                    bot_core::locale::Locale::Es => "Se trabó el /transcribe. Probá más tarde",
-                    bot_core::locale::Locale::En => "/transcribe failed. Try again later",
+                    bot_core::locale::Locale::Es => {
+                        format!("Se trabó el {command}. Probá más tarde")
+                    }
+                    bot_core::locale::Locale::En => format!("{command} failed. Try again later"),
                 };
-                return self.send_failure_reply(chat_id, message_id, text);
+                return self.send_failure_reply(chat_id, message_id, &text);
             }
         };
         let AiPreparation::Reply {
@@ -4595,7 +4600,7 @@ where
             TelegramAction::SendDocument {
                 chat_id,
                 document: text.as_bytes().to_vec().into(),
-                file_name: "youtube-transcript.txt".to_owned(),
+                file_name: "transcript.txt".to_owned(),
                 reply_to_message_id: Some(message_id),
                 caption: String::new(),
             }
@@ -4702,12 +4707,12 @@ where
             };
             let mut stream = TelegramAiStream::new(&mut self.actions, chat_id, message_id)
                 .with_thinking_text(thinking_text(locale));
-            let thinking_status_failed = stream.show_thinking().is_err();
+            // Live updates are best effort, as for chat replies.
+            let mut thinking_status_failed = stream.show_thinking().is_err();
             let preparation =
                 source.prepare_summary_command_streaming_events(input, &mut |event| {
-                    stream
-                        .feed(event)
-                        .map_err(|error| format!("Telegram rejected the summary stream: {error}"))
+                    thinking_status_failed |= stream.feed(event).is_err();
+                    Ok(())
                 });
             match preparation {
                 Err(error) => {
@@ -4752,7 +4757,7 @@ where
         };
         if thinking_status_failed {
             self.state_diagnostics.push(
-                "summary Telegram thinking status send failed; continuing so response delivery can retry"
+                "summary Telegram live update failed; continuing so response delivery can retry"
                     .to_owned(),
             );
         }
@@ -6580,6 +6585,15 @@ mod tests {
         sent_messages(&actions[actions.len() - 1..])[0]
     }
 
+    /// Media commands show "typing" first; returns what follows it.
+    fn after_typing(actions: &[TelegramAction]) -> &[TelegramAction] {
+        assert!(
+            matches!(actions.first(), Some(TelegramAction::SendTyping { .. })),
+            "expected a typing status first: {actions:?}"
+        );
+        &actions[1..]
+    }
+
     /// The only recorded action, which must be a sent message.
     fn only_sent(actions: &[TelegramAction]) -> &SendMessage {
         assert_eq!(actions.len(), 1, "expected one action: {actions:?}");
@@ -7586,7 +7600,7 @@ mod tests {
                 .as_ref()
                 .is_some_and(|metadata| metadata.payload.contains("/transcript"))
         );
-        let message = only_sent(&dispatcher.actions.0);
+        let message = only_sent(after_typing(&dispatcher.actions.0));
         assert_eq!(message.text, "synthetic transcript");
         assert_eq!(
             deliveries.borrow().as_slice(),
@@ -7631,7 +7645,7 @@ mod tests {
             );
             // Long transcripts are sent as a complete text document.
             assert!(matches!(
-                dispatcher.actions.0.as_slice(),
+                after_typing(&dispatcher.actions.0),
                 [TelegramAction::SendDocument {
                     document,
                     file_name,
@@ -7639,7 +7653,7 @@ mod tests {
                     caption,
                     ..
                 }] if document.as_ref() == transcript.as_bytes()
-                    && file_name == "youtube-transcript.txt"
+                    && file_name == "transcript.txt"
                     && caption.is_empty()
             ));
             let expected = completion_id
@@ -7660,28 +7674,27 @@ mod tests {
     fn media_command_failure_sends_the_exact_localized_error() {
         let (mut source, _observations) = ai_source(Ok(AiPreparation::silent()));
         source.media_preparation = Some(Err("synthetic media failure".to_owned()));
-        let mut dispatcher = NativeDispatcher::new(
-            Config {
-                value: Ok(ChatConfig::default()),
-                chat_ids: Vec::new(),
-            },
-            Actions::default(),
-            State::default(),
-            values(),
-            random(),
-            authorization(),
-            "@mybot",
+        // The typing status is rejected too; the error reply still goes out
+        // and names the command the user sent.
+        let mut dispatcher = configured(
+            ChatConfig::default(),
+            failing_actions(ActionKind::Any, 1, "synthetic typing failure", false),
         )
         .with_ai_conversation_source(Box::new(source));
         assert_eq!(
-            dispatcher.dispatch(update("/transcribe", None)),
+            dispatcher.dispatch(update("/describe", None)),
             Ok(DispatchOutcome::Handled)
         );
-        let message = only_sent(&dispatcher.actions.0);
-        assert_eq!(message.text, "Se trabó el /transcribe. Probá más tarde");
+        assert_eq!(
+            sent_texts(&dispatcher.actions.0),
+            ["Se trabó el /describe. Probá más tarde"]
+        );
         assert_eq!(
             dispatcher.state_diagnostics(),
-            ["media command: synthetic media failure"]
+            [
+                "media command typing status: synthetic typing failure",
+                "media command: synthetic media failure"
+            ]
         );
     }
 
@@ -7841,10 +7854,10 @@ mod tests {
             );
             match case {
                 CommandCase::MediaNone => {
-                    assert_eq!(dispatcher.actions.0.len(), 1);
+                    assert_eq!(after_typing(&dispatcher.actions.0).len(), 1);
                 }
                 CommandCase::MediaSilent => {
-                    assert!(dispatcher.actions.0.is_empty());
+                    assert!(after_typing(&dispatcher.actions.0).is_empty());
                 }
                 CommandCase::SummaryNone => {
                     assert_eq!(dispatcher.actions.0.len(), 3);
@@ -19798,27 +19811,27 @@ mod tests {
     }
 
     #[test]
-    fn rejected_stream_drafts_fail_the_turn_with_a_retry_reply() {
+    fn rejected_live_updates_still_deliver_the_reply() {
         for (text, diagnostic, reply) in [
             (
                 "synthetic question",
-                "AI conversation: Telegram rejected the streamed response: synthetic draft failure",
-                "Me quedé reculando y no te pude responder. Probá de nuevo",
+                "AI Telegram live update failed; continuing so response delivery can retry",
+                "respuesta",
             ),
             (
                 "/summary",
-                "summary command: Telegram rejected the summary stream: synthetic draft failure",
-                "No pude generar el resumen. Probá de nuevo",
+                "summary Telegram live update failed; continuing so response delivery can retry",
+                "resumen",
             ),
         ] {
             let (mut source, _observations) =
                 ai_source(Ok(AiPreparation::reply("respuesta", None)));
             source.tokens = vec!["borrador".to_owned()];
             source.summary_preparation = Some(Ok(AiPreparation::reply("resumen", None)));
-            // The thinking status and the first draft are both rejected.
+            // The thinking status is rejected; the reply is still sent once.
             let mut dispatcher = configured(
                 ChatConfig::default(),
-                failing_actions(ActionKind::SendMessage, 2, "synthetic draft failure", false),
+                failing_actions(ActionKind::SendMessage, 1, "synthetic draft failure", false),
             )
             .with_ai_conversation_source(Box::new(source));
             assert_eq!(

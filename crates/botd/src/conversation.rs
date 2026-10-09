@@ -158,6 +158,9 @@ struct PendingConversation {
     compaction_payer: Option<PayerSource>,
 }
 
+/// A partial answer at least this long is delivered when the stream fails.
+const MIN_KEPT_PARTIAL_REPLY_CHARS: usize = 80;
+
 #[derive(Debug, Clone, Copy)]
 enum PendingKind {
     Conversation { provider_failed: bool },
@@ -1287,12 +1290,19 @@ where
             (!identity.is_empty()).then_some(identity.as_str()),
         )
         .final_text;
-        let fallback = cleaned.trim().is_empty() || provider_failed;
+        // The user already watched a long partial answer stream in, so a
+        // provider failure keeps it (marked as cut) instead of replacing it
+        // with the generic error.
+        let partial_kept =
+            provider_failed && cleaned.trim().chars().count() >= MIN_KEPT_PARTIAL_REPLY_CHARS;
+        let fallback = cleaned.trim().is_empty() || (provider_failed && !partial_kept);
         let has_failure_fallback = !failure_fallbacks.is_empty();
         let text = if fallback && has_failure_fallback {
             failure_fallbacks.join("\n")
         } else if fallback {
             Self::preparation_error(input.locale).to_owned()
+        } else if partial_kept {
+            format!("{}…", cleaned.trim_end())
         } else {
             cleaned
         };
@@ -1525,7 +1535,16 @@ where
             reason,
             waive_charge.then_some(0),
         )?;
-        if delivery.delivered && matches!(pending.kind, PendingKind::Conversation { .. }) {
+        // Error and fallback replies stay out of the history, so the model
+        // never reads them back as something it said.
+        if delivery.delivered
+            && matches!(
+                pending.kind,
+                PendingKind::Conversation {
+                    provider_failed: false
+                }
+            )
+        {
             self.state.record_outgoing(
                 &pending.input,
                 delivery.sent_message_id.map(|id| id.0),
@@ -5112,6 +5131,45 @@ mod tests {
             "ai_response_provider_usage_before_fallback"
         );
         assert!(service.billing.settlements[0].actual_credit_units > 0);
+    }
+
+    #[test]
+    fn a_cut_stream_keeps_a_long_partial_answer_and_hides_errors_from_history() {
+        let long = "la privatización arrancó en 1993 y el contrato prometía inversiones que nunca llegaron del todo";
+        let cut = |text: &str| {
+            vec![Err(ChatRoundError {
+                source: OpenRouterChatError::Stream("synthetic cut".to_owned()),
+                partial: Box::new(round(text, None)),
+            })]
+        };
+
+        let mut kept = conversation(cut(long), Billing::default());
+        let (text, completion_id, _diagnostics) = pending(reply(kept.prepare(input())));
+        assert_eq!(text, format!("{long}…"));
+        assert_eq!(kept.complete_delivery(deliver(completion_id, true)), Ok(()));
+        assert_eq!(kept.billing.settlements[0].reason, "ai_response_success");
+        assert_eq!(kept.state.outgoing.len(), 1);
+
+        // A short fragment is not worth keeping; the error is not remembered.
+        let mut replaced = conversation(cut("la privatización"), Billing::default());
+        let (text, completion_id, _diagnostics) = pending(reply(replaced.prepare(input())));
+        assert_eq!(text, "I could not answer. Try again");
+        assert_eq!(
+            replaced.complete_delivery(deliver(completion_id, true)),
+            Ok(())
+        );
+        assert_eq!(
+            replaced.billing.settlements[0].reason,
+            "ai_response_provider_usage_before_fallback"
+        );
+        assert!(replaced.state.outgoing.is_empty());
+
+        for (length, expected_kept) in [(79, false), (80, true)] {
+            let partial = "a".repeat(length);
+            let mut service = conversation(cut(&partial), Billing::default());
+            let (text, _completion_id, _diagnostics) = pending(reply(service.prepare(input())));
+            assert_eq!(text.ends_with('…'), expected_kept, "{length}");
+        }
     }
 
     #[test]
