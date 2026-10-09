@@ -51,7 +51,7 @@ It streams replies, remembers conversations, understands media, tracks markets, 
 | `/language`, `/idioma` | Language settings |
 | `/topup`, `/balance` | Add or check AI credits |
 | `/charges`, `/history`, `/gastos` | Credit history |
-| `/transfer` | Move credits to a group |
+| `/transfer` | Move credits to a group, or to someone by replying to them |
 | `/tarea`, `/task`, `/tareas`, `/tasks` | Manage scheduled tasks |
 | `/random`, `/convertbase`, `/comando`, `/time` | Utilities |
 | `/gm`, `/gn`, `/help`, `/instance` | Greetings and bot information |

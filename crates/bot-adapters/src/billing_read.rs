@@ -413,6 +413,80 @@ impl BillingRepository {
         })
     }
 
+    /// Moves personal credits to another user once per `operation_id`. The
+    /// result's `chat_balance` is the recipient's balance. Accounts are
+    /// locked in id order, so opposite transfers can't deadlock.
+    pub fn transfer_user_to_user(
+        &self,
+        user_id: i64,
+        recipient_id: i64,
+        amount: i32,
+        operation_id: &str,
+    ) -> Result<TransferResult, BillingError> {
+        self.run_transaction(|transaction| {
+            let (first, second) = if user_id <= recipient_id {
+                (user_id, recipient_id)
+            } else {
+                (recipient_id, user_id)
+            };
+            let first_balance = Self::balance_for_update(transaction, BillingScope::User, first)?;
+            let second_balance = Self::balance_for_update(transaction, BillingScope::User, second)?;
+            let (user_balance, recipient_balance) = if first == user_id {
+                (first_balance, second_balance)
+            } else {
+                (second_balance, first_balance)
+            };
+            let replayed = Self::command_operation_applied(transaction, operation_id)?;
+            if replayed || user_balance < amount {
+                return Ok(TransferResult {
+                    transferred: replayed,
+                    user_balance: user_balance.into(),
+                    chat_balance: recipient_balance.into(),
+                });
+            }
+            let updated_user_balance = user_balance
+                .checked_sub(amount)
+                .ok_or(BillingError::BalanceOverflow)?;
+            let updated_recipient_balance = recipient_balance
+                .checked_add(amount)
+                .ok_or(BillingError::BalanceOverflow)?;
+            Self::set_balance(
+                transaction,
+                BillingScope::User,
+                user_id,
+                updated_user_balance,
+            )?;
+            Self::set_balance(
+                transaction,
+                BillingScope::User,
+                recipient_id,
+                updated_recipient_balance,
+            )?;
+            let sent = amount.checked_neg().ok_or(BillingError::BalanceOverflow)?;
+            for (owner, delta, direction) in [
+                (user_id, sent, "user_to_user"),
+                (recipient_id, amount, "user_from_user"),
+            ] {
+                let metadata = json!({
+                    "direction": direction,
+                    "counterpart_user_id": if owner == user_id { recipient_id } else { user_id },
+                    "command_operation_id": operation_id,
+                });
+                transaction.execute(
+                    "INSERT INTO credit_ledger \
+                        (event_type, actor_user_id, user_id, amount, metadata) \
+                     VALUES ('transfer_user_to_user', $1, $2, $3, $4)",
+                    &[&user_id, &owner, &delta, &metadata],
+                )?;
+            }
+            Ok(TransferResult {
+                transferred: true,
+                user_balance: updated_user_balance.into(),
+                chat_balance: updated_recipient_balance.into(),
+            })
+        })
+    }
+
     pub fn charge_chat_ai_credits(
         &self,
         chat_id: i64,
@@ -2256,6 +2330,58 @@ mod tests {
         assert_eq!(replay_evidence.get::<_, i64>(0), 2);
         assert_eq!(replay_evidence.get::<_, i64>(1), 1);
 
+        // Personal credits to another user. The recipient's lower id makes
+        // the accounts lock in the other order.
+        const SENDER: i64 = 7_000_000_000_120;
+        const RECIPIENT: i64 = 7_000_000_000_110;
+        let seeded = repository.mint_user_credits(SENDER, 300, None, &fresh_op())?;
+        assert_eq!(seeded, 300);
+        let user_operation = fresh_op();
+        for _ in 0..2 {
+            let sent = repository.transfer_user_to_user(SENDER, RECIPIENT, 120, &user_operation)?;
+            assert_eq!(
+                sent,
+                TransferResult {
+                    transferred: true,
+                    user_balance: 180,
+                    chat_balance: 120,
+                }
+            );
+        }
+        let short = repository.transfer_user_to_user(SENDER, RECIPIENT, 181, &fresh_op())?;
+        assert_eq!(
+            short,
+            TransferResult {
+                transferred: false,
+                user_balance: 180,
+                chat_balance: 120,
+            }
+        );
+        let back = repository.transfer_user_to_user(RECIPIENT, SENDER, 20, &fresh_op())?;
+        assert_eq!(
+            back,
+            TransferResult {
+                transferred: true,
+                user_balance: 100,
+                chat_balance: 200,
+            }
+        );
+        let sender_text = SENDER.to_string();
+        let user_evidence = client.query_one(
+            "SELECT \
+                COUNT(*), \
+                COALESCE(SUM(amount) FILTER (WHERE user_id = $2), 0), \
+                COUNT(*) FILTER (WHERE metadata->>'counterpart_user_id' = $3) \
+             FROM credit_ledger \
+             WHERE event_type = 'transfer_user_to_user' \
+               AND metadata->>'command_operation_id' = $1",
+            &[&user_operation, &RECIPIENT, &sender_text],
+        );
+        let user_evidence = user_evidence?;
+        assert_eq!(user_evidence.get::<_, i64>(0), 2);
+        assert_eq!(user_evidence.get::<_, i64>(1), 120);
+        assert_eq!(user_evidence.get::<_, i64>(2), 1);
+
         assert_eq!(
             repository.mint_user_credits(7_000_000_000_011, 500, None, &fresh_op())?,
             500
@@ -3963,6 +4089,15 @@ mod tests {
             ("'transfer_user_to_chat'", 1),
         ] {
             let operation = || repository.transfer_user_to_chat(10, -20, 5, &fresh_op());
+            assert_billing_fault(&mut client, fragment, skip_hits, operation)?;
+        }
+        for (fragment, skip_hits) in [
+            (set_balance, 0),
+            (set_balance, 1),
+            ("'transfer_user_to_user'", 0),
+            ("'transfer_user_to_user'", 1),
+        ] {
+            let operation = || repository.transfer_user_to_user(10, 11, 5, &fresh_op());
             assert_billing_fault(&mut client, fragment, skip_hits, operation)?;
         }
         let operation = || repository.charge_chat_ai_credits(-20, 5, "chat_ai_charge", empty);

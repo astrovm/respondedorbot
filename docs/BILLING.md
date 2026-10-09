@@ -15,6 +15,7 @@ Rust is the sole billing reader and writer. PostgreSQL remains the system of rec
 - Successful uncached YouTube transcripts cost 0.60 displayed credits for either Supadata or Apify; cached transcripts and unsuccessful retrievals cost nothing.
 - Telegram Stars payment payloads and provider charge identifiers are replay protected.
 - Onboarding grants, administrator credits, transfers, and maintenance writes are transactional.
+- `/transfer` and `/printcredits` carry an operation id from their Telegram message, so a retried update applies them once. A `/transfer` that replies to a person moves personal credits to that person instead of the group.
 - Reconciliation reads durable operation and segment state and cannot duplicate completed settlement.
 
 ## Compatibility

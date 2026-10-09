@@ -1338,6 +1338,25 @@ impl BillingTransferSink for BillingRepository {
             chat_balance: result.chat_balance,
         })
     }
+
+    fn transfer_to_user(
+        &mut self,
+        user_id: i64,
+        recipient_id: i64,
+        amount: i64,
+        operation_id: &str,
+    ) -> Result<bot_core::billing_commands::TransferResult, String> {
+        let amount = i32::try_from(amount)
+            .map_err(|_| "credit transfer amount exceeds the persistent range".to_owned())?;
+        let result = self
+            .transfer_user_to_user(user_id, recipient_id, amount, operation_id)
+            .map_err(error_text)?;
+        Ok(bot_core::billing_commands::TransferResult {
+            transferred: result.transferred,
+            user_balance: result.user_balance,
+            chat_balance: result.chat_balance,
+        })
+    }
 }
 
 fn build_charge_history_page(
@@ -5506,6 +5525,10 @@ mod tests {
             repository.transfer(42, -202, i64::from(i32::MAX) + 1, &fresh_op(),),
             Err("credit transfer amount exceeds the persistent range".to_owned())
         );
+        assert_eq!(
+            repository.transfer_to_user(42, 43, i64::from(i32::MAX) + 1, &fresh_op()),
+            Err("credit transfer amount exceeds the persistent range".to_owned())
+        );
     }
 
     #[test]
@@ -7207,6 +7230,19 @@ mod tests {
         assert!(transfer.transferred);
         assert_eq!(transfer.user_balance, initial_user_balance - 25);
         assert_eq!(transfer.chat_balance, 25);
+        // Personal credits to another user; only the recipient gains them.
+        let (recipient_id, operation) = (user_id + 1, fresh_op());
+        let sent = BillingTransferSink::transfer_to_user(
+            &mut billing,
+            user_id,
+            recipient_id,
+            5,
+            &operation,
+        );
+        let sent = sent?;
+        assert!(sent.transferred);
+        assert_eq!(sent.user_balance, initial_user_balance - 30);
+        assert_eq!(sent.chat_balance, 5);
 
         let payment = StarPaymentRecord {
             charge_id: format!("synthetic-charge-{nonce}"),
@@ -7218,10 +7254,10 @@ mod tests {
         };
         let receipt = StarPaymentSink::record(&mut billing, &payment)?;
         assert!(receipt.inserted);
-        assert_eq!(receipt.user_balance, initial_user_balance + 25);
+        assert_eq!(receipt.user_balance, initial_user_balance + 20);
         let replay = StarPaymentSink::record(&mut billing, &payment)?;
         assert!(!replay.inserted);
-        assert_eq!(replay.user_balance, initial_user_balance + 25);
+        assert_eq!(replay.user_balance, initial_user_balance + 20);
 
         let operation_id = format!("synthetic-history-{nonce}");
         let metadata = serde_json::Map::from_iter([

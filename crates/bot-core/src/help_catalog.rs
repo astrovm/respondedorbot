@@ -35,8 +35,8 @@ pub fn render_help_page(
             "credits",
             "Créditos",
             "Credits",
-            "/balance: ver tu saldo\n/topup: cargar con Telegram Stars\n/gastos: ver en qué gastaste\n/transfer 1.5: pasar créditos al grupo",
-            "/balance: check your balance\n/topup: add credits with Telegram Stars\n/charges: see what you spent\n/transfer 1.5: move credits to the group",
+            "/balance: ver tu saldo\n/topup: cargar con Telegram Stars\n/gastos: ver en qué gastaste\n/transfer 1.5: pasar créditos al grupo, o a alguien si le respondés",
+            "/balance: check your balance\n/topup: add credits with Telegram Stars\n/charges: see what you spent\n/transfer 1.5: move credits to the group, or to someone if you reply to them",
         ),
         (
             "tools",

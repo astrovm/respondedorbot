@@ -7,8 +7,8 @@ use bot_core::admin_commands::{
 };
 use bot_core::bcra::classify_bcra_command;
 use bot_core::billing_commands::{
-    TransferCommandContext, TransferCommandPlan, TransferResult, plan_transfer_command,
-    transfer_result_reply,
+    TransferCommandContext, TransferCommandPlan, TransferRecipient, TransferResult,
+    plan_transfer_command, transfer_result_reply, user_transfer_result_reply,
 };
 use bot_core::bitcoin_commands::{
     BitcoinCommand, bitcoin_price_error, classify_bitcoin_command, render_market_model,
@@ -260,6 +260,54 @@ pub trait BillingTransferSink {
         amount: i64,
         operation_id: &str,
     ) -> Result<TransferResult, String>;
+
+    /// Moves personal credits to another user; `chat_balance` in the result
+    /// is the recipient's balance.
+    fn transfer_to_user(
+        &mut self,
+        user_id: i64,
+        recipient_id: i64,
+        amount: i64,
+        operation_id: &str,
+    ) -> Result<TransferResult, String>;
+}
+
+/// The person a `/transfer` replies to. Replying to this bot (or to nothing)
+/// keeps the transfer going to the group.
+fn transfer_recipient(message: &IncomingMessage, bot_name: &str) -> Option<TransferRecipient> {
+    let bot_username = bot_name.trim().trim_start_matches('@');
+    let to_this_bot = !bot_username.is_empty()
+        && message
+            .replied_sender_username
+            .as_deref()
+            .is_some_and(|username| username.eq_ignore_ascii_case(bot_username));
+    if to_this_bot {
+        return None;
+    }
+    message.replied_sender_id.map(|user_id| TransferRecipient {
+        user_id: user_id.0,
+        is_bot: message.replied_sender_is_bot,
+    })
+}
+
+fn recipient_display_name(message: &IncomingMessage, locale: bot_core::locale::Locale) -> String {
+    let first_name = message
+        .replied_sender_first_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    let username = message
+        .replied_sender_username
+        .as_deref()
+        .filter(|name| !name.is_empty());
+    match (first_name, username) {
+        (Some(name), _) => name.to_owned(),
+        (None, Some(username)) => format!("@{username}"),
+        (None, None) => match locale {
+            bot_core::locale::Locale::Es => "esa persona".to_owned(),
+            bot_core::locale::Locale::En => "them".to_owned(),
+        },
+    }
 }
 
 pub trait ChargeHistorySource {
@@ -5005,6 +5053,7 @@ where
                 locale,
                 is_group,
                 billing_available: self.billing_available,
+                recipient: transfer_recipient(message, &self.bot_name),
             },
         );
         let printcredits_plan = plan_printcredits_command(
@@ -5172,6 +5221,37 @@ where
                 }
             };
             let mut message = SendMessage::new(ChatId(chat_id), &text);
+            message.reply_to_message_id = Some(message_id);
+            StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+        } else if let TransferCommandPlan::TransferToUser {
+            user_id,
+            recipient_id,
+            amount,
+        } = transfer_plan
+        {
+            let Some(sink) = self.transfer_sink.as_mut() else {
+                return Err(DispatchError::MissingService("credit transfers"));
+            };
+            let operation_id = format!("transfer:{}:{}", chat_id.0, message_id.0);
+            let text = match sink.transfer_to_user(user_id, recipient_id, amount, &operation_id) {
+                Ok(result) => {
+                    let name = recipient_display_name(message, locale);
+                    user_transfer_result_reply(amount, &name, result, locale)
+                }
+                Err(error) => {
+                    self.state_diagnostics.push(format!(
+                        "user credit transfer chat_id={} amount={amount}: {error}",
+                        chat_id.0
+                    ));
+                    match locale {
+                        bot_core::locale::Locale::Es => {
+                            "Se trabó la transferencia. Probá de nuevo".to_owned()
+                        }
+                        bot_core::locale::Locale::En => "The transfer failed. Try again".to_owned(),
+                    }
+                }
+            };
+            let mut message = SendMessage::new(chat_id, &text);
             message.reply_to_message_id = Some(message_id);
             StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
         } else if let PrintCreditsPlan::Reply(action) = printcredits_plan {
@@ -6557,6 +6637,8 @@ mod tests {
             replied_message_id: None,
             replied_sender_first_name: None,
             replied_sender_username: None,
+            replied_sender_id: None,
+            replied_sender_is_bot: false,
             replied_text: None,
             visual_media_kind: None,
             audio_media_kind: None,
@@ -6740,6 +6822,23 @@ mod tests {
                     && operation_id.len() > format!("transfer:{chat_id}:").len()
             );
             self.calls.borrow_mut().push((user_id, chat_id, amount));
+            self.result.clone()
+        }
+
+        fn transfer_to_user(
+            &mut self,
+            user_id: i64,
+            recipient_id: i64,
+            amount: i64,
+            operation_id: &str,
+        ) -> Result<TransferResult, String> {
+            // Keyed by chat and message like group transfers.
+            assert!(
+                operation_id.starts_with("transfer:") && operation_id.matches(':').count() == 2
+            );
+            self.calls
+                .borrow_mut()
+                .push((user_id, recipient_id, amount));
             self.result.clone()
         }
     }
@@ -7299,6 +7398,8 @@ mod tests {
                 replied_message_id: None,
                 replied_sender_first_name: None,
                 replied_sender_username: None,
+                replied_sender_id: None,
+                replied_sender_is_bot: false,
                 replied_text: None,
                 visual_media_kind: None,
                 audio_media_kind: None,
@@ -17528,6 +17629,145 @@ mod tests {
     }
 
     #[test]
+    fn transfer_replying_to_a_person_sends_them_personal_credits() {
+        let sent = TransferResult {
+            transferred: true,
+            user_balance: 285,
+            chat_balance: 9_999,
+        };
+        let run = |result: Result<TransferResult, String>, edit: &dyn Fn(&mut IncomingMessage)| {
+            let calls = Rc::new(RefCell::new(Vec::new()));
+            let mut dispatcher = NativeDispatcher::new(
+                Config {
+                    value: Ok(ChatConfig::default()),
+                    chat_ids: Vec::new(),
+                },
+                Actions::default(),
+                State::default(),
+                values(),
+                random(),
+                authorization(),
+                "@mybot",
+            )
+            .with_transfer_sink(Box::new(Transfers {
+                result,
+                calls: Rc::clone(&calls),
+            }))
+            // Replies need the AI service configured, as in production.
+            .with_ai_conversation_source(Box::new(ai_source(Ok(AiPreparation::silent())).0));
+            let update = message_update("/transfer 0.1", Some("es"), |message| {
+                message.chat_type = Some("group".to_owned());
+                message.has_reply = true;
+                message.replied_sender_id = Some(UserId(77));
+                edit(message);
+            });
+            assert_eq!(dispatcher.dispatch(update), Ok(DispatchOutcome::Handled));
+            let text = first_sent(&dispatcher.actions.0).text.clone();
+            let calls = calls.borrow().clone();
+            (text, calls)
+        };
+
+        let (text, calls) = run(Ok(sent), &|message| {
+            message.replied_sender_first_name = Some(" Ana ".to_owned());
+            message.replied_sender_username = Some("ana".to_owned());
+        });
+        assert_eq!(calls, [(88, 77, 10)]);
+        assert_eq!(
+            text,
+            "Le pasaste 0.10 créditos a Ana\n\nTu saldo: 2.85 créditos"
+        );
+        let (text, _) = run(Ok(sent), &|message| {
+            message.replied_sender_first_name = Some("  ".to_owned());
+            message.replied_sender_username = Some("ana".to_owned());
+        });
+        assert_eq!(
+            text,
+            "Le pasaste 0.10 créditos a @ana\n\nTu saldo: 2.85 créditos"
+        );
+        let (text, _) = run(Ok(sent), &|_message| {});
+        assert_eq!(
+            text,
+            "Le pasaste 0.10 créditos a esa persona\n\nTu saldo: 2.85 créditos"
+        );
+        let (text, calls) = run(Err("synthetic database failure".to_owned()), &|_message| {});
+        assert_eq!(calls, [(88, 77, 10)]);
+        assert_eq!(text, "Se trabó la transferencia. Probá de nuevo");
+        let (text, calls) = run(Ok(sent), &|message| {
+            message.replied_sender_is_bot = true;
+        });
+        assert!(calls.is_empty());
+        assert_eq!(text, "Los bots no usan créditos, pasáselos a una persona");
+
+        // Replying to this bot keeps the transfer going to the group.
+        let (text, calls) = run(Ok(sent), &|message| {
+            message.replied_sender_username = Some("mybot".to_owned());
+            message.replied_sender_is_bot = true;
+        });
+        assert_eq!(calls, [(88, -42, 10)]);
+        assert!(text.starts_with("Pasaste 0.10 créditos al grupo"));
+    }
+
+    #[test]
+    fn user_transfers_need_the_transfer_service_and_fail_in_english_too() {
+        let reply_to_person = |language: &str| {
+            message_update("/transfer 0.1", Some(language), |message| {
+                message.chat_type = Some("group".to_owned());
+                message.has_reply = true;
+                message.replied_sender_id = Some(UserId(77));
+            })
+        };
+        let english = || Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let build = || {
+            NativeDispatcher::new(
+                english(),
+                Actions::default(),
+                State::default(),
+                values(),
+                random(),
+                authorization(),
+                "@mybot",
+            )
+            .with_ai_conversation_source(Box::new(ai_source(Ok(AiPreparation::silent())).0))
+        };
+        assert_eq!(
+            build().dispatch(reply_to_person("en")),
+            Err(DispatchError::MissingService("credit transfers"))
+        );
+        let mut failing = build().with_transfer_sink(Box::new(Transfers {
+            result: Err("synthetic database failure".to_owned()),
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            failing.dispatch(reply_to_person("en")),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            first_sent(&failing.actions.0).text,
+            "The transfer failed. Try again"
+        );
+    }
+
+    #[test]
+    fn user_transfer_names_fall_back_by_locale() {
+        let message = IncomingMessage {
+            replied_sender_first_name: None,
+            replied_sender_username: Some(String::new()),
+            ..incoming_message("/transfer 1", None)
+        };
+        assert_eq!(
+            super::recipient_display_name(&message, bot_core::locale::Locale::En),
+            "them"
+        );
+        assert_eq!(super::transfer_recipient(&message, ""), None);
+    }
+
+    #[test]
     fn transfer_guards_are_native_and_transaction_failures_are_safe() {
         let config = Config {
             value: Ok(ChatConfig::default()),
@@ -17549,7 +17789,7 @@ mod tests {
         let message = first_sent(&private.actions.0);
         assert_eq!(
             message.text,
-            "Esto es para grupos, capo. Usalo ahí: /transfer <monto>"
+            "Esto es para grupos, capo. Usalo ahí: /transfer <monto> se lo pasa al grupo, o respondé a alguien para pasárselo a esa persona"
         );
 
         let config = Config {

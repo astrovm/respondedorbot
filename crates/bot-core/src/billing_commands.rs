@@ -14,6 +14,15 @@ pub struct TransferCommandContext {
     pub locale: Locale,
     pub is_group: bool,
     pub billing_available: bool,
+    /// The sender of the message `/transfer` replies to, unless that is this
+    /// bot. Replying to a person sends the credits to them instead of the group.
+    pub recipient: Option<TransferRecipient>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransferRecipient {
+    pub user_id: i64,
+    pub is_bot: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +32,11 @@ pub enum TransferCommandPlan {
     Transfer {
         user_id: i64,
         chat_id: i64,
+        amount: i64,
+    },
+    TransferToUser {
+        user_id: i64,
+        recipient_id: i64,
         amount: i64,
     },
 }
@@ -71,8 +85,12 @@ pub fn plan_transfer_command(
         return reply(
             context,
             match context.locale {
-                Locale::Es => "Esto es para grupos, capo. Usalo ahí: /transfer <monto>",
-                Locale::En => "This command is for groups. Use it there: /transfer <amount>",
+                Locale::Es => {
+                    "Esto es para grupos, capo. Usalo ahí: /transfer <monto> se lo pasa al grupo, o respondé a alguien para pasárselo a esa persona"
+                }
+                Locale::En => {
+                    "This command is for groups. Use it there: /transfer <amount> moves credits to the group, or reply to someone to send them to that person"
+                }
             },
         );
     }
@@ -95,8 +113,12 @@ pub fn plan_transfer_command(
         return reply(
             context,
             match context.locale {
-                Locale::Es => "Mandalo así: /transfer <monto>\nEjemplo: /transfer 1.5",
-                Locale::En => "Usage: /transfer <amount>\nExample: /transfer 1.5",
+                Locale::Es => {
+                    "Mandalo así: /transfer <monto>\nEjemplo: /transfer 1.5\nRespondé a alguien para pasárselo a esa persona"
+                }
+                Locale::En => {
+                    "Usage: /transfer <amount>\nExample: /transfer 1.5\nReply to someone to send them the credits"
+                }
             },
         );
     };
@@ -108,6 +130,31 @@ pub fn plan_transfer_command(
                 Locale::En => "The amount must be greater than 0",
             },
         );
+    }
+    if let Some(recipient) = context.recipient {
+        if recipient.is_bot {
+            return reply(
+                context,
+                match context.locale {
+                    Locale::Es => "Los bots no usan créditos, pasáselos a una persona",
+                    Locale::En => "Bots can't use credits. Send them to a person",
+                },
+            );
+        }
+        if recipient.user_id == user_id {
+            return reply(
+                context,
+                match context.locale {
+                    Locale::Es => "No te podés pasar créditos a vos mismo",
+                    Locale::En => "You can't send credits to yourself",
+                },
+            );
+        }
+        return TransferCommandPlan::TransferToUser {
+            user_id,
+            recipient_id: recipient.user_id,
+            amount,
+        };
     }
     TransferCommandPlan::Transfer {
         user_id,
@@ -144,11 +191,35 @@ pub fn transfer_result_reply(amount: i64, result: TransferResult, locale: Locale
     }
 }
 
+/// Reply after sending credits to another user. Only the sender's balance is
+/// shown: the reply is public and the recipient's balance is theirs.
+#[must_use]
+pub fn user_transfer_result_reply(
+    amount: i64,
+    recipient_name: &str,
+    result: TransferResult,
+    locale: Locale,
+) -> String {
+    if !result.transferred {
+        return transfer_result_reply(amount, result, locale);
+    }
+    let amount = display_credit_units(CreditUnits::new(amount));
+    let user_balance = display_credit_units(CreditUnits::new(result.user_balance));
+    match locale {
+        Locale::Es => format!(
+            "Le pasaste {amount} créditos a {recipient_name}\n\nTu saldo: {user_balance} créditos"
+        ),
+        Locale::En => format!(
+            "Sent {amount} credits to {recipient_name}\n\nYour balance: {user_balance} credits"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        TransferCommandContext, TransferCommandPlan, TransferResult, plan_transfer_command,
-        transfer_result_reply,
+        TransferCommandContext, TransferCommandPlan, TransferRecipient, TransferResult,
+        plan_transfer_command, transfer_result_reply, user_transfer_result_reply,
     };
     use crate::locale::Locale;
     use crate::telegram_actions::TelegramAction;
@@ -162,6 +233,7 @@ mod tests {
             locale,
             is_group: true,
             billing_available: true,
+            recipient: None,
         }
     }
 
@@ -203,7 +275,7 @@ mod tests {
         private.is_group = false;
         assert_eq!(
             reply_text(plan_transfer_command("/transfer 1", "", private)),
-            "Esto es para grupos, capo. Usalo ahí: /transfer <monto>"
+            "Esto es para grupos, capo. Usalo ahí: /transfer <monto> se lo pasa al grupo, o respondé a alguien para pasárselo a esa persona"
         );
 
         let mut missing_user = context(Locale::En);
@@ -219,7 +291,7 @@ mod tests {
                 "",
                 context(Locale::Es)
             )),
-            "Mandalo así: /transfer <monto>\nEjemplo: /transfer 1.5"
+            "Mandalo así: /transfer <monto>\nEjemplo: /transfer 1.5\nRespondé a alguien para pasárselo a esa persona"
         );
         assert_eq!(
             reply_text(plan_transfer_command(
@@ -228,6 +300,72 @@ mod tests {
                 context(Locale::En)
             )),
             "The amount must be greater than 0"
+        );
+    }
+
+    #[test]
+    fn replying_to_a_person_sends_the_credits_to_them() {
+        let to = |user_id, is_bot| TransferCommandContext {
+            recipient: Some(TransferRecipient { user_id, is_bot }),
+            ..context(Locale::Es)
+        };
+        assert_eq!(
+            plan_transfer_command("/transfer 1.5", "", to(77, false)),
+            TransferCommandPlan::TransferToUser {
+                user_id: 55,
+                recipient_id: 77,
+                amount: 150,
+            }
+        );
+        // Amount checks still come first.
+        assert_eq!(
+            reply_text(plan_transfer_command("/transfer 0", "", to(77, false))),
+            "El monto tiene que ser mayor a 0, no me rompas las bolas"
+        );
+        assert_eq!(
+            reply_text(plan_transfer_command("/transfer 1", "", to(55, false))),
+            "No te podés pasar créditos a vos mismo"
+        );
+        assert_eq!(
+            reply_text(plan_transfer_command("/transfer 1", "", to(77, true))),
+            "Los bots no usan créditos, pasáselos a una persona"
+        );
+        let english = |user_id, is_bot| TransferCommandContext {
+            recipient: Some(TransferRecipient { user_id, is_bot }),
+            ..context(Locale::En)
+        };
+        assert_eq!(
+            reply_text(plan_transfer_command("/transfer 1", "", english(55, false))),
+            "You can't send credits to yourself"
+        );
+        assert_eq!(
+            reply_text(plan_transfer_command("/transfer 1", "", english(1, true))),
+            "Bots can't use credits. Send them to a person"
+        );
+    }
+
+    #[test]
+    fn user_transfer_replies_show_only_the_senders_balance() {
+        let sent = TransferResult {
+            transferred: true,
+            user_balance: 70,
+            chat_balance: 9_999,
+        };
+        assert_eq!(
+            user_transfer_result_reply(150, "Ana", sent, Locale::Es),
+            "Le pasaste 1.50 créditos a Ana\n\nTu saldo: 0.70 créditos"
+        );
+        assert_eq!(
+            user_transfer_result_reply(150, "@ana", sent, Locale::En),
+            "Sent 1.50 credits to @ana\n\nYour balance: 0.70 credits"
+        );
+        let short = TransferResult {
+            transferred: false,
+            ..sent
+        };
+        assert_eq!(
+            user_transfer_result_reply(150, "Ana", short, Locale::En),
+            "Not enough personal balance: you have 0.70 credits\nTry a smaller amount or add credits with /topup"
         );
     }
 
@@ -279,7 +417,7 @@ mod tests {
         };
         assert_eq!(
             reply_text(plan_transfer_command("/transfer 1", "", private)),
-            "This command is for groups. Use it there: /transfer <amount>"
+            "This command is for groups. Use it there: /transfer <amount> moves credits to the group, or reply to someone to send them to that person"
         );
         let anonymous = TransferCommandContext {
             user_id: None,
@@ -291,7 +429,7 @@ mod tests {
         );
         assert_eq!(
             reply_text(plan_transfer_command("/transfer", "", context(Locale::En))),
-            "Usage: /transfer <amount>\nExample: /transfer 1.5"
+            "Usage: /transfer <amount>\nExample: /transfer 1.5\nReply to someone to send them the credits"
         );
         assert_eq!(
             reply_text(plan_transfer_command(
