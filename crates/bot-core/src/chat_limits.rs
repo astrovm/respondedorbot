@@ -82,10 +82,10 @@ pub fn plan_limit_command(command: LimitCommand, context: LimitCommandContext) -
     let (Some(target), Some(argument)) = (context.target, parse_limit_argument(&argument)) else {
         return reply(match locale {
             Locale::Es => {
-                "Respondé al mensaje de alguien con /limitar y cuántos mensajes por hora le paga el grupo, o con /limitar off para sacarle el límite"
+                "Respondé al mensaje de alguien con /limitar y cuántos mensajes por hora le paga el grupo, o mandá /limitar @usuario y el número. Con off le sacás el límite"
             }
             Locale::En => {
-                "Reply to someone's message with /limit and how many messages per hour the group pays for, or /limit off to remove it"
+                "Reply to someone's message with /limit and how many messages per hour the group pays for, or send /limit @username and the number. Use off to remove it"
             }
         });
     };
@@ -270,11 +270,11 @@ mod tests {
         for (locale, expected) in [
             (
                 Locale::Es,
-                "Respondé al mensaje de alguien con /limitar y cuántos mensajes por hora le paga el grupo, o con /limitar off para sacarle el límite",
+                "Respondé al mensaje de alguien con /limitar y cuántos mensajes por hora le paga el grupo, o mandá /limitar @usuario y el número. Con off le sacás el límite",
             ),
             (
                 Locale::En,
-                "Reply to someone's message with /limit and how many messages per hour the group pays for, or /limit off to remove it",
+                "Reply to someone's message with /limit and how many messages per hour the group pays for, or send /limit @username and the number. Use off to remove it",
             ),
         ] {
             for (target, argument) in [

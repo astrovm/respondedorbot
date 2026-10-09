@@ -108,7 +108,7 @@ use num_bigint::{BigInt, BigUint};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::chat_members_tool::ChatMembersTool;
+use crate::chat_members_tool::{ChatMemberSource, ChatMembersTool};
 use crate::chat_provider::OpenRouterChatStreamer;
 use crate::chat_tool_loop::DEFAULT_MAX_TOOL_ROUNDS;
 use crate::compaction_scheduler::production_compaction_scheduler;
@@ -181,6 +181,20 @@ impl ChatLimitStore for ChatLimitRepository {
 
     fn list(&mut self, chat_id: i64) -> Result<Vec<bot_core::chat_limits::LimitedUser>, String> {
         ChatLimitRepository::list(self, chat_id).map_err(error_text)
+    }
+}
+
+/// The members the bot has seen write in a chat, read from Redis on each
+/// lookup so ban and limit commands can name someone by @username.
+struct KnownMembers {
+    redis_endpoint: RedisEndpoint,
+}
+
+impl ChatMemberSource for KnownMembers {
+    fn members(&mut self, chat_id: &str) -> Result<Vec<(String, String)>, String> {
+        RedisMessageState::new(&self.redis_endpoint)
+            .map_err(error_text)?
+            .members(chat_id)
     }
 }
 
@@ -3238,6 +3252,9 @@ fn build_native_dispatcher_with_stream_delivery(
     .with_admin_credit_sink(Box::new(BillingRepository::new(options.database_url)))
     .with_admin_creditlog_source(Box::new(BillingRepository::new(options.database_url)))
     .with_ban_store(Box::new(ChatBanRepository::new(options.database_url)))
+    .with_member_source(Box::new(KnownMembers {
+        redis_endpoint: options.redis_endpoint.clone(),
+    }))
     .with_limit_store(Box::new(ChatLimitRepository::new(options.database_url)))
     .with_dollar_quotes_source(Box::new(CriptoYaDollarQuotesSource {
         transport: criptoya_transport,
@@ -6440,6 +6457,39 @@ mod tests {
             telegram_delivery: TelegramDeliveryCoordinator::default(),
         });
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn known_members_read_the_members_the_bot_has_seen_in_redis() {
+        use crate::chat_members_tool::ChatMemberSource;
+        let Some(endpoint) = redis_env() else { return };
+        let chat_id = "-100900411";
+        let payload =
+            r#"{"schema_version":1,"first_name":"Lemon","username":"lemon","last_seen":1}"#;
+        let saved =
+            bot_adapters::redis_message_state::RedisMessageState::new(&endpoint).map(|state| {
+                state.save_chat_member(
+                    &bot_core::message_state::chat_members_key(chat_id),
+                    "77",
+                    payload,
+                    60,
+                )
+            });
+        assert!(matches!(saved, Ok(Ok(()))));
+        let mut members = super::KnownMembers {
+            redis_endpoint: endpoint.clone(),
+        };
+        assert_eq!(
+            members.members(chat_id),
+            Ok(vec![("77".to_owned(), payload.to_owned())])
+        );
+        let mut offline = super::KnownMembers {
+            redis_endpoint: RedisEndpoint {
+                port: 1,
+                ..endpoint
+            },
+        };
+        assert!(offline.members(chat_id).is_err());
     }
 
     #[test]

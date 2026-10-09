@@ -72,10 +72,18 @@ pub fn plan_ban_command(command: BanCommand, context: BanCommandContext) -> BanC
     }
     let Some(target) = context.target else {
         return reply(match (command, locale) {
-            (BanCommand::Ban, Locale::Es) => "Respondé al mensaje de quien quieras banear con /ban",
-            (BanCommand::Ban, Locale::En) => "Reply to someone's message with /ban to ban them",
-            (_, Locale::Es) => "Respondé al mensaje de quien quieras desbanear con /unban",
-            (_, Locale::En) => "Reply to someone's message with /unban to unban them",
+            (BanCommand::Ban, Locale::Es) => {
+                "Respondé al mensaje de quien quieras banear con /ban, o mandá /ban @usuario"
+            }
+            (BanCommand::Ban, Locale::En) => {
+                "Reply to someone's message with /ban, or send /ban @username, to ban them"
+            }
+            (_, Locale::Es) => {
+                "Respondé al mensaje de quien quieras desbanear con /unban, o mandá /unban @usuario"
+            }
+            (_, Locale::En) => {
+                "Reply to someone's message with /unban, or send /unban @username, to unban them"
+            }
         });
     };
     if command == BanCommand::Unban {
@@ -257,22 +265,22 @@ mod tests {
             (
                 BanCommand::Ban,
                 Locale::Es,
-                "Respondé al mensaje de quien quieras banear con /ban",
+                "Respondé al mensaje de quien quieras banear con /ban, o mandá /ban @usuario",
             ),
             (
                 BanCommand::Ban,
                 Locale::En,
-                "Reply to someone's message with /ban to ban them",
+                "Reply to someone's message with /ban, or send /ban @username, to ban them",
             ),
             (
                 BanCommand::Unban,
                 Locale::Es,
-                "Respondé al mensaje de quien quieras desbanear con /unban",
+                "Respondé al mensaje de quien quieras desbanear con /unban, o mandá /unban @usuario",
             ),
             (
                 BanCommand::Unban,
                 Locale::En,
-                "Reply to someone's message with /unban to unban them",
+                "Reply to someone's message with /unban, or send /unban @username, to unban them",
             ),
         ] {
             let plan = plan_ban_command(command, context(locale, None));

@@ -135,6 +135,13 @@ Primary key: (`chat_id`, `user_id`), both `BIGINT`. Also stores
   `/limit off` deletes it.
 - If the lookup fails, the group's limit applies.
 
+`/ban`, `/unban` and `/limit` can name a member by `@username` instead of
+replying. Telegram doesn't let bots look usernames up, so the name is matched,
+ignoring case, against the chat's known members in Redis (`chat_members:{chat_id}`),
+preferring whoever used it most recently. A mistyped `@` matches nobody rather
+falling back to the replied member, and usernames ending in `bot` are refused
+like bots. Both tables still store the user id.
+
 ## Redis database 0
 
 Unless explicitly noted, application Redis state is in the configured default

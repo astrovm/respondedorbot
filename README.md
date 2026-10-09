@@ -51,9 +51,9 @@ Telegram's `/` menu shows the same command names in every language, the first na
 | --- | --- |
 | `/config`, `/settings` | Chat settings |
 | `/language`, `/idioma` | Language settings |
-| `/ban`, `/unban`, `/vetar`, `/desvetar` | Group admins: reply to someone to stop or allow them using the bot in that group |
+| `/ban`, `/unban`, `/vetar`, `/desvetar` | Group admins: reply to someone, or name them by @username, to stop or allow them using the bot in that group |
 | `/bans`, `/banned`, `/vetados` | List who is banned in the group |
-| `/limit`, `/limitar` | Group admins: reply to someone with how many AI messages per hour the group pays for them, or `off` to go back to the group limit |
+| `/limit`, `/limitar` | Group admins: reply to someone, or name them by @username, with how many AI messages per hour the group pays for them, or `off` to go back to the group limit |
 | `/limited`, `/limitados` | List who has their own limit in the group |
 | `/topup`, `/balance` | Add or check AI credits |
 | `/charges`, `/history`, `/gastos` | Credit history |
