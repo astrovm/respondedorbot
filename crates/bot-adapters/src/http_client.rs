@@ -5,6 +5,10 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use reqwest::blocking::Client;
 use serde::Serialize;
 
+/// A complete desktop browser user agent. Cloudflare-fronted sites such as
+/// Finviz reject truncated ones with a 403 challenge page.
+pub(crate) const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+
 /// Why a request to a market or data provider failed before it got a response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

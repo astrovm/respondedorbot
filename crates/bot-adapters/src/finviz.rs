@@ -8,8 +8,7 @@ use regex::Regex;
 use reqwest::blocking::Client;
 use serde::Serialize;
 
-const SCREENER_URL: &str = "https://finviz.com/screener.ashx";
-const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36";
+const SCREENER_URL: &str = "https://finviz.com/screener";
 const MAX_SYMBOLS: usize = 10;
 
 static COMPANY_REGEX: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
@@ -21,7 +20,7 @@ pub struct HttpResponse {
 }
 
 pub use crate::http_client::TransportFailureKind;
-use crate::http_client::classify_error;
+use crate::http_client::{BROWSER_USER_AGENT, classify_error};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -68,7 +67,7 @@ impl FinvizTransport for ReqwestFinvizTransport {
             .client
             .get(&self.screener_url)
             .query(&[("v", "152"), ("f", "cap_mega"), ("o", "-marketcap")])
-            .header("User-Agent", USER_AGENT)
+            .header("User-Agent", BROWSER_USER_AGENT)
             .send()
             .map_err(classify_error)?;
         let status_code = response.status().as_u16();
@@ -207,11 +206,9 @@ mod tests {
             let bytes = stream.read(&mut request).unwrap_or_default();
             let request = String::from_utf8_lossy(&request[..bytes]);
             assert!(request.starts_with("GET /screener?v=152&f=cap_mega&o=-marketcap HTTP/1.1"));
-            assert!(
-                request
-                    .to_ascii_lowercase()
-                    .contains("user-agent: mozilla/5.0")
-            );
+            assert!(request.to_ascii_lowercase().contains(
+                &format!("user-agent: {}", super::BROWSER_USER_AGENT).to_ascii_lowercase()
+            ));
             let body = "synthetic screener";
             let written = write!(
                 stream,

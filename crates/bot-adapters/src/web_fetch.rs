@@ -13,11 +13,11 @@ use std::sync::OnceLock;
 use thiserror::Error;
 use url::{Host, Url};
 
+use crate::http_client::BROWSER_USER_AGENT;
+
 pub const FETCH_MAX_BYTES: usize = 262_144;
 pub const FETCH_MAX_CHARS: usize = 12_000;
 pub const FETCH_MAX_REDIRECTS: usize = 5;
-
-const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebFetchResponse {
