@@ -251,12 +251,15 @@ pub trait BillingBalanceSource {
     fn load(&mut self, user_id: i64, chat_id: Option<i64>) -> Result<BillingBalances, String>;
 }
 
+/// Credit-moving commands carry an operation id unique to their Telegram
+/// message, so a retried update can't apply them twice.
 pub trait BillingTransferSink {
     fn transfer(
         &mut self,
         user_id: i64,
         chat_id: i64,
         amount: i64,
+        operation_id: &str,
     ) -> Result<TransferResult, String>;
 }
 
@@ -271,7 +274,7 @@ pub trait ChargeHistorySource {
 }
 
 pub trait AdminCreditSink {
-    fn mint(&mut self, user_id: i64, amount: i64) -> Result<i64, String>;
+    fn mint(&mut self, user_id: i64, amount: i64, operation_id: &str) -> Result<i64, String>;
 }
 
 pub trait AdminCreditLogSource {
@@ -931,6 +934,9 @@ pub enum DispatchError<ConfigError, ActionError, RandomError> {
     MissingService(&'static str),
     #[error("native dispatch invariant failed: {0}")]
     Invariant(&'static str),
+    /// A write that must not be lost failed; the update is retried.
+    #[error("could not persist {0}")]
+    Persistence(String),
 }
 
 type NativeDispatchResult<Config, Actions, Random> = Result<
@@ -1491,6 +1497,8 @@ where
                 total_amount,
                 charge_id,
             } => {
+                // The user paid, so the charge id must survive for a refund.
+                eprintln!("Invalid successful payment chat_id={chat_id} charge_id={charge_id}");
                 self.state_diagnostics.push(format!(
                     "Invalid successful payment payload chat_id={chat_id} user_id={user_id} currency={currency} payload={payload} total_amount={total_amount} charge_id={charge_id}"
                 ));
@@ -1517,24 +1525,26 @@ where
                 let Some(sink) = self.payment_sink.as_mut() else {
                     return Err(DispatchError::MissingService("payment persistence"));
                 };
-                let text = match sink.record(&payment) {
-                    Ok(receipt) => successful_payment_reply(
-                        *credits_awarded,
-                        receipt.user_balance,
-                        receipt.inserted,
-                        locale,
-                    ),
-                    Err(error) => {
-                        self.state_diagnostics.push(format!(
-                            "successful payment persistence chat_id={chat_id} user_id={} charge_id={}: {error}",
-                            payment.user_id, payment.charge_id
-                        ));
-                        match locale {
-                            bot_core::locale::Locale::Es => "Me entró la guita pero se trabó la acreditación. Avisale al admin".to_owned(),
-                            bot_core::locale::Locale::En => "I received the payment but could not add the credits. Please tell the admin".to_owned(),
-                        }
-                    }
-                };
+                // Recording is idempotent per charge id, so a failed write is
+                // retried with the update instead of leaving the user paid
+                // but uncredited. The log keeps the charge id either way.
+                let receipt = sink.record(&payment).map_err(|error| {
+                    // The charge id is enough to find and refund the payment.
+                    eprintln!(
+                        "Payment not recorded yet: chat_id={chat_id} charge_id={}",
+                        payment.charge_id
+                    );
+                    DispatchError::Persistence(format!(
+                        "successful payment chat_id={chat_id} charge_id={}: {error}",
+                        payment.charge_id
+                    ))
+                })?;
+                let text = successful_payment_reply(
+                    *credits_awarded,
+                    receipt.user_balance,
+                    receipt.inserted,
+                    locale,
+                );
                 (chat_id, text)
             }
         };
@@ -5141,7 +5151,8 @@ where
             let Some(sink) = self.transfer_sink.as_mut() else {
                 return Err(DispatchError::MissingService("credit transfers"));
             };
-            let text = match sink.transfer(user_id, chat_id, amount) {
+            let operation_id = format!("transfer:{chat_id}:{}", message_id.0);
+            let text = match sink.transfer(user_id, chat_id, amount, &operation_id) {
                 Ok(result) => transfer_result_reply(amount, result, locale),
                 Err(error) => {
                     self.state_diagnostics.push(format!(
@@ -5164,7 +5175,8 @@ where
             let Some(sink) = self.admin_credit_sink.as_mut() else {
                 return Err(DispatchError::MissingService("admin credit minting"));
             };
-            let text = match sink.mint(user_id, amount) {
+            let operation_id = format!("printcredits:{}:{}", chat_id.0, message_id.0);
+            let text = match sink.mint(user_id, amount, &operation_id) {
                 Ok(balance) => printcredits_result_reply(amount, balance, locale),
                 Err(error) => {
                     self.state_diagnostics.push(format!(
@@ -6706,7 +6718,13 @@ mod tests {
             user_id: i64,
             chat_id: i64,
             amount: i64,
+            operation_id: &str,
         ) -> Result<TransferResult, String> {
+            // One id per Telegram message: "transfer:<chat>:<message>".
+            assert!(
+                operation_id.starts_with(&format!("transfer:{chat_id}:"))
+                    && operation_id.len() > format!("transfer:{chat_id}:").len()
+            );
             self.calls.borrow_mut().push((user_id, chat_id, amount));
             self.result.clone()
         }
@@ -6720,7 +6738,10 @@ mod tests {
     }
 
     impl AdminCreditSink for AdminCredits {
-        fn mint(&mut self, user_id: i64, amount: i64) -> Result<i64, String> {
+        fn mint(&mut self, user_id: i64, amount: i64, operation_id: &str) -> Result<i64, String> {
+            assert!(
+                operation_id.starts_with("printcredits:") && operation_id.matches(':').count() == 2
+            );
             self.calls.borrow_mut().push((user_id, amount));
             self.result.clone()
         }
@@ -17614,46 +17635,66 @@ mod tests {
 
     #[test]
     fn duplicate_and_failed_payment_writes_have_distinct_safe_replies() {
-        for (result, expected, diagnostic) in [
-            (
-                Ok(StarPaymentReceipt {
-                    inserted: false,
-                    user_balance: 5_300,
-                }),
-                "This payment was already credited\nPersonal balance: 53.00 credits",
-                false,
-            ),
-            (
-                Err("synthetic database failure".to_owned()),
-                "I received the payment but could not add the credits. Please tell the admin",
-                true,
-            ),
-        ] {
-            let config = Config {
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
                 value: Ok(ChatConfig::default()),
                 chat_ids: Vec::new(),
-            };
-            let mut dispatcher = NativeDispatcher::new(
-                config,
-                Actions::default(),
-                State::default(),
-                values(),
-                random(),
-                authorization(),
-                "@mybot",
-            )
-            .with_payment_sink(Box::new(Payments {
-                result,
-                records: Rc::new(RefCell::new(Vec::new())),
-            }));
-            assert_eq!(
-                dispatcher.dispatch(successful_payment_update("p50", 42, 25, Some("en"))),
-                Ok(DispatchOutcome::Handled)
-            );
-            let message = only_sent(&dispatcher.actions.0);
-            assert_eq!(message.text, expected);
-            assert_eq!(!dispatcher.state_diagnostics().is_empty(), diagnostic);
-        }
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_payment_sink(Box::new(Payments {
+            result: Ok(StarPaymentReceipt {
+                inserted: false,
+                user_balance: 5_300,
+            }),
+            records: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(successful_payment_update("p50", 42, 25, Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let message = only_sent(&dispatcher.actions.0);
+        assert_eq!(
+            message.text,
+            "This payment was already credited\nPersonal balance: 53.00 credits"
+        );
+        assert!(dispatcher.state_diagnostics().is_empty());
+
+        // A failed write is retried with the update (recording is idempotent
+        // per charge id), so nothing is sent yet and the error is retryable.
+        let mut failing = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_payment_sink(Box::new(Payments {
+            result: Err("synthetic database failure".to_owned()),
+            records: Rc::new(RefCell::new(Vec::new())),
+        }));
+        let failure = failing
+            .dispatch(successful_payment_update("p50", 42, 25, Some("en")))
+            .err();
+        assert!(matches!(
+            &failure,
+            Some(DispatchError::Persistence(text)) if text.contains("charge_id=") && text.contains("synthetic database failure")
+        ));
+        assert_eq!(
+            failure.map(|error| failing.error_disposition(&error)),
+            Some(HandlerErrorDisposition::RetryUpdate)
+        );
+        assert!(failing.actions.0.is_empty());
     }
 
     #[test]
@@ -18990,23 +19031,19 @@ mod tests {
             )),
             Ok(DispatchOutcome::Handled)
         );
-        assert_eq!(
+        assert!(matches!(
             dispatcher.dispatch(payment_message(
                 chat,
                 json!({"id": 42}),
                 valid_payment("topup:p50:42:es"),
             )),
-            Ok(DispatchOutcome::Handled)
-        );
+            Err(DispatchError::Persistence(_))
+        ));
         assert_eq!(
             sent_texts(&dispatcher.actions.0),
-            [
-                "Me cayó un pago raro y no lo pude validar. Avisale al admin",
-                "Me entró la guita pero se trabó la acreditación. Avisale al admin",
-            ]
+            ["Me cayó un pago raro y no lo pude validar. Avisale al admin"]
         );
         assert_eq!(records.borrow().len(), 1);
-        assert!(dispatcher.state_diagnostics()[0].contains("charge_id=charge-1"));
     }
 
     #[test]

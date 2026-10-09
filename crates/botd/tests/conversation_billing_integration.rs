@@ -68,16 +68,22 @@ fn postgres_and_redis_enforce_onboarding_replay_cap_and_refund_policy() -> Resul
     let user_id = 8_100_000_000_000_i64 + suffix;
     let chat_id = -8_200_000_000_000_i64 - suffix;
     let repository = BillingRepository::new(&database_url);
-    assert_eq!(repository.mint_user_credits(user_id, 1_000, None)?, 1_000);
+    assert_eq!(
+        repository.mint_user_credits(user_id, 1_000, None, &fresh_op())?,
+        1_000
+    );
     assert!(
         repository
-            .transfer_user_to_chat(user_id, chat_id, 1_000)?
+            .transfer_user_to_chat(user_id, chat_id, 1_000, &fresh_op())?
             .transferred
     );
 
     let task_user_id = user_id + 500_000_000;
     let task_operation = format!("integration-task:{nonce}");
-    assert_eq!(repository.mint_user_credits(task_user_id, 100, None)?, 100);
+    assert_eq!(
+        repository.mint_user_credits(task_user_id, 100, None, &fresh_op())?,
+        100
+    );
     let task_metadata = Map::from_iter([
         ("operation_id".to_owned(), json!(task_operation)),
         ("usage_tag".to_owned(), json!("scheduled_task")),
@@ -213,12 +219,12 @@ fn postgres_and_redis_enforce_onboarding_replay_cap_and_refund_policy() -> Resul
     let refund_user_id = user_id + 100_000_000;
     let refund_chat_id = chat_id - 100_000_000;
     assert_eq!(
-        repository.mint_user_credits(refund_user_id, 1_000, None)?,
+        repository.mint_user_credits(refund_user_id, 1_000, None, &fresh_op())?,
         1_000
     );
     assert!(
         repository
-            .transfer_user_to_chat(refund_user_id, refund_chat_id, 1_000)?
+            .transfer_user_to_chat(refund_user_id, refund_chat_id, 1_000, &fresh_op())?
             .transferred
     );
     let refund_key = creditless_cap_key(&refund_chat_id.to_string(), refund_user_id);
@@ -290,12 +296,12 @@ fn postgres_and_redis_enforce_onboarding_replay_cap_and_refund_policy() -> Resul
     let crash_user_id = refund_user_id + 100_000_000;
     let crash_chat_id = refund_chat_id - 100_000_000;
     assert_eq!(
-        repository.mint_user_credits(crash_user_id, 1_000, None)?,
+        repository.mint_user_credits(crash_user_id, 1_000, None, &fresh_op())?,
         1_000
     );
     assert!(
         repository
-            .transfer_user_to_chat(crash_user_id, crash_chat_id, 1_000)?
+            .transfer_user_to_chat(crash_user_id, crash_chat_id, 1_000, &fresh_op())?
             .transferred
     );
     let crash_key = creditless_cap_key(&crash_chat_id.to_string(), crash_user_id);
@@ -331,4 +337,19 @@ fn postgres_and_redis_enforce_onboarding_replay_cap_and_refund_policy() -> Resul
     replacement.abort_operation(&crash_operation)?;
     assert_eq!(cap_reader.count(&crash_key)?, Some(0));
     Ok(())
+}
+
+/// A credit command operation id that is unique across test runs, so reruns
+/// against the same database never replay an earlier run's operation.
+fn fresh_op() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!(
+        "synthetic-operation-{}-{nanos}-{sequence}",
+        std::process::id()
+    )
 }

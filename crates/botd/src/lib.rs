@@ -58,6 +58,21 @@ pub(crate) mod test_env {
         (!value.is_empty()).then_some(value)
     }
 
+    /// A credit command operation id that is unique across test runs, so reruns
+    /// against the same database never replay an earlier run's operation.
+    pub(crate) fn fresh_op() -> String {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!(
+            "synthetic-operation-{}-{nanos}-{sequence}",
+            std::process::id()
+        )
+    }
+
     pub(crate) fn database_url() -> Option<String> {
         std::env::var("TEST_DATABASE_URL").ok().and_then(non_empty)
     }

@@ -880,7 +880,8 @@ fn durable_parallel_handler_surfaces_queue_and_recovery_failures() {
     let mut panic_failure = None;
     for _ in 0..WAIT_POLLS {
         let failures = panicking.take_background_failures();
-        panic_failure = failures.retrying.first().cloned();
+        // A panic would repeat on retry, so the update is quarantined.
+        panic_failure = failures.quarantined.first().cloned();
         if panic_failure.is_some() {
             break;
         }

@@ -80,6 +80,9 @@ WHERE event_type IN (
 CREATE INDEX IF NOT EXISTS idx_credit_ledger_user_settlement_lookup
 ON credit_ledger (user_id, (metadata->>'settlement_id'), id DESC)
 WHERE metadata ? 'settlement_id';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_unique_command_operation
+ON credit_ledger ((metadata->>'command_operation_id'), (metadata->>'direction'))
+WHERE metadata ? 'command_operation_id';
 CREATE TABLE IF NOT EXISTS credit_schema_migrations (
     name TEXT PRIMARY KEY,
     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

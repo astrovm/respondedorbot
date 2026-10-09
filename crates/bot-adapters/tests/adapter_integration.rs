@@ -199,8 +199,16 @@ fn billing_operations_report_a_missing_schema_at_each_public_boundary() {
             .record_star_payment("synthetic-charge", 1, "synthetic-pack", 1, 1, None)
             .is_err()
     );
-    assert!(repository.mint_user_credits(1, 1, None).is_err());
-    assert!(repository.transfer_user_to_chat(1, -1, 1).is_err());
+    assert!(
+        repository
+            .mint_user_credits(1, 1, None, &fresh_op())
+            .is_err()
+    );
+    assert!(
+        repository
+            .transfer_user_to_chat(1, -1, 1, &fresh_op())
+            .is_err()
+    );
     assert!(
         repository
             .record_ai_provider_usage(1, None, &json!({"operation_id":"synthetic"}))
@@ -788,4 +796,19 @@ fn public_network_entrypoints_validate_requests_before_provider_io() {
 
     let addresses = SystemHostResolver.addresses("localhost", 80);
     assert!(addresses.is_ok_and(|values| !values.is_empty()));
+}
+
+/// A credit command operation id that is unique across test runs, so reruns
+/// against the same database never replay an earlier run's operation.
+fn fresh_op() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!(
+        "synthetic-operation-{}-{nanos}-{sequence}",
+        std::process::id()
+    )
 }

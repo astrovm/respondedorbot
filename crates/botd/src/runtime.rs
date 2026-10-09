@@ -7,6 +7,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use bot_adapters::redis_update_queue::{QueuedUpdate, RedisUpdateQueue};
 use bot_adapters::telegram_polling::{
@@ -16,6 +17,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const MAX_UPDATE_ATTEMPTS: usize = 3;
+/// Wait before each retry of a failed update, by the attempt that failed.
+const UPDATE_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(5)];
+
+fn retry_delay(failed_attempt: usize) -> Option<Duration> {
+    UPDATE_RETRY_DELAYS.get(failed_attempt).copied()
+}
 const DURABLE_UPDATE_SCHEMA_VERSION: u32 = 1;
 const WORKER_STOPPED_DURING_STARTUP: &str = "worker stopped during startup";
 
@@ -443,8 +450,19 @@ where
                                 == HandlerErrorDisposition::DiscardUpdate,
                             false,
                         ),
-                        Err(_) => (Some("update handler panicked".to_owned()), false, true),
+                        // A panic repeats on every retry, so the update is
+                        // quarantined at once instead of taking more workers.
+                        Err(_) => (Some("update handler panicked".to_owned()), true, true),
                     };
+                    if error.is_some()
+                        && !permanent
+                        && let Some(delay) = retry_delay(record.attempts)
+                    {
+                        // Give a brief outage (Redis, Postgres, Telegram)
+                        // time to pass before the update runs again.
+                        // Unit tests exercise retries without sleeping through them.
+                        thread::sleep(if cfg!(test) { Duration::ZERO } else { delay });
+                    }
                     report_durable_completion(
                         &updates,
                         &completion_sender,
@@ -456,7 +474,12 @@ where
                         },
                     );
                     if panicked {
-                        return;
+                        // The panic may have left the handler half-updated,
+                        // so the worker continues with a fresh one.
+                        match panic::catch_unwind(AssertUnwindSafe(|| factory())) {
+                            Ok(Ok(fresh)) => handler = fresh,
+                            Ok(Err(_)) | Err(_) => return,
+                        }
                     }
                 }
             }));
@@ -968,7 +991,7 @@ mod tests {
         DurableUpdateRecord, HandlerErrorDisposition, MAX_UPDATE_ATTEMPTS,
         ParallelHandlerBuildError, ParallelHandlerError, ParallelUpdateHandler, PollingError,
         PollingRuntime, RuntimeError, StepOutcome, UpdateConfirmation, UpdateFailure,
-        UpdateHandler, UpdateSource,
+        UpdateHandler, UpdateSource, retry_delay,
     };
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -2268,42 +2291,76 @@ mod tests {
     }
 
     #[test]
-    fn a_retry_with_no_live_worker_stops_the_runtime_for_recovery() -> TestResult {
-        let (gate, gate_receiver) = mpsc::channel();
-        let (script, started) = reporting_script(Script {
+    fn a_panicking_update_is_quarantined_and_its_worker_keeps_serving() -> TestResult {
+        let script = Arc::new(Script {
             panicking: AtomicUsize::new(1),
-            ..gated_script(gate_receiver)
+            ..Script::default()
         });
         let queue = MemoryDurableQueue::default();
-        let mut handler = durable(1, 1, &queue, &script)?;
+        let mut handler = durable(1, 2, &queue, &script)?;
         assert_eq!(handler.handle(update(711)), Ok(()));
-        assert_eq!(started_id(&started), Some(711));
         assert_eq!(handler.handle(update(712)), Ok(()));
-        assert_eq!(gate.send(()), Ok(()));
 
         let mut failures = BackgroundUpdateFailures::default();
         wait_until(|| {
             let next = handler.take_background_failures();
+            failures.quarantined.extend(next.quarantined);
             failures.retrying.extend(next.retrying);
-            failures.fatal = next.fatal;
-            failures.fatal.is_some()
+            persisted_completed(&queue, 712)
         });
+        // The panic would repeat on every retry, so it is not retried.
         assert_eq!(
-            failures.fatal.as_deref(),
-            Some("could not resubmit durable update 711")
-        );
-        assert_eq!(
-            failures.retrying,
+            failures.quarantined,
             [UpdateFailure {
                 update_id: 711,
                 error: "update handler panicked".to_owned(),
             }]
         );
-        // The retry was persisted before resubmission failed, so a restart
-        // replays it from the durable queue.
-        let record = queue.record(711);
-        assert!(matches!(record, Some(record) if !record.completed && record.attempts == 1));
+        assert!(failures.retrying.is_empty());
+        assert_eq!(script.calls.load(Ordering::SeqCst), 2);
         handler.stop();
+        Ok(())
+    }
+
+    #[test]
+    fn failed_updates_wait_longer_before_each_retry() {
+        assert_eq!(retry_delay(0), Some(Duration::from_secs(1)));
+        assert_eq!(retry_delay(1), Some(Duration::from_secs(5)));
+        assert_eq!(retry_delay(MAX_UPDATE_ATTEMPTS - 1), None);
+    }
+
+    #[test]
+    fn a_worker_that_cannot_be_rebuilt_after_a_panic_stops() -> TestResult {
+        let script = Arc::new(Script {
+            panicking: AtomicUsize::new(1),
+            ..Script::default()
+        });
+        let built = Arc::new(AtomicUsize::new(0));
+        let factory: Factory = {
+            let script = Arc::clone(&script);
+            let built = Arc::clone(&built);
+            Box::new(move || {
+                if built.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Ok(Worker(Arc::clone(&script)))
+                } else {
+                    Err("synthetic rebuild failure".to_owned())
+                }
+            })
+        };
+        let queue = MemoryDurableQueue::default();
+        let mut handler = DurableParallelUpdateHandler::start(1, 2, queue.clone(), factory)?;
+        assert_eq!(handler.handle(update(731)), Ok(()));
+        wait_until(|| built.load(Ordering::SeqCst) == 2);
+        // With no worker left, a retry cannot be resubmitted, so the runtime
+        // stops for recovery; the persisted retry replays after a restart.
+        handler.handle_completion(completion(732, 0, Some("synthetic retry")), true);
+        assert_eq!(
+            handler.failures.fatal.as_deref(),
+            Some("could not resubmit durable update 732")
+        );
+        assert!(matches!(queue.record(732), Some(record) if record.attempts == 1));
+        handler.stop();
+        assert_eq!(script.calls.load(Ordering::SeqCst), 1);
         Ok(())
     }
 

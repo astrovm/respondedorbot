@@ -273,18 +273,17 @@ fn media_kind(payload: &Map<String, Value>, kinds: &[&str]) -> Option<String> {
         .map(|kind| (*kind).to_owned())
 }
 
-fn parse_update(value: Value) -> Result<IncomingUpdate, PollingError> {
-    let mut object = value
-        .as_object()
-        .cloned()
-        .ok_or(PollingError::InvalidResponse)?;
+/// One malformed update must not fail the batch: the bot would refetch the
+/// same batch forever. A readable id is still acknowledged as unsupported;
+/// without one there is nothing to acknowledge, and later ids move past it.
+fn parse_update(value: Value) -> Option<IncomingUpdate> {
+    let mut object = value.as_object().cloned()?;
     let update_id = object
         .remove("update_id")
-        .and_then(|value| value.as_i64())
-        .ok_or(PollingError::InvalidResponse)?;
-    Ok(IncomingUpdate {
+        .and_then(|value| value.as_i64())?;
+    Some(IncomingUpdate {
         update_id,
-        event: parse_event(&mut object)?,
+        event: parse_event(&mut object).unwrap_or(IncomingEvent::Unsupported),
     })
 }
 
@@ -305,10 +304,7 @@ pub fn parse_response(status_code: u16, body: &str) -> Result<PollOutcome, Polli
         return Ok(PollOutcome::Retry(failure));
     }
     let result = envelope.result.ok_or(PollingError::InvalidResponse)?;
-    let updates = result
-        .into_iter()
-        .map(parse_update)
-        .collect::<Result<Vec<_>, _>>()?;
+    let updates = result.into_iter().filter_map(parse_update).collect();
     Ok(PollOutcome::Updates(updates))
 }
 
@@ -800,19 +796,44 @@ mod tests {
 
     #[test]
     fn malformed_success_payloads_are_rejected() {
-        for body in [
-            "not-json",
-            r#"{"ok":true}"#,
-            r#"{"ok":true,"result":{}}"#,
-            r#"{"ok":true,"result":[{}]}"#,
-            r#"{"ok":true,"result":[{"update_id":1,"message":[]}]}"#,
-            r#"{"ok":true,"result":[{"update_id":1,"message":{},"callback_query":{}}]}"#,
-        ] {
+        for body in ["not-json", r#"{"ok":true}"#, r#"{"ok":true,"result":{}}"#] {
             assert_eq!(
                 parse_response(200, body),
                 Err(PollingError::InvalidResponse)
             );
         }
+    }
+
+    #[test]
+    fn one_malformed_update_does_not_fail_its_batch() {
+        let unsupported = |update_id| IncomingUpdate {
+            update_id,
+            event: IncomingEvent::Unsupported,
+        };
+        let body = r#"{"ok":true,"result":[
+            {},
+            "not an update",
+            {"update_id":"7"},
+            {"update_id":1,"message":[]},
+            {"update_id":2,"message":{},"callback_query":{}},
+            {"update_id":3,"poll":{"id":"p"}}
+        ]}"#;
+        let poll = serde_json::from_value::<serde_json::Map<String, Value>>(json!({"id": "p"}))
+            .unwrap_or_default();
+        let updates = vec![
+            unsupported(1),
+            unsupported(2),
+            IncomingUpdate {
+                update_id: 3,
+                event: IncomingEvent::Poll(poll),
+            },
+        ];
+        assert_eq!(
+            parse_response(200, body),
+            Ok(PollOutcome::Updates(updates.clone()))
+        );
+        // The offset still moves past every acknowledged update.
+        assert_eq!(next_offset(&updates, None), Some(4));
     }
 
     #[test]
