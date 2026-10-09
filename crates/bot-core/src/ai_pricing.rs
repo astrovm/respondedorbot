@@ -575,7 +575,6 @@ pub fn calculate_billing_for_segments(segments: &Value) -> Result<Value, AiPrici
     let charged_credit_units = total.ceil_credit_units()?;
     Ok(json!({
         "pricing_version": PRICING_VERSION,
-        "markup_multiplier": 2.0,
         "raw_usd_micros": total.floor_i64()?,
         "raw_usd_micros_exact": total.fixed_string()?,
         "charged_credit_units": charged_credit_units,
