@@ -108,8 +108,10 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
         match plan.action {
             StreamAction::None => {}
             StreamAction::Send => {
-                let receipt = self.actions.execute(self.send_action(&self.buffer, true))?;
+                // One attempt only: after a failure the final reply is sent
+                // by `finalize`, instead of retrying on every token.
                 self.send_attempted = true;
+                let receipt = self.actions.execute(self.send_action(&self.buffer, true))?;
                 self.accept_send(receipt, now_seconds);
             }
             StreamAction::Edit => self.try_edit(now_seconds, true),
@@ -183,10 +185,10 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
             return Ok(());
         }
         if self.message_id.is_none() && !self.send_attempted {
+            self.send_attempted = true;
             let receipt = self
                 .actions
                 .execute(self.send_action(&self.buffer, disable_web_page_preview))?;
-            self.send_attempted = true;
             self.accept_send(receipt, now_seconds);
         } else if self.message_id.is_some()
             && self.buffer != self.sent_text
@@ -704,6 +706,24 @@ mod tests {
             Some(TelegramAction::SendMessage(message))
                 if message.text.chars().count() <= bot_core::telegram_actions::MAX_TELEGRAM_TEXT_LENGTH
         ));
+    }
+
+    #[test]
+    fn finalize_skips_telegram_when_the_draft_already_shows_the_answer() {
+        let mut actions = Actions {
+            next_message_id: Some(MessageId(80)),
+            ..Actions::default()
+        };
+        let mut stream = TelegramStream::with_policy(&mut actions, ChatId(7), MessageId(4), 0.0, 1);
+        assert_eq!(stream.feed_at("answer", 0.0), Ok(()));
+        assert_eq!(
+            stream.finalize("answer"),
+            Ok(StreamDelivery {
+                message_id: MessageId(80)
+            })
+        );
+        drop(stream);
+        assert_eq!(actions.actions.len(), 1);
     }
 
     #[test]

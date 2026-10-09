@@ -12,7 +12,7 @@ macro_rules! static_regex {
 static_regex!(GORDO_PREFIX, r"(?i)^\s*gordo\b\s*:\s*");
 static_regex!(MARKDOWN_CODE_FENCE, r"(?s)```(?:[^\n`]*)\n?(.*?)```");
 static_regex!(MARKDOWN_IMAGE, r"!\[([^\]]*)\]\([^)]*\)");
-static_regex!(MARKDOWN_LINK, r"\[([^\]]+)\]\([^)]*\)");
+static_regex!(MARKDOWN_LINK, r"\[([^\]]+)\]\(([^)\s]*)\)");
 static_regex!(MARKDOWN_INLINE_CODE, r"`([^`]+)`");
 static_regex!(MARKDOWN_HEADER, r"(?m)^\s{0,3}#{2,6}\s+");
 static_regex!(MARKDOWN_HRULE, r"(?m)^\s{0,3}(?:-{3,}|\*{3,})\s*$");
@@ -82,14 +82,7 @@ pub fn clean_duplicate_response(response: &str) -> String {
     if response.is_empty() {
         return String::new();
     }
-    let mut lines: Vec<&str> = Vec::new();
-    for line in response.split('\n') {
-        let stripped = line.trim();
-        if !stripped.is_empty() && lines.last().copied() != Some(stripped) {
-            lines.push(stripped);
-        }
-    }
-    let cleaned = lines.join("\n");
+    let cleaned = without_repeated_lines(response);
     let mut sentences: Vec<&str> = Vec::new();
     for sentence in cleaned.split(". ") {
         let stripped = sentence.trim();
@@ -97,7 +90,55 @@ pub fn clean_duplicate_response(response: &str) -> String {
             sentences.push(stripped);
         }
     }
-    sentences.join(". ").replace("..", ".")
+    collapse_double_periods(&sentences.join(". "))
+}
+
+/// Trims lines and drops consecutive repeats, keeping single blank lines
+/// so paragraphs stay apart.
+fn without_repeated_lines(text: &str) -> String {
+    let mut lines: Vec<&str> = Vec::new();
+    for line in text.split('\n') {
+        let stripped = line.trim();
+        let repeated = lines.last().copied() == Some(stripped);
+        let leading_blank = stripped.is_empty() && lines.is_empty();
+        if !repeated && !leading_blank {
+            lines.push(stripped);
+        }
+    }
+    while lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+/// Trims lines and keeps at most one blank line between paragraphs.
+fn single_blank_lines(text: &str) -> String {
+    let mut lines: Vec<&str> = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if !line.is_empty() || lines.last().is_some_and(|last| !last.is_empty()) {
+            lines.push(line);
+        }
+    }
+    lines.join("\n").trim().to_owned()
+}
+
+/// Turns an accidental ".." into "." but leaves an ellipsis ("...") alone.
+fn collapse_double_periods(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character != '.' {
+            result.push(character);
+            continue;
+        }
+        let mut run = 1;
+        while chars.next_if_eq(&'.').is_some() {
+            run += 1;
+        }
+        let kept = if run == 2 { 1 } else { run };
+        result.extend(std::iter::repeat_n('.', kept));
+    }
+    result
 }
 
 #[must_use]
@@ -162,7 +203,8 @@ pub fn strip_markdown_formatting(text: &str) -> String {
     }
     let mut cleaned = regex_replace_all(&MARKDOWN_CODE_FENCE, text, "$1");
     cleaned = regex_replace_all(&MARKDOWN_IMAGE, &cleaned, "$1");
-    cleaned = regex_replace_all(&MARKDOWN_LINK, &cleaned, "$1");
+    // Keep link targets: a cited source is useless without its URL.
+    cleaned = regex_replace_all(&MARKDOWN_LINK, &cleaned, "$1 ($2)");
     cleaned = regex_replace_all(&MARKDOWN_INLINE_CODE, &cleaned, "$1");
     cleaned = regex_replace_all(&MARKDOWN_HEADER, &cleaned, "");
     cleaned = regex_replace_all(&MARKDOWN_HRULE, &cleaned, "");
@@ -172,13 +214,7 @@ pub fn strip_markdown_formatting(text: &str) -> String {
     cleaned = replace_until_stable(&MARKDOWN_BOLD_UNDERSCORE, &cleaned, "$1$2$3");
     cleaned = replace_until_stable(&MARKDOWN_ITALIC_STAR, &cleaned, "$1$2$3");
     cleaned = replace_until_stable(&MARKDOWN_ITALIC_UNDERSCORE, &cleaned, "$1$2$3");
-    cleaned
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_owned()
+    single_blank_lines(&cleaned)
 }
 
 fn regex_replace_all(pattern: &Option<Regex>, text: &str, replacement: &str) -> String {
@@ -210,8 +246,9 @@ fn starts_with_case_insensitive(value: &str, prefix: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CleanupStages, clean_duplicate_response, cleanup_response, remove_gordo_prefix,
-        strip_leading_context, strip_markdown_formatting, strip_user_identity_prefix,
+        CleanupStages, clean_duplicate_response, cleanup_response, collapse_double_periods,
+        remove_gordo_prefix, strip_leading_context, strip_markdown_formatting,
+        strip_user_identity_prefix,
     };
 
     #[test]
@@ -245,6 +282,22 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_keeps_ellipses_and_paragraphs() {
+        assert_eq!(
+            collapse_double_periods("ok.. y bueno... o...."),
+            "ok. y bueno... o...."
+        );
+        assert_eq!(
+            clean_duplicate_response("\n\nprimero.\n\n\n\nsegundo\nsegundo\n\n"),
+            "primero.\n\nsegundo"
+        );
+        assert_eq!(
+            strip_markdown_formatting("uno\n\n\n  dos  \n\n"),
+            "uno\n\ndos"
+        );
+    }
+
+    #[test]
     fn strips_supported_markdown_without_changing_url_underscores() {
         let input = concat!(
             "## Header\n",
@@ -259,7 +312,8 @@ mod tests {
             concat!(
                 "Header\n",
                 "bold and italic and strong and soft\n",
-                "code link cat\n",
+                "code link (https://example.com) cat\n",
+                "\n",
                 "https://example.com/my_path_value\n",
                 "let x = 1;"
             )
