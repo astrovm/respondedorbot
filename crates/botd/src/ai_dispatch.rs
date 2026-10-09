@@ -58,6 +58,9 @@ pub struct AiConversationInput {
     pub locale: Locale,
     pub timezone_offset_hours: i64,
     pub creditless_user_hourly_limit: i64,
+    /// The limit above is the member's own, set by an admin with /limitar,
+    /// rather than the group's.
+    pub own_creditless_limit: bool,
     /// The group pays before the member's own credits, up to the hourly limit.
     pub group_pays_first: bool,
     pub timestamp: i64,
@@ -272,6 +275,7 @@ mod tests {
             locale: Locale::En,
             timezone_offset_hours: 0,
             creditless_user_hourly_limit: 0,
+            own_creditless_limit: false,
             group_pays_first: false,
             timestamp: 1_700_000_000,
             spontaneous: false,
