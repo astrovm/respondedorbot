@@ -17,6 +17,7 @@ mod http_client;
 mod idle_pool;
 pub mod link_preview;
 pub mod media_provider;
+pub mod opennode;
 pub mod openrouter_chat;
 pub mod openrouter_generation;
 pub mod polymarket;
