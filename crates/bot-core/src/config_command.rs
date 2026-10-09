@@ -66,6 +66,14 @@ fn creditless_text(limit: i64) -> String {
     }
 }
 
+fn payer_text(group_pays_first: bool, locale: Locale) -> &'static str {
+    if group_pays_first {
+        localized(locale, "Grupo", "Group")
+    } else {
+        localized(locale, "Cada uno", "Members")
+    }
+}
+
 fn render_config_keyboard(
     config: &ChatConfig,
     locale: Locale,
@@ -137,13 +145,23 @@ fn render_config_keyboard(
             button("+1".to_owned(), "cfg:creditless:increase".to_owned()),
             button("∞".to_owned(), "cfg:creditless:unlimited".to_owned()),
         ]);
+        rows.push(vec![
+            button(
+                selected_label(config.group_pays_first, payer_text(true, locale)),
+                "cfg:payer:group".to_owned(),
+            ),
+            button(
+                selected_label(!config.group_pays_first, payer_text(false, locale)),
+                "cfg:payer:members".to_owned(),
+            ),
+        ]);
     }
     InlineKeyboardMarkup {
         inline_keyboard: rows,
     }
 }
 
-const PAGES: [&str; 7] = [
+const PAGES: [&str; 8] = [
     "language",
     "link",
     "followups",
@@ -151,9 +169,10 @@ const PAGES: [&str; 7] = [
     "timezone",
     "random",
     "creditless",
+    "payer",
 ];
 
-fn titles(locale: Locale) -> [&'static str; 7] {
+fn titles(locale: Locale) -> [&'static str; 8] {
     match locale {
         Locale::Es => [
             "Idioma",
@@ -163,6 +182,7 @@ fn titles(locale: Locale) -> [&'static str; 7] {
             "Zona horaria",
             "Respuestas random",
             "Mensajes gratis por hora",
+            "Quién paga primero",
         ],
         Locale::En => [
             "Language",
@@ -172,11 +192,12 @@ fn titles(locale: Locale) -> [&'static str; 7] {
             "Timezone",
             "Random replies",
             "Free messages per hour",
+            "Who pays first",
         ],
     }
 }
 
-fn descriptions(locale: Locale) -> [&'static str; 7] {
+fn descriptions(locale: Locale) -> [&'static str; 8] {
     match locale {
         Locale::Es => [
             "El idioma de mis mensajes, menús y respuestas.",
@@ -186,6 +207,7 @@ fn descriptions(locale: Locale) -> [&'static str; 7] {
             "La hora que uso para tareas, recordatorios y fechas.",
             "De vez en cuando me meto en la charla del grupo aunque nadie me llame.",
             "Cuántos mensajes de IA por hora puede usar cada persona con el saldo del grupo.\n\n0 = nadie, ∞ = sin límite",
+            "Quién paga los mensajes de IA de alguien que tiene créditos propios.\n\n• Grupo: paga el grupo hasta el límite por hora, después sus créditos.\n• Cada uno: paga con sus créditos, y el grupo cuando no le alcanzan.",
         ],
         Locale::En => [
             "The language of my messages, menus and replies.",
@@ -195,6 +217,7 @@ fn descriptions(locale: Locale) -> [&'static str; 7] {
             "The time I use for tasks, reminders and dates.",
             "Every now and then I join the group conversation without being called.",
             "How many AI messages per hour each person can use from the group balance.\n\n0 = nobody, ∞ = no limit",
+            "Who pays for the AI messages of someone with their own credits.\n\n• Group: the group pays up to the hourly limit, then their credits.\n• Members: they pay with their credits, and the group when theirs run out.",
         ],
     }
 }
@@ -270,8 +293,9 @@ pub fn render_config_page(
         offset_text(config.timezone_offset),
         on_off_text(config.ai_random_replies, locale).to_owned(),
         creditless_text(config.creditless_user_hourly_limit),
+        payer_text(config.group_pays_first, locale).to_owned(),
     ];
-    let mut rows = (0..if is_group { 7 } else { 5 })
+    let mut rows = (0..if is_group { 8 } else { 5 })
         .map(|i| {
             vec![button(
                 format!("{}: {}", names[i], values[i]),
@@ -331,7 +355,7 @@ mod tests {
                 let (text, keyboard) = render_config(&ChatConfig::default(), locale, group);
                 assert!(text.lines().count() <= 3);
                 assert!(!text.contains("UTC"));
-                assert_eq!(keyboard.inline_keyboard.len(), if group { 8 } else { 6 });
+                assert_eq!(keyboard.inline_keyboard.len(), if group { 9 } else { 6 });
                 assert!(keyboard.inline_keyboard[4][0].text.contains("UTC-3"));
                 assert_eq!(
                     keyboard.inline_keyboard[0][0].callback_data.as_deref(),
@@ -343,7 +367,7 @@ mod tests {
                         .as_deref(),
                     Some("cfg:page:close")
                 );
-                for page in PAGES.iter().take(if group { 7 } else { 5 }) {
+                for page in PAGES.iter().take(if group { 8 } else { 5 }) {
                     let (detail, keyboard) =
                         render_config_page(&ChatConfig::default(), locale, group, page);
                     assert!(!detail.contains("Elegí"));
@@ -388,9 +412,48 @@ mod tests {
     }
 
     #[test]
+    fn payer_page_marks_who_pays_first() {
+        for (group_pays_first, selected, es, en) in [
+            (
+                false,
+                1,
+                "Quién paga primero: Cada uno",
+                "Who pays first: Members",
+            ),
+            (
+                true,
+                0,
+                "Quién paga primero: Grupo",
+                "Who pays first: Group",
+            ),
+        ] {
+            let config = ChatConfig {
+                group_pays_first,
+                ..ChatConfig::default()
+            };
+            let (text, page) = render_config_page(&config, Locale::En, true, "payer");
+            assert!(text.starts_with("Who pays first\n\n"));
+            let options = &page.inline_keyboard[0];
+            assert_eq!(
+                options
+                    .iter()
+                    .map(|b| b.callback_data.as_deref())
+                    .collect::<Vec<_>>(),
+                [Some("cfg:payer:group"), Some("cfg:payer:members")]
+            );
+            assert!(options[selected].text.starts_with('✓'));
+            assert!(!options[1 - selected].text.starts_with('✓'));
+            for (locale, label) in [(Locale::Es, es), (Locale::En, en)] {
+                let (_, home) = render_config(&config, locale, true);
+                assert_eq!(home.inline_keyboard[7][0].text, label);
+            }
+        }
+    }
+
+    #[test]
     fn unavailable_group_pages_return_home() {
         let config = ChatConfig::default();
-        for page in ["random", "creditless", "unknown"] {
+        for page in ["random", "creditless", "payer", "unknown"] {
             assert_eq!(
                 render_config_page(&config, Locale::En, false, page),
                 render_config(&config, Locale::En, false)

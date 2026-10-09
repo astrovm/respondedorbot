@@ -34,6 +34,7 @@ pub enum ConfigCallbackEvaluation {
     SetToggle { field: ToggleField, value: bool },
     SetTimezone(i64),
     SetCreditlessLimit(i64),
+    SetGroupPaysFirst(bool),
 }
 
 pub enum ConfigCallbackDiagnostic {
@@ -104,6 +105,8 @@ pub fn evaluate_config_callback(input: &ConfigCallbackInput) -> ConfigCallbackEv
                 })
         }
         ("creditless", _) => evaluate_creditless(input),
+        ("payer", "group") => ConfigCallbackEvaluation::SetGroupPaysFirst(true),
+        ("payer", "members") => ConfigCallbackEvaluation::SetGroupPaysFirst(false),
         (action, value) => toggle_field(action).zip(input.current_toggle).map_or(
             ConfigCallbackEvaluation::NoChange,
             |(field, current)| ConfigCallbackEvaluation::SetToggle {
@@ -217,6 +220,10 @@ pub fn plan_config_callback(
         }
         ConfigCallbackEvaluation::SetCreditlessLimit(value) => {
             config.creditless_user_hourly_limit = value;
+            None
+        }
+        ConfigCallbackEvaluation::SetGroupPaysFirst(value) => {
+            config.group_pays_first = value;
             None
         }
     };
@@ -529,6 +536,28 @@ mod tests {
     }
 
     #[test]
+    fn payer_callbacks_switch_who_pays_first_and_ignore_unknown_values() {
+        let members = ChatConfig::default();
+        let (outcome, group) = plan_config_callback("cfg:payer:group", &members);
+        assert!(matches!(
+            outcome,
+            ConfigCallbackOutcome::Render {
+                changed: true,
+                diagnostic: None
+            }
+        ));
+        assert!(group.group_pays_first);
+        let (_, back) = plan_config_callback("cfg:payer:members", &group);
+        assert!(!back.group_pays_first);
+        let (outcome, unchanged) = plan_config_callback("cfg:payer:everyone", &group);
+        assert!(matches!(
+            outcome,
+            ConfigCallbackOutcome::Render { changed: false, .. }
+        ));
+        assert_eq!(unchanged, group);
+    }
+
+    #[test]
     fn derived_traits_cover_every_callback_outcome_shape() {
         let input = input("random", "toggle");
         assert_eq!(input.clone(), input);
@@ -547,6 +576,7 @@ mod tests {
             },
             ConfigCallbackEvaluation::SetTimezone(2),
             ConfigCallbackEvaluation::SetCreditlessLimit(7),
+            ConfigCallbackEvaluation::SetGroupPaysFirst(true),
         ];
         for evaluation in evaluations {
             assert_eq!(evaluation.clone(), evaluation);

@@ -58,6 +58,8 @@ pub struct AiConversationInput {
     pub locale: Locale,
     pub timezone_offset_hours: i64,
     pub creditless_user_hourly_limit: i64,
+    /// The group pays before the member's own credits, up to the hourly limit.
+    pub group_pays_first: bool,
     pub timestamp: i64,
     pub spontaneous: bool,
     /// Bounded preview metadata (title/description) for links in the message.
@@ -270,6 +272,7 @@ mod tests {
             locale: Locale::En,
             timezone_offset_hours: 0,
             creditless_user_hourly_limit: 0,
+            group_pays_first: false,
             timestamp: 1_700_000_000,
             spontaneous: false,
             link_context: None,

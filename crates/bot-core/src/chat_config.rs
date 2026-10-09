@@ -16,6 +16,9 @@ pub struct ChatConfig {
     pub timezone_offset: i64,
     pub ai_random_replies: bool,
     pub creditless_user_hourly_limit: i64,
+    /// Charge the group before a member's own credits, up to their hourly
+    /// limit. Off: members pay first and the group covers the rest.
+    pub group_pays_first: bool,
 }
 
 impl Default for ChatConfig {
@@ -28,6 +31,7 @@ impl Default for ChatConfig {
             timezone_offset: DEFAULT_TIMEZONE_OFFSET,
             ai_random_replies: true,
             creditless_user_hourly_limit: DEFAULT_CREDITLESS_USER_HOURLY_LIMIT,
+            group_pays_first: false,
         }
     }
 }
@@ -119,6 +123,10 @@ impl ChatConfig {
                 "creditless_user_hourly_limit",
                 defaults.creditless_user_hourly_limit,
             )?,
+            group_pays_first: coerce_bool(
+                values.get("group_pays_first"),
+                defaults.group_pays_first,
+            ),
         })
     }
 }
@@ -144,7 +152,8 @@ mod tests {
                 "ignore_link_fix_followups": 0,
                 "timezone_offset": "4",
                 "ai_random_replies": "enabled",
-                "creditless_user_hourly_limit": 9.8
+                "creditless_user_hourly_limit": 9.8,
+                "group_pays_first": "on"
             })),
             Ok(ChatConfig {
                 language: "en".to_owned(),
@@ -154,6 +163,7 @@ mod tests {
                 timezone_offset: 4,
                 ai_random_replies: true,
                 creditless_user_hourly_limit: 9,
+                group_pays_first: true,
             })
         );
     }
@@ -194,6 +204,7 @@ mod tests {
                 timezone_offset: 1,
                 ai_random_replies: defaults.ai_random_replies,
                 creditless_user_hourly_limit: 3,
+                group_pays_first: false,
             })
         );
         let mixed = ChatConfig::from_json(&json!({

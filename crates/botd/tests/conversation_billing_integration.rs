@@ -40,6 +40,7 @@ fn reserve_request(
         reservation_id: format!("{operation_id}:{reservation}"),
         amount,
         creditless_user_hourly_limit: limit,
+        group_pays_first: false,
         metadata: Map::from_iter([
             ("operation_id".to_owned(), json!(operation_id)),
             ("origin_chat_id".to_owned(), json!(chat_id)),
