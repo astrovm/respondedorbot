@@ -376,6 +376,9 @@ pub struct PostgresConversationBilling {
     repository: BillingRepository,
     creditless_cap: Option<RedisCreditlessCap>,
     payer_by_operation: HashMap<String, PayerSource>,
+    /// Credit units held per reservation of each operation, so a group-paid
+    /// operation can move to the member in one piece.
+    held_by_operation: HashMap<String, HashMap<String, i64>>,
     cap_key_by_operation: HashMap<String, String>,
     cap_checked_operations: HashSet<String>,
     onboarding_checked_operations: HashSet<String>,
@@ -390,6 +393,7 @@ impl PostgresConversationBilling {
             repository: BillingRepository::new(database_url),
             creditless_cap: None,
             payer_by_operation: HashMap::new(),
+            held_by_operation: HashMap::new(),
             cap_key_by_operation: HashMap::new(),
             cap_checked_operations: HashSet::new(),
             onboarding_checked_operations: HashSet::new(),
@@ -412,6 +416,7 @@ impl PostgresConversationBilling {
 
     fn release_operation_state(&mut self, operation_id: &str) {
         self.payer_by_operation.remove(operation_id);
+        self.held_by_operation.remove(operation_id);
         self.onboarding_checked_operations.remove(operation_id);
         self.cap_checked_operations.remove(operation_id);
         self.cap_key_by_operation.remove(operation_id);
@@ -455,6 +460,10 @@ impl PostgresConversationBilling {
             return Ok("chat");
         };
         let cap_key = reservation_cap_key(request, chat_id);
+        // Recorded before Redis is asked, so if the answer is lost after the
+        // message was counted, aborting the operation still gives it back.
+        self.cap_key_by_operation
+            .insert(request.operation_id.clone(), cap_key.clone());
         let count = creditless_cap
             .admit_once(&cap_key, &request.operation_id, CREDITLESS_CAP_TTL_SECONDS)
             .map_err(error_text)?;
@@ -462,14 +471,67 @@ impl PostgresConversationBilling {
             creditless_cap
                 .refund_once(&cap_key, &request.operation_id)
                 .map_err(error_text)?;
+            self.cap_key_by_operation.remove(&request.operation_id);
             return Ok("user");
         }
         // Already counted, so the check after charging the group skips it.
         self.cap_checked_operations
             .insert(request.operation_id.clone());
-        self.cap_key_by_operation
-            .insert(request.operation_id.clone(), cap_key);
         Ok("chat")
+    }
+
+    /// With the group paying first, a later reservation the group can't
+    /// cover moves the whole operation to the member: the group gets back
+    /// what it held and its hourly slot, and the member's credits hold all of
+    /// it. An operation settles with one payer, so it can't be split.
+    fn move_operation_to_member(
+        &mut self,
+        request: &ReserveRequest,
+        amount: i32,
+        refused: AiChargeResult,
+    ) -> Result<AiChargeResult, String> {
+        let held = self
+            .held_by_operation
+            .get(&request.operation_id)
+            .map_or(0, |holds| holds.values().sum::<i64>());
+        let total = held + i64::from(amount);
+        if refused.user_balance < total {
+            return Ok(refused);
+        }
+        let held = i32::try_from(held)
+            .map_err(|_| "AI reservation exceeds the database range".to_owned())?;
+        let total = i32::try_from(total)
+            .map_err(|_| "AI reservation exceeds the database range".to_owned())?;
+        let mut refund_metadata = request.metadata.clone();
+        refund_metadata.insert("reason".to_owned(), json!("group_short_moved_to_member"));
+        self.repository
+            .refund_ai_charge(
+                request.user_id,
+                request.chat_id,
+                held,
+                "chat",
+                "ai_refund",
+                &refund_metadata,
+                Some(&format!("{}:moved_to_member", request.operation_id)),
+                &request.operation_id,
+            )
+            .map_err(error_text)?;
+        self.refund_creditless_cap(&request.operation_id)?;
+        self.cap_key_by_operation.remove(&request.operation_id);
+        self.held_by_operation.remove(&request.operation_id);
+        self.payer_by_operation.remove(&request.operation_id);
+        self.repository
+            .charge_ai_credits(
+                request.user_id,
+                request.chat_id,
+                total,
+                "ai_reserve",
+                &request.metadata,
+                Some("user"),
+                Some(&format!("{}:member", request.reservation_id)),
+                &request.operation_id,
+            )
+            .map_err(error_text)
     }
 
     fn refund_creditless_cap(&self, operation_id: &str) -> Result<(), String> {
@@ -541,6 +603,14 @@ impl ConversationBilling for PostgresConversationBilling {
             self.refund_creditless_cap(&request.operation_id)?;
             self.cap_key_by_operation.remove(&request.operation_id);
             result = self.charge_reservation(&request, amount, Some("user"))?;
+        } else if cached_source == Some("chat") && request.group_pays_first && !result.ok {
+            result = self.move_operation_to_member(&request, amount, result)?;
+        }
+        if result.ok {
+            self.held_by_operation
+                .entry(request.operation_id.clone())
+                .or_default()
+                .insert(request.reservation_id.clone(), result.amount);
         }
         let source = match result.source.as_deref() {
             Some("user") => Some(PayerSource::User),
@@ -1537,6 +1607,7 @@ mod tests {
         let broke = 6_350_000_000_000_i64 + suffix;
         let rich = 6_360_000_000_000_i64 + suffix;
         let funder = 6_370_000_000_000_i64 + suffix;
+        let mover = 6_390_000_000_000_i64 + suffix;
         let chat_id = -6_380_000_000_000_i64 - suffix;
         let repository = bot_adapters::billing_read::BillingRepository::new(&database_url);
         repository.mint_user_credits(member, 500, None, &fresh_op())?;
@@ -1619,6 +1690,50 @@ mod tests {
         assert_eq!(unlimited.source, Some(PayerSource::Chat));
         assert_eq!(unlimited.chat_balance, 840);
 
+        // The group pays the start of a message but can't cover the rest: the
+        // whole message moves to the member, and the group gets it all back.
+        repository.mint_user_credits(mover, 2_000, None, &fresh_op())?;
+        let moved_op = format!("synthetic-moved:{nonce}");
+        let base = billing.reserve(request(mover, &moved_op, 800, 5))?;
+        assert_eq!(base.source, Some(PayerSource::Chat));
+        assert_eq!(base.chat_balance, 40);
+        assert_eq!(used(mover)?, Some(1));
+        let extension = billing.reserve(ReserveRequest {
+            reservation_id: format!("{moved_op}:extension"),
+            ..request(mover, &moved_op, 100, 5)
+        })?;
+        assert!(extension.authorized);
+        assert_eq!(extension.source, Some(PayerSource::User));
+        assert_eq!(extension.chat_balance, 840);
+        assert_eq!(used(mover)?, Some(0));
+        let before_settlement = repository.get_balance("user", mover)?;
+        billing.settle(SettlementRequest {
+            user_id: mover,
+            chat_id: Some(chat_id),
+            operation_id: moved_op.clone(),
+            actual_credit_units: 850,
+            delivered: true,
+            reason: "synthetic".to_owned(),
+            billing_segments: Vec::new(),
+        })?;
+        // One payer at settlement: the member gets back what wasn't used.
+        assert_eq!(
+            repository.get_balance("user", mover)?,
+            before_settlement + 50
+        );
+        assert_eq!(repository.get_balance("chat", chat_id)?, 840);
+
+        // When the member can't cover it either, the group keeps its hold.
+        let stuck_op = format!("synthetic-stuck:{nonce}");
+        let stuck_base = billing.reserve(request(broke, &stuck_op, 100, 5))?;
+        assert_eq!(stuck_base.source, Some(PayerSource::Chat));
+        let stuck = billing.reserve(ReserveRequest {
+            reservation_id: format!("{stuck_op}:extension"),
+            ..request(broke, &stuck_op, 100_000, 5)
+        })?;
+        assert!(!stuck.authorized);
+        assert_eq!(stuck.chat_balance, 740);
+
         // A counter that cannot be read fails the reservation.
         let mut unreachable_cap = PostgresConversationBilling::new(&database_url)
             .with_creditless_cap(RedisCreditlessCap::new(&unreachable_redis())?);
@@ -1631,6 +1746,13 @@ mod tests {
         assert!(
             matches!(&failed, Err(error) if !error.is_empty()),
             "{failed:?}"
+        );
+        // Its key is already recorded, so aborting can still give the slot back
+        // if Redis counted it before the answer was lost.
+        assert!(
+            unreachable_cap
+                .cap_key_by_operation
+                .contains_key(&format!("synthetic-group-unreachable:{nonce}"))
         );
         Ok(())
     }
