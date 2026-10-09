@@ -1452,6 +1452,7 @@ pub struct TelegramActionSink<Transport> {
 }
 
 const TELEGRAM_ACTION_MAX_ATTEMPTS: usize = 3;
+const TELEGRAM_ACTION_MAX_RETRY_SECONDS: u64 = 60;
 const TELEGRAM_ACTION_DEFAULT_RETRY_SECONDS: u64 = 1;
 const TELEGRAM_DELIVERY_LOCK_CLEANUP_THRESHOLD: usize = 1_024;
 
@@ -2430,7 +2431,12 @@ impl<Transport: TelegramTransport> TelegramActionSink<Transport> {
             match outcome {
                 ActionOutcome::RateLimited {
                     retry_after_seconds,
-                } if attempts < TELEGRAM_ACTION_MAX_ATTEMPTS => {
+                } if attempts < TELEGRAM_ACTION_MAX_ATTEMPTS
+                    && retry_after_seconds
+                        .is_none_or(|seconds| seconds <= TELEGRAM_ACTION_MAX_RETRY_SECONDS) =>
+                {
+                    // Waiting holds this worker and the chat's delivery lock,
+                    // so only short flood waits are waited out here.
                     let seconds = retry_after_seconds
                         .unwrap_or(TELEGRAM_ACTION_DEFAULT_RETRY_SECONDS)
                         .max(1);
@@ -4042,11 +4048,37 @@ mod tests {
     }
 
     #[test]
+    fn action_sink_does_not_wait_out_long_flood_waits() {
+        let transport = Transport::with(vec![telegram_response(
+            429,
+            r#"{"ok":false,"error_code":429,"parameters":{"retry_after":61}}"#,
+        )]);
+        let waits = Arc::new(Mutex::new(Vec::new()));
+        let recorded_waits = waits.clone();
+        let mut sink = TelegramActionSink::new(transport, "token").with_wait(move |duration| {
+            if let Ok(mut waits) = recorded_waits.lock() {
+                waits.push(duration);
+            }
+        });
+        assert_eq!(
+            sink.execute(TelegramAction::SendMessage(SendMessage::new(
+                ChatId(1),
+                "hello"
+            ))),
+            Err(TelegramActionSinkError::RateLimited {
+                retry_after_seconds: Some(61)
+            })
+        );
+        assert_eq!(sink.transport.requests.borrow().len(), 1);
+        assert!(waits.lock().is_ok_and(|waits| waits.is_empty()));
+    }
+
+    #[test]
     fn action_sink_retries_rate_limits_and_delivers_the_original_action() {
         let transport = Transport::with(vec![
             telegram_response(
                 429,
-                r#"{"ok":false,"error_code":429,"parameters":{"retry_after":2}}"#,
+                r#"{"ok":false,"error_code":429,"parameters":{"retry_after":60}}"#,
             ),
             telegram_response(200, r#"{"ok":true,"result":{"message_id":9}}"#),
         ]);
@@ -4069,7 +4101,7 @@ mod tests {
         assert!(
             waits
                 .lock()
-                .is_ok_and(|waits| waits.as_slice() == [Duration::from_secs(2)])
+                .is_ok_and(|waits| waits.as_slice() == [Duration::from_secs(60)])
         );
     }
 
