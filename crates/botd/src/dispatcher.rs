@@ -934,6 +934,9 @@ pub enum DispatchError<ConfigError, ActionError, RandomError> {
     MissingService(&'static str),
     #[error("native dispatch invariant failed: {0}")]
     Invariant(&'static str),
+    /// A write that must not be lost failed; the update is retried.
+    #[error("could not persist {0}")]
+    Persistence(String),
 }
 
 type NativeDispatchResult<Config, Actions, Random> = Result<
@@ -1494,9 +1497,12 @@ where
                 total_amount,
                 charge_id,
             } => {
-                self.state_diagnostics.push(format!(
+                let failure = format!(
                     "Invalid successful payment payload chat_id={chat_id} user_id={user_id} currency={currency} payload={payload} total_amount={total_amount} charge_id={charge_id}"
-                ));
+                );
+                // The user paid, so the charge id must survive for a refund.
+                eprintln!("{failure}");
+                self.state_diagnostics.push(failure);
                 (
                     chat_id,
                     match locale {
@@ -1520,24 +1526,23 @@ where
                 let Some(sink) = self.payment_sink.as_mut() else {
                     return Err(DispatchError::MissingService("payment persistence"));
                 };
-                let text = match sink.record(&payment) {
-                    Ok(receipt) => successful_payment_reply(
-                        *credits_awarded,
-                        receipt.user_balance,
-                        receipt.inserted,
-                        locale,
-                    ),
-                    Err(error) => {
-                        self.state_diagnostics.push(format!(
-                            "successful payment persistence chat_id={chat_id} user_id={} charge_id={}: {error}",
-                            payment.user_id, payment.charge_id
-                        ));
-                        match locale {
-                            bot_core::locale::Locale::Es => "Me entró la guita pero se trabó la acreditación. Avisale al admin".to_owned(),
-                            bot_core::locale::Locale::En => "I received the payment but could not add the credits. Please tell the admin".to_owned(),
-                        }
-                    }
-                };
+                // Recording is idempotent per charge id, so a failed write is
+                // retried with the update instead of leaving the user paid
+                // but uncredited. The log keeps the charge id either way.
+                let receipt = sink.record(&payment).map_err(|error| {
+                    let failure = format!(
+                        "successful payment chat_id={chat_id} user_id={} charge_id={}: {error}",
+                        payment.user_id, payment.charge_id
+                    );
+                    eprintln!("Payment not recorded yet: {failure}");
+                    DispatchError::Persistence(failure)
+                })?;
+                let text = successful_payment_reply(
+                    *credits_awarded,
+                    receipt.user_balance,
+                    receipt.inserted,
+                    locale,
+                );
                 (chat_id, text)
             }
         };
@@ -17628,46 +17633,66 @@ mod tests {
 
     #[test]
     fn duplicate_and_failed_payment_writes_have_distinct_safe_replies() {
-        for (result, expected, diagnostic) in [
-            (
-                Ok(StarPaymentReceipt {
-                    inserted: false,
-                    user_balance: 5_300,
-                }),
-                "This payment was already credited\nPersonal balance: 53.00 credits",
-                false,
-            ),
-            (
-                Err("synthetic database failure".to_owned()),
-                "I received the payment but could not add the credits. Please tell the admin",
-                true,
-            ),
-        ] {
-            let config = Config {
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
                 value: Ok(ChatConfig::default()),
                 chat_ids: Vec::new(),
-            };
-            let mut dispatcher = NativeDispatcher::new(
-                config,
-                Actions::default(),
-                State::default(),
-                values(),
-                random(),
-                authorization(),
-                "@mybot",
-            )
-            .with_payment_sink(Box::new(Payments {
-                result,
-                records: Rc::new(RefCell::new(Vec::new())),
-            }));
-            assert_eq!(
-                dispatcher.dispatch(successful_payment_update("p50", 42, 25, Some("en"))),
-                Ok(DispatchOutcome::Handled)
-            );
-            let message = only_sent(&dispatcher.actions.0);
-            assert_eq!(message.text, expected);
-            assert_eq!(!dispatcher.state_diagnostics().is_empty(), diagnostic);
-        }
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_payment_sink(Box::new(Payments {
+            result: Ok(StarPaymentReceipt {
+                inserted: false,
+                user_balance: 5_300,
+            }),
+            records: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(successful_payment_update("p50", 42, 25, Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let message = only_sent(&dispatcher.actions.0);
+        assert_eq!(
+            message.text,
+            "This payment was already credited\nPersonal balance: 53.00 credits"
+        );
+        assert!(dispatcher.state_diagnostics().is_empty());
+
+        // A failed write is retried with the update (recording is idempotent
+        // per charge id), so nothing is sent yet and the error is retryable.
+        let mut failing = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_payment_sink(Box::new(Payments {
+            result: Err("synthetic database failure".to_owned()),
+            records: Rc::new(RefCell::new(Vec::new())),
+        }));
+        let failure = failing
+            .dispatch(successful_payment_update("p50", 42, 25, Some("en")))
+            .err();
+        assert!(matches!(
+            &failure,
+            Some(DispatchError::Persistence(text)) if text.contains("charge_id=") && text.contains("synthetic database failure")
+        ));
+        assert_eq!(
+            failure.map(|error| failing.error_disposition(&error)),
+            Some(HandlerErrorDisposition::RetryUpdate)
+        );
+        assert!(failing.actions.0.is_empty());
     }
 
     #[test]
@@ -19004,23 +19029,19 @@ mod tests {
             )),
             Ok(DispatchOutcome::Handled)
         );
-        assert_eq!(
+        assert!(matches!(
             dispatcher.dispatch(payment_message(
                 chat,
                 json!({"id": 42}),
                 valid_payment("topup:p50:42:es"),
             )),
-            Ok(DispatchOutcome::Handled)
-        );
+            Err(DispatchError::Persistence(_))
+        ));
         assert_eq!(
             sent_texts(&dispatcher.actions.0),
-            [
-                "Me cayó un pago raro y no lo pude validar. Avisale al admin",
-                "Me entró la guita pero se trabó la acreditación. Avisale al admin",
-            ]
+            ["Me cayó un pago raro y no lo pude validar. Avisale al admin"]
         );
         assert_eq!(records.borrow().len(), 1);
-        assert!(dispatcher.state_diagnostics()[0].contains("charge_id=charge-1"));
     }
 
     #[test]
