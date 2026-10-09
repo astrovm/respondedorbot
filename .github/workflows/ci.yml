@@ -48,7 +48,7 @@ jobs:
       contents: read
     services:
       postgres:
-        image: postgres:18-alpine
+        image: mirror.gcr.io/library/postgres:18-alpine
         env:
           POSTGRES_DB: respondedorbot_test
           POSTGRES_PASSWORD: synthetic-password
@@ -60,7 +60,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       redis:
-        image: redis/redis-stack-server:7.4.0-v8
+        image: mirror.gcr.io/redis/redis-stack-server:7.4.0-v8
         ports:
           - 6379:6379
         options: >-
@@ -116,6 +116,9 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # Docker Hub rate-limits shared runners; Google's mirror doesn't.
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       - name: Set image creation timestamp
         id: image-metadata
@@ -163,6 +166,9 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # Docker Hub rate-limits shared runners; Google's mirror doesn't.
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       - name: Set image creation timestamp
         id: image-metadata

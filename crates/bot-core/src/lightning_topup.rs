@@ -6,19 +6,17 @@
 
 use crate::credit_units::{CreditUnits, display_credit_units};
 use crate::locale::Locale;
-use crate::menu_ui::{back, button, localized};
+use crate::menu_ui::localized;
 use crate::provider_pricing::STAR_PAYOUT_USD_MICROS;
 use crate::telegram_actions::{
     CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode, SendMessage,
 };
 use crate::telegram_input::ChatId;
-use crate::telegram_payments::{
-    BillingPackTerms, billing_packs, default_billing_pack, whole_credits,
-};
+use crate::telegram_payments::{BillingPackTerms, default_billing_pack, whole_credits};
 
 pub const LIGHTNING_MENU_CALLBACK: &str = "topup:ln";
 pub const STARS_MENU_CALLBACK: &str = "topup:stars";
-const LIGHTNING_PACK_PREFIX: &str = "topup:ln:";
+pub const LIGHTNING_PACK_PREFIX: &str = "topup:ln:";
 /// How long a Lightning invoice can be paid.
 pub const LIGHTNING_INVOICE_TTL_MINUTES: u32 = 30;
 /// OpenNode's cut of each payment, in hundredths of a percent.
@@ -69,35 +67,6 @@ pub fn parse_lightning_callback(data: &str) -> Option<LightningCallback> {
     )
 }
 
-#[must_use]
-pub fn lightning_menu(locale: Locale) -> (String, InlineKeyboardMarkup) {
-    let rows = billing_packs()
-        .map(|pack| {
-            let credits = whole_credits(pack.credits_awarded);
-            let price = format_usd(lightning_usd_cents(&pack));
-            vec![button(
-                match locale {
-                    Locale::Es => format!("{credits} créditos por {price} ⚡"),
-                    Locale::En => format!("{credits} credits for {price} ⚡"),
-                },
-                format!("{LIGHTNING_PACK_PREFIX}{}", pack.id),
-            )]
-        })
-        .chain(std::iter::once(vec![back(locale, STARS_MENU_CALLBACK)]))
-        .collect();
-    (
-        localized(
-            locale,
-            "Cargar con Lightning ⚡\n\nSin la comisión de Telegram, así que te sale más barato. Elegí un pack.",
-            "Pay with Lightning ⚡\n\nNo Telegram fee, so it's cheaper. Choose a pack.",
-        )
-        .to_owned(),
-        InlineKeyboardMarkup {
-            inline_keyboard: rows,
-        },
-    )
-}
-
 /// What the payment provider returned for a new charge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LightningInvoice {
@@ -107,8 +76,8 @@ pub struct LightningInvoice {
     pub sats: Option<i64>,
 }
 
-/// Invoice text with the BOLT11 request in a code entity, which Telegram
-/// copies on tap.
+/// Invoice caption for the QR code. The BOLT11 request goes in the copy
+/// button, or in the text as a code entity when it is too long for one.
 #[must_use]
 pub fn lightning_invoice_message(
     chat_id: ChatId,
@@ -123,18 +92,18 @@ pub fn lightning_invoice_message(
         None => price,
     };
     let minutes = LIGHTNING_INVOICE_TTL_MINUTES;
-    let text = match locale {
+    let mut text = match locale {
         Locale::Es => format!(
-            "Factura Lightning ⚡\n\n{credits} créditos por {price}\nVence en {minutes} minutos. Cuando la pagues, te acredito solo.\n\n<code>{}</code>",
-            invoice.payreq
+            "Factura Lightning ⚡\n\n{credits} créditos por {price}\nVence en {minutes} minutos. Cuando la pagues, te acredito solo."
         ),
         Locale::En => format!(
-            "Lightning invoice ⚡\n\n{credits} credits for {price}\nExpires in {minutes} minutes. I'll add the credits as soon as it's paid.\n\n<code>{}</code>",
-            invoice.payreq
+            "Lightning invoice ⚡\n\n{credits} credits for {price}\nExpires in {minutes} minutes. I'll add the credits as soon as it's paid."
         ),
     };
     let mut rows = Vec::new();
-    if invoice.payreq.len() <= MAX_COPY_TEXT_LENGTH {
+    if invoice.payreq.len() > MAX_COPY_TEXT_LENGTH {
+        text.push_str(&format!("\n\n<code>{}</code>", invoice.payreq));
+    } else {
         rows.push(vec![InlineKeyboardButton {
             text: localized(locale, "Copiar factura", "Copy invoice").to_owned(),
             url: None,
@@ -193,7 +162,7 @@ pub fn lightning_paid_reply(credits_awarded: i64, user_balance: i64, locale: Loc
 mod tests {
     use super::{
         LightningCallback, LightningInvoice, format_usd, lightning_invoice_failed,
-        lightning_invoice_message, lightning_invoice_ready, lightning_menu, lightning_paid_reply,
+        lightning_invoice_message, lightning_invoice_ready, lightning_paid_reply,
         lightning_usd_cents, parse_lightning_callback,
     };
     use crate::locale::Locale;
@@ -253,51 +222,16 @@ mod tests {
             default_billing_pack("p100").map(LightningCallback::Pack)
         );
         assert_eq!(
+            parse_lightning_callback("topup:ln:c300"),
+            default_billing_pack("c300").map(LightningCallback::Pack)
+        );
+        assert_eq!(
             parse_lightning_callback("topup:ln:nope"),
             Some(LightningCallback::InvalidPack)
         );
         for data in ["topup:p50", "topup:lnp50", "ln:p50", ""] {
             assert_eq!(parse_lightning_callback(data), None, "{data}");
         }
-    }
-
-    #[test]
-    fn menu_lists_every_pack_and_goes_back_to_stars() {
-        let (text, keyboard) = lightning_menu(Locale::Es);
-        assert!(text.starts_with("Cargar con Lightning ⚡"));
-        let rows = &keyboard.inline_keyboard;
-        assert_eq!(rows.len(), 7);
-        assert_eq!(rows[0][0].text, "50 créditos por US$0.33 ⚡");
-        assert_eq!(rows[0][0].callback_data.as_deref(), Some("topup:ln:p50"));
-        assert_eq!(rows[6][0].text, "‹ Volver");
-        assert_eq!(rows[6][0].callback_data.as_deref(), Some("topup:stars"));
-        let (text, keyboard) = lightning_menu(Locale::En);
-        assert_eq!(
-            text,
-            "Pay with Lightning ⚡\n\nNo Telegram fee, so it's cheaper. Choose a pack."
-        );
-        assert_eq!(
-            keyboard.inline_keyboard[5][0].text,
-            "2,500 credits for US$16.42 ⚡"
-        );
-    }
-
-    #[test]
-    fn stars_menu_offers_lightning_only_when_available() {
-        use crate::telegram_payments::topup_menu;
-        let (text, keyboard) = topup_menu(Locale::Es, true);
-        assert!(text.ends_with("\n\nCon Lightning ⚡ te sale más barato."));
-        let rows = &keyboard.inline_keyboard;
-        assert_eq!(rows.len(), 8);
-        assert_eq!(rows[6][0].text, "⚡ Pagar con Lightning");
-        assert_eq!(rows[6][0].callback_data.as_deref(), Some("topup:ln"));
-        assert_eq!(rows[7][0].callback_data.as_deref(), Some("topup:close"));
-        let (text, keyboard) = topup_menu(Locale::En, true);
-        assert!(text.ends_with("\n\nLightning ⚡ is cheaper."));
-        assert_eq!(keyboard.inline_keyboard[6][0].text, "⚡ Pay with Lightning");
-        let (text, keyboard) = topup_menu(Locale::En, false);
-        assert!(!text.contains("Lightning"));
-        assert_eq!(keyboard.inline_keyboard.len(), 7);
     }
 
     fn invoice(payreq_length: usize, checkout: bool, sats: Option<i64>) -> LightningInvoice {
@@ -321,10 +255,7 @@ mod tests {
         assert!(message.disable_web_page_preview);
         assert_eq!(
             message.text,
-            format!(
-                "Factura Lightning ⚡\n\n50 créditos por US$0.33 (512 sats)\nVence en 30 minutos. Cuando la pagues, te acredito solo.\n\n<code>{}</code>",
-                short.payreq
-            )
+            "Factura Lightning ⚡\n\n50 créditos por US$0.33 (512 sats)\nVence en 30 minutos. Cuando la pagues, te acredito solo."
         );
         let rows = message
             .reply_markup
@@ -352,9 +283,16 @@ mod tests {
                 "Lightning invoice ⚡\n\n50 credits for US$0.33\nExpires in 30 minutes."
             )
         );
+        // Too long for the copy button, so it goes in the text instead.
+        assert!(
+            message
+                .text
+                .ends_with(&format!("\n\n<code>{}</code>", long.payreq))
+        );
         assert_eq!(message.reply_markup, None);
         let message =
             lightning_invoice_message(ChatId(88), &pack, &invoice(256, false, None), Locale::En);
+        assert!(!message.text.contains("<code>"));
         let rows = message
             .reply_markup
             .map(|markup| markup.inline_keyboard)
