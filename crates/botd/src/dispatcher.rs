@@ -10338,14 +10338,14 @@ mod tests {
         );
         assert_eq!(dispatcher.state.incoming.len(), 1);
         assert_eq!(dispatcher.state.outgoing.len(), 1);
-        // The chat's own menu follows its configured language, not the app's.
+        // The chat's own menu is described in its configured language, not the app's.
         assert!(matches!(
             dispatcher.actions.0.last(),
             Some(TelegramAction::SetCommands {
                 commands,
                 language_code: None,
                 scope: bot_core::telegram_actions::CommandScope::Chat(_),
-            }) if commands.iter().any(|entry| entry.command == "language")
+            }) if commands[0].command == "ask" && commands[0].description == "ask me anything"
         ));
     }
 
@@ -10504,7 +10504,7 @@ mod tests {
                 commands,
                 scope: bot_core::telegram_actions::CommandScope::Chat(_),
                 ..
-            }) if commands.iter().any(|entry| entry.command == "weather")
+            }) if commands[0].command == "ask" && commands[0].description == "ask me anything"
         ));
 
         let mut other_setting = NativeDispatcher::new(
@@ -22167,7 +22167,7 @@ mod tests {
 
             assert_eq!(
                 replies(&mut dispatcher, group("/vetados", |_| {})),
-                "No hay nadie vetado en este grupo"
+                "No hay nadie baneado en este grupo"
             );
             assert_eq!(
                 replies(&mut dispatcher, replying("/vetar")),
@@ -22186,11 +22186,15 @@ mod tests {
             );
             assert_eq!(
                 replies(&mut dispatcher, replying("/ban@mybot")),
-                "Ana ya tenía veto en este grupo"
+                "Ana ya estaba baneado en este grupo"
             );
             assert_eq!(
                 replies(&mut dispatcher, group("/banned", |_| {})),
-                "Vetados en este grupo\n- Ana"
+                "Baneados en este grupo\n- Ana"
+            );
+            assert_eq!(
+                replies(&mut dispatcher, group("/bans", |_| {})),
+                "Baneados en este grupo\n- Ana"
             );
             assert_eq!(
                 replies(&mut dispatcher, replying("/desvetar")),
@@ -22198,7 +22202,7 @@ mod tests {
             );
             assert_eq!(
                 replies(&mut dispatcher, replying("/unban")),
-                "Ana no tenía veto"
+                "Ana no estaba baneado"
             );
             assert!(rows.borrow().is_empty());
             assert!(
@@ -22215,7 +22219,7 @@ mod tests {
                     "es",
                     "Esto funciona solo en grupos",
                     "Este comando es solo para admins del grupo",
-                    "A los admins no los puedo vetar",
+                    "A los admins no los puedo banear",
                 ),
                 (
                     "en",

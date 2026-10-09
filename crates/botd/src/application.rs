@@ -433,7 +433,7 @@ mod tests {
     fn publishes_default_spanish_and_english_command_menus_in_order() {
         let mut sink = Sink::default();
         assert!(publish_commands(&mut sink).is_empty());
-        assert_eq!(sink.actions.len(), 4);
+        assert_eq!(sink.actions.len(), 5);
         assert!(matches!(
             &sink.actions[0],
             TelegramAction::SetCommands {
@@ -463,6 +463,14 @@ mod tests {
                 ..
             }
         ));
+        assert!(matches!(
+            &sink.actions[4],
+            TelegramAction::SetCommands {
+                language_code: Some(language),
+                scope: bot_core::telegram_actions::CommandScope::AllGroupChats,
+                ..
+            } if language == "en"
+        ));
     }
 
     #[test]
@@ -472,8 +480,8 @@ mod tests {
             ..Sink::default()
         };
         let diagnostics = publish_commands(&mut sink);
-        assert_eq!(sink.calls, 4);
-        assert_eq!(sink.actions.len(), 3);
+        assert_eq!(sink.calls, 5);
+        assert_eq!(sink.actions.len(), 4);
         assert!(matches!(
             sink.actions.last(),
             Some(TelegramAction::SetCommands {

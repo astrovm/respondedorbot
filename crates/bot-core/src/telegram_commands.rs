@@ -159,18 +159,18 @@ const COMMAND_GROUPS: &[CommandGroup] = &[
         description_en: "move your credits to the group [amount]",
     },
     CommandGroup {
-        aliases: &["vetar", "ban"],
-        description_es: "admins: que alguien no me use en el grupo",
+        aliases: &["ban", "vetar"],
+        description_es: "admins: banear a alguien para que no me use",
         description_en: "admins: stop someone using me in the group",
     },
     CommandGroup {
-        aliases: &["desvetar", "unban"],
-        description_es: "admins: sacarle el veto a alguien",
+        aliases: &["unban", "desvetar"],
+        description_es: "admins: desbanear a alguien",
         description_en: "admins: lift someone's ban",
     },
     CommandGroup {
-        aliases: &["vetados", "banned"],
-        description_es: "ver quién tiene veto en el grupo",
+        aliases: &["bans", "banned", "vetados"],
+        description_es: "ver los baneados del grupo",
         description_en: "see who is banned in the group",
     },
     CommandGroup {
@@ -214,54 +214,51 @@ pub fn telegram_commands(locale: Locale) -> Vec<TelegramCommand> {
     commands
 }
 
-/// The `/` picker shows one entry per command, most useful first, named in
-/// the menu's language; every alias in [`telegram_commands`] still works.
-const MENU_ORDER: &[(&str, &str)] = &[
-    ("ask", "ask"),
-    ("p", "p"),
-    ("c", "c"),
-    ("s", "s"),
-    ("dolar", "dollar"),
-    ("clima", "weather"),
-    ("tarea", "task"),
-    ("resumen", "summary"),
-    ("transcribe", "transcribe"),
-    ("balance", "balance"),
-    ("topup", "topup"),
-    ("gastos", "charges"),
-    ("transfer", "transfer"),
-    ("config", "config"),
-    ("idioma", "language"),
-    ("vetar", "ban"),
-    ("desvetar", "unban"),
-    ("vetados", "banned"),
-    ("help", "help"),
-    ("bcra", "bcra"),
-    ("rulo", "rulo"),
-    ("devo", "devo"),
-    ("petroleo", "oil"),
-    ("elecciones", "elections"),
-    ("powerlaw", "powerlaw"),
-    ("rainbow", "rainbow"),
-    ("satoshi", "satoshi"),
-    ("random", "random"),
-    ("convertbase", "convertbase"),
-    ("comando", "command"),
-    ("time", "time"),
-    ("gm", "gm"),
-    ("gn", "gn"),
-    ("instance", "instance"),
+/// The `/` picker shows one entry per command, most useful first. Names are
+/// the same in every language (mostly English, Spanish for the Argentine
+/// ones) so the menu never changes; only the descriptions are translated.
+/// Every alias in [`telegram_commands`] still works.
+const MENU: &[&str] = &[
+    "ask",
+    "p",
+    "c",
+    "s",
+    "dolar",
+    "clima",
+    "tarea",
+    "resumen",
+    "transcribe",
+    "balance",
+    "topup",
+    "gastos",
+    "transfer",
+    "config",
+    "idioma",
+    "ban",
+    "unban",
+    "bans",
+    "help",
+    "bcra",
+    "rulo",
+    "devo",
+    "oil",
+    "elections",
+    "powerlaw",
+    "rainbow",
+    "satoshi",
+    "random",
+    "convertbase",
+    "command",
+    "time",
+    "gm",
+    "gn",
+    "instance",
 ];
 
 #[must_use]
 pub fn primary_telegram_commands(locale: Locale) -> Vec<TelegramCommand> {
-    MENU_ORDER
-        .iter()
-        .filter_map(|(spanish, english)| {
-            let command = match locale {
-                Locale::Es => spanish,
-                Locale::En => english,
-            };
+    MENU.iter()
+        .filter_map(|command| {
             COMMAND_GROUPS
                 .iter()
                 .find(|group| group.aliases.contains(command))
@@ -276,8 +273,8 @@ pub fn primary_telegram_commands(locale: Locale) -> Vec<TelegramCommand> {
         .collect()
 }
 
-/// Startup menus. Groups speak Spanish unless configured otherwise, so they
-/// get the Spanish menu whatever language each member's Telegram app uses.
+/// Startup menus: the same commands everywhere, described in Spanish unless
+/// the member's Telegram app is in English.
 #[must_use]
 pub fn command_publication_actions() -> Vec<TelegramAction> {
     [
@@ -285,6 +282,7 @@ pub fn command_publication_actions() -> Vec<TelegramAction> {
         (Some("es"), Locale::Es, CommandScope::Default),
         (Some("en"), Locale::En, CommandScope::Default),
         (None, Locale::Es, CommandScope::AllGroupChats),
+        (Some("en"), Locale::En, CommandScope::AllGroupChats),
     ]
     .into_iter()
     .map(
@@ -297,8 +295,8 @@ pub fn command_publication_actions() -> Vec<TelegramAction> {
     .collect()
 }
 
-/// Menu for one chat in its configured language, so it matches the replies
-/// even when a member's Telegram app uses another language.
+/// Menu for one chat with descriptions in its configured language, so they
+/// match the replies even when a member's Telegram app uses another language.
 #[must_use]
 pub fn chat_command_menu_action(chat_id: ChatId, locale: Locale) -> TelegramAction {
     TelegramAction::SetCommands {
@@ -331,15 +329,15 @@ mod tests {
         for (locale, expected_hash) in [
             (
                 Locale::Es,
-                "cb7a8d18b86c0afd13c5ee57c699c1f305d7ab6f69ee2ba6eab36292b5d68725",
+                "68961bcbf0257c9b8218308cc164580b2c733f6018e1ca111521f8972dd7379b",
             ),
             (
                 Locale::En,
-                "ee9b11d63d8d01faf0d55cfbd5e467b5e91941d2e3a076d391e04f0178e69182",
+                "e5ba610326d6ca12f2317bf047cd7d794f344206c36f3d687ad34da8c0044178",
             ),
         ] {
             let commands = telegram_commands(locale);
-            assert_eq!(commands.len(), 81);
+            assert_eq!(commands.len(), 82);
             let encoded = serde_json::to_string(&commands);
             assert!(encoded.is_ok());
             let digest = encoded.map(|value| sha256_hex(&value));
@@ -362,19 +360,66 @@ mod tests {
     }
 
     #[test]
-    fn primary_menu_keeps_aliases_out_of_picker_only() {
-        assert!(
-            super::primary_telegram_commands(Locale::Es)
-                .iter()
-                .any(|c| c.command == "idioma")
-        );
-        let commands = super::primary_telegram_commands(Locale::En);
+    fn primary_menu_names_are_the_same_in_every_language() {
+        let spanish = super::primary_telegram_commands(Locale::Es);
+        let english = super::primary_telegram_commands(Locale::En);
+        let names = |menu: &[super::TelegramCommand]| {
+            menu.iter().map(|entry| entry.command).collect::<Vec<_>>()
+        };
+        assert_eq!(names(&spanish), names(&english));
         for name in [
-            "p", "c", "s", "help", "config", "weather", "task", "summary",
+            "dolar",
+            "clima",
+            "tarea",
+            "resumen",
+            "gastos",
+            "idioma",
+            "ban",
+            "unban",
+            "bans",
+            "oil",
+            "elections",
+            "command",
         ] {
-            assert!(commands.iter().any(|c| c.command == name));
+            assert!(spanish.iter().any(|entry| entry.command == name), "{name}");
         }
-        for alias in ["prices", "precios", "settings", "tldr"] {
+        let description = |menu: &[super::TelegramCommand], name: &str| {
+            menu.iter()
+                .find(|entry| entry.command == name)
+                .map(|entry| entry.description)
+        };
+        assert_eq!(
+            description(&spanish, "bans"),
+            Some("ver los baneados del grupo")
+        );
+        assert_eq!(
+            description(&english, "bans"),
+            Some("see who is banned in the group")
+        );
+    }
+
+    #[test]
+    fn primary_menu_keeps_aliases_out_of_picker_only() {
+        let commands = super::primary_telegram_commands(Locale::En);
+        for alias in [
+            "prices",
+            "precios",
+            "settings",
+            "tldr",
+            "dollar",
+            "weather",
+            "task",
+            "summary",
+            "charges",
+            "language",
+            "vetar",
+            "desvetar",
+            "vetados",
+            "banned",
+            "petroleo",
+            "elecciones",
+            "comando",
+        ] {
             assert!(!commands.iter().any(|c| c.command == alias));
             assert!(
                 telegram_commands(Locale::En)
@@ -403,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn publication_plans_default_spanish_and_english_menus_and_a_spanish_group_menu() {
+    fn publication_plans_spanish_and_english_descriptions_for_private_and_group_chats() {
         use crate::telegram_actions::{CommandScope, TelegramAction};
         let actions = command_publication_actions();
         // Unrelated actions are ignored by the filter below.
@@ -419,17 +464,20 @@ mod tests {
                     commands,
                     language_code,
                     scope,
-                } => Some((commands[4].command, language_code.as_deref(), *scope)),
+                } => Some((commands[0].description, language_code.as_deref(), *scope)),
                 _ => None,
             })
             .collect::<Vec<_>>();
+        let es = "preguntame lo que quieras";
+        let en = "ask me anything";
         assert_eq!(
             plans,
             [
-                ("dolar", None, CommandScope::Default),
-                ("dolar", Some("es"), CommandScope::Default),
-                ("dollar", Some("en"), CommandScope::Default),
-                ("dolar", None, CommandScope::AllGroupChats),
+                (es, None, CommandScope::Default),
+                (es, Some("es"), CommandScope::Default),
+                (en, Some("en"), CommandScope::Default),
+                (es, None, CommandScope::AllGroupChats),
+                (en, Some("en"), CommandScope::AllGroupChats),
             ]
         );
     }
@@ -437,7 +485,10 @@ mod tests {
     #[test]
     fn chat_menu_uses_the_chat_scope_and_its_language() {
         use crate::telegram_actions::{CommandScope, TelegramAction};
-        for (locale, expected) in [(Locale::Es, "idioma"), (Locale::En, "language")] {
+        for (locale, expected) in [
+            (Locale::Es, "preguntame lo que quieras"),
+            (Locale::En, "ask me anything"),
+        ] {
             let action = super::chat_command_menu_action(ChatId(-42), locale);
             assert!(matches!(
                 &action,
@@ -445,7 +496,7 @@ mod tests {
                     commands,
                     language_code: None,
                     scope: CommandScope::Chat(ChatId(-42)),
-                } if commands.iter().any(|entry| entry.command == expected)
+                } if commands[0].command == "ask" && commands[0].description == expected
             ));
         }
     }

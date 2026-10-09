@@ -20,6 +20,8 @@ It streams replies, remembers conversations, understands media, tracks markets, 
 
 ## 🚀 Use
 
+Telegram's `/` menu shows the same command names in every language, the first name in each row below. Only the descriptions follow the user's language. The other names still work.
+
 ### AI and media
 
 | Command | Purpose |
@@ -37,8 +39,8 @@ It streams replies, remembers conversations, understands media, tracks markets, 
 | `/clima`, `/weather` | Current weather |
 | `/dolar`, `/dollar`, `/usd` | Dollar rates |
 | `/s`, `/accion`, `/acciones`, `/stock`, `/stocks` | Stock prices |
-| `/petroleo`, `/oil` | Oil prices |
-| `/eleccion`, `/elections` | Polymarket elections |
+| `/oil`, `/petroleo` | Oil prices |
+| `/elections`, `/eleccion` | Polymarket elections |
 | `/bcra`, `/variables` | BCRA variables |
 | `/devo`, `/rulo` | Arbitrage calculations |
 | `/powerlaw`, `/rainbow`, `/satoshi` | Bitcoin reference models |
@@ -48,14 +50,14 @@ It streams replies, remembers conversations, understands media, tracks markets, 
 | Command | Purpose |
 | --- | --- |
 | `/config`, `/settings` | Chat settings |
-| `/language`, `/idioma` | Language settings |
-| `/ban`, `/vetar`, `/unban`, `/desvetar` | Group admins: reply to someone to stop or allow them using the bot in that group |
-| `/banned`, `/vetados` | List who is banned in the group |
+| `/idioma`, `/language` | Language settings |
+| `/ban`, `/unban`, `/vetar`, `/desvetar` | Group admins: reply to someone to stop or allow them using the bot in that group |
+| `/bans`, `/banned`, `/vetados` | List who is banned in the group |
 | `/topup`, `/balance` | Add or check AI credits |
-| `/charges`, `/history`, `/gastos` | Credit history |
+| `/gastos`, `/charges`, `/history` | Credit history |
 | `/transfer` | Move credits to a group, or to someone by replying to them |
 | `/tarea`, `/task`, `/tareas`, `/tasks` | Manage scheduled tasks |
-| `/random`, `/convertbase`, `/comando`, `/time` | Utilities |
+| `/random`, `/convertbase`, `/command`, `/comando`, `/time` | Utilities |
 | `/gm`, `/gn`, `/help`, `/instance` | Greetings and bot information |
 
 ## Prices and charts

@@ -5980,7 +5980,7 @@ mod tests {
 
         let mut flaky = Flaky::default();
         assert_eq!(publish_telegram_commands(&mut flaky), Err(1));
-        assert_eq!(flaky.0, 4);
+        assert_eq!(flaky.0, 5);
     }
 
     #[test]
@@ -6014,7 +6014,12 @@ mod tests {
                     scope: bot_core::telegram_actions::CommandScope::AllGroupChats,
                     ..
                 },
-            ] if spanish == "es" && english == "en"
+                TelegramAction::SetCommands {
+                    language_code: Some(group_english),
+                    scope: bot_core::telegram_actions::CommandScope::AllGroupChats,
+                    ..
+                },
+            ] if spanish == "es" && english == "en" && group_english == "en"
         ));
     }
 
