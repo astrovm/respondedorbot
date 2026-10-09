@@ -432,7 +432,12 @@ mod tests {
                 ..ChatConfig::default()
             };
             let (text, page) = render_config_page(&config, Locale::En, true, "payer");
-            assert!(text.starts_with("Who pays first\n\n"));
+            assert_eq!(
+                text,
+                "Who pays first\n\nWho pays for the AI messages of someone with their own credits.\n\n• Group: the group pays up to the hourly limit, then their credits.\n• Members: they pay with their credits, and the group when theirs run out."
+            );
+            let (spanish, _) = render_config_page(&config, Locale::Es, true, "payer");
+            assert!(spanish.starts_with("Quién paga primero\n\nQuién paga los mensajes de IA"));
             let options = &page.inline_keyboard[0];
             assert_eq!(
                 options
