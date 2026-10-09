@@ -108,8 +108,10 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
         match plan.action {
             StreamAction::None => {}
             StreamAction::Send => {
-                let receipt = self.actions.execute(self.send_action(&self.buffer, true))?;
+                // One attempt only: after a failure the final reply is sent
+                // by `finalize`, instead of retrying on every token.
                 self.send_attempted = true;
+                let receipt = self.actions.execute(self.send_action(&self.buffer, true))?;
                 self.accept_send(receipt, now_seconds);
             }
             StreamAction::Edit => self.try_edit(now_seconds, true),
@@ -183,10 +185,10 @@ impl<'a, Actions: ActionSink> TelegramStream<'a, Actions> {
             return Ok(());
         }
         if self.message_id.is_none() && !self.send_attempted {
+            self.send_attempted = true;
             let receipt = self
                 .actions
                 .execute(self.send_action(&self.buffer, disable_web_page_preview))?;
-            self.send_attempted = true;
             self.accept_send(receipt, now_seconds);
         } else if self.message_id.is_some()
             && self.buffer != self.sent_text

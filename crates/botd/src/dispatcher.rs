@@ -4311,15 +4311,13 @@ where
                 .with_thinking_text(thinking_text(locale));
             // The thinking status waits for the source to admit the turn, so
             // denied or spontaneous turns that end silently never flash it.
+            // Live updates are best effort: a failed send or edit must not
+            // abort a model call that is already running. `finalize` still
+            // delivers the reply.
             let mut thinking_status_failed = false;
             let preparation = source.prepare_streaming_events(input, &mut |event| {
-                if event == AiStreamEvent::Admitted {
-                    thinking_status_failed |= stream.feed(event).is_err();
-                    return Ok(());
-                }
-                stream
-                    .feed(event)
-                    .map_err(|error| format!("Telegram rejected the streamed response: {error}"))
+                thinking_status_failed |= stream.feed(event).is_err();
+                Ok(())
             });
             match preparation {
                 Err(error) => {
@@ -4359,7 +4357,7 @@ where
         };
         if thinking_status_failed {
             self.state_diagnostics.push(
-                "AI Telegram thinking status send failed; continuing so response delivery can retry"
+                "AI Telegram live update failed; continuing so response delivery can retry"
                     .to_owned(),
             );
         }
@@ -4654,12 +4652,12 @@ where
             };
             let mut stream = TelegramAiStream::new(&mut self.actions, chat_id, message_id)
                 .with_thinking_text(thinking_text(locale));
-            let thinking_status_failed = stream.show_thinking().is_err();
+            // Live updates are best effort, as for chat replies.
+            let mut thinking_status_failed = stream.show_thinking().is_err();
             let preparation =
                 source.prepare_summary_command_streaming_events(input, &mut |event| {
-                    stream
-                        .feed(event)
-                        .map_err(|error| format!("Telegram rejected the summary stream: {error}"))
+                    thinking_status_failed |= stream.feed(event).is_err();
+                    Ok(())
                 });
             match preparation {
                 Err(error) => {
@@ -4704,7 +4702,7 @@ where
         };
         if thinking_status_failed {
             self.state_diagnostics.push(
-                "summary Telegram thinking status send failed; continuing so response delivery can retry"
+                "summary Telegram live update failed; continuing so response delivery can retry"
                     .to_owned(),
             );
         }
@@ -19558,27 +19556,27 @@ mod tests {
     }
 
     #[test]
-    fn rejected_stream_drafts_fail_the_turn_with_a_retry_reply() {
+    fn rejected_live_updates_still_deliver_the_reply() {
         for (text, diagnostic, reply) in [
             (
                 "synthetic question",
-                "AI conversation: Telegram rejected the streamed response: synthetic draft failure",
-                "Me quedé reculando y no te pude responder. Probá de nuevo",
+                "AI Telegram live update failed; continuing so response delivery can retry",
+                "respuesta",
             ),
             (
                 "/summary",
-                "summary command: Telegram rejected the summary stream: synthetic draft failure",
-                "No pude generar el resumen. Probá de nuevo",
+                "summary Telegram live update failed; continuing so response delivery can retry",
+                "resumen",
             ),
         ] {
             let (mut source, _observations) =
                 ai_source(Ok(AiPreparation::reply("respuesta", None)));
             source.tokens = vec!["borrador".to_owned()];
             source.summary_preparation = Some(Ok(AiPreparation::reply("resumen", None)));
-            // The thinking status and the first draft are both rejected.
+            // The thinking status is rejected; the reply is still sent once.
             let mut dispatcher = configured(
                 ChatConfig::default(),
-                failing_actions(ActionKind::SendMessage, 2, "synthetic draft failure", false),
+                failing_actions(ActionKind::SendMessage, 1, "synthetic draft failure", false),
             )
             .with_ai_conversation_source(Box::new(source));
             assert_eq!(
