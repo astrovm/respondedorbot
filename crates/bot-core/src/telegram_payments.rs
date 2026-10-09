@@ -51,6 +51,17 @@ pub fn default_billing_pack(pack_id: &str) -> Option<BillingPackTerms> {
         })
 }
 
+/// Every production pack, smallest first.
+pub fn billing_packs() -> impl Iterator<Item = BillingPackTerms> {
+    DEFAULT_BILLING_PACKS
+        .iter()
+        .map(|(id, xtr_amount, credits_awarded)| BillingPackTerms {
+            id: (*id).to_owned(),
+            xtr_amount: *xtr_amount,
+            credits_awarded: *credits_awarded,
+        })
+}
+
 #[must_use]
 pub fn invoice_payload_locale(payload: &str) -> Option<&str> {
     let mut parts = payload.split(':');
@@ -64,11 +75,42 @@ pub fn invoice_payload_locale(payload: &str) -> Option<&str> {
 }
 
 /// Pack sizes are whole credits, so buttons drop the ",00".
-fn whole_credits(units: i64) -> String {
+pub(crate) fn whole_credits(units: i64) -> String {
     let formatted = display_credit_units(CreditUnits::new(units));
     formatted
         .strip_suffix(".00")
         .map_or_else(|| formatted.clone(), ToOwned::to_owned)
+}
+
+/// The Stars pack list, with a way into the Lightning packs when they are
+/// available.
+#[must_use]
+pub fn topup_menu(locale: Locale, lightning_available: bool) -> (String, InlineKeyboardMarkup) {
+    let mut text = match locale {
+        Locale::Es => "Cargar créditos\n\nElegí un pack. Pagás con Telegram Stars y los créditos van a tu saldo personal.",
+        Locale::En => "Add credits\n\nChoose a pack. You pay with Telegram Stars and the credits go to your personal balance.",
+    }
+    .to_owned();
+    let mut keyboard = topup_keyboard(locale);
+    if lightning_available {
+        text.push_str(match locale {
+            Locale::Es => "\n\nCon Lightning ⚡ te sale más barato.",
+            Locale::En => "\n\nLightning ⚡ is cheaper.",
+        });
+        let close_row = keyboard.inline_keyboard.len() - 1;
+        keyboard.inline_keyboard.insert(
+            close_row,
+            vec![crate::menu_ui::button(
+                crate::menu_ui::localized(
+                    locale,
+                    "⚡ Pagar con Lightning",
+                    "⚡ Pay with Lightning",
+                ),
+                crate::lightning_topup::LIGHTNING_MENU_CALLBACK,
+            )],
+        );
+    }
+    (text, keyboard)
 }
 
 fn topup_keyboard(locale: Locale) -> InlineKeyboardMarkup {
@@ -97,6 +139,7 @@ fn topup_keyboard(locale: Locale) -> InlineKeyboardMarkup {
 }
 
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn plan_topup_command(
     chat_id: ChatId,
     message_id: MessageId,
@@ -105,6 +148,7 @@ pub fn plan_topup_command(
     locale: Locale,
     chat_type: &str,
     billing_available: bool,
+    lightning_available: bool,
 ) -> Option<TelegramAction> {
     if parse_command(message_text, bot_name).command != "/topup" {
         return None;
@@ -140,14 +184,8 @@ pub fn plan_topup_command(
             }),
         )
     } else {
-        (
-            match locale {
-                Locale::Es => "Cargar créditos\n\nElegí un pack. Pagás con Telegram Stars y los créditos van a tu saldo personal.",
-                Locale::En => "Add credits\n\nChoose a pack. You pay with Telegram Stars and the credits go to your personal balance.",
-            }
-            .to_owned(),
-            Some(topup_keyboard(locale)),
-        )
+        let (text, keyboard) = topup_menu(locale, lightning_available);
+        (text, Some(keyboard))
     };
     let mut message = SendMessage::new(chat_id, &text);
     message.reply_to_message_id = Some(message_id);
@@ -739,6 +777,7 @@ mod tests {
             Locale::En,
             "private",
             true,
+            false,
         );
         let private = sent(private).ok_or("private topup message")?;
         assert!(private.text.starts_with("Add credits\n\n"));
@@ -787,6 +826,7 @@ mod tests {
                 locale,
                 chat_type,
                 available,
+                false,
             ))
             .ok_or("topup message")?;
             assert_eq!(message.text, expected);
@@ -807,6 +847,7 @@ mod tests {
                 Locale::Es,
                 "private",
                 true,
+                false,
             ),
             None
         );
@@ -1328,6 +1369,7 @@ mod tests {
             Locale::Es,
             "private",
             true,
+            false,
         ))
         .ok_or("spanish catalog")?;
         assert!(
@@ -1350,6 +1392,7 @@ mod tests {
             Locale::En,
             "supergroup",
             true,
+            false,
         ))
         .ok_or("english redirect")?;
         assert_eq!(group.text, "Top-ups happen in private: open @mybot");
@@ -1373,6 +1416,7 @@ mod tests {
             Locale::Es,
             "group",
             true,
+            false,
         ))
         .ok_or("spanish redirect")?;
         assert_eq!(

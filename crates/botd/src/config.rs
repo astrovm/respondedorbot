@@ -49,6 +49,8 @@ pub struct ProductionConfig {
     firecrawl_api_key: Option<String>,
     supadata_api_key: Option<String>,
     apify_api_key: Option<String>,
+    opennode_api_key: Option<String>,
+    pub opennode_api_url: String,
     pub system_prompt: String,
     pub trigger_words: Vec<String>,
     pub reconciliation_interval: Duration,
@@ -116,6 +118,8 @@ impl fmt::Debug for ProductionConfig {
             .field("firecrawl_configured", &self.firecrawl_api_key.is_some())
             .field("supadata_configured", &self.supadata_api_key.is_some())
             .field("apify_configured", &self.apify_api_key.is_some())
+            .field("opennode_configured", &self.opennode_api_key.is_some())
+            .field("opennode_api_url", &self.opennode_api_url)
             .field("system_prompt", &"[REDACTED]")
             .field("trigger_words", &self.trigger_words)
             .field("reconciliation_interval", &self.reconciliation_interval)
@@ -422,6 +426,9 @@ impl ProductionConfig {
             firecrawl_api_key: optional_trimmed(&lookup, "FIRECRAWL_API_KEY"),
             supadata_api_key: optional_trimmed(&lookup, "SUPADATA_API_KEY"),
             apify_api_key: optional_trimmed(&lookup, "APIFY_API_KEY"),
+            opennode_api_key: optional_trimmed(&lookup, "OPENNODE_API_KEY"),
+            opennode_api_url: optional_trimmed(&lookup, "OPENNODE_API_URL")
+                .unwrap_or_else(|| bot_adapters::opennode::OPENNODE_API_URL.to_owned()),
             system_prompt,
             trigger_words,
             reconciliation_interval,
@@ -462,6 +469,12 @@ impl ProductionConfig {
     #[must_use]
     pub fn apify_api_key(&self) -> Option<&str> {
         self.apify_api_key.as_deref()
+    }
+
+    /// Lightning top-ups are offered only when this key is set.
+    #[must_use]
+    pub fn opennode_api_key(&self) -> Option<&str> {
+        self.opennode_api_key.as_deref()
     }
 
     #[must_use]

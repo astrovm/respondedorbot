@@ -1596,7 +1596,7 @@ impl BillingRepository {
         Ok(())
     }
 
-    fn run_transaction<T, F>(&self, operation: F) -> Result<T, BillingError>
+    pub(crate) fn run_transaction<T, F>(&self, operation: F) -> Result<T, BillingError>
     where
         F: for<'transaction> Fn(&mut Transaction<'transaction>) -> Result<T, BillingError>,
     {
@@ -1630,7 +1630,7 @@ impl BillingRepository {
             .is_some())
     }
 
-    fn balance_for_update(
+    pub(crate) fn balance_for_update(
         transaction: &mut Transaction<'_>,
         scope: BillingScope,
         scope_id: i64,
@@ -1649,7 +1649,7 @@ impl BillingRepository {
             .get(0))
     }
 
-    fn set_balance(
+    pub(crate) fn set_balance(
         transaction: &mut Transaction<'_>,
         scope: BillingScope,
         scope_id: i64,

@@ -33,6 +33,15 @@ boundary. Records also contain user, pack, XTR amount, awarded credit units,
 payload, and creation time. A duplicate Telegram payment must not award credits
 twice.
 
+### `lightning_charges`
+
+`charge_id` is the OpenNode charge id and the primary key. Records also contain
+user, chat, invoice message, pack, USD cents, awarded credit units, locale,
+status (`unpaid`, `paid` or `expired`), expiry, creation and settlement time.
+Settling moves any row that isn't `paid` yet (an expired invoice paid late
+still counts) to `paid` and writes a `topup` ledger entry in
+the same transaction, so a charge seen as paid twice awards credits once.
+
 ### `credit_ledger`
 
 The append-oriented ledger stores event type, actor/user/chat identifiers,
@@ -54,6 +63,7 @@ Known event types that must remain readable include:
 - `transfer_user_to_chat`
 - `transfer_user_to_user`
 - `admin_command`
+- `topup` (Stars and Lightning; Lightning ones carry `source: lightning`)
 
 Important metadata identifiers include `operation_id`, `settlement_id`,
 `segment_id`, `usage_tag`, provider generation/request identifiers,
@@ -234,6 +244,7 @@ Configuration includes:
 - `FIRECRAWL_API_KEY`
 - `SUPADATA_API_KEY`, `APIFY_API_KEY`
 - `COINMARKETCAP_KEY`
+- `OPENNODE_API_KEY`, `OPENNODE_API_URL`
 - `GIPHY_API_KEY`
 - `ADMIN_CHAT_ID`, `FRIENDLY_INSTANCE_NAME`
 - `AI_RECONCILIATION_INTERVAL_SECONDS`, `AI_RECONCILIATION_RETRY_SECONDS`

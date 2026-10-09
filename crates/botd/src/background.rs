@@ -12,7 +12,9 @@ use crate::compaction_adapters::{ProductionCompactionWorker, production_compacti
 use crate::compaction_worker::{
     CompactionBilling, CompactionProvider, CompactionQueue, CompactionState, CompactionWorker,
 };
+use crate::composition::TelegramActionSink;
 use crate::composition::TelegramDeliveryCoordinator;
+use crate::lightning_payments::{LightningPaymentWorker, OpenNodeOptions, opennode_provider};
 use crate::operational_reporting::{OperationalReport, OperationalReporter};
 use crate::price_refresh::production_price_refresh_worker;
 use crate::reconciliation::{
@@ -22,12 +24,15 @@ use crate::reconciliation::{
 use crate::scheduler::SchedulerMode;
 use crate::scheduler::{ScheduledTaskExecutor, SchedulerStep, SchedulerStore, TaskScheduler};
 use crate::task_service::{TaskServiceOptions, build_task_scheduler};
+use bot_adapters::billing_read::BillingRepository;
 use bot_adapters::openrouter_chat::OpenRouterPricingCache;
 use bot_adapters::redis_connection::RedisEndpoint;
+use bot_adapters::telegram_http::ReqwestTelegramTransport;
 
 const TASK_INTERVAL: Duration = Duration::from_secs(1);
 const TASK_WORKER_COUNT: usize = 4;
 const COMPACTION_INTERVAL: Duration = Duration::from_secs(2);
+const LIGHTNING_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const PRICE_REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const REPEATED_FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
@@ -46,6 +51,7 @@ pub struct ProductionBackgroundOptions<'a> {
     pub reconciliation_settings: ReconciliationSettings,
     pub active_operations: ActiveOperationRegistry,
     pub coinmarketcap_key: Option<&'a str>,
+    pub opennode: Option<OpenNodeOptions>,
     pub telegram_delivery: TelegramDeliveryCoordinator,
 }
 
@@ -102,6 +108,20 @@ pub fn build_production_background_specs(
             Box::new(price_refresh),
         ),
     ]);
+    if let Some(opennode) = &options.opennode {
+        let transport = ReqwestTelegramTransport::new()
+            .map_err(|error| format!("could not construct Telegram transport: {error:?}"))?;
+        task_workers.push(BackgroundWorkerSpec::new(
+            "lightning-payments",
+            LIGHTNING_POLL_INTERVAL,
+            Box::new(LightningPaymentWorker::new(
+                opennode_provider(&opennode.api_url, &opennode.api_key)?,
+                BillingRepository::new(options.database_url),
+                TelegramActionSink::new(transport, options.telegram_token)
+                    .with_delivery_coordinator(options.telegram_delivery.clone()),
+            )),
+        ));
+    }
     Ok(task_workers)
 }
 
@@ -492,6 +512,7 @@ mod tests {
         ProductionBackgroundOptions, build_production_background_specs, spawn_named_thread,
     };
     use crate::composition::TelegramDeliveryCoordinator;
+    use crate::lightning_payments::OpenNodeOptions;
     use crate::operational_reporting::{OperationalReport, OperationalReporter};
     use crate::reconciliation::{ActiveOperationRegistry, ReconciliationSettings};
     use crate::scheduler::SchedulerMode;
@@ -670,13 +691,17 @@ mod tests {
                 reconciliation_settings: ReconciliationSettings::default(),
                 active_operations: ActiveOperationRegistry::default(),
                 coinmarketcap_key: Some("synthetic-coinmarketcap-key"),
+                opennode: Some(OpenNodeOptions {
+                    api_key: "synthetic-opennode-key".to_owned(),
+                    api_url: "https://opennode.example.test".to_owned(),
+                }),
                 telegram_delivery: TelegramDeliveryCoordinator::default(),
             })
         };
         assert!(build("not-a-url").is_err());
         let result = build("https://openrouter.example.test/api/v1");
         assert!(result.is_ok());
-        assert_eq!(result.map(|specs| specs.len()), Ok(7));
+        assert_eq!(result.map(|specs| specs.len()), Ok(8));
         Ok(())
     }
 
@@ -989,6 +1014,7 @@ mod tests {
             reconciliation_settings: ReconciliationSettings::default(),
             active_operations: ActiveOperationRegistry::default(),
             coinmarketcap_key: None,
+            opennode: None,
             telegram_delivery: TelegramDeliveryCoordinator::default(),
         });
         assert!(matches!(&result, Err(error) if error.contains("owner token")));

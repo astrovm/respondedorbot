@@ -43,6 +43,10 @@ use bot_core::dollar::{
 };
 use bot_core::greeting_commands::{GreetingCategory, classify_greeting_command, greeting_fallback};
 use bot_core::language_command::{LanguageCommandPlan, plan_language_command};
+use bot_core::lightning_topup::{
+    LightningCallback, LightningInvoice, lightning_invoice_failed, lightning_invoice_message,
+    lightning_invoice_ready, lightning_menu, parse_lightning_callback,
+};
 use bot_core::links::{
     LinkActionContext, LinkMode, LinkReplacement, has_replaceable_link, plan_link_actions,
 };
@@ -79,10 +83,11 @@ use bot_core::telegram_callbacks::{
 use bot_core::telegram_commands::telegram_commands;
 use bot_core::telegram_input::{ChatId, MessageId, UserId, is_group_chat_type};
 use bot_core::telegram_payments::{
-    BalanceCommandContext, BalanceCommandPlan, StarPaymentRecord, SuccessfulPaymentDecision,
-    TopupCallbackPlan, balance_reply, evaluate_default_successful_payment, invoice_payload_locale,
-    payment_record, plan_balance_command, plan_pre_checkout, plan_topup_callback,
-    plan_topup_command, successful_payment_reply,
+    BalanceCommandContext, BalanceCommandPlan, BillingPackTerms, StarPaymentRecord,
+    SuccessfulPaymentDecision, TopupCallbackPlan, balance_reply,
+    evaluate_default_successful_payment, invoice_payload_locale, payment_record,
+    plan_balance_command, plan_pre_checkout, plan_topup_callback, plan_topup_command,
+    successful_payment_reply, topup_menu,
 };
 use bot_core::token_signals::{
     SIGNAL_REFRESH_COOLDOWN_SECONDS, SignalQuery, SignalState, TokenAddress, TokenSignal,
@@ -331,6 +336,21 @@ pub trait AdminCreditSink {
 
 pub trait AdminCreditLogSource {
     fn load(&mut self, limit: usize) -> Result<Vec<CreditLogEntry>, String>;
+}
+
+/// Creates Lightning charges at the payment provider and tracks them until
+/// the background poller credits them.
+pub trait LightningCheckout {
+    fn create(
+        &mut self,
+        user_id: i64,
+        chat_id: i64,
+        pack: &BillingPackTerms,
+        locale: bot_core::locale::Locale,
+    ) -> Result<LightningInvoice, String>;
+
+    /// Remembers the invoice message so the payment notice can reply to it.
+    fn attach_message(&mut self, charge_id: &str, message_id: i64) -> Result<(), String>;
 }
 
 /// Members a group's admins banned from using the bot in that group.
@@ -1054,6 +1074,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     admin_user_id: Option<i64>,
     admin_credit_sink: Option<Box<dyn AdminCreditSink>>,
     admin_creditlog_source: Option<Box<dyn AdminCreditLogSource>>,
+    lightning_checkout: Option<Box<dyn LightningCheckout>>,
     ban_store: Option<Box<dyn ChatBanStore>>,
     /// Set while a banned member's message is routed to the AI turn only to
     /// be recorded as ignored.
@@ -1118,6 +1139,7 @@ where
             admin_user_id: None,
             admin_credit_sink: None,
             admin_creditlog_source: None,
+            lightning_checkout: None,
             ban_store: None,
             sender_banned: false,
             bitcoin_price_source: None,
@@ -1190,6 +1212,12 @@ where
     #[must_use]
     pub fn with_admin_creditlog_source(mut self, source: Box<dyn AdminCreditLogSource>) -> Self {
         self.admin_creditlog_source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub fn with_lightning_checkout(mut self, checkout: Box<dyn LightningCheckout>) -> Self {
+        self.lightning_checkout = Some(checkout);
         self
     }
 
@@ -3867,6 +3895,14 @@ where
                 context.user_language_code.as_deref(),
                 &context.chat_type,
             );
+            if let Some(callback) = parse_lightning_callback(&context.data) {
+                return self.dispatch_lightning_callback(
+                    &context,
+                    ChatId(chat_id),
+                    callback,
+                    locale,
+                );
+            }
             return match plan_topup_callback(
                 context.callback_id.as_deref(),
                 &context.data,
@@ -4271,6 +4307,144 @@ where
         fallback.map_err(DispatchError::Action)?;
         if config.language != current_config.language {
             self.sync_chat_command_menu(chat_id, rendered_locale);
+        }
+        Ok(DispatchOutcome::Handled)
+    }
+
+    fn dispatch_lightning_callback(
+        &mut self,
+        context: &CallbackContext,
+        chat_id: ChatId,
+        callback: LightningCallback,
+        locale: bot_core::locale::Locale,
+    ) -> NativeDispatchResult<Config, Actions, Random> {
+        let callback_id = context.callback_id.as_deref();
+        let alert_text = if !self.billing_available {
+            Some(bot_core::billing_commands::billing_unavailable(locale))
+        } else if context.chat_type != "private" {
+            Some(match locale {
+                bot_core::locale::Locale::Es => "Cargá por privado, maestro",
+                bot_core::locale::Locale::En => "Open this in a private chat",
+            })
+        } else if self.lightning_checkout.is_none() {
+            Some(lightning_invoice_failed(locale))
+        } else if callback == LightningCallback::InvalidPack {
+            Some(match locale {
+                bot_core::locale::Locale::Es => "Ese pack es fruta, elegí otro",
+                bot_core::locale::Locale::En => "That credit pack is invalid, choose another one",
+            })
+        } else {
+            None
+        };
+        if let Some(text) = alert_text {
+            return self.answer_callback_alert(callback_id, text);
+        }
+        let message_id = MessageId(context.message_id);
+        let (pack, user_id) = match (callback, context.user_id) {
+            (LightningCallback::Pack(pack), Some(user_id)) => (pack, user_id),
+            (LightningCallback::Pack(_), None) => {
+                self.answer_callback_best_effort(callback_id);
+                return Ok(DispatchOutcome::Handled);
+            }
+            (menu, _) => {
+                self.answer_callback_best_effort(callback_id);
+                let (text, keyboard) = if menu == LightningCallback::Menu {
+                    lightning_menu(locale)
+                } else {
+                    topup_menu(locale, true)
+                };
+                self.actions
+                    .try_edit(TelegramAction::EditMessage {
+                        chat_id,
+                        message_id,
+                        text,
+                        reply_markup: Some(keyboard),
+                    })
+                    .map_err(DispatchError::Action)?;
+                return Ok(DispatchOutcome::Handled);
+            }
+        };
+        // Same single-flight guard as Stars invoices: a double tap must not
+        // create two payable charges.
+        let claim_key = topup_invoice_claim_key(user_id, &format!("ln:{}", pack.id));
+        let claimed = self
+            .market_price_source
+            .as_mut()
+            .map_or(Ok(true), |source| {
+                source.claim(claim_key.as_str(), "1", TOPUP_INVOICE_CLAIM_TTL_SECONDS)
+            })
+            .unwrap_or_else(|error| {
+                self.state_diagnostics.push(format!(
+                    "lightning invoice claim failed user_id={user_id}: {error}"
+                ));
+                true
+            });
+        if !claimed {
+            return self.answer_callback_alert(
+                callback_id,
+                match locale {
+                    bot_core::locale::Locale::Es => "Ya te dejé la factura más arriba",
+                    bot_core::locale::Locale::En => "The invoice is already above",
+                },
+            );
+        }
+        let created = self
+            .lightning_checkout
+            .as_mut()
+            .map(|checkout| checkout.create(user_id, chat_id.0, &pack, locale));
+        let Some(Ok(invoice)) = created else {
+            if let Some(Err(error)) = created {
+                self.state_diagnostics.push(format!(
+                    "lightning invoice user_id={user_id} pack={}: {error}",
+                    pack.id
+                ));
+            }
+            if let Some(source) = self.market_price_source.as_mut()
+                && let Err(error) = source.take_selection(claim_key.as_str())
+            {
+                self.state_diagnostics
+                    .push(format!("lightning invoice claim release failed: {error}"));
+            }
+            return self.answer_callback_alert(callback_id, lightning_invoice_failed(locale));
+        };
+        let message = lightning_invoice_message(chat_id, &pack, &invoice, locale);
+        let receipt = self
+            .actions
+            .execute(TelegramAction::SendMessage(message))
+            .map_err(DispatchError::Action)?;
+        if let (Some(sent), Some(checkout)) = (receipt.message_id, self.lightning_checkout.as_mut())
+            && let Err(error) = checkout.attach_message(&invoice.charge_id, sent.0)
+        {
+            self.state_diagnostics.push(format!(
+                "lightning invoice message charge_id={}: {error}",
+                invoice.charge_id
+            ));
+        }
+        if let Some(callback_id) = callback_id {
+            self.actions
+                .execute(TelegramAction::AnswerCallback {
+                    callback_id: callback_id.to_owned(),
+                    text: Some(lightning_invoice_ready(locale).to_owned()),
+                    show_alert: false,
+                })
+                .map_err(DispatchError::Action)?;
+        }
+        Ok(DispatchOutcome::Handled)
+    }
+
+    fn answer_callback_alert(
+        &mut self,
+        callback_id: Option<&str>,
+        text: &str,
+    ) -> NativeDispatchResult<Config, Actions, Random> {
+        if let Some(callback_id) = callback_id {
+            self.actions
+                .execute(TelegramAction::AnswerCallback {
+                    callback_id: callback_id.to_owned(),
+                    text: Some(text.to_owned()),
+                    show_alert: true,
+                })
+                .map_err(DispatchError::Action)?;
         }
         Ok(DispatchOutcome::Handled)
     }
@@ -5299,6 +5473,7 @@ where
             locale,
             message.chat_type.as_deref().unwrap_or_default(),
             self.billing_available,
+            self.lightning_checkout.is_some(),
         ) {
             StatelessCommandPlan::Action(action)
         } else if matches!(
@@ -6027,6 +6202,7 @@ mod tests {
         AiStreamEvent,
     };
 
+    use super::LightningCheckout;
     use super::{
         ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BcraLoad, BcraSource,
         BillingBalanceSource, BillingBalances, BillingTransferSink, BitcoinPriceSource,
@@ -6046,11 +6222,15 @@ mod tests {
     use bot_core::charge_history::{ChargeHistoryEntry, ChargeHistoryGroup};
     use bot_core::devo::DevoQuotes;
     use bot_core::greeting_commands::GreetingCategory;
+    use bot_core::lightning_topup::{
+        LIGHTNING_MENU_CALLBACK, LightningInvoice, lightning_invoice_failed,
+    };
     use bot_core::links::LinkReplacement;
     use bot_core::polymarket::parse_election_events;
     use bot_core::rulo::{ExchangeQuote, RuloInput};
     use bot_core::scheduled_tasks::{ScheduledTask, TaskId, TaskSchedule, TaskStateError};
     use bot_core::stocks::StockQuote;
+    use bot_core::telegram_payments::{BillingPackTerms, topup_menu};
     use bot_core::weather::WeatherObservation;
 
     struct Config {
@@ -17423,6 +17603,465 @@ mod tests {
             ]
         ));
         Ok(())
+    }
+
+    #[derive(Default)]
+    struct FakeLightningCheckout {
+        refuse: bool,
+        attach_error: bool,
+        log: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl LightningCheckout for FakeLightningCheckout {
+        fn create(
+            &mut self,
+            user_id: i64,
+            chat_id: i64,
+            pack: &BillingPackTerms,
+            locale: bot_core::locale::Locale,
+        ) -> Result<LightningInvoice, String> {
+            self.log
+                .borrow_mut()
+                .push(format!("create {user_id} {chat_id} {} {locale:?}", pack.id));
+            if self.refuse {
+                return Err("provider down".to_owned());
+            }
+            Ok(LightningInvoice {
+                charge_id: "charge-1".to_owned(),
+                payreq: "lnbc1synthetic".to_owned(),
+                checkout_url: None,
+                sats: Some(512),
+            })
+        }
+
+        fn attach_message(&mut self, charge_id: &str, message_id: i64) -> Result<(), String> {
+            self.log
+                .borrow_mut()
+                .push(format!("attach {charge_id} {message_id}"));
+            if self.attach_error {
+                return Err("database down".to_owned());
+            }
+            Ok(())
+        }
+    }
+
+    fn lightning_dispatcher(
+        actions: Actions,
+        checkout: Option<FakeLightningCheckout>,
+    ) -> NativeDispatcher<Config, Actions, State, Values, Samples, Authorization> {
+        lightning_dispatcher_in("en", actions, checkout)
+    }
+
+    fn lightning_dispatcher_in(
+        language: &str,
+        actions: Actions,
+        checkout: Option<FakeLightningCheckout>,
+    ) -> NativeDispatcher<Config, Actions, State, Values, Samples, Authorization> {
+        let config = Config {
+            value: Ok(ChatConfig {
+                language: language.to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let dispatcher = NativeDispatcher::new(
+            config,
+            actions,
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        );
+        match checkout {
+            Some(checkout) => dispatcher.with_lightning_checkout(Box::new(checkout)),
+            None => dispatcher,
+        }
+    }
+
+    fn callback_alerts(actions: &[TelegramAction]) -> Vec<(String, bool)> {
+        actions
+            .iter()
+            .filter_map(|action| match action {
+                TelegramAction::AnswerCallback {
+                    text: Some(text),
+                    show_alert,
+                    ..
+                } => Some((text.clone(), *show_alert)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn topup_offers_lightning_only_when_a_checkout_is_configured() {
+        let has_lightning_button = |checkout: Option<FakeLightningCheckout>| {
+            let mut dispatcher = lightning_dispatcher(Actions::default(), checkout);
+            assert_eq!(
+                dispatcher.dispatch(update("/topup", Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+            first_sent(&dispatcher.actions.0)
+                .reply_markup
+                .as_ref()
+                .is_some_and(|markup| {
+                    markup.inline_keyboard.iter().flatten().any(|button| {
+                        button.callback_data.as_deref() == Some(LIGHTNING_MENU_CALLBACK)
+                    })
+                })
+        };
+        assert!(has_lightning_button(Some(FakeLightningCheckout::default())));
+        assert!(!has_lightning_button(None));
+    }
+
+    #[test]
+    fn lightning_menus_switch_in_place() {
+        let mut dispatcher =
+            lightning_dispatcher(Actions::default(), Some(FakeLightningCheckout::default()));
+        for data in ["topup:ln", "topup:stars"] {
+            assert_eq!(
+                dispatcher.dispatch(callback_update(data, "private", Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+        }
+        let edits: Vec<_> = dispatcher
+            .actions
+            .0
+            .iter()
+            .filter_map(|action| match action {
+                TelegramAction::EditMessage {
+                    message_id: MessageId(7),
+                    text,
+                    reply_markup: Some(markup),
+                    ..
+                } => Some((text.clone(), markup.inline_keyboard.len())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(edits.len(), 2);
+        assert!(edits[0].0.starts_with("Pay with Lightning ⚡"));
+        assert_eq!(edits[0].1, 7);
+        assert_eq!(edits[1].0, topup_menu(bot_core::locale::Locale::En, true).0);
+    }
+
+    #[test]
+    fn lightning_pack_sends_the_invoice_and_links_its_message() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut dispatcher = lightning_dispatcher(
+            Actions::default(),
+            Some(FakeLightningCheckout {
+                log: Rc::clone(&log),
+                ..FakeLightningCheckout::default()
+            }),
+        );
+        assert_eq!(
+            dispatcher.dispatch(callback_update("topup:ln:p50", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            *log.borrow(),
+            ["create 88 -42 p50 En", "attach charge-1 700"]
+        );
+        let invoice = first_sent(&dispatcher.actions.0);
+        assert_eq!(invoice.chat_id, ChatId(-42));
+        assert!(invoice.text.starts_with("Lightning invoice ⚡"));
+        assert!(invoice.text.contains("<code>lnbc1synthetic</code>"));
+        assert_eq!(
+            callback_alerts(&dispatcher.actions.0),
+            [("Invoice ready".to_owned(), false)]
+        );
+        assert!(dispatcher.state_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn lightning_invoice_without_a_message_id_or_callback_id_still_succeeds() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut dispatcher = lightning_dispatcher(
+            Actions::scripted(ActionScript {
+                receipts: Receipts::Fixed(None),
+                ..ActionScript::default()
+            }),
+            Some(FakeLightningCheckout {
+                log: Rc::clone(&log),
+                ..FakeLightningCheckout::default()
+            }),
+        );
+        assert_eq!(
+            dispatcher.dispatch(callback_update_with_context(
+                "topup:ln:p50",
+                json!(88),
+                "private",
+                7,
+                Some(88),
+                Some("en"),
+                None,
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(*log.borrow(), ["create 88 88 p50 En"]);
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [TelegramAction::SendMessage(_)]
+        ));
+    }
+
+    #[test]
+    fn lightning_invoice_message_link_failure_is_only_a_diagnostic() {
+        let mut dispatcher = lightning_dispatcher(
+            Actions::default(),
+            Some(FakeLightningCheckout {
+                attach_error: true,
+                ..FakeLightningCheckout::default()
+            }),
+        );
+        assert_eq!(
+            dispatcher.dispatch(callback_update("topup:ln:p50", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            dispatcher.state_diagnostics(),
+            ["lightning invoice message charge_id=charge-1: database down"]
+        );
+        assert_eq!(
+            callback_alerts(&dispatcher.actions.0),
+            [("Invoice ready".to_owned(), false)]
+        );
+    }
+
+    #[test]
+    fn lightning_guards_answer_with_alerts() {
+        let unavailable = |dispatcher: &mut NativeDispatcher<
+            Config,
+            Actions,
+            State,
+            Values,
+            Samples,
+            Authorization,
+        >,
+                           data: &str,
+                           chat_type: &str| {
+            assert_eq!(
+                dispatcher.dispatch(callback_update(data, chat_type, Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+            callback_alerts(&dispatcher.actions.0)
+                .pop()
+                .map(|(text, show_alert)| {
+                    assert!(show_alert);
+                    text
+                })
+                .unwrap_or_default()
+        };
+        let mut dispatcher =
+            lightning_dispatcher(Actions::default(), Some(FakeLightningCheckout::default()));
+        assert_eq!(
+            unavailable(&mut dispatcher, "topup:ln:p50", "group"),
+            "Open this in a private chat"
+        );
+        assert_eq!(
+            unavailable(&mut dispatcher, "topup:ln:nope", "private"),
+            "That credit pack is invalid, choose another one"
+        );
+        dispatcher.billing_available = false;
+        assert_eq!(
+            unavailable(&mut dispatcher, "topup:ln", "private"),
+            bot_core::billing_commands::billing_unavailable(bot_core::locale::Locale::En)
+        );
+        let mut without_checkout = lightning_dispatcher(Actions::default(), None);
+        assert_eq!(
+            unavailable(&mut without_checkout, "topup:ln:p50", "private"),
+            lightning_invoice_failed(bot_core::locale::Locale::En)
+        );
+    }
+
+    #[test]
+    fn lightning_alerts_speak_spanish() {
+        let mut dispatcher = lightning_dispatcher_in(
+            "es",
+            Actions::default(),
+            Some(FakeLightningCheckout::default()),
+        )
+        .with_market_price_source(Box::new(SelectableMarketPrices {
+            initial: market_selection_load(None),
+            candidate: market_candidate_quote(),
+            stored: Rc::new(RefCell::new(HashMap::new())),
+            selected: Rc::new(RefCell::new(Vec::new())),
+        }));
+        for (data, chat_type) in [
+            ("topup:ln:p50", "group"),
+            ("topup:ln:nope", "private"),
+            ("topup:ln:p50", "private"),
+            ("topup:ln:p50", "private"),
+        ] {
+            assert_eq!(
+                dispatcher.dispatch(callback_update(data, chat_type, Some("es"))),
+                Ok(DispatchOutcome::Handled)
+            );
+        }
+        assert_eq!(
+            callback_alerts(&dispatcher.actions.0),
+            [
+                ("Cargá por privado, maestro".to_owned(), true),
+                ("Ese pack es fruta, elegí otro".to_owned(), true),
+                ("Listo, te dejé la factura".to_owned(), false),
+                ("Ya te dejé la factura más arriba".to_owned(), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn lightning_alerts_without_a_callback_id_stay_silent() {
+        let mut dispatcher =
+            lightning_dispatcher(Actions::default(), Some(FakeLightningCheckout::default()));
+        assert_eq!(
+            dispatcher.dispatch(callback_update_with_context(
+                "topup:ln:p50",
+                json!(-42),
+                "group",
+                7,
+                Some(88),
+                Some("en"),
+                None,
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(dispatcher.actions.0.is_empty());
+    }
+
+    #[test]
+    fn lightning_pack_without_a_user_is_ignored() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut dispatcher = lightning_dispatcher(
+            Actions::default(),
+            Some(FakeLightningCheckout {
+                log: Rc::clone(&log),
+                ..FakeLightningCheckout::default()
+            }),
+        );
+        assert_eq!(
+            dispatcher.dispatch(callback_update_with_context(
+                "topup:ln:p50",
+                json!(88),
+                "private",
+                7,
+                None,
+                None,
+                Some("callback-1"),
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(log.borrow().is_empty());
+        assert!(matches!(
+            dispatcher.actions.0.as_slice(),
+            [TelegramAction::AnswerCallback { text: None, .. }]
+        ));
+    }
+
+    #[test]
+    fn double_tapped_lightning_pack_creates_a_single_charge() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let mut dispatcher = lightning_dispatcher(
+            Actions::default(),
+            Some(FakeLightningCheckout {
+                log: Rc::clone(&log),
+                ..FakeLightningCheckout::default()
+            }),
+        )
+        .with_market_price_source(Box::new(SelectableMarketPrices {
+            initial: market_selection_load(None),
+            candidate: market_candidate_quote(),
+            stored: Rc::clone(&stored),
+            selected: Rc::new(RefCell::new(Vec::new())),
+        }));
+        for _ in 0..2 {
+            assert_eq!(
+                dispatcher.dispatch(callback_update("topup:ln:p50", "private", Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+        }
+        assert_eq!(
+            log.borrow()
+                .iter()
+                .filter(|entry| entry.starts_with("create"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            callback_alerts(&dispatcher.actions.0),
+            [
+                ("Invoice ready".to_owned(), false),
+                ("The invoice is already above".to_owned(), true),
+            ]
+        );
+        assert_eq!(stored.borrow().len(), 1);
+    }
+
+    #[test]
+    fn failed_lightning_charge_releases_the_claim_for_retry() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let mut dispatcher = lightning_dispatcher(
+            Actions::default(),
+            Some(FakeLightningCheckout {
+                refuse: true,
+                log: Rc::clone(&log),
+                ..FakeLightningCheckout::default()
+            }),
+        )
+        .with_market_price_source(Box::new(SelectableMarketPrices {
+            initial: market_selection_load(None),
+            candidate: market_candidate_quote(),
+            stored: Rc::clone(&stored),
+            selected: Rc::new(RefCell::new(Vec::new())),
+        }));
+        for _ in 0..2 {
+            assert_eq!(
+                dispatcher.dispatch(callback_update("topup:ln:p50", "private", Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+        }
+        assert_eq!(log.borrow().len(), 2);
+        assert!(stored.borrow().is_empty());
+        let failed = lightning_invoice_failed(bot_core::locale::Locale::En).to_owned();
+        assert_eq!(
+            callback_alerts(&dispatcher.actions.0),
+            [(failed.clone(), true), (failed, true)]
+        );
+        assert!(
+            dispatcher
+                .state_diagnostics()
+                .contains(&"lightning invoice user_id=88 pack=p50: provider down".to_owned())
+        );
+    }
+
+    #[test]
+    fn lightning_claim_storage_failures_are_diagnostics() {
+        let mut dispatcher = lightning_dispatcher(
+            Actions::default(),
+            Some(FakeLightningCheckout {
+                refuse: true,
+                ..FakeLightningCheckout::default()
+            }),
+        )
+        .with_market_price_source(Box::new(ScriptedTakeMarketPrices {
+            load: Ok(None),
+            takes: RefCell::new(VecDeque::from([Err("redis down".to_owned())])),
+            saves: RefCell::new(VecDeque::new()),
+            candidate: market_candidate_quote(),
+        }));
+        assert_eq!(
+            dispatcher.dispatch(callback_update("topup:ln:p50", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            dispatcher.state_diagnostics(),
+            [
+                "lightning invoice claim failed user_id=88: market selection storage unavailable",
+                "lightning invoice user_id=88 pack=p50: provider down",
+                "lightning invoice claim release failed: redis down",
+            ]
+        );
     }
 
     #[test]

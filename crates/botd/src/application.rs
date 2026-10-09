@@ -23,6 +23,7 @@ use crate::composition::{
 use crate::config::ProductionConfig;
 use crate::dispatcher::ActionSink;
 use crate::error_text;
+use crate::lightning_payments::OpenNodeOptions;
 use crate::operational_reporting::{
     NoopOperationalReporter, OperationalReport, OperationalReporter, TelegramOperationalReporter,
 };
@@ -173,6 +174,13 @@ fn interruptible_wait(stopping: &AtomicBool, duration: Duration) {
     }
 }
 
+fn opennode_options(config: &ProductionConfig) -> Option<OpenNodeOptions> {
+    config.opennode_api_key().map(|api_key| OpenNodeOptions {
+        api_key: api_key.to_owned(),
+        api_url: config.opennode_api_url.clone(),
+    })
+}
+
 fn build_operational_reporter(
     config: &ProductionConfig,
 ) -> Result<Arc<dyn OperationalReporter>, String> {
@@ -190,6 +198,7 @@ fn build_operational_reporter(
         config.firecrawl_api_key(),
         config.supadata_api_key(),
         config.apify_api_key(),
+        config.opennode_api_key(),
         Some(config.system_prompt.as_str()),
     ]
     .into_iter()
@@ -314,6 +323,7 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
         firecrawl_api_key: config.firecrawl_api_key().map(str::to_owned),
         supadata_api_key: config.supadata_api_key().map(str::to_owned),
         apify_api_key: config.apify_api_key().map(str::to_owned),
+        opennode: opennode_options(config),
         system_prompt: Some(config.system_prompt.clone()),
         trigger_words: Some(config.trigger_words.clone()),
         active_operations: active_operations.clone(),
@@ -335,6 +345,7 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
         reconciliation_settings: config.reconciliation_settings,
         active_operations,
         coinmarketcap_key: Some(config.coinmarketcap_key()),
+        opennode: opennode_options(config),
         telegram_delivery: telegram_delivery.clone(),
     })?;
     let mut supervisor =
@@ -388,8 +399,8 @@ mod tests {
 
     use super::{
         BackgroundReports, ShutdownHandler, build_operational_reporter, install_shutdown_handler,
-        interruptible_wait, log_and_queue, poll_retry_report, poll_until_stopped, publish_commands,
-        report_best_effort, retry_delay, run_polling_until, telegram_transport,
+        interruptible_wait, log_and_queue, opennode_options, poll_retry_report, poll_until_stopped,
+        publish_commands, report_best_effort, retry_delay, run_polling_until, telegram_transport,
         update_failure_report,
     };
     use crate::config::ProductionConfig;
@@ -667,6 +678,8 @@ mod tests {
                 "COINMARKETCAP_KEY" => Some("synthetic-market-key".to_owned()),
                 "OPENROUTER_API_KEY" => Some("synthetic-ai-key".to_owned()),
                 "ADMIN_CHAT_ID" => admin.map(str::to_owned),
+                // The admin config also exercises the optional Lightning keys.
+                "OPENNODE_API_KEY" => admin.map(|_| "synthetic-opennode-key".to_owned()),
                 _ => None,
             };
             let config = ProductionConfig::from_lookup_and_prompt(lookup, || {
@@ -684,6 +697,14 @@ mod tests {
             Some("could not construct admin reporting transport: Request")
         );
         assert!(build_operational_reporter(&config(Some("42"))).is_ok());
+        assert!(opennode_options(&config(None)).is_none());
+        assert_eq!(
+            opennode_options(&config(Some("42"))).map(|options| (options.api_key, options.api_url)),
+            Some((
+                "synthetic-opennode-key".to_owned(),
+                "https://api.opennode.com".to_owned()
+            ))
+        );
 
         struct FailingReporter;
         impl OperationalReporter for FailingReporter {
