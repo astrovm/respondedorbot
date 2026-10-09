@@ -7231,13 +7231,13 @@ mod tests {
         assert_eq!(transfer.user_balance, initial_user_balance - 25);
         assert_eq!(transfer.chat_balance, 25);
         // Personal credits to another user; only the recipient gains them.
-        let recipient_id = user_id + 1;
+        let (recipient_id, operation) = (user_id + 1, fresh_op());
         let sent = BillingTransferSink::transfer_to_user(
             &mut billing,
             user_id,
             recipient_id,
             5,
-            &fresh_op(),
+            &operation,
         )?;
         assert!(sent.transferred);
         assert_eq!(sent.user_balance, initial_user_balance - 30);

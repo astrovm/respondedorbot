@@ -17695,6 +17695,52 @@ mod tests {
     }
 
     #[test]
+    fn user_transfers_need_the_transfer_service_and_fail_in_english_too() {
+        let reply_to_person = |language: &str| {
+            message_update("/transfer 0.1", Some(language), |message| {
+                message.chat_type = Some("group".to_owned());
+                message.has_reply = true;
+                message.replied_sender_id = Some(UserId(77));
+            })
+        };
+        let english = || Config {
+            value: Ok(ChatConfig {
+                language: "en".to_owned(),
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let build = || {
+            NativeDispatcher::new(
+                english(),
+                Actions::default(),
+                State::default(),
+                values(),
+                random(),
+                authorization(),
+                "@mybot",
+            )
+            .with_ai_conversation_source(Box::new(ai_source(Ok(AiPreparation::silent())).0))
+        };
+        assert_eq!(
+            build().dispatch(reply_to_person("en")),
+            Err(DispatchError::MissingService("credit transfers"))
+        );
+        let mut failing = build().with_transfer_sink(Box::new(Transfers {
+            result: Err("synthetic database failure".to_owned()),
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            failing.dispatch(reply_to_person("en")),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            first_sent(&failing.actions.0).text,
+            "The transfer failed. Try again"
+        );
+    }
+
+    #[test]
     fn user_transfer_names_fall_back_by_locale() {
         let message = IncomingMessage {
             replied_sender_first_name: None,

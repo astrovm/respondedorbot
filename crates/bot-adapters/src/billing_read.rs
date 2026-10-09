@@ -2366,6 +2366,7 @@ mod tests {
                 chat_balance: 200,
             }
         );
+        let sender_text = SENDER.to_string();
         let user_evidence = client.query_one(
             "SELECT \
                 COUNT(*), \
@@ -2374,7 +2375,7 @@ mod tests {
              FROM credit_ledger \
              WHERE event_type = 'transfer_user_to_user' \
                AND metadata->>'command_operation_id' = $1",
-            &[&user_operation, &RECIPIENT, &SENDER.to_string()],
+            &[&user_operation, &RECIPIENT, &sender_text],
         )?;
         assert_eq!(user_evidence.get::<_, i64>(0), 2);
         assert_eq!(user_evidence.get::<_, i64>(1), 120);
