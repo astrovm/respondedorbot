@@ -68,7 +68,9 @@ where
 
 /// Rewrites the menu of each chat with a fixed language, so chats that got
 /// their own menu pick up catalog changes without anyone touching `/config`.
-/// One report covers every failed chat.
+/// One report covers every failed chat. Chats the bot can no longer reach
+/// (removed, blocked, deleted) are skipped quietly, since they fail on every
+/// restart and need no action.
 pub fn refresh_chat_menus<S, E>(
     sink: &mut S,
     chats: Result<Vec<(i64, String)>, E>,
@@ -92,8 +94,11 @@ where
     for (chat_id, language) in &chats {
         let locale = bot_core::locale::normalize_locale(language, Locale::Es);
         if let Err(error) = sink.execute(chat_command_menu_action(ChatId(*chat_id), locale)) {
-            failed += 1;
-            last_error = error.to_string();
+            let error = error.to_string();
+            if !chat_is_unreachable(&error) {
+                failed += 1;
+                last_error = error;
+            }
         }
     }
     if failed == 0 {
@@ -109,6 +114,13 @@ where
             chats.len()
         ),
     )]
+}
+
+/// Telegram's answers for a chat the bot is no longer in or can't write to.
+fn chat_is_unreachable(error: &str) -> bool {
+    ["Forbidden:", "chat not found", "upgraded to a supergroup"]
+        .iter()
+        .any(|marker| error.contains(marker))
 }
 
 pub fn run_polling_until<Source, Handler, Stop, Wait, ReportRetry, ReportHandler>(
@@ -553,6 +565,48 @@ mod tests {
             [
                 (ChatId(-42), "ask", "ask me anything"),
                 (ChatId(7), "ask", "preguntame lo que quieras"),
+            ]
+        );
+    }
+
+    #[test]
+    fn chat_menu_refresh_skips_chats_the_bot_can_no_longer_reach() {
+        struct Answers(VecDeque<Result<ActionReceipt, &'static str>>);
+
+        impl ActionSink for Answers {
+            type Error = &'static str;
+
+            fn execute(&mut self, _action: TelegramAction) -> Result<ActionReceipt, Self::Error> {
+                self.0
+                    .pop_front()
+                    .unwrap_or(Ok(ActionReceipt { message_id: None }))
+            }
+        }
+
+        let gone = [
+            "Telegram action failed with status Some(403): Forbidden: bot was kicked from the group chat",
+            "Telegram action failed with status Some(403): Forbidden: bot was blocked by the user",
+            "Telegram action failed with status Some(400): Bad Request: chat not found",
+            "Telegram action failed with status Some(400): Bad Request: group chat was upgraded to a supergroup chat",
+        ];
+        let chats = (1..=5)
+            .map(|chat| (chat, "es".to_owned()))
+            .collect::<Vec<_>>();
+        let mut sink = Answers(gone.iter().map(|error| Err(*error)).collect());
+        assert!(refresh_chat_menus(&mut sink, Ok::<_, &str>(chats.clone())).is_empty());
+
+        let mut sink = Answers(VecDeque::from([
+            Err(gone[0]),
+            Err("Telegram action transport failed: Timeout"),
+        ]));
+        let reports = refresh_chat_menus(&mut sink, Ok::<_, &str>(chats));
+        assert_eq!(
+            reports
+                .iter()
+                .map(OperationalReport::english)
+                .collect::<Vec<_>>(),
+            [
+                "chat command menu refresh failed for 1 of 5 chats: Telegram action transport failed: Timeout"
             ]
         );
     }
