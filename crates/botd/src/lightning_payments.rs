@@ -691,12 +691,15 @@ mod tests {
 
     #[test]
     fn billing_repository_backs_the_lightning_ledger() {
-        let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
-            return;
-        };
-        let schema = bot_adapters::billing_schema::BillingSchemaRepository::new(&url);
+        if let Ok(url) = std::env::var("TEST_DATABASE_URL") {
+            ledger_round_trip(&url);
+        }
+    }
+
+    fn ledger_round_trip(url: &str) {
+        let schema = bot_adapters::billing_schema::BillingSchemaRepository::new(url);
         assert!(schema.ensure_schema().is_ok());
-        let mut ledger = BillingRepository::new(&url);
+        let mut ledger = BillingRepository::new(url);
         let charge_id = format!("synthetic-ledger-{}", crate::test_env::fresh_op());
         let user_id = 7_000_000_000_401;
         assert_eq!(

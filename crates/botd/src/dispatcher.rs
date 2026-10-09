@@ -17649,9 +17649,17 @@ mod tests {
         actions: Actions,
         checkout: Option<FakeLightningCheckout>,
     ) -> NativeDispatcher<Config, Actions, State, Values, Samples, Authorization> {
+        lightning_dispatcher_in("en", actions, checkout)
+    }
+
+    fn lightning_dispatcher_in(
+        language: &str,
+        actions: Actions,
+        checkout: Option<FakeLightningCheckout>,
+    ) -> NativeDispatcher<Config, Actions, State, Values, Samples, Authorization> {
         let config = Config {
             value: Ok(ChatConfig {
-                language: "en".to_owned(),
+                language: language.to_owned(),
                 ..ChatConfig::default()
             }),
             chat_ids: Vec::new(),
@@ -17864,6 +17872,60 @@ mod tests {
             unavailable(&mut without_checkout, "topup:ln:p50", "private"),
             lightning_invoice_failed(bot_core::locale::Locale::En)
         );
+    }
+
+    #[test]
+    fn lightning_alerts_speak_spanish() {
+        let mut dispatcher = lightning_dispatcher_in(
+            "es",
+            Actions::default(),
+            Some(FakeLightningCheckout::default()),
+        )
+        .with_market_price_source(Box::new(SelectableMarketPrices {
+            initial: market_selection_load(None),
+            candidate: market_candidate_quote(),
+            stored: Rc::new(RefCell::new(HashMap::new())),
+            selected: Rc::new(RefCell::new(Vec::new())),
+        }));
+        for (data, chat_type) in [
+            ("topup:ln:p50", "group"),
+            ("topup:ln:nope", "private"),
+            ("topup:ln:p50", "private"),
+            ("topup:ln:p50", "private"),
+        ] {
+            assert_eq!(
+                dispatcher.dispatch(callback_update(data, chat_type, Some("es"))),
+                Ok(DispatchOutcome::Handled)
+            );
+        }
+        assert_eq!(
+            callback_alerts(&dispatcher.actions.0),
+            [
+                ("Cargá por privado, maestro".to_owned(), true),
+                ("Ese pack es fruta, elegí otro".to_owned(), true),
+                ("Listo, te dejé la factura".to_owned(), false),
+                ("Ya te dejé la factura más arriba".to_owned(), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn lightning_alerts_without_a_callback_id_stay_silent() {
+        let mut dispatcher =
+            lightning_dispatcher(Actions::default(), Some(FakeLightningCheckout::default()));
+        assert_eq!(
+            dispatcher.dispatch(callback_update_with_context(
+                "topup:ln:p50",
+                json!(-42),
+                "group",
+                7,
+                Some(88),
+                Some("en"),
+                None,
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(dispatcher.actions.0.is_empty());
     }
 
     #[test]
