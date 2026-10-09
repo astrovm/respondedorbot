@@ -722,15 +722,41 @@ mod tests {
 
     use super::{
         MESSAGE_HISTORY_SCHEMA_VERSION, PayerSource, PostgresConversationBilling,
-        RedisConversationState, StoredHistoryEntry, build_compaction_view, decode_history,
-        decode_retrieved, decode_summary_memory, history_sort_key, prompt_history_window, role,
-        user_identity,
+        RedisConversationState, StoredHistoryEntry, build_compaction_view, copy_pricing_metadata,
+        decode_history, decode_retrieved, decode_summary_memory, history_sort_key,
+        prompt_history_window, role, user_identity,
     };
     use crate::ai_dispatch::AiConversationInput;
     use crate::conversation::{
         ConversationBilling, ConversationState, ReserveDenial, ReserveRequest, SettlementRequest,
     };
     use crate::reconciliation::ActiveOperationRegistry;
+
+    #[test]
+    fn charge_metadata_keeps_the_pricing_details_and_nothing_else() {
+        let pricing = json!({
+            "pricing_version": "synthetic-version",
+            "raw_usd_micros": 120,
+            "model_breakdown": [{"model": "synthetic/model"}],
+            "tool_breakdown": [],
+            "segment_breakdown": [{"segment": 0}],
+            "pricing_complete": true,
+            "charged_credit_units": 3,
+        });
+        let mut metadata = serde_json::Map::new();
+        copy_pricing_metadata(&mut metadata, &pricing);
+        assert_eq!(
+            serde_json::Value::Object(metadata),
+            json!({
+                "pricing_version": "synthetic-version",
+                "raw_usd_micros": 120,
+                "model_breakdown": [{"model": "synthetic/model"}],
+                "tool_breakdown": [],
+                "segment_breakdown": [{"segment": 0}],
+                "pricing_complete": true,
+            })
+        );
+    }
 
     #[test]
     fn settlement_releases_all_ephemeral_guards_when_pricing_fails() {

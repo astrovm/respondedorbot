@@ -222,9 +222,17 @@ mod tests {
             let kept = i128::from(lightning_usd_cents(&pack)) * 10_000 * 99 / 100;
             let payout =
                 i128::from(pack.xtr_amount) * crate::provider_pricing::STAR_PAYOUT_USD_MICROS;
-            assert!(kept >= payout, "{}", pack.id);
-            assert!(kept - payout < 10_000, "{}", pack.id);
+            assert!(kept >= payout);
+            assert!(kept - payout < 10_000);
         }
+        // An exact multiple must not round up a cent: 99 Stars pay out
+        // US$1.287, which is US$1.30 once OpenNode keeps its 1%.
+        let exact = crate::telegram_payments::BillingPackTerms {
+            id: "synthetic".to_owned(),
+            xtr_amount: 99,
+            credits_awarded: 19_800,
+        };
+        assert_eq!(lightning_usd_cents(&exact), 130);
         assert_eq!(format_usd(33), "US$0.33");
         assert_eq!(format_usd(1_625), "US$16.25");
         assert_eq!(format_usd(500), "US$5.00");

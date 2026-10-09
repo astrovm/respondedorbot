@@ -750,12 +750,7 @@ mod tests {
         for pack in super::billing_packs() {
             let payout = i128::from(pack.xtr_amount) * STAR_PAYOUT_USD_MICROS;
             let ai_cost = i128::from(pack.credits_awarded) * CREDIT_UNIT_USD_MICROS;
-            assert_eq!(
-                payout * 100,
-                ai_cost * (100 + AI_MARKUP_PERCENT),
-                "{}",
-                pack.id
-            );
+            assert_eq!(payout * 100, ai_cost * (100 + AI_MARKUP_PERCENT));
         }
     }
 
