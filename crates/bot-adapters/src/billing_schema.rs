@@ -40,6 +40,23 @@ CREATE TABLE IF NOT EXISTS star_payments (
     payload TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE TABLE IF NOT EXISTS lightning_charges (
+    charge_id TEXT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    chat_id BIGINT NOT NULL,
+    message_id BIGINT,
+    pack_id TEXT NOT NULL,
+    usd_cents INTEGER NOT NULL,
+    credits_awarded INTEGER NOT NULL,
+    locale TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'unpaid' CHECK (status IN ('unpaid', 'paid', 'expired')),
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    settled_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_lightning_charges_unpaid
+ON lightning_charges (created_at)
+WHERE status = 'unpaid';
 CREATE TABLE IF NOT EXISTS credit_ledger (
     id BIGSERIAL PRIMARY KEY,
     event_type TEXT NOT NULL,

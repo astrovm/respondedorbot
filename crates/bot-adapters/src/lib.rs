@@ -15,6 +15,7 @@ pub mod giphy_pool;
 pub mod hacker_news;
 mod http_client;
 mod idle_pool;
+pub mod lightning_charges;
 pub mod link_preview;
 pub mod media_provider;
 pub mod opennode;
