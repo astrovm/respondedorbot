@@ -391,17 +391,19 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
         let server = thread::spawn(move || {
-            let Ok((mut stream, _)) = listener.accept() else {
-                return String::new();
-            };
-            let mut request = [0_u8; 4_096];
-            let bytes = stream.read(&mut request).unwrap_or_default();
-            let _written = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            String::from_utf8_lossy(&request[..bytes]).into_owned()
+            listener.accept().map_or_else(
+                |_| String::new(),
+                |(mut stream, _)| {
+                    let mut request = [0_u8; 4_096];
+                    let bytes = stream.read(&mut request).unwrap_or_default();
+                    let _written = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    String::from_utf8_lossy(&request[..bytes]).into_owned()
+                },
+            )
         });
         Ok((format!("http://{address}/"), server))
     }

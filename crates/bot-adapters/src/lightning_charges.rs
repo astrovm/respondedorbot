@@ -163,10 +163,11 @@ mod tests {
     use std::error::Error;
 
     use super::{LightningSettlement, NewLightningCharge, PendingLightningCharge};
-    use crate::billing_read::BillingRepository;
+    use crate::billing_read::{BillingError, BillingRepository};
     use crate::billing_schema::{BillingSchemaRepository, fault_injection};
 
     type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
+    type FaultedOperation<'a> = dyn Fn() -> Result<(), BillingError> + 'a;
 
     const USER: i64 = 7_000_000_000_301;
 
@@ -185,28 +186,27 @@ mod tests {
 
     #[test]
     fn lightning_charges_credit_once_and_close_when_expired() -> TestResult {
-        let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
-            return Ok(());
-        };
-        BillingSchemaRepository::new(&url).ensure_schema()?;
-        let mut client = fault_injection::connect(&url)?;
-        client.execute("DELETE FROM lightning_charges WHERE user_id = $1", &[&USER])?;
-        client.execute("DELETE FROM credit_ledger WHERE user_id = $1", &[&USER])?;
-        client.execute(
-            "DELETE FROM credit_accounts WHERE scope_type = 'user' AND scope_id = $1",
-            &[&USER],
-        )?;
-        let repository = BillingRepository::new(&url);
+        std::env::var("TEST_DATABASE_URL").map_or(Ok(()), |url| credit_once(&url))
+    }
+
+    fn credit_once(url: &str) -> TestResult {
+        BillingSchemaRepository::new(url).ensure_schema()?;
+        let mut client = fault_injection::connect(url)?;
+        let reset = format!(
+            "DELETE FROM lightning_charges WHERE user_id = {USER}; \
+             DELETE FROM credit_ledger WHERE user_id = {USER}; \
+             DELETE FROM credit_accounts WHERE scope_type = 'user' AND scope_id = {USER}"
+        );
+        client.batch_execute(&reset)?;
+        let repository = BillingRepository::new(url);
 
         repository.record_lightning_charge(&charge("synthetic-ln-paid", 30))?;
         repository.record_lightning_charge(&charge("synthetic-ln-paid", 30))?;
         repository.record_lightning_charge(&charge("synthetic-ln-old", 10))?;
-        client.execute(
-            "UPDATE lightning_charges SET expires_at = NOW() - INTERVAL '20 minutes', \
+        let age = "UPDATE lightning_charges SET expires_at = NOW() - INTERVAL '20 minutes', \
                 created_at = NOW() - INTERVAL '1 hour' \
-             WHERE charge_id = 'synthetic-ln-old'",
-            &[],
-        )?;
+             WHERE charge_id = 'synthetic-ln-old'";
+        client.batch_execute(age)?;
         repository.attach_lightning_message("synthetic-ln-paid", 55)?;
         let pending = repository.pending_lightning_charges(10, 10)?;
         let ours = pending
@@ -233,50 +233,44 @@ mod tests {
             ]
         );
 
+        let settled = repository.settle_lightning_charge("synthetic-ln-paid")?;
         assert_eq!(
-            repository.settle_lightning_charge("synthetic-ln-paid")?,
+            settled,
             Some(LightningSettlement {
                 credits_awarded: 5_000,
                 user_balance: 5_000,
             })
         );
-        assert_eq!(
-            repository.settle_lightning_charge("synthetic-ln-paid")?,
-            None
-        );
-        assert_eq!(
-            repository.settle_lightning_charge("synthetic-ln-missing")?,
-            None
-        );
+        let again = repository.settle_lightning_charge("synthetic-ln-paid")?;
+        assert_eq!(again, None);
+        let missing = repository.settle_lightning_charge("synthetic-ln-missing")?;
+        assert_eq!(missing, None);
 
         repository.close_lightning_charge("synthetic-ln-old")?;
         repository.close_lightning_charge("synthetic-ln-paid")?;
+        let pending = repository.pending_lightning_charges(1_000, 10)?;
         assert!(
-            repository
-                .pending_lightning_charges(1_000, 10)?
+            pending
                 .iter()
                 .all(|charge| !charge.charge_id.starts_with("synthetic-ln-"))
         );
         // A late payment on a closed charge is still credited.
+        let late = repository.settle_lightning_charge("synthetic-ln-old")?;
         assert_eq!(
-            repository.settle_lightning_charge("synthetic-ln-old")?,
+            late,
             Some(LightningSettlement {
                 credits_awarded: 5_000,
                 user_balance: 10_000,
             })
         );
-        let row = client.query_one(
-            "SELECT COUNT(*), COUNT(*) FILTER (WHERE metadata->>'source' = 'lightning' \
+        let ledger = "SELECT COUNT(*), COUNT(*) FILTER (WHERE metadata->>'source' = 'lightning' \
                 AND metadata->>'usd_cents' = '33' AND metadata->>'pack_id' = 'p50') \
-             FROM credit_ledger WHERE user_id = $1 AND event_type = 'topup'",
-            &[&USER],
-        )?;
+             FROM credit_ledger WHERE user_id = $1 AND event_type = 'topup'";
+        let row = client.query_one(ledger, &[&USER])?;
         assert_eq!((row.get::<_, i64>(0), row.get::<_, i64>(1)), (2, 2));
-        let statuses = client.query(
-            "SELECT status FROM lightning_charges WHERE user_id = $1 ORDER BY charge_id",
-            &[&USER],
-        )?;
-        let statuses = statuses
+        let statuses = "SELECT status FROM lightning_charges WHERE user_id = $1 ORDER BY charge_id";
+        let statuses = client
+            .query(statuses, &[&USER])?
             .iter()
             .map(|row| row.get::<_, String>(0))
             .collect::<Vec<_>>();
@@ -286,35 +280,108 @@ mod tests {
 
     #[test]
     fn settling_into_a_full_balance_reports_overflow() -> TestResult {
-        let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
-            return Ok(());
-        };
-        BillingSchemaRepository::new(&url).ensure_schema()?;
+        std::env::var("TEST_DATABASE_URL").map_or(Ok(()), |url| settle_overflow(&url))
+    }
+
+    fn settle_overflow(url: &str) -> TestResult {
+        BillingSchemaRepository::new(url).ensure_schema()?;
         let user = USER + 1;
-        let mut client = fault_injection::connect(&url)?;
-        client.execute("DELETE FROM lightning_charges WHERE user_id = $1", &[&user])?;
-        client.execute(
-            "INSERT INTO credit_accounts (scope_type, scope_id, balance) \
-             VALUES ('user', $1, 2147483647) \
-             ON CONFLICT (scope_type, scope_id) DO UPDATE SET balance = 2147483647",
-            &[&user],
-        )?;
-        let repository = BillingRepository::new(&url);
+        let mut client = fault_injection::connect(url)?;
+        let full = format!(
+            "DELETE FROM lightning_charges WHERE user_id = {user}; \
+             INSERT INTO credit_accounts (scope_type, scope_id, balance) \
+             VALUES ('user', {user}, 2147483647) \
+             ON CONFLICT (scope_type, scope_id) DO UPDATE SET balance = 2147483647"
+        );
+        client.batch_execute(&full)?;
+        let repository = BillingRepository::new(url);
         repository.record_lightning_charge(&NewLightningCharge {
             user_id: user,
             ..charge("synthetic-ln-overflow", 30)
         })?;
         assert!(matches!(
             repository.settle_lightning_charge("synthetic-ln-overflow"),
-            Err(crate::billing_read::BillingError::BalanceOverflow)
+            Err(BillingError::BalanceOverflow)
         ));
         // The failed transaction left the charge unpaid.
-        let status = client.query_one(
-            "SELECT status FROM lightning_charges WHERE charge_id = 'synthetic-ln-overflow'",
-            &[],
-        )?;
+        let status =
+            "SELECT status FROM lightning_charges WHERE charge_id = 'synthetic-ln-overflow'";
+        let status = client.query_one(status, &[])?;
         assert_eq!(status.get::<_, String>(0), "unpaid");
-        client.execute("DELETE FROM lightning_charges WHERE user_id = $1", &[&user])?;
+        let cleanup = format!("DELETE FROM lightning_charges WHERE user_id = {user}");
+        client.batch_execute(&cleanup)?;
+        Ok(())
+    }
+
+    #[test]
+    fn every_lightning_statement_failure_rolls_back() -> TestResult {
+        std::env::var("TEST_DATABASE_URL").map_or(Ok(()), |url| lightning_faults(&url))
+    }
+
+    fn lightning_faults(database_url: &str) -> TestResult {
+        let url = fault_injection::isolated_schema_url(database_url, "lightning_faults", "")?;
+        BillingSchemaRepository::new(&url).ensure_schema()?;
+        let mut client = fault_injection::connect(&url)?;
+        let tables = ["lightning_charges", "credit_accounts", "credit_ledger"];
+        fault_injection::install(&mut client, &tables, &[])?;
+        client.batch_execute(&format!(
+            "INSERT INTO credit_accounts (scope_type, scope_id, balance) VALUES ('user', {USER}, 0)"
+        ))?;
+        let repository = BillingRepository::new(&url);
+        repository.record_lightning_charge(&charge("fault-charge", 30))?;
+        let unpaid = || -> Result<String, Box<dyn Error + Send + Sync>> {
+            let mut client = fault_injection::connect(&url)?;
+            let status =
+                "SELECT status FROM lightning_charges_data WHERE charge_id = 'fault-charge'";
+            Ok(client.query_one(status, &[])?.get(0))
+        };
+        let cases: [(&str, &FaultedOperation); 8] = [
+            ("INSERT INTO lightning_charges", &|| {
+                repository.record_lightning_charge(&charge("fault-new", 30))
+            }),
+            ("SET message_id", &|| {
+                repository.attach_lightning_message("fault-charge", 1)
+            }),
+            ("WHERE status = 'unpaid' ORDER BY", &|| {
+                repository.pending_lightning_charges(5, 10).map(|_| ())
+            }),
+            ("SET status = 'paid'", &|| {
+                repository
+                    .settle_lightning_charge("fault-charge")
+                    .map(|_| ())
+            }),
+            ("FOR UPDATE", &|| {
+                repository
+                    .settle_lightning_charge("fault-charge")
+                    .map(|_| ())
+            }),
+            ("UPDATE credit_accounts SET balance", &|| {
+                repository
+                    .settle_lightning_charge("fault-charge")
+                    .map(|_| ())
+            }),
+            ("VALUES ('topup'", &|| {
+                repository
+                    .settle_lightning_charge("fault-charge")
+                    .map(|_| ())
+            }),
+            ("SET status = 'expired'", &|| {
+                repository.close_lightning_charge("fault-charge")
+            }),
+        ];
+        for (fragment, operation) in cases {
+            fault_injection::inject(&mut client, fragment, 0, None, "P0001")?;
+            let expected = format!("injected billing fault: {fragment}");
+            let outcome = operation();
+            assert!(
+                matches!(&outcome, Err(BillingError::Postgres(error))
+                    if error.as_db_error().is_some_and(|db| db.message() == expected)),
+                "{fragment}: {outcome:?}"
+            );
+            assert_eq!(fault_injection::hits(&mut client)?, 1, "{fragment}");
+            assert_eq!(unpaid()?, "unpaid", "{fragment} must roll back");
+            fault_injection::clear(&mut client)?;
+        }
         Ok(())
     }
 }
