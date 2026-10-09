@@ -404,11 +404,10 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
     let mut command_sink =
         TelegramActionSink::new(command_transport, config.runtime.telegram_token())
             .with_delivery_coordinator(telegram_delivery);
-    for diagnostic in publish_commands(&mut command_sink) {
-        log_and_queue(&reports, diagnostic);
-    }
+    let mut diagnostics = publish_commands(&mut command_sink);
     let chats = ChatConfigRepository::new(config.database_url()).chats_with_language();
-    for diagnostic in refresh_chat_menus(&mut command_sink, chats) {
+    diagnostics.extend(refresh_chat_menus(&mut command_sink, chats));
+    for diagnostic in diagnostics {
         log_and_queue(&reports, diagnostic);
     }
 
@@ -531,9 +530,15 @@ mod tests {
         let mut sink = Sink::default();
         let chats: Result<_, &str> = Ok(vec![(-42, "en".to_owned()), (7, "es".to_owned())]);
         assert!(refresh_chat_menus(&mut sink, chats).is_empty());
+        // Unrelated actions are ignored by the filter below.
+        let unrelated = TelegramAction::DeleteMessage {
+            chat_id: ChatId(1),
+            message_id: bot_core::telegram_input::MessageId(1),
+        };
         let menus = sink
             .actions
             .iter()
+            .chain(std::iter::once(&unrelated))
             .filter_map(|action| match action {
                 TelegramAction::SetCommands {
                     commands,
