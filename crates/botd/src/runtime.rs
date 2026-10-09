@@ -2351,6 +2351,14 @@ mod tests {
         let mut handler = DurableParallelUpdateHandler::start(1, 2, queue.clone(), factory)?;
         assert_eq!(handler.handle(update(731)), Ok(()));
         wait_until(|| built.load(Ordering::SeqCst) == 2);
+        // With no worker left, a retry cannot be resubmitted, so the runtime
+        // stops for recovery; the persisted retry replays after a restart.
+        handler.handle_completion(completion(732, 0, Some("synthetic retry")), true);
+        assert_eq!(
+            handler.failures.fatal.as_deref(),
+            Some("could not resubmit durable update 732")
+        );
+        assert!(matches!(queue.record(732), Some(record) if record.attempts == 1));
         handler.stop();
         assert_eq!(script.calls.load(Ordering::SeqCst), 1);
         Ok(())

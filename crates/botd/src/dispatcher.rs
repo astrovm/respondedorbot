@@ -1497,12 +1497,11 @@ where
                 total_amount,
                 charge_id,
             } => {
-                let failure = format!(
-                    "Invalid successful payment payload chat_id={chat_id} user_id={user_id} currency={currency} payload={payload} total_amount={total_amount} charge_id={charge_id}"
-                );
                 // The user paid, so the charge id must survive for a refund.
-                eprintln!("{failure}");
-                self.state_diagnostics.push(failure);
+                eprintln!("Invalid successful payment chat_id={chat_id} charge_id={charge_id}");
+                self.state_diagnostics.push(format!(
+                    "Invalid successful payment payload chat_id={chat_id} user_id={user_id} currency={currency} payload={payload} total_amount={total_amount} charge_id={charge_id}"
+                ));
                 (
                     chat_id,
                     match locale {
@@ -1530,12 +1529,15 @@ where
                 // retried with the update instead of leaving the user paid
                 // but uncredited. The log keeps the charge id either way.
                 let receipt = sink.record(&payment).map_err(|error| {
-                    let failure = format!(
-                        "successful payment chat_id={chat_id} user_id={} charge_id={}: {error}",
-                        payment.user_id, payment.charge_id
+                    // The charge id is enough to find and refund the payment.
+                    eprintln!(
+                        "Payment not recorded yet: chat_id={chat_id} charge_id={}",
+                        payment.charge_id
                     );
-                    eprintln!("Payment not recorded yet: {failure}");
-                    DispatchError::Persistence(failure)
+                    DispatchError::Persistence(format!(
+                        "successful payment chat_id={chat_id} charge_id={}: {error}",
+                        payment.charge_id
+                    ))
                 })?;
                 let text = successful_payment_reply(
                     *credits_awarded,
