@@ -785,6 +785,7 @@ mod tests {
                 ("FIRECRAWL_API_KEY", "firecrawl-secret"),
                 ("SUPADATA_API_KEY", "supadata-secret"),
                 ("APIFY_API_KEY", "apify-secret"),
+                ("OPENNODE_API_KEY", "opennode-secret"),
                 ("BOT_TRIGGER_WORDS", " gordo, test, ,bot "),
                 ("FRIENDLY_INSTANCE_NAME", "VPS"),
                 ("AI_RECONCILIATION_INTERVAL_SECONDS", "1"),
@@ -803,7 +804,10 @@ mod tests {
         assert_eq!(config.reconciliation_settings.safety_credit_units, 0);
         assert_eq!(config.reconciliation_settings.stale_seconds, 30);
         let debug = format!("{config:?}");
+        assert!(debug.contains("opennode_configured: true"));
+        assert!(debug.contains("bot_name: \"test_bot\""));
         for secret in [
+            "opennode-secret",
             "telegram-secret",
             "synthetic-password",
             "redis-secret",

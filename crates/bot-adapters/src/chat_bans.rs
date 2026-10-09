@@ -144,9 +144,12 @@ mod tests {
         let Some(database_url) = url() else { return };
         let (chat_id, other_chat) = (-100_900_101, -100_900_102);
         let repository = ChatBanRepository::new(&database_url);
-        assert_eq!(repository.list(chat_id).ok(), Some(Vec::new()));
+        // The first call creates the table, so leftovers from an interrupted
+        // run can only be cleaned up after it.
+        let _schema = repository.is_banned(chat_id, 2);
         cleanup(&database_url, chat_id);
         cleanup(&database_url, other_chat);
+        assert_eq!(repository.list(chat_id).ok(), Some(Vec::new()));
 
         assert_eq!(repository.is_banned(chat_id, 2).ok(), Some(false));
         assert_eq!(repository.ban(chat_id, 2, "Ana", 1).ok(), Some(true));
