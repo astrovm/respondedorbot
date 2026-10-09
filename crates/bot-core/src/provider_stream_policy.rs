@@ -118,11 +118,11 @@ pub fn accumulate_stream_tool_calls(
             name: String::new(),
             arguments: String::new(),
         });
-        append_nonempty(&mut accumulated.id, fragment.id);
+        append_identifier(&mut accumulated.id, fragment.id);
         if let Some(call_type) = fragment.call_type.filter(|value| !value.is_empty()) {
             accumulated.call_type = call_type;
         }
-        append_nonempty(&mut accumulated.name, fragment.name);
+        append_identifier(&mut accumulated.name, fragment.name);
         append_nonempty(&mut accumulated.arguments, fragment.arguments);
     }
     calls.into_values().collect()
@@ -149,6 +149,14 @@ fn stream_fragment_index(value: &Value) -> Option<i64> {
 fn append_nonempty(target: &mut String, fragment: Option<String>) {
     if let Some(fragment) = fragment.filter(|value| !value.is_empty()) {
         target.push_str(&fragment);
+    }
+}
+
+/// Ids and names usually arrive once, but some providers repeat the whole
+/// value in every chunk; a repeat must not be appended again.
+fn append_identifier(target: &mut String, fragment: Option<String>) {
+    if fragment.as_deref() != Some(target.as_str()) {
+        append_nonempty(target, fragment);
     }
 }
 
@@ -286,6 +294,24 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn repeated_ids_and_names_are_not_appended_twice() {
+        let fragment = |arguments: &str| StreamToolCallFragment {
+            position: 0,
+            index: json!(0),
+            id: Some("call_a".to_owned()),
+            call_type: Some("function".to_owned()),
+            name: Some("web_search".to_owned()),
+            arguments: Some(arguments.to_owned()),
+        };
+        let actual =
+            accumulate_stream_tool_calls(vec![], vec![fragment("{\"q\":"), fragment("\"mate\"}")]);
+        assert_eq!(actual.len(), 1);
+        assert_eq!(actual[0].id, "call_a");
+        assert_eq!(actual[0].name, "web_search");
+        assert_eq!(actual[0].arguments, "{\"q\":\"mate\"}");
     }
 
     #[test]
