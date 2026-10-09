@@ -5100,6 +5100,7 @@ where
             locale,
             message.chat_type.as_deref().unwrap_or_default(),
             self.billing_available,
+            false,
         ) {
             StatelessCommandPlan::Action(action)
         } else if matches!(
