@@ -184,7 +184,7 @@ const COMMAND_GROUPS: &[CommandGroup] = &[
         description_en: "see who has their own limit in the group",
     },
     CommandGroup {
-        aliases: &["groupcharges"],
+        aliases: &["gastosgrupo", "groupcharges"],
         description_es: "admins: quién gastó créditos del grupo [días]",
         description_en: "admins: who spent the group's credits [days]",
     },
@@ -347,15 +347,15 @@ mod tests {
         for (locale, expected_hash) in [
             (
                 Locale::Es,
-                "43ea5d9c238eb7e6e8d783f91ae517e4dc32b8c2da4b0ee14a1b2802b82b2bd7",
+                "0815f14a1aef120b7d74737708a803032a81e104fb2ebae5871defad20d465ef",
             ),
             (
                 Locale::En,
-                "538ed665081ef621b225cf391c730284678aea13a181bf6264c59b616167004f",
+                "b121e8b216bd82eaabf37dda3c189acdea0fa38707871daf8d3743d7b27a2b82",
             ),
         ] {
             let commands = telegram_commands(locale);
-            assert_eq!(commands.len(), 87);
+            assert_eq!(commands.len(), 88);
             let encoded = serde_json::to_string(&commands);
             assert!(encoded.is_ok());
             let digest = encoded.map(|value| sha256_hex(&value));
@@ -434,6 +434,7 @@ mod tests {
             "desvetar",
             "vetados",
             "banned",
+            "gastosgrupo",
             "petroleo",
             "elecciones",
             "comando",

@@ -62,6 +62,9 @@ struct ChatMemberEntry<'a> {
     first_name: &'a str,
     username: &'a str,
     last_seen: i64,
+    /// Only written for bots, so people's entries stay as they were.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    is_bot: bool,
 }
 
 /// Truncate stored message text by Unicode character count.
@@ -150,6 +153,7 @@ pub fn chat_members_key(chat_id: &str) -> String {
 pub fn prepare_chat_member_payload(
     first_name: &str,
     username: &str,
+    is_bot: bool,
     last_seen: i64,
 ) -> Result<String, serde_json::Error> {
     serde_json::to_string(&ChatMemberEntry {
@@ -157,6 +161,7 @@ pub fn prepare_chat_member_payload(
         first_name,
         username,
         last_seen,
+        is_bot,
     })
 }
 
@@ -407,7 +412,7 @@ mod tests {
             "bot_message_meta:-1:42"
         );
         assert_eq!(chat_members_key("-1"), "chat_members:-1");
-        let payload = prepare_chat_member_payload("Ana", "ana", 100);
+        let payload = prepare_chat_member_payload("Ana", "ana", false, 100);
         assert!(payload.is_ok());
         let version = payload.ok().and_then(|encoded| {
             serde_json::from_str::<serde_json::Value>(&encoded)
@@ -415,5 +420,20 @@ mod tests {
                 .and_then(|value| value["schema_version"].as_u64())
         });
         assert_eq!(version, Some(u64::from(CHAT_MEMBER_SCHEMA_VERSION)));
+        // People's entries keep their old shape; only bots get the flag.
+        assert_eq!(
+            prepare_chat_member_payload("Ana", "ana", false, 100)
+                .ok()
+                .as_deref(),
+            Some(r#"{"schema_version":1,"first_name":"Ana","username":"ana","last_seen":100}"#)
+        );
+        assert_eq!(
+            prepare_chat_member_payload("Group", "GroupAnonymousBot", true, 100)
+                .ok()
+                .as_deref(),
+            Some(
+                r#"{"schema_version":1,"first_name":"Group","username":"GroupAnonymousBot","last_seen":100,"is_bot":true}"#
+            )
+        );
     }
 }

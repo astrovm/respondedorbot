@@ -8,7 +8,8 @@ use crate::locale::Locale;
 use crate::telegram_actions::TelegramAction;
 use crate::telegram_input::{ChatId, MessageId};
 
-/// The AI ledger keeps 30 days by default, so older spending is gone.
+/// The AI ledger keeps 30 days by default, so older spending is gone. A
+/// shorter `AI_LEDGER_RETENTION_DAYS` lowers it further.
 pub const MAX_GROUP_CHARGES_DAYS: i64 = 30;
 pub const GROUP_CHARGES_LIMIT: usize = 10;
 
@@ -26,18 +27,28 @@ pub enum GroupChargesPlan {
     Load { days: i64 },
 }
 
-/// Returns the text after `/groupcharges`, or `None` for any other message.
+/// Returns the text after `/gastosgrupo` or `/groupcharges`, or `None` for
+/// any other message.
 #[must_use]
 pub fn classify_group_charges_command(message_text: &str, bot_name: &str) -> Option<String> {
     let parsed = parse_command(message_text, bot_name);
-    (parsed.command == "/groupcharges").then_some(parsed.message_text)
+    matches!(parsed.command.as_str(), "/gastosgrupo" | "/groupcharges")
+        .then_some(parsed.message_text)
+}
+
+/// How far back the list can go: the ledger's retention, up to
+/// [`MAX_GROUP_CHARGES_DAYS`].
+#[must_use]
+pub fn group_charges_max_days(ledger_retention_days: i64) -> i64 {
+    ledger_retention_days.clamp(1, MAX_GROUP_CHARGES_DAYS)
 }
 
 /// No argument is the last day; otherwise a number of days up to
-/// [`MAX_GROUP_CHARGES_DAYS`].
+/// `max_days`.
 #[must_use]
 pub fn plan_group_charges_command(
     argument: &str,
+    max_days: i64,
     chat_id: ChatId,
     message_id: MessageId,
     locale: Locale,
@@ -47,17 +58,17 @@ pub fn plan_group_charges_command(
         return GroupChargesPlan::Load { days: 1 };
     }
     match argument.parse::<i64>() {
-        Ok(days @ 1..=MAX_GROUP_CHARGES_DAYS) => GroupChargesPlan::Load { days },
+        Ok(days) if (1..=max_days).contains(&days) => GroupChargesPlan::Load { days },
         _ => GroupChargesPlan::Reply(ban_reply(
             chat_id,
             message_id,
-            match locale {
-                Locale::Es => {
-                    "Mandá /groupcharges para el último día, o /groupcharges y una cantidad de días, hasta 30"
-                }
-                Locale::En => {
-                    "Send /groupcharges for the last day, or /groupcharges and a number of days, up to 30"
-                }
+            &match locale {
+                Locale::Es => format!(
+                    "Mandá /gastosgrupo para el último día, o /gastosgrupo y una cantidad de días, hasta {max_days}"
+                ),
+                Locale::En => format!(
+                    "Send /groupcharges for the last day, or /groupcharges and a number of days, up to {max_days}"
+                ),
             },
         )),
     }
@@ -126,14 +137,14 @@ pub fn render_group_charges(spenders: &[GroupSpender], days: i64, locale: Locale
 mod tests {
     use super::{
         GroupChargesPlan, GroupSpender, classify_group_charges_command, group_charges_failed,
-        plan_group_charges_command, render_group_charges, spender_name,
+        group_charges_max_days, plan_group_charges_command, render_group_charges, spender_name,
     };
     use crate::locale::Locale;
     use crate::telegram_actions::TelegramAction;
     use crate::telegram_input::{ChatId, MessageId};
 
     fn plan(argument: &str, locale: Locale) -> GroupChargesPlan {
-        plan_group_charges_command(argument, ChatId(-100), MessageId(7), locale)
+        plan_group_charges_command(argument, 30, ChatId(-100), MessageId(7), locale)
     }
 
     fn reply_text(plan: &GroupChargesPlan) -> Option<&str> {
@@ -153,8 +164,8 @@ mod tests {
             ("/groupcharges", Some("")),
             ("/groupcharges@gordo_bot 7", Some("7")),
             ("/GROUPCHARGES  30", Some("30")),
+            ("/gastosgrupo 3", Some("3")),
             ("/gastos", None),
-            ("/gastosgrupo", None),
             ("groupcharges", None),
             ("/groupcharges@other_bot", None),
         ] {
@@ -176,7 +187,7 @@ mod tests {
         for (locale, expected) in [
             (
                 Locale::Es,
-                "Mandá /groupcharges para el último día, o /groupcharges y una cantidad de días, hasta 30",
+                "Mandá /gastosgrupo para el último día, o /gastosgrupo y una cantidad de días, hasta 30",
             ),
             (
                 Locale::En,
@@ -188,6 +199,23 @@ mod tests {
                 assert_eq!(reply_text(&plan), Some(expected), "{argument}");
             }
         }
+    }
+
+    #[test]
+    fn a_shorter_ledger_retention_lowers_the_maximum() {
+        for (retention, max_days) in [(7, 7), (1, 1), (30, 30), (90, 30), (0, 1), (-5, 1)] {
+            assert_eq!(group_charges_max_days(retention), max_days, "{retention}");
+        }
+        let short = |argument| {
+            plan_group_charges_command(argument, 7, ChatId(-100), MessageId(7), Locale::En)
+        };
+        assert_eq!(short("7"), GroupChargesPlan::Load { days: 7 });
+        assert_eq!(
+            reply_text(&short("8")),
+            Some(
+                "Send /groupcharges for the last day, or /groupcharges and a number of days, up to 7"
+            )
+        );
     }
 
     #[test]

@@ -204,6 +204,7 @@ impl ChatMemberSource for KnownMembers {
 struct GroupSpending {
     billing: BillingRepository,
     redis_endpoint: RedisEndpoint,
+    ledger_retention_days: i64,
 }
 
 impl GroupSpendingSource for GroupSpending {
@@ -232,6 +233,10 @@ impl GroupSpendingSource for GroupSpending {
             }
         }
         Ok(spenders)
+    }
+
+    fn max_days(&self) -> i64 {
+        bot_core::group_charges::group_charges_max_days(self.ledger_retention_days)
     }
 }
 
@@ -2878,6 +2883,7 @@ pub struct NativeRuntimeOptions<'a> {
     pub trigger_words: Option<Vec<String>>,
     pub active_operations: ActiveOperationRegistry,
     pub telegram_delivery: TelegramDeliveryCoordinator,
+    pub ai_ledger_retention_days: i64,
 }
 
 #[derive(Clone)]
@@ -2902,6 +2908,7 @@ struct OwnedNativeRuntimeOptions {
     trigger_words: Option<Vec<String>>,
     active_operations: ActiveOperationRegistry,
     telegram_delivery: TelegramDeliveryCoordinator,
+    ai_ledger_retention_days: i64,
 }
 
 impl OwnedNativeRuntimeOptions {
@@ -2927,6 +2934,7 @@ impl OwnedNativeRuntimeOptions {
             trigger_words: options.trigger_words,
             active_operations: options.active_operations,
             telegram_delivery: options.telegram_delivery,
+            ai_ledger_retention_days: options.ai_ledger_retention_days,
         }
     }
 
@@ -2952,6 +2960,7 @@ impl OwnedNativeRuntimeOptions {
             trigger_words: self.trigger_words.clone(),
             active_operations: self.active_operations.clone(),
             telegram_delivery: self.telegram_delivery.clone(),
+            ai_ledger_retention_days: self.ai_ledger_retention_days,
         }
     }
 }
@@ -3296,6 +3305,7 @@ fn build_native_dispatcher_with_stream_delivery(
     .with_group_spending_source(Box::new(GroupSpending {
         billing: BillingRepository::new(options.database_url),
         redis_endpoint: options.redis_endpoint.clone(),
+        ledger_retention_days: options.ai_ledger_retention_days,
     }))
     .with_dollar_quotes_source(Box::new(CriptoYaDollarQuotesSource {
         transport: criptoya_transport,
@@ -6337,6 +6347,7 @@ mod tests {
             user_id: UserId(88),
             first_name: Some("Synthetic"),
             username: Some("tester"),
+            is_bot: false,
             text: "/time",
             is_group: true,
             timestamp: 1_672_531_200,
@@ -6441,6 +6452,7 @@ mod tests {
             trigger_words: None,
             active_operations: ActiveOperationRegistry::default(),
             telegram_delivery: TelegramDeliveryCoordinator::default(),
+            ai_ledger_retention_days: 30,
         });
         assert!(result.is_ok());
         let result = build_native_runtime(NativeRuntimeOptions {
@@ -6464,6 +6476,7 @@ mod tests {
             trigger_words: None,
             active_operations: ActiveOperationRegistry::default(),
             telegram_delivery: TelegramDeliveryCoordinator::default(),
+            ai_ledger_retention_days: 30,
         });
         assert!(result.is_ok());
         let result = build_native_runtime(NativeRuntimeOptions {
@@ -6496,6 +6509,7 @@ mod tests {
             trigger_words: Some(vec!["synthetic".to_owned()]),
             active_operations: ActiveOperationRegistry::default(),
             telegram_delivery: TelegramDeliveryCoordinator::default(),
+            ai_ledger_retention_days: 30,
         });
         assert!(result.is_ok());
     }
@@ -6602,7 +6616,10 @@ mod tests {
         let mut source = super::GroupSpending {
             billing,
             redis_endpoint: endpoint,
+            ledger_retention_days: 7,
         };
+        // A shorter ledger retention lowers how far back admins can look.
+        assert_eq!(source.max_days(), 7);
         let spender = |user_id, name: &str, credit_units| bot_core::group_charges::GroupSpender {
             user_id,
             name: name.to_owned(),
@@ -6626,6 +6643,7 @@ mod tests {
                 port: 1,
                 ..source.redis_endpoint.clone()
             },
+            ledger_retention_days: 30,
         };
         assert_eq!(
             nameless.load(chat_id, 1, 1),
@@ -6634,7 +6652,9 @@ mod tests {
         let mut offline = super::GroupSpending {
             billing: BillingRepository::new("postgresql://synthetic:synthetic@127.0.0.1:1/none"),
             redis_endpoint: source.redis_endpoint.clone(),
+            ledger_retention_days: 90,
         };
+        assert_eq!(offline.max_days(), 30);
         assert!(offline.load(chat_id, 1, 10).is_err());
     }
 
@@ -6721,6 +6741,7 @@ mod tests {
             trigger_words: Some(vec!["synthetic".to_owned()]),
             active_operations: ActiveOperationRegistry::default(),
             telegram_delivery: TelegramDeliveryCoordinator::default(),
+            ai_ledger_retention_days: 30,
         });
         assert!(result.is_ok());
     }
@@ -6743,6 +6764,7 @@ mod tests {
             sender_id: UserId(9),
             sender_first_name: "Synthetic".to_owned(),
             sender_username: "synthetic_user".to_owned(),
+            sender_is_bot: false,
             message_text: "synthetic question".to_owned(),
             command: String::new(),
             reply_to_message_id: None,
@@ -6755,8 +6777,7 @@ mod tests {
             audio_duration_seconds: None,
             locale: Locale::En,
             timezone_offset_hours: i64::from(i32::MAX) + 1,
-            creditless_user_hourly_limit: 10,
-            own_creditless_limit: false,
+            creditless_limit: crate::ai_dispatch::CreditlessLimit::Group(10),
             group_pays_first: false,
             timestamp: 1_700_000_000,
             spontaneous: false,
@@ -8766,6 +8787,7 @@ mod tests {
                 user_id: UserId(88),
                 first_name: Some("Synthetic"),
                 username: Some("tester"),
+                is_bot: false,
                 text: "/time",
                 is_group,
                 timestamp: 1_672_531_200,
@@ -8878,6 +8900,7 @@ mod tests {
             sender_id: UserId(user_id),
             sender_first_name: "Synthetic First".to_owned(),
             sender_username: String::new(),
+            sender_is_bot: false,
             message_text: "remind me".to_owned(),
             command: String::new(),
             reply_to_message_id: None,
@@ -8890,8 +8913,7 @@ mod tests {
             audio_duration_seconds: None,
             locale: Locale::En,
             timezone_offset_hours: -3,
-            creditless_user_hourly_limit: 10,
-            own_creditless_limit: false,
+            creditless_limit: crate::ai_dispatch::CreditlessLimit::Group(10),
             group_pays_first: false,
             timestamp: 1_700_000_000,
             spontaneous: false,

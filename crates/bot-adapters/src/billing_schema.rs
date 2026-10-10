@@ -94,6 +94,9 @@ WHERE event_type IN (
     'ai_settlement_result', 'memory_compaction_settlement', 'ai_reserve',
     'ai_refund', 'ai_settlement_charge', 'ai_settlement_debt'
 );
+CREATE INDEX IF NOT EXISTS idx_credit_ledger_chat_created
+ON credit_ledger (chat_id, created_at)
+WHERE chat_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_credit_ledger_user_settlement_lookup
 ON credit_ledger (user_id, (metadata->>'settlement_id'), id DESC)
 WHERE metadata ? 'settlement_id';

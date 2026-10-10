@@ -79,8 +79,14 @@ Current uniqueness contracts include:
 
 `/groupcharges` reads this table: per member, it nets the AI reserve, refund,
 settlement and compaction rows whose `source` is `chat`, grouped by
-`operation_id` and placed in the window each operation started in. It relies
-on every group-paid row carrying `source: chat` and its `operation_id`.
+`operation_id` and placed in the window of the operation's first reserve.
+Operations without a reserve row, such as a refund whose reserve ledger
+cleanup already deleted, don't count. It reads one day more than asked, which
+is enough since operations last seconds, through the
+`idx_credit_ledger_chat_created` index on (`chat_id`, `created_at`). It relies
+on every group-paid row carrying `source: chat` and its `operation_id`. The
+bot reads `AI_LEDGER_RETENTION_DAYS` too, so `/groupcharges` never asks for
+more days than the ledger keeps.
 
 Rust must preserve transaction boundaries, advisory locks used by schema
 migrations, retry classification, and integer scaling. It must not use floating
@@ -142,12 +148,17 @@ Primary key: (`chat_id`, `user_id`), both `BIGINT`. Also stores
   `/limit off` deletes it.
 - If the lookup fails, the group's limit applies.
 
-`/ban`, `/unban` and `/limit` can name a member by `@username` instead of
-replying. Telegram doesn't let bots look usernames up, so the name is matched,
-ignoring case, against the chat's known members in Redis (`chat_members:{chat_id}`),
+`/ban`, `/unban` and `/limit` can name a member instead of replying. A member
+picked from Telegram's mention list arrives as a `text_mention` entity with
+their user id, so it needs no lookup and works for members without a username.
+A typed `@username` can't be looked up by bots, so it is matched, ignoring
+case, against the chat's known members in Redis (`chat_members:{chat_id}`),
 preferring whoever used it most recently. A mistyped `@` matches nobody rather
-falling back to the replied member, and usernames ending in `bot` are refused
-like bots. Both tables still store the user id.
+than falling back to the replied member. If Redis can't be read, the admin is
+asked to try again. Bots are refused by the `is_bot` flag stored with each
+member; entries saved before it existed count as bots only when they are
+Telegram's stand-ins for anonymous admins and channels. Both tables still
+store the user id.
 
 ## Redis database 0
 
@@ -167,7 +178,7 @@ database and values are decoded as UTF-8 strings.
 | `chat_compacted_until:{chat_id}` | Compaction marker | 30 days |
 | `chat_user_compacted_until:{chat_id}` | User compaction marker | 30 days |
 | `bot_message_meta:{chat_id}:{message_id}` | Version 1 JSON metadata for bot replies | 3 days |
-| `chat_members:{chat_id}` | Hash of user ID to JSON member data | 30 days |
+| `chat_members:{chat_id}` | Hash of user ID to version 1 JSON member data (`first_name`, `username`, `last_seen`, and `is_bot: true` only for bots) | 30 days |
 
 The RediSearch index name is `idx:chat_messages`, with prefix `chatmsg:`. Its
 schema includes TAG fields for chat/role/user/reply/mention, TEXT fields for

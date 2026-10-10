@@ -203,6 +203,7 @@ impl ConversationState for RedisConversationState {
             let payload = prepare_chat_member_payload(
                 &input.sender_first_name,
                 &input.sender_username,
+                input.sender_is_bot,
                 input.timestamp,
             )
             .map_err(error_text)?;
@@ -951,6 +952,7 @@ mod tests {
             sender_id: UserId(42),
             sender_first_name: "Synthetic".to_owned(),
             sender_username: "synthetic_user".to_owned(),
+            sender_is_bot: false,
             message_text: "synthetic message".to_owned(),
             command: String::new(),
             reply_to_message_id: Some(MessageId(message_id - 1)),
@@ -963,8 +965,7 @@ mod tests {
             audio_duration_seconds: None,
             locale,
             timezone_offset_hours: -3,
-            creditless_user_hourly_limit: 10,
-            own_creditless_limit: false,
+            creditless_limit: crate::ai_dispatch::CreditlessLimit::Group(10),
             group_pays_first: false,
             timestamp: 1_700_000_000 + message_id,
             spontaneous: false,
@@ -1059,6 +1060,22 @@ mod tests {
         anonymous.message_id = MessageId(8);
         anonymous.reply_context = None;
         state.record_incoming(&anonymous)?;
+
+        // Group members are stored with Telegram's bot flag.
+        use crate::chat_members_tool::ChatMemberSource;
+        let mut stand_in = conversation_input(chat_id, 9, Locale::En);
+        stand_in.chat_type = "supergroup".to_owned();
+        stand_in.sender_id = UserId(1_087_968_824);
+        stand_in.sender_is_bot = true;
+        state.record_incoming(&stand_in)?;
+        let members = bot_core::chat_members::decode_chat_members(
+            &state.state.members(&chat_id.to_string())?,
+        );
+        assert!(
+            members
+                .iter()
+                .any(|member| member.user_id == "1087968824" && member.is_bot)
+        );
         Ok(())
     }
 

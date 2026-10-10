@@ -1,30 +1,52 @@
-//! The @username a moderation command can name instead of replying to the
-//! member. Telegram doesn't let bots look a username up, so it is matched
-//! against the members the bot has seen write in the chat.
+//! The member a moderation command can name instead of replying to them:
+//! either one picked from Telegram's mention list, which carries the user,
+//! or an @username. Telegram doesn't let bots look a username up, so it is
+//! matched against the members the bot has seen write in the chat.
 
+use crate::chat_bans::BanTarget;
 use crate::chat_members::KnownChatMember;
 use crate::locale::Locale;
+use crate::telegram_input::TextMention;
 
-/// Splits a leading `@username` off a command's text, returning it without
-/// the `@` and the rest of the text. Any first word starting with `@` counts,
-/// even a mistyped one: it then matches nobody, so a typo while replying to
-/// someone never falls back to that member. Text that doesn't start with `@`
-/// comes back whole.
-#[must_use]
-pub fn split_leading_mention(text: &str) -> (Option<&str>, &str) {
-    let text = text.trim();
-    let (first, rest) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
-    match first.strip_prefix('@') {
-        Some(username) => (Some(username), rest.trim()),
-        None => (None, text),
-    }
+/// The stand-ins Telegram sends for anonymous admins and channel posts.
+/// Members stored before the bot flag was saved can only be bots if they are
+/// one of these, since bots never see other bots' messages.
+const TELEGRAM_STAND_IN_BOTS: [&str; 2] = ["1087968824", "136817688"];
+
+/// Who a command's leading word names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamedMember<'a> {
+    /// Picked from the mention list, so Telegram sent who it is.
+    Picked(&'a TextMention),
+    /// Typed as `@username`, without the `@`.
+    Username(&'a str),
 }
 
-/// Telegram requires every bot's username to end in "bot", so a member
-/// stored with one is a bot even though the stored data doesn't say so.
+/// Splits who a command names off its text, returning the rest. A member
+/// picked from the mention list wins when the text starts with its name.
+/// Otherwise any first word starting with `@` counts, even a mistyped one:
+/// it then matches nobody, so a typo while replying to someone never falls
+/// back to that member. Text that names nobody comes back whole.
 #[must_use]
-pub fn is_bot_username(username: &str) -> bool {
-    username.to_ascii_lowercase().ends_with("bot")
+pub fn split_named_member<'a>(
+    text: &'a str,
+    mentions: &'a [TextMention],
+) -> (Option<NamedMember<'a>>, &'a str) {
+    let text = text.trim();
+    let picked = mentions.iter().find_map(|mention| {
+        let rest = text.strip_prefix(mention.text.as_str())?;
+        let whole_name =
+            !mention.text.trim().is_empty() && rest.chars().next().is_none_or(char::is_whitespace);
+        whole_name.then_some((NamedMember::Picked(mention), rest.trim()))
+    });
+    if let Some((picked, rest)) = picked {
+        return (Some(picked), rest);
+    }
+    let (first, rest) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+    match first.strip_prefix('@') {
+        Some(username) => (Some(NamedMember::Username(username)), rest.trim()),
+        None => (None, text),
+    }
 }
 
 /// The member who used `username` most recently, ignoring case, so a
@@ -40,11 +62,31 @@ pub fn find_member_by_username<'a>(
         .max_by_key(|member| member.last_seen)
 }
 
+/// A member found by @username, or `None` when the stored id isn't a number.
 #[must_use]
-pub fn mentioned_member_name(member: &KnownChatMember) -> String {
-    match member.first_name.trim() {
-        "" => format!("@{}", member.username),
-        first_name => first_name.to_owned(),
+pub fn known_member_target(member: &KnownChatMember) -> Option<BanTarget> {
+    Some(BanTarget {
+        user_id: member.user_id.parse().ok()?,
+        is_bot: member.is_bot || TELEGRAM_STAND_IN_BOTS.contains(&member.user_id.as_str()),
+        name: display_name(&member.first_name, &member.username, ""),
+    })
+}
+
+#[must_use]
+pub fn picked_member_target(mention: &TextMention) -> BanTarget {
+    BanTarget {
+        user_id: mention.user_id,
+        is_bot: mention.is_bot,
+        name: display_name(&mention.first_name, &mention.username, &mention.text),
+    }
+}
+
+/// The first name, else the @username, else the text the mention covered.
+fn display_name(first_name: &str, username: &str, text: &str) -> String {
+    match (first_name.trim(), username.trim()) {
+        ("", "") => text.trim().to_owned(),
+        ("", username) => format!("@{username}"),
+        (first_name, _) => first_name.to_owned(),
     }
 }
 
@@ -60,14 +102,29 @@ pub fn unknown_mention_reply(username: &str, locale: Locale) -> String {
     }
 }
 
+/// The members the bot has seen couldn't be read, so nobody can be named.
+#[must_use]
+pub fn mention_lookup_failed_reply(username: &str, locale: Locale) -> String {
+    match locale {
+        Locale::Es => {
+            format!("No pude buscar a @{username}, probá de nuevo o respondé a un mensaje suyo")
+        }
+        Locale::En => {
+            format!("I couldn't look up @{username}. Try again, or reply to one of their messages")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        find_member_by_username, is_bot_username, mentioned_member_name, split_leading_mention,
-        unknown_mention_reply,
+        NamedMember, find_member_by_username, known_member_target, mention_lookup_failed_reply,
+        picked_member_target, split_named_member, unknown_mention_reply,
     };
+    use crate::chat_bans::BanTarget;
     use crate::chat_members::KnownChatMember;
     use crate::locale::Locale;
+    use crate::telegram_input::TextMention;
 
     fn member(user_id: &str, first_name: &str, username: &str, last_seen: i64) -> KnownChatMember {
         KnownChatMember {
@@ -75,6 +132,17 @@ mod tests {
             first_name: first_name.to_owned(),
             username: username.to_owned(),
             last_seen,
+            is_bot: false,
+        }
+    }
+
+    fn picked(text: &str, user_id: i64) -> TextMention {
+        TextMention {
+            text: text.to_owned(),
+            user_id,
+            first_name: text.to_owned(),
+            username: String::new(),
+            is_bot: false,
         }
     }
 
@@ -92,20 +160,42 @@ mod tests {
             ("@juán", (Some("juán"), "")),
             ("", (None, "")),
         ] {
-            assert_eq!(split_leading_mention(text), expected, "{text}");
+            let (named, rest) = split_named_member(text, &[]);
+            assert_eq!(
+                (named, rest),
+                (expected.0.map(NamedMember::Username), expected.1),
+                "{text}"
+            );
         }
     }
 
     #[test]
-    fn bot_usernames_end_in_bot() {
-        for (username, expected) in [
-            ("GroupAnonymousBot", true),
-            ("channel_bot", true),
-            ("robotic", false),
-            ("lemon", false),
-        ] {
-            assert_eq!(is_bot_username(username), expected, "{username}");
-        }
+    fn a_picked_member_wins_when_the_text_starts_with_their_name() {
+        let mentions = [picked("Lemon Pie", 77), picked("Ana", 78)];
+        assert_eq!(
+            split_named_member(" Lemon Pie 3 ", &mentions),
+            (Some(NamedMember::Picked(&mentions[0])), "3")
+        );
+        assert_eq!(
+            split_named_member("Ana", &mentions),
+            (Some(NamedMember::Picked(&mentions[1])), "")
+        );
+        // Only a whole name at the start counts.
+        assert_eq!(
+            split_named_member("Anabel 3", &mentions),
+            (None, "Anabel 3")
+        );
+        assert_eq!(
+            split_named_member("3 Lemon Pie", &mentions),
+            (None, "3 Lemon Pie")
+        );
+        assert_eq!(
+            split_named_member("@lemon 3", &mentions),
+            (Some(NamedMember::Username("lemon")), "3")
+        );
+        // An empty mention never swallows the text.
+        let empty = [picked(" ", 79)];
+        assert_eq!(split_named_member(" 3", &empty), (None, "3"));
     }
 
     #[test]
@@ -123,16 +213,75 @@ mod tests {
     }
 
     #[test]
-    fn names_prefer_the_first_name_then_the_username() {
+    fn known_members_are_bots_by_their_flag_or_as_telegram_stand_ins() {
+        let target = |member: &KnownChatMember| known_member_target(member);
         assert_eq!(
-            mentioned_member_name(&member("1", " Ana ", "ana", 1)),
-            "Ana"
+            target(&member("7", " Ana ", "ana", 1)),
+            Some(BanTarget {
+                user_id: 7,
+                is_bot: false,
+                name: "Ana".to_owned(),
+            })
         );
-        assert_eq!(mentioned_member_name(&member("1", " ", "ana", 1)), "@ana");
+        assert_eq!(
+            target(&member("7", " ", "ana", 1)).map(|target| target.name),
+            Some("@ana".to_owned())
+        );
+        // A person whose username ends in "bot" is still a person.
+        assert_eq!(
+            target(&member("8", "Abbot", "the_abbot", 1)).map(|target| target.is_bot),
+            Some(false)
+        );
+        let flagged = KnownChatMember {
+            is_bot: true,
+            ..member("9", "Helper", "helper", 1)
+        };
+        assert_eq!(target(&flagged).map(|target| target.is_bot), Some(true));
+        for stand_in in ["1087968824", "136817688"] {
+            assert_eq!(
+                target(&member(stand_in, "Group", "GroupAnonymousBot", 1))
+                    .map(|target| target.is_bot),
+                Some(true),
+                "{stand_in}"
+            );
+        }
+        assert_eq!(target(&member("x", "Broken", "broken", 1)), None);
     }
 
     #[test]
-    fn unknown_usernames_explain_how_to_reach_the_member() {
+    fn picked_members_keep_telegrams_bot_flag_and_best_name() {
+        assert_eq!(
+            picked_member_target(&picked("Lemon Pie", 77)),
+            BanTarget {
+                user_id: 77,
+                is_bot: false,
+                name: "Lemon Pie".to_owned(),
+            }
+        );
+        let bot = TextMention {
+            text: "Helper".to_owned(),
+            user_id: 78,
+            first_name: String::new(),
+            username: "helper_bot".to_owned(),
+            is_bot: true,
+        };
+        assert_eq!(
+            picked_member_target(&bot),
+            BanTarget {
+                user_id: 78,
+                is_bot: true,
+                name: "@helper_bot".to_owned(),
+            }
+        );
+        let nameless = TextMention {
+            first_name: String::new(),
+            ..picked(" Lemon ", 79)
+        };
+        assert_eq!(picked_member_target(&nameless).name, "Lemon");
+    }
+
+    #[test]
+    fn replies_explain_how_to_reach_the_member() {
         assert_eq!(
             unknown_mention_reply("lemon", Locale::Es),
             "No sé quién es @lemon: tiene que haber escrito en el grupo, o respondé a un mensaje suyo"
@@ -140,6 +289,14 @@ mod tests {
         assert_eq!(
             unknown_mention_reply("lemon", Locale::En),
             "I don't know who @lemon is: they need to have written in the group, or reply to one of their messages"
+        );
+        assert_eq!(
+            mention_lookup_failed_reply("lemon", Locale::Es),
+            "No pude buscar a @lemon, probá de nuevo o respondé a un mensaje suyo"
+        );
+        assert_eq!(
+            mention_lookup_failed_reply("lemon", Locale::En),
+            "I couldn't look up @lemon. Try again, or reply to one of their messages"
         );
     }
 }

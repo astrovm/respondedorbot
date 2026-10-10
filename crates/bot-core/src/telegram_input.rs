@@ -283,6 +283,58 @@ pub fn normalize_numeric_id(value: &Value) -> Option<i64> {
     }
 }
 
+/// A member picked from Telegram's mention list. Members without a username
+/// come as a `text_mention` entity that carries the user itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextMention {
+    /// The text the entity covers, usually the member's name.
+    pub text: String,
+    pub user_id: i64,
+    pub first_name: String,
+    pub username: String,
+    pub is_bot: bool,
+}
+
+/// The `text_mention` entities of a message's text, or of its caption when it
+/// has no text. Entity offsets count UTF-16 code units.
+#[must_use]
+pub fn extract_text_mentions(message: &Map<String, Value>) -> Vec<TextMention> {
+    let (text, entities) = match message.get("text").and_then(Value::as_str) {
+        Some(text) => (text, message.get("entities")),
+        None => match message.get("caption").and_then(Value::as_str) {
+            Some(caption) => (caption, message.get("caption_entities")),
+            None => return Vec::new(),
+        },
+    };
+    let units = text.encode_utf16().collect::<Vec<_>>();
+    entities
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .filter(|entity| entity.get("type").and_then(Value::as_str) == Some("text_mention"))
+        .filter_map(|entity| {
+            let offset = usize::try_from(entity.get("offset")?.as_u64()?).ok()?;
+            let length = usize::try_from(entity.get("length")?.as_u64()?).ok()?;
+            let covered = units.get(offset..offset.checked_add(length)?)?;
+            let user = entity.get("user")?.as_object()?;
+            let field = |name: &str| {
+                user.get(name)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            Some(TextMention {
+                text: String::from_utf16(covered).ok()?,
+                user_id: user.get("id").and_then(normalize_numeric_id)?,
+                first_name: field("first_name"),
+                username: field("username"),
+                is_bot: user.get("is_bot").and_then(Value::as_bool).unwrap_or(false),
+            })
+        })
+        .collect()
+}
+
 #[must_use]
 pub fn extract_user_id(message: &Value) -> Option<UserId> {
     message
@@ -319,9 +371,94 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        MessageContent, TelegramInputError, UserId, extract_message_content, extract_user_id,
-        format_user_identity, is_group_chat_type, normalize_numeric_id, without_poll_notes,
+        MessageContent, TelegramInputError, TextMention, UserId, extract_message_content,
+        extract_text_mentions, extract_user_id, format_user_identity, is_group_chat_type,
+        normalize_numeric_id, without_poll_notes,
     };
+
+    fn mentions(message: serde_json::Value) -> Vec<TextMention> {
+        message
+            .as_object()
+            .map(extract_text_mentions)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn text_mentions_carry_the_user_and_the_text_they_cover() {
+        let lemon = json!({"id": 77, "is_bot": false, "first_name": "Lemon Pie"});
+        // "🍋" is two UTF-16 units, so the name starts at unit 8, not byte 10.
+        let found = mentions(json!({
+            "text": "/ban 🍋 Lemon Pie 3",
+            "entities": [
+                {"type": "bot_command", "offset": 0, "length": 4},
+                {"type": "text_mention", "offset": 8, "length": 9, "user": lemon},
+                {"type": "mention", "offset": 0, "length": 4},
+            ],
+        }));
+        assert_eq!(
+            found,
+            [TextMention {
+                text: "Lemon Pie".to_owned(),
+                user_id: 77,
+                first_name: "Lemon Pie".to_owned(),
+                username: String::new(),
+                is_bot: false,
+            }]
+        );
+        let caption = mentions(json!({
+            "caption": "/limit Ana 2",
+            "caption_entities": [{
+                "type": "text_mention", "offset": 7, "length": 3,
+                "user": {"id": "78", "is_bot": true, "first_name": "Ana", "username": "ana_bot"},
+            }],
+        }));
+        assert_eq!(caption.len(), 1);
+        assert_eq!(caption[0].text, "Ana");
+        assert_eq!(caption[0].user_id, 78);
+        assert_eq!(caption[0].username, "ana_bot");
+        assert!(caption[0].is_bot);
+    }
+
+    #[test]
+    fn malformed_text_mentions_are_skipped() {
+        let user = json!({"id": 77, "first_name": "Lemon"});
+        for entity in [
+            json!({"type": "text_mention", "offset": 5, "length": 99, "user": user}),
+            json!({"type": "text_mention", "offset": 99, "length": 1, "user": user}),
+            json!({"type": "text_mention", "offset": -1, "length": 1, "user": user}),
+            json!({"type": "text_mention", "offset": 5, "user": user}),
+            json!({"type": "text_mention", "offset": 5, "length": 5}),
+            json!({"type": "text_mention", "offset": 5, "length": 5, "user": {"first_name": "x"}}),
+            json!({"type": "text_link", "offset": 5, "length": 5, "user": user}),
+            json!("text_mention"),
+        ] {
+            assert_eq!(
+                mentions(json!({"text": "/ban Lemon", "entities": [entity]})),
+                [],
+                "{entity}"
+            );
+        }
+        // Without text or caption there is nothing to cover, and caption
+        // entities don't apply to a text.
+        assert_eq!(mentions(json!({"entities": []})), []);
+        assert_eq!(
+            mentions(json!({
+                "text": "/ban Lemon",
+                "caption_entities": [
+                    {"type": "text_mention", "offset": 5, "length": 5, "user": user}
+                ],
+            })),
+            []
+        );
+        // A split surrogate pair can't be decoded.
+        assert_eq!(
+            mentions(json!({
+                "text": "/ban 🍋",
+                "entities": [{"type": "text_mention", "offset": 5, "length": 1, "user": user}],
+            })),
+            []
+        );
+    }
 
     #[test]
     fn extracts_text_caption_poll_and_direct_media_in_priority_order() {

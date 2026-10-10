@@ -1386,8 +1386,11 @@ impl BillingRepository {
     }
 
     /// Who spent the most of a group's own balance on AI in the last `days`,
-    /// net of refunds. An operation belongs to the window it started in, so a
-    /// refund never lands without its charge. A message only counts when the
+    /// net of refunds. An operation belongs to the window its first reserve
+    /// is in, so a refund never lands without its charge, even when ledger
+    /// cleanup already removed that reserve. Operations last seconds, so
+    /// reading one extra day is enough to find where each one started. A
+    /// message only counts when the
     /// group still paid something for it, so one handed back to the member's
     /// credits doesn't, and memory compactions add their cost but no message.
     /// Names are left empty for the caller to fill in.
@@ -1404,13 +1407,15 @@ impl BillingRepository {
                     BOOL_OR(COALESCE(metadata->>'background', '') = 'true') AS background \
                 FROM credit_ledger \
                 WHERE chat_id = $1 AND user_id IS NOT NULL \
+                  AND created_at >= NOW() - (($2::bigint + 1) * INTERVAL '1 day') \
                   AND event_type IN ( \
                     'ai_reserve', 'ai_refund', 'ai_settlement_charge', 'ai_settlement_debt', \
                     'memory_compaction_settlement' \
                   ) \
                   AND metadata->>'source' = 'chat' \
                 GROUP BY user_id, metadata->>'operation_id' \
-                HAVING MIN(created_at) >= NOW() - ($2::bigint * INTERVAL '1 day') \
+                HAVING MIN(created_at) FILTER (WHERE event_type = 'ai_reserve') \
+                    >= NOW() - ($2::bigint * INTERVAL '1 day') \
              ) \
              SELECT user_id, SUM(spent)::bigint, \
                 COUNT(*) FILTER (WHERE spent > 0 AND NOT background) \
@@ -2099,6 +2104,20 @@ mod tests {
                  '{{"source":"chat","operation_id":"{dropped}"}}')"#
         ));
         compactions?;
+        // Ledger cleanup removed this call's reserve but kept its refund, and
+        // a call from long ago is past the extra day the query reads. Neither
+        // counts.
+        let (purged, ancient) = (fresh_op(), fresh_op());
+        let leftovers = client.batch_execute(&format!(
+            r#"INSERT INTO credit_ledger
+                (event_type, actor_user_id, user_id, chat_id, amount, metadata, created_at)
+             VALUES
+                ('ai_refund', {beto}, {beto}, {chat}, 70,
+                 '{{"source":"chat","operation_id":"{purged}"}}', NOW()),
+                ('ai_reserve', {beto}, {beto}, {chat}, -900,
+                 '{{"source":"chat","operation_id":"{ancient}"}}', NOW() - INTERVAL '20 days')"#
+        ));
+        leftovers?;
         let spender = |user_id, credit_units, messages| GroupSpender {
             user_id,
             name: String::new(),
@@ -2119,6 +2138,14 @@ mod tests {
             repository.list_chat_ai_spenders(chat, 7, 10)?,
             vec![
                 spender(beto, 900, 2),
+                spender(ana, 190, 2),
+                spender(carla, 150, 2)
+            ]
+        );
+        assert_eq!(
+            repository.list_chat_ai_spenders(chat, 30, 10)?,
+            vec![
+                spender(beto, 1_800, 3),
                 spender(ana, 190, 2),
                 spender(carla, 150, 2)
             ]
@@ -2264,7 +2291,8 @@ mod tests {
                     'idx_credit_ledger_unique_ai_provider_segment', \
                     'idx_credit_ledger_user_charge_history', \
                     'idx_credit_ledger_user_charge_operations', \
-                    'idx_credit_ledger_user_settlement_lookup' \
+                    'idx_credit_ledger_user_settlement_lookup', \
+                    'idx_credit_ledger_chat_created' \
                 ))",
             &[],
         );
@@ -2279,7 +2307,7 @@ mod tests {
         );
         assert_eq!(schema_evidence.get::<_, i32>(5), 9_500);
         assert_eq!(schema_evidence.get::<_, i64>(6), 3);
-        assert_eq!(schema_evidence.get::<_, i64>(7), 8);
+        assert_eq!(schema_evidence.get::<_, i64>(7), 9);
         assert_eq!(
             BillingSchemaRepository::new(&database_url).ensure_schema()?,
             BillingSchemaResult {

@@ -21,6 +21,7 @@ pub struct IncomingCommandState<'a> {
     pub user_id: UserId,
     pub first_name: Option<&'a str>,
     pub username: Option<&'a str>,
+    pub is_bot: bool,
     pub text: &'a str,
     pub is_group: bool,
     pub timestamp: i64,
@@ -113,6 +114,7 @@ pub fn prepare_incoming_command_state(
         let payload = prepare_chat_member_payload(
             input.first_name.unwrap_or_default(),
             username,
+            input.is_bot,
             input.timestamp,
         );
         Some(ChatMemberWritePlan {
@@ -181,6 +183,7 @@ mod tests {
             user_id: UserId(88),
             first_name: Some("Synthetic"),
             username: Some("tester"),
+            is_bot: false,
             text: "/time",
             is_group: true,
             timestamp: 1_672_531_200,
@@ -199,6 +202,29 @@ mod tests {
                 .and_then(|value| value.get("last_seen").cloned()),
             Some(Value::from(1_672_531_200))
         );
+    }
+
+    #[test]
+    fn group_members_remember_when_they_are_bots() {
+        let is_bot = |is_bot| {
+            prepare_incoming_command_state(IncomingCommandState {
+                chat_id: ChatId(-42),
+                message_id: MessageId(7),
+                user_id: UserId(1_087_968_824),
+                first_name: Some("Group"),
+                username: Some("GroupAnonymousBot"),
+                is_bot,
+                text: "/bans",
+                is_group: true,
+                timestamp: 1,
+            })
+            .ok()
+            .and_then(|plan| plan.member)
+            .and_then(|member| serde_json::from_str::<Value>(&member.payload).ok())
+            .map(|payload| payload.get("is_bot").cloned())
+        };
+        assert_eq!(is_bot(true), Some(Some(Value::Bool(true))));
+        assert_eq!(is_bot(false), Some(None));
     }
 
     #[test]
@@ -237,6 +263,7 @@ mod tests {
             user_id: UserId(3),
             first_name: None,
             username: None,
+            is_bot: false,
             text: "hello",
             is_group: false,
             timestamp: 4,

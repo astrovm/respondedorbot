@@ -11,7 +11,8 @@ use serde_json::{Map, Value, json};
 use thiserror::Error;
 
 use bot_core::telegram_input::{
-    ChatId, MessageContent, MessageId, UserId, extract_message_content, normalize_numeric_id,
+    ChatId, MessageContent, MessageId, TextMention, UserId, extract_message_content,
+    extract_text_mentions, normalize_numeric_id,
 };
 
 use crate::telegram_http::{
@@ -59,6 +60,9 @@ pub struct IncomingMessage {
     pub sender_last_name: Option<String>,
     pub sender_username: Option<String>,
     pub sender_language_code: Option<String>,
+    // Defaults let updates queued by an older version still decode.
+    #[serde(default)]
+    pub sender_is_bot: bool,
     pub has_reply: bool,
     pub replied_message_id: Option<MessageId>,
     pub replied_sender_first_name: Option<String>,
@@ -73,6 +77,9 @@ pub struct IncomingMessage {
     pub audio_media_kind: Option<String>,
     pub audio_duration_seconds: Option<u64>,
     pub content: Option<MessageContent>,
+    /// Members picked from Telegram's mention list, with their ids.
+    #[serde(default)]
+    pub text_mentions: Vec<TextMention>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -180,6 +187,10 @@ fn parse_message(payload: &Map<String, Value>) -> IncomingMessage {
         .and_then(|sender| sender.get("id"))
         .and_then(normalize_numeric_id)
         .map(UserId);
+    let sender_is_bot = sender
+        .and_then(|sender| sender.get("is_bot"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let sender_language_code = sender
         .and_then(|sender| sender.get("language_code"))
         .and_then(Value::as_str)
@@ -252,6 +263,7 @@ fn parse_message(payload: &Map<String, Value>) -> IncomingMessage {
         sender_last_name,
         sender_username,
         sender_language_code,
+        sender_is_bot,
         has_reply: payload.contains_key("reply_to_message"),
         replied_message_id,
         replied_sender_first_name,
@@ -263,6 +275,7 @@ fn parse_message(payload: &Map<String, Value>) -> IncomingMessage {
         audio_media_kind,
         audio_duration_seconds,
         content: extract_message_content(&Value::Object(payload.clone())).ok(),
+        text_mentions: extract_text_mentions(payload),
     }
 }
 
@@ -629,6 +642,40 @@ mod tests {
         let legacy: IncomingMessage = serde_json::from_value(legacy)?;
         assert_eq!(legacy.replied_sender_id, None);
         assert!(!legacy.replied_sender_is_bot);
+        Ok(())
+    }
+
+    #[test]
+    fn sender_bot_flag_and_text_mentions_are_parsed() -> TestResult {
+        let parse = |message: Value| {
+            super::parse_message(&message.as_object().cloned().unwrap_or_default())
+        };
+        let message = parse(json!({
+            "message_id": 9,
+            "chat": {"id": -42, "type": "supergroup"},
+            "from": {"id": 1_087_968_824, "is_bot": true, "first_name": "Group"},
+            "text": "/ban Lemon",
+            "entities": [{
+                "type": "text_mention", "offset": 5, "length": 5,
+                "user": {"id": 77, "is_bot": false, "first_name": "Lemon"},
+            }],
+        }));
+        assert!(message.sender_is_bot);
+        assert_eq!(message.text_mentions.len(), 1);
+        assert_eq!(message.text_mentions[0].user_id, 77);
+        assert_eq!(message.text_mentions[0].text, "Lemon");
+        let person = parse(json!({"message_id": 9, "from": {"id": 8}, "text": "hola"}));
+        assert!(!person.sender_is_bot);
+        assert!(person.text_mentions.is_empty());
+        // Messages queued by an older version have neither field.
+        let mut legacy = serde_json::to_value(&message)?;
+        if let Some(object) = legacy.as_object_mut() {
+            object.remove("sender_is_bot");
+            object.remove("text_mentions");
+        }
+        let legacy: IncomingMessage = serde_json::from_value(legacy)?;
+        assert!(!legacy.sender_is_bot);
+        assert!(legacy.text_mentions.is_empty());
         Ok(())
     }
 

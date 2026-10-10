@@ -36,6 +36,25 @@ impl AiReplyMetadata {
     }
 }
 
+/// How many AI messages an hour the group pays for this member, and whose
+/// limit it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreditlessLimit {
+    /// The group's limit for every member.
+    Group(i64),
+    /// The member's own limit, set by an admin with /limit.
+    Member(i64),
+}
+
+impl CreditlessLimit {
+    #[must_use]
+    pub const fn hourly(self) -> i64 {
+        match self {
+            Self::Group(limit) | Self::Member(limit) => limit,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct AiConversationInput {
     pub chat_id: ChatId,
@@ -45,6 +64,7 @@ pub struct AiConversationInput {
     pub sender_id: UserId,
     pub sender_first_name: String,
     pub sender_username: String,
+    pub sender_is_bot: bool,
     pub message_text: String,
     pub command: String,
     pub reply_to_message_id: Option<MessageId>,
@@ -57,10 +77,7 @@ pub struct AiConversationInput {
     pub audio_duration_seconds: Option<f64>,
     pub locale: Locale,
     pub timezone_offset_hours: i64,
-    pub creditless_user_hourly_limit: i64,
-    /// The limit above is the member's own, set by an admin with /limitar,
-    /// rather than the group's.
-    pub own_creditless_limit: bool,
+    pub creditless_limit: CreditlessLimit,
     /// The group pays before the member's own credits, up to the hourly limit.
     pub group_pays_first: bool,
     pub timestamp: i64,
@@ -262,6 +279,7 @@ mod tests {
             sender_id: UserId(3),
             sender_first_name: "Synthetic".to_owned(),
             sender_username: "synthetic_user".to_owned(),
+            sender_is_bot: false,
             message_text: "synthetic message".to_owned(),
             command: String::new(),
             reply_to_message_id: None,
@@ -274,8 +292,7 @@ mod tests {
             audio_duration_seconds: None,
             locale: Locale::En,
             timezone_offset_hours: 0,
-            creditless_user_hourly_limit: 0,
-            own_creditless_limit: false,
+            creditless_limit: super::CreditlessLimit::Group(0),
             group_pays_first: false,
             timestamp: 1_700_000_000,
             spontaneous: false,
