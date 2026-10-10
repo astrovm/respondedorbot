@@ -1,4 +1,4 @@
-FROM mirror.gcr.io/library/rust:1.98.1-slim AS chef
+FROM mirror.gcr.io/library/rust:1.99.0-slim AS chef
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
