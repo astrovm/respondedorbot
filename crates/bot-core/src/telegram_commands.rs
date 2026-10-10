@@ -229,6 +229,14 @@ pub fn telegram_commands(locale: Locale) -> Vec<TelegramCommand> {
     commands
 }
 
+/// Whether `name` (no `/`) is a command or alias in the catalog.
+#[must_use]
+pub fn is_known_command(name: &str) -> bool {
+    COMMAND_GROUPS
+        .iter()
+        .any(|group| group.aliases.contains(&name))
+}
+
 /// The `/` picker shows one entry per command, most useful first. Names are
 /// the same in every language (mostly English, Spanish for the Argentine
 /// ones) so the menu never changes; only the descriptions are translated.
@@ -330,7 +338,7 @@ mod tests {
 
     use sha2::{Digest, Sha256};
 
-    use super::{command_publication_actions, telegram_commands};
+    use super::{command_publication_actions, is_known_command, telegram_commands};
     use crate::locale::Locale;
     use crate::telegram_input::ChatId;
 
@@ -375,6 +383,25 @@ mod tests {
             assert!(!commands.iter().any(|entry| entry.command == hidden));
         }
         assert!(commands.iter().any(|entry| entry.command == "tldr"));
+    }
+
+    #[test]
+    fn known_commands_are_exactly_the_catalog_aliases() {
+        for command in telegram_commands(Locale::Es) {
+            assert!(is_known_command(command.command), "{}", command.command);
+        }
+        for unknown in [
+            "",
+            "/gm",
+            "GM",
+            "buscar",
+            "gm@testbot",
+            "hola",
+            "printcredits",
+            "creditlog",
+        ] {
+            assert!(!is_known_command(unknown), "{unknown}");
+        }
     }
 
     #[test]

@@ -1,5 +1,7 @@
 //! Telegram command parsing without routing or I/O.
 
+use crate::telegram_commands::is_known_command;
+
 /// A normalized command token and its remaining message text.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParsedCommand {
@@ -54,11 +56,22 @@ pub fn parse_command(message_text: &str, bot_name: &str) -> ParsedCommand {
     }
 }
 
+/// `!gm` as `/gm`, so catalog commands answer to `!` without their own handling.
+/// Text whose `!` doesn't start one of them is left alone.
+#[must_use]
+pub fn bang_command_as_slash(message_text: &str, bot_name: &str) -> Option<String> {
+    let slashed = format!("/{}", message_text.strip_prefix('!')?);
+    let command = parse_command(&slashed, bot_name).command;
+    let name = command.strip_prefix('/')?;
+    let name = name.split_once('@').map_or(name, |(name, _)| name);
+    is_known_command(name).then_some(slashed)
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
 
-    use super::{ParsedCommand, parse_command};
+    use super::{ParsedCommand, bang_command_as_slash, parse_command};
     use crate::locale::Locale;
     use crate::telegram_commands::telegram_commands;
 
@@ -115,6 +128,51 @@ mod tests {
                     "command={command} bot_name={bot_name}",
                 );
             }
+        }
+    }
+
+    #[test]
+    fn every_catalog_command_answers_to_a_bang_too() {
+        for entry in telegram_commands(Locale::Es) {
+            let command = entry.command;
+            for text in [
+                command.to_owned(),
+                format!("{command} value"),
+                format!("{command}@TestBot value"),
+                format!("{command}@otherbot"),
+                command.to_uppercase(),
+            ] {
+                assert_eq!(
+                    bang_command_as_slash(&format!("!{text}"), "testbot"),
+                    Some(format!("/{text}")),
+                    "text={text}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bangs_that_start_no_command_stay_text() {
+        assert_eq!(
+            bang_command_as_slash("!ㅤ hola", "testbot").as_deref(),
+            Some("/ㅤ hola")
+        );
+        for text in [
+            "gm",
+            "/gm",
+            " !gm",
+            "!",
+            "! gm",
+            "!!gm",
+            "!!!",
+            "!hola che",
+            "!gmail",
+            "!@testbot",
+            "!/gm",
+            "!printcredits 2",
+            "!creditlog",
+        ] {
+            assert_eq!(bang_command_as_slash(text, "testbot"), None, "text={text}");
         }
     }
 

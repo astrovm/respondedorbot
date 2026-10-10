@@ -31,7 +31,7 @@ use bot_core::chat_limits::{
     limit_admin_target, limit_result_reply, plan_limit_command, render_limit_list,
     unlimit_result_reply,
 };
-use bot_core::command_parsing::parse_command;
+use bot_core::command_parsing::{bang_command_as_slash, parse_command};
 use bot_core::command_state::{
     IncomingCommandState, IncomingCommandWritePlan, OutgoingCommandState, OutgoingCommandWritePlan,
     prepare_incoming_command_state, prepare_outgoing_command_state,
@@ -6512,7 +6512,17 @@ where
         update: IncomingUpdate,
     ) -> NativeDispatchResult<Config, Actions, Random> {
         let outcome = match update.event {
-            IncomingEvent::Message(message) => self.dispatch_message(&message)?,
+            IncomingEvent::Message(mut message) => {
+                // Some groups have moderation bots delete every message that
+                // starts with `/`, so `!gm` is `/gm` from here on, for every
+                // handler and check.
+                if let Some(content) = message.content.as_mut()
+                    && let Some(slashed) = bang_command_as_slash(&content.text, &self.bot_name)
+                {
+                    content.text = slashed;
+                }
+                self.dispatch_message(&message)?
+            }
             IncomingEvent::SuccessfulPayment(message) => {
                 self.dispatch_successful_payment(message)?
             }
@@ -8313,6 +8323,47 @@ mod tests {
     }
 
     #[test]
+    fn bang_text_that_is_no_command_still_reaches_the_ai() {
+        let (source, (prepared, ignored, _)) = ai_source(Ok(AiPreparation::silent()));
+        let mut dispatcher = NativeDispatcher::new(
+            Config {
+                value: Ok(ChatConfig::default()),
+                chat_ids: Vec::new(),
+            },
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_ai_conversation_source(Box::new(source));
+
+        for text in ["!hola che", "!ask hola", "!", "!!! @mybot hola"] {
+            assert_eq!(
+                dispatcher.dispatch(update(text, None)),
+                Ok(DispatchOutcome::Handled),
+                "{text}"
+            );
+        }
+        let prepared = prepared.borrow();
+        let turns = prepared
+            .iter()
+            .map(|turn| (turn.command.as_str(), turn.message_text.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            turns,
+            [
+                ("!hola", "!hola che"),
+                ("/ask", "hola"),
+                ("!", "!"),
+                ("!!!", "!!! @mybot hola"),
+            ]
+        );
+        assert!(ignored.borrow().is_empty());
+    }
+
+    #[test]
     fn native_ai_failure_sends_the_localized_retry_reply() {
         let (source, _observations) = ai_source(Err("synthetic provider failure".to_owned()));
         let mut dispatcher = NativeDispatcher::new(
@@ -9916,6 +9967,156 @@ mod tests {
         );
         assert!(dispatcher.actions.0.is_empty());
         assert!(dispatcher.state.incoming.is_empty());
+    }
+
+    #[test]
+    fn bang_commands_dispatch_exactly_like_slash_commands() {
+        let dispatch = |text: &str| {
+            let mut dispatcher = NativeDispatcher::new(
+                Config {
+                    value: Ok(ChatConfig::default()),
+                    chat_ids: Vec::new(),
+                },
+                Actions::default(),
+                State::default(),
+                values(),
+                random(),
+                authorization(),
+                "@mybot",
+            )
+            .with_greeting_pool_source(Box::new(GreetingPools {
+                result: GreetingPoolLoad {
+                    urls: vec![
+                        "https://example.test/first.gif".to_owned(),
+                        "https://example.test/second.gif".to_owned(),
+                    ],
+                    diagnostics: Vec::new(),
+                },
+                calls: Rc::new(RefCell::new(Vec::new())),
+            }));
+            let outcome = dispatcher.dispatch(update(text, None));
+            (outcome, dispatcher.actions.0, dispatcher.state.incoming)
+        };
+        let slash = dispatch("/gm");
+        assert!(matches!(
+            slash.1.as_slice(),
+            [TelegramAction::SendAnimation { .. }]
+        ));
+        assert_eq!(dispatch("!gm"), slash);
+        let addressed = dispatch("/gm@MyBot");
+        assert!(matches!(
+            addressed.1.as_slice(),
+            [TelegramAction::SendAnimation { .. }]
+        ));
+        assert_eq!(dispatch("!gm@MyBot"), addressed);
+        assert_eq!(dispatch("!time"), dispatch("/time"));
+    }
+
+    #[test]
+    fn bang_commands_reuse_handlers_arguments_and_command_state() -> Result<(), String> {
+        for command in [
+            "time",
+            "instance",
+            "help",
+            "convertbase 101, 2, 10",
+            "comando Hola !gm",
+            "balance",
+            "charges",
+        ] {
+            let mut slash = dispatcher().with_billing_available(false);
+            let mut bang = dispatcher().with_billing_available(false);
+            assert_eq!(
+                bang.dispatch(update(&format!("!{command}"), Some("es"))),
+                slash.dispatch(update(&format!("/{command}"), Some("es"))),
+            );
+            assert!(!bang.actions.0.is_empty(), "{command}");
+            assert_eq!(bang.actions.0, slash.actions.0, "{command}");
+            assert_eq!(bang.state.incoming, slash.state.incoming, "{command}");
+            assert_eq!(bang.state.outgoing, slash.state.outgoing, "{command}");
+            assert!(!bang.state.outgoing.is_empty(), "{command}");
+            for plan in &bang.state.outgoing {
+                let metadata = plan.metadata.as_ref().ok_or("missing command metadata")?;
+                let metadata: Value =
+                    serde_json::from_str(&metadata.payload).map_err(|error| error.to_string())?;
+                assert_eq!(
+                    metadata["command"],
+                    format!("/{}", command.split(' ').next().ok_or("missing command")?)
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bang_commands_with_links_skip_link_replacement() {
+        for text in [
+            "/time https://x.com/a/status/1",
+            "!time https://x.com/a/status/1",
+        ] {
+            for is_reply in [false, true] {
+                let (mut source, _observations) = ai_source(Ok(AiPreparation::silent()));
+                source.metadata_error = Some("unexpected reply metadata read".to_owned());
+                let mut dispatcher = dispatcher().with_ai_conversation_source(Box::new(source));
+                dispatcher.config.value = Ok(ChatConfig {
+                    ai_command_followups: false,
+                    ..ChatConfig::default()
+                });
+                let message = message_update(text, None, |message| {
+                    message.has_reply = is_reply;
+                    message.replied_message_id = is_reply.then_some(MessageId(6));
+                    message.replied_sender_username = is_reply.then(|| "mybot".to_owned());
+                });
+                assert_eq!(dispatcher.dispatch(message), Ok(DispatchOutcome::Handled));
+                assert_eq!(only_sent(&dispatcher.actions.0).text, "1672531200");
+                assert_eq!(dispatcher.state_diagnostics(), &[] as &[String]);
+            }
+        }
+    }
+
+    #[test]
+    fn bang_media_and_summary_commands_use_the_same_ai_transactions() {
+        for command in [
+            "transcribe",
+            "transcript",
+            "describe",
+            "summary",
+            "resumen",
+            "tldr",
+        ] {
+            let mut outcomes = Vec::new();
+            for prefix in ['/', '!'] {
+                let (mut source, (prepared, ignored, deliveries)) =
+                    ai_source(Ok(AiPreparation::silent()));
+                source.media_preparation =
+                    Some(Ok(AiPreparation::reply("synthetic transcript", None)));
+                source.summary_preparation =
+                    Some(Ok(AiPreparation::reply("synthetic summary", None)));
+                let mut dispatcher = dispatcher().with_ai_conversation_source(Box::new(source));
+                let message =
+                    message_update(&format!("{prefix}{command} Hola !gm"), None, |message| {
+                        message.chat_type = Some("group".to_owned());
+                        message.has_reply = true;
+                        message.replied_message_id = Some(MessageId(6));
+                        message.audio_media_kind = Some("voice".to_owned());
+                        if let Some(content) = message.content.as_mut() {
+                            content.audio_file_id = Some("synthetic-voice".to_owned());
+                        }
+                    });
+                assert_eq!(dispatcher.dispatch(message), Ok(DispatchOutcome::Handled));
+                assert!(ignored.borrow().is_empty());
+                assert_eq!(prepared.borrow().len(), 1);
+                assert_eq!(prepared.borrow()[0].command, format!("/{command}"));
+                assert_eq!(prepared.borrow()[0].message_text, "Hola !gm");
+                outcomes.push((
+                    dispatcher.actions.0,
+                    dispatcher.state.incoming,
+                    dispatcher.state.outgoing,
+                    prepared.borrow().clone(),
+                    deliveries.borrow().clone(),
+                ));
+            }
+            assert_eq!(outcomes[0], outcomes[1], "{command}");
+        }
     }
 
     #[test]
@@ -22898,7 +23099,7 @@ mod tests {
             let bans = Bans::default();
             let rows = Rc::clone(&bans.rows);
             let mut dispatcher = build("es", &[88], Some(bans), Some(ai));
-            for text in ["/ban", "/BAN @lemon", "/unban", "/bans", "/banned"] {
+            for text in ["/ban", "/BAN @lemon", "/unban", "/bans", "/banned", "!ban"] {
                 assert_eq!(
                     dispatcher.dispatch(replying(text)),
                     Ok(DispatchOutcome::Handled),
@@ -22908,7 +23109,7 @@ mod tests {
             assert!(dispatcher.actions.0.is_empty());
             assert!(rows.borrow().is_empty());
             assert!(prepared.borrow().is_empty());
-            assert_eq!(ignored.borrow().len(), 5);
+            assert_eq!(ignored.borrow().len(), 6);
             assert!(!dispatcher.listen_only);
 
             assert_eq!(
@@ -22916,6 +23117,31 @@ mod tests {
                 "Listo, Ana ya no puede usarme en este grupo"
             );
             assert_eq!(rows.borrow().len(), 1);
+        }
+
+        #[test]
+        fn bang_commands_work_in_groups() {
+            let (ai, (prepared, ignored, _)) = ai_source(Ok(AiPreparation::silent()));
+            let bans = Bans::default();
+            let rows = Rc::clone(&bans.rows);
+            let mut dispatcher = build("es", &[88], Some(bans), Some(ai));
+            assert_eq!(
+                replies(&mut dispatcher, replying("!vetar")),
+                "Listo, Ana ya no puede usarme en este grupo"
+            );
+            assert_eq!(rows.borrow().len(), 1);
+
+            for text in ["!ask hola", "!hola", "!ask@otherbot hola"] {
+                assert_eq!(
+                    dispatcher.dispatch(group(text, |_| {})),
+                    Ok(DispatchOutcome::Handled),
+                    "{text}"
+                );
+            }
+            let prepared = prepared.borrow();
+            assert_eq!(prepared.len(), 1);
+            assert_eq!(prepared[0].message_text, "hola");
+            assert_eq!(ignored.borrow().len(), 2);
         }
 
         #[test]

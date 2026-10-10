@@ -73,8 +73,8 @@ pub fn render_help_page(
     (
         localized(
             locale,
-            "Ayuda\n\nHablame con /ask, mencionándome o respondiendo a un mensaje mío.",
-            "Help\n\nTalk to me with /ask, by mentioning me or by replying to one of my messages.",
+            "Ayuda\n\nHablame con /ask, mencionándome o respondiendo a un mensaje mío.\nTodos los comandos también funcionan con ! en vez de /.",
+            "Help\n\nTalk to me with /ask, by mentioning me or by replying to one of my messages.\nEvery command also works with ! instead of /.",
         )
         .to_owned(),
         crate::telegram_actions::InlineKeyboardMarkup {
@@ -86,6 +86,22 @@ pub fn render_help_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn help_home_says_commands_also_work_with_a_bang() {
+        for (locale, expected) in [
+            (
+                Locale::Es,
+                "Ayuda\n\nHablame con /ask, mencionándome o respondiendo a un mensaje mío.\nTodos los comandos también funcionan con ! en vez de /.",
+            ),
+            (
+                Locale::En,
+                "Help\n\nTalk to me with /ask, by mentioning me or by replying to one of my messages.\nEvery command also works with ! instead of /.",
+            ),
+        ] {
+            assert_eq!(render_help_page(locale, "home").0, expected);
+        }
+    }
 
     #[test]
     fn every_help_category_is_localized_and_has_navigation() {

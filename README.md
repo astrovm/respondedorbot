@@ -22,6 +22,8 @@ It streams replies, remembers conversations, understands media, tracks markets, 
 
 Telegram's `/` menu shows the same command names in every language, the first name in each row below. Only the descriptions follow the user's language. The other names still work.
 
+Every command and alias also works with `!` instead of `/`, for groups where a moderation bot deletes messages that start with `/`: `!gm` works like `/gm` and `!prices BTC` like `/prices BTC`. A message whose `!` doesn't start a command stays an ordinary message. In groups with privacy mode on, Telegram only sends the bot `!` messages that reply to it, unless the bot is an admin. The Telegram menu still shows `/`.
+
 ### AI and media
 
 | Command | Purpose |
