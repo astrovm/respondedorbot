@@ -122,7 +122,7 @@ during a read-modify-write operation.
 ### `chat_bans`
 
 Primary key: (`chat_id`, `user_id`), both `BIGINT`. Also stores
-`display_name` (the name shown in `/banned`), `banned_by`, and `created_at`.
+`display_name` (the name shown in `/ignored`), `banned_by`, and `created_at`.
 
 - A row means that member gets no replies in that group. Their messages still
   go into chat history.
@@ -148,7 +148,7 @@ Primary key: (`chat_id`, `user_id`), both `BIGINT`. Also stores
   `/limit off` deletes it.
 - If the lookup fails, the group's limit applies.
 
-`/ban`, `/unban` and `/limit` can name a member instead of replying. A member
+`/ignore`, `/unignore` and `/limit` can name a member instead of replying. A member
 picked from Telegram's mention list arrives as a `text_mention` entity with
 their user id, so it needs no lookup and works for members without a username.
 A typed `@username` can't be looked up by bots, so it is matched, ignoring

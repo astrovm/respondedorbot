@@ -51,8 +51,8 @@ Telegram's `/` menu shows the same command names in every language, the first na
 | --- | --- |
 | `/config`, `/settings` | Chat settings |
 | `/language`, `/idioma` | Language settings |
-| `/ban`, `/unban`, `/vetar`, `/desvetar` | Group admins: reply to someone, or name them (pick them from the @ list, or type their @username), to stop or allow them using the bot in that group |
-| `/bans`, `/banned`, `/vetados` | List who is banned in the group |
+| `/ignore`, `/unignore`, `/ignorar`, `/designorar`, `/vetar`, `/desvetar` | Group admins: reply to someone, or name them (pick them from the @ list, or type their @username), to make the bot ignore them in that group or stop ignoring them. `/ban` and `/unban` only count as `/ban@bot`, since moderation bots like Rose and GroupHelp answer the bare ones |
+| `/ignored`, `/ignorados`, `/vetados` | List who the bot ignores in the group |
 | `/limit`, `/limitar` | Group admins: reply to someone, or name them (pick them from the @ list, or type their @username), with how many AI messages per hour the group pays for them, or `off` to go back to the group limit |
 | `/limited`, `/limitados` | List who has their own limit in the group |
 | `/groupcharges`, `/gastosgrupo` | Group admins: who spent the group's own credits on AI, in the last day or up to 30 days (or `AI_LEDGER_RETENTION_DAYS`, if shorter) |

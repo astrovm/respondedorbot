@@ -22,7 +22,8 @@ use bot_core::charge_history::{
 use bot_core::chat_bans::{
     BanCommand, BanCommandContext, BanCommandPlan, BanTarget, BannedUser, ban_admin_target,
     ban_list_failed, ban_reply, ban_result_reply, ban_store_failed, bans_group_only,
-    classify_ban_command, plan_ban_command, render_ban_list, unban_result_reply,
+    classify_ban_command, is_shared_ban_command, plan_ban_command, render_ban_list,
+    unban_result_reply,
 };
 use bot_core::chat_config::ChatConfig;
 use bot_core::chat_limits::{
@@ -1138,9 +1139,9 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     member_source: Option<Box<dyn crate::chat_members_tool::ChatMemberSource>>,
     limit_store: Option<Box<dyn ChatLimitStore>>,
     group_spending_source: Option<Box<dyn GroupSpendingSource>>,
-    /// Set while a banned member's message is routed to the AI turn only to
-    /// be recorded as ignored.
-    sender_banned: bool,
+    /// Set while a message is routed to the AI turn only to be recorded as
+    /// ignored: a banned member's, or a bare `/ban` left to moderation bots.
+    listen_only: bool,
     bitcoin_price_source: Option<Box<dyn BitcoinPriceSource>>,
     dollar_quotes_source: Option<Box<dyn DollarQuotesSource>>,
     dollar_market_source: Option<Box<dyn DollarMarketSource>>,
@@ -1206,7 +1207,7 @@ where
             member_source: None,
             limit_store: None,
             group_spending_source: None,
-            sender_banned: false,
+            listen_only: false,
             bitcoin_price_source: None,
             dollar_quotes_source: None,
             dollar_market_source: None,
@@ -4994,7 +4995,7 @@ where
             random_sample: None,
         };
         let evaluation = loop {
-            if self.sender_banned {
+            if self.listen_only {
                 break ResponseRoutingEvaluation::Ignore;
             }
             // Trigger words are provided up front, so routing never asks for
@@ -5624,16 +5625,18 @@ where
             message.chat_type.as_deref().unwrap_or_default(),
         );
         let timestamp = self.runtime_values.unix_timestamp();
+        // Banned members get no reply, but their messages still reach the chat
+        // history so summaries and replies to others keep context. A bare
+        // `/ban` is the same: Rose and GroupHelp answer it, and acting on it
+        // too would ignore someone an admin only meant to ban from the group.
         if is_group_chat_type(message.chat_type.as_deref())
-            && self.sender_is_banned(chat_id, sender_id.0)
+            && (self.sender_is_banned(chat_id, sender_id.0) || is_shared_ban_command(&content.text))
         {
-            // Banned members get no reply, but their messages still reach the
-            // chat history so summaries and replies to others keep context.
             if self.ai_conversation_source.is_none() {
                 return Ok(DispatchOutcome::Handled);
             }
             let parsed = parse_command(&content.text, &self.bot_name);
-            self.sender_banned = true;
+            self.listen_only = true;
             let outcome = self.dispatch_ai_message(
                 message,
                 &config,
@@ -5642,7 +5645,7 @@ where
                 &parsed.command,
                 &parsed.message_text,
             );
-            self.sender_banned = false;
+            self.listen_only = false;
             return outcome;
         }
         let cashtag_with_period = {
@@ -22757,7 +22760,7 @@ mod tests {
 
             assert_eq!(
                 replies(&mut dispatcher, group("/vetados", |_| {})),
-                "No hay nadie baneado en este grupo"
+                "No ignoro a nadie en este grupo"
             );
             assert_eq!(
                 replies(&mut dispatcher, replying("/vetar")),
@@ -22776,23 +22779,23 @@ mod tests {
             );
             assert_eq!(
                 replies(&mut dispatcher, replying("/ban@mybot")),
-                "Ana ya estaba baneado en este grupo"
+                "Ana ya estaba ignorado en este grupo"
             );
             assert_eq!(
-                replies(&mut dispatcher, group("/banned", |_| {})),
-                "Baneados en este grupo\n- Ana"
+                replies(&mut dispatcher, group("/ignored", |_| {})),
+                "Ignorados en este grupo\n- Ana"
             );
             assert_eq!(
-                replies(&mut dispatcher, group("/bans", |_| {})),
-                "Baneados en este grupo\n- Ana"
+                replies(&mut dispatcher, group("/ignorados", |_| {})),
+                "Ignorados en este grupo\n- Ana"
             );
             assert_eq!(
                 replies(&mut dispatcher, replying("/desvetar")),
                 "Listo, Ana puede volver a usarme"
             );
             assert_eq!(
-                replies(&mut dispatcher, replying("/unban")),
-                "Ana no estaba baneado"
+                replies(&mut dispatcher, replying("/unignore")),
+                "Ana no estaba ignorado"
             );
             assert!(rows.borrow().is_empty());
             assert!(
@@ -22809,24 +22812,24 @@ mod tests {
                     "es",
                     "Esto funciona solo en grupos",
                     "Este comando es solo para admins del grupo",
-                    "A los admins no los puedo banear",
+                    "A los admins no los puedo ignorar",
                 ),
                 (
                     "en",
                     "This only works in groups",
                     "Only group admins can use this command",
-                    "I can't ban admins",
+                    "I can't ignore admins",
                 ),
             ] {
                 let bans = Bans::default();
                 let rows = Rc::clone(&bans.rows);
                 let mut dispatcher = build(language, &[88, 77], Some(bans), Some(silent_ai()));
                 assert_eq!(replies(&mut dispatcher, update("/ban", None)), group_only);
-                assert_eq!(replies(&mut dispatcher, replying("/ban")), admin_target);
+                assert_eq!(replies(&mut dispatcher, replying("/ignore")), admin_target);
                 assert!(rows.borrow().is_empty());
 
                 let mut member = build(language, &[], Some(Bans::default()), Some(silent_ai()));
-                for command in ["/ban", "/unban", "/banned"] {
+                for command in ["/ignore", "/unignore", "/ignored"] {
                     assert_eq!(replies(&mut member, replying(command)), admins_only);
                 }
                 assert!(
@@ -22838,18 +22841,44 @@ mod tests {
         }
 
         #[test]
+        fn bare_ban_commands_in_groups_are_left_to_moderation_bots() {
+            let (ai, (prepared, ignored, _)) = ai_source(Ok(AiPreparation::silent()));
+            let bans = Bans::default();
+            let rows = Rc::clone(&bans.rows);
+            let mut dispatcher = build("es", &[88], Some(bans), Some(ai));
+            for text in ["/ban", "/BAN @lemon", "/unban", "/bans", "/banned"] {
+                assert_eq!(
+                    dispatcher.dispatch(replying(text)),
+                    Ok(DispatchOutcome::Handled),
+                    "{text}"
+                );
+            }
+            assert!(dispatcher.actions.0.is_empty());
+            assert!(rows.borrow().is_empty());
+            assert!(prepared.borrow().is_empty());
+            assert_eq!(ignored.borrow().len(), 5);
+            assert!(!dispatcher.listen_only);
+
+            assert_eq!(
+                replies(&mut dispatcher, replying("/ban@MyBot")),
+                "Listo, Ana ya no puede usarme en este grupo"
+            );
+            assert_eq!(rows.borrow().len(), 1);
+        }
+
+        #[test]
         fn ban_planner_replies_reach_the_chat() {
             let mut dispatcher = build("en", &[88], Some(Bans::default()), Some(silent_ai()));
             assert_eq!(
-                replies(&mut dispatcher, group("/ban", |_| {})),
-                "Reply to someone's message with /ban, or send /ban @username, to ban them"
+                replies(&mut dispatcher, group("/ignore", |_| {})),
+                "Reply to someone's message with /ignore, or send /ignore @username, and I'll ignore them"
             );
-            let bot = group("/ban", |message| {
+            let bot = group("/ignore", |message| {
                 message.has_reply = true;
                 message.replied_sender_id = Some(UserId(5));
                 message.replied_sender_is_bot = true;
             });
-            assert_eq!(replies(&mut dispatcher, bot), "I can't ban bots");
+            assert_eq!(replies(&mut dispatcher, bot), "I can't ignore bots");
         }
 
         #[test]
@@ -22872,9 +22901,9 @@ mod tests {
                 };
                 let mut dispatcher = build(language, &[88], Some(bans), Some(silent_ai()));
                 for (command, expected, diagnostic) in [
-                    ("/ban", saved, "chat ban chat_id=-42 user_id=77"),
-                    ("/unban", saved, "chat unban chat_id=-42 user_id=77"),
-                    ("/banned", listed, "chat ban list chat_id=-42"),
+                    ("/ignore", saved, "chat ban chat_id=-42 user_id=77"),
+                    ("/unignore", saved, "chat unban chat_id=-42 user_id=77"),
+                    ("/ignored", listed, "chat ban list chat_id=-42"),
                 ] {
                     assert_eq!(replies(&mut dispatcher, replying(command)), expected);
                     assert!(
@@ -22930,7 +22959,7 @@ mod tests {
             assert_eq!(ignored[0].message_text, "@mybot hola");
             assert_eq!(ignored[1].message_text, "hola");
             assert_eq!(checks.borrow()[0], (-42, 88));
-            assert!(!dispatcher.sender_banned);
+            assert!(!dispatcher.listen_only);
 
             // The same member is untouched in private chats and other groups.
             let other_group = group("/time", |message| message.chat_id = Some(ChatId(-43)));
@@ -23007,7 +23036,7 @@ mod tests {
             let mut dispatcher = build("es", &[88, 99], Some(bans), Some(silent_ai()))
                 .with_member_source(Box::new(known_members()));
             assert_eq!(
-                replies(&mut dispatcher, group("/ban @LEMON", |_| {})),
+                replies(&mut dispatcher, group("/ignore @LEMON", |_| {})),
                 "Listo, Lemon ya no puede usarme en este grupo"
             );
             assert_eq!(rows.borrow()[0].1.user_id, 77);
@@ -23019,25 +23048,25 @@ mod tests {
             );
             assert_eq!(rows.borrow()[1].1.user_id, 55);
             assert_eq!(
-                replies(&mut dispatcher, group("/unban @lemon", |_| {})),
+                replies(&mut dispatcher, group("/unignore @lemon", |_| {})),
                 "Listo, Lemon puede volver a usarme"
             );
             assert_eq!(
-                replies(&mut dispatcher, group("/ban @boss", |_| {})),
-                "A los admins no los puedo banear"
+                replies(&mut dispatcher, group("/ignore @boss", |_| {})),
+                "A los admins no los puedo ignorar"
             );
             assert_eq!(
-                replies(&mut dispatcher, group("/ban @tester", |_| {})),
-                "No podés banearte"
+                replies(&mut dispatcher, group("/ignore @tester", |_| {})),
+                "No podés ignorarte"
             );
             assert_eq!(
-                replies(&mut dispatcher, group("/ban @groupanonymousbot", |_| {})),
-                "A los bots no los puedo banear"
+                replies(&mut dispatcher, group("/ignore @groupanonymousbot", |_| {})),
+                "A los bots no los puedo ignorar"
             );
             // A mistyped username while replying never bans the replied member.
             for username in ["nadie", "broken", "lemon."] {
                 assert_eq!(
-                    replies(&mut dispatcher, replying(&format!("/ban @{username}"))),
+                    replies(&mut dispatcher, replying(&format!("/ignore @{username}"))),
                     format!(
                         "No sé quién es @{username}: tiene que haber escrito en el grupo, o respondé a un mensaje suyo"
                     )
@@ -23045,16 +23074,16 @@ mod tests {
             }
             // Listing ignores a username.
             assert_eq!(
-                replies(&mut dispatcher, group("/bans @nadie", |_| {})),
-                "Baneados en este grupo\n- @nameless"
+                replies(&mut dispatcher, group("/ignorados @nadie", |_| {})),
+                "Ignorados en este grupo\n- @nameless"
             );
             // Bots go by the flag Telegram sent, not by how the username ends.
             assert_eq!(
-                replies(&mut dispatcher, group("/ban @helper", |_| {})),
-                "A los bots no los puedo banear"
+                replies(&mut dispatcher, group("/ignore @helper", |_| {})),
+                "A los bots no los puedo ignorar"
             );
             assert_eq!(
-                replies(&mut dispatcher, group("/ban @the_abbot", |_| {})),
+                replies(&mut dispatcher, group("/ignore @the_abbot", |_| {})),
                 "Listo, Abbot ya no puede usarme en este grupo"
             );
             assert_eq!(rows.borrow()[1].1.user_id, 33);
@@ -23071,13 +23100,13 @@ mod tests {
             assert_eq!(
                 replies(
                     &mut dispatcher,
-                    picking("/ban Lemon Pie", picked("Lemon Pie", 77, false))
+                    picking("/ignore Lemon Pie", picked("Lemon Pie", 77, false))
                 ),
                 "Listo, Lemon Pie ya no puede usarme en este grupo"
             );
             assert_eq!(rows.borrow()[0].1.user_id, 77);
             // The picked member wins over the replied one.
-            let mut reply = replying("/unban Lemon Pie");
+            let mut reply = replying("/unignore Lemon Pie");
             if let IncomingEvent::Message(message) = &mut reply.event {
                 message.text_mentions = vec![picked("Lemon Pie", 66, false)];
             }
@@ -23086,20 +23115,23 @@ mod tests {
             assert_eq!(
                 replies(
                     &mut dispatcher,
-                    picking("/unban Lemon Pie", picked("Lemon Pie", 77, false))
+                    picking("/unignore Lemon Pie", picked("Lemon Pie", 77, false))
                 ),
                 "Listo, Lemon Pie puede volver a usarme"
             );
             assert!(rows.borrow().is_empty());
             for (mention, expected) in [
-                (picked("Helper", 44, true), "A los bots no los puedo banear"),
+                (
+                    picked("Helper", 44, true),
+                    "A los bots no los puedo ignorar",
+                ),
                 (
                     picked("Boss", 99, false),
-                    "A los admins no los puedo banear",
+                    "A los admins no los puedo ignorar",
                 ),
-                (picked("Synthetic", 88, false), "No podés banearte"),
+                (picked("Synthetic", 88, false), "No podés ignorarte"),
             ] {
-                let text = format!("/ban {}", mention.text);
+                let text = format!("/ignore {}", mention.text);
                 assert_eq!(replies(&mut dispatcher, picking(&text, mention)), expected);
             }
         }
@@ -23110,7 +23142,7 @@ mod tests {
             let mut failing = build("en", &[88], Some(Bans::default()), Some(silent_ai()))
                 .with_member_source(Box::new(Members(Err("synthetic redis failure".to_owned()))));
             assert_eq!(
-                replies(&mut failing, replying("/ban @lemon")),
+                replies(&mut failing, replying("/ignore @lemon")),
                 "I couldn't look up @lemon. Try again, or reply to one of their messages"
             );
             assert_eq!(failing.actions.0.len(), 1);
@@ -23121,7 +23153,7 @@ mod tests {
             );
             let mut without = build("en", &[88], Some(Bans::default()), Some(silent_ai()));
             assert_eq!(
-                replies(&mut without, group("/unban @lemon", |_| {})),
+                replies(&mut without, group("/unignore @lemon", |_| {})),
                 unknown
             );
 
@@ -23130,7 +23162,7 @@ mod tests {
             let mut member = build("es", &[], Some(Bans::default()), Some(silent_ai()))
                 .with_member_source(Box::new(known_members()));
             assert_eq!(
-                replies(&mut member, group("/ban @lemon", |_| {})),
+                replies(&mut member, group("/ignore @lemon", |_| {})),
                 "Este comando es solo para admins del grupo"
             );
             assert_eq!(

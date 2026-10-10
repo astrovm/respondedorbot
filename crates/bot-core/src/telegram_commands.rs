@@ -159,19 +159,19 @@ const COMMAND_GROUPS: &[CommandGroup] = &[
         description_en: "move your credits to the group [amount]",
     },
     CommandGroup {
-        aliases: &["ban", "vetar"],
-        description_es: "admins: banear a alguien para que no me use",
-        description_en: "admins: stop someone using me in the group",
+        aliases: &["ignore", "ignorar", "vetar", "ban"],
+        description_es: "admins: que ignore a alguien en el grupo",
+        description_en: "admins: make me ignore someone in the group",
     },
     CommandGroup {
-        aliases: &["unban", "desvetar"],
-        description_es: "admins: desbanear a alguien",
-        description_en: "admins: lift someone's ban",
+        aliases: &["unignore", "designorar", "desvetar", "unban"],
+        description_es: "admins: que deje de ignorar a alguien",
+        description_en: "admins: stop ignoring someone",
     },
     CommandGroup {
-        aliases: &["bans", "banned", "vetados"],
-        description_es: "ver los baneados del grupo",
-        description_en: "see who is banned in the group",
+        aliases: &["ignored", "ignorados", "vetados", "bans", "banned"],
+        description_es: "ver a quién ignoro en el grupo",
+        description_en: "see who I ignore in the group",
     },
     CommandGroup {
         aliases: &["limitar", "limit"],
@@ -249,9 +249,9 @@ const MENU: &[&str] = &[
     "transfer",
     "config",
     "language",
-    "ban",
-    "unban",
-    "bans",
+    "ignore",
+    "unignore",
+    "ignored",
     "limit",
     "limited",
     "groupcharges",
@@ -347,15 +347,15 @@ mod tests {
         for (locale, expected_hash) in [
             (
                 Locale::Es,
-                "0815f14a1aef120b7d74737708a803032a81e104fb2ebae5871defad20d465ef",
+                "f8a967d606a2cee730019d136cdd65c2a2901d1af370b0c632c7e86f72df7508",
             ),
             (
                 Locale::En,
-                "b121e8b216bd82eaabf37dda3c189acdea0fa38707871daf8d3743d7b27a2b82",
+                "95879fe87904db115fb4e0f3a8c55453105f37805e794f0c48d4b93123bb331b",
             ),
         ] {
             let commands = telegram_commands(locale);
-            assert_eq!(commands.len(), 88);
+            assert_eq!(commands.len(), 94);
             let encoded = serde_json::to_string(&commands);
             assert!(encoded.is_ok());
             let digest = encoded.map(|value| sha256_hex(&value));
@@ -392,9 +392,9 @@ mod tests {
             "resumen",
             "charges",
             "language",
-            "ban",
-            "unban",
-            "bans",
+            "ignore",
+            "unignore",
+            "ignored",
             "oil",
             "elections",
             "command",
@@ -407,12 +407,12 @@ mod tests {
                 .map(|entry| entry.description)
         };
         assert_eq!(
-            description(&spanish, "bans"),
-            Some("ver los baneados del grupo")
+            description(&spanish, "ignored"),
+            Some("ver a quién ignoro en el grupo")
         );
         assert_eq!(
-            description(&english, "bans"),
-            Some("see who is banned in the group")
+            description(&english, "ignored"),
+            Some("see who I ignore in the group")
         );
     }
 
@@ -434,6 +434,10 @@ mod tests {
             "desvetar",
             "vetados",
             "banned",
+            "ban",
+            "unban",
+            "bans",
+            "ignorar",
             "gastosgrupo",
             "petroleo",
             "elecciones",
