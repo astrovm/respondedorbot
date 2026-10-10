@@ -8,7 +8,7 @@ use bot_core::telegram_input::{ChatId, MessageId};
 #[test]
 fn public_config_renderer_covers_bilingual_private_and_group_states() {
     let cases = [
-        (ChatConfig::default(), Locale::Es, true, "Configuración", 9),
+        (ChatConfig::default(), Locale::Es, true, "Configuración", 10),
         (
             ChatConfig {
                 language: "es".to_owned(),
@@ -19,6 +19,7 @@ fn public_config_renderer_covers_bilingual_private_and_group_states() {
                 ai_random_replies: false,
                 creditless_user_hourly_limit: 0,
                 group_pays_first: true,
+                ignore_media_replies: true,
             },
             Locale::Es,
             false,
@@ -37,7 +38,7 @@ fn public_config_renderer_covers_bilingual_private_and_group_states() {
             Locale::En,
             true,
             "Group settings",
-            9,
+            10,
         ),
         (
             ChatConfig {
@@ -92,6 +93,7 @@ fn public_config_callback_planner_covers_every_transition_family() {
         "cfg:random:toggle",
         "cfg:followups:toggle",
         "cfg:linkfixfollowups:toggle",
+        "cfg:mediareplies:off",
         "cfg:random:on",
         "cfg:followups:off",
         "cfg:timezone:2",

@@ -335,6 +335,43 @@ pub fn extract_text_mentions(message: &Map<String, Value>) -> Vec<TextMention> {
         .collect()
 }
 
+/// What a message carries besides text, named after its Telegram field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Attachment {
+    Animation,
+    Sticker,
+    Photo,
+    Video,
+    VideoNote,
+    Voice,
+    Audio,
+    Document,
+    Story,
+    PaidMedia,
+}
+
+/// The message's own attachment, never the one of the message it replies to.
+/// `animation` goes before `document` because GIFs set both.
+#[must_use]
+pub fn extract_attachment(message: &Map<String, Value>) -> Option<Attachment> {
+    [
+        ("animation", Attachment::Animation),
+        ("sticker", Attachment::Sticker),
+        ("photo", Attachment::Photo),
+        ("video", Attachment::Video),
+        ("video_note", Attachment::VideoNote),
+        ("voice", Attachment::Voice),
+        ("audio", Attachment::Audio),
+        ("document", Attachment::Document),
+        ("story", Attachment::Story),
+        ("paid_media", Attachment::PaidMedia),
+    ]
+    .into_iter()
+    .find(|(field, _)| message.get(*field).is_some_and(python_truthy))
+    .map(|(_, attachment)| attachment)
+}
+
 #[must_use]
 pub fn extract_user_id(message: &Value) -> Option<UserId> {
     message
@@ -371,9 +408,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        MessageContent, TelegramInputError, TextMention, UserId, extract_message_content,
-        extract_text_mentions, extract_user_id, format_user_identity, is_group_chat_type,
-        normalize_numeric_id, without_poll_notes,
+        Attachment, MessageContent, TelegramInputError, TextMention, UserId, extract_attachment,
+        extract_message_content, extract_text_mentions, extract_user_id, format_user_identity,
+        is_group_chat_type, normalize_numeric_id, without_poll_notes,
     };
 
     fn mentions(message: serde_json::Value) -> Vec<TextMention> {
@@ -458,6 +495,44 @@ mod tests {
             })),
             []
         );
+    }
+
+    #[test]
+    fn attachments_come_from_the_message_itself() {
+        let attachment =
+            |message: serde_json::Value| message.as_object().and_then(extract_attachment);
+        for (field, expected) in [
+            ("animation", Attachment::Animation),
+            ("sticker", Attachment::Sticker),
+            ("photo", Attachment::Photo),
+            ("video", Attachment::Video),
+            ("video_note", Attachment::VideoNote),
+            ("voice", Attachment::Voice),
+            ("audio", Attachment::Audio),
+            ("document", Attachment::Document),
+            ("story", Attachment::Story),
+            ("paid_media", Attachment::PaidMedia),
+        ] {
+            assert_eq!(
+                attachment(json!({"caption": "jaja", field: {"file_id": "f"}})),
+                Some(expected),
+                "{field}"
+            );
+        }
+        // A GIF also sets `document`.
+        assert_eq!(
+            attachment(json!({"animation": {"file_id": "a"}, "document": {"file_id": "d"}})),
+            Some(Attachment::Animation)
+        );
+        for message in [
+            json!({"text": "hola"}),
+            json!({"sticker": null}),
+            json!({"photo": []}),
+            json!({"dice": {"emoji": "🎲", "value": 3}}),
+            json!({"text": "hola", "reply_to_message": {"animation": {"file_id": "a"}}}),
+        ] {
+            assert_eq!(attachment(message.clone()), None, "{message}");
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Deterministic message-routing decisions.
 
-use crate::telegram_input::without_poll_notes;
+use crate::telegram_input::{Attachment, without_poll_notes};
 
 /// Normalized facts needed to decide automatic media processing.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -46,6 +46,9 @@ pub struct ResponseRoutingInput {
     pub ignore_link_fix_followups: bool,
     pub is_non_ai_command_followup: bool,
     pub ai_command_followups: bool,
+    pub ignore_media_replies: bool,
+    /// The message's own attachment when it has no text or caption.
+    pub bare_attachment: Option<Attachment>,
     pub random_replies_enabled: bool,
     pub trigger_words: Option<Vec<String>>,
     pub random_sample: Option<f64>,
@@ -109,6 +112,16 @@ pub fn evaluate_response_routing(input: &ResponseRoutingInput) -> ResponseRoutin
     {
         return ResponseRoutingEvaluation::Ignore;
     }
+    // The setting is only offered in groups.
+    if !input.is_private
+        && input.is_reply
+        && input.ignore_media_replies
+        && input
+            .bare_attachment
+            .is_some_and(|attachment| !matches!(attachment, Attachment::Voice | Attachment::Audio))
+    {
+        return ResponseRoutingEvaluation::Ignore;
+    }
 
     let Some(trigger_words) = input.trigger_words.as_ref() else {
         return ResponseRoutingEvaluation::NeedsTriggerWords;
@@ -156,7 +169,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::{
-        MediaRoutingInput, ResponseRoutingEvaluation, ResponseRoutingInput,
+        Attachment, MediaRoutingInput, ResponseRoutingEvaluation, ResponseRoutingInput,
         evaluate_response_routing, mentions_trigger_word, should_auto_process_media,
     };
 
@@ -182,6 +195,8 @@ mod tests {
             ignore_link_fix_followups: true,
             is_non_ai_command_followup: false,
             ai_command_followups: true,
+            ignore_media_replies: false,
+            bare_attachment: None,
             random_replies_enabled: true,
             trigger_words: None,
             random_sample: None,
@@ -254,6 +269,54 @@ mod tests {
             value.reply_username = Some("testbot".to_owned());
             assert!(!should_auto_process_media(&value));
         }
+    }
+
+    #[test]
+    fn media_only_replies_are_ignored_when_the_chat_asks() {
+        for (attachment, ignored_when_on) in [
+            (Some(Attachment::Sticker), true),
+            (Some(Attachment::Animation), true),
+            (Some(Attachment::Photo), true),
+            (Some(Attachment::Video), true),
+            (Some(Attachment::VideoNote), true),
+            (Some(Attachment::Document), true),
+            (Some(Attachment::Story), true),
+            (Some(Attachment::PaidMedia), true),
+            (Some(Attachment::Voice), false),
+            (Some(Attachment::Audio), false),
+            (None, false),
+        ] {
+            for ignore_media_replies in [true, false] {
+                let mut value = response_input();
+                value.message_text = String::new();
+                value.is_reply = true;
+                value.ignore_media_replies = ignore_media_replies;
+                value.bare_attachment = attachment;
+                value.trigger_words = Some(Vec::new());
+                let expected = if ignore_media_replies && ignored_when_on {
+                    ResponseRoutingEvaluation::Ignore
+                } else {
+                    ResponseRoutingEvaluation::Respond
+                };
+                assert_eq!(
+                    evaluate_response_routing(&value),
+                    expected,
+                    "{ignore_media_replies} {attachment:?}"
+                );
+            }
+        }
+        // Private chats, where the setting isn't offered, still get an answer.
+        let mut sticker = response_input();
+        sticker.message_text = String::new();
+        sticker.ignore_media_replies = true;
+        sticker.bare_attachment = Some(Attachment::Sticker);
+        sticker.trigger_words = Some(Vec::new());
+        sticker.is_reply = true;
+        sticker.is_private = true;
+        assert_eq!(
+            evaluate_response_routing(&sticker),
+            ResponseRoutingEvaluation::Respond
+        );
     }
 
     #[test]
