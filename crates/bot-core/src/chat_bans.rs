@@ -44,14 +44,25 @@ pub struct BannedUser {
     pub name: String,
 }
 
+/// Old names that moderation bots like Rose and GroupHelp also answer, so a
+/// bare `/ban` in a group would ban the member from the group too.
+const SHARED_BAN_COMMANDS: &[&str] = &["/ban", "/unban", "/bans", "/banned"];
+
 #[must_use]
 pub fn classify_ban_command(message_text: &str, bot_name: &str) -> Option<BanCommand> {
     match parse_command(message_text, bot_name).command.as_str() {
-        "/ban" | "/vetar" => Some(BanCommand::Ban),
-        "/unban" | "/desvetar" => Some(BanCommand::Unban),
-        "/bans" | "/banned" | "/vetados" => Some(BanCommand::List),
+        "/ignore" | "/ignorar" | "/vetar" | "/ban" => Some(BanCommand::Ban),
+        "/unignore" | "/designorar" | "/desvetar" | "/unban" => Some(BanCommand::Unban),
+        "/ignored" | "/ignorados" | "/vetados" | "/bans" | "/banned" => Some(BanCommand::List),
         _ => None,
     }
+}
+
+/// Whether the message is a bare `/ban`-style command. In groups it is left to
+/// the moderation bots; `/ban@thisbot` still counts.
+#[must_use]
+pub fn is_shared_ban_command(message_text: &str) -> bool {
+    SHARED_BAN_COMMANDS.contains(&parse_command(message_text, "").command.as_str())
 }
 
 #[must_use]
@@ -73,16 +84,16 @@ pub fn plan_ban_command(command: BanCommand, context: BanCommandContext) -> BanC
     let Some(target) = context.target else {
         return reply(match (command, locale) {
             (BanCommand::Ban, Locale::Es) => {
-                "Respondé al mensaje de quien quieras banear con /ban, o mandá /ban @usuario"
+                "Respondé al mensaje de quien quieras que ignore con /ignore, o mandá /ignore @usuario"
             }
             (BanCommand::Ban, Locale::En) => {
-                "Reply to someone's message with /ban, or send /ban @username, to ban them"
+                "Reply to someone's message with /ignore, or send /ignore @username, and I'll ignore them"
             }
             (_, Locale::Es) => {
-                "Respondé al mensaje de quien quieras desbanear con /unban, o mandá /unban @usuario"
+                "Respondé al mensaje de quien quieras que deje de ignorar con /unignore, o mandá /unignore @usuario"
             }
             (_, Locale::En) => {
-                "Reply to someone's message with /unban, or send /unban @username, to unban them"
+                "Reply to someone's message with /unignore, or send /unignore @username, and I'll stop ignoring them"
             }
         });
     };
@@ -94,14 +105,14 @@ pub fn plan_ban_command(command: BanCommand, context: BanCommandContext) -> BanC
     }
     if target.user_id == context.sender_id {
         return reply(match locale {
-            Locale::Es => "No podés banearte",
-            Locale::En => "You can't ban yourself",
+            Locale::Es => "No podés ignorarte",
+            Locale::En => "You can't ignore yourself",
         });
     }
     if target.is_bot {
         return reply(match locale {
-            Locale::Es => "A los bots no los puedo banear",
-            Locale::En => "I can't ban bots",
+            Locale::Es => "A los bots no los puedo ignorar",
+            Locale::En => "I can't ignore bots",
         });
     }
     BanCommandPlan::Ban {
@@ -121,8 +132,8 @@ pub const fn bans_group_only(locale: Locale) -> &'static str {
 #[must_use]
 pub const fn ban_admin_target(locale: Locale) -> &'static str {
     match locale {
-        Locale::Es => "A los admins no los puedo banear",
-        Locale::En => "I can't ban admins",
+        Locale::Es => "A los admins no los puedo ignorar",
+        Locale::En => "I can't ignore admins",
     }
 }
 
@@ -147,8 +158,8 @@ pub fn ban_result_reply(name: &str, inserted: bool, locale: Locale) -> String {
     match (inserted, locale) {
         (true, Locale::Es) => format!("Listo, {name} ya no puede usarme en este grupo"),
         (true, Locale::En) => format!("Done, {name} can't use me in this group anymore"),
-        (false, Locale::Es) => format!("{name} ya estaba baneado en este grupo"),
-        (false, Locale::En) => format!("{name} was already banned in this group"),
+        (false, Locale::Es) => format!("{name} ya estaba ignorado en este grupo"),
+        (false, Locale::En) => format!("I was already ignoring {name} in this group"),
     }
 }
 
@@ -157,8 +168,8 @@ pub fn unban_result_reply(name: &str, removed: bool, locale: Locale) -> String {
     match (removed, locale) {
         (true, Locale::Es) => format!("Listo, {name} puede volver a usarme"),
         (true, Locale::En) => format!("Done, {name} can use me again"),
-        (false, Locale::Es) => format!("{name} no estaba baneado"),
-        (false, Locale::En) => format!("{name} wasn't banned"),
+        (false, Locale::Es) => format!("{name} no estaba ignorado"),
+        (false, Locale::En) => format!("I wasn't ignoring {name}"),
     }
 }
 
@@ -166,14 +177,14 @@ pub fn unban_result_reply(name: &str, removed: bool, locale: Locale) -> String {
 pub fn render_ban_list(users: &[BannedUser], locale: Locale) -> String {
     if users.is_empty() {
         return match locale {
-            Locale::Es => "No hay nadie baneado en este grupo",
-            Locale::En => "Nobody is banned in this group",
+            Locale::Es => "No ignoro a nadie en este grupo",
+            Locale::En => "I'm not ignoring anyone in this group",
         }
         .to_owned();
     }
     let header = match locale {
-        Locale::Es => "Baneados en este grupo",
-        Locale::En => "Banned in this group",
+        Locale::Es => "Ignorados en este grupo",
+        Locale::En => "Ignored in this group",
     };
     let lines = users
         .iter()
@@ -194,7 +205,8 @@ mod tests {
     use super::{
         BanCommand, BanCommandContext, BanCommandPlan, BanTarget, BannedUser, ban_admin_target,
         ban_list_failed, ban_reply, ban_result_reply, ban_store_failed, bans_group_only,
-        classify_ban_command, plan_ban_command, render_ban_list, unban_result_reply,
+        classify_ban_command, is_shared_ban_command, plan_ban_command, render_ban_list,
+        unban_result_reply,
     };
     use crate::locale::Locale;
     use crate::telegram_actions::{SendMessage, TelegramAction};
@@ -245,8 +257,33 @@ mod tests {
             ("ban", None),
             ("", None),
             ("/ban@other_bot", None),
+            ("/ignore", Some(BanCommand::Ban)),
+            ("/ignorar@gordo_bot", Some(BanCommand::Ban)),
+            ("/unignore", Some(BanCommand::Unban)),
+            ("/designorar", Some(BanCommand::Unban)),
+            ("/ignored", Some(BanCommand::List)),
+            ("/ignorados", Some(BanCommand::List)),
         ] {
             assert_eq!(classify_ban_command(text, "gordo_bot"), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn only_bare_old_names_are_shared_with_moderation_bots() {
+        for (text, expected) in [
+            ("/ban", true),
+            ("/BAN @ana", true),
+            ("/unban", true),
+            ("/bans", true),
+            ("/banned", true),
+            ("/ban@gordo_bot", false),
+            ("/ban@other_bot", false),
+            ("/ignore", false),
+            ("/vetar", false),
+            ("ban", false),
+            ("", false),
+        ] {
+            assert_eq!(is_shared_ban_command(text), expected, "{text}");
         }
     }
 
@@ -265,22 +302,22 @@ mod tests {
             (
                 BanCommand::Ban,
                 Locale::Es,
-                "Respondé al mensaje de quien quieras banear con /ban, o mandá /ban @usuario",
+                "Respondé al mensaje de quien quieras que ignore con /ignore, o mandá /ignore @usuario",
             ),
             (
                 BanCommand::Ban,
                 Locale::En,
-                "Reply to someone's message with /ban, or send /ban @username, to ban them",
+                "Reply to someone's message with /ignore, or send /ignore @username, and I'll ignore them",
             ),
             (
                 BanCommand::Unban,
                 Locale::Es,
-                "Respondé al mensaje de quien quieras desbanear con /unban, o mandá /unban @usuario",
+                "Respondé al mensaje de quien quieras que deje de ignorar con /unignore, o mandá /unignore @usuario",
             ),
             (
                 BanCommand::Unban,
                 Locale::En,
-                "Reply to someone's message with /unban, or send /unban @username, to unban them",
+                "Reply to someone's message with /unignore, or send /unignore @username, and I'll stop ignoring them",
             ),
         ] {
             let plan = plan_ban_command(command, context(locale, None));
@@ -291,15 +328,15 @@ mod tests {
     #[test]
     fn ban_refuses_self_and_bots() {
         for (locale, expected) in [
-            (Locale::Es, "No podés banearte"),
-            (Locale::En, "You can't ban yourself"),
+            (Locale::Es, "No podés ignorarte"),
+            (Locale::En, "You can't ignore yourself"),
         ] {
             let plan = plan_ban_command(BanCommand::Ban, context(locale, target(1, false)));
             assert_eq!(reply_text(&plan), Some(expected));
         }
         for (locale, expected) in [
-            (Locale::Es, "A los bots no los puedo banear"),
-            (Locale::En, "I can't ban bots"),
+            (Locale::Es, "A los bots no los puedo ignorar"),
+            (Locale::En, "I can't ignore bots"),
         ] {
             let plan = plan_ban_command(BanCommand::Ban, context(locale, target(2, true)));
             assert_eq!(reply_text(&plan), Some(expected));
@@ -344,9 +381,9 @@ mod tests {
         assert_eq!(bans_group_only(Locale::En), "This only works in groups");
         assert_eq!(
             ban_admin_target(Locale::Es),
-            "A los admins no los puedo banear"
+            "A los admins no los puedo ignorar"
         );
-        assert_eq!(ban_admin_target(Locale::En), "I can't ban admins");
+        assert_eq!(ban_admin_target(Locale::En), "I can't ignore admins");
         assert_eq!(
             ban_store_failed(Locale::Es),
             "No pude guardar el cambio, probá de nuevo"
@@ -377,11 +414,11 @@ mod tests {
         );
         assert_eq!(
             ban_result_reply("Ana", false, Locale::Es),
-            "Ana ya estaba baneado en este grupo"
+            "Ana ya estaba ignorado en este grupo"
         );
         assert_eq!(
             ban_result_reply("Ana", false, Locale::En),
-            "Ana was already banned in this group"
+            "I was already ignoring Ana in this group"
         );
         assert_eq!(
             unban_result_reply("Ana", true, Locale::Es),
@@ -393,11 +430,11 @@ mod tests {
         );
         assert_eq!(
             unban_result_reply("Ana", false, Locale::Es),
-            "Ana no estaba baneado"
+            "Ana no estaba ignorado"
         );
         assert_eq!(
             unban_result_reply("Ana", false, Locale::En),
-            "Ana wasn't banned"
+            "I wasn't ignoring Ana"
         );
     }
 
@@ -405,11 +442,11 @@ mod tests {
     fn ban_list_names_members_and_falls_back_to_ids() {
         assert_eq!(
             render_ban_list(&[], Locale::Es),
-            "No hay nadie baneado en este grupo"
+            "No ignoro a nadie en este grupo"
         );
         assert_eq!(
             render_ban_list(&[], Locale::En),
-            "Nobody is banned in this group"
+            "I'm not ignoring anyone in this group"
         );
         let users = [
             BannedUser {
@@ -423,11 +460,11 @@ mod tests {
         ];
         assert_eq!(
             render_ban_list(&users, Locale::Es),
-            "Baneados en este grupo\n- Ana\n- 3"
+            "Ignorados en este grupo\n- Ana\n- 3"
         );
         assert_eq!(
             render_ban_list(&users, Locale::En),
-            "Banned in this group\n- Ana\n- 3"
+            "Ignored in this group\n- Ana\n- 3"
         );
     }
 }
