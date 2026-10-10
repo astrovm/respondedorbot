@@ -4990,6 +4990,8 @@ where
                 .as_ref()
                 .is_some_and(crate::ai_dispatch::AiReplyMetadata::is_non_ai_command),
             ai_command_followups: config.ai_command_followups,
+            ignore_media_replies: config.ignore_media_replies,
+            bare_attachment: message.attachment.filter(|_| content.text.is_empty()),
             random_replies_enabled: config.ai_random_replies,
             trigger_words: Some(self.trigger_words.clone()),
             random_sample: None,
@@ -6605,7 +6607,7 @@ mod tests {
     use bot_core::chat_config::ChatConfig;
     use bot_core::command_state::{IncomingCommandWritePlan, OutgoingCommandWritePlan};
     use bot_core::telegram_actions::{MAX_TELEGRAM_TEXT_LENGTH, SendMessage, TelegramAction};
-    use bot_core::telegram_input::{ChatId, MessageContent, MessageId, UserId};
+    use bot_core::telegram_input::{Attachment, ChatId, MessageContent, MessageId, UserId};
     use bot_core::telegram_payments::StarPaymentRecord;
     use bot_core::token_signals::{
         PairLiquidity, PairPriceChange, PairToken, PairTransactionWindows, PairTransactions,
@@ -7439,6 +7441,7 @@ mod tests {
             visual_media_kind: None,
             audio_media_kind: None,
             audio_duration_seconds: None,
+            attachment: None,
             content: Some(MessageContent {
                 text: text.to_owned(),
                 photo_file_id: None,
@@ -8202,6 +8205,7 @@ mod tests {
                 visual_media_kind: None,
                 audio_media_kind: None,
                 audio_duration_seconds: None,
+                attachment: None,
                 content: None,
             })),
         };
@@ -8908,6 +8912,54 @@ mod tests {
         );
         assert!(deliveries.borrow().is_empty());
         assert!(dispatcher.actions.0.is_empty());
+    }
+
+    #[test]
+    fn media_only_replies_to_the_bot_follow_the_chat_setting() {
+        for (ignore_media_replies, text, attachment, answered) in [
+            (true, "", Some(Attachment::Sticker), false),
+            (true, "", Some(Attachment::Animation), false),
+            // A one-word caption is still text.
+            (true, "jaja", Some(Attachment::Photo), true),
+            (true, "", Some(Attachment::Voice), true),
+            // No attachment of its own, like a dice or a location.
+            (true, "", None, true),
+            (false, "", Some(Attachment::Sticker), true),
+            (false, "", Some(Attachment::Animation), true),
+        ] {
+            let (source, (prepared, ignored, _)) = ai_source(Ok(AiPreparation::silent()));
+            let mut dispatcher = NativeDispatcher::new(
+                Config {
+                    value: Ok(ChatConfig {
+                        ignore_media_replies,
+                        ..ChatConfig::default()
+                    }),
+                    chat_ids: Vec::new(),
+                },
+                Actions::default(),
+                State::default(),
+                values(),
+                random(),
+                authorization(),
+                "@mybot",
+            )
+            .with_ai_conversation_source(Box::new(source));
+            let reply = message_update(text, None, |message| {
+                message.chat_type = Some("group".to_owned());
+                message.has_reply = true;
+                message.replied_message_id = Some(MessageId(3));
+                message.replied_sender_username = Some("mybot".to_owned());
+                message.attachment = attachment;
+            });
+            let case = format!("{ignore_media_replies} {text:?} {attachment:?}");
+            assert_eq!(
+                dispatcher.dispatch(reply),
+                Ok(DispatchOutcome::Handled),
+                "{case}"
+            );
+            assert_eq!(prepared.borrow().len(), usize::from(answered), "{case}");
+            assert_eq!(ignored.borrow().len(), usize::from(!answered), "{case}");
+        }
     }
 
     #[test]
@@ -10801,7 +10853,7 @@ mod tests {
                 .reply_markup
                 .as_ref()
                 .map(|markup| markup.inline_keyboard.len()),
-            Some(9)
+            Some(10)
         );
         assert_eq!(dispatcher.state.incoming.len(), 1);
         assert_eq!(dispatcher.state.outgoing.len(), 1);

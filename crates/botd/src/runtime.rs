@@ -1278,6 +1278,7 @@ mod tests {
                 visual_media_kind: None,
                 audio_media_kind: None,
                 audio_duration_seconds: None,
+                attachment: None,
                 content: None,
             })),
         }

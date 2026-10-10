@@ -11,8 +11,8 @@ use serde_json::{Map, Value, json};
 use thiserror::Error;
 
 use bot_core::telegram_input::{
-    ChatId, MessageContent, MessageId, TextMention, UserId, extract_message_content,
-    extract_text_mentions, normalize_numeric_id,
+    Attachment, ChatId, MessageContent, MessageId, TextMention, UserId, extract_attachment,
+    extract_message_content, extract_text_mentions, normalize_numeric_id,
 };
 
 use crate::telegram_http::{
@@ -76,6 +76,10 @@ pub struct IncomingMessage {
     pub visual_media_kind: Option<String>,
     pub audio_media_kind: Option<String>,
     pub audio_duration_seconds: Option<u64>,
+    /// The message's own file, unlike the media fields above, which fall back
+    /// to the replied message.
+    #[serde(default)]
+    pub attachment: Option<Attachment>,
     pub content: Option<MessageContent>,
     /// Members picked from Telegram's mention list, with their ids.
     #[serde(default)]
@@ -274,6 +278,7 @@ fn parse_message(payload: &Map<String, Value>) -> IncomingMessage {
         visual_media_kind,
         audio_media_kind,
         audio_duration_seconds,
+        attachment: extract_attachment(payload),
         content: extract_message_content(&Value::Object(payload.clone())).ok(),
         text_mentions: extract_text_mentions(payload),
     }
@@ -397,7 +402,7 @@ mod tests {
 
     use std::cell::RefCell;
 
-    use bot_core::telegram_input::{MessageContent, MessageId};
+    use bot_core::telegram_input::{Attachment, MessageContent, MessageId};
     use reqwest::Method;
     use serde_json::{Value, json};
 
@@ -676,6 +681,43 @@ mod tests {
         let legacy: IncomingMessage = serde_json::from_value(legacy)?;
         assert!(!legacy.sender_is_bot);
         assert!(legacy.text_mentions.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn only_the_messages_own_file_is_its_attachment() -> TestResult {
+        let parse = |message: Value| {
+            super::parse_message(&message.as_object().cloned().unwrap_or_default())
+        };
+        let gif = json!({"file_id": "gif", "duration": 2});
+        let sticker = parse(json!({
+            "message_id": 9,
+            "sticker": {"file_id": "laugh", "emoji": "😂"},
+            "reply_to_message": {"message_id": 8, "animation": gif},
+        }));
+        assert_eq!(sticker.attachment, Some(Attachment::Sticker));
+        // A caption of spaces leaves no text.
+        let photo = parse(json!({"message_id": 11, "caption": "  ", "photo": [{"file_id": "p"}]}));
+        assert_eq!(photo.attachment, Some(Attachment::Photo));
+        assert_eq!(
+            photo.content.map(|content| content.text),
+            Some(String::new())
+        );
+        // The media fields fall back to the replied GIF; the attachment doesn't.
+        let dice = parse(json!({
+            "message_id": 10,
+            "dice": {"emoji": "🎲", "value": 3},
+            "reply_to_message": {"message_id": 8, "animation": gif},
+        }));
+        assert_eq!(dice.visual_media_kind.as_deref(), Some("animation"));
+        assert_eq!(dice.attachment, None);
+        // Messages queued by an older version have no attachment field.
+        let mut legacy = serde_json::to_value(&sticker)?;
+        if let Some(object) = legacy.as_object_mut() {
+            object.remove("attachment");
+        }
+        let legacy: IncomingMessage = serde_json::from_value(legacy)?;
+        assert_eq!(legacy.attachment, None);
         Ok(())
     }
 

@@ -21,6 +21,7 @@ pub enum ToggleField {
     RandomReplies,
     CommandFollowups,
     IgnoreLinkFixFollowups,
+    IgnoreMediaReplies,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -56,6 +57,7 @@ fn toggle_field(action: &str) -> Option<ToggleField> {
         "random" => Some(ToggleField::RandomReplies),
         "followups" => Some(ToggleField::CommandFollowups),
         "linkfixfollowups" => Some(ToggleField::IgnoreLinkFixFollowups),
+        "mediareplies" => Some(ToggleField::IgnoreMediaReplies),
         _ => None,
     }
 }
@@ -151,6 +153,7 @@ pub fn plan_config_callback(
         "random" => Some(current.ai_random_replies),
         "followups" => Some(current.ai_command_followups),
         "linkfixfollowups" => Some(current.ignore_link_fix_followups),
+        "mediareplies" => Some(current.ignore_media_replies),
         _ => None,
     };
     if action == "creditless"
@@ -211,6 +214,7 @@ pub fn plan_config_callback(
                 ToggleField::IgnoreLinkFixFollowups => {
                     config.ignore_link_fix_followups = value;
                 }
+                ToggleField::IgnoreMediaReplies => config.ignore_media_replies = value,
             }
             None
         }
@@ -492,6 +496,13 @@ mod tests {
                 "cfg:linkfixfollowups:toggle",
                 ChatConfig {
                     ignore_link_fix_followups: false,
+                    ..current.clone()
+                },
+            ),
+            (
+                "cfg:mediareplies:on",
+                ChatConfig {
+                    ignore_media_replies: true,
                     ..current.clone()
                 },
             ),

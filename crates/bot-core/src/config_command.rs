@@ -155,13 +155,18 @@ fn render_config_keyboard(
                 "cfg:payer:members".to_owned(),
             ),
         ]);
+        rows.push(toggle_buttons(
+            "mediareplies",
+            config.ignore_media_replies,
+            locale,
+        ));
     }
     InlineKeyboardMarkup {
         inline_keyboard: rows,
     }
 }
 
-const PAGES: [&str; 8] = [
+const PAGES: [&str; 9] = [
     "language",
     "link",
     "followups",
@@ -170,9 +175,10 @@ const PAGES: [&str; 8] = [
     "random",
     "creditless",
     "payer",
+    "mediareplies",
 ];
 
-fn titles(locale: Locale) -> [&'static str; 8] {
+fn titles(locale: Locale) -> [&'static str; 9] {
     match locale {
         Locale::Es => [
             "Idioma",
@@ -183,6 +189,7 @@ fn titles(locale: Locale) -> [&'static str; 8] {
             "Respuestas random",
             "Mensajes gratis por hora",
             "Quién paga primero",
+            "Ignorar replies con multimedia",
         ],
         Locale::En => [
             "Language",
@@ -193,11 +200,12 @@ fn titles(locale: Locale) -> [&'static str; 8] {
             "Random replies",
             "Free messages per hour",
             "Who pays first",
+            "Ignore media replies",
         ],
     }
 }
 
-fn descriptions(locale: Locale) -> [&'static str; 8] {
+fn descriptions(locale: Locale) -> [&'static str; 9] {
     match locale {
         Locale::Es => [
             "El idioma de mis mensajes, menús y respuestas.",
@@ -208,6 +216,7 @@ fn descriptions(locale: Locale) -> [&'static str; 8] {
             "De vez en cuando me meto en la charla del grupo aunque nadie me llame.",
             "Cuántos mensajes de IA por hora puede usar cada persona con el saldo del grupo.\n\n0 = nadie, ∞ = sin límite",
             "Quién paga los mensajes de IA de alguien que tiene créditos propios.\n\n• Grupo: paga el grupo hasta el límite por hora, después sus créditos.\n• Cada uno: paga con sus créditos, y el grupo cuando no le alcanzan.",
+            "Si alguien me responde solo con multimedia, como un sticker, GIF, foto, video o videomensaje, sin texto, no le contesto. Los audios y las notas de voz los sigo escuchando, y /describe y /transcribe andan igual.",
         ],
         Locale::En => [
             "The language of my messages, menus and replies.",
@@ -218,6 +227,7 @@ fn descriptions(locale: Locale) -> [&'static str; 8] {
             "Every now and then I join the group conversation without being called.",
             "How many AI messages per hour each person can use from the group balance.\n\n0 = nobody, ∞ = no limit",
             "Who pays for the AI messages of someone with their own credits.\n\n• Group: the group pays up to the hourly limit, then their credits.\n• Members: they pay with their credits, and the group when theirs run out.",
+            "When someone replies to me with only media, like a sticker, GIF, photo, video or video message, and no text, I don't answer. I still listen to audio and voice messages, and /describe and /transcribe keep working.",
         ],
     }
 }
@@ -294,8 +304,9 @@ pub fn render_config_page(
         on_off_text(config.ai_random_replies, locale).to_owned(),
         creditless_text(config.creditless_user_hourly_limit),
         payer_text(config.group_pays_first, locale).to_owned(),
+        on_off_text(config.ignore_media_replies, locale).to_owned(),
     ];
-    let mut rows = (0..if is_group { 8 } else { 5 })
+    let mut rows = (0..if is_group { 9 } else { 5 })
         .map(|i| {
             vec![button(
                 format!("{}: {}", names[i], values[i]),
@@ -355,7 +366,7 @@ mod tests {
                 let (text, keyboard) = render_config(&ChatConfig::default(), locale, group);
                 assert!(text.lines().count() <= 3);
                 assert!(!text.contains("UTC"));
-                assert_eq!(keyboard.inline_keyboard.len(), if group { 9 } else { 6 });
+                assert_eq!(keyboard.inline_keyboard.len(), if group { 10 } else { 6 });
                 assert!(keyboard.inline_keyboard[4][0].text.contains("UTC-3"));
                 assert_eq!(
                     keyboard.inline_keyboard[0][0].callback_data.as_deref(),
@@ -367,7 +378,7 @@ mod tests {
                         .as_deref(),
                     Some("cfg:page:close")
                 );
-                for page in PAGES.iter().take(if group { 8 } else { 5 }) {
+                for page in PAGES.iter().take(if group { 9 } else { 5 }) {
                     let (detail, keyboard) =
                         render_config_page(&ChatConfig::default(), locale, group, page);
                     assert!(!detail.contains("Elegí"));
@@ -456,9 +467,56 @@ mod tests {
     }
 
     #[test]
+    fn media_replies_page_marks_whether_they_are_ignored() {
+        for (ignore_media_replies, selected, es, en) in [
+            (
+                false,
+                1,
+                "Ignorar replies con multimedia: Desactivado",
+                "Ignore media replies: Off",
+            ),
+            (
+                true,
+                0,
+                "Ignorar replies con multimedia: Activado",
+                "Ignore media replies: On",
+            ),
+        ] {
+            let config = ChatConfig {
+                ignore_media_replies,
+                ..ChatConfig::default()
+            };
+            let (text, page) = render_config_page(&config, Locale::En, true, "mediareplies");
+            assert_eq!(
+                text,
+                "Ignore media replies\n\nWhen someone replies to me with only media, like a sticker, GIF, photo, video or video message, and no text, I don't answer. I still listen to audio and voice messages, and /describe and /transcribe keep working."
+            );
+            let (spanish, _) = render_config_page(&config, Locale::Es, true, "mediareplies");
+            assert_eq!(
+                spanish,
+                "Ignorar replies con multimedia\n\nSi alguien me responde solo con multimedia, como un sticker, GIF, foto, video o videomensaje, sin texto, no le contesto. Los audios y las notas de voz los sigo escuchando, y /describe y /transcribe andan igual."
+            );
+            let options = &page.inline_keyboard[0];
+            assert_eq!(
+                options
+                    .iter()
+                    .map(|b| b.callback_data.as_deref())
+                    .collect::<Vec<_>>(),
+                [Some("cfg:mediareplies:on"), Some("cfg:mediareplies:off")]
+            );
+            assert!(options[selected].text.starts_with('✓'));
+            assert!(!options[1 - selected].text.starts_with('✓'));
+            for (locale, label) in [(Locale::Es, es), (Locale::En, en)] {
+                let (_, home) = render_config(&config, locale, true);
+                assert_eq!(home.inline_keyboard[8][0].text, label);
+            }
+        }
+    }
+
+    #[test]
     fn unavailable_group_pages_return_home() {
         let config = ChatConfig::default();
-        for page in ["random", "creditless", "payer", "unknown"] {
+        for page in ["random", "creditless", "payer", "mediareplies", "unknown"] {
             assert_eq!(
                 render_config_page(&config, Locale::En, false, page),
                 render_config(&config, Locale::En, false)

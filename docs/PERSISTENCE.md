@@ -115,6 +115,7 @@ Recognized settings and defaults:
 | `ai_random_replies` | `true` | Boolean; group setting |
 | `creditless_user_hourly_limit` | `5` | Existing bounded integer choices |
 | `group_pays_first` | `false` | Boolean; group setting. `true` charges the group before the member's own credits until their hourly limit |
+| `ignore_media_replies` | `false` | Boolean; group setting. `true` ignores replies to the bot that carry only a sticker, GIF, photo, video, video message, file, story or paid media, with no text; voice messages and audio still get answers |
 
 Unknown stored fields must not cause existing recognized settings to be lost
 during a read-modify-write operation.

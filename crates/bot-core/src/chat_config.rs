@@ -19,6 +19,8 @@ pub struct ChatConfig {
     /// Charge the group before a member's own credits, up to their hourly
     /// limit. Off: members pay first and the group covers the rest.
     pub group_pays_first: bool,
+    /// Don't answer replies to the bot that carry only media, with no text.
+    pub ignore_media_replies: bool,
 }
 
 impl Default for ChatConfig {
@@ -32,6 +34,7 @@ impl Default for ChatConfig {
             ai_random_replies: true,
             creditless_user_hourly_limit: DEFAULT_CREDITLESS_USER_HOURLY_LIMIT,
             group_pays_first: false,
+            ignore_media_replies: false,
         }
     }
 }
@@ -127,6 +130,10 @@ impl ChatConfig {
                 values.get("group_pays_first"),
                 defaults.group_pays_first,
             ),
+            ignore_media_replies: coerce_bool(
+                values.get("ignore_media_replies"),
+                defaults.ignore_media_replies,
+            ),
         })
     }
 }
@@ -153,7 +160,8 @@ mod tests {
                 "timezone_offset": "4",
                 "ai_random_replies": "enabled",
                 "creditless_user_hourly_limit": 9.8,
-                "group_pays_first": "on"
+                "group_pays_first": "on",
+                "ignore_media_replies": 1
             })),
             Ok(ChatConfig {
                 language: "en".to_owned(),
@@ -164,6 +172,7 @@ mod tests {
                 ai_random_replies: true,
                 creditless_user_hourly_limit: 9,
                 group_pays_first: true,
+                ignore_media_replies: true,
             })
         );
     }
@@ -205,6 +214,7 @@ mod tests {
                 ai_random_replies: defaults.ai_random_replies,
                 creditless_user_hourly_limit: 3,
                 group_pays_first: false,
+                ignore_media_replies: false,
             })
         );
         let mixed = ChatConfig::from_json(&json!({
