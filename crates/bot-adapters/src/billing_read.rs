@@ -1,5 +1,6 @@
 //! PostgreSQL billing repository.
 
+use bot_core::group_charges::GroupSpender;
 use postgres::{Transaction, error::SqlState};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -1384,6 +1385,50 @@ impl BillingRepository {
         })
     }
 
+    /// Who spent the most of a group's own balance on AI in the last `days`,
+    /// net of refunds. An operation belongs to the window it started in, so a
+    /// refund never lands without its charge. A message only counts when the
+    /// group still paid something for it, so one handed back to the member's
+    /// credits doesn't, and memory compactions add their cost but no message.
+    /// Names are left empty for the caller to fill in.
+    pub fn list_chat_ai_spenders(
+        &self,
+        chat_id: i64,
+        days: i64,
+        limit: i64,
+    ) -> Result<Vec<GroupSpender>, BillingError> {
+        let mut client = self.connect()?;
+        let rows = client.query(
+            "WITH per_operation AS ( \
+                SELECT user_id, -SUM(amount)::bigint AS spent, \
+                    BOOL_OR(COALESCE(metadata->>'background', '') = 'true') AS background \
+                FROM credit_ledger \
+                WHERE chat_id = $1 AND user_id IS NOT NULL \
+                  AND event_type IN ( \
+                    'ai_reserve', 'ai_refund', 'ai_settlement_charge', 'ai_settlement_debt', \
+                    'memory_compaction_settlement' \
+                  ) \
+                  AND metadata->>'source' = 'chat' \
+                GROUP BY user_id, metadata->>'operation_id' \
+                HAVING MIN(created_at) >= NOW() - ($2::bigint * INTERVAL '1 day') \
+             ) \
+             SELECT user_id, SUM(spent)::bigint, \
+                COUNT(*) FILTER (WHERE spent > 0 AND NOT background) \
+             FROM per_operation GROUP BY user_id HAVING SUM(spent) > 0 \
+             ORDER BY 2 DESC, user_id LIMIT $3",
+            &[&chat_id, &days, &limit],
+        )?;
+        Ok(rows
+            .iter()
+            .map(|row| GroupSpender {
+                user_id: row.get(0),
+                name: String::new(),
+                credit_units: row.get(1),
+                messages: row.get(2),
+            })
+            .collect())
+    }
+
     pub fn list_user_ai_charge_rows(
         &self,
         user_id: i64,
@@ -1891,6 +1936,7 @@ mod tests {
     };
     use crate::billing_schema::fault_injection::{self, TestResult};
     use crate::billing_schema::{BillingSchemaRepository, BillingSchemaResult};
+    use bot_core::group_charges::GroupSpender;
 
     #[test]
     fn validates_the_persistent_scope_contract_before_connecting() {
@@ -1940,6 +1986,154 @@ mod tests {
         Ok(format!(
             "{database_url}{separator}options=-csearch_path%3D{schema}"
         ))
+    }
+
+    #[test]
+    fn chat_ai_spenders_count_only_what_the_group_paid() -> Result<(), Box<dyn std::error::Error>> {
+        std::env::var("TEST_DATABASE_URL").map_or(Ok(()), |url| chat_ai_spenders(&url))
+    }
+
+    fn chat_ai_spenders(database_url: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let database_url = isolated_schema_url(database_url, "chat_ai_spenders_test")?;
+        let connector = TlsConnector::builder().build()?;
+        let mut client = Client::connect(&database_url, MakeTlsConnector::new(connector))?;
+        BillingSchemaRepository::new(&database_url).ensure_schema()?;
+        let repository = BillingRepository::new(&database_url);
+        let (chat, other_chat) = (-8_300_000_000_001_i64, -8_300_000_000_002_i64);
+        let (ana, beto, carla) = (8_300_000_000_011_i64, 8_300_000_000_012, 8_300_000_000_013);
+        let funded = client.batch_execute(
+            "INSERT INTO credit_accounts (scope_type, scope_id, balance) VALUES \
+                ('chat', -8300000000001, 100000), ('chat', -8300000000002, 100000), \
+                ('user', 8300000000011, 100000), ('user', 8300000000012, 100000), \
+                ('user', 8300000000013, 100000)",
+        );
+        funded?;
+        // Each operation is reserved from one payer and settled at its real cost.
+        let spend = |user_id: i64, chat_id: i64, source: &str, reserved: i32, actual: i64| {
+            let operation_id = fresh_op();
+            let metadata =
+                serde_json::Map::from_iter([("operation_id".to_owned(), json!(operation_id))]);
+            let reserve = repository.charge_ai_credits(
+                user_id,
+                Some(chat_id),
+                reserved,
+                "ai_reserve",
+                &metadata,
+                Some(source),
+                Some(&operation_id),
+                &operation_id,
+            );
+            assert!(reserve?.ok);
+            let settled = repository.settle_ai_operation_once(
+                user_id,
+                Some(chat_id),
+                &operation_id,
+                actual,
+                &metadata,
+            );
+            settled?;
+            Ok::<_, BillingError>(operation_id)
+        };
+        spend(ana, chat, "chat", 300, 100)?;
+        spend(ana, chat, "chat", 50, 50)?;
+        spend(ana, chat, "user", 1_000, 1_000)?;
+        spend(ana, other_chat, "chat", 999, 999)?;
+        spend(beto, chat, "chat", 400, 400)?;
+        let old = spend(beto, chat, "chat", 500, 500)?;
+        spend(carla, chat, "chat", 200, 0)?;
+        // A message the group started paying for and then handed back to
+        // Ana's own credits, as when the group runs short mid-message.
+        let moved = fresh_op();
+        let moved_metadata =
+            serde_json::Map::from_iter([("operation_id".to_owned(), json!(moved))]);
+        let held = repository.charge_ai_credits(
+            ana,
+            Some(chat),
+            300,
+            "ai_reserve",
+            &moved_metadata,
+            Some("chat"),
+            Some(&format!("{moved}:base")),
+            &moved,
+        );
+        assert!(held?.ok);
+        let handed_back = repository.refund_ai_charge(
+            ana,
+            Some(chat),
+            300,
+            "chat",
+            "ai_refund",
+            &moved_metadata,
+            Some(&format!("{moved}:handoff")),
+            &moved,
+        );
+        handed_back?;
+        let aged = client.execute(
+            "UPDATE credit_ledger SET created_at = NOW() - INTERVAL '3 days' \
+             WHERE metadata->>'operation_id' = $1",
+            &[&old],
+        );
+        aged?;
+        // Carla's call reserved two days ago and settled now belongs to the
+        // day it started, so its refund never lands in the last day alone.
+        let straddling = spend(carla, chat, "chat", 300, 100)?;
+        let started_earlier = client.execute(
+            "UPDATE credit_ledger SET created_at = NOW() - INTERVAL '2 days' \
+             WHERE metadata->>'operation_id' = $1 AND event_type = 'ai_reserve'",
+            &[&straddling],
+        );
+        started_earlier?;
+        spend(carla, chat, "chat", 50, 50)?;
+        // Memory compactions the group paid add their cost but no message, and
+        // one that was handed back in full adds nothing.
+        let (kept, dropped) = (fresh_op(), fresh_op());
+        let compactions = client.batch_execute(&format!(
+            r#"INSERT INTO credit_ledger
+                (event_type, actor_user_id, user_id, chat_id, amount, metadata)
+             VALUES
+                ('ai_reserve', {ana}, {ana}, {chat}, -40,
+                 '{{"source":"chat","operation_id":"{kept}","background":true}}'),
+                ('ai_reserve', {ana}, {ana}, {chat}, -100,
+                 '{{"source":"chat","operation_id":"{dropped}","background":true}}'),
+                ('memory_compaction_settlement', {ana}, {ana}, {chat}, 100,
+                 '{{"source":"chat","operation_id":"{dropped}"}}')"#
+        ));
+        compactions?;
+        let spender = |user_id, credit_units, messages| GroupSpender {
+            user_id,
+            name: String::new(),
+            credit_units,
+            messages,
+        };
+
+        // Ana's own credits, her other group and Carla's refunded call don't count.
+        assert_eq!(
+            repository.list_chat_ai_spenders(chat, 1, 10)?,
+            vec![
+                spender(beto, 400, 1),
+                spender(ana, 190, 2),
+                spender(carla, 50, 1)
+            ]
+        );
+        assert_eq!(
+            repository.list_chat_ai_spenders(chat, 7, 10)?,
+            vec![
+                spender(beto, 900, 2),
+                spender(ana, 190, 2),
+                spender(carla, 150, 2)
+            ]
+        );
+        assert_eq!(
+            repository.list_chat_ai_spenders(chat, 7, 1)?,
+            vec![spender(beto, 900, 2)]
+        );
+        assert_eq!(repository.list_chat_ai_spenders(-1, 7, 10)?, Vec::new());
+        assert!(
+            BillingRepository::new("postgresql://synthetic:synthetic@127.0.0.1:1/none")
+                .list_chat_ai_spenders(chat, 1, 10)
+                .is_err()
+        );
+        Ok(())
     }
 
     #[test]

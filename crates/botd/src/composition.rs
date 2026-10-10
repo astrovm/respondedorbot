@@ -120,11 +120,12 @@ use crate::dispatcher::{
     BillingBalanceSource, BillingBalances, BillingTransferSink, BitcoinPriceSource,
     ChargeHistorySource, ChatBanStore, ChatConfigSource, ChatLimitStore, DollarMarketLoad,
     DollarMarketSource, DollarQuotesSource, ElectionLoad, ElectionSource, GreetingPoolLoad,
-    GreetingPoolSource, GroupAuthorizationDecision, GroupAuthorizer, LinkReplacementLoad,
-    LinkReplacementSource, MarketPriceLoad, MarketPriceSource, MessageStateSink, NativeDispatcher,
-    OilPriceSource, OilQuoteLoad, RandomSource, RuloInputLoad, RuloSource, RuntimeValues,
-    ScheduledTaskSource, StarPaymentReceipt, StarPaymentSink, StockPriceSource, StockQuotesLoad,
-    TokenSignalLoad, TokenSignalSource, WeatherObservationLoad, WeatherSource,
+    GreetingPoolSource, GroupAuthorizationDecision, GroupAuthorizer, GroupSpendingSource,
+    LinkReplacementLoad, LinkReplacementSource, MarketPriceLoad, MarketPriceSource,
+    MessageStateSink, NativeDispatcher, OilPriceSource, OilQuoteLoad, RandomSource, RuloInputLoad,
+    RuloSource, RuntimeValues, ScheduledTaskSource, StarPaymentReceipt, StarPaymentSink,
+    StockPriceSource, StockQuotesLoad, TokenSignalLoad, TokenSignalSource, WeatherObservationLoad,
+    WeatherSource,
 };
 use crate::error_text;
 use crate::firecrawl_tool::FirecrawlTool;
@@ -195,6 +196,42 @@ impl ChatMemberSource for KnownMembers {
         RedisMessageState::new(&self.redis_endpoint)
             .map_err(error_text)?
             .members(chat_id)
+    }
+}
+
+/// Spending comes from the billing ledger and names from the members the
+/// bot has seen in the chat.
+struct GroupSpending {
+    billing: BillingRepository,
+    redis_endpoint: RedisEndpoint,
+}
+
+impl GroupSpendingSource for GroupSpending {
+    fn load(
+        &mut self,
+        chat_id: i64,
+        days: i64,
+        limit: usize,
+    ) -> Result<Vec<bot_core::group_charges::GroupSpender>, String> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut spenders = self
+            .billing
+            .list_chat_ai_spenders(chat_id, days, limit)
+            .map_err(error_text)?;
+        // Names are best effort: without them the list shows ids.
+        let members = RedisMessageState::new(&self.redis_endpoint)
+            .map_err(error_text)
+            .and_then(|mut state| state.members(&chat_id.to_string()))
+            .map(|entries| bot_core::chat_members::decode_chat_members(&entries))
+            .unwrap_or_default();
+        for spender in &mut spenders {
+            let user_id = spender.user_id.to_string();
+            if let Some(member) = members.iter().find(|member| member.user_id == user_id) {
+                spender.name =
+                    bot_core::group_charges::spender_name(&member.first_name, &member.username);
+            }
+        }
+        Ok(spenders)
     }
 }
 
@@ -3256,6 +3293,10 @@ fn build_native_dispatcher_with_stream_delivery(
         redis_endpoint: options.redis_endpoint.clone(),
     }))
     .with_limit_store(Box::new(ChatLimitRepository::new(options.database_url)))
+    .with_group_spending_source(Box::new(GroupSpending {
+        billing: BillingRepository::new(options.database_url),
+        redis_endpoint: options.redis_endpoint.clone(),
+    }))
     .with_dollar_quotes_source(Box::new(CriptoYaDollarQuotesSource {
         transport: criptoya_transport,
         cache: criptoya_cache,
@@ -6493,6 +6534,111 @@ mod tests {
     }
 
     #[test]
+    fn group_spending_reads_the_ledger_and_names_members_the_bot_has_seen() {
+        use crate::dispatcher::GroupSpendingSource;
+        let Some(database_url) = db_env() else { return };
+        let Some(endpoint) = redis_env() else { return };
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.subsec_nanos());
+        // A fresh group per run, so spending from earlier runs never adds up.
+        let chat_id = -100_900_000_000 - i64::from(nanos);
+        let (ana, beto) = (900_311_i64, 900_312_i64);
+        assert!(
+            bot_adapters::billing_schema::BillingSchemaRepository::new(&database_url)
+                .ensure_schema()
+                .is_ok()
+        );
+        let billing = BillingRepository::new(&database_url);
+        let operation = |name: &str| format!("synthetic-group-spending-{chat_id}-{name}");
+        assert!(
+            billing
+                .mint_user_credits(ana, 10_000, None, &operation("mint"))
+                .is_ok()
+        );
+        assert!(
+            billing
+                .transfer_user_to_chat(ana, chat_id, 10_000, &operation("fund"))
+                .is_ok()
+        );
+        for (user_id, reserved, actual) in [(ana, 300, 120), (beto, 200, 200)] {
+            let operation_id = operation(&format!("{user_id}"));
+            let metadata = serde_json::Map::from_iter([(
+                "operation_id".to_owned(),
+                serde_json::json!(operation_id),
+            )]);
+            let reserve = billing.charge_ai_credits(
+                user_id,
+                Some(chat_id),
+                reserved,
+                "ai_reserve",
+                &metadata,
+                Some("chat"),
+                Some(&operation_id),
+                &operation_id,
+            );
+            assert!(reserve.is_ok_and(|reserve| reserve.ok));
+            let settled = billing.settle_ai_operation_once(
+                user_id,
+                Some(chat_id),
+                &operation_id,
+                actual,
+                &metadata,
+            );
+            assert!(settled.is_ok());
+        }
+        let members = bot_adapters::redis_message_state::RedisMessageState::new(&endpoint);
+        assert!(members.is_ok_and(|members| {
+            members
+                .save_chat_member(
+                    &bot_core::message_state::chat_members_key(&chat_id.to_string()),
+                    &ana.to_string(),
+                    r#"{"schema_version":1,"first_name":"Ana","username":"ana","last_seen":1}"#,
+                    60,
+                )
+                .is_ok()
+        }));
+
+        let mut source = super::GroupSpending {
+            billing,
+            redis_endpoint: endpoint,
+        };
+        let spender = |user_id, name: &str, credit_units| bot_core::group_charges::GroupSpender {
+            user_id,
+            name: name.to_owned(),
+            credit_units,
+            messages: 1,
+        };
+        assert_eq!(
+            source.load(chat_id, 1, 10),
+            Ok(vec![spender(beto, "", 200), spender(ana, "Ana", 120)])
+        );
+        assert_eq!(
+            source.load(chat_id, 1, usize::MAX),
+            Ok(vec![spender(beto, "", 200), spender(ana, "Ana", 120)])
+        );
+
+        // Without Redis the list still loads, only without names.
+        let mut nameless = super::GroupSpending {
+            billing: BillingRepository::new(&database_url),
+            redis_endpoint: RedisEndpoint {
+                host: "127.0.0.1".to_owned(),
+                port: 1,
+                ..source.redis_endpoint.clone()
+            },
+        };
+        assert_eq!(
+            nameless.load(chat_id, 1, 1),
+            Ok(vec![spender(beto, "", 200)])
+        );
+        let mut offline = super::GroupSpending {
+            billing: BillingRepository::new("postgresql://synthetic:synthetic@127.0.0.1:1/none"),
+            redis_endpoint: source.redis_endpoint.clone(),
+        };
+        assert!(offline.load(chat_id, 1, 10).is_err());
+    }
+
+    #[test]
     fn chat_limit_repository_backs_the_dispatcher_limit_store() {
         use crate::dispatcher::ChatLimitStore;
         let Some(database_url) = db_env() else { return };
@@ -6610,6 +6756,7 @@ mod tests {
             locale: Locale::En,
             timezone_offset_hours: i64::from(i32::MAX) + 1,
             creditless_user_hourly_limit: 10,
+            own_creditless_limit: false,
             group_pays_first: false,
             timestamp: 1_700_000_000,
             spontaneous: false,
@@ -8744,6 +8891,7 @@ mod tests {
             locale: Locale::En,
             timezone_offset_hours: -3,
             creditless_user_hourly_limit: 10,
+            own_creditless_limit: false,
             group_pays_first: false,
             timestamp: 1_700_000_000,
             spontaneous: false,
