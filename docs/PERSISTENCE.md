@@ -77,6 +77,11 @@ Current uniqueness contracts include:
 - Idempotent reservation/refund lookup through event type and metadata keys.
 - Special compaction settlement/refund repair behavior.
 
+`/groupcharges` reads this table: per member, it nets the AI reserve, refund,
+settlement and compaction rows whose `source` is `chat`, grouped by
+`operation_id` and placed in the window each operation started in. It relies
+on every group-paid row carrying `source: chat` and its `operation_id`.
+
 Rust must preserve transaction boundaries, advisory locks used by schema
 migrations, retry classification, and integer scaling. It must not use floating
 point for balances or mutations.

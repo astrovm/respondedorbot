@@ -47,6 +47,10 @@ use bot_core::dollar::{
     DollarCommandPlan, classify_dollar_command, invalid_timeframe_message, plan_dollar_command,
 };
 use bot_core::greeting_commands::{GreetingCategory, classify_greeting_command, greeting_fallback};
+use bot_core::group_charges::{
+    GROUP_CHARGES_LIMIT, GroupChargesPlan, GroupSpender, classify_group_charges_command,
+    group_charges_failed, plan_group_charges_command, render_group_charges,
+};
 use bot_core::language_command::{LanguageCommandPlan, plan_language_command};
 use bot_core::lightning_topup::{
     LightningCallback, LightningInvoice, lightning_invoice_failed, lightning_invoice_message,
@@ -397,6 +401,13 @@ pub trait ChatLimitStore {
     fn clear(&mut self, chat_id: i64, user_id: i64) -> Result<bool, String>;
 
     fn list(&mut self, chat_id: i64) -> Result<Vec<LimitedUser>, String>;
+}
+
+/// What members spent from a group's own balance on AI.
+pub trait GroupSpendingSource {
+    /// The biggest spenders over the last `days`, at most `limit` of them,
+    /// with their names when the bot knows them.
+    fn load(&mut self, chat_id: i64, days: i64, limit: usize) -> Result<Vec<GroupSpender>, String>;
 }
 
 /// The member a ban or limit command replies to, bots included so the
@@ -1116,6 +1127,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     lightning_checkout: Option<Box<dyn LightningCheckout>>,
     ban_store: Option<Box<dyn ChatBanStore>>,
     limit_store: Option<Box<dyn ChatLimitStore>>,
+    group_spending_source: Option<Box<dyn GroupSpendingSource>>,
     /// Set while a banned member's message is routed to the AI turn only to
     /// be recorded as ignored.
     sender_banned: bool,
@@ -1182,6 +1194,7 @@ where
             lightning_checkout: None,
             ban_store: None,
             limit_store: None,
+            group_spending_source: None,
             sender_banned: false,
             bitcoin_price_source: None,
             dollar_quotes_source: None,
@@ -1271,6 +1284,12 @@ where
     #[must_use]
     pub fn with_limit_store(mut self, store: Box<dyn ChatLimitStore>) -> Self {
         self.limit_store = Some(store);
+        self
+    }
+
+    #[must_use]
+    pub fn with_group_spending_source(mut self, source: Box<dyn GroupSpendingSource>) -> Self {
+        self.group_spending_source = Some(source);
         self
     }
 
@@ -4688,6 +4707,60 @@ where
         }
     }
 
+    fn dispatch_group_charges_command(
+        &mut self,
+        (chat_id, message_id, sender_id): (ChatId, MessageId, UserId),
+        argument: &str,
+        locale: bot_core::locale::Locale,
+        is_group: bool,
+    ) -> NativeDispatchResult<Config, Actions, Random> {
+        let Some(source) = self.group_spending_source.as_mut() else {
+            return Err(DispatchError::MissingService("group charges"));
+        };
+        let chat = chat_id.0.to_string();
+        let reply = |text: &str| ban_reply(chat_id, message_id, text);
+        let authorization = if is_group {
+            let authorization = self
+                .authorization
+                .authorize(&chat, &sender_id.0.to_string());
+            self.state_diagnostics.extend(authorization.diagnostics);
+            Some(authorization.is_admin)
+        } else {
+            None
+        };
+        let action = match authorization {
+            None => reply(bans_group_only(locale)),
+            Some(false) => {
+                self.state_diagnostics.push(format!(
+                    "Unauthorized group charges attempt chat_id={chat} user_id={}",
+                    sender_id.0
+                ));
+                reply(match locale {
+                    bot_core::locale::Locale::Es => "Este comando es solo para admins del grupo",
+                    bot_core::locale::Locale::En => "Only group admins can use this command",
+                })
+            }
+            Some(true) => match plan_group_charges_command(argument, chat_id, message_id, locale) {
+                GroupChargesPlan::Reply(action) => action,
+                GroupChargesPlan::Load { days } => {
+                    match source.load(chat_id.0, days, GROUP_CHARGES_LIMIT) {
+                        Ok(spenders) => reply(&render_group_charges(&spenders, days, locale)),
+                        Err(error) => {
+                            self.state_diagnostics
+                                .push(format!("group charges chat_id={chat}: {error}"));
+                            reply(group_charges_failed(locale))
+                        }
+                    }
+                }
+            },
+        };
+        let _receipt = self
+            .actions
+            .execute(action)
+            .map_err(DispatchError::Action)?;
+        Ok(DispatchOutcome::Handled)
+    }
+
     fn dispatch_limit_command(
         &mut self,
         message: &IncomingMessage,
@@ -5592,6 +5665,10 @@ where
         if let Some(command) = classify_limit_command(&content.text, &self.bot_name) {
             let ids = (chat_id, message_id, sender_id);
             return self.dispatch_limit_command(message, ids, command, locale, is_group);
+        }
+        if let Some(argument) = classify_group_charges_command(&content.text, &self.bot_name) {
+            let ids = (chat_id, message_id, sender_id);
+            return self.dispatch_group_charges_command(ids, &argument, locale, is_group);
         }
         let is_settings_command = matches!(
             parsed.command.as_str(),
@@ -23148,6 +23225,182 @@ mod tests {
             assert!(diagnostics.contains(
                 &"chat limit check chat_id=-42 user_id=88: synthetic database failure".to_owned()
             ));
+        }
+    }
+
+    mod group_charges {
+        use super::*;
+        use crate::dispatcher::GroupSpendingSource;
+        use bot_core::group_charges::GroupSpender;
+
+        type Loads = Rc<RefCell<Vec<(i64, i64, usize)>>>;
+
+        /// Fixed spenders, every load recorded, and an optional failure.
+        #[derive(Default)]
+        struct Spending {
+            loads: Loads,
+            spenders: Vec<GroupSpender>,
+            error: Option<String>,
+        }
+
+        impl GroupSpendingSource for Spending {
+            fn load(
+                &mut self,
+                chat_id: i64,
+                days: i64,
+                limit: usize,
+            ) -> Result<Vec<GroupSpender>, String> {
+                self.loads.borrow_mut().push((chat_id, days, limit));
+                self.error
+                    .clone()
+                    .map_or_else(|| Ok(self.spenders.clone()), Err)
+            }
+        }
+
+        struct Admins(Vec<i64>);
+
+        impl GroupAuthorizer for Admins {
+            fn authorize(&mut self, _chat_id: &str, user_id: &str) -> GroupAuthorizationDecision {
+                GroupAuthorizationDecision {
+                    is_admin: self.0.iter().any(|admin| admin.to_string() == user_id),
+                    diagnostics: vec![format!("checked {user_id}")],
+                }
+            }
+        }
+
+        fn build(
+            language: &str,
+            admins: &[i64],
+            spending: Option<Spending>,
+        ) -> NativeDispatcher<Config, Actions, State, Values, Samples, Admins> {
+            let dispatcher = NativeDispatcher::new(
+                Config {
+                    value: Ok(ChatConfig {
+                        language: language.to_owned(),
+                        ..ChatConfig::default()
+                    }),
+                    chat_ids: Vec::new(),
+                },
+                Actions::default(),
+                State::default(),
+                values(),
+                random(),
+                Admins(admins.to_vec()),
+                "@mybot",
+            );
+            match spending {
+                Some(spending) => dispatcher.with_group_spending_source(Box::new(spending)),
+                None => dispatcher,
+            }
+        }
+
+        fn group(text: &str) -> IncomingUpdate {
+            message_update(text, None, |message| {
+                message.chat_type = Some("supergroup".to_owned());
+            })
+        }
+
+        fn replies(
+            dispatcher: &mut NativeDispatcher<Config, Actions, State, Values, Samples, Admins>,
+            update: IncomingUpdate,
+        ) -> String {
+            dispatcher.actions.0.clear();
+            assert_eq!(dispatcher.dispatch(update), Ok(DispatchOutcome::Handled));
+            let message = first_sent(&dispatcher.actions.0);
+            assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
+            message.text.clone()
+        }
+
+        #[test]
+        fn admins_see_who_spent_the_groups_credits() {
+            let spending = Spending {
+                spenders: vec![GroupSpender {
+                    user_id: 77,
+                    name: "Ana".to_owned(),
+                    credit_units: 123_450,
+                    messages: 8,
+                }],
+                ..Spending::default()
+            };
+            let loads = Rc::clone(&spending.loads);
+            let mut dispatcher = build("es", &[88], Some(spending));
+            assert_eq!(
+                replies(&mut dispatcher, group("/groupcharges")),
+                "Créditos del grupo gastados en las últimas 24 horas\n- Ana: 1,234.50 (8 mensajes)"
+            );
+            assert_eq!(
+                replies(&mut dispatcher, group("/groupcharges@mybot 7")),
+                "Créditos del grupo gastados en los últimos 7 días\n- Ana: 1,234.50 (8 mensajes)"
+            );
+            assert_eq!(loads.borrow().as_slice(), [(-42, 1, 10), (-42, 7, 10)]);
+
+            let mut empty = build("en", &[88], Some(Spending::default()));
+            assert_eq!(
+                replies(&mut empty, group("/groupcharges 30")),
+                "Nobody spent the group's credits in the last 30 days"
+            );
+        }
+
+        #[test]
+        fn group_charges_refuse_private_chats_non_admins_and_bad_days() {
+            for (language, group_only, admins_only, usage) in [
+                (
+                    "es",
+                    "Esto funciona solo en grupos",
+                    "Este comando es solo para admins del grupo",
+                    "Mandá /groupcharges para el último día, o /groupcharges y una cantidad de días, hasta 30",
+                ),
+                (
+                    "en",
+                    "This only works in groups",
+                    "Only group admins can use this command",
+                    "Send /groupcharges for the last day, or /groupcharges and a number of days, up to 30",
+                ),
+            ] {
+                let spending = Spending::default();
+                let loads = Rc::clone(&spending.loads);
+                let mut dispatcher = build(language, &[88], Some(spending));
+                assert_eq!(
+                    replies(&mut dispatcher, update("/groupcharges", None)),
+                    group_only
+                );
+                assert_eq!(replies(&mut dispatcher, group("/groupcharges 31")), usage);
+                assert!(loads.borrow().is_empty());
+
+                let mut member = build(language, &[], Some(Spending::default()));
+                assert_eq!(replies(&mut member, group("/groupcharges")), admins_only);
+                assert!(member.state_diagnostics().contains(
+                    &"Unauthorized group charges attempt chat_id=-42 user_id=88".to_owned()
+                ));
+            }
+        }
+
+        #[test]
+        fn group_charges_failure_replies_and_leaves_a_diagnostic() {
+            let spending = Spending {
+                error: Some("synthetic database failure".to_owned()),
+                ..Spending::default()
+            };
+            let mut dispatcher = build("en", &[88], Some(spending));
+            assert_eq!(
+                replies(&mut dispatcher, group("/groupcharges")),
+                "I couldn't load the spending, try again"
+            );
+            assert!(
+                dispatcher
+                    .state_diagnostics()
+                    .contains(&"group charges chat_id=-42: synthetic database failure".to_owned())
+            );
+        }
+
+        #[test]
+        fn group_charges_need_the_spending_source() {
+            let mut dispatcher = build("es", &[88], None);
+            assert_eq!(
+                dispatcher.dispatch(group("/groupcharges")),
+                Err(DispatchError::MissingService("group charges"))
+            );
+            assert!(dispatcher.actions.0.is_empty());
         }
     }
 }
