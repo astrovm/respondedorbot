@@ -1006,7 +1006,7 @@ mod tests {
     /// Takes one unit from a failure budget, reporting whether it was spent.
     fn spend(budget: &AtomicUsize) -> bool {
         budget
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                 remaining.checked_sub(1)
             })
             .is_ok()
