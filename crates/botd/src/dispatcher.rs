@@ -64,6 +64,10 @@ use bot_core::market_prices::{
     MarketCandidate, MarketConversion, MarketPriceCommand, MarketSelection,
     classify_market_price_command, format_market_selection,
 };
+use bot_core::mention_targets::{
+    NamedMember, find_member_by_username, known_member_target, mention_lookup_failed_reply,
+    picked_member_target, split_named_member, unknown_mention_reply,
+};
 use bot_core::polymarket::{ElectionEvent, classify_election_command, render_elections};
 use bot_core::random_selection::{RandomSelection, parse_random_selection};
 use bot_core::routing::{
@@ -115,7 +119,8 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 
 use crate::ai_dispatch::{
-    AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, reply_context,
+    AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, CreditlessLimit,
+    reply_context,
 };
 use crate::runtime::{HandlerErrorDisposition, UpdateHandler};
 use crate::telegram_stream::{StreamFinalizeError, TelegramAiStream};
@@ -408,6 +413,9 @@ pub trait GroupSpendingSource {
     /// The biggest spenders over the last `days`, at most `limit` of them,
     /// with their names when the bot knows them.
     fn load(&mut self, chat_id: i64, days: i64, limit: usize) -> Result<Vec<GroupSpender>, String>;
+
+    /// How many days back the ledger still has.
+    fn max_days(&self) -> i64;
 }
 
 /// The member a ban or limit command replies to, bots included so the
@@ -1126,6 +1134,8 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     admin_creditlog_source: Option<Box<dyn AdminCreditLogSource>>,
     lightning_checkout: Option<Box<dyn LightningCheckout>>,
     ban_store: Option<Box<dyn ChatBanStore>>,
+    /// Resolves the @username in ban and limit commands.
+    member_source: Option<Box<dyn crate::chat_members_tool::ChatMemberSource>>,
     limit_store: Option<Box<dyn ChatLimitStore>>,
     group_spending_source: Option<Box<dyn GroupSpendingSource>>,
     /// Set while a banned member's message is routed to the AI turn only to
@@ -1193,6 +1203,7 @@ where
             admin_creditlog_source: None,
             lightning_checkout: None,
             ban_store: None,
+            member_source: None,
             limit_store: None,
             group_spending_source: None,
             sender_banned: false,
@@ -1278,6 +1289,15 @@ where
     #[must_use]
     pub fn with_ban_store(mut self, store: Box<dyn ChatBanStore>) -> Self {
         self.ban_store = Some(store);
+        self
+    }
+
+    #[must_use]
+    pub fn with_member_source(
+        mut self,
+        source: Box<dyn crate::chat_members_tool::ChatMemberSource>,
+    ) -> Self {
+        self.member_source = Some(source);
         self
     }
 
@@ -1552,6 +1572,7 @@ where
                 user_id: sender_id,
                 first_name: message.sender_first_name.as_deref(),
                 username: message.sender_username.as_deref(),
+                is_bot: message.sender_is_bot,
                 text,
                 is_group: is_group_chat_type(message.chat_type.as_deref()),
                 timestamp,
@@ -1823,6 +1844,7 @@ where
             user_id,
             first_name: message.sender_first_name.as_deref(),
             username: message.sender_username.as_deref(),
+            is_bot: message.sender_is_bot,
             text: &content.text,
             is_group: is_group_chat_type(message.chat_type.as_deref()),
             timestamp,
@@ -4574,14 +4596,52 @@ where
         }
     }
 
+    /// The member a ban or limit command is about: the one it names, either
+    /// picked from Telegram's mention list or by @username looked up among
+    /// the members the bot has seen write, or else the one it replies to.
+    /// `Err` is the reply for a username the bot can't resolve.
+    fn moderation_target(
+        &mut self,
+        message: &IncomingMessage,
+        chat_id: ChatId,
+        named: Option<NamedMember<'_>>,
+        locale: bot_core::locale::Locale,
+    ) -> Result<Option<BanTarget>, String> {
+        let username = match named {
+            None => return Ok(ban_target(message, locale)),
+            Some(NamedMember::Picked(mention)) => return Ok(Some(picked_member_target(mention))),
+            Some(NamedMember::Username(username)) => username,
+        };
+        let entries = match self.member_source.as_mut() {
+            Some(source) => source.members(&chat_id.0.to_string()).map_err(|error| {
+                self.state_diagnostics
+                    .push(format!("chat members chat_id={}: {error}", chat_id.0));
+                mention_lookup_failed_reply(username, locale)
+            })?,
+            None => Vec::new(),
+        };
+        let members = bot_core::chat_members::decode_chat_members(&entries);
+        find_member_by_username(&members, username)
+            .and_then(known_member_target)
+            .map(Some)
+            .ok_or_else(|| unknown_mention_reply(username, locale))
+    }
+
     fn dispatch_ban_command(
         &mut self,
         message: &IncomingMessage,
         (chat_id, message_id, sender_id): (ChatId, MessageId, UserId),
         command: BanCommand,
+        argument: &str,
         locale: bot_core::locale::Locale,
         is_group: bool,
     ) -> NativeDispatchResult<Config, Actions, Random> {
+        let (named, _) = if command == BanCommand::List {
+            (None, "")
+        } else {
+            split_named_member(argument, &message.text_mentions)
+        };
+        let target = self.moderation_target(message, chat_id, named, locale);
         let Some(store) = self.ban_store.as_mut() else {
             return Err(DispatchError::MissingService("chat bans"));
         };
@@ -4608,13 +4668,14 @@ where
                     bot_core::locale::Locale::En => "Only group admins can use this command",
                 })
             }
+            Some(true) if target.is_err() => reply(&target.err().unwrap_or_default()),
             Some(true) => {
                 let context = BanCommandContext {
                     chat_id,
                     message_id,
                     sender_id: sender_id.0,
                     locale,
-                    target: ban_target(message, locale),
+                    target: target.ok().flatten(),
                 };
                 match plan_ban_command(command, context) {
                     BanCommandPlan::Reply(action) => action,
@@ -4669,15 +4730,14 @@ where
     /// A member's own limit replaces the group's for AI messages the group
     /// pays for. Admins keep the group's limit, so a limit left from before
     /// they were promoted can't hold them back, and a failed lookup keeps it
-    /// too rather than blocking the member. The flag tells whether the limit
-    /// is the member's own.
-    fn creditless_user_hourly_limit(
+    /// too rather than blocking the member.
+    fn creditless_limit(
         &mut self,
         message: &IncomingMessage,
         (chat_id, sender_id): (ChatId, UserId),
         config: &ChatConfig,
-    ) -> (i64, bool) {
-        let group_limit = (config.creditless_user_hourly_limit, false);
+    ) -> CreditlessLimit {
+        let group_limit = CreditlessLimit::Group(config.creditless_user_hourly_limit);
         if !is_group_chat_type(message.chat_type.as_deref()) {
             return group_limit;
         }
@@ -4694,7 +4754,7 @@ where
                 if authorization.is_admin {
                     group_limit
                 } else {
-                    (own_limit, true)
+                    CreditlessLimit::Member(own_limit)
                 }
             }
             Err(error) => {
@@ -4740,7 +4800,13 @@ where
                     bot_core::locale::Locale::En => "Only group admins can use this command",
                 })
             }
-            Some(true) => match plan_group_charges_command(argument, chat_id, message_id, locale) {
+            Some(true) => match plan_group_charges_command(
+                argument,
+                source.max_days(),
+                chat_id,
+                message_id,
+                locale,
+            ) {
                 GroupChargesPlan::Reply(action) => action,
                 GroupChargesPlan::Load { days } => {
                     match source.load(chat_id.0, days, GROUP_CHARGES_LIMIT) {
@@ -4769,6 +4835,17 @@ where
         locale: bot_core::locale::Locale,
         is_group: bool,
     ) -> NativeDispatchResult<Config, Actions, Random> {
+        let (command, target) = match command {
+            LimitCommand::Change(argument) => {
+                let (named, rest) = split_named_member(&argument, &message.text_mentions);
+                let target = self.moderation_target(message, chat_id, named, locale);
+                (LimitCommand::Change(rest.to_owned()), target)
+            }
+            LimitCommand::List => (
+                LimitCommand::List,
+                self.moderation_target(message, chat_id, None, locale),
+            ),
+        };
         let Some(store) = self.limit_store.as_mut() else {
             return Err(DispatchError::MissingService("chat limits"));
         };
@@ -4795,13 +4872,14 @@ where
                     bot_core::locale::Locale::En => "Only group admins can use this command",
                 })
             }
+            Some(true) if target.is_err() => reply(&target.err().unwrap_or_default()),
             Some(true) => {
                 let context = LimitCommandContext {
                     chat_id,
                     message_id,
                     sender_id: sender_id.0,
                     locale,
-                    target: ban_target(message, locale),
+                    target: target.ok().flatten(),
                 };
                 match plan_limit_command(command, context) {
                     LimitCommandPlan::Reply(action) => action,
@@ -4939,12 +5017,11 @@ where
             content.text.as_str()
         };
         // Ignored messages are never charged, so they skip the lookup.
-        let (creditless_user_hourly_limit, own_creditless_limit) =
-            if evaluation == ResponseRoutingEvaluation::Ignore {
-                (config.creditless_user_hourly_limit, false)
-            } else {
-                self.creditless_user_hourly_limit(message, (chat_id, sender_id), config)
-            };
+        let creditless_limit = if evaluation == ResponseRoutingEvaluation::Ignore {
+            CreditlessLimit::Group(config.creditless_user_hourly_limit)
+        } else {
+            self.creditless_limit(message, (chat_id, sender_id), config)
+        };
         let input = AiConversationInput {
             chat_id,
             message_id,
@@ -4953,6 +5030,7 @@ where
             sender_id,
             sender_first_name: message.sender_first_name.clone().unwrap_or_default(),
             sender_username: message.sender_username.clone().unwrap_or_default(),
+            sender_is_bot: message.sender_is_bot,
             message_text: ai_prompt_text.to_owned(),
             command: command.to_owned(),
             reply_to_message_id: message.replied_message_id,
@@ -4969,8 +5047,7 @@ where
             audio_duration_seconds: message.audio_duration_seconds.map(|value| value as f64),
             locale,
             timezone_offset_hours: config.timezone_offset,
-            creditless_user_hourly_limit,
-            own_creditless_limit,
+            creditless_limit,
             group_pays_first: config.group_pays_first,
             timestamp,
             spontaneous,
@@ -5162,8 +5239,7 @@ where
         ) else {
             return Ok(DispatchOutcome::Unsupported);
         };
-        let (creditless_user_hourly_limit, own_creditless_limit) =
-            self.creditless_user_hourly_limit(message, (chat_id, sender_id), config);
+        let creditless_limit = self.creditless_limit(message, (chat_id, sender_id), config);
         let Some(source) = self.ai_conversation_source.as_mut() else {
             return Err(DispatchError::MissingService("AI conversation"));
         };
@@ -5175,6 +5251,7 @@ where
             sender_id,
             sender_first_name: message.sender_first_name.clone().unwrap_or_default(),
             sender_username: message.sender_username.clone().unwrap_or_default(),
+            sender_is_bot: message.sender_is_bot,
             message_text: prompt_text.to_owned(),
             command: command.to_owned(),
             reply_to_message_id: message.replied_message_id,
@@ -5191,8 +5268,7 @@ where
             audio_duration_seconds: message.audio_duration_seconds.map(|value| value as f64),
             locale,
             timezone_offset_hours: config.timezone_offset,
-            creditless_user_hourly_limit,
-            own_creditless_limit,
+            creditless_limit,
             group_pays_first: config.group_pays_first,
             timestamp,
             spontaneous: false,
@@ -5236,6 +5312,7 @@ where
             user_id: sender_id,
             first_name: message.sender_first_name.as_deref(),
             username: message.sender_username.as_deref(),
+            is_bot: message.sender_is_bot,
             text: &content.text,
             is_group: is_group_chat_type(message.chat_type.as_deref()),
             timestamp,
@@ -5323,8 +5400,7 @@ where
         ) else {
             return Ok(DispatchOutcome::Unsupported);
         };
-        let (creditless_user_hourly_limit, own_creditless_limit) =
-            self.creditless_user_hourly_limit(message, (chat_id, sender_id), config);
+        let creditless_limit = self.creditless_limit(message, (chat_id, sender_id), config);
         let input = AiConversationInput {
             chat_id,
             message_id,
@@ -5333,6 +5409,7 @@ where
             sender_id,
             sender_first_name: message.sender_first_name.clone().unwrap_or_default(),
             sender_username: message.sender_username.clone().unwrap_or_default(),
+            sender_is_bot: message.sender_is_bot,
             message_text: prompt_text.to_owned(),
             command: command.to_owned(),
             reply_to_message_id: message.replied_message_id,
@@ -5349,8 +5426,7 @@ where
             audio_duration_seconds: message.audio_duration_seconds.map(|value| value as f64),
             locale,
             timezone_offset_hours: config.timezone_offset,
-            creditless_user_hourly_limit,
-            own_creditless_limit,
+            creditless_limit,
             group_pays_first: config.group_pays_first,
             timestamp,
             spontaneous: false,
@@ -5461,6 +5537,7 @@ where
             user_id: sender_id,
             first_name: message.sender_first_name.as_deref(),
             username: message.sender_username.as_deref(),
+            is_bot: message.sender_is_bot,
             text: &content.text,
             is_group: is_group_chat_type(message.chat_type.as_deref()),
             timestamp,
@@ -5660,7 +5737,8 @@ where
         let is_group = is_group_chat_type(message.chat_type.as_deref());
         if let Some(command) = classify_ban_command(&content.text, &self.bot_name) {
             let ids = (chat_id, message_id, sender_id);
-            return self.dispatch_ban_command(message, ids, command, locale, is_group);
+            let argument = parsed.message_text.as_str();
+            return self.dispatch_ban_command(message, ids, command, argument, locale, is_group);
         }
         if let Some(command) = classify_limit_command(&content.text, &self.bot_name) {
             let ids = (chat_id, message_id, sender_id);
@@ -6357,6 +6435,7 @@ where
                     user_id: sender_id,
                     first_name: message.sender_first_name.as_deref(),
                     username: message.sender_username.as_deref(),
+                    is_bot: message.sender_is_bot,
                     text: &content.text,
                     is_group,
                     timestamp,
@@ -6534,7 +6613,7 @@ mod tests {
 
     use crate::ai_dispatch::{
         AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, AiReplyMetadata,
-        AiStreamEvent,
+        AiStreamEvent, CreditlessLimit,
     };
 
     use super::LightningCheckout;
@@ -7345,6 +7424,8 @@ mod tests {
             sender_last_name: None,
             sender_username: Some("tester".to_owned()),
             sender_language_code: language.map(ToOwned::to_owned),
+            sender_is_bot: false,
+            text_mentions: Vec::new(),
             has_reply: false,
             replied_message_id: None,
             replied_sender_first_name: None,
@@ -8106,6 +8187,8 @@ mod tests {
                 sender_last_name: None,
                 sender_username: None,
                 sender_language_code: None,
+                sender_is_bot: false,
+                text_mentions: Vec::new(),
                 has_reply: false,
                 replied_message_id: None,
                 replied_sender_first_name: None,
@@ -22468,6 +22551,59 @@ mod tests {
         ));
     }
 
+    /// Members a test group's bot has seen write, as stored in Redis, or a
+    /// failed lookup.
+    struct Members(Result<Vec<(String, String)>, String>);
+
+    impl crate::chat_members_tool::ChatMemberSource for Members {
+        fn members(&mut self, chat_id: &str) -> Result<Vec<(String, String)>, String> {
+            assert_eq!(chat_id, "-42");
+            self.0.clone()
+        }
+    }
+
+    /// Lemon (77) wrote last with @Lemon, which 66 used before; @nameless
+    /// (55) has no first name; one stored id isn't a number; the sender (88)
+    /// is @tester, admin 99 is @boss, and anonymous admins show up as a bot.
+    /// @helper (44) was stored as a bot and @the_abbot (33) is a person.
+    fn known_members() -> Members {
+        let member = |user_id: &str, first_name: &str, username: &str, last_seen: i64| {
+            let payload = serde_json::json!({
+                "schema_version": 1,
+                "first_name": first_name,
+                "username": username,
+                "last_seen": last_seen,
+            });
+            (user_id.to_owned(), payload.to_string())
+        };
+        Members(Ok(vec![
+            member("66", "Old", "lemon", 1),
+            member("77", "Lemon", "Lemon", 2),
+            member("55", "", "nameless", 3),
+            member("x", "Broken", "broken", 4),
+            member("88", "Synthetic", "tester", 5),
+            member("99", "Boss", "boss", 6),
+            member("1087968824", "Group", "GroupAnonymousBot", 7),
+            member("33", "Abbot", "the_abbot", 8),
+            (
+                "44".to_owned(),
+                r#"{"schema_version":1,"first_name":"Helper","username":"helper","last_seen":9,"is_bot":true}"#
+                    .to_owned(),
+            ),
+        ]))
+    }
+
+    /// A member picked from Telegram's mention list, who has no username.
+    fn picked(text: &str, user_id: i64, is_bot: bool) -> bot_core::telegram_input::TextMention {
+        bot_core::telegram_input::TextMention {
+            text: text.to_owned(),
+            user_id,
+            first_name: text.to_owned(),
+            username: String::new(),
+            is_bot,
+        }
+    }
+
     mod chat_bans {
         use super::*;
         use crate::dispatcher::ChatBanStore;
@@ -22706,7 +22842,7 @@ mod tests {
             let mut dispatcher = build("en", &[88], Some(Bans::default()), Some(silent_ai()));
             assert_eq!(
                 replies(&mut dispatcher, group("/ban", |_| {})),
-                "Reply to someone's message with /ban to ban them"
+                "Reply to someone's message with /ban, or send /ban @username, to ban them"
             );
             let bot = group("/ban", |message| {
                 message.has_reply = true;
@@ -22863,6 +22999,144 @@ mod tests {
                 Ok(DispatchOutcome::Handled)
             );
             assert_eq!(dispatcher.actions.0.len(), 2);
+        }
+        #[test]
+        fn admins_ban_and_unban_members_by_username() {
+            let bans = Bans::default();
+            let rows = Rc::clone(&bans.rows);
+            let mut dispatcher = build("es", &[88, 99], Some(bans), Some(silent_ai()))
+                .with_member_source(Box::new(known_members()));
+            assert_eq!(
+                replies(&mut dispatcher, group("/ban @LEMON", |_| {})),
+                "Listo, Lemon ya no puede usarme en este grupo"
+            );
+            assert_eq!(rows.borrow()[0].1.user_id, 77);
+            // The username wins over the replied member, and without a first
+            // name the reply uses the username.
+            assert_eq!(
+                replies(&mut dispatcher, replying("/ban@mybot @nameless")),
+                "Listo, @nameless ya no puede usarme en este grupo"
+            );
+            assert_eq!(rows.borrow()[1].1.user_id, 55);
+            assert_eq!(
+                replies(&mut dispatcher, group("/unban @lemon", |_| {})),
+                "Listo, Lemon puede volver a usarme"
+            );
+            assert_eq!(
+                replies(&mut dispatcher, group("/ban @boss", |_| {})),
+                "A los admins no los puedo banear"
+            );
+            assert_eq!(
+                replies(&mut dispatcher, group("/ban @tester", |_| {})),
+                "No podés banearte"
+            );
+            assert_eq!(
+                replies(&mut dispatcher, group("/ban @groupanonymousbot", |_| {})),
+                "A los bots no los puedo banear"
+            );
+            // A mistyped username while replying never bans the replied member.
+            for username in ["nadie", "broken", "lemon."] {
+                assert_eq!(
+                    replies(&mut dispatcher, replying(&format!("/ban @{username}"))),
+                    format!(
+                        "No sé quién es @{username}: tiene que haber escrito en el grupo, o respondé a un mensaje suyo"
+                    )
+                );
+            }
+            // Listing ignores a username.
+            assert_eq!(
+                replies(&mut dispatcher, group("/bans @nadie", |_| {})),
+                "Baneados en este grupo\n- @nameless"
+            );
+            // Bots go by the flag Telegram sent, not by how the username ends.
+            assert_eq!(
+                replies(&mut dispatcher, group("/ban @helper", |_| {})),
+                "A los bots no los puedo banear"
+            );
+            assert_eq!(
+                replies(&mut dispatcher, group("/ban @the_abbot", |_| {})),
+                "Listo, Abbot ya no puede usarme en este grupo"
+            );
+            assert_eq!(rows.borrow()[1].1.user_id, 33);
+        }
+
+        #[test]
+        fn admins_ban_members_picked_from_the_mention_list() {
+            let bans = Bans::default();
+            let rows = Rc::clone(&bans.rows);
+            // Picked members need no member lookup.
+            let mut dispatcher = build("es", &[88, 99], Some(bans), Some(silent_ai()));
+            let picking =
+                |text: &str, mention| group(text, |message| message.text_mentions = vec![mention]);
+            assert_eq!(
+                replies(
+                    &mut dispatcher,
+                    picking("/ban Lemon Pie", picked("Lemon Pie", 77, false))
+                ),
+                "Listo, Lemon Pie ya no puede usarme en este grupo"
+            );
+            assert_eq!(rows.borrow()[0].1.user_id, 77);
+            // The picked member wins over the replied one.
+            let mut reply = replying("/unban Lemon Pie");
+            if let IncomingEvent::Message(message) = &mut reply.event {
+                message.text_mentions = vec![picked("Lemon Pie", 66, false)];
+            }
+            replies(&mut dispatcher, reply);
+            assert_eq!(rows.borrow()[0].1.user_id, 77);
+            assert_eq!(
+                replies(
+                    &mut dispatcher,
+                    picking("/unban Lemon Pie", picked("Lemon Pie", 77, false))
+                ),
+                "Listo, Lemon Pie puede volver a usarme"
+            );
+            assert!(rows.borrow().is_empty());
+            for (mention, expected) in [
+                (picked("Helper", 44, true), "A los bots no los puedo banear"),
+                (
+                    picked("Boss", 99, false),
+                    "A los admins no los puedo banear",
+                ),
+                (picked("Synthetic", 88, false), "No podés banearte"),
+            ] {
+                let text = format!("/ban {}", mention.text);
+                assert_eq!(replies(&mut dispatcher, picking(&text, mention)), expected);
+            }
+        }
+
+        #[test]
+        fn usernames_the_bot_cannot_look_up_get_a_reply_saying_so() {
+            let unknown = "I don't know who @lemon is: they need to have written in the group, or reply to one of their messages";
+            let mut failing = build("en", &[88], Some(Bans::default()), Some(silent_ai()))
+                .with_member_source(Box::new(Members(Err("synthetic redis failure".to_owned()))));
+            assert_eq!(
+                replies(&mut failing, replying("/ban @lemon")),
+                "I couldn't look up @lemon. Try again, or reply to one of their messages"
+            );
+            assert_eq!(failing.actions.0.len(), 1);
+            assert!(
+                failing
+                    .state_diagnostics()
+                    .contains(&"chat members chat_id=-42: synthetic redis failure".to_owned())
+            );
+            let mut without = build("en", &[88], Some(Bans::default()), Some(silent_ai()));
+            assert_eq!(
+                replies(&mut without, group("/unban @lemon", |_| {})),
+                unknown
+            );
+
+            // Members still get the admins-only reply, and private chats the
+            // groups-only one.
+            let mut member = build("es", &[], Some(Bans::default()), Some(silent_ai()))
+                .with_member_source(Box::new(known_members()));
+            assert_eq!(
+                replies(&mut member, group("/ban @lemon", |_| {})),
+                "Este comando es solo para admins del grupo"
+            );
+            assert_eq!(
+                replies(&mut member, update("/ban @lemon", None)),
+                "Esto funciona solo en grupos"
+            );
         }
     }
 
@@ -23101,7 +23375,7 @@ mod tests {
         #[test]
         fn limit_planner_replies_reach_the_chat() {
             let mut dispatcher = build("en", &[88], Some(Limits::default()), silent_ai());
-            let usage = "Reply to someone's message with /limit and how many messages per hour the group pays for, or /limit off to remove it";
+            let usage = "Reply to someone's message with /limit and how many messages per hour the group pays for, or send /limit @username and the number. Use off to remove it";
             assert_eq!(replies(&mut dispatcher, group("/limit 3", |_| {})), usage);
             assert_eq!(replies(&mut dispatcher, replying("/limit lots")), usage);
             let bot = group("/limit 3", |message| {
@@ -23178,14 +23452,9 @@ mod tests {
             let received = prepared
                 .borrow()
                 .iter()
-                .map(|input| {
-                    (
-                        input.creditless_user_hourly_limit,
-                        input.own_creditless_limit,
-                    )
-                })
+                .map(|input| input.creditless_limit)
                 .collect::<Vec<_>>();
-            assert_eq!(received, [(2, true), (2, true), (2, true)]);
+            assert_eq!(received, [CreditlessLimit::Member(2); 3]);
         }
 
         /// The limit the AI turn receives for one message from member 88,
@@ -23198,10 +23467,10 @@ mod tests {
             let (ai, (prepared, _, _)) = ai_source(Ok(AiPreparation::silent()));
             let mut dispatcher = build("es", admins, limits, ai);
             assert_eq!(dispatcher.dispatch(update), Ok(DispatchOutcome::Handled));
-            let limit = prepared.borrow()[0].creditless_user_hourly_limit;
             // Every case here keeps the group's limit, so none is the member's own.
-            assert!(!prepared.borrow()[0].own_creditless_limit);
-            (limit, dispatcher.state_diagnostics().to_vec())
+            let limit = prepared.borrow()[0].creditless_limit;
+            assert!(matches!(limit, CreditlessLimit::Group(_)));
+            (limit.hourly(), dispatcher.state_diagnostics().to_vec())
         }
 
         #[test]
@@ -23226,6 +23495,64 @@ mod tests {
                 &"chat limit check chat_id=-42 user_id=88: synthetic database failure".to_owned()
             ));
         }
+
+        #[test]
+        fn admins_limit_members_by_username() {
+            let limits = Limits::default();
+            let rows = Rc::clone(&limits.rows);
+            let mut dispatcher = build("es", &[88], Some(limits), silent_ai())
+                .with_member_source(Box::new(known_members()));
+            assert_eq!(
+                replies(&mut dispatcher, group("/limit @lemon 0", |_| {})),
+                "Listo, Lemon ya no puede usar el saldo del grupo, solo el suyo"
+            );
+            assert_eq!(rows.borrow()[0].1.user_id, 77);
+            assert_eq!(
+                replies(&mut dispatcher, group("/limitar @Lemon 3", |_| {})),
+                "Listo, el grupo le paga a Lemon hasta 3 mensajes por hora"
+            );
+            assert_eq!(rows.borrow()[0].1.hourly_limit, 3);
+            assert_eq!(
+                replies(&mut dispatcher, group("/limit @lemon off", |_| {})),
+                "Listo, Lemon vuelve al límite del grupo"
+            );
+            assert!(rows.borrow().is_empty());
+            assert_eq!(
+                replies(&mut dispatcher, group("/limit @lemon", |_| {})),
+                "Respondé al mensaje de alguien con /limitar y cuántos mensajes por hora le paga el grupo, o mandá /limitar @usuario y el número. Con off le sacás el límite"
+            );
+            assert_eq!(
+                replies(&mut dispatcher, group("/limit @nadie 3", |_| {})),
+                "No sé quién es @nadie: tiene que haber escrito en el grupo, o respondé a un mensaje suyo"
+            );
+            assert_eq!(
+                replies(&mut dispatcher, group("/limited", |_| {})),
+                "Nadie tiene un límite propio en este grupo"
+            );
+        }
+
+        #[test]
+        fn admins_limit_members_picked_from_the_mention_list() {
+            let limits = Limits::default();
+            let rows = Rc::clone(&limits.rows);
+            let mut dispatcher = build("en", &[88], Some(limits), silent_ai());
+            let picking = |text: &str| {
+                group(text, |message| {
+                    message.text_mentions = vec![picked("Lemon Pie", 77, false)];
+                })
+            };
+            assert_eq!(
+                replies(&mut dispatcher, picking("/limit Lemon Pie 3")),
+                "Done, the group pays for up to 3 messages per hour from Lemon Pie"
+            );
+            assert_eq!(rows.borrow()[0].1.user_id, 77);
+            assert_eq!(rows.borrow()[0].1.hourly_limit, 3);
+            assert_eq!(
+                replies(&mut dispatcher, picking("/limit Lemon Pie off")),
+                "Done, Lemon Pie is back to the group's limit"
+            );
+            assert!(rows.borrow().is_empty());
+        }
     }
 
     mod group_charges {
@@ -23241,6 +23568,7 @@ mod tests {
             loads: Loads,
             spenders: Vec<GroupSpender>,
             error: Option<String>,
+            max_days: Option<i64>,
         }
 
         impl GroupSpendingSource for Spending {
@@ -23254,6 +23582,10 @@ mod tests {
                 self.error
                     .clone()
                     .map_or_else(|| Ok(self.spenders.clone()), Err)
+            }
+
+            fn max_days(&self) -> i64 {
+                self.max_days.unwrap_or(30)
             }
         }
 
@@ -23332,7 +23664,27 @@ mod tests {
                 replies(&mut dispatcher, group("/groupcharges@mybot 7")),
                 "Créditos del grupo gastados en los últimos 7 días\n- Ana: 1,234.50 (8 mensajes)"
             );
-            assert_eq!(loads.borrow().as_slice(), [(-42, 1, 10), (-42, 7, 10)]);
+            assert_eq!(
+                replies(&mut dispatcher, group("/gastosgrupo 3")),
+                "Créditos del grupo gastados en los últimos 3 días\n- Ana: 1,234.50 (8 mensajes)"
+            );
+            assert_eq!(
+                loads.borrow().as_slice(),
+                [(-42, 1, 10), (-42, 7, 10), (-42, 3, 10)]
+            );
+
+            // A shorter ledger retention caps the days.
+            let short = Spending {
+                max_days: Some(7),
+                ..Spending::default()
+            };
+            let short_loads = Rc::clone(&short.loads);
+            let mut short = build("en", &[88], Some(short));
+            assert_eq!(
+                replies(&mut short, group("/groupcharges 8")),
+                "Send /groupcharges for the last day, or /groupcharges and a number of days, up to 7"
+            );
+            assert!(short_loads.borrow().is_empty());
 
             let mut empty = build("en", &[88], Some(Spending::default()));
             assert_eq!(
@@ -23348,7 +23700,7 @@ mod tests {
                     "es",
                     "Esto funciona solo en grupos",
                     "Este comando es solo para admins del grupo",
-                    "Mandá /groupcharges para el último día, o /groupcharges y una cantidad de días, hasta 30",
+                    "Mandá /gastosgrupo para el último día, o /gastosgrupo y una cantidad de días, hasta 30",
                 ),
                 (
                     "en",

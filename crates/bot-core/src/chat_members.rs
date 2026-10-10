@@ -10,6 +10,7 @@ pub struct KnownChatMember {
     pub first_name: String,
     pub username: String,
     pub last_seen: i64,
+    pub is_bot: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -21,6 +22,8 @@ struct StoredMemberPayload {
     username: String,
     #[serde(default)]
     last_seen: i64,
+    #[serde(default)]
+    is_bot: bool,
 }
 
 #[must_use]
@@ -35,6 +38,7 @@ pub fn decode_chat_members(entries: &[(String, String)]) -> Vec<KnownChatMember>
                 first_name: parsed.first_name,
                 username: parsed.username,
                 last_seen: parsed.last_seen,
+                is_bot: parsed.is_bot,
             })
         })
         .collect()
@@ -106,13 +110,28 @@ mod tests {
                 ),
                 ("8".to_owned(), "invalid".to_owned()),
                 (String::new(), "{}".to_owned()),
+                (
+                    "9".to_owned(),
+                    r#"{"schema_version":1,"first_name":"Helper","last_seen":5,"is_bot":true}"#
+                        .to_owned(),
+                ),
             ]),
-            [KnownChatMember {
-                user_id: "7".to_owned(),
-                first_name: "Ana".to_owned(),
-                username: "ana".to_owned(),
-                last_seen: 100,
-            },]
+            [
+                KnownChatMember {
+                    user_id: "7".to_owned(),
+                    first_name: "Ana".to_owned(),
+                    username: "ana".to_owned(),
+                    last_seen: 100,
+                    is_bot: false,
+                },
+                KnownChatMember {
+                    user_id: "9".to_owned(),
+                    first_name: "Helper".to_owned(),
+                    username: String::new(),
+                    last_seen: 5,
+                    is_bot: true,
+                },
+            ]
         );
     }
 
@@ -124,24 +143,28 @@ mod tests {
                 first_name: "A".to_owned(),
                 username: "a".to_owned(),
                 last_seen: 9_970,
+                is_bot: false,
             },
             KnownChatMember {
                 user_id: "2".to_owned(),
                 first_name: "B".to_owned(),
                 username: String::new(),
                 last_seen: 9_400,
+                is_bot: false,
             },
             KnownChatMember {
                 user_id: "3".to_owned(),
                 first_name: "C".to_owned(),
                 username: String::new(),
                 last_seen: 2_800,
+                is_bot: false,
             },
             KnownChatMember {
                 user_id: "4".to_owned(),
                 first_name: "D".to_owned(),
                 username: String::new(),
                 last_seen: -76_400,
+                is_bot: false,
             },
         ];
         assert_eq!(

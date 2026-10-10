@@ -154,8 +154,9 @@ mod tests {
     fn assert_member_round_trip(endpoint: &RedisEndpoint) -> Result<(), String> {
         let mut state = RedisMessageState::new(endpoint).map_err(crate::error_text)?;
         let chat_id = format!("synthetic-members-{}", std::process::id());
-        let payload = prepare_chat_member_payload("Synthetic", "synthetic_user", 1_700_000_000)
-            .map_err(crate::error_text)?;
+        let payload =
+            prepare_chat_member_payload("Synthetic", "synthetic_user", false, 1_700_000_000)
+                .map_err(crate::error_text)?;
         state
             .save_chat_member(&chat_members_key(&chat_id), "42", &payload, 60)
             .map_err(crate::error_text)?;

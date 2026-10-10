@@ -55,6 +55,8 @@ pub struct ProductionConfig {
     pub trigger_words: Vec<String>,
     pub reconciliation_interval: Duration,
     pub reconciliation_settings: ReconciliationSettings,
+    /// How many days the AI ledger keeps, which bounds /groupcharges.
+    pub ai_ledger_retention_days: i64,
 }
 
 #[derive(Clone)]
@@ -224,6 +226,19 @@ impl TaskVerificationConfig {
     }
 }
 
+fn ledger_retention_days<F>(lookup: &F) -> Result<i64, ConfigError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("AI_LEDGER_RETENTION_DAYS").map_or(Ok(DEFAULT_AI_LEDGER_RETENTION_DAYS), |value| {
+        value
+            .parse::<i64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or(ConfigError::InvalidLedgerRetention)
+    })
+}
+
 impl MaintenanceConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_lookup(|name| std::env::var(name).ok())
@@ -250,16 +265,7 @@ impl MaintenanceConfig {
         ) {
             return Err(ConfigError::UnsafeRedisMaxmemoryPolicy);
         }
-        let ai_ledger_retention_days = lookup("AI_LEDGER_RETENTION_DAYS").map_or(
-            Ok(DEFAULT_AI_LEDGER_RETENTION_DAYS),
-            |value| {
-                value
-                    .parse::<i64>()
-                    .ok()
-                    .filter(|value| *value > 0)
-                    .ok_or(ConfigError::InvalidLedgerRetention)
-            },
-        )?;
+        let ai_ledger_retention_days = ledger_retention_days(&lookup)?;
         Ok(Self {
             redis_endpoint,
             database_url,
@@ -433,6 +439,7 @@ impl ProductionConfig {
             trigger_words,
             reconciliation_interval,
             reconciliation_settings,
+            ai_ledger_retention_days: ledger_retention_days(&lookup)?,
         })
     }
 
@@ -857,5 +864,31 @@ mod tests {
             )),
             Ok((60, 3_600))
         );
+    }
+
+    #[test]
+    fn production_configuration_reads_the_ledger_retention() {
+        let base = [
+            ("TELEGRAM_TOKEN", "token"),
+            ("TELEGRAM_USERNAME", "bot"),
+            ("SUPABASE_POSTGRES_URL", SYNTHETIC_DATABASE_URL),
+            ("COINMARKETCAP_KEY", "cmc"),
+            ("OPENROUTER_API_KEY", "openrouter"),
+        ];
+        let retention = |value: Option<&str>| {
+            let mut values = base.to_vec();
+            values.extend(value.map(|value| ("AI_LEDGER_RETENTION_DAYS", value)));
+            production(&values, Some("synthetic prompt"))
+                .map(|config| config.ai_ledger_retention_days)
+        };
+        assert_eq!(retention(None), Ok(30));
+        assert_eq!(retention(Some("7")), Ok(7));
+        for invalid in ["0", "-1", "a week"] {
+            assert_eq!(
+                retention(Some(invalid)),
+                Err(ConfigError::InvalidLedgerRetention),
+                "{invalid}"
+            );
+        }
     }
 }

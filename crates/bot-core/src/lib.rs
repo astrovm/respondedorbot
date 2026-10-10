@@ -42,6 +42,7 @@ pub mod locale;
 pub mod market_context;
 pub mod market_models;
 pub mod market_prices;
+pub mod mention_targets;
 pub mod menu_ui;
 pub mod message_state;
 pub mod output_format;

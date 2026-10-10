@@ -387,6 +387,7 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
         trigger_words: Some(config.trigger_words.clone()),
         active_operations: active_operations.clone(),
         telegram_delivery: telegram_delivery.clone(),
+        ai_ledger_retention_days: config.ai_ledger_retention_days,
     })
     .map_err(error_text)?;
     let specs = build_production_background_specs(ProductionBackgroundOptions {

@@ -1266,6 +1266,8 @@ mod tests {
                 sender_last_name: None,
                 sender_username: None,
                 sender_language_code: None,
+                sender_is_bot: false,
+                text_mentions: Vec::new(),
                 has_reply: false,
                 replied_message_id: None,
                 replied_sender_first_name: None,
