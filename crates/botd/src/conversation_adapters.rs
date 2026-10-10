@@ -964,6 +964,7 @@ mod tests {
             locale,
             timezone_offset_hours: -3,
             creditless_user_hourly_limit: 10,
+            own_creditless_limit: false,
             group_pays_first: false,
             timestamp: 1_700_000_000 + message_id,
             spontaneous: false,

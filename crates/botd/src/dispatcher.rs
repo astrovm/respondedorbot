@@ -4650,14 +4650,15 @@ where
     /// A member's own limit replaces the group's for AI messages the group
     /// pays for. Admins keep the group's limit, so a limit left from before
     /// they were promoted can't hold them back, and a failed lookup keeps it
-    /// too rather than blocking the member.
+    /// too rather than blocking the member. The flag tells whether the limit
+    /// is the member's own.
     fn creditless_user_hourly_limit(
         &mut self,
         message: &IncomingMessage,
         (chat_id, sender_id): (ChatId, UserId),
         config: &ChatConfig,
-    ) -> i64 {
-        let group_limit = config.creditless_user_hourly_limit;
+    ) -> (i64, bool) {
+        let group_limit = (config.creditless_user_hourly_limit, false);
         if !is_group_chat_type(message.chat_type.as_deref()) {
             return group_limit;
         }
@@ -4674,7 +4675,7 @@ where
                 if authorization.is_admin {
                     group_limit
                 } else {
-                    own_limit
+                    (own_limit, true)
                 }
             }
             Err(error) => {
@@ -4865,11 +4866,12 @@ where
             content.text.as_str()
         };
         // Ignored messages are never charged, so they skip the lookup.
-        let creditless_user_hourly_limit = if evaluation == ResponseRoutingEvaluation::Ignore {
-            config.creditless_user_hourly_limit
-        } else {
-            self.creditless_user_hourly_limit(message, (chat_id, sender_id), config)
-        };
+        let (creditless_user_hourly_limit, own_creditless_limit) =
+            if evaluation == ResponseRoutingEvaluation::Ignore {
+                (config.creditless_user_hourly_limit, false)
+            } else {
+                self.creditless_user_hourly_limit(message, (chat_id, sender_id), config)
+            };
         let input = AiConversationInput {
             chat_id,
             message_id,
@@ -4895,6 +4897,7 @@ where
             locale,
             timezone_offset_hours: config.timezone_offset,
             creditless_user_hourly_limit,
+            own_creditless_limit,
             group_pays_first: config.group_pays_first,
             timestamp,
             spontaneous,
@@ -5086,7 +5089,7 @@ where
         ) else {
             return Ok(DispatchOutcome::Unsupported);
         };
-        let creditless_user_hourly_limit =
+        let (creditless_user_hourly_limit, own_creditless_limit) =
             self.creditless_user_hourly_limit(message, (chat_id, sender_id), config);
         let Some(source) = self.ai_conversation_source.as_mut() else {
             return Err(DispatchError::MissingService("AI conversation"));
@@ -5116,6 +5119,7 @@ where
             locale,
             timezone_offset_hours: config.timezone_offset,
             creditless_user_hourly_limit,
+            own_creditless_limit,
             group_pays_first: config.group_pays_first,
             timestamp,
             spontaneous: false,
@@ -5246,7 +5250,7 @@ where
         ) else {
             return Ok(DispatchOutcome::Unsupported);
         };
-        let creditless_user_hourly_limit =
+        let (creditless_user_hourly_limit, own_creditless_limit) =
             self.creditless_user_hourly_limit(message, (chat_id, sender_id), config);
         let input = AiConversationInput {
             chat_id,
@@ -5273,6 +5277,7 @@ where
             locale,
             timezone_offset_hours: config.timezone_offset,
             creditless_user_hourly_limit,
+            own_creditless_limit,
             group_pays_first: config.group_pays_first,
             timestamp,
             spontaneous: false,
@@ -23096,9 +23101,14 @@ mod tests {
             let received = prepared
                 .borrow()
                 .iter()
-                .map(|input| input.creditless_user_hourly_limit)
+                .map(|input| {
+                    (
+                        input.creditless_user_hourly_limit,
+                        input.own_creditless_limit,
+                    )
+                })
                 .collect::<Vec<_>>();
-            assert_eq!(received, [2, 2, 2]);
+            assert_eq!(received, [(2, true), (2, true), (2, true)]);
         }
 
         /// The limit the AI turn receives for one message from member 88,
@@ -23112,6 +23122,8 @@ mod tests {
             let mut dispatcher = build("es", admins, limits, ai);
             assert_eq!(dispatcher.dispatch(update), Ok(DispatchOutcome::Handled));
             let limit = prepared.borrow()[0].creditless_user_hourly_limit;
+            // Every case here keeps the group's limit, so none is the member's own.
+            assert!(!prepared.borrow()[0].own_creditless_limit);
             (limit, dispatcher.state_diagnostics().to_vec())
         }
 
