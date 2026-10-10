@@ -301,13 +301,6 @@ mod tests {
     }
 
     #[test]
-    fn creditless_limit_keeps_the_hourly_count_for_either_owner() {
-        assert_eq!(super::CreditlessLimit::Group(3).hourly(), 3);
-        assert_eq!(super::CreditlessLimit::Member(0).hourly(), 0);
-        assert_eq!(super::CreditlessLimit::Member(5).hourly(), 5);
-    }
-
-    #[test]
     fn creditless_limit_hourly_is_the_limit_whoever_set_it() {
         for (limit, hourly) in [
             (CreditlessLimit::Group(3), 3),
