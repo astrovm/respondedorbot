@@ -214,7 +214,7 @@ mod tests {
 
     use super::{
         AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, AiReplyMetadata,
-        AiStreamEvent, reply_context,
+        AiStreamEvent, CreditlessLimit, reply_context,
     };
 
     struct TokenStreamingSource;
@@ -292,11 +292,30 @@ mod tests {
             audio_duration_seconds: None,
             locale: Locale::En,
             timezone_offset_hours: 0,
-            creditless_limit: super::CreditlessLimit::Group(0),
+            creditless_limit: CreditlessLimit::Group(0),
             group_pays_first: false,
             timestamp: 1_700_000_000,
             spontaneous: false,
             link_context: None,
+        }
+    }
+
+    #[test]
+    fn creditless_limit_keeps_the_hourly_count_for_either_owner() {
+        assert_eq!(super::CreditlessLimit::Group(3).hourly(), 3);
+        assert_eq!(super::CreditlessLimit::Member(0).hourly(), 0);
+        assert_eq!(super::CreditlessLimit::Member(5).hourly(), 5);
+    }
+
+    #[test]
+    fn creditless_limit_hourly_is_the_limit_whoever_set_it() {
+        for (limit, hourly) in [
+            (CreditlessLimit::Group(3), 3),
+            (CreditlessLimit::Member(5), 5),
+            (CreditlessLimit::Member(0), 0),
+            (CreditlessLimit::Group(-1), -1),
+        ] {
+            assert_eq!(limit.hourly(), hourly, "{limit:?}");
         }
     }
 
