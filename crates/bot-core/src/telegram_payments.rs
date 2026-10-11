@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::chat_config::ChatConfig;
 use crate::command_parsing::parse_command;
-use crate::credit_units::{CreditUnits, display_credit_units};
+use crate::credit_units::{CREDIT_SCALE, CreditUnits, display_credit_units};
 use crate::locale::Locale;
 use crate::telegram_actions::{
     InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, SendMessage, TelegramAction,
@@ -48,6 +48,14 @@ const QUICK_TOPUP_CREDITS: [i64; 4] = [50, 100, 500, 1_000];
 /// A typical AI message costs 0.21 credits with memory upkeep (production,
 /// 30 days); rounded up so the estimate doesn't overpromise.
 const ESTIMATED_CREDIT_UNITS_PER_MESSAGE: i64 = 25;
+
+/// About how many AI messages an amount in credit units pays for, at the
+/// average cost. Only meaningful from the smallest top-up up: each message
+/// first reserves its worst case, so a smaller balance can be refused sooner.
+#[must_use]
+pub fn estimated_messages(credit_units: i64) -> i64 {
+    credit_units / ESTIMATED_CREDIT_UNITS_PER_MESSAGE
+}
 
 /// Any whole number of credits in range, at the same 2 credits per Star as
 /// the fixed packs. Odd amounts round the Stars up.
@@ -174,7 +182,7 @@ pub fn topup_menu(
     let pack = topup_terms(credits);
     let amount = whole_credits(pack.credits_awarded);
     let messages = crate::output_format::readable_number(
-        &(pack.credits_awarded / ESTIMATED_CREDIT_UNITS_PER_MESSAGE).to_string(),
+        &estimated_messages(pack.credits_awarded).to_string(),
     );
     let text = match locale {
         Locale::Es => format!(
@@ -357,6 +365,21 @@ pub fn plan_balance_command(
     }
 }
 
+/// A balance with the AI messages it pays for, `30.00 créditos (≈ 120
+/// mensajes)`, or only the credits below the smallest top-up.
+fn balance_amount(credit_units: i64, locale: Locale) -> String {
+    let credits = display_credit_units(CreditUnits::new(credit_units));
+    let messages =
+        crate::output_format::readable_number(&estimated_messages(credit_units).to_string());
+    let estimated = credit_units >= MIN_TOPUP_CREDITS * CREDIT_SCALE;
+    match (estimated, locale) {
+        (true, Locale::Es) => format!("{credits} créditos (≈ {messages} mensajes)"),
+        (true, Locale::En) => format!("{credits} credits (≈ {messages} messages)"),
+        (false, Locale::Es) => format!("{credits} créditos"),
+        (false, Locale::En) => format!("{credits} credits"),
+    }
+}
+
 /// Who pays for a member's AI messages in a group, following the same order
 /// and per-member hourly limit that billing applies.
 fn payer_order(config: &ChatConfig, locale: Locale) -> String {
@@ -400,26 +423,26 @@ pub fn balance_reply(
     config: &ChatConfig,
     locale: Locale,
 ) -> String {
-    let user = display_credit_units(CreditUnits::new(user_balance));
+    let user = balance_amount(user_balance, locale);
     match (chat_balance, locale) {
         (None, Locale::Es) => {
-            format!("Saldo de IA: {user} créditos\n\nCargá más con /topup")
+            format!("Saldo de IA: {user}\n\nCargá más con /topup")
         }
         (None, Locale::En) => {
-            format!("AI balance: {user} credits\n\nAdd more with /topup")
+            format!("AI balance: {user}\n\nAdd more with /topup")
         }
         (Some(chat), Locale::Es) => {
-            let chat = display_credit_units(CreditUnits::new(chat));
+            let chat = balance_amount(chat, locale);
             let order = payer_order(config, locale);
             format!(
-                "Saldos de IA\n\nTu saldo personal: {user} créditos\nSaldo del grupo: {chat} créditos\n\n{order}\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
+                "Saldos de IA\n\nTu saldo personal: {user}\nSaldo del grupo: {chat}\n\n{order}\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
             )
         }
         (Some(chat), Locale::En) => {
-            let chat = display_credit_units(CreditUnits::new(chat));
+            let chat = balance_amount(chat, locale);
             let order = payer_order(config, locale);
             format!(
-                "AI balances\n\nYour personal balance: {user} credits\nGroup balance: {chat} credits\n\n{order}\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
+                "AI balances\n\nYour personal balance: {user}\nGroup balance: {chat}\n\n{order}\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
             )
         }
     }
@@ -874,11 +897,11 @@ mod tests {
     use super::{
         BalanceCommandContext, BalanceCommandPlan, BillingPackTerms, PaymentValidationError,
         PreCheckoutDecision, StarPaymentRecord, SuccessfulPaymentDecision, TopupCallbackPlan,
-        balance_reply, default_billing_pack, evaluate_default_successful_payment,
-        evaluate_pre_checkout, evaluate_successful_payment, invoice_payload_locale,
-        parse_topup_amount, parse_topup_payload, payer_order, payment_record, plan_balance_command,
-        plan_pre_checkout, plan_topup_callback, plan_topup_command, successful_payment_reply,
-        topup_menu, topup_menu_title,
+        balance_reply, default_billing_pack, estimated_messages,
+        evaluate_default_successful_payment, evaluate_pre_checkout, evaluate_successful_payment,
+        invoice_payload_locale, parse_topup_amount, parse_topup_payload, payer_order,
+        payment_record, plan_balance_command, plan_pre_checkout, plan_topup_callback,
+        plan_topup_command, successful_payment_reply, topup_menu, topup_menu_title,
     };
     use crate::chat_config::ChatConfig;
     use crate::locale::Locale;
@@ -1249,19 +1272,19 @@ mod tests {
         let config = payer_config(false, -1);
         assert_eq!(
             balance_reply(4_200, None, &config, Locale::Es),
-            "Saldo de IA: 42.00 créditos\n\nCargá más con /topup"
+            "Saldo de IA: 42.00 créditos (≈ 168 mensajes)\n\nCargá más con /topup"
         );
         assert_eq!(
             balance_reply(4_200, None, &config, Locale::En),
-            "AI balance: 42.00 credits\n\nAdd more with /topup"
+            "AI balance: 42.00 credits (≈ 168 messages)\n\nAdd more with /topup"
         );
         assert_eq!(
-            balance_reply(3_000, Some(12_000), &config, Locale::Es),
-            "Saldos de IA\n\nTu saldo personal: 30.00 créditos\nSaldo del grupo: 120.00 créditos\n\nPaga primero quien me habla; si no le alcanza, el grupo.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
+            balance_reply(3_000, Some(13_000), &config, Locale::Es),
+            "Saldos de IA\n\nTu saldo personal: 30.00 créditos (≈ 120 mensajes)\nSaldo del grupo: 130.00 créditos (≈ 520 mensajes)\n\nPaga primero quien me habla; si no le alcanza, el grupo.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
         );
         assert_eq!(
-            balance_reply(3_000, Some(12_000), &config, Locale::En),
-            "AI balances\n\nYour personal balance: 30.00 credits\nGroup balance: 120.00 credits\n\nWhoever talks to me pays first; if they're short, the group does.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
+            balance_reply(3_000, Some(13_000), &config, Locale::En),
+            "AI balances\n\nYour personal balance: 30.00 credits (≈ 120 messages)\nGroup balance: 130.00 credits (≈ 520 messages)\n\nWhoever talks to me pays first; if they're short, the group does.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
         );
     }
 
@@ -1269,18 +1292,53 @@ mod tests {
     fn group_balance_reply_follows_who_pays_first() {
         let config = payer_config(true, -1);
         assert_eq!(
-            balance_reply(3_000, Some(12_000), &config, Locale::Es),
-            "Saldos de IA\n\nTu saldo personal: 30.00 créditos\nSaldo del grupo: 120.00 créditos\n\nPaga primero el grupo; si no le alcanza, quien me habla.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
+            balance_reply(3_000, Some(13_000), &config, Locale::Es),
+            "Saldos de IA\n\nTu saldo personal: 30.00 créditos (≈ 120 mensajes)\nSaldo del grupo: 130.00 créditos (≈ 520 mensajes)\n\nPaga primero el grupo; si no le alcanza, quien me habla.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
         );
         assert_eq!(
-            balance_reply(3_000, Some(12_000), &config, Locale::En),
-            "AI balances\n\nYour personal balance: 30.00 credits\nGroup balance: 120.00 credits\n\nThe group pays first; if it's short, whoever talks to me.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
+            balance_reply(3_000, Some(13_000), &config, Locale::En),
+            "AI balances\n\nYour personal balance: 30.00 credits (≈ 120 messages)\nGroup balance: 130.00 credits (≈ 520 messages)\n\nThe group pays first; if it's short, whoever talks to me.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
         );
         // Private chats have no group balance, so the setting doesn't apply.
         assert_eq!(
             balance_reply(4_200, None, &payer_config(true, 0), Locale::Es),
             balance_reply(4_200, None, &payer_config(false, 5), Locale::Es)
         );
+    }
+
+    #[test]
+    fn estimated_messages_round_down() {
+        for (credit_units, messages) in [(24, 0), (25, 1), (49, 1), (50, 2), (10_000, 400)] {
+            assert_eq!(estimated_messages(credit_units), messages);
+        }
+    }
+
+    #[test]
+    fn balance_reply_estimates_messages_only_from_the_smallest_top_up() {
+        let config = ChatConfig::default();
+        for (credit_units, es, en) in [
+            (-150, "-1.50 créditos", "-1.50 credits"),
+            (999, "9.99 créditos", "9.99 credits"),
+            (
+                1_000,
+                "10.00 créditos (≈ 40 mensajes)",
+                "10.00 credits (≈ 40 messages)",
+            ),
+            (
+                25_000,
+                "250.00 créditos (≈ 1,000 mensajes)",
+                "250.00 credits (≈ 1,000 messages)",
+            ),
+        ] {
+            assert_eq!(
+                balance_reply(credit_units, None, &config, Locale::Es),
+                format!("Saldo de IA: {es}\n\nCargá más con /topup")
+            );
+            assert_eq!(
+                balance_reply(credit_units, None, &config, Locale::En),
+                format!("AI balance: {en}\n\nAdd more with /topup")
+            );
+        }
     }
 
     #[test]
