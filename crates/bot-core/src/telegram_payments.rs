@@ -4,6 +4,7 @@ use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::chat_config::ChatConfig;
 use crate::command_parsing::parse_command;
 use crate::credit_units::{CreditUnits, display_credit_units};
 use crate::locale::Locale;
@@ -356,8 +357,49 @@ pub fn plan_balance_command(
     }
 }
 
+/// Who pays for a member's AI messages in a group, following the same order
+/// and per-member hourly limit that billing applies.
+fn payer_order(config: &ChatConfig, locale: Locale) -> String {
+    let limit = config.creditless_user_hourly_limit;
+    if limit == 0 {
+        return match locale {
+            Locale::Es => "Paga quien me habla; el grupo no paga mensajes de IA.",
+            Locale::En => "Whoever talks to me pays; the group doesn't pay for AI messages.",
+        }
+        .to_owned();
+    }
+    let cap = (limit > 0).then(|| match locale {
+        Locale::Es if limit == 1 => ", hasta 1 mensaje por hora a cada uno".to_owned(),
+        Locale::Es => format!(", hasta {limit} mensajes por hora a cada uno"),
+        Locale::En if limit == 1 => ", up to 1 message per hour per person".to_owned(),
+        Locale::En => format!(", up to {limit} messages per hour per person"),
+    });
+    let cap = cap.as_deref().unwrap_or_default();
+    match (config.group_pays_first, locale) {
+        (true, Locale::Es) if cap.is_empty() => {
+            "Paga primero el grupo; si no le alcanza, quien me habla.".to_owned()
+        }
+        (true, Locale::Es) => format!("Paga primero el grupo{cap}; si no, quien me habla."),
+        (true, Locale::En) if cap.is_empty() => {
+            "The group pays first; if it's short, whoever talks to me.".to_owned()
+        }
+        (true, Locale::En) => format!("The group pays first{cap}; otherwise, whoever talks to me."),
+        (false, Locale::Es) => {
+            format!("Paga primero quien me habla; si no le alcanza, el grupo{cap}.")
+        }
+        (false, Locale::En) => {
+            format!("Whoever talks to me pays first; if they're short, the group does{cap}.")
+        }
+    }
+}
+
 #[must_use]
-pub fn balance_reply(user_balance: i64, chat_balance: Option<i64>, locale: Locale) -> String {
+pub fn balance_reply(
+    user_balance: i64,
+    chat_balance: Option<i64>,
+    config: &ChatConfig,
+    locale: Locale,
+) -> String {
     let user = display_credit_units(CreditUnits::new(user_balance));
     match (chat_balance, locale) {
         (None, Locale::Es) => {
@@ -368,14 +410,16 @@ pub fn balance_reply(user_balance: i64, chat_balance: Option<i64>, locale: Local
         }
         (Some(chat), Locale::Es) => {
             let chat = display_credit_units(CreditUnits::new(chat));
+            let order = payer_order(config, locale);
             format!(
-                "Saldos de IA\n\nTuyo: {user} créditos\nDel grupo: {chat} créditos\n\nPrimero uso tu saldo y, si no alcanza, el del grupo.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
+                "Saldos de IA\n\nTu saldo personal: {user} créditos\nSaldo del grupo: {chat} créditos\n\n{order}\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
             )
         }
         (Some(chat), Locale::En) => {
             let chat = display_credit_units(CreditUnits::new(chat));
+            let order = payer_order(config, locale);
             format!(
-                "AI balances\n\nYours: {user} credits\nGroup: {chat} credits\n\nI use your balance first, then the group's.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
+                "AI balances\n\nYour personal balance: {user} credits\nGroup balance: {chat} credits\n\n{order}\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
             )
         }
     }
@@ -832,10 +876,11 @@ mod tests {
         PreCheckoutDecision, StarPaymentRecord, SuccessfulPaymentDecision, TopupCallbackPlan,
         balance_reply, default_billing_pack, evaluate_default_successful_payment,
         evaluate_pre_checkout, evaluate_successful_payment, invoice_payload_locale,
-        parse_topup_amount, parse_topup_payload, payment_record, plan_balance_command,
+        parse_topup_amount, parse_topup_payload, payer_order, payment_record, plan_balance_command,
         plan_pre_checkout, plan_topup_callback, plan_topup_command, successful_payment_reply,
         topup_menu, topup_menu_title,
     };
+    use crate::chat_config::ChatConfig;
     use crate::locale::Locale;
     use crate::telegram_actions::{InlineKeyboardButton, LabeledPrice, TelegramAction};
     use crate::telegram_input::{ChatId, MessageId};
@@ -1191,24 +1236,114 @@ mod tests {
         Ok(())
     }
 
+    fn payer_config(group_pays_first: bool, creditless_user_hourly_limit: i64) -> ChatConfig {
+        ChatConfig {
+            group_pays_first,
+            creditless_user_hourly_limit,
+            ..ChatConfig::default()
+        }
+    }
+
     #[test]
     fn balance_replies_match_private_and_group_credit_formatting() {
+        let config = payer_config(false, -1);
         assert_eq!(
-            balance_reply(4_200, None, Locale::Es),
+            balance_reply(4_200, None, &config, Locale::Es),
             "Saldo de IA: 42.00 créditos\n\nCargá más con /topup"
         );
         assert_eq!(
-            balance_reply(4_200, None, Locale::En),
+            balance_reply(4_200, None, &config, Locale::En),
             "AI balance: 42.00 credits\n\nAdd more with /topup"
         );
         assert_eq!(
-            balance_reply(3_000, Some(12_000), Locale::Es),
-            "Saldos de IA\n\nTuyo: 30.00 créditos\nDel grupo: 120.00 créditos\n\nPrimero uso tu saldo y, si no alcanza, el del grupo.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
+            balance_reply(3_000, Some(12_000), &config, Locale::Es),
+            "Saldos de IA\n\nTu saldo personal: 30.00 créditos\nSaldo del grupo: 120.00 créditos\n\nPaga primero quien me habla; si no le alcanza, el grupo.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
         );
         assert_eq!(
-            balance_reply(3_000, Some(12_000), Locale::En),
-            "AI balances\n\nYours: 30.00 credits\nGroup: 120.00 credits\n\nI use your balance first, then the group's.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
+            balance_reply(3_000, Some(12_000), &config, Locale::En),
+            "AI balances\n\nYour personal balance: 30.00 credits\nGroup balance: 120.00 credits\n\nWhoever talks to me pays first; if they're short, the group does.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
         );
+    }
+
+    #[test]
+    fn group_balance_reply_follows_who_pays_first() {
+        let config = payer_config(true, -1);
+        assert_eq!(
+            balance_reply(3_000, Some(12_000), &config, Locale::Es),
+            "Saldos de IA\n\nTu saldo personal: 30.00 créditos\nSaldo del grupo: 120.00 créditos\n\nPaga primero el grupo; si no le alcanza, quien me habla.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
+        );
+        assert_eq!(
+            balance_reply(3_000, Some(12_000), &config, Locale::En),
+            "AI balances\n\nYour personal balance: 30.00 credits\nGroup balance: 120.00 credits\n\nThe group pays first; if it's short, whoever talks to me.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
+        );
+        // Private chats have no group balance, so the setting doesn't apply.
+        assert_eq!(
+            balance_reply(4_200, None, &payer_config(true, 0), Locale::Es),
+            balance_reply(4_200, None, &payer_config(false, 5), Locale::Es)
+        );
+    }
+
+    #[test]
+    fn payer_order_includes_the_hourly_group_limit() {
+        let cases = [
+            (
+                true,
+                5,
+                Locale::Es,
+                "Paga primero el grupo, hasta 5 mensajes por hora a cada uno; si no, quien me habla.",
+            ),
+            (
+                true,
+                5,
+                Locale::En,
+                "The group pays first, up to 5 messages per hour per person; otherwise, whoever talks to me.",
+            ),
+            (
+                false,
+                5,
+                Locale::Es,
+                "Paga primero quien me habla; si no le alcanza, el grupo, hasta 5 mensajes por hora a cada uno.",
+            ),
+            (
+                false,
+                5,
+                Locale::En,
+                "Whoever talks to me pays first; if they're short, the group does, up to 5 messages per hour per person.",
+            ),
+            (
+                true,
+                1,
+                Locale::Es,
+                "Paga primero el grupo, hasta 1 mensaje por hora a cada uno; si no, quien me habla.",
+            ),
+            (
+                false,
+                1,
+                Locale::En,
+                "Whoever talks to me pays first; if they're short, the group does, up to 1 message per hour per person.",
+            ),
+        ];
+        for (group_pays_first, limit, locale, expected) in cases {
+            assert_eq!(
+                payer_order(&payer_config(group_pays_first, limit), locale),
+                expected,
+                "group_pays_first={group_pays_first} limit={limit}"
+            );
+        }
+    }
+
+    #[test]
+    fn payer_order_says_the_group_never_pays_with_a_zero_limit() {
+        for group_pays_first in [true, false] {
+            assert_eq!(
+                payer_order(&payer_config(group_pays_first, 0), Locale::Es),
+                "Paga quien me habla; el grupo no paga mensajes de IA."
+            );
+            assert_eq!(
+                payer_order(&payer_config(group_pays_first, 0), Locale::En),
+                "Whoever talks to me pays; the group doesn't pay for AI messages."
+            );
+        }
     }
 
     #[test]

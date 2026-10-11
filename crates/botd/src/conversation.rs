@@ -334,12 +334,12 @@ impl<Provider, Tools, State, Billing> NativeConversation<Provider, Tools, State,
         if matches!(input.chat_type.as_str(), "group" | "supergroup") {
             match locale {
                 Locale::Es => format!(
-                    "Se quedaron secos de créditos de IA en este grupo, boludo\n\nTuyo: {}\nDel grupo: {}\n\nMetele /topup por privado y, si querés, pasale saldo al grupo con /transfer <monto>. Para ver bien la miseria, mandá /balance",
+                    "Se quedaron secos de créditos de IA en este grupo, boludo\n\nTu saldo personal: {}\nSaldo del grupo: {}\n\nMetele /topup por privado y, si querés, pasale saldo al grupo con /transfer <monto>. Para ver bien la miseria, mandá /balance",
                     format_credit_units(decision.user_balance),
                     format_credit_units(decision.chat_balance),
                 ),
                 Locale::En => format!(
-                    "This group is out of AI credits\n\nYours: {}\nGroup: {}\n\nUse /topup in private and /transfer <amount> to fund the group. Use /balance to see the balances",
+                    "This group is out of AI credits\n\nYour personal balance: {}\nGroup balance: {}\n\nUse /topup in private and /transfer <amount> to fund the group. Use /balance to see the balances",
                     format_credit_units(decision.user_balance),
                     format_credit_units(decision.chat_balance),
                 ),
@@ -2660,13 +2660,22 @@ mod tests {
             .contains("Te quedaste seco")
         );
         private.chat_type = "supergroup".to_owned();
-        assert!(
+        // Same balance labels as /balance.
+        assert_eq!(
             NativeConversation::<Provider, Tools, State, Billing>::insufficient(
                 Locale::En,
                 &private,
                 &denied,
-            )
-            .contains("This group")
+            ),
+            "This group is out of AI credits\n\nYour personal balance: 1.25\nGroup balance: 2.50\n\nUse /topup in private and /transfer <amount> to fund the group. Use /balance to see the balances"
+        );
+        assert_eq!(
+            NativeConversation::<Provider, Tools, State, Billing>::insufficient(
+                Locale::Es,
+                &private,
+                &denied,
+            ),
+            "Se quedaron secos de créditos de IA en este grupo, boludo\n\nTu saldo personal: 1.25\nSaldo del grupo: 2.50\n\nMetele /topup por privado y, si querés, pasale saldo al grupo con /transfer <monto>. Para ver bien la miseria, mandá /balance"
         );
         let capped = ReserveDecision {
             denial: Some(ReserveDenial::CreditlessHourlyCap { limit: 5 }),
