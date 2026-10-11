@@ -5936,7 +5936,7 @@ where
                     balance_reply(
                         balances.user_balance,
                         balances.chat_balance,
-                        config.group_pays_first,
+                        &config,
                         locale,
                     )
                 }
@@ -18976,7 +18976,7 @@ mod tests {
         let message = first_sent(&group.actions.0);
         assert_eq!(
             message.text,
-            "AI balances\n\nYour personal balance: 30.00 credits\nGroup balance: 120.00 credits\n\nWhoever talks to me pays first; if they're short, the group does.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
+            "AI balances\n\nYour personal balance: 30.00 credits\nGroup balance: 120.00 credits\n\nWhoever talks to me pays first; if they're short, the group does, up to 5 messages per hour per person.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
         );
     }
 
@@ -18985,6 +18985,7 @@ mod tests {
         let config = Config {
             value: Ok(ChatConfig {
                 group_pays_first: true,
+                creditless_user_hourly_limit: 3,
                 ..ChatConfig::default()
             }),
             chat_ids: Vec::new(),
@@ -19012,7 +19013,7 @@ mod tests {
         assert_eq!(group.dispatch(group_update), Ok(DispatchOutcome::Handled));
         assert_eq!(
             first_sent(&group.actions.0).text,
-            "Saldos de IA\n\nTu saldo personal: 30.00 créditos\nSaldo del grupo: 120.00 créditos\n\nPaga primero el grupo; si no le alcanza, quien me habla.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
+            "Saldos de IA\n\nTu saldo personal: 30.00 créditos\nSaldo del grupo: 120.00 créditos\n\nPaga primero el grupo, hasta 3 mensajes por hora a cada uno; si no, quien me habla.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
         );
     }
 
