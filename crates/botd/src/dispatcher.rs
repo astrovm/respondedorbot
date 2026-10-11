@@ -18937,7 +18937,7 @@ mod tests {
         let message = first_sent(&private.actions.0);
         assert_eq!(
             message.text,
-            "Saldo de IA: 42.00 créditos\n\nCargá más con /topup"
+            "Saldo de IA: 42.00 créditos (≈ 168 mensajes)\n\nCargá más con /topup"
         );
         assert_eq!(
             private.state_diagnostics(),
@@ -18963,7 +18963,7 @@ mod tests {
         .with_balance_source(Box::new(Balances {
             result: Ok(BillingBalances {
                 user_balance: 3_000,
-                chat_balance: Some(12_000),
+                chat_balance: Some(13_000),
                 diagnostics: Vec::new(),
             }),
             calls: Rc::clone(&calls),
@@ -18976,7 +18976,7 @@ mod tests {
         let message = first_sent(&group.actions.0);
         assert_eq!(
             message.text,
-            "AI balances\n\nYour personal balance: 30.00 credits\nGroup balance: 120.00 credits\n\nWhoever talks to me pays first; if they're short, the group does, up to 5 messages per hour per person.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
+            "AI balances\n\nYour personal balance: 30.00 credits (≈ 120 messages)\nGroup balance: 130.00 credits (≈ 520 messages)\n\nWhoever talks to me pays first; if they're short, the group does, up to 5 messages per hour per person.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
         );
     }
 
@@ -19002,7 +19002,7 @@ mod tests {
         .with_balance_source(Box::new(Balances {
             result: Ok(BillingBalances {
                 user_balance: 3_000,
-                chat_balance: Some(12_000),
+                chat_balance: Some(13_000),
                 diagnostics: Vec::new(),
             }),
             calls: Rc::new(RefCell::new(Vec::new())),
@@ -19013,7 +19013,7 @@ mod tests {
         assert_eq!(group.dispatch(group_update), Ok(DispatchOutcome::Handled));
         assert_eq!(
             first_sent(&group.actions.0).text,
-            "Saldos de IA\n\nTu saldo personal: 30.00 créditos\nSaldo del grupo: 120.00 créditos\n\nPaga primero el grupo, hasta 3 mensajes por hora a cada uno; si no, quien me habla.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
+            "Saldos de IA\n\nTu saldo personal: 30.00 créditos (≈ 120 mensajes)\nSaldo del grupo: 130.00 créditos (≈ 520 mensajes)\n\nPaga primero el grupo, hasta 3 mensajes por hora a cada uno; si no, quien me habla.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
         );
     }
 
