@@ -357,7 +357,12 @@ pub fn plan_balance_command(
 }
 
 #[must_use]
-pub fn balance_reply(user_balance: i64, chat_balance: Option<i64>, locale: Locale) -> String {
+pub fn balance_reply(
+    user_balance: i64,
+    chat_balance: Option<i64>,
+    group_pays_first: bool,
+    locale: Locale,
+) -> String {
     let user = display_credit_units(CreditUnits::new(user_balance));
     match (chat_balance, locale) {
         (None, Locale::Es) => {
@@ -368,14 +373,24 @@ pub fn balance_reply(user_balance: i64, chat_balance: Option<i64>, locale: Local
         }
         (Some(chat), Locale::Es) => {
             let chat = display_credit_units(CreditUnits::new(chat));
+            let order = if group_pays_first {
+                "Paga primero el grupo; si no le alcanza, quien me habla."
+            } else {
+                "Paga primero quien me habla; si no le alcanza, el grupo."
+            };
             format!(
-                "Saldos de IA\n\nTuyo: {user} créditos\nDel grupo: {chat} créditos\n\nPrimero uso tu saldo y, si no alcanza, el del grupo.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
+                "Saldos de IA\n\nTu saldo personal: {user} créditos\nSaldo del grupo: {chat} créditos\n\n{order}\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
             )
         }
         (Some(chat), Locale::En) => {
             let chat = display_credit_units(CreditUnits::new(chat));
+            let order = if group_pays_first {
+                "The group pays first; if it's short, whoever talks to me."
+            } else {
+                "Whoever talks to me pays first; if they're short, the group does."
+            };
             format!(
-                "AI balances\n\nYours: {user} credits\nGroup: {chat} credits\n\nI use your balance first, then the group's.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
+                "AI balances\n\nYour personal balance: {user} credits\nGroup balance: {chat} credits\n\n{order}\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
             )
         }
     }
@@ -1194,20 +1209,37 @@ mod tests {
     #[test]
     fn balance_replies_match_private_and_group_credit_formatting() {
         assert_eq!(
-            balance_reply(4_200, None, Locale::Es),
+            balance_reply(4_200, None, false, Locale::Es),
             "Saldo de IA: 42.00 créditos\n\nCargá más con /topup"
         );
         assert_eq!(
-            balance_reply(4_200, None, Locale::En),
+            balance_reply(4_200, None, false, Locale::En),
             "AI balance: 42.00 credits\n\nAdd more with /topup"
         );
         assert_eq!(
-            balance_reply(3_000, Some(12_000), Locale::Es),
-            "Saldos de IA\n\nTuyo: 30.00 créditos\nDel grupo: 120.00 créditos\n\nPrimero uso tu saldo y, si no alcanza, el del grupo.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
+            balance_reply(3_000, Some(12_000), false, Locale::Es),
+            "Saldos de IA\n\nTu saldo personal: 30.00 créditos\nSaldo del grupo: 120.00 créditos\n\nPaga primero quien me habla; si no le alcanza, el grupo.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
         );
         assert_eq!(
-            balance_reply(3_000, Some(12_000), Locale::En),
-            "AI balances\n\nYours: 30.00 credits\nGroup: 120.00 credits\n\nI use your balance first, then the group's.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
+            balance_reply(3_000, Some(12_000), false, Locale::En),
+            "AI balances\n\nYour personal balance: 30.00 credits\nGroup balance: 120.00 credits\n\nWhoever talks to me pays first; if they're short, the group does.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
+        );
+    }
+
+    #[test]
+    fn group_balance_reply_follows_who_pays_first() {
+        assert_eq!(
+            balance_reply(3_000, Some(12_000), true, Locale::Es),
+            "Saldos de IA\n\nTu saldo personal: 30.00 créditos\nSaldo del grupo: 120.00 créditos\n\nPaga primero el grupo; si no le alcanza, quien me habla.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
+        );
+        assert_eq!(
+            balance_reply(3_000, Some(12_000), true, Locale::En),
+            "AI balances\n\nYour personal balance: 30.00 credits\nGroup balance: 120.00 credits\n\nThe group pays first; if it's short, whoever talks to me.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
+        );
+        // Private chats have no group balance, so the setting doesn't apply.
+        assert_eq!(
+            balance_reply(4_200, None, true, Locale::Es),
+            balance_reply(4_200, None, false, Locale::Es)
         );
     }
 

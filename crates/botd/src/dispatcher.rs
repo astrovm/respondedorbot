@@ -5933,7 +5933,12 @@ where
             let text = match balances {
                 Ok(balances) => {
                     self.state_diagnostics.extend(balances.diagnostics);
-                    balance_reply(balances.user_balance, balances.chat_balance, locale)
+                    balance_reply(
+                        balances.user_balance,
+                        balances.chat_balance,
+                        config.group_pays_first,
+                        locale,
+                    )
                 }
                 Err(error) => {
                     self.state_diagnostics.push(format!(
@@ -18969,10 +18974,45 @@ mod tests {
         assert_eq!(group.dispatch(group_update), Ok(DispatchOutcome::Handled));
         assert_eq!(calls.borrow().as_slice(), [(88, None), (88, Some(-42))]);
         let message = first_sent(&group.actions.0);
-        assert!(
-            message
-                .text
-                .starts_with("AI balances\n\nYours: 30.00 credits\nGroup: 120.00 credits")
+        assert_eq!(
+            message.text,
+            "AI balances\n\nYour personal balance: 30.00 credits\nGroup balance: 120.00 credits\n\nWhoever talks to me pays first; if they're short, the group does.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
+        );
+    }
+
+    #[test]
+    fn group_balance_says_the_group_pays_first_when_configured() {
+        let config = Config {
+            value: Ok(ChatConfig {
+                group_pays_first: true,
+                ..ChatConfig::default()
+            }),
+            chat_ids: Vec::new(),
+        };
+        let mut group = NativeDispatcher::new(
+            config,
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_balance_source(Box::new(Balances {
+            result: Ok(BillingBalances {
+                user_balance: 3_000,
+                chat_balance: Some(12_000),
+                diagnostics: Vec::new(),
+            }),
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }));
+        let group_update = message_update("/balance", Some("es"), |message| {
+            message.chat_type = Some("group".to_owned());
+        });
+        assert_eq!(group.dispatch(group_update), Ok(DispatchOutcome::Handled));
+        assert_eq!(
+            first_sent(&group.actions.0).text,
+            "Saldos de IA\n\nTu saldo personal: 30.00 créditos\nSaldo del grupo: 120.00 créditos\n\nPaga primero el grupo; si no le alcanza, quien me habla.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
         );
     }
 
