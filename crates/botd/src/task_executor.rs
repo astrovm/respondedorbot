@@ -14,6 +14,12 @@ use crate::scheduler::{ScheduledTaskExecutor, TaskExecutionDisposition};
 const MAX_FALLBACK_RETRIES: usize = 1;
 const MAX_EMPTY_RETRIES: usize = 1;
 
+pub(crate) fn current_unix_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs().min(i64::MAX as u64) as i64)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskProviderReply {
     pub text: String,
@@ -221,7 +227,7 @@ where
             messenger,
             journal,
             diagnostics,
-            now: || chrono::Utc::now().timestamp(),
+            now: current_unix_timestamp,
         }
     }
 

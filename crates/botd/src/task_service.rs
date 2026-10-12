@@ -27,6 +27,7 @@ use crate::scheduler::{
 };
 use crate::task_executor::{
     NativeTaskExecutor, StderrTaskDiagnostics, TaskExecutionJournal, TaskExecutionState,
+    current_unix_timestamp,
 };
 
 const TASK_EXECUTION_TTL_SECONDS: i64 = 86_400 * 7;
@@ -180,12 +181,6 @@ pub fn build_task_scheduler(
         SchedulerSettings::default(),
         options.owner_token,
     )?)
-}
-
-fn current_unix_timestamp() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs().min(i64::MAX as u64) as i64)
 }
 
 #[cfg(test)]
