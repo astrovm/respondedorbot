@@ -216,7 +216,7 @@ where
     Diagnostics: TaskDiagnostics,
 {
     #[must_use]
-    pub const fn new(
+    pub fn new(
         provider: Provider,
         billing: Billing,
         messenger: Messenger,
