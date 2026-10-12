@@ -11,6 +11,7 @@ use bot_core::scheduled_tasks::ScheduledTask;
 
 use crate::chat_tool_loop::ToolExecutionResult;
 use crate::dispatcher::PollUpdateSink;
+use crate::task_executor::TaskPollDeliveryError;
 use crate::tool_output;
 use crate::tool_requests::{ExternalToolExecutor, ExternalToolRequest};
 
@@ -106,18 +107,26 @@ pub struct PollTool<Sender, Store, Now> {
 }
 
 pub trait ScheduledPollDelivery: Send {
-    fn send(&mut self, task: &ScheduledTask, poll: &PollRequest) -> Result<(), String>;
+    fn send(
+        &mut self,
+        task: &ScheduledTask,
+        poll: &PollRequest,
+    ) -> Result<(), TaskPollDeliveryError>;
 }
 
 impl<Sender: PollSender + Send, Store: PollStore + Send, Now: FnMut() -> i64 + Send>
     ScheduledPollDelivery for PollTool<Sender, Store, Now>
 {
-    fn send(&mut self, task: &ScheduledTask, poll: &PollRequest) -> Result<(), String> {
+    fn send(
+        &mut self,
+        task: &ScheduledTask,
+        poll: &PollRequest,
+    ) -> Result<(), TaskPollDeliveryError> {
         self.context = PollToolContext {
-            chat_id: task
-                .chat_id
-                .parse()
-                .map_err(|_| "scheduled-task Telegram chat ID is invalid".to_owned())?,
+            chat_id: task.chat_id.parse().map_err(|_| TaskPollDeliveryError {
+                message: "scheduled-task Telegram chat ID is invalid".to_owned(),
+                retryable: false,
+            })?,
             reply_to_message_id: None,
             locale: if task.locale == "en" {
                 Locale::En
@@ -125,7 +134,7 @@ impl<Sender: PollSender + Send, Store: PollStore + Send, Now: FnMut() -> i64 + S
                 Locale::Es
             },
         };
-        let result = self.create(poll);
+        let (result, retryable) = self.create(poll);
         for diagnostic in result.diagnostics {
             eprintln!(
                 "scheduled task {} poll_delivery: {diagnostic}",
@@ -135,7 +144,10 @@ impl<Sender: PollSender + Send, Store: PollStore + Send, Now: FnMut() -> i64 + S
         if result.failure_fallback.is_some() {
             Ok(())
         } else {
-            Err(result.output)
+            Err(TaskPollDeliveryError {
+                message: result.output,
+                retryable,
+            })
         }
     }
 }
@@ -158,7 +170,7 @@ where
     Store: PollStore,
     Now: FnMut() -> i64,
 {
-    fn create(&mut self, poll: &PollRequest) -> ToolExecutionResult {
+    fn create(&mut self, poll: &PollRequest) -> (ToolExecutionResult, bool) {
         let locale = self.context.locale;
         let sent = match self.sender.send_poll(
             self.context.chat_id,
@@ -167,25 +179,37 @@ where
         ) {
             Ok(sent) => sent,
             Err(SendPollError::Transport(kind)) => {
-                return ToolExecutionResult::with_diagnostics(
-                    match locale {
-                        Locale::Es => {
-                            "no sé si la encuesta llegó al chat; no la mandes de nuevo sin preguntar"
-                        }
-                        Locale::En => {
-                            "I do not know if the poll reached the chat; do not send it again without asking"
-                        }
-                    },
-                    vec![format!("sendPoll transport failed: {kind:?}")],
+                return (
+                    ToolExecutionResult::with_diagnostics(
+                        match locale {
+                            Locale::Es => {
+                                "no sé si la encuesta llegó al chat; no la mandes de nuevo sin preguntar"
+                            }
+                            Locale::En => {
+                                "I do not know if the poll reached the chat; do not send it again without asking"
+                            }
+                        },
+                        vec![format!("sendPoll transport failed: {kind:?}")],
+                    ),
+                    false,
                 );
             }
             Err(error) => {
-                return ToolExecutionResult::with_diagnostics(
-                    match locale {
-                        Locale::Es => format!("Telegram no aceptó la encuesta: {error}"),
-                        Locale::En => format!("Telegram did not accept the poll: {error}"),
-                    },
-                    vec![format!("sendPoll failed: {error}")],
+                return (
+                    ToolExecutionResult::with_diagnostics(
+                        match locale {
+                            Locale::Es => format!("Telegram no aceptó la encuesta: {error}"),
+                            Locale::En => format!("Telegram did not accept the poll: {error}"),
+                        },
+                        vec![format!("sendPoll failed: {error}")],
+                    ),
+                    matches!(
+                        error,
+                        SendPollError::Rejected {
+                            status_code: 429,
+                            ..
+                        }
+                    ),
                 );
             }
         };
@@ -218,7 +242,7 @@ where
                 .diagnostics
                 .push(format!("poll sent but not stored: {error}"));
         }
-        result
+        (result, false)
     }
 
     fn list(&mut self) -> ToolExecutionResult {
@@ -245,7 +269,7 @@ where
         _tool_call_id: &str,
     ) -> ToolExecutionResult {
         match request {
-            ExternalToolRequest::CreatePoll(poll) => self.create(&poll),
+            ExternalToolRequest::CreatePoll(poll) => self.create(&poll).0,
             ExternalToolRequest::GetPolls => self.list(),
             _ => ToolExecutionResult::output(tool_output::incompatible(
                 self.context.locale,
@@ -546,7 +570,7 @@ mod tests {
         );
         assert!(
             ScheduledPollDelivery::send(&mut rejected, &scheduled_task("es"), &poll())
-                .is_err_and(|error| error.contains("Telegram no aceptó"))
+                .is_err_and(|error| error.message.contains("Telegram no aceptó"))
         );
         assert!(rejected.store.saved.is_empty());
 
@@ -561,8 +585,41 @@ mod tests {
         invalid.chat_id = "bad id".to_owned();
         assert_eq!(
             ScheduledPollDelivery::send(&mut tool, &invalid, &poll()),
-            Err("scheduled-task Telegram chat ID is invalid".to_owned())
+            Err(TaskPollDeliveryError {
+                message: "scheduled-task Telegram chat ID is invalid".to_owned(),
+                retryable: false
+            })
         );
         assert_eq!(tool.sender.sent.len(), 1);
+    }
+    #[test]
+    fn scheduled_polls_retry_only_explicit_rate_limit_rejections() {
+        for (error, retryable) in [
+            (
+                SendPollError::Rejected {
+                    status_code: 429,
+                    description: "retry later".to_owned(),
+                },
+                true,
+            ),
+            (
+                SendPollError::Rejected {
+                    status_code: 400,
+                    description: "bad poll".to_owned(),
+                },
+                false,
+            ),
+            (
+                SendPollError::Transport(TransportFailureKind::Timeout),
+                false,
+            ),
+            (SendPollError::InvalidResponse, false),
+        ] {
+            let mut tool = poll_tool(Err(error), false, Locale::En);
+            let error = ScheduledPollDelivery::send(&mut tool, &scheduled_task("en"), &poll())
+                .expect_err("delivery failed");
+            assert_eq!(error.retryable, retryable);
+            assert!(tool.store.saved.is_empty());
+        }
     }
 }

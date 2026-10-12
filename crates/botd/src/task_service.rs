@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn authoritative_composition_is_side_effect_free_until_the_scheduler_steps()
     -> crate::test_env::TestResult {
-        assert!(super::current_unix_timestamp() > 0);
+        assert!(super::current_unix_timestamp() > 1_700_000_000);
         let pricing =
             OpenRouterPricingCache::new("synthetic-key", "https://synthetic.invalid/api/v1");
         let pricing = Arc::new(pricing?);
@@ -300,7 +300,6 @@ mod tests {
             build_task_verifier(&endpoint, ""),
             Err(TaskServiceError::Scheduler(SchedulerError::EmptyOwnerToken))
         ));
-        assert!(super::current_unix_timestamp() > 0);
         let pricing =
             OpenRouterPricingCache::new("synthetic-key", "https://synthetic.invalid/api/v1");
         let pricing = Arc::new(pricing?);

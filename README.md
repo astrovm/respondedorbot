@@ -15,7 +15,7 @@ It streams replies, remembers conversations, understands media, tracks markets, 
 - **Markets and data.** Crypto, market, dollar, BCRA, weather, and Polymarket data.
 - **Credits.** Telegram Stars, AI credits, transfers, and charge history.
 - **Scheduled tasks.** Recurring or one-time.
-- **Polls.** Sends Telegram polls when asked, including from scheduled tasks, and reads back the votes and who voted. Scheduled polls are attempted once per occurrence to avoid duplicates after timeouts or restarts.
+- **Polls.** Sends Telegram polls when asked, including from scheduled tasks, and reads back the votes and who voted. Scheduled polls avoid duplicate sends after timeouts or restarts; explicit rate-limit rejections get up to three attempts.
 - **Links and languages.** Repairs supported links and handles localized Telegram commands.
 
 ## 🚀 Use

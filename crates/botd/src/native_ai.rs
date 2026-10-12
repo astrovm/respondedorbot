@@ -33,8 +33,8 @@ use crate::firecrawl_tool::ScheduledWebSearch;
 use crate::native_tools::{NativeTool, tool_schema};
 use crate::poll_tools::ScheduledPollDelivery;
 use crate::task_executor::{
-    TaskAiProvider, TaskBilling, TaskMessenger, TaskPromptMessage, TaskProviderFailure,
-    TaskProviderReply, TaskReserveOutcome, build_task_messages,
+    TaskAiProvider, TaskBilling, TaskMessenger, TaskPollDeliveryError, TaskPromptMessage,
+    TaskProviderFailure, TaskProviderReply, TaskReserveOutcome, build_task_messages,
 };
 use crate::tool_requests::{ExternalToolRequest, validate_request};
 
@@ -736,10 +736,17 @@ where
             .map_err(|error| error.to_string())
     }
 
-    fn send_poll(&mut self, task: &ScheduledTask, poll: &PollRequest) -> Result<(), Self::Error> {
+    fn send_poll(
+        &mut self,
+        task: &ScheduledTask,
+        poll: &PollRequest,
+    ) -> Result<(), TaskPollDeliveryError> {
         self.polls
             .as_mut()
-            .ok_or_else(|| "scheduled polls are unavailable".to_owned())?
+            .ok_or_else(|| TaskPollDeliveryError {
+                message: "scheduled polls are unavailable".to_owned(),
+                retryable: false,
+            })?
             .send(task, poll)
     }
 }
@@ -1832,7 +1839,10 @@ mod tests {
         };
         assert_eq!(
             messenger.send_poll(&task("en"), &poll),
-            Err("scheduled polls are unavailable".to_owned())
+            Err(super::TaskPollDeliveryError {
+                message: "scheduled polls are unavailable".to_owned(),
+                retryable: false
+            })
         );
     }
 }

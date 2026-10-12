@@ -104,7 +104,19 @@ pub trait TaskMessenger {
 
     fn send(&mut self, chat_id: &str, text: &str) -> Result<(), Self::Error>;
 
-    fn send_poll(&mut self, task: &ScheduledTask, poll: &PollRequest) -> Result<(), Self::Error>;
+    fn send_poll(
+        &mut self,
+        task: &ScheduledTask,
+        poll: &PollRequest,
+    ) -> Result<(), TaskPollDeliveryError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{message}")]
+pub struct TaskPollDeliveryError {
+    pub message: String,
+    /// Only explicit rate-limit rejections are safe to retry.
+    pub retryable: bool,
 }
 
 const MAX_DELIVERY_ATTEMPTS: u8 = 3;
@@ -116,6 +128,8 @@ pub struct TaskExecutionState {
     poll: Option<PollRequest>,
     #[serde(default)]
     poll_attempted: bool,
+    #[serde(default)]
+    poll_delivery_attempts: u8,
     billing_segments: Vec<Value>,
     kind: TaskExecutionKind,
     billing_finalized: bool,
@@ -338,12 +352,22 @@ where
             // Telegram has no idempotency key for sendPoll. Save before I/O:
             // a timeout or crash must not produce a second poll on replay.
             state.poll_attempted = true;
+            state.poll_delivery_attempts = state.poll_delivery_attempts.saturating_add(1);
             self.journal
                 .save(execution_id, &state)
                 .map_err(|error| Self::journal_error("save_poll_attempt", error))?;
             if let Err(error) = self.messenger.send_poll(task, &poll) {
                 self.diagnostics
                     .record(task.id.as_str(), "poll_delivery", &error.to_string());
+                if error.retryable && state.poll_delivery_attempts < MAX_DELIVERY_ATTEMPTS {
+                    state.poll_attempted = false;
+                    self.journal
+                        .save(execution_id, &state)
+                        .map_err(|error| Self::journal_error("save_poll_retry", error))?;
+                    return Err(NativeTaskExecutorError::Delivery {
+                        message: error.message,
+                    });
+                }
                 self.send_nonfatal(task, &execute_failed(task, &error.to_string()));
             }
         }
@@ -408,6 +432,7 @@ where
                     let state = TaskExecutionState {
                         poll: None,
                         poll_attempted: false,
+                        poll_delivery_attempts: 0,
                         response: None,
                         billing_segments: segments,
                         kind: TaskExecutionKind::ProviderError,
@@ -434,6 +459,7 @@ where
                 let state = TaskExecutionState {
                     poll: None,
                     poll_attempted: false,
+                    poll_delivery_attempts: 0,
                     response: None,
                     billing_segments: segments,
                     kind: TaskExecutionKind::Empty,
@@ -459,6 +485,7 @@ where
                 response: (!reply.text.trim().is_empty()).then(|| clean_task_response(&reply.text)),
                 poll: reply.poll,
                 poll_attempted: false,
+                poll_delivery_attempts: 0,
                 billing_segments: segments,
                 kind: if reply.fallback {
                     TaskExecutionKind::Fallback
@@ -602,9 +629,9 @@ mod tests {
     use super::{
         NativeTaskExecutor, NativeTaskExecutorError, ScheduledTaskExecutor, TaskAiProvider,
         TaskBilling, TaskDiagnostics, TaskExecutionDisposition, TaskExecutionJournal,
-        TaskExecutionKind, TaskExecutionState, TaskMessenger, TaskPromptMessage,
-        TaskProviderFailure, TaskProviderReply, TaskReserveOutcome, build_task_messages,
-        clean_task_response, diagnostic_line,
+        TaskExecutionKind, TaskExecutionState, TaskMessenger, TaskPollDeliveryError,
+        TaskPromptMessage, TaskProviderFailure, TaskProviderReply, TaskReserveOutcome,
+        build_task_messages, clean_task_response, diagnostic_line,
     };
 
     #[derive(Default)]
@@ -693,6 +720,7 @@ mod tests {
         messages: Vec<(String, String)>,
         polls: Vec<(String, PollRequest)>,
         fail_poll: bool,
+        rate_limited: bool,
         fail: bool,
     }
 
@@ -711,10 +739,13 @@ mod tests {
             &mut self,
             task: &ScheduledTask,
             poll: &PollRequest,
-        ) -> Result<(), Self::Error> {
+        ) -> Result<(), TaskPollDeliveryError> {
             self.polls.push((task.chat_id.clone(), poll.clone()));
-            if self.fail_poll {
-                Err("poll delivery failed")
+            if self.fail_poll || self.rate_limited {
+                Err(TaskPollDeliveryError {
+                    message: "poll delivery failed".to_owned(),
+                    retryable: self.rate_limited,
+                })
             } else {
                 Ok(())
             }
@@ -870,6 +901,7 @@ mod tests {
             TaskExecutionState {
                 poll: None,
                 poll_attempted: false,
+                poll_delivery_attempts: 0,
                 response: Some("saved answer".to_owned()),
                 billing_segments: vec![json!({"kind": "chat"})],
                 kind: TaskExecutionKind::Success,
@@ -1360,6 +1392,7 @@ mod tests {
             let saved = TaskExecutionState {
                 poll: None,
                 poll_attempted: false,
+                poll_delivery_attempts: 0,
                 response: None,
                 billing_segments: vec![json!({"kind": "chat"})],
                 kind,
@@ -1576,5 +1609,84 @@ mod tests {
         assert!(restarted.parts().0.prompts.is_empty());
         assert!(restarted.parts().1.settlements.is_empty());
         assert!(restarted.parts().2.polls.is_empty());
+    }
+    #[test]
+    fn explicit_rate_limits_retry_the_saved_poll_without_repeating_ai_billing_or_text() {
+        let mut executor = executor(
+            poll_reply("context"),
+            Billing::default(),
+            Messenger {
+                rate_limited: true,
+                ..Messenger::default()
+            },
+        );
+        assert!(executor.execute(&task("en"), "task123:1000").is_err());
+        let state = executor
+            .journal
+            .states
+            .get("task123:1000")
+            .expect("saved state");
+        assert!(!state.poll_attempted);
+        assert_eq!(state.poll_delivery_attempts, 1);
+        executor.messenger.rate_limited = false;
+        assert_eq!(
+            executor.execute(&task("en"), "task123:1000"),
+            Ok(TaskExecutionDisposition::Complete)
+        );
+        assert_eq!(executor.parts().0.prompts.len(), 1);
+        assert_eq!(executor.parts().1.settlements.len(), 1);
+        assert_eq!(executor.parts().2.messages.len(), 1);
+        assert_eq!(executor.parts().2.polls.len(), 2);
+        assert_eq!(
+            executor.execute(&task("en"), "task123:1000"),
+            Ok(TaskExecutionDisposition::Complete)
+        );
+        assert_eq!(executor.parts().2.polls.len(), 2);
+    }
+
+    #[test]
+    fn rate_limit_retries_are_bounded_and_retry_markers_must_be_persisted() {
+        let mut limited = executor(
+            poll_reply(""),
+            Billing::default(),
+            Messenger {
+                rate_limited: true,
+                ..Messenger::default()
+            },
+        );
+        for _ in 0..2 {
+            assert!(limited.execute(&task("en"), "task123:1000").is_err());
+        }
+        for _ in 0..2 {
+            assert_eq!(
+                limited.execute(&task("en"), "task123:1000"),
+                Ok(TaskExecutionDisposition::Complete)
+            );
+        }
+        assert_eq!(limited.parts().2.polls.len(), 3);
+        assert_eq!(limited.parts().2.messages.len(), 1);
+
+        let mut persistence_failure = journal_executor(
+            poll_reply(""),
+            Billing::default(),
+            Messenger {
+                rate_limited: true,
+                ..Messenger::default()
+            },
+            Journal {
+                failing_save: Some(4),
+                ..Journal::default()
+            },
+        );
+        assert_eq!(
+            persistence_failure.execute(&task("en"), "task123:1000"),
+            journal_failure("save_poll_retry")
+        );
+        assert_eq!(persistence_failure.parts().2.polls.len(), 1);
+        assert_eq!(
+            persistence_failure.execute(&task("en"), "task123:1000"),
+            Ok(TaskExecutionDisposition::Complete)
+        );
+        assert_eq!(persistence_failure.parts().2.polls.len(), 1);
     }
 }
