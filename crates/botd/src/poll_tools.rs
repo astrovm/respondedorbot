@@ -127,7 +127,10 @@ impl<Sender: PollSender + Send, Store: PollStore + Send, Now: FnMut() -> i64 + S
         };
         let result = self.create(poll);
         for diagnostic in result.diagnostics {
-            eprintln!("scheduled task {} poll_delivery: {diagnostic}", task.id);
+            eprintln!(
+                "scheduled task {} poll_delivery: {diagnostic}",
+                task.id.as_str()
+            );
         }
         if result.failure_fallback.is_some() {
             Ok(())
