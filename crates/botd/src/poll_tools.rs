@@ -7,6 +7,7 @@ use bot_adapters::telegram_http::{
 use bot_adapters::telegram_polls::{SendPollError, SentPoll, send_poll_with};
 use bot_core::locale::Locale;
 use bot_core::polls::{PollAnswer, PollRecord, PollRequest, PollState, PollVote, render_polls};
+use bot_core::scheduled_tasks::ScheduledTask;
 
 use crate::chat_tool_loop::ToolExecutionResult;
 use crate::dispatcher::PollUpdateSink;
@@ -102,6 +103,38 @@ pub struct PollTool<Sender, Store, Now> {
     store: Store,
     now: Now,
     context: PollToolContext,
+}
+
+pub trait ScheduledPollDelivery: Send {
+    fn send(&mut self, task: &ScheduledTask, poll: &PollRequest) -> Result<(), String>;
+}
+
+impl<Sender: PollSender + Send, Store: PollStore + Send, Now: FnMut() -> i64 + Send>
+    ScheduledPollDelivery for PollTool<Sender, Store, Now>
+{
+    fn send(&mut self, task: &ScheduledTask, poll: &PollRequest) -> Result<(), String> {
+        self.context = PollToolContext {
+            chat_id: task
+                .chat_id
+                .parse()
+                .map_err(|_| "scheduled-task Telegram chat ID is invalid".to_owned())?,
+            reply_to_message_id: None,
+            locale: if task.locale == "en" {
+                Locale::En
+            } else {
+                Locale::Es
+            },
+        };
+        let result = self.create(poll);
+        for diagnostic in result.diagnostics {
+            eprintln!("scheduled task {} poll_delivery: {diagnostic}", task.id);
+        }
+        if result.failure_fallback.is_some() {
+            Ok(())
+        } else {
+            Err(result.output)
+        }
+    }
 }
 
 impl<Sender, Store, Now> PollTool<Sender, Store, Now> {
@@ -220,6 +253,7 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -471,5 +505,61 @@ mod tests {
         assert!(polls[0].0.closed);
         assert_eq!(polls[0].1[0].name, "Ana");
         Ok(())
+    }
+    fn scheduled_task(locale: &str) -> ScheduledTask {
+        ScheduledTask {
+            id: bot_core::scheduled_tasks::TaskId::new("synthetic-poll-task").expect("task id"),
+            chat_id: "-200".to_owned(),
+            text: "create a poll".to_owned(),
+            user_name: "synthetic-user".to_owned(),
+            user_id: Some(42),
+            schedule: bot_core::scheduled_tasks::TaskSchedule::Once,
+            timezone_offset: -3,
+            locale: locale.to_owned(),
+            schedule_anchor_at: Some(1000),
+            next_run_at: Some(1000),
+            last_execution_id: None,
+        }
+    }
+
+    #[test]
+    fn scheduled_delivery_uses_the_task_chat_and_stores_votes_without_replying() {
+        let mut tool = poll_tool(sent(), false, Locale::Es);
+        assert_eq!(
+            ScheduledPollDelivery::send(&mut tool, &scheduled_task("en"), &poll()),
+            Ok(())
+        );
+        assert_eq!(tool.sender.sent, vec![(-200, None, poll())]);
+        assert_eq!(tool.store.saved[0].chat_id, -200);
+        assert_eq!(tool.context.locale, Locale::En);
+
+        let mut rejected = poll_tool(
+            Err(SendPollError::Rejected {
+                status_code: 400,
+                description: "bad poll".to_owned(),
+            }),
+            false,
+            Locale::En,
+        );
+        assert!(
+            ScheduledPollDelivery::send(&mut rejected, &scheduled_task("es"), &poll())
+                .is_err_and(|error| error.contains("Telegram no aceptó"))
+        );
+        assert!(rejected.store.saved.is_empty());
+
+        let mut store_failure = poll_tool(sent(), true, Locale::En);
+        assert_eq!(
+            ScheduledPollDelivery::send(&mut store_failure, &scheduled_task("en"), &poll()),
+            Ok(())
+        );
+        assert_eq!(store_failure.sender.sent.len(), 1);
+
+        let mut invalid = scheduled_task("en");
+        invalid.chat_id = "bad id".to_owned();
+        assert_eq!(
+            ScheduledPollDelivery::send(&mut tool, &invalid, &poll()),
+            Err("scheduled-task Telegram chat ID is invalid".to_owned())
+        );
+        assert_eq!(tool.sender.sent.len(), 1);
     }
 }

@@ -19,7 +19,7 @@ pub const POLL_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
 /// Only the newest polls per chat stay listed for the AI.
 pub const MAX_POLLS_PER_CHAT: usize = 10;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PollRequest {
     pub question: String,
     pub options: Vec<String>,
@@ -636,5 +636,19 @@ mod tests {
             "created_at": 3
         }));
         assert_eq!(decoded.ok().map(|record| record.closed), Some(false));
+    }
+    proptest::proptest! {
+        #[test]
+        fn poll_delivery_payload_survives_journal_serialization(
+            question in ".{1,100}",
+            options in proptest::collection::vec(".{1,50}", 2..=12),
+            anonymous in proptest::bool::ANY,
+            multiple_answers in proptest::bool::ANY,
+        ) {
+            let poll = PollRequest { question, options, anonymous, multiple_answers };
+            let encoded = serde_json::to_string(&poll)?;
+            let decoded: PollRequest = serde_json::from_str(&encoded)?;
+            proptest::prop_assert_eq!(decoded, poll);
+        }
     }
 }
