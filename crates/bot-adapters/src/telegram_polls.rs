@@ -29,6 +29,8 @@ pub enum SendPollError {
     /// The poll may or may not have been posted.
     #[error("Telegram sendPoll transport failed: {0:?}")]
     Transport(TransportFailureKind),
+    #[error("Telegram rate limited sendPoll; retry after {retry_after_seconds} seconds")]
+    RateLimited { retry_after_seconds: u64 },
     #[error("Telegram rejected sendPoll ({status_code}): {description}")]
     Rejected {
         status_code: u16,
@@ -80,6 +82,16 @@ pub fn send_poll_with<T: TelegramTransport>(
         }
     };
     let envelope = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
+    if status_code == 429 {
+        return Err(SendPollError::RateLimited {
+            retry_after_seconds: envelope
+                .get("parameters")
+                .and_then(|parameters| parameters.get("retry_after"))
+                .and_then(Value::as_u64)
+                .unwrap_or(60)
+                .max(1),
+        });
+    }
     if !(200..300).contains(&status_code) || envelope.get("ok") != Some(&Value::Bool(true)) {
         return Err(SendPollError::Rejected {
             status_code,
@@ -224,5 +236,25 @@ mod tests {
             send_poll_with(&timeout, "t", 1, None, &poll),
             Err(SendPollError::Transport(TransportFailureKind::Timeout))
         );
+    }
+    #[test]
+    fn poll_rate_limits_preserve_retry_after_and_default_invalid_delays() {
+        for (body, seconds) in [
+            (json!({"ok": false, "parameters": {"retry_after": 17}}), 17),
+            (json!({"ok": false, "parameters": {"retry_after": 0}}), 1),
+            (json!({"ok": false, "parameters": {"retry_after": -1}}), 60),
+            (
+                json!({"ok": false, "parameters": {"retry_after": "bad"}}),
+                60,
+            ),
+            (json!({"ok": false}), 60),
+        ] {
+            assert_eq!(
+                send_poll_with(&transport(429, &body.to_string()), "t", 1, None, &poll()),
+                Err(SendPollError::RateLimited {
+                    retry_after_seconds: seconds
+                })
+            );
+        }
     }
 }

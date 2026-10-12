@@ -116,7 +116,7 @@ pub trait TaskMessenger {
 pub struct TaskPollDeliveryError {
     pub message: String,
     /// Only explicit rate-limit rejections are safe to retry.
-    pub retryable: bool,
+    pub retry_after_seconds: Option<u64>,
 }
 
 const MAX_DELIVERY_ATTEMPTS: u8 = 3;
@@ -130,6 +130,8 @@ pub struct TaskExecutionState {
     poll_attempted: bool,
     #[serde(default)]
     poll_delivery_attempts: u8,
+    #[serde(default)]
+    poll_retry_at: Option<i64>,
     billing_segments: Vec<Value>,
     kind: TaskExecutionKind,
     billing_finalized: bool,
@@ -193,6 +195,7 @@ pub struct NativeTaskExecutor<Provider, Billing, Messenger, Journal, Diagnostics
     messenger: Messenger,
     journal: Journal,
     diagnostics: Diagnostics,
+    now: fn() -> i64,
 }
 
 impl<Provider, Billing, Messenger, Journal, Diagnostics>
@@ -218,7 +221,14 @@ where
             messenger,
             journal,
             diagnostics,
+            now: || chrono::Utc::now().timestamp(),
         }
+    }
+
+    #[must_use]
+    pub fn with_clock(mut self, now: fn() -> i64) -> Self {
+        self.now = now;
+        self
     }
 
     fn billing_error(
@@ -273,6 +283,7 @@ where
         execution_id: &str,
         mut state: TaskExecutionState,
     ) -> Result<TaskExecutionDisposition, NativeTaskExecutorError> {
+        let now = (self.now)();
         if !state.billing_finalized {
             match state.kind {
                 TaskExecutionKind::Success => self
@@ -346,6 +357,9 @@ where
                 .save(execution_id, &state)
                 .map_err(|error| Self::journal_error("save_delivery", error))?;
         }
+        if state.poll_retry_at.is_some_and(|retry_at| now < retry_at) {
+            return Ok(TaskExecutionDisposition::Retry);
+        }
         if !state.poll_attempted
             && let Some(poll) = state.poll.clone()
         {
@@ -353,14 +367,20 @@ where
             // a timeout or crash must not produce a second poll on replay.
             state.poll_attempted = true;
             state.poll_delivery_attempts = state.poll_delivery_attempts.saturating_add(1);
+            state.poll_retry_at = None;
             self.journal
                 .save(execution_id, &state)
                 .map_err(|error| Self::journal_error("save_poll_attempt", error))?;
             if let Err(error) = self.messenger.send_poll(task, &poll) {
                 self.diagnostics
                     .record(task.id.as_str(), "poll_delivery", &error.to_string());
-                if error.retryable && state.poll_delivery_attempts < MAX_DELIVERY_ATTEMPTS {
+                if let Some(seconds) = error.retry_after_seconds
+                    && state.poll_delivery_attempts < MAX_DELIVERY_ATTEMPTS
+                {
                     state.poll_attempted = false;
+                    state.poll_retry_at = Some(
+                        (self.now)().saturating_add(i64::try_from(seconds).unwrap_or(i64::MAX)),
+                    );
                     self.journal
                         .save(execution_id, &state)
                         .map_err(|error| Self::journal_error("save_poll_retry", error))?;
@@ -433,6 +453,7 @@ where
                         poll: None,
                         poll_attempted: false,
                         poll_delivery_attempts: 0,
+                        poll_retry_at: None,
                         response: None,
                         billing_segments: segments,
                         kind: TaskExecutionKind::ProviderError,
@@ -460,6 +481,7 @@ where
                     poll: None,
                     poll_attempted: false,
                     poll_delivery_attempts: 0,
+                    poll_retry_at: None,
                     response: None,
                     billing_segments: segments,
                     kind: TaskExecutionKind::Empty,
@@ -486,6 +508,7 @@ where
                 poll: reply.poll,
                 poll_attempted: false,
                 poll_delivery_attempts: 0,
+                poll_retry_at: None,
                 billing_segments: segments,
                 kind: if reply.fallback {
                     TaskExecutionKind::Fallback
@@ -744,7 +767,7 @@ mod tests {
             if self.fail_poll || self.rate_limited {
                 Err(TaskPollDeliveryError {
                     message: "poll delivery failed".to_owned(),
-                    retryable: self.rate_limited,
+                    retry_after_seconds: self.rate_limited.then_some(60),
                 })
             } else {
                 Ok(())
@@ -902,6 +925,7 @@ mod tests {
                 poll: None,
                 poll_attempted: false,
                 poll_delivery_attempts: 0,
+                poll_retry_at: None,
                 response: Some("saved answer".to_owned()),
                 billing_segments: vec![json!({"kind": "chat"})],
                 kind: TaskExecutionKind::Success,
@@ -1393,6 +1417,7 @@ mod tests {
                 poll: None,
                 poll_attempted: false,
                 poll_delivery_attempts: 0,
+                poll_retry_at: None,
                 response: None,
                 billing_segments: vec![json!({"kind": "chat"})],
                 kind,
@@ -1620,6 +1645,7 @@ mod tests {
                 ..Messenger::default()
             },
         );
+        executor = executor.with_clock(|| 1_000);
         assert!(executor.execute(&task("en"), "task123:1000").is_err());
         let state = executor
             .journal
@@ -1628,6 +1654,12 @@ mod tests {
             .expect("saved state");
         assert!(!state.poll_attempted);
         assert_eq!(state.poll_delivery_attempts, 1);
+        assert_eq!(
+            executor.execute(&task("en"), "task123:1000"),
+            Ok(TaskExecutionDisposition::Retry)
+        );
+        assert_eq!(executor.parts().2.polls.len(), 1);
+        executor.now = || 1_060;
         executor.messenger.rate_limited = false;
         assert_eq!(
             executor.execute(&task("en"), "task123:1000"),
@@ -1654,9 +1686,12 @@ mod tests {
                 ..Messenger::default()
             },
         );
-        for _ in 0..2 {
+        limited.now = || 1_000;
+        for index in 0..2 {
+            limited.now = if index == 0 { || 1_000 } else { || 1_060 };
             assert!(limited.execute(&task("en"), "task123:1000").is_err());
         }
+        limited.now = || 1_120;
         for _ in 0..2 {
             assert_eq!(
                 limited.execute(&task("en"), "task123:1000"),

@@ -745,7 +745,7 @@ where
             .as_mut()
             .ok_or_else(|| TaskPollDeliveryError {
                 message: "scheduled polls are unavailable".to_owned(),
-                retryable: false,
+                retry_after_seconds: None,
             })?
             .send(task, poll)
     }
@@ -1841,7 +1841,7 @@ mod tests {
             messenger.send_poll(&task("en"), &poll),
             Err(super::TaskPollDeliveryError {
                 message: "scheduled polls are unavailable".to_owned(),
-                retryable: false
+                retry_after_seconds: None
             })
         );
     }
