@@ -7,6 +7,7 @@ use bot_core::polls::PollRequest;
 use bot_core::scheduled_tasks::ScheduledTask;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use thiserror::Error;
 
 use crate::scheduler::{ScheduledTaskExecutor, TaskExecutionDisposition};
@@ -202,6 +203,7 @@ pub struct NativeTaskExecutor<Provider, Billing, Messenger, Journal, Diagnostics
     journal: Journal,
     diagnostics: Diagnostics,
     now: fn() -> i64,
+    pending_poll_retries: HashMap<String, TaskExecutionState>,
 }
 
 impl<Provider, Billing, Messenger, Journal, Diagnostics>
@@ -228,6 +230,7 @@ where
             journal,
             diagnostics,
             now: current_unix_timestamp,
+            pending_poll_retries: HashMap::new(),
         }
     }
 
@@ -387,9 +390,14 @@ where
                     state.poll_retry_at = Some(
                         (self.now)().saturating_add(i64::try_from(seconds).unwrap_or(i64::MAX)),
                     );
-                    self.journal
-                        .save(execution_id, &state)
-                        .map_err(|error| Self::journal_error("save_poll_retry", error))?;
+                    if let Err(error) = self.journal.save(execution_id, &state) {
+                        // Retain a known rejection while the journal recovers.
+                        // After a process crash only the durable attempt marker
+                        // remains, so that uncertain send is never repeated.
+                        self.pending_poll_retries
+                            .insert(execution_id.to_owned(), state);
+                        return Err(Self::journal_error("save_poll_retry", error));
+                    }
                     return Err(NativeTaskExecutorError::Delivery {
                         message: error.message,
                     });
@@ -412,6 +420,13 @@ where
                 "chat, text, and user name are required",
             );
             return Ok(TaskExecutionDisposition::Retry);
+        }
+        if let Some(state) = self.pending_poll_retries.get(execution_id).cloned() {
+            self.journal
+                .save(execution_id, &state)
+                .map_err(|error| Self::journal_error("save_poll_retry", error))?;
+            self.pending_poll_retries.remove(execution_id);
+            return self.finish_saved_result(task, execution_id, state);
         }
         if let Some(state) = self
             .journal
@@ -1724,10 +1739,21 @@ mod tests {
             journal_failure("save_poll_retry")
         );
         assert_eq!(persistence_failure.parts().2.polls.len(), 1);
+        persistence_failure.journal.failing_save = Some(5);
+        assert_eq!(
+            persistence_failure.execute(&task("en"), "task123:1000"),
+            journal_failure("save_poll_retry")
+        );
+        assert_eq!(persistence_failure.parts().2.polls.len(), 1);
+        persistence_failure.journal.failing_save = None;
+        persistence_failure.now = || i64::MAX;
+        persistence_failure.messenger.rate_limited = false;
         assert_eq!(
             persistence_failure.execute(&task("en"), "task123:1000"),
             Ok(TaskExecutionDisposition::Complete)
         );
-        assert_eq!(persistence_failure.parts().2.polls.len(), 1);
+        assert_eq!(persistence_failure.parts().2.polls.len(), 2);
+        assert_eq!(persistence_failure.parts().0.prompts.len(), 1);
+        assert_eq!(persistence_failure.parts().1.settlements.len(), 1);
     }
 }

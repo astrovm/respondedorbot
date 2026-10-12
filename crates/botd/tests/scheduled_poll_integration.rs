@@ -19,10 +19,7 @@ use bot_core::scheduled_tasks::{ScheduledTask, TaskId, TaskSchedule};
 use botd::composition::TelegramActionSink;
 use botd::native_ai::{ActionTaskMessenger, OpenRouterTaskProvider};
 use botd::poll_tools::{PollTool, PollToolContext, TelegramPollSender};
-use botd::scheduler::{
-    ScheduledTaskExecutor, SchedulerMode, SchedulerSettings, SchedulerStep,
-    TaskExecutionDisposition, TaskScheduler,
-};
+use botd::scheduler::{SchedulerMode, SchedulerSettings, SchedulerStep, TaskScheduler};
 use botd::task_executor::{
     NativeTaskExecutor, StderrTaskDiagnostics, TaskBilling, TaskPromptMessage, TaskReserveOutcome,
 };
@@ -205,12 +202,20 @@ fn weekly_poll_runs_through_scheduler_delivery_vote_tracking_and_restart()
     assert!(failures.is_empty(), "{failures:?}");
     let next = store.load_task(&id)?.ok_or("weekly task missing")?;
     assert_eq!(next.task.next_run_at, Some(now + 604_800));
-    let execution_id = next.task.last_execution_id.ok_or("execution id missing")?;
+    assert!(next.task.last_execution_id.is_some());
     assert!(scheduler.shutdown()?);
-    assert_eq!(
-        make_executor()?.execute(&task, &execution_id)?,
-        TaskExecutionDisposition::Complete
-    );
+    let mut restarted = TaskScheduler::new(
+        RedisTaskStore::new(&endpoint)?,
+        make_executor()?,
+        SchedulerMode::Authoritative,
+        SchedulerSettings::default(),
+        format!("synthetic-restarted-owner-{id}"),
+    )?;
+    let SchedulerStep::Observed { failures, .. } = restarted.step(now)? else {
+        return Err("restarted scheduler did not acquire ownership".into());
+    };
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(restarted.shutdown()?);
 
     let captured = events.lock().map_err(|error| error.to_string())?.clone();
     assert_eq!(
