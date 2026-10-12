@@ -8,8 +8,10 @@ use bot_adapters::billing_read::BillingRepository;
 use bot_adapters::firecrawl::ReqwestFirecrawlTransport;
 use bot_adapters::openrouter_chat::{OpenRouterPricingCache, ReqwestOpenRouterTransport};
 use bot_adapters::redis_connection::RedisEndpoint;
+use bot_adapters::redis_poll_store::RedisPollStore;
 use bot_adapters::redis_task_store::{RedisTaskStore, task_execution_key};
 use bot_adapters::telegram_http::ReqwestTelegramTransport;
+use bot_core::locale::Locale;
 use bot_core::scheduled_tasks::ScheduledTask;
 use thiserror::Error;
 
@@ -18,12 +20,14 @@ use crate::firecrawl_tool::FirecrawlScheduledWebSearch;
 use crate::native_ai::{
     ActionTaskMessenger, OpenRouterTaskProvider, PRIMARY_CHAT_MODEL, PostgresTaskBilling,
 };
+use crate::poll_tools::{PollTool, PollToolContext, TelegramPollSender};
 use crate::scheduler::{
     ScheduledTaskExecutor, SchedulerMode, SchedulerSettings, SchedulerStep,
     TaskExecutionDisposition, TaskScheduler,
 };
 use crate::task_executor::{
     NativeTaskExecutor, StderrTaskDiagnostics, TaskExecutionJournal, TaskExecutionState,
+    current_unix_timestamp,
 };
 
 const TASK_EXECUTION_TTL_SECONDS: i64 = 86_400 * 7;
@@ -93,6 +97,8 @@ pub struct TaskServiceOptions<'a> {
 pub enum TaskServiceError {
     #[error("could not construct the scheduled-task Redis store: {0}")]
     Redis(#[from] bot_adapters::redis_task_store::RedisTaskStoreError),
+    #[error("could not construct the scheduled-poll Redis store: {0}")]
+    PollStore(#[from] bot_adapters::redis_poll_store::RedisPollStoreError),
     #[error("could not construct the OpenRouter transport: {0}")]
     OpenRouter(#[from] bot_adapters::openrouter_chat::OpenRouterChatError),
     #[error("could not construct the Firecrawl transport: {0}")]
@@ -154,7 +160,17 @@ pub fn build_task_scheduler(
     let messenger = ActionTaskMessenger::new(
         TelegramActionSink::new(action_transport, options.telegram_token)
             .with_delivery_coordinator(options.telegram_delivery),
-    );
+    )
+    .with_polls(Box::new(PollTool::new(
+        TelegramPollSender::new(options.telegram_token).map_err(TaskServiceError::Telegram)?,
+        RedisPollStore::new(options.redis_endpoint)?,
+        current_unix_timestamp,
+        PollToolContext {
+            chat_id: 0,
+            reply_to_message_id: None,
+            locale: Locale::Es,
+        },
+    )));
     let journal = RedisTaskStore::new(options.redis_endpoint)?;
     let executor =
         NativeTaskExecutor::new(provider, billing, messenger, journal, StderrTaskDiagnostics);
@@ -189,6 +205,7 @@ mod tests {
     #[test]
     fn authoritative_composition_is_side_effect_free_until_the_scheduler_steps()
     -> crate::test_env::TestResult {
+        assert!(super::current_unix_timestamp() > 1_700_000_000);
         let pricing =
             OpenRouterPricingCache::new("synthetic-key", "https://synthetic.invalid/api/v1");
         let pricing = Arc::new(pricing?);

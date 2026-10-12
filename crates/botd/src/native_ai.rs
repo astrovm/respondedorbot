@@ -17,6 +17,7 @@ use bot_core::ai_reserve::{
 use bot_core::ai_usage::stable_provider_segment_id;
 use bot_core::credit_units::{CreditUnits, display_credit_units};
 use bot_core::locale::{Locale, format_date};
+use bot_core::polls::PollRequest;
 #[cfg(test)]
 use bot_core::provider_pricing::DEEPSEEK_FLASH_MODEL;
 use bot_core::provider_pricing::{DEEPSEEK_MODEL, TokenPricing};
@@ -30,11 +31,12 @@ use thiserror::Error;
 use crate::dispatcher::ActionSink;
 use crate::firecrawl_tool::ScheduledWebSearch;
 use crate::native_tools::{NativeTool, tool_schema};
+use crate::poll_tools::ScheduledPollDelivery;
 use crate::task_executor::{
-    TaskAiProvider, TaskBilling, TaskMessenger, TaskPromptMessage, TaskProviderFailure,
-    TaskProviderReply, TaskReserveOutcome, build_task_messages,
+    TaskAiProvider, TaskBilling, TaskMessenger, TaskPollDeliveryError, TaskPromptMessage,
+    TaskProviderFailure, TaskProviderReply, TaskReserveOutcome, build_task_messages,
 };
-use crate::tool_requests::validate_request;
+use crate::tool_requests::{ExternalToolRequest, validate_request};
 
 pub const PRIMARY_CHAT_MODEL: &str = DEEPSEEK_MODEL;
 pub const VISION_MODEL: &str = DEEPSEEK_MODEL;
@@ -173,6 +175,11 @@ impl<Transport> OpenRouterTaskProvider<Transport> {
         if self.web_search.is_some() {
             request.tools = vec![tool_schema(NativeTool::WebSearch)];
         }
+        let mut poll_schema = tool_schema(NativeTool::CreatePoll);
+        poll_schema["function"]["description"] = json!(
+            "Create a native Telegram poll for this scheduled task, only when the task asks for a poll or vote. Include the situation in the question, or explain it in the same assistant message's content. Use short options; do not repeat them in content. Calling this tool finishes the task; the saved poll is delivered after billing. Do not claim it was already sent."
+        );
+        request.tools.push(poll_schema);
         Ok(request)
     }
 }
@@ -206,7 +213,12 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
             let calls = completion
                 .tool_calls
                 .into_iter()
-                .filter(|call| call.function.name == NativeTool::WebSearch.name())
+                .filter(|call| {
+                    matches!(
+                        NativeTool::from_name(&call.function.name),
+                        Some(NativeTool::WebSearch | NativeTool::CreatePoll)
+                    )
+                })
                 .collect::<Vec<_>>();
             if calls.is_empty() {
                 break;
@@ -219,6 +231,25 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
                     .ok()
                     .filter(Value::is_object)
                     .unwrap_or_else(|| json!({}));
+                if call.function.name == NativeTool::CreatePoll.name() {
+                    match validate_request(NativeTool::CreatePoll, &arguments, locale) {
+                        Ok(ExternalToolRequest::CreatePoll(poll)) => {
+                            return Ok(TaskProviderReply {
+                                text,
+                                poll: Some(poll),
+                                fallback: false,
+                                billing_segments,
+                            });
+                        }
+                        result => {
+                            request.messages.push(ChatMessage::tool_result(
+                                call.id,
+                                result.err().unwrap_or_default(),
+                            ));
+                            continue;
+                        }
+                    }
+                }
                 let result = if search_uses >= TASK_WEB_SEARCH_MAX_USES {
                     crate::chat_tool_loop::ToolExecutionResult::output(
                         "web_search usage limit reached",
@@ -249,6 +280,7 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
         }
         Ok(TaskProviderReply {
             text,
+            poll: None,
             fallback: false,
             billing_segments,
         })
@@ -668,12 +700,19 @@ fn insufficient_credits_message(locale: &str, balance: i64) -> String {
 
 pub struct ActionTaskMessenger<Sink> {
     sink: Sink,
+    polls: Option<Box<dyn ScheduledPollDelivery>>,
 }
 
 impl<Sink> ActionTaskMessenger<Sink> {
     #[must_use]
     pub const fn new(sink: Sink) -> Self {
-        Self { sink }
+        Self { sink, polls: None }
+    }
+
+    #[must_use]
+    pub fn with_polls(mut self, polls: Box<dyn ScheduledPollDelivery>) -> Self {
+        self.polls = Some(polls);
+        self
     }
 }
 
@@ -696,10 +735,24 @@ where
             .map(|_| ())
             .map_err(|error| error.to_string())
     }
+
+    fn send_poll(
+        &mut self,
+        task: &ScheduledTask,
+        poll: &PollRequest,
+    ) -> Result<(), TaskPollDeliveryError> {
+        self.polls
+            .as_mut()
+            .ok_or_else(|| TaskPollDeliveryError {
+                message: "scheduled polls are unavailable".to_owned(),
+                retry_after_seconds: None,
+            })?
+            .send(task, poll)
+    }
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
+#[allow(clippy::panic, clippy::expect_used)]
 mod tests {
     use std::cell::RefCell;
     use std::collections::{BTreeMap, VecDeque};
@@ -710,6 +763,7 @@ mod tests {
         HttpRequest, HttpResponse, OpenRouterChatError, OpenRouterPricingCache, OpenRouterTransport,
     };
     use bot_core::locale::Locale;
+    use bot_core::polls::PollRequest;
     use bot_core::scheduled_tasks::{ScheduledTask, TaskId, TaskSchedule};
     use bot_core::telegram_actions::TelegramAction;
     use serde_json::{Map, Value, json};
@@ -1680,5 +1734,115 @@ mod tests {
         assert!(billing.store.charges.borrow().is_empty());
         assert!(matches!(server.join(), Ok(Ok(()))));
         Ok(())
+    }
+    fn poll_completion(arguments: Value, content: Value) -> HttpResponse {
+        HttpResponse {
+            status_code: 200,
+            body: json!({
+                "id": "generation-poll", "model": "resolved/model",
+                "choices": [{"message": {"content": content, "tool_calls": [{
+                    "id": "poll-call", "type": "function", "function": {
+                        "name": "create_poll", "arguments": arguments.to_string()
+                    }
+                }]}, "finish_reason": "tool_calls"}],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 34}
+            })
+            .to_string(),
+            headers: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn scheduled_poll_tool_generates_a_validated_delivery_without_an_extra_model_round() {
+        for locale in ["en", "es"] {
+            let transport = Transport {
+                requests: RefCell::new(Vec::new()),
+                responses: RefCell::new(VecDeque::from([poll_completion(
+                    json!({
+                        "question": "  Found a wallet. What do you do?  ",
+                        "options": [" Return it ", "Keep it"],
+                        "anonymous": true, "multiple_answers": true
+                    }),
+                    json!("A fictional dilemma"),
+                )])),
+            };
+            let mut provider = OpenRouterTaskProvider::new(
+                transport,
+                "synthetic-key",
+                "https://synthetic.invalid/api/v1",
+                "synthetic/model",
+                "persona",
+            );
+            let reply = provider
+                .complete(&[], &task(locale), "task123:1000")
+                .expect("poll reply");
+            assert_eq!(reply.text, "A fictional dilemma");
+            assert_eq!(reply.billing_segments.len(), 1);
+            assert_eq!(
+                reply.poll,
+                Some(PollRequest {
+                    question: "Found a wallet. What do you do?".to_owned(),
+                    options: vec!["Return it".to_owned(), "Keep it".to_owned()],
+                    anonymous: true,
+                    multiple_answers: true,
+                })
+            );
+            let requests = provider.transport.requests.borrow();
+            assert_eq!(requests.len(), 1);
+            let body: Value = serde_json::from_str(&requests[0].body).expect("request JSON");
+            assert_eq!(body["tools"][0]["function"]["name"], "create_poll");
+            assert_eq!(body["tools"].as_array().expect("tools").len(), 1);
+        }
+    }
+
+    #[test]
+    fn invalid_scheduled_polls_return_validation_to_the_model_for_repair() {
+        let mut provider = OpenRouterTaskProvider::new(
+            Transport {
+                requests: RefCell::new(Vec::new()),
+                responses: RefCell::new(VecDeque::from([
+                    poll_completion(
+                        json!({"question": "Q", "options": ["same", "SAME"]}),
+                        Value::Null,
+                    ),
+                    poll_completion(
+                        json!({"question": "Q", "options": ["Yes", "No"]}),
+                        Value::Null,
+                    ),
+                ])),
+            },
+            "synthetic-key",
+            "https://synthetic.invalid/api/v1",
+            "synthetic/model",
+            "persona",
+        );
+        let reply = provider
+            .complete(&[], &task("en"), "task123:1000")
+            .expect("repaired poll");
+        assert!(reply.text.is_empty());
+        assert!(reply.poll.is_some());
+        assert_eq!(reply.billing_segments.len(), 2);
+        let requests = provider.transport.requests.borrow();
+        let body: Value = serde_json::from_str(&requests[1].body).expect("request JSON");
+        assert_eq!(body["messages"][2]["content"], "some options are repeated");
+        assert_eq!(body["messages"][2]["tool_call_id"], "poll-call");
+    }
+
+    #[test]
+    fn scheduled_poll_messenger_reports_unavailable_delivery() {
+        let mut messenger = ActionTaskMessenger::new(Sink::default());
+        let poll = PollRequest {
+            question: "Q".to_owned(),
+            options: vec!["A".to_owned(), "B".to_owned()],
+            anonymous: false,
+            multiple_answers: false,
+        };
+        assert_eq!(
+            messenger.send_poll(&task("en"), &poll),
+            Err(super::TaskPollDeliveryError {
+                message: "scheduled polls are unavailable".to_owned(),
+                retry_after_seconds: None
+            })
+        );
     }
 }

@@ -3,9 +3,11 @@
 use bot_core::ai_response_cleanup::{
     clean_duplicate_response, remove_gordo_prefix, strip_markdown_formatting,
 };
+use bot_core::polls::PollRequest;
 use bot_core::scheduled_tasks::ScheduledTask;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use thiserror::Error;
 
 use crate::scheduler::{ScheduledTaskExecutor, TaskExecutionDisposition};
@@ -13,9 +15,16 @@ use crate::scheduler::{ScheduledTaskExecutor, TaskExecutionDisposition};
 const MAX_FALLBACK_RETRIES: usize = 1;
 const MAX_EMPTY_RETRIES: usize = 1;
 
+pub(crate) fn current_unix_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs().min(i64::MAX as u64) as i64)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskProviderReply {
     pub text: String,
+    pub poll: Option<PollRequest>,
     pub fallback: bool,
     pub billing_segments: Vec<Value>,
 }
@@ -101,6 +110,20 @@ pub trait TaskMessenger {
     type Error: std::fmt::Display;
 
     fn send(&mut self, chat_id: &str, text: &str) -> Result<(), Self::Error>;
+
+    fn send_poll(
+        &mut self,
+        task: &ScheduledTask,
+        poll: &PollRequest,
+    ) -> Result<(), TaskPollDeliveryError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{message}")]
+pub struct TaskPollDeliveryError {
+    pub message: String,
+    /// Only explicit rate-limit rejections are safe to retry.
+    pub retry_after_seconds: Option<u64>,
 }
 
 const MAX_DELIVERY_ATTEMPTS: u8 = 3;
@@ -108,6 +131,14 @@ const MAX_DELIVERY_ATTEMPTS: u8 = 3;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskExecutionState {
     response: Option<String>,
+    #[serde(default)]
+    poll: Option<PollRequest>,
+    #[serde(default)]
+    poll_attempted: bool,
+    #[serde(default)]
+    poll_delivery_attempts: u8,
+    #[serde(default)]
+    poll_retry_at: Option<i64>,
     billing_segments: Vec<Value>,
     kind: TaskExecutionKind,
     billing_finalized: bool,
@@ -171,6 +202,8 @@ pub struct NativeTaskExecutor<Provider, Billing, Messenger, Journal, Diagnostics
     messenger: Messenger,
     journal: Journal,
     diagnostics: Diagnostics,
+    now: fn() -> i64,
+    pending_poll_retries: HashMap<String, TaskExecutionState>,
 }
 
 impl<Provider, Billing, Messenger, Journal, Diagnostics>
@@ -183,7 +216,7 @@ where
     Diagnostics: TaskDiagnostics,
 {
     #[must_use]
-    pub const fn new(
+    pub fn new(
         provider: Provider,
         billing: Billing,
         messenger: Messenger,
@@ -196,7 +229,15 @@ where
             messenger,
             journal,
             diagnostics,
+            now: current_unix_timestamp,
+            pending_poll_retries: HashMap::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_clock(mut self, now: fn() -> i64) -> Self {
+        self.now = now;
+        self
     }
 
     fn billing_error(
@@ -251,6 +292,7 @@ where
         execution_id: &str,
         mut state: TaskExecutionState,
     ) -> Result<TaskExecutionDisposition, NativeTaskExecutorError> {
+        let now = (self.now)();
         if !state.billing_finalized {
             match state.kind {
                 TaskExecutionKind::Success => self
@@ -324,6 +366,45 @@ where
                 .save(execution_id, &state)
                 .map_err(|error| Self::journal_error("save_delivery", error))?;
         }
+        if state.poll_retry_at.is_some_and(|retry_at| now < retry_at) {
+            return Ok(TaskExecutionDisposition::Retry);
+        }
+        if !state.poll_attempted
+            && let Some(poll) = state.poll.clone()
+        {
+            // Telegram has no idempotency key for sendPoll. Save before I/O:
+            // a timeout or crash must not produce a second poll on replay.
+            state.poll_attempted = true;
+            state.poll_delivery_attempts = state.poll_delivery_attempts.saturating_add(1);
+            state.poll_retry_at = None;
+            self.journal
+                .save(execution_id, &state)
+                .map_err(|error| Self::journal_error("save_poll_attempt", error))?;
+            if let Err(error) = self.messenger.send_poll(task, &poll) {
+                self.diagnostics
+                    .record(task.id.as_str(), "poll_delivery", &error.to_string());
+                if let Some(seconds) = error.retry_after_seconds
+                    && state.poll_delivery_attempts < MAX_DELIVERY_ATTEMPTS
+                {
+                    state.poll_attempted = false;
+                    state.poll_retry_at = Some(
+                        (self.now)().saturating_add(i64::try_from(seconds).unwrap_or(i64::MAX)),
+                    );
+                    if let Err(error) = self.journal.save(execution_id, &state) {
+                        // Retain a known rejection while the journal recovers.
+                        // After a process crash only the durable attempt marker
+                        // remains, so that uncertain send is never repeated.
+                        self.pending_poll_retries
+                            .insert(execution_id.to_owned(), state);
+                        return Err(Self::journal_error("save_poll_retry", error));
+                    }
+                    return Err(NativeTaskExecutorError::Delivery {
+                        message: error.message,
+                    });
+                }
+                self.send_nonfatal(task, &execute_failed(task, &error.to_string()));
+            }
+        }
         Ok(TaskExecutionDisposition::Complete)
     }
 
@@ -339,6 +420,13 @@ where
                 "chat, text, and user name are required",
             );
             return Ok(TaskExecutionDisposition::Retry);
+        }
+        if let Some(state) = self.pending_poll_retries.get(execution_id).cloned() {
+            self.journal
+                .save(execution_id, &state)
+                .map_err(|error| Self::journal_error("save_poll_retry", error))?;
+            self.pending_poll_retries.remove(execution_id);
+            return self.finish_saved_result(task, execution_id, state);
         }
         if let Some(state) = self
             .journal
@@ -383,6 +471,10 @@ where
                     self.diagnostics
                         .record(task.id.as_str(), "provider", &message);
                     let state = TaskExecutionState {
+                        poll: None,
+                        poll_attempted: false,
+                        poll_delivery_attempts: 0,
+                        poll_retry_at: None,
                         response: None,
                         billing_segments: segments,
                         kind: TaskExecutionKind::ProviderError,
@@ -397,7 +489,7 @@ where
                 }
             };
             segments.extend(reply.billing_segments);
-            if reply.text.trim().is_empty() {
+            if reply.text.trim().is_empty() && reply.poll.is_none() {
                 if empty_retries < MAX_EMPTY_RETRIES {
                     empty_retries += 1;
                     messages.push(TaskPromptMessage {
@@ -407,6 +499,10 @@ where
                     continue;
                 }
                 let state = TaskExecutionState {
+                    poll: None,
+                    poll_attempted: false,
+                    poll_delivery_attempts: 0,
+                    poll_retry_at: None,
                     response: None,
                     billing_segments: segments,
                     kind: TaskExecutionKind::Empty,
@@ -429,7 +525,11 @@ where
             }
 
             let state = TaskExecutionState {
-                response: Some(clean_task_response(&reply.text)),
+                response: (!reply.text.trim().is_empty()).then(|| clean_task_response(&reply.text)),
+                poll: reply.poll,
+                poll_attempted: false,
+                poll_delivery_attempts: 0,
+                poll_retry_at: None,
                 billing_segments: segments,
                 kind: if reply.fallback {
                     TaskExecutionKind::Fallback
@@ -488,9 +588,9 @@ pub fn build_task_messages(text: &str, locale: &str) -> Vec<TaskPromptMessage> {
 
 fn format_prompt(locale: &str) -> &'static str {
     if locale == "en" {
-        "INSTRUCTIONS:\n- keep the bot persona\n- use casual English\n- respond without markdown or emojis\n- use a numbered list when the user asks for a list or there are several topics\n- leave a blank line between numbered items\n- give each item a short title and a brief explanation\n- structure the answer so it is easy to read"
+        "INSTRUCTIONS:\n- if the task asks for a poll or vote, call create_poll instead of writing answer options as a list\n- keep the bot persona\n- use casual English\n- respond without markdown or emojis\n- use a numbered list when the user asks for a list or there are several topics\n- leave a blank line between numbered items\n- give each item a short title and a brief explanation\n- structure the answer so it is easy to read"
     } else {
-        "INSTRUCCIONES:\n- mantené el personaje del gordo\n- usá lenguaje coloquial argentino\n- respondé en minúsculas, sin emojis, sin punto final\n- si el usuario pide una lista o hay varios temas, usá lista numerada: 1., 2., 3.\n- dejá una línea en blanco entre cada item numerado\n- cada item debe tener título corto en su propia línea y explicación breve abajo\n- no la pongas toda en una sola frase: estructurala para que sea fácil de leer"
+        "INSTRUCCIONES:\n- si la tarea pide una encuesta o votación, usá create_poll en vez de escribir las opciones como una lista\n- mantené el personaje del gordo\n- usá lenguaje coloquial argentino\n- respondé en minúsculas, sin emojis, sin punto final\n- si el usuario pide una lista o hay varios temas, usá lista numerada: 1., 2., 3.\n- dejá una línea en blanco entre cada item numerado\n- cada item debe tener título corto en su propia línea y explicación breve abajo\n- no la pongas toda en una sola frase: estructurala para que sea fácil de leer"
     }
 }
 
@@ -568,12 +668,14 @@ mod tests {
     use bot_core::scheduled_tasks::{ScheduledTask, TaskId, TaskSchedule};
     use serde_json::{Value, json};
 
+    use bot_core::polls::PollRequest;
+
     use super::{
         NativeTaskExecutor, NativeTaskExecutorError, ScheduledTaskExecutor, TaskAiProvider,
         TaskBilling, TaskDiagnostics, TaskExecutionDisposition, TaskExecutionJournal,
-        TaskExecutionKind, TaskExecutionState, TaskMessenger, TaskPromptMessage,
-        TaskProviderFailure, TaskProviderReply, TaskReserveOutcome, build_task_messages,
-        clean_task_response, diagnostic_line,
+        TaskExecutionKind, TaskExecutionState, TaskMessenger, TaskPollDeliveryError,
+        TaskPromptMessage, TaskProviderFailure, TaskProviderReply, TaskReserveOutcome,
+        build_task_messages, clean_task_response, diagnostic_line,
     };
 
     #[derive(Default)]
@@ -595,6 +697,7 @@ mod tests {
             self.prompts.push(messages.to_vec());
             self.execution_ids.push(execution_id.to_owned());
             self.replies.pop_front().unwrap_or(Ok(TaskProviderReply {
+                poll: None,
                 text: "synthetic answer".to_owned(),
                 fallback: false,
                 billing_segments: vec![json!({"kind": "chat"})],
@@ -659,6 +762,9 @@ mod tests {
     #[derive(Default)]
     struct Messenger {
         messages: Vec<(String, String)>,
+        polls: Vec<(String, PollRequest)>,
+        fail_poll: bool,
+        rate_limited: bool,
         fail: bool,
     }
 
@@ -669,6 +775,21 @@ mod tests {
             self.messages.push((chat_id.to_owned(), text.to_owned()));
             if self.fail {
                 Err("delivery failed")
+            } else {
+                Ok(())
+            }
+        }
+        fn send_poll(
+            &mut self,
+            task: &ScheduledTask,
+            poll: &PollRequest,
+        ) -> Result<(), TaskPollDeliveryError> {
+            self.polls.push((task.chat_id.clone(), poll.clone()));
+            if self.fail_poll || self.rate_limited {
+                Err(TaskPollDeliveryError {
+                    message: "poll delivery failed".to_owned(),
+                    retry_after_seconds: self.rate_limited.then_some(60),
+                })
             } else {
                 Ok(())
             }
@@ -822,6 +943,10 @@ mod tests {
         journal.states.insert(
             execution_id.to_owned(),
             TaskExecutionState {
+                poll: None,
+                poll_attempted: false,
+                poll_delivery_attempts: 0,
+                poll_retry_at: None,
                 response: Some("saved answer".to_owned()),
                 billing_segments: vec![json!({"kind": "chat"})],
                 kind: TaskExecutionKind::Success,
@@ -899,16 +1024,19 @@ mod tests {
         let provider = Provider {
             replies: VecDeque::from([
                 Ok(TaskProviderReply {
+                    poll: None,
                     text: String::new(),
                     fallback: false,
                     billing_segments: vec![json!({"attempt": 1})],
                 }),
                 Ok(TaskProviderReply {
+                    poll: None,
                     text: "fallback".to_owned(),
                     fallback: true,
                     billing_segments: vec![json!({"attempt": 2})],
                 }),
                 Ok(TaskProviderReply {
+                    poll: None,
                     text: "paid answer".to_owned(),
                     fallback: false,
                     billing_segments: vec![json!({"attempt": 3})],
@@ -938,11 +1066,13 @@ mod tests {
             let provider = Provider {
                 replies: VecDeque::from([
                     Ok(TaskProviderReply {
+                        poll: None,
                         text: "fallback one".to_owned(),
                         fallback: true,
                         billing_segments: segments.clone(),
                     }),
                     Ok(TaskProviderReply {
+                        poll: None,
                         text: "fallback two".to_owned(),
                         fallback: true,
                         billing_segments: segments.clone(),
@@ -999,11 +1129,13 @@ mod tests {
         let provider = Provider {
             replies: VecDeque::from([
                 Ok(TaskProviderReply {
+                    poll: None,
                     text: String::new(),
                     fallback: false,
                     billing_segments: Vec::new(),
                 }),
                 Ok(TaskProviderReply {
+                    poll: None,
                     text: "   ".to_owned(),
                     fallback: false,
                     billing_segments: Vec::new(),
@@ -1199,11 +1331,13 @@ mod tests {
         let empty = || Provider {
             replies: VecDeque::from([
                 Ok(TaskProviderReply {
+                    poll: None,
                     text: " ".to_owned(),
                     fallback: false,
                     billing_segments: Vec::new(),
                 }),
                 Ok(TaskProviderReply {
+                    poll: None,
                     text: String::new(),
                     fallback: false,
                     billing_segments: Vec::new(),
@@ -1301,6 +1435,10 @@ mod tests {
             TaskExecutionKind::Empty,
         ] {
             let saved = TaskExecutionState {
+                poll: None,
+                poll_attempted: false,
+                poll_delivery_attempts: 0,
+                poll_retry_at: None,
                 response: None,
                 billing_segments: vec![json!({"kind": "chat"})],
                 kind,
@@ -1334,5 +1472,288 @@ mod tests {
             assert!(provider.prompts.is_empty());
             assert!(billing.refunds.is_empty());
         }
+    }
+    fn poll_reply(text: &str) -> Provider {
+        Provider {
+            replies: VecDeque::from([Ok(TaskProviderReply {
+                text: text.to_owned(),
+                poll: Some(PollRequest {
+                    question: "Encontrás una billetera. ¿Qué hacés?".to_owned(),
+                    options: vec!["Devolverla".to_owned(), "Quedártela".to_owned()],
+                    anonymous: false,
+                    multiple_answers: false,
+                }),
+                fallback: false,
+                billing_segments: vec![json!({"kind": "chat"})],
+            })]),
+            ..Provider::default()
+        }
+    }
+
+    #[test]
+    fn scheduled_polls_are_saved_billed_delivered_and_not_repeated() {
+        for text in ["", "un dilema ficticio"] {
+            let mut executor = executor(poll_reply(text), Billing::default(), Messenger::default());
+            let task = task("es");
+            for _ in 0..2 {
+                assert_eq!(
+                    executor.execute(&task, "task123:1000"),
+                    Ok(TaskExecutionDisposition::Complete)
+                );
+            }
+            let state = executor
+                .journal
+                .states
+                .get("task123:1000")
+                .expect("saved state");
+            assert!(state.poll_attempted);
+            assert!(state.poll.is_some());
+            assert_eq!(state.response.is_some(), !text.is_empty());
+            let (provider, billing, messenger, _) = executor.parts();
+            assert_eq!(provider.prompts.len(), 1);
+            assert_eq!(billing.settlements.len(), 1);
+            assert_eq!(billing.refunds.len(), 0);
+            assert_eq!(messenger.polls.len(), 1);
+            assert_eq!(messenger.polls[0].0, task.chat_id);
+            assert_eq!(messenger.messages.len(), usize::from(!text.is_empty()));
+        }
+    }
+
+    #[test]
+    fn poll_send_failure_is_reported_once_without_retrying() {
+        let mut executor = executor(
+            poll_reply(""),
+            Billing::default(),
+            Messenger {
+                fail_poll: true,
+                ..Messenger::default()
+            },
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                executor.execute(&task("es"), "task123:1000"),
+                Ok(TaskExecutionDisposition::Complete)
+            );
+        }
+        assert_eq!(executor.parts().2.polls.len(), 1);
+        assert_eq!(executor.parts().2.messages.len(), 1);
+        assert!(
+            executor.parts().2.messages[0]
+                .1
+                .contains("poll delivery failed")
+        );
+        assert_eq!(executor.parts().3.0[0].1, "poll_delivery");
+    }
+
+    #[test]
+    fn polls_wait_for_billing_text_delivery_and_durable_attempt_marker() {
+        // The fourth save follows provider output, billing and text delivery.
+        let mut executor = journal_executor(
+            poll_reply("context"),
+            Billing::default(),
+            Messenger::default(),
+            Journal {
+                failing_save: Some(4),
+                ..Journal::default()
+            },
+        );
+        assert_eq!(
+            executor.execute(&task("en"), "task123:1000"),
+            journal_failure("save_poll_attempt")
+        );
+        assert!(executor.parts().2.polls.is_empty());
+        assert_eq!(executor.parts().2.messages.len(), 1);
+        assert_eq!(
+            executor.execute(&task("en"), "task123:1000"),
+            Ok(TaskExecutionDisposition::Complete)
+        );
+        assert_eq!(executor.parts().2.messages.len(), 1);
+        assert_eq!(executor.parts().2.polls.len(), 1);
+        assert_eq!(executor.parts().0.prompts.len(), 1);
+
+        let mut billing_failure = super::NativeTaskExecutor::new(
+            poll_reply(""),
+            Billing {
+                fail_settlement: true,
+                ..Billing::default()
+            },
+            Messenger::default(),
+            Journal::default(),
+            Diagnostics::default(),
+        );
+        assert!(
+            billing_failure
+                .execute(&task("en"), "task123:1000")
+                .is_err()
+        );
+        assert!(billing_failure.parts().2.polls.is_empty());
+        billing_failure.billing.fail_settlement = false;
+        assert_eq!(
+            billing_failure.execute(&task("en"), "task123:1000"),
+            Ok(TaskExecutionDisposition::Complete)
+        );
+        assert_eq!(billing_failure.parts().2.polls.len(), 1);
+
+        let mut text_failure = super::NativeTaskExecutor::new(
+            poll_reply("context"),
+            Billing::default(),
+            Messenger {
+                fail: true,
+                ..Messenger::default()
+            },
+            Journal::default(),
+            Diagnostics::default(),
+        );
+        assert!(text_failure.execute(&task("en"), "task123:1000").is_err());
+        assert!(text_failure.parts().2.polls.is_empty());
+        text_failure.messenger.fail = false;
+        assert_eq!(
+            text_failure.execute(&task("en"), "task123:1000"),
+            Ok(TaskExecutionDisposition::Complete)
+        );
+        assert_eq!(text_failure.parts().2.polls.len(), 1);
+    }
+
+    #[test]
+    fn restart_after_poll_attempt_does_not_send_again_and_old_states_still_load() {
+        let old: TaskExecutionState = serde_json::from_value(json!({
+            "response": "saved answer", "billing_segments": [], "kind": "success",
+            "billing_finalized": true, "delivered": true
+        }))
+        .expect("old journal state");
+        assert!(old.poll.is_none());
+        assert!(!old.poll_attempted);
+        assert_eq!(old.delivery_attempts, 0);
+
+        let mut first = executor(poll_reply(""), Billing::default(), Messenger::default());
+        assert_eq!(
+            first.execute(&task("en"), "task123:1000"),
+            Ok(TaskExecutionDisposition::Complete)
+        );
+        let serialized = serde_json::to_string(
+            first
+                .journal
+                .states
+                .get("task123:1000")
+                .expect("saved state"),
+        )
+        .expect("serialize");
+        let state: TaskExecutionState = serde_json::from_str(&serialized).expect("deserialize");
+        let mut restarted = journal_executor(
+            Provider::default(),
+            Billing::default(),
+            Messenger::default(),
+            Journal {
+                states: HashMap::from([("task123:1000".to_owned(), state)]),
+                ..Journal::default()
+            },
+        );
+        assert_eq!(
+            restarted.execute(&task("en"), "task123:1000"),
+            Ok(TaskExecutionDisposition::Complete)
+        );
+        assert!(restarted.parts().0.prompts.is_empty());
+        assert!(restarted.parts().1.settlements.is_empty());
+        assert!(restarted.parts().2.polls.is_empty());
+    }
+    #[test]
+    fn explicit_rate_limits_retry_the_saved_poll_without_repeating_ai_billing_or_text() {
+        let mut executor = executor(
+            poll_reply("context"),
+            Billing::default(),
+            Messenger {
+                rate_limited: true,
+                ..Messenger::default()
+            },
+        );
+        executor = executor.with_clock(|| 1_000);
+        assert!(executor.execute(&task("en"), "task123:1000").is_err());
+        let state = executor
+            .journal
+            .states
+            .get("task123:1000")
+            .expect("saved state");
+        assert!(!state.poll_attempted);
+        assert_eq!(state.poll_delivery_attempts, 1);
+        assert_eq!(
+            executor.execute(&task("en"), "task123:1000"),
+            Ok(TaskExecutionDisposition::Retry)
+        );
+        assert_eq!(executor.parts().2.polls.len(), 1);
+        executor.now = || 1_060;
+        executor.messenger.rate_limited = false;
+        assert_eq!(
+            executor.execute(&task("en"), "task123:1000"),
+            Ok(TaskExecutionDisposition::Complete)
+        );
+        assert_eq!(executor.parts().0.prompts.len(), 1);
+        assert_eq!(executor.parts().1.settlements.len(), 1);
+        assert_eq!(executor.parts().2.messages.len(), 1);
+        assert_eq!(executor.parts().2.polls.len(), 2);
+        assert_eq!(
+            executor.execute(&task("en"), "task123:1000"),
+            Ok(TaskExecutionDisposition::Complete)
+        );
+        assert_eq!(executor.parts().2.polls.len(), 2);
+    }
+
+    #[test]
+    fn rate_limit_retries_are_bounded_and_retry_markers_must_be_persisted() {
+        let mut limited = executor(
+            poll_reply(""),
+            Billing::default(),
+            Messenger {
+                rate_limited: true,
+                ..Messenger::default()
+            },
+        );
+        limited.now = || 1_000;
+        for index in 0..2 {
+            limited.now = if index == 0 { || 1_000 } else { || 1_060 };
+            assert!(limited.execute(&task("en"), "task123:1000").is_err());
+        }
+        limited.now = || 1_120;
+        for _ in 0..2 {
+            assert_eq!(
+                limited.execute(&task("en"), "task123:1000"),
+                Ok(TaskExecutionDisposition::Complete)
+            );
+        }
+        assert_eq!(limited.parts().2.polls.len(), 3);
+        assert_eq!(limited.parts().2.messages.len(), 1);
+
+        let mut persistence_failure = journal_executor(
+            poll_reply(""),
+            Billing::default(),
+            Messenger {
+                rate_limited: true,
+                ..Messenger::default()
+            },
+            Journal {
+                failing_save: Some(4),
+                ..Journal::default()
+            },
+        );
+        assert_eq!(
+            persistence_failure.execute(&task("en"), "task123:1000"),
+            journal_failure("save_poll_retry")
+        );
+        assert_eq!(persistence_failure.parts().2.polls.len(), 1);
+        persistence_failure.journal.failing_save = Some(5);
+        assert_eq!(
+            persistence_failure.execute(&task("en"), "task123:1000"),
+            journal_failure("save_poll_retry")
+        );
+        assert_eq!(persistence_failure.parts().2.polls.len(), 1);
+        persistence_failure.journal.failing_save = None;
+        persistence_failure.now = || i64::MAX;
+        persistence_failure.messenger.rate_limited = false;
+        assert_eq!(
+            persistence_failure.execute(&task("en"), "task123:1000"),
+            Ok(TaskExecutionDisposition::Complete)
+        );
+        assert_eq!(persistence_failure.parts().2.polls.len(), 2);
+        assert_eq!(persistence_failure.parts().0.prompts.len(), 1);
+        assert_eq!(persistence_failure.parts().1.settlements.len(), 1);
     }
 }
