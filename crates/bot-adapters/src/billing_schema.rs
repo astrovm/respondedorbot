@@ -543,6 +543,61 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn reconciliation_indexes_upgrade_existing_data_and_can_be_rolled_back() -> TestResult {
+        let Ok(database_url) = std::env::var("TEST_DATABASE_URL") else {
+            return Ok(());
+        };
+        let url = fault_injection::isolated_schema_url(&database_url, "billing_index_upgrade", "")?;
+        let repository = BillingSchemaRepository::new(&url);
+        repository.ensure_schema()?;
+        let mut client = fault_injection::connect(&url)?;
+        client.batch_execute(
+            "INSERT INTO credit_accounts (scope_type,scope_id,balance) VALUES ('user',10,1234);
+             INSERT INTO credit_ledger (event_type,user_id,amount,metadata)
+             VALUES ('ai_reserve',10,-25,'{\"operation_id\":\"synthetic-old-operation\",\"source\":\"user\"}')",
+        )?;
+        let before: serde_json::Value = client.query_one(
+            "SELECT jsonb_build_object('accounts',(SELECT jsonb_agg(to_jsonb(a)) FROM credit_accounts a),
+                'ledger',(SELECT jsonb_agg(to_jsonb(l)) FROM credit_ledger l))", &[],
+        )?.get(0);
+        let drop_indexes = "DROP INDEX idx_credit_ledger_ai_settlement_operation;
+            DROP INDEX idx_credit_ledger_ai_usage_operation;
+            DROP INDEX idx_credit_ledger_background_operation";
+        client.batch_execute("BEGIN")?;
+        client.batch_execute(drop_indexes)?;
+        client.batch_execute("ROLLBACK")?;
+        assert_eq!(reconciliation_index_count(&mut client)?, 3);
+        client.batch_execute(drop_indexes)?;
+        assert_eq!(reconciliation_index_count(&mut client)?, 0);
+        for _ in 0..2 {
+            let result = repository.ensure_schema()?;
+            assert!(!result.migrated_to_tenths);
+            assert!(!result.migrated_to_hundredths);
+            assert_eq!(result.repaired_compaction_refunds, 0);
+            assert_eq!(reconciliation_index_count(&mut client)?, 3);
+            let after: serde_json::Value = client.query_one(
+                "SELECT jsonb_build_object('accounts',(SELECT jsonb_agg(to_jsonb(a)) FROM credit_accounts a),
+                    'ledger',(SELECT jsonb_agg(to_jsonb(l)) FROM credit_ledger l))", &[],
+            )?.get(0);
+            assert_eq!(after, before);
+        }
+        Ok(())
+    }
+
+    fn reconciliation_index_count(client: &mut Client) -> TestResult<i64> {
+        Ok(client
+            .query_one(
+                "SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid
+             JOIN pg_namespace n ON n.oid=c.relnamespace
+             WHERE n.nspname=current_schema() AND i.indisvalid AND c.relname IN
+                ('idx_credit_ledger_ai_settlement_operation','idx_credit_ledger_ai_usage_operation',
+                 'idx_credit_ledger_background_operation')",
+                &[],
+            )?
+            .get(0))
+    }
+
     /// Migration names, total balance, and ledger size: everything a failed
     /// migration must leave untouched.
     fn snapshot(client: &mut Client) -> TestResult<(Option<String>, Option<i64>, i64)> {

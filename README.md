@@ -172,6 +172,10 @@ Stop it with `Ctrl+C`. The bot waits for background work to finish before it exi
 > For Supabase, use the session pooler on port `5432` with `sslmode=require`.
 > Do not use the transaction pooler on port `6543`.
 
+Billing reconciliation reads have a five-second statement timeout. The timeout
+applies only to that read and is restored before the connection returns to the
+pool. Billing and connection failures include PostgreSQL's message and SQLSTATE.
+
 </details>
 
 <details>
