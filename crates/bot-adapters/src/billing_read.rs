@@ -6,7 +6,9 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use thiserror::Error;
 
-use crate::postgres_pool::{PooledPostgresClient, PostgresPool, PostgresPoolError};
+use crate::postgres_pool::{
+    PooledPostgresClient, PostgresPool, PostgresPoolError, postgres_error_message, sqlstate_suffix,
+};
 
 const ONBOARDING_MAX_GRANTS_PER_HOUR: i64 = 4;
 const ONBOARDING_MAX_GRANTS_PER_DAY: i64 = 16;
@@ -42,7 +44,8 @@ pub enum BillingError {
     InvalidScope(String),
     #[error("could not initialize PostgreSQL TLS: {0}")]
     Tls(#[from] native_tls::Error),
-    #[error("PostgreSQL billing read failed: {0}")]
+    #[error("PostgreSQL billing read failed: {message}{code}",
+        message = postgres_error_message(.0), code = sqlstate_suffix(.0))]
     Postgres(#[from] postgres::Error),
     #[error("PostgreSQL onboarding transaction retry limit was exhausted")]
     TransactionRetriesExhausted,
@@ -184,6 +187,61 @@ const COMMAND_OPERATION_SQL: &str = "SELECT 1 FROM credit_ledger \
      WHERE metadata ? 'command_operation_id' \
        AND metadata->>'command_operation_id' = $1 \
      LIMIT 1";
+
+// Limit pending operations before loading usage, and keep each settlement
+// lookup separate so PostgreSQL can use its matching partial index.
+const UNSETTLED_AI_OPERATIONS_SQL: &str = "
+WITH pending AS MATERIALIZED (
+    SELECT ledger.metadata->>'operation_id' AS operation_id,
+        MIN(ledger.user_id) AS user_id, MIN(ledger.chat_id) AS chat_id,
+        GREATEST(0, COALESCE(SUM(-ledger.amount), 0)) AS authorized,
+        MIN(ledger.metadata->>'source') AS source,
+        MIN(ledger.created_at) AS created_at,
+        MAX(ledger.created_at) AS hold_activity_at,
+        (ARRAY_AGG(ledger.metadata ORDER BY ledger.id)
+            FILTER (WHERE ledger.event_type = 'ai_reserve'))[1] AS reserve_metadata
+    FROM credit_ledger AS ledger
+    WHERE ledger.event_type IN ('ai_reserve', 'ai_refund')
+      AND ledger.user_id IS NOT NULL
+      AND ledger.metadata ? 'operation_id'
+      AND NOT EXISTS (
+          SELECT 1 FROM credit_ledger AS background
+          WHERE background.event_type = 'ai_reserve'
+            AND background.metadata->>'operation_id' = ledger.metadata->>'operation_id'
+            AND background.metadata->>'background' = 'true'
+      )
+      AND NOT EXISTS (
+          SELECT 1 FROM credit_ledger AS settled
+          WHERE settled.event_type = 'ai_settlement_result'
+            AND settled.metadata->>'operation_id' = ledger.metadata->>'operation_id'
+      )
+      AND NOT EXISTS (
+          SELECT 1 FROM credit_ledger AS legacy
+          WHERE legacy.event_type = 'memory_compaction_settlement'
+            AND legacy.user_id = ledger.user_id
+            AND legacy.metadata->>'usage_tag' = ledger.metadata->>'usage_tag'
+      )
+    GROUP BY ledger.metadata->>'operation_id'
+    ORDER BY MIN(ledger.created_at), ledger.metadata->>'operation_id'
+    LIMIT $1
+)
+SELECT pending.operation_id, pending.user_id, pending.chat_id,
+    pending.authorized, pending.source, pending.created_at::text,
+    GREATEST(pending.hold_activity_at,
+        COALESCE(usage.last_activity_at, pending.hold_activity_at))::text,
+    pending.reserve_metadata, COALESCE(usage.segments, '[]'::jsonb)
+FROM pending
+LEFT JOIN LATERAL (
+    SELECT MAX(entry.created_at) AS last_activity_at,
+        jsonb_agg(jsonb_build_object(
+            'segment_id', entry.metadata->>'segment_id',
+            'segment', entry.metadata->'segment') ORDER BY entry.id) AS segments
+    FROM credit_ledger AS entry
+    WHERE entry.event_type = 'ai_provider_usage'
+      AND entry.metadata->>'operation_id' = pending.operation_id
+) AS usage ON true
+ORDER BY pending.created_at, pending.operation_id
+";
 
 pub struct BillingRepository {
     pool: PostgresPool,
@@ -1280,67 +1338,25 @@ impl BillingRepository {
         &self,
         limit: i64,
     ) -> Result<Vec<UnsettledAiOperation>, BillingError> {
+        self.list_unsettled_with_timeout(limit, std::time::Duration::from_secs(5))
+    }
+
+    fn list_unsettled_with_timeout(
+        &self,
+        limit: i64,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<UnsettledAiOperation>, BillingError> {
         let mut client = self.connect()?;
-        client
-            .query(
-                "WITH pending AS ( \
-                    SELECT ledger.metadata->>'operation_id' AS operation_id, \
-                        MIN(ledger.user_id) AS user_id, MIN(ledger.chat_id) AS chat_id, \
-                        GREATEST(0, COALESCE(SUM(-ledger.amount), 0)) AS authorized, \
-                        MIN(ledger.metadata->>'source') AS source, \
-                        MIN(ledger.created_at) AS created_at, \
-                        MAX(ledger.created_at) AS hold_activity_at, \
-                        (ARRAY_AGG(ledger.metadata ORDER BY ledger.id) \
-                            FILTER (WHERE ledger.event_type = 'ai_reserve'))[1] \
-                            AS reserve_metadata \
-                    FROM credit_ledger AS ledger \
-                    WHERE ledger.event_type IN ('ai_reserve', 'ai_refund') \
-                      AND ledger.user_id IS NOT NULL \
-                      AND ledger.metadata ? 'operation_id' \
-                      AND NOT EXISTS ( \
-                          SELECT 1 FROM credit_ledger AS background \
-                          WHERE background.event_type = 'ai_reserve' \
-                            AND background.metadata->>'operation_id' \
-                                = ledger.metadata->>'operation_id' \
-                            AND background.metadata->>'background' = 'true' \
-                      ) \
-                      AND NOT EXISTS ( \
-                          SELECT 1 FROM credit_ledger AS settled WHERE ( \
-                              settled.event_type = 'ai_settlement_result' \
-                              AND settled.metadata->>'operation_id' \
-                                  = ledger.metadata->>'operation_id' \
-                          ) OR ( \
-                              settled.event_type = 'memory_compaction_settlement' \
-                              AND settled.user_id = ledger.user_id \
-                              AND settled.metadata->>'usage_tag' \
-                                  = ledger.metadata->>'usage_tag' \
-                          ) \
-                      ) \
-                    GROUP BY ledger.metadata->>'operation_id' \
-                ) \
-                SELECT pending.operation_id, pending.user_id, pending.chat_id, \
-                    pending.authorized, pending.source, pending.created_at::text, \
-                    GREATEST( \
-                        pending.hold_activity_at, \
-                        COALESCE(( \
-                            SELECT MAX(usage.created_at) FROM credit_ledger AS usage \
-                            WHERE usage.event_type = 'ai_provider_usage' \
-                              AND usage.metadata->>'operation_id' = pending.operation_id \
-                        ), pending.hold_activity_at) \
-                    )::text AS last_activity_at, pending.reserve_metadata, \
-                    COALESCE(( \
-                        SELECT jsonb_agg(jsonb_build_object( \
-                            'segment_id', usage.metadata->>'segment_id', \
-                            'segment', usage.metadata->'segment') ORDER BY usage.id) \
-                        FROM credit_ledger AS usage \
-                        WHERE usage.event_type = 'ai_provider_usage' \
-                          AND usage.metadata->>'operation_id' = pending.operation_id \
-                    ), '[]'::jsonb) AS segments \
-                FROM pending \
-                ORDER BY pending.created_at LIMIT $1",
-                &[&limit],
-            )?
-            .into_iter()
+        let mut transaction = client.transaction()?;
+        // Scope the limit to this read. Commit and rollback both restore the
+        // pooled session's settings, including when PostgreSQL cancels it.
+        transaction.query_one(
+            "SELECT set_config('statement_timeout', $1, true)",
+            &[&timeout.as_millis().to_string()],
+        )?;
+        let rows = transaction.query(UNSETTLED_AI_OPERATIONS_SQL, &[&limit])?;
+        transaction.commit()?;
+        rows.into_iter()
             .map(|row| {
                 let segments: Value = row.try_get(8)?;
                 Ok(UnsettledAiOperation {
@@ -4584,6 +4600,232 @@ mod tests {
         fault_injection::clear(&mut client)?;
         assert_eq!(repository.get_balance("user", 10)?, 1007);
         Ok(())
+    }
+
+    #[test]
+    fn pending_listing_preserves_billing_rules_across_generated_histories() -> TestResult {
+        std::env::var("TEST_DATABASE_URL").map_or(Ok(()), |database_url| {
+        let url =
+            fault_injection::isolated_schema_url(&database_url, "billing_pending_properties", "")?;
+        BillingSchemaRepository::new(&url).ensure_schema()?;
+        let mut client = fault_injection::connect(&url)?;
+        let mut events = Vec::new();
+        let mut expected = std::collections::BTreeMap::new();
+        // Exhaust the state flags, with zero, partial refund, over-refund,
+        // and the largest supported reservation at each state.
+        for (amount_case, (reserve, refund)) in [(0, 0), (100, 25), (50, 100), (i32::MAX, 0)]
+            .into_iter()
+            .enumerate()
+        {
+            for flags in 0..64 {
+                let operation = format!("synthetic-pending-{amount_case}-{flags:02}");
+                let user_id = 1000 + (amount_case * 64 + flags) as i64;
+                let source = if flags & 1 == 0 { "user" } else { "chat" };
+                let metadata =
+                    json!({"operation_id": operation, "usage_tag": operation, "source": source});
+                events.push(json!({"event_type": "ai_reserve", "user_id": user_id,
+                    "amount": -reserve, "metadata": metadata}));
+                events.push(json!({"event_type": "ai_refund", "user_id": user_id,
+                    "amount": refund, "metadata": metadata}));
+                for (mask, event_type, other_user, background) in [
+                    (2, "ai_settlement_result", false, false),
+                    (4, "memory_compaction_settlement", false, false),
+                    (8, "memory_compaction_settlement", true, false),
+                    (16, "ai_reserve", false, true),
+                    (32, "ai_reserve", true, true),
+                ] {
+                    if flags & mask != 0 {
+                        let mut extra = metadata.clone();
+                        extra["background"] = json!(background);
+                        events.push(json!({"event_type": event_type,
+                            "user_id": if other_user { user_id + 100_000 } else { user_id },
+                            "amount": 0, "metadata": extra}));
+                    }
+                }
+                if flags & (2 | 4 | 16 | 32) == 0 {
+                    expected.insert(
+                        operation,
+                        (user_id, i64::from(reserve - refund).max(0), source),
+                    );
+                }
+            }
+        }
+        let seeded = client.execute(
+            "INSERT INTO credit_ledger (event_type,user_id,chat_id,amount,metadata,created_at)
+             SELECT event_type,user_id,-20,amount,metadata,'2026-01-01'::timestamptz
+             FROM jsonb_to_recordset($1) AS event(event_type text,user_id bigint,amount integer,metadata jsonb)",
+            &[&json!(events)],
+        );
+        seeded?;
+        let repository = BillingRepository::new(&url);
+        let actual = repository.list_unsettled_ai_operations(500)?;
+        assert_eq!(actual.len(), expected.len());
+        for operation in &actual {
+            let (user_id, authorized, source) = expected
+                .get(&operation.operation_id)
+                .ok_or("unexpected generated operation")?;
+            assert_eq!(operation.user_id, *user_id);
+            assert_eq!(operation.authorized_credit_units, *authorized);
+            assert_eq!(operation.source, *source);
+            assert_eq!(operation.chat_id, Some(-20));
+            assert!(operation.segments.is_empty());
+        }
+        let first = repository.list_unsettled_ai_operations(1)?;
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].operation_id, actual[0].operation_id);
+        assert!(repository.list_unsettled_ai_operations(0)?.is_empty());
+        let before = client.query_one("SELECT count(*),sum(amount) FROM credit_ledger", &[])?;
+        let error = repository
+            .list_unsettled_ai_operations(-1)
+            .err()
+            .ok_or("negative limit must fail")?;
+        assert!(error.to_string().contains("LIMIT must not be negative"));
+        assert!(error.to_string().contains("SQLSTATE 2201W"));
+        let after = client.query_one("SELECT count(*),sum(amount) FROM credit_ledger", &[])?;
+        assert_eq!(before.get::<_, i64>(0), after.get::<_, i64>(0));
+        assert_eq!(
+            before.get::<_, Option<i64>>(1),
+            after.get::<_, Option<i64>>(1)
+        );
+        assert_eq!(repository.list_unsettled_ai_operations(500)?, actual);
+        Ok(())
+        })
+    }
+
+    #[test]
+    fn pending_read_timeout_preserves_the_pooled_session_and_billing_data() -> TestResult {
+        std::env::var("TEST_DATABASE_URL").map_or(Ok(()), |database_url| {
+            let url =
+                fault_injection::isolated_schema_url(&database_url, "billing_pending_timeout", "")?;
+            BillingSchemaRepository::new(&url).ensure_schema()?;
+            let repository = BillingRepository::new(&url);
+            repository
+                .pool
+                .get()?
+                .batch_execute("SET statement_timeout = '12s'")?;
+            let mut holder = fault_injection::connect(&url)?;
+            holder.batch_execute("BEGIN; LOCK TABLE credit_ledger IN ACCESS EXCLUSIVE MODE")?;
+            let release = std::thread::spawn(move || -> TestResult {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                holder.batch_execute("ROLLBACK")?;
+                Ok(())
+            });
+            let error =
+                repository.list_unsettled_with_timeout(5, std::time::Duration::from_millis(50));
+            release.join().ok().ok_or("lock holder panicked")??;
+            let error = error.err().ok_or("blocked pending read must time out")?;
+            assert!(matches!(&error, BillingError::Postgres(error)
+            if error.code() == Some(&SqlState::QUERY_CANCELED)));
+            assert!(
+                error
+                    .to_string()
+                    .contains("canceling statement due to statement timeout")
+            );
+            assert!(error.to_string().contains("SQLSTATE 57014"));
+            assert_eq!(
+                repository
+                    .pool
+                    .get()?
+                    .query_one("SHOW statement_timeout", &[])?
+                    .get::<_, String>(0),
+                "12s"
+            );
+            assert!(repository.list_unsettled_ai_operations(5)?.is_empty());
+            assert_eq!(
+                repository
+                    .pool
+                    .get()?
+                    .query_one("SHOW statement_timeout", &[])?
+                    .get::<_, String>(0),
+                "12s"
+            );
+            assert_eq!(repository.get_balance("user", 10)?, 0);
+            let invalid =
+                repository.list_unsettled_with_timeout(5, std::time::Duration::from_secs(u64::MAX));
+            assert!(matches!(invalid, Err(BillingError::Postgres(error))
+            if error.code() == Some(&SqlState::INVALID_PARAMETER_VALUE)));
+            assert_eq!(
+                repository
+                    .pool
+                    .get()?
+                    .query_one("SHOW statement_timeout", &[])?
+                    .get::<_, String>(0),
+                "12s"
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn pending_read_default_budget_cancels_a_stalled_query() -> TestResult {
+        std::env::var("TEST_DATABASE_URL").map_or(Ok(()), |database_url| {
+            let url =
+                fault_injection::isolated_schema_url(&database_url, "billing_pending_budget", "")?;
+            BillingSchemaRepository::new(&url).ensure_schema()?;
+            let mut holder = fault_injection::connect(&url)?;
+            holder.batch_execute("BEGIN; LOCK TABLE credit_ledger IN ACCESS EXCLUSIVE MODE")?;
+            let release = std::thread::spawn(move || -> TestResult {
+                std::thread::sleep(std::time::Duration::from_secs(6));
+                holder.batch_execute("ROLLBACK")?;
+                Ok(())
+            });
+            let started = std::time::Instant::now();
+            let result = BillingRepository::new(&url).list_unsettled_ai_operations(5);
+            let elapsed = started.elapsed();
+            release.join().ok().ok_or("lock holder panicked")??;
+            assert!(matches!(result, Err(BillingError::Postgres(error))
+            if error.code() == Some(&SqlState::QUERY_CANCELED)));
+            assert!(elapsed >= std::time::Duration::from_secs(4));
+            assert!(elapsed < std::time::Duration::from_secs(6));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn historical_ledger_does_not_force_repeated_usage_or_settlement_scans() -> TestResult {
+        std::env::var("TEST_DATABASE_URL").map_or(Ok(()), |database_url| {
+        let url = fault_injection::isolated_schema_url(&database_url, "billing_pending_plan", "")?;
+        BillingSchemaRepository::new(&url).ensure_schema()?;
+        let mut client = fault_injection::connect(&url)?;
+        let seeded = client.batch_execute(
+            "INSERT INTO credit_ledger (event_type,user_id,amount,metadata)
+             SELECT kind, n, CASE WHEN kind='ai_reserve' THEN -100 ELSE 0 END,
+                jsonb_build_object('operation_id','synthetic-history-'||n,'source','user',
+                    'segment_id','s1','segment',jsonb_build_object('input_tokens',3),'padding',repeat('x',400))
+             FROM generate_series(1,4000) n
+             CROSS JOIN (VALUES ('ai_reserve'),('ai_settlement_result'),('ai_provider_usage')) event(kind);
+             INSERT INTO credit_ledger (event_type,user_id,amount,metadata)
+             VALUES ('ai_reserve',5000,-30,'{\"operation_id\":\"synthetic-current\",\"source\":\"user\"}'),
+                 ('ai_provider_usage',5000,0,'{\"operation_id\":\"synthetic-current\",\"segment_id\":\"s1\",\"segment\":{\"input_tokens\":12}}');
+             ANALYZE credit_ledger",
+        );
+        seeded?;
+        let explained = client
+            .query_one(
+                &format!(
+                    "EXPLAIN (FORMAT JSON) {}",
+                    super::UNSETTLED_AI_OPERATIONS_SQL
+                ),
+                &[&500_i64],
+            );
+        let plan: Value = explained?.get(0);
+        let plan_text = plan.to_string();
+        assert!(
+            plan_text.contains("idx_credit_ledger_ai_usage_operation"),
+            "usage must use the operation index: {plan_text}"
+        );
+        assert!(
+            !plan_text.contains("BitmapOr"),
+            "settlement branches must not repeatedly scan all settlements: {plan_text}"
+        );
+        let rows = BillingRepository::new(&url)
+            .list_unsettled_with_timeout(500, std::time::Duration::from_secs(1))?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].operation_id, "synthetic-current");
+        assert_eq!(rows[0].authorized_credit_units, 30);
+        assert_eq!(rows[0].segments[0]["segment"]["input_tokens"], 12);
+        Ok(())
+        })
     }
 
     const WAITING_SQL: &str = "SELECT COUNT(*) > 0 FROM pg_stat_activity \

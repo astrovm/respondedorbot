@@ -18,7 +18,8 @@ const CONNECTION_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration
 pub enum PostgresPoolError {
     #[error("could not initialize PostgreSQL TLS: {0}")]
     Tls(#[from] native_tls::Error),
-    #[error("could not open PostgreSQL connection: {0}{code}", code = sqlstate_suffix(.0))]
+    #[error("could not open PostgreSQL connection: {message}{code}",
+        message = postgres_error_message(.0), code = sqlstate_suffix(.0))]
     Postgres(#[from] postgres::Error),
 }
 
@@ -85,6 +86,13 @@ impl PostgresPool {
             pool: self.inner.clone(),
         })
     }
+}
+
+pub(crate) fn postgres_error_message(error: &postgres::Error) -> String {
+    error.as_db_error().map_or_else(
+        || error.to_string(),
+        |database_error| database_error.message().to_owned(),
+    )
 }
 
 pub(crate) fn sqlstate_suffix(error: &postgres::Error) -> String {
@@ -304,10 +312,9 @@ mod tests {
         assert_eq!(attempts, 1);
         let error = refused.err().ok_or("expected invalid credentials")?;
         assert_eq!(super::sqlstate_suffix(&error), " (SQLSTATE 28P01)");
-        assert!(
-            PostgresPoolError::Postgres(error)
-                .to_string()
-                .contains("SQLSTATE 28P01")
+        assert_eq!(
+            PostgresPoolError::Postgres(error).to_string(),
+            "could not open PostgreSQL connection: synthetic connection refusal (SQLSTATE 28P01)"
         );
 
         let mut attempts = 0;
@@ -332,6 +339,7 @@ mod tests {
             .err()
             .ok_or("expected invalid configuration")?;
         assert_eq!(super::sqlstate_suffix(&invalid), "");
+        assert_eq!(super::postgres_error_message(&invalid), invalid.to_string());
         assert_eq!(
             super::connect_with_retry(|| Ok::<_, postgres::Error>(7), std::thread::sleep)?,
             7
