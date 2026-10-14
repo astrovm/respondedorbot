@@ -70,6 +70,15 @@ CREATE TABLE IF NOT EXISTS credit_ledger (
 CREATE INDEX IF NOT EXISTS idx_credit_ledger_compaction_usage_tag
 ON credit_ledger ((metadata->>'usage_tag'))
 WHERE event_type = 'memory_compaction_settlement';
+CREATE INDEX IF NOT EXISTS idx_credit_ledger_ai_settlement_operation
+ON credit_ledger ((metadata->>'operation_id'))
+WHERE event_type = 'ai_settlement_result';
+CREATE INDEX IF NOT EXISTS idx_credit_ledger_ai_usage_operation
+ON credit_ledger ((metadata->>'operation_id'), id)
+WHERE event_type = 'ai_provider_usage';
+CREATE INDEX IF NOT EXISTS idx_credit_ledger_background_operation
+ON credit_ledger ((metadata->>'operation_id'))
+WHERE event_type = 'ai_reserve' AND metadata->>'background' = 'true';
 CREATE INDEX IF NOT EXISTS idx_credit_ledger_user_ai_settlements
 ON credit_ledger (user_id, created_at DESC, id DESC)
 WHERE event_type = 'ai_settlement_result';
