@@ -4604,9 +4604,7 @@ mod tests {
 
     #[test]
     fn pending_listing_preserves_billing_rules_across_generated_histories() -> TestResult {
-        let Ok(database_url) = std::env::var("TEST_DATABASE_URL") else {
-            return Ok(());
-        };
+        std::env::var("TEST_DATABASE_URL").map_or(Ok(()), |database_url| {
         let url =
             fault_injection::isolated_schema_url(&database_url, "billing_pending_properties", "")?;
         BillingSchemaRepository::new(&url).ensure_schema()?;
@@ -4652,12 +4650,13 @@ mod tests {
                 }
             }
         }
-        client.execute(
+        let seeded = client.execute(
             "INSERT INTO credit_ledger (event_type,user_id,chat_id,amount,metadata,created_at)
              SELECT event_type,user_id,-20,amount,metadata,'2026-01-01'::timestamptz
              FROM jsonb_to_recordset($1) AS event(event_type text,user_id bigint,amount integer,metadata jsonb)",
             &[&json!(events)],
-        )?;
+        );
+        seeded?;
         let repository = BillingRepository::new(&url);
         let actual = repository.list_unsettled_ai_operations(500)?;
         assert_eq!(actual.len(), expected.len());
@@ -4690,95 +4689,105 @@ mod tests {
         );
         assert_eq!(repository.list_unsettled_ai_operations(500)?, actual);
         Ok(())
+        })
     }
 
     #[test]
     fn pending_read_timeout_preserves_the_pooled_session_and_billing_data() -> TestResult {
-        let Ok(database_url) = std::env::var("TEST_DATABASE_URL") else {
-            return Ok(());
-        };
-        let url =
-            fault_injection::isolated_schema_url(&database_url, "billing_pending_timeout", "")?;
-        BillingSchemaRepository::new(&url).ensure_schema()?;
-        let repository = BillingRepository::new(&url);
-        repository
-            .pool
-            .get()?
-            .batch_execute("SET statement_timeout = '12s'")?;
-        let mut holder = fault_injection::connect(&url)?;
-        holder.batch_execute("BEGIN; LOCK TABLE credit_ledger IN ACCESS EXCLUSIVE MODE")?;
-        let release = std::thread::spawn(move || -> TestResult {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            holder.batch_execute("ROLLBACK")?;
-            Ok(())
-        });
-        let error = repository.list_unsettled_with_timeout(5, std::time::Duration::from_millis(50));
-        release.join().ok().ok_or("lock holder panicked")??;
-        let error = error.err().ok_or("blocked pending read must time out")?;
-        assert!(matches!(&error, BillingError::Postgres(error)
+        std::env::var("TEST_DATABASE_URL").map_or(Ok(()), |database_url| {
+            let url =
+                fault_injection::isolated_schema_url(&database_url, "billing_pending_timeout", "")?;
+            BillingSchemaRepository::new(&url).ensure_schema()?;
+            let repository = BillingRepository::new(&url);
+            repository
+                .pool
+                .get()?
+                .batch_execute("SET statement_timeout = '12s'")?;
+            let mut holder = fault_injection::connect(&url)?;
+            holder.batch_execute("BEGIN; LOCK TABLE credit_ledger IN ACCESS EXCLUSIVE MODE")?;
+            let release = std::thread::spawn(move || -> TestResult {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                holder.batch_execute("ROLLBACK")?;
+                Ok(())
+            });
+            let error =
+                repository.list_unsettled_with_timeout(5, std::time::Duration::from_millis(50));
+            release.join().ok().ok_or("lock holder panicked")??;
+            let error = error.err().ok_or("blocked pending read must time out")?;
+            assert!(matches!(&error, BillingError::Postgres(error)
             if error.code() == Some(&SqlState::QUERY_CANCELED)));
-        assert!(
-            error
-                .to_string()
-                .contains("canceling statement due to statement timeout")
-        );
-        assert!(error.to_string().contains("SQLSTATE 57014"));
-        assert_eq!(
-            repository
-                .pool
-                .get()?
-                .query_one("SHOW statement_timeout", &[])?
-                .get::<_, String>(0),
-            "12s"
-        );
-        assert!(repository.list_unsettled_ai_operations(5)?.is_empty());
-        assert_eq!(
-            repository
-                .pool
-                .get()?
-                .query_one("SHOW statement_timeout", &[])?
-                .get::<_, String>(0),
-            "12s"
-        );
-        assert_eq!(repository.get_balance("user", 10)?, 0);
-        Ok(())
+            assert!(
+                error
+                    .to_string()
+                    .contains("canceling statement due to statement timeout")
+            );
+            assert!(error.to_string().contains("SQLSTATE 57014"));
+            assert_eq!(
+                repository
+                    .pool
+                    .get()?
+                    .query_one("SHOW statement_timeout", &[])?
+                    .get::<_, String>(0),
+                "12s"
+            );
+            assert!(repository.list_unsettled_ai_operations(5)?.is_empty());
+            assert_eq!(
+                repository
+                    .pool
+                    .get()?
+                    .query_one("SHOW statement_timeout", &[])?
+                    .get::<_, String>(0),
+                "12s"
+            );
+            assert_eq!(repository.get_balance("user", 10)?, 0);
+            let invalid =
+                repository.list_unsettled_with_timeout(5, std::time::Duration::from_secs(u64::MAX));
+            assert!(matches!(invalid, Err(BillingError::Postgres(error))
+            if error.code() == Some(&SqlState::INVALID_PARAMETER_VALUE)));
+            assert_eq!(
+                repository
+                    .pool
+                    .get()?
+                    .query_one("SHOW statement_timeout", &[])?
+                    .get::<_, String>(0),
+                "12s"
+            );
+            Ok(())
+        })
     }
 
     #[test]
     fn pending_read_default_budget_cancels_a_stalled_query() -> TestResult {
-        let Ok(database_url) = std::env::var("TEST_DATABASE_URL") else {
-            return Ok(());
-        };
-        let url =
-            fault_injection::isolated_schema_url(&database_url, "billing_pending_budget", "")?;
-        BillingSchemaRepository::new(&url).ensure_schema()?;
-        let mut holder = fault_injection::connect(&url)?;
-        holder.batch_execute("BEGIN; LOCK TABLE credit_ledger IN ACCESS EXCLUSIVE MODE")?;
-        let release = std::thread::spawn(move || -> TestResult {
-            std::thread::sleep(std::time::Duration::from_secs(6));
-            holder.batch_execute("ROLLBACK")?;
-            Ok(())
-        });
-        let started = std::time::Instant::now();
-        let result = BillingRepository::new(&url).list_unsettled_ai_operations(5);
-        let elapsed = started.elapsed();
-        release.join().ok().ok_or("lock holder panicked")??;
-        assert!(matches!(result, Err(BillingError::Postgres(error))
+        std::env::var("TEST_DATABASE_URL").map_or(Ok(()), |database_url| {
+            let url =
+                fault_injection::isolated_schema_url(&database_url, "billing_pending_budget", "")?;
+            BillingSchemaRepository::new(&url).ensure_schema()?;
+            let mut holder = fault_injection::connect(&url)?;
+            holder.batch_execute("BEGIN; LOCK TABLE credit_ledger IN ACCESS EXCLUSIVE MODE")?;
+            let release = std::thread::spawn(move || -> TestResult {
+                std::thread::sleep(std::time::Duration::from_secs(6));
+                holder.batch_execute("ROLLBACK")?;
+                Ok(())
+            });
+            let started = std::time::Instant::now();
+            let result = BillingRepository::new(&url).list_unsettled_ai_operations(5);
+            let elapsed = started.elapsed();
+            release.join().ok().ok_or("lock holder panicked")??;
+            assert!(matches!(result, Err(BillingError::Postgres(error))
             if error.code() == Some(&SqlState::QUERY_CANCELED)));
-        assert!(elapsed >= std::time::Duration::from_secs(4));
-        assert!(elapsed < std::time::Duration::from_secs(6));
-        Ok(())
+            assert!(elapsed >= std::time::Duration::from_secs(4));
+            assert!(elapsed < std::time::Duration::from_secs(6));
+            Ok(())
+        })
     }
 
     #[test]
     fn historical_ledger_does_not_force_repeated_usage_or_settlement_scans() -> TestResult {
-        let Ok(database_url) = std::env::var("TEST_DATABASE_URL") else {
-            return Ok(());
-        };
+        std::env::var("TEST_DATABASE_URL").map_or(Ok(()), |database_url| {
         let url = fault_injection::isolated_schema_url(&database_url, "billing_pending_plan", "")?;
         BillingSchemaRepository::new(&url).ensure_schema()?;
         let mut client = fault_injection::connect(&url)?;
-        client.batch_execute(
+        let seeded = client.batch_execute(
             "INSERT INTO credit_ledger (event_type,user_id,amount,metadata)
              SELECT kind, n, CASE WHEN kind='ai_reserve' THEN -100 ELSE 0 END,
                 jsonb_build_object('operation_id','synthetic-history-'||n,'source','user',
@@ -4789,16 +4798,17 @@ mod tests {
              VALUES ('ai_reserve',5000,-30,'{\"operation_id\":\"synthetic-current\",\"source\":\"user\"}'),
                  ('ai_provider_usage',5000,0,'{\"operation_id\":\"synthetic-current\",\"segment_id\":\"s1\",\"segment\":{\"input_tokens\":12}}');
              ANALYZE credit_ledger",
-        )?;
-        let plan: Value = client
+        );
+        seeded?;
+        let explained = client
             .query_one(
                 &format!(
                     "EXPLAIN (FORMAT JSON) {}",
                     super::UNSETTLED_AI_OPERATIONS_SQL
                 ),
                 &[&500_i64],
-            )?
-            .get(0);
+            );
+        let plan: Value = explained?.get(0);
         let plan_text = plan.to_string();
         assert!(
             plan_text.contains("idx_credit_ledger_ai_usage_operation"),
@@ -4815,6 +4825,7 @@ mod tests {
         assert_eq!(rows[0].authorized_credit_units, 30);
         assert_eq!(rows[0].segments[0]["segment"]["input_tokens"], 12);
         Ok(())
+        })
     }
 
     const WAITING_SQL: &str = "SELECT COUNT(*) > 0 FROM pg_stat_activity \
