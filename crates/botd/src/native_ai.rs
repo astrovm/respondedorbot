@@ -197,7 +197,6 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
             .request(messages, task)
             .map_err(|source| TaskProviderFailure::new(source, Vec::new()))?;
         let mut billing_segments = Vec::new();
-        let mut text = String::new();
         let mut search_uses = 0_usize;
         let locale = if task.locale == "en" {
             Locale::En
@@ -209,7 +208,7 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
                 complete_with(&self.transport, &self.api_key, &self.base_url, &request)
                     .map_err(|source| TaskProviderFailure::new(source, billing_segments.clone()))?;
             billing_segments.push(task_completion_segment(&completion));
-            text = completion.text.clone();
+            let text = completion.text;
             let calls = completion
                 .tool_calls
                 .into_iter()
@@ -221,11 +220,16 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
                 })
                 .collect::<Vec<_>>();
             if calls.is_empty() {
-                break;
+                return Ok(TaskProviderReply {
+                    text,
+                    poll: None,
+                    fallback: false,
+                    billing_segments,
+                });
             }
-            request
-                .messages
-                .push(ChatMessage::assistant_tool_calls(calls.clone()));
+            let mut assistant = ChatMessage::assistant_tool_calls(calls.clone());
+            assistant.content = (!text.is_empty()).then(|| json!(text));
+            request.messages.push(assistant);
             for call in calls {
                 let arguments = serde_json::from_str(&call.function.arguments)
                     .ok()
@@ -278,12 +282,10 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
                     .push(ChatMessage::tool_result(call.id, result.output));
             }
         }
-        Ok(TaskProviderReply {
-            text,
-            poll: None,
-            fallback: false,
+        Err(TaskProviderFailure::new(
+            OpenRouterChatError::MalformedResponse,
             billing_segments,
-        })
+        ))
     }
 }
 
