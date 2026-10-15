@@ -131,17 +131,21 @@ impl<Sender: PollSender + Send, Store: PollStore + Send, Now: FnMut() -> i64 + S
         } else {
             Locale::Es
         };
-        let diagnostics =
-            self.send_and_store(chat_id, None, poll)
-                .map_err(|error| TaskPollDeliveryError {
-                    message: send_failure_message(locale, &error),
-                    retry_after_seconds: match error {
-                        SendPollError::RateLimited {
-                            retry_after_seconds,
-                        } => Some(retry_after_seconds),
-                        _ => None,
-                    },
-                })?;
+        let diagnostics = self.send_and_store(chat_id, None, poll).map_err(|error| {
+            eprintln!(
+                "scheduled task {} poll_delivery: sendPoll failed: {error}",
+                task.id.as_str()
+            );
+            TaskPollDeliveryError {
+                message: send_failure_message(locale, &error),
+                retry_after_seconds: match error {
+                    SendPollError::RateLimited {
+                        retry_after_seconds,
+                    } => Some(retry_after_seconds),
+                    _ => None,
+                },
+            }
+        })?;
         for diagnostic in diagnostics {
             eprintln!(
                 "scheduled task {} poll_delivery: {diagnostic}",
