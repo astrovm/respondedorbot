@@ -122,33 +122,51 @@ impl<Sender: PollSender + Send, Store: PollStore + Send, Now: FnMut() -> i64 + S
         task: &ScheduledTask,
         poll: &PollRequest,
     ) -> Result<(), TaskPollDeliveryError> {
-        self.context = PollToolContext {
-            chat_id: task.chat_id.parse().map_err(|_| TaskPollDeliveryError {
-                message: "scheduled-task Telegram chat ID is invalid".to_owned(),
-                retry_after_seconds: None,
-            })?,
-            reply_to_message_id: None,
-            locale: if task.locale == "en" {
-                Locale::En
-            } else {
-                Locale::Es
-            },
+        let chat_id = task.chat_id.parse().map_err(|_| TaskPollDeliveryError {
+            message: "scheduled-task Telegram chat ID is invalid".to_owned(),
+            retry_after_seconds: None,
+        })?;
+        let locale = if task.locale == "en" {
+            Locale::En
+        } else {
+            Locale::Es
         };
-        let (result, retry_after_seconds) = self.create(poll);
-        for diagnostic in result.diagnostics {
+        let diagnostics = self.send_and_store(chat_id, None, poll).map_err(|error| {
+            eprintln!(
+                "scheduled task {} poll_delivery: sendPoll failed: {error}",
+                task.id.as_str()
+            );
+            TaskPollDeliveryError {
+                message: send_failure_message(locale, &error),
+                retry_after_seconds: match error {
+                    SendPollError::RateLimited {
+                        retry_after_seconds,
+                    } => Some(retry_after_seconds),
+                    _ => None,
+                },
+            }
+        })?;
+        for diagnostic in diagnostics {
             eprintln!(
                 "scheduled task {} poll_delivery: {diagnostic}",
                 task.id.as_str()
             );
         }
-        if result.failure_fallback.is_some() {
-            Ok(())
-        } else {
-            Err(TaskPollDeliveryError {
-                message: result.output,
-                retry_after_seconds,
-            })
+        Ok(())
+    }
+}
+
+/// Tells the chat why a poll is missing.
+fn send_failure_message(locale: Locale, error: &SendPollError) -> String {
+    match (error, locale) {
+        (SendPollError::Transport(_), Locale::Es) => {
+            "no sé si la encuesta llegó al chat".to_owned()
         }
+        (SendPollError::Transport(_), Locale::En) => {
+            "I do not know if the poll reached the chat".to_owned()
+        }
+        (_, Locale::Es) => format!("Telegram no aceptó la encuesta: {error}"),
+        (_, Locale::En) => format!("Telegram did not accept the poll: {error}"),
     }
 }
 
@@ -170,53 +188,18 @@ where
     Store: PollStore,
     Now: FnMut() -> i64,
 {
-    fn create(&mut self, poll: &PollRequest) -> (ToolExecutionResult, Option<u64>) {
-        let locale = self.context.locale;
-        let sent = match self.sender.send_poll(
-            self.context.chat_id,
-            self.context.reply_to_message_id,
-            poll,
-        ) {
-            Ok(sent) => sent,
-            Err(SendPollError::Transport(kind)) => {
-                return (
-                    ToolExecutionResult::with_diagnostics(
-                        match locale {
-                            Locale::Es => {
-                                "no sé si la encuesta llegó al chat; no la mandes de nuevo sin preguntar"
-                            }
-                            Locale::En => {
-                                "I do not know if the poll reached the chat; do not send it again without asking"
-                            }
-                        },
-                        vec![format!("sendPoll transport failed: {kind:?}")],
-                    ),
-                    None,
-                );
-            }
-            Err(error) => {
-                return (
-                    ToolExecutionResult::with_diagnostics(
-                        match locale {
-                            Locale::Es => format!("Telegram no aceptó la encuesta: {error}"),
-                            Locale::En => format!("Telegram did not accept the poll: {error}"),
-                        },
-                        vec![format!("sendPoll failed: {error}")],
-                    ),
-                    if let SendPollError::RateLimited {
-                        retry_after_seconds,
-                    } = error
-                    {
-                        Some(retry_after_seconds)
-                    } else {
-                        None
-                    },
-                );
-            }
-        };
+    /// Sends the poll and stores it for vote tracking. A store failure only
+    /// adds a diagnostic: the poll is already in the chat.
+    fn send_and_store(
+        &mut self,
+        chat_id: i64,
+        reply_to_message_id: Option<i64>,
+        poll: &PollRequest,
+    ) -> Result<Vec<String>, SendPollError> {
+        let sent = self.sender.send_poll(chat_id, reply_to_message_id, poll)?;
         let record = PollRecord {
             poll_id: sent.poll_id,
-            chat_id: self.context.chat_id,
+            chat_id,
             message_id: sent.message_id,
             question: poll.question.clone(),
             options: poll.options.clone(),
@@ -227,23 +210,48 @@ where
             counts: None,
             total_voters: None,
         };
-        let output = match locale {
-            Locale::Es => format!(
-                "Mandé la encuesta \"{}\" al chat. No repitas las opciones, ya se ven",
-                poll.question
+        Ok(self
+            .store
+            .save_poll(&record)
+            .err()
+            .map(|error| format!("poll sent but not stored: {error}"))
+            .into_iter()
+            .collect())
+    }
+
+    fn create(&mut self, poll: &PollRequest) -> ToolExecutionResult {
+        let locale = self.context.locale;
+        match self.send_and_store(self.context.chat_id, self.context.reply_to_message_id, poll) {
+            Ok(diagnostics) => {
+                let mut result = ToolExecutionResult::confirmed_output(match locale {
+                    Locale::Es => format!(
+                        "Mandé la encuesta \"{}\" al chat. No repitas las opciones, ya se ven",
+                        poll.question
+                    ),
+                    Locale::En => format!(
+                        "Sent the poll \"{}\" to the chat. Do not repeat the options, people can see them",
+                        poll.question
+                    ),
+                });
+                result.diagnostics = diagnostics;
+                result
+            }
+            Err(SendPollError::Transport(kind)) => ToolExecutionResult::with_diagnostics(
+                match locale {
+                    Locale::Es => {
+                        "no sé si la encuesta llegó al chat; no la mandes de nuevo sin preguntar"
+                    }
+                    Locale::En => {
+                        "I do not know if the poll reached the chat; do not send it again without asking"
+                    }
+                },
+                vec![format!("sendPoll transport failed: {kind:?}")],
             ),
-            Locale::En => format!(
-                "Sent the poll \"{}\" to the chat. Do not repeat the options, people can see them",
-                poll.question
+            Err(error) => ToolExecutionResult::with_diagnostics(
+                send_failure_message(locale, &error),
+                vec![format!("sendPoll failed: {error}")],
             ),
-        };
-        let mut result = ToolExecutionResult::confirmed_output(output);
-        if let Err(error) = self.store.save_poll(&record) {
-            result
-                .diagnostics
-                .push(format!("poll sent but not stored: {error}"));
         }
-        (result, None)
     }
 
     fn list(&mut self) -> ToolExecutionResult {
@@ -270,7 +278,7 @@ where
         _tool_call_id: &str,
     ) -> ToolExecutionResult {
         match request {
-            ExternalToolRequest::CreatePoll(poll) => self.create(&poll).0,
+            ExternalToolRequest::CreatePoll(poll) => self.create(&poll),
             ExternalToolRequest::GetPolls => self.list(),
             _ => ToolExecutionResult::output(tool_output::incompatible(
                 self.context.locale,
@@ -534,6 +542,7 @@ mod tests {
         assert_eq!(polls[0].1[0].name, "Ana");
         Ok(())
     }
+
     fn scheduled_task(locale: &str) -> ScheduledTask {
         ScheduledTask {
             id: bot_core::scheduled_tasks::TaskId::new("synthetic-poll-task").expect("task id"),
@@ -559,7 +568,7 @@ mod tests {
         );
         assert_eq!(tool.sender.sent, vec![(-200, None, poll())]);
         assert_eq!(tool.store.saved[0].chat_id, -200);
-        assert_eq!(tool.context.locale, Locale::En);
+        assert_eq!(tool.context.chat_id, -100);
 
         let mut rejected = poll_tool(
             Err(SendPollError::Rejected {
@@ -593,6 +602,7 @@ mod tests {
         );
         assert_eq!(tool.sender.sent.len(), 1);
     }
+
     #[test]
     fn scheduled_polls_retry_only_explicit_rate_limit_rejections() {
         for (error, retryable) in [
@@ -620,6 +630,27 @@ mod tests {
                 .expect_err("delivery failed");
             assert_eq!(error.retry_after_seconds.is_some(), retryable);
             assert!(tool.store.saved.is_empty());
+        }
+    }
+
+    #[test]
+    fn scheduled_transport_failures_tell_the_chat_without_model_instructions() {
+        for (locale, expected) in [
+            ("en", "I do not know if the poll reached the chat"),
+            ("es", "no sé si la encuesta llegó al chat"),
+        ] {
+            let mut tool = poll_tool(
+                Err(SendPollError::Transport(TransportFailureKind::Timeout)),
+                false,
+                Locale::En,
+            );
+            assert_eq!(
+                ScheduledPollDelivery::send(&mut tool, &scheduled_task(locale), &poll()),
+                Err(TaskPollDeliveryError {
+                    message: expected.to_owned(),
+                    retry_after_seconds: None
+                })
+            );
         }
     }
 }

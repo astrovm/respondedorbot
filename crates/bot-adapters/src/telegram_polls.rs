@@ -237,6 +237,7 @@ mod tests {
             Err(SendPollError::Transport(TransportFailureKind::Timeout))
         );
     }
+
     #[test]
     fn poll_rate_limits_preserve_retry_after_and_default_invalid_delays() {
         for (body, seconds) in [

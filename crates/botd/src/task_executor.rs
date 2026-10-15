@@ -4,7 +4,7 @@ use bot_core::ai_response_cleanup::{
     clean_duplicate_response, remove_gordo_prefix, strip_markdown_formatting,
 };
 use bot_core::polls::PollRequest;
-use bot_core::scheduled_tasks::ScheduledTask;
+use bot_core::scheduled_tasks::{MISFIRE_GRACE_SECONDS, ScheduledTask};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -127,6 +127,8 @@ pub struct TaskPollDeliveryError {
 }
 
 const MAX_DELIVERY_ATTEMPTS: u8 = 3;
+/// Leaves one minute of the scheduler's misfire grace for the retry to run.
+const POLL_RETRY_DEADLINE_SECONDS: i64 = MISFIRE_GRACE_SECONDS - 60;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskExecutionState {
@@ -329,15 +331,14 @@ where
         if !state.delivered
             && let Some(response) = state.response.as_deref()
         {
+            // An abandoned text still lets a scheduled poll go out below.
             if state.delivery_attempts >= MAX_DELIVERY_ATTEMPTS {
                 self.diagnostics.record(
                     task.id.as_str(),
                     "delivery_abandoned",
                     "scheduled-task result reached its delivery retry limit",
                 );
-                return Ok(TaskExecutionDisposition::Complete);
-            }
-            if let Err(error) = self
+            } else if let Err(error) = self
                 .messenger
                 .send(&task.chat_id, &task_result(task, response))
             {
@@ -356,15 +357,15 @@ where
                     },
                     &message,
                 );
-                if exhausted {
-                    return Ok(TaskExecutionDisposition::Complete);
+                if !exhausted {
+                    return Err(NativeTaskExecutorError::Delivery { message });
                 }
-                return Err(NativeTaskExecutorError::Delivery { message });
+            } else {
+                state.delivered = true;
+                self.journal
+                    .save(execution_id, &state)
+                    .map_err(|error| Self::journal_error("save_delivery", error))?;
             }
-            state.delivered = true;
-            self.journal
-                .save(execution_id, &state)
-                .map_err(|error| Self::journal_error("save_delivery", error))?;
         }
         if state.poll_retry_at.is_some_and(|retry_at| now < retry_at) {
             return Ok(TaskExecutionDisposition::Retry);
@@ -383,13 +384,19 @@ where
             if let Err(error) = self.messenger.send_poll(task, &poll) {
                 self.diagnostics
                     .record(task.id.as_str(), "poll_delivery", &error.to_string());
-                if let Some(seconds) = error.retry_after_seconds
-                    && state.poll_delivery_attempts < MAX_DELIVERY_ATTEMPTS
+                let retry_at = error.retry_after_seconds.map(|seconds| {
+                    (self.now)().saturating_add(i64::try_from(seconds).unwrap_or(i64::MAX))
+                });
+                // The scheduler skips occurrences past the misfire grace, so a
+                // later retry would drop the poll without telling the chat.
+                if let Some(retry_at) = retry_at.filter(|retry_at| {
+                    task.next_run_at.is_some_and(|scheduled_for| {
+                        *retry_at <= scheduled_for.saturating_add(POLL_RETRY_DEADLINE_SECONDS)
+                    })
+                }) && state.poll_delivery_attempts < MAX_DELIVERY_ATTEMPTS
                 {
                     state.poll_attempted = false;
-                    state.poll_retry_at = Some(
-                        (self.now)().saturating_add(i64::try_from(seconds).unwrap_or(i64::MAX)),
-                    );
+                    state.poll_retry_at = Some(retry_at);
                     if let Err(error) = self.journal.save(execution_id, &state) {
                         // Retain a known rejection while the journal recovers.
                         // After a process crash only the durable attempt marker
@@ -1473,6 +1480,7 @@ mod tests {
             assert!(billing.refunds.is_empty());
         }
     }
+
     fn poll_reply(text: &str) -> Provider {
         Provider {
             replies: VecDeque::from([Ok(TaskProviderReply {
@@ -1615,6 +1623,32 @@ mod tests {
     }
 
     #[test]
+    fn abandoned_poll_context_text_still_delivers_the_poll() {
+        let mut executor = executor(
+            poll_reply("context"),
+            Billing::default(),
+            Messenger {
+                fail: true,
+                ..Messenger::default()
+            },
+        );
+        for _ in 1..super::MAX_DELIVERY_ATTEMPTS {
+            assert!(executor.execute(&task("en"), "task123:1000").is_err());
+            assert!(executor.parts().2.polls.is_empty());
+        }
+        for _ in 0..2 {
+            assert_eq!(
+                executor.execute(&task("en"), "task123:1000"),
+                Ok(TaskExecutionDisposition::Complete)
+            );
+        }
+        let (provider, billing, messenger, _) = executor.parts();
+        assert_eq!(provider.prompts.len(), 1);
+        assert_eq!(billing.settlements.len(), 1);
+        assert_eq!(messenger.polls.len(), 1);
+    }
+
+    #[test]
     fn restart_after_poll_attempt_does_not_send_again_and_old_states_still_load() {
         let old: TaskExecutionState = serde_json::from_value(json!({
             "response": "saved answer", "billing_segments": [], "kind": "success",
@@ -1733,7 +1767,8 @@ mod tests {
                 failing_save: Some(4),
                 ..Journal::default()
             },
-        );
+        )
+        .with_clock(|| 1_000);
         assert_eq!(
             persistence_failure.execute(&task("en"), "task123:1000"),
             journal_failure("save_poll_retry")
@@ -1755,5 +1790,50 @@ mod tests {
         assert_eq!(persistence_failure.parts().2.polls.len(), 2);
         assert_eq!(persistence_failure.parts().0.prompts.len(), 1);
         assert_eq!(persistence_failure.parts().1.settlements.len(), 1);
+    }
+
+    #[test]
+    fn rate_limits_past_the_misfire_grace_report_the_failure_instead_of_retrying() {
+        // Scheduled at 1000 with a 60-second Telegram delay: 1180 still fits,
+        // 1181 would run after the scheduler skipped the occurrence.
+        let clocks: [(fn() -> i64, bool); 2] = [(|| 1_180, true), (|| 1_181, false)];
+        for (now, retried) in clocks {
+            let mut executor = executor(
+                poll_reply(""),
+                Billing::default(),
+                Messenger {
+                    rate_limited: true,
+                    ..Messenger::default()
+                },
+            )
+            .with_clock(now);
+            assert_eq!(
+                executor.execute(&task("en"), "task123:1000").is_err(),
+                retried
+            );
+            let messages = &executor.parts().2.messages;
+            assert_eq!(messages.len(), usize::from(!retried));
+            assert!(
+                messages
+                    .iter()
+                    .all(|(_, text)| text.contains("poll delivery failed"))
+            );
+        }
+        let mut unscheduled = executor(
+            poll_reply(""),
+            Billing::default(),
+            Messenger {
+                rate_limited: true,
+                ..Messenger::default()
+            },
+        )
+        .with_clock(|| 1_000);
+        let mut task = task("en");
+        task.next_run_at = None;
+        assert_eq!(
+            unscheduled.execute(&task, "task123:1000"),
+            Ok(TaskExecutionDisposition::Complete)
+        );
+        assert_eq!(unscheduled.parts().2.messages.len(), 1);
     }
 }
