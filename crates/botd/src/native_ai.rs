@@ -1737,6 +1737,7 @@ mod tests {
         assert!(matches!(server.join(), Ok(Ok(()))));
         Ok(())
     }
+
     fn poll_completion(arguments: Value, content: Value) -> HttpResponse {
         HttpResponse {
             status_code: 200,

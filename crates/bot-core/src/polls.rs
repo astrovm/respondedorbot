@@ -637,6 +637,7 @@ mod tests {
         }));
         assert_eq!(decoded.ok().map(|record| record.closed), Some(false));
     }
+
     proptest::proptest! {
         #[test]
         fn poll_delivery_payload_survives_journal_serialization(

@@ -15,7 +15,7 @@ It streams replies, remembers conversations, understands media, tracks markets, 
 - **Markets and data.** Crypto, market, dollar, BCRA, weather, and Polymarket data.
 - **Credits.** Telegram Stars, AI credits, transfers, and charge history.
 - **Scheduled tasks.** Recurring or one-time.
-- **Polls.** Sends Telegram polls when asked, including from scheduled tasks, and reads back the votes and who voted. Scheduled polls avoid duplicate sends after timeouts or restarts; explicit rate-limit rejections get up to three attempts after Telegram’s retry delay. A crash after recording a send attempt can skip that occurrence.
+- **Polls.** Sends Telegram polls when asked, including from scheduled tasks, and reads back the votes and who voted.
 - **Links and languages.** Repairs supported links and handles localized Telegram commands.
 
 ## 🚀 Use
@@ -171,10 +171,6 @@ Stop it with `Ctrl+C`. The bot waits for background work to finish before it exi
 > [!IMPORTANT]
 > For Supabase, use the session pooler on port `5432` with `sslmode=require`.
 > Do not use the transaction pooler on port `6543`.
-
-Billing reconciliation reads have a five-second statement timeout. The timeout
-applies only to that read and is restored before the connection returns to the
-pool. Billing and connection failures include PostgreSQL's message and SQLSTATE.
 
 </details>
 
