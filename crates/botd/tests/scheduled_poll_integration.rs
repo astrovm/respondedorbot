@@ -26,7 +26,11 @@ use botd::task_executor::{
 use serde_json::{Value, json};
 
 #[derive(Clone)]
-struct Transport(Arc<Mutex<Vec<Value>>>);
+struct Transport {
+    events: Arc<Mutex<Vec<Value>>>,
+    repair: bool,
+    poll_prefix: String,
+}
 
 impl OpenRouterTransport for Transport {
     fn post(&self, request: &HttpRequest) -> Result<HttpResponse, OpenRouterChatError> {
@@ -37,10 +41,25 @@ impl OpenRouterTransport for Transport {
                 .iter()
                 .any(|tool| tool["function"]["name"] == "create_poll")
         }));
-        self.0
+        let mut events = self
+            .events
             .lock()
-            .map_err(|error| OpenRouterChatError::Transport(error.to_string()))?
-            .push(json!({"kind": "ai"}));
+            .map_err(|error| OpenRouterChatError::Transport(error.to_string()))?;
+        let repairing = events.iter().any(|event| event["kind"] == "ai");
+        if repairing {
+            assert_eq!(
+                body["messages"][2]["content"],
+                "situación ficticia: encontrás una billetera en la calle"
+            );
+            assert_eq!(body["messages"][3]["tool_call_id"], "poll-call");
+            assert_eq!(body["messages"][3]["content"], "hay opciones repetidas");
+        }
+        events.push(json!({"kind": "ai"}));
+        let options = if self.repair && !repairing {
+            json!(["Devolverla", "Devolverla"])
+        } else {
+            json!(["Devolverla", "Quedártela"])
+        };
         Ok(HttpResponse {
             status_code: 200,
             body: json!({
@@ -50,7 +69,7 @@ impl OpenRouterTransport for Transport {
                     "tool_calls": [{"id": "poll-call", "type": "function", "function": {
                         "name": "create_poll", "arguments": json!({
                             "question": "Encontrás una billetera. ¿Qué hacés?",
-                            "options": ["Devolverla", "Quedártela"]
+                            "options": options
                         }).to_string()
                     }}]
                 }, "finish_reason": "tool_calls"}],
@@ -64,7 +83,10 @@ impl OpenRouterTransport for Transport {
 
 impl TelegramTransport for Transport {
     fn send(&self, request: &TelegramRequest) -> Result<TelegramResponse, TransportFailureKind> {
-        let mut events = self.0.lock().map_err(|_| TransportFailureKind::Request)?;
+        let mut events = self
+            .events
+            .lock()
+            .map_err(|_| TransportFailureKind::Request)?;
         let payload = request.json_payload.clone().unwrap_or(Value::Null);
         events.push(json!({"kind": request.endpoint, "payload": payload}));
         let poll_number = events
@@ -75,7 +97,7 @@ impl TelegramTransport for Transport {
             status_code: 200,
             body: json!({"ok": true, "result": {
                 "message_id": poll_number as i64 + 100,
-                "poll": {"id": format!("synthetic-poll-{poll_number}")}
+                "poll": {"id": format!("{}-{poll_number}", self.poll_prefix)}
             }})
             .to_string(),
         })
@@ -107,11 +129,12 @@ impl TaskBilling for Billing {
         segments: &[Value],
         _reason: &'static str,
     ) -> Result<(), String> {
-        assert_eq!(segments.len(), 1);
-        self.0
-            .lock()
-            .map_err(|error| error.to_string())?
-            .push(json!({"kind": "settle"}));
+        let mut events = self.0.lock().map_err(|error| error.to_string())?;
+        assert_eq!(
+            segments.len(),
+            events.iter().filter(|event| event["kind"] == "ai").count()
+        );
+        events.push(json!({"kind": "settle"}));
         Ok(())
     }
 
@@ -128,6 +151,11 @@ impl TaskBilling for Billing {
 #[test]
 fn weekly_poll_runs_through_scheduler_delivery_vote_tracking_and_restart()
 -> Result<(), Box<dyn Error>> {
+    run_weekly_poll(false)?;
+    run_weekly_poll(true)
+}
+
+fn run_weekly_poll(repair: bool) -> Result<(), Box<dyn Error>> {
     let Some(port) = std::env::var("TEST_REDIS_PORT").ok() else {
         return Ok(());
     };
@@ -139,8 +167,11 @@ fn weekly_poll_runs_through_scheduler_delivery_vote_tracking_and_restart()
             .filter(|value| !value.is_empty()),
     };
     let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())?;
-    let id = format!("synthetic-weekly-poll-{}-{now}", std::process::id());
-    let chat_id = -9_000_000_000 - i64::from(std::process::id());
+    let id = format!(
+        "synthetic-weekly-poll-{}-{now}-{repair}",
+        std::process::id()
+    );
+    let chat_id = -9_000_000_000 - i64::from(std::process::id()) * 2 - i64::from(repair);
     let task = ScheduledTask {
         id: TaskId::new(&id)?, chat_id: chat_id.to_string(),
         text: "hacer una encuesta semanal en el chat planteando una situación ficticia con dilema moral para que voten".to_owned(),
@@ -161,7 +192,11 @@ fn weekly_poll_runs_through_scheduler_delivery_vote_tracking_and_restart()
     )?;
     let events = Arc::new(Mutex::new(Vec::new()));
     let make_executor = || -> Result<_, Box<dyn Error>> {
-        let transport = Transport(Arc::clone(&events));
+        let transport = Transport {
+            events: Arc::clone(&events),
+            repair,
+            poll_prefix: id.clone(),
+        };
         Ok(NativeTaskExecutor::new(
             OpenRouterTaskProvider::new(
                 transport.clone(),
@@ -223,9 +258,13 @@ fn weekly_poll_runs_through_scheduler_delivery_vote_tracking_and_restart()
             .iter()
             .map(|event| event["kind"].as_str().unwrap_or_default())
             .collect::<Vec<_>>(),
-        ["reserve", "ai", "settle", "sendMessage", "sendPoll"]
+        if repair {
+            vec!["reserve", "ai", "ai", "settle", "sendMessage", "sendPoll"]
+        } else {
+            vec!["reserve", "ai", "settle", "sendMessage", "sendPoll"]
+        }
     );
-    let payload = &captured[4]["payload"];
+    let payload = &captured.last().ok_or("poll delivery missing")?["payload"];
     assert_eq!(payload["chat_id"], chat_id);
     assert_eq!(
         payload["options"],
@@ -236,7 +275,7 @@ fn weekly_poll_runs_through_scheduler_delivery_vote_tracking_and_restart()
     assert!(payload.get("reply_parameters").is_none());
     let polls = RedisPollStore::new(&endpoint)?;
     assert!(polls.record_answer(&PollAnswer {
-        poll_id: "synthetic-poll-1".to_owned(),
+        poll_id: format!("{id}-1"),
         voter_id: "4242".to_owned(),
         vote: PollVote {
             name: "Synthetic Voter".to_owned(),

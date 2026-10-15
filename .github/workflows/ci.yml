@@ -233,4 +233,4 @@ jobs:
       - name: Require every PR validation job to pass
         env:
           RESULTS: ${{ toJSON(needs.*.result) }}
-        run: jq --exit-status 'length > 0 and all(. != "failure" and . != "cancelled")' <<< "$RESULTS"
+        run: jq --exit-status 'length > 0 and all(. == "success")' <<< "$RESULTS"

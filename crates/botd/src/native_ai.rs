@@ -197,7 +197,6 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
             .request(messages, task)
             .map_err(|source| TaskProviderFailure::new(source, Vec::new()))?;
         let mut billing_segments = Vec::new();
-        let mut text = String::new();
         let mut search_uses = 0_usize;
         let locale = if task.locale == "en" {
             Locale::En
@@ -209,7 +208,7 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
                 complete_with(&self.transport, &self.api_key, &self.base_url, &request)
                     .map_err(|source| TaskProviderFailure::new(source, billing_segments.clone()))?;
             billing_segments.push(task_completion_segment(&completion));
-            text = completion.text.clone();
+            let text = completion.text;
             let calls = completion
                 .tool_calls
                 .into_iter()
@@ -221,11 +220,16 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
                 })
                 .collect::<Vec<_>>();
             if calls.is_empty() {
-                break;
+                return Ok(TaskProviderReply {
+                    text,
+                    poll: None,
+                    fallback: false,
+                    billing_segments,
+                });
             }
-            request
-                .messages
-                .push(ChatMessage::assistant_tool_calls(calls.clone()));
+            let mut assistant = ChatMessage::assistant_tool_calls(calls.clone());
+            assistant.content = (!text.is_empty()).then(|| json!(text));
+            request.messages.push(assistant);
             for call in calls {
                 let arguments = serde_json::from_str(&call.function.arguments)
                     .ok()
@@ -278,12 +282,10 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
                     .push(ChatMessage::tool_result(call.id, result.output));
             }
         }
-        Ok(TaskProviderReply {
-            text,
-            poll: None,
-            fallback: false,
+        Err(TaskProviderFailure::new(
+            OpenRouterChatError::MalformedResponse,
             billing_segments,
-        })
+        ))
     }
 }
 
@@ -1803,7 +1805,7 @@ mod tests {
                 responses: RefCell::new(VecDeque::from([
                     poll_completion(
                         json!({"question": "Q", "options": ["same", "SAME"]}),
-                        Value::Null,
+                        json!("You find a wallet on the street."),
                     ),
                     poll_completion(
                         json!({"question": "Q", "options": ["Yes", "No"]}),
@@ -1824,8 +1826,39 @@ mod tests {
         assert_eq!(reply.billing_segments.len(), 2);
         let requests = provider.transport.requests.borrow();
         let body: Value = serde_json::from_str(&requests[1].body).expect("request JSON");
+        assert_eq!(
+            body["messages"][1]["content"],
+            "You find a wallet on the street."
+        );
         assert_eq!(body["messages"][2]["content"], "some options are repeated");
         assert_eq!(body["messages"][2]["tool_call_id"], "poll-call");
+    }
+
+    #[test]
+    fn exhausted_poll_repairs_fail_with_all_incurred_usage() {
+        let rounds = crate::chat_tool_loop::DEFAULT_MAX_TOOL_ROUNDS;
+        let mut provider = OpenRouterTaskProvider::new(
+            Transport {
+                requests: RefCell::new(Vec::new()),
+                responses: RefCell::new(VecDeque::from(vec![
+                    poll_completion(
+                        json!({"question": "Q", "options": ["same", "SAME"]}),
+                        json!("An unfinished poll"),
+                    );
+                    rounds
+                ])),
+            },
+            "synthetic-key",
+            "https://synthetic.invalid/api/v1",
+            "synthetic/model",
+            "persona",
+        );
+        let failure = provider
+            .complete(&[], &task("en"), "task123:1000")
+            .expect_err("invalid polls must not be returned as successful text");
+        assert_eq!(failure.source, OpenRouterChatError::MalformedResponse);
+        assert_eq!(failure.billing_segments.len(), rounds);
+        assert_eq!(provider.transport.requests.borrow().len(), rounds);
     }
 
     #[test]
