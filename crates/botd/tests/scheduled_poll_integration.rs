@@ -26,7 +26,11 @@ use botd::task_executor::{
 use serde_json::{Value, json};
 
 #[derive(Clone)]
-struct Transport(Arc<Mutex<Vec<Value>>>, bool);
+struct Transport {
+    events: Arc<Mutex<Vec<Value>>>,
+    repair: bool,
+    poll_prefix: String,
+}
 
 impl OpenRouterTransport for Transport {
     fn post(&self, request: &HttpRequest) -> Result<HttpResponse, OpenRouterChatError> {
@@ -38,7 +42,7 @@ impl OpenRouterTransport for Transport {
                 .any(|tool| tool["function"]["name"] == "create_poll")
         }));
         let mut events = self
-            .0
+            .events
             .lock()
             .map_err(|error| OpenRouterChatError::Transport(error.to_string()))?;
         let repairing = events.iter().any(|event| event["kind"] == "ai");
@@ -51,7 +55,7 @@ impl OpenRouterTransport for Transport {
             assert_eq!(body["messages"][3]["content"], "hay opciones repetidas");
         }
         events.push(json!({"kind": "ai"}));
-        let options = if self.1 && !repairing {
+        let options = if self.repair && !repairing {
             json!(["Devolverla", "Devolverla"])
         } else {
             json!(["Devolverla", "Quedártela"])
@@ -79,7 +83,10 @@ impl OpenRouterTransport for Transport {
 
 impl TelegramTransport for Transport {
     fn send(&self, request: &TelegramRequest) -> Result<TelegramResponse, TransportFailureKind> {
-        let mut events = self.0.lock().map_err(|_| TransportFailureKind::Request)?;
+        let mut events = self
+            .events
+            .lock()
+            .map_err(|_| TransportFailureKind::Request)?;
         let payload = request.json_payload.clone().unwrap_or(Value::Null);
         events.push(json!({"kind": request.endpoint, "payload": payload}));
         let poll_number = events
@@ -90,7 +97,7 @@ impl TelegramTransport for Transport {
             status_code: 200,
             body: json!({"ok": true, "result": {
                 "message_id": poll_number as i64 + 100,
-                "poll": {"id": format!("synthetic-poll-{poll_number}")}
+                "poll": {"id": format!("{}-{poll_number}", self.poll_prefix)}
             }})
             .to_string(),
         })
@@ -185,7 +192,11 @@ fn run_weekly_poll(repair: bool) -> Result<(), Box<dyn Error>> {
     )?;
     let events = Arc::new(Mutex::new(Vec::new()));
     let make_executor = || -> Result<_, Box<dyn Error>> {
-        let transport = Transport(Arc::clone(&events), repair);
+        let transport = Transport {
+            events: Arc::clone(&events),
+            repair,
+            poll_prefix: id.clone(),
+        };
         Ok(NativeTaskExecutor::new(
             OpenRouterTaskProvider::new(
                 transport.clone(),
@@ -264,7 +275,7 @@ fn run_weekly_poll(repair: bool) -> Result<(), Box<dyn Error>> {
     assert!(payload.get("reply_parameters").is_none());
     let polls = RedisPollStore::new(&endpoint)?;
     assert!(polls.record_answer(&PollAnswer {
-        poll_id: "synthetic-poll-1".to_owned(),
+        poll_id: format!("{id}-1"),
         voter_id: "4242".to_owned(),
         vote: PollVote {
             name: "Synthetic Voter".to_owned(),
