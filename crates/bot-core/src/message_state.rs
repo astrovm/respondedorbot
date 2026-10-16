@@ -436,4 +436,18 @@ mod tests {
             )
         );
     }
+
+    #[test]
+    fn candidates_without_a_message_id_are_never_excluded() {
+        let candidates = vec![SearchCandidate {
+            index: 0,
+            message_id: String::new(),
+            text: "wallet error".to_owned(),
+            reply_to_message_id: String::new(),
+            timestamp: 10,
+        }];
+        let excluded = HashSet::from([String::new()]);
+        let ranked = rank_search_candidates(&candidates, "wallet", None, &excluded, 5);
+        assert_eq!(ranked.len(), 1);
+    }
 }

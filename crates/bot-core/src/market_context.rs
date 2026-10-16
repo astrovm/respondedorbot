@@ -135,4 +135,18 @@ mod tests {
         assert!(formatted.contains("(+0 24h)"));
         assert!(formatted.contains("- DOWN: -0 usd (-0 24h)"));
     }
+
+    #[test]
+    fn crypto_without_a_daily_change_shows_only_the_price() {
+        let snapshot = MarketSnapshot {
+            crypto: vec![CryptoQuote {
+                symbol: "BTC".to_owned(),
+                price: 100.0,
+                change_24h: None,
+                dominance: None,
+            }],
+            dollars: Vec::new(),
+        };
+        assert!(format_market_context(&snapshot).ends_with("- BTC: 100 usd"));
+    }
 }

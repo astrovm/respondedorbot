@@ -131,4 +131,12 @@ mod tests {
         let terminal_with_usage = retry_after_failure(MAX_ATTEMPTS - 1, 100.0, true);
         assert_eq!(terminal_with_usage.actual_credit_units, None);
     }
+
+    #[test]
+    fn a_changed_marker_alone_makes_the_compaction_obsolete() {
+        assert_eq!(
+            evaluate_compaction(Some("old"), Some("m3"), Some("old"), Some("m1"), None, "m2",),
+            CompactionDisposition::SettleObsolete
+        );
+    }
 }

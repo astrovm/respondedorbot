@@ -749,5 +749,6 @@ mod tests {
         assert!(!profile("https://x.com/someone/status/1"));
         assert!(!profile("https://x.com/someone/followers"));
         assert!(!profile("https://x.com/home"));
+        assert!(!profile("https://x.com/someone/media/extra"));
     }
 }

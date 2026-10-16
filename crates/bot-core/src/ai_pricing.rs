@@ -1143,4 +1143,50 @@ mod tests {
             proptest::prop_assert_eq!(rendered, Some(Ok(expected)));
         }
     }
+
+    #[test]
+    fn unparseable_upstream_costs_count_as_missing() -> Result<(), AiPricingError> {
+        for usage in [
+            json!({"cost_details": {}}),
+            json!({"cost_details": {"upstream_inference_cost": "abc"}}),
+        ] {
+            let output = calculate_billing_for_segments(&json!([{
+                "kind": "chat",
+                "model": "synthetic/model",
+                "source": "openrouter",
+                "usage": usage,
+            }]))?;
+            assert_eq!(output["pricing_complete"], false);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn segments_without_provider_or_model_get_default_labels() -> Result<(), AiPricingError> {
+        let output = calculate_billing_for_segments(&json!([
+            {"kind": "youtube_transcript", "source": ""},
+            {"kind": "web_search", "source": "", "metadata": {"firecrawl_credits_used": 1}},
+            {"kind": "chat", "source": "openrouter"}
+        ]))?;
+        assert_eq!(output["segment_breakdown"][0]["provider"], "unknown");
+        assert_eq!(output["segment_breakdown"][1]["provider"], "firecrawl");
+        assert_eq!(
+            output["unsupported_notes"],
+            json!(["missing_usage_or_cost:segment=2:provider=openrouter:model=unknown"])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn web_searches_without_firecrawl_credits_are_priced_like_other_segments()
+    -> Result<(), AiPricingError> {
+        let output = calculate_billing_for_segments(&json!([{
+            "kind": "web_search",
+            "source": "firecrawl",
+            "metadata": {"web_search_requests": 1}
+        }]))?;
+        assert_eq!(output["tool_breakdown"], json!([]));
+        assert_eq!(output["segment_breakdown"][0]["pricing_basis"], "missing");
+        Ok(())
+    }
 }

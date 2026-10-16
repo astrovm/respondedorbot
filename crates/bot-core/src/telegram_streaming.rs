@@ -201,4 +201,15 @@ mod tests {
         assert_eq!(StreamAction::Send.as_str(), "send");
         assert_eq!(StreamAction::Edit.as_str(), "edit");
     }
+
+    #[test]
+    fn a_failed_first_send_is_not_retried_on_every_token() {
+        assert_eq!(
+            plan_feed(false, false, true, "", "", "hi", 0.0, 0.0, 0.3, 15),
+            FeedPlan {
+                buffer: "hi".to_owned(),
+                action: StreamAction::None,
+            }
+        );
+    }
 }

@@ -198,4 +198,19 @@ mod tests {
             "- Plain → https://plain.test"
         );
     }
+
+    #[test]
+    fn items_without_a_link_render_just_the_title() {
+        let items = [HackerNewsRenderItem {
+            title: "Ask HN".to_owned(),
+            url: String::new(),
+            points: None,
+            comments: None,
+            comments_url: String::new(),
+        }];
+        assert_eq!(
+            format_items(&items, true, "no data", "comments"),
+            "- Ask HN"
+        );
+    }
 }

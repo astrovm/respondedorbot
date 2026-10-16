@@ -538,4 +538,15 @@ mod tests {
         assert_eq!(super::country_flag("A1"), "");
         assert_eq!(country_flag_from_name("atlantis"), "");
     }
+
+    #[test]
+    fn events_without_a_slug_are_skipped() {
+        let events = parse_election_events(&json!([
+            {"title": "No link", "slug": "", "liquidity": 9_000, "markets": []},
+            {"title": "Linked", "slug": "linked", "liquidity": 1_000, "markets": []}
+        ]));
+        let text = render_elections(&events, &HashMap::new(), Locale::En);
+        assert!(text.contains("Linked"));
+        assert!(!text.contains("No link"));
+    }
 }

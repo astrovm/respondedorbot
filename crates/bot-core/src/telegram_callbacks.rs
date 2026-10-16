@@ -235,4 +235,12 @@ mod tests {
             Err(CallbackParseError::InvalidMessageId)
         );
     }
+
+    #[test]
+    fn falsy_nested_values_count_as_empty_objects() {
+        assert_eq!(
+            parse_callback_context(&json!({"data":"cfg:x:y","message":0})),
+            parse_callback_context(&json!({"data":"cfg:x:y"}))
+        );
+    }
 }

@@ -547,4 +547,19 @@ mod tests {
             assert!(prompt.contains(expected), "{prompt}");
         }
     }
+
+    #[test]
+    fn untitled_groups_and_missing_replies_add_nothing() {
+        let mut value = input(Locale::En);
+        value.chat_title = String::new();
+        value.reply_context = Some(String::new());
+        let messages = build_conversation_prompt(&value);
+        let prompt = messages.last().map(text_of).unwrap_or_default();
+        assert!(prompt.contains("- Chat: group\n"));
+        assert!(!prompt.contains("MESSAGE BEING REPLIED TO"));
+        value.reply_context = None;
+        let messages = build_conversation_prompt(&value);
+        let prompt = messages.last().map(text_of).unwrap_or_default();
+        assert!(!prompt.contains("MESSAGE BEING REPLIED TO"));
+    }
 }

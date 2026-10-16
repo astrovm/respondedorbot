@@ -605,4 +605,25 @@ mod tests {
             None
         ));
     }
+
+    #[test]
+    fn decreasing_an_unlimited_creditless_limit_keeps_it_unlimited() {
+        let mut unlimited = input("creditless", "decrease");
+        unlimited.current_creditless_limit = Some(-1);
+        assert_eq!(
+            evaluate_config_callback(&unlimited),
+            ConfigCallbackEvaluation::SetCreditlessLimit(-1)
+        );
+    }
+
+    #[test]
+    fn non_numeric_creditless_values_are_reported_as_invalid() {
+        let current = ChatConfig::default();
+        assert!(render_matches(
+            plan_config_callback("cfg:creditless:abc", &current),
+            &current,
+            false,
+            Some("creditless"),
+        ));
+    }
 }

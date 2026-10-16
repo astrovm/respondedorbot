@@ -597,4 +597,10 @@ mod tests {
         assert_eq!(calculate_expression("-7 % 3", Locale::En), "2");
         assert_eq!(calculate_expression("2.5 ** 2", Locale::En), "6.25");
     }
+
+    #[test]
+    fn floor_division_with_matching_signs_truncates() {
+        assert_eq!(calculate_expression("7 // 2", Locale::En), "3");
+        assert_eq!(calculate_expression("-7 // -2", Locale::En), "3");
+    }
 }

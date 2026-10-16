@@ -798,4 +798,12 @@ mod tests {
             ""
         );
     }
+
+    #[test]
+    fn falsy_polls_are_ignored() {
+        assert_eq!(
+            extract_message_content(&json!({"text":"hola","poll":0})),
+            extract_message_content(&json!({"text":"hola"}))
+        );
+    }
 }

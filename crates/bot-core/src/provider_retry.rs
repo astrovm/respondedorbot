@@ -366,4 +366,25 @@ mod tests {
             assert_eq!(parse(raw), expected);
         }
     }
+
+    #[test]
+    fn huge_durations_and_letters_in_offsets_are_rejected() {
+        assert_eq!(
+            parse_retry_window_seconds(Some("99999999999999999999h"), 0.0),
+            None
+        );
+        assert_eq!(
+            parse_retry_window_seconds(Some("Wed, 21 Oct 2015 07:28:00 +12a4"), 0.0),
+            None
+        );
+        // Month names always map to 1 to 12, but the calendar check stands alone.
+        assert_eq!(
+            super::date_time_to_unix(2026, 13, 1, "00:00:00", "GMT"),
+            None
+        );
+        assert_eq!(
+            super::date_time_to_unix(2026, 0, 1, "00:00:00", "GMT"),
+            None
+        );
+    }
 }

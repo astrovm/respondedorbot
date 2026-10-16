@@ -299,4 +299,11 @@ mod tests {
             "I couldn't look up @lemon. Try again, or reply to one of their messages"
         );
     }
+
+    #[test]
+    fn blank_picked_mentions_never_match() {
+        let blank = picked(" ", 7);
+        let (named, rest) = split_named_member("hola", std::slice::from_ref(&blank));
+        assert_eq!((named, rest), (None, "hola"));
+    }
 }

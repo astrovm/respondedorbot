@@ -290,4 +290,11 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn infinite_strings_and_huge_unsigned_counters_are_classified() {
+        assert!(!super::positive_float(Some(&json!("inf"))));
+        assert!(!super::positive_float(Some(&json!("NaN"))));
+        assert!(super::positive_integer(&json!(u64::MAX)));
+    }
 }

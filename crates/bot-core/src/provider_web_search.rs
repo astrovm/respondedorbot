@@ -156,10 +156,10 @@ fn python_int(value: Option<&Value>) -> Option<i64> {
 }
 
 fn float_to_i64(value: f64) -> Option<i64> {
-    if !value.is_finite() || value < i64::MIN as f64 || value > i64::MAX as f64 {
-        return None;
-    }
-    Some(value.trunc() as i64)
+    // The range check also rejects NaN and both infinities.
+    (i64::MIN as f64..=i64::MAX as f64)
+        .contains(&value)
+        .then(|| value.trunc() as i64)
 }
 
 fn string_field(value: Option<&Value>) -> &str {
@@ -351,5 +351,22 @@ mod tests {
         assert_eq!(metrics.request_count, 2);
         assert_eq!(metrics.metadata_request_count, Some(2));
         assert_eq!(metrics.grounded, Some(false));
+    }
+
+    #[test]
+    fn rounds_without_requests_or_citations_have_no_metadata() {
+        let metrics = round_metrics(None, &[], &[]);
+        assert_eq!(metrics.metadata_request_count, None);
+        assert_eq!(metrics.grounded, None);
+        assert_eq!(metrics.request_count, 0);
+    }
+
+    #[test]
+    fn floats_outside_the_integer_range_are_rejected() {
+        assert_eq!(super::float_to_i64(f64::NAN), None);
+        assert_eq!(super::float_to_i64(f64::INFINITY), None);
+        assert_eq!(super::float_to_i64(-1e30), None);
+        assert_eq!(super::float_to_i64(1e30), None);
+        assert_eq!(super::float_to_i64(-2.7), Some(-2));
     }
 }

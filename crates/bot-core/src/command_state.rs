@@ -283,4 +283,38 @@ mod tests {
         assert_eq!(outgoing.message.message_id, "bot_2");
         assert_eq!(outgoing.metadata, None);
     }
+
+    #[test]
+    fn slash_commands_without_a_mention_still_mention_the_bot() {
+        let plan = prepare_incoming_command_state(IncomingCommandState {
+            chat_id: ChatId(-42),
+            message_id: MessageId(7),
+            user_id: UserId(88),
+            first_name: Some("Synthetic"),
+            username: None,
+            is_bot: false,
+            text: "/time",
+            is_group: false,
+            timestamp: 1_672_531_200,
+        });
+        assert_eq!(
+            plan.ok().map(|plan| plan.message.mentions_bot).as_deref(),
+            Some("1")
+        );
+        let plan = prepare_incoming_command_state(IncomingCommandState {
+            chat_id: ChatId(-42),
+            message_id: MessageId(8),
+            user_id: UserId(88),
+            first_name: Some("Synthetic"),
+            username: None,
+            is_bot: false,
+            text: "hola",
+            is_group: false,
+            timestamp: 1_672_531_200,
+        });
+        assert_eq!(
+            plan.ok().map(|plan| plan.message.mentions_bot).as_deref(),
+            Some("0")
+        );
+    }
 }
