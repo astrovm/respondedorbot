@@ -567,7 +567,7 @@ mod tests {
     proptest! {
         #[test]
         fn valid_tasks_survive_encoding_and_decoding(
-            id in "[A-Za-z0-9_-]{1,32}",
+            id in "[A-Za-z0-9_-]{1,32}".prop_filter_map("valid task id", |id| TaskId::new(id).ok()),
             chat_id in any::<i64>(),
             text in "\\PC{1,200}",
             user_name in "\\PC{0,40}",
@@ -580,7 +580,7 @@ mod tests {
             last_execution in proptest::option::of(0_i64..4_000_000_000),
         ) {
             let task = ScheduledTask {
-                id: TaskId::new(id.clone()).map_err(|error| TestCaseError::fail(error.to_string()))?,
+                id: id.clone(),
                 chat_id: chat_id.to_string(),
                 text,
                 user_name,
@@ -590,18 +590,18 @@ mod tests {
                 locale: if english { "en" } else { "es" }.to_owned(),
                 schedule_anchor_at: anchor,
                 next_run_at: Some(next_run_at),
-                last_execution_id: last_execution.map(|at| format!("{id}:{at}")),
+                last_execution_id: last_execution.map(|at| format!("{}:{at}", id.as_str())),
             };
             let document = TaskRecordDocument {
                 task,
                 run_date: None,
                 extra: BTreeMap::new(),
             };
-            let encoded = encode_task_record(&document)
-                .map_err(|error| TestCaseError::fail(error.to_string()))?;
-            let decoded = decode_task_record(&encoded)
-                .map_err(|error| TestCaseError::fail(format!("{error}: {encoded}")))?;
-            prop_assert_eq!(decoded.task, document.task);
+            let decoded = encode_task_record(&document)
+                .and_then(|encoded| decode_task_record(&encoded))
+                .ok()
+                .map(|decoded| decoded.task);
+            prop_assert_eq!(decoded, Some(document.task));
         }
     }
 }

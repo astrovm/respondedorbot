@@ -513,9 +513,7 @@ mod tests {
         ] {
             assert_eq!(
                 calculate_expression(expression, Locale::En),
-                "expression is too long",
-                "{}",
-                &expression[..40]
+                "expression is too long"
             );
         }
         // The largest results still fit.

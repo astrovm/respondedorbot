@@ -464,14 +464,33 @@ fn exercise_main_flows(
             .iter()
             .any(|body| body["chat_id"].as_i64() == Some(user_id) && body["text"] == AI_REPLY)
     })?;
+    // The real scheduler also runs here and may pick up tasks other tests left
+    // in the shared Redis, so only count requests for this conversation.
     let completions = server
         .state
         .requests()
         .into_iter()
         .filter(|request| request.path.ends_with("/chat/completions"))
         .collect::<Vec<_>>();
-    assert_eq!(completions.len(), 1);
-    let prompt = completions[0].body["messages"].to_string();
+    let ours = completions
+        .iter()
+        .filter(|request| {
+            request.body["messages"]
+                .as_array()
+                .and_then(|messages| messages.last())
+                .is_some_and(|last| last["content"].to_string().contains("hola"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ours.len(),
+        1,
+        "{:#?}",
+        completions
+            .iter()
+            .map(|request| request.body["messages"].to_string())
+            .collect::<Vec<_>>()
+    );
+    let prompt = ours[0].body["messages"].to_string();
     assert!(prompt.contains("synthetic personality"), "{prompt}");
     assert!(prompt.contains("synthetic rules"), "{prompt}");
     assert!(prompt.contains("hola"), "{prompt}");
