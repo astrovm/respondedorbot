@@ -1006,11 +1006,8 @@ pub fn is_usable_chart_candle(candle: &[f64], reference_price: Option<f64>) -> b
     if let Some(reference) = reference_price.filter(|value| value.is_finite() && *value > 0.0) {
         let high_ratio = high / reference;
         let low_ratio = reference / low;
-        if !high_ratio.is_finite()
-            || !low_ratio.is_finite()
-            || high_ratio > MAX_CANDLE_PRICE_RATIO
-            || low_ratio > MAX_CANDLE_PRICE_RATIO
-        {
+        // Both ratios are positive, and an overflow to infinity fails the cap too.
+        if high_ratio > MAX_CANDLE_PRICE_RATIO || low_ratio > MAX_CANDLE_PRICE_RATIO {
             return false;
         }
     }
@@ -1191,7 +1188,8 @@ pub fn has_usable_chart(signal: &TokenSignal) -> bool {
         .iter()
         .map(|candle| candle[3])
         .fold(f64::INFINITY, f64::min);
-    high > 0.0 && (high - low).abs() > f64::EPSILON
+    // Usable candles have positive prices, so only a flat chart is left to reject.
+    (high - low).abs() > f64::EPSILON
 }
 
 #[must_use]
@@ -2212,5 +2210,82 @@ mod tests {
         };
         assert_eq!(slug(128), Some(SignalQuery::Slug("a".repeat(128))));
         assert_eq!(slug(129), None);
+    }
+
+    #[test]
+    fn uninformative_extra_and_load_time_history_leave_the_change_unavailable() {
+        let mut signal = signal();
+        signal.pair.price_change.h24 = serde_json::Value::Null;
+        let single = vec![vec![1_700_086_400.0, 2.0, 2.0, 2.0, 125.0]];
+        signal.candles.clear();
+        let quote = format_signal_quote_with_candles(&signal, Some("24h"), Some(&single));
+        assert!(quote.contains("N/A 24h"), "{quote}");
+        signal.candles.clone_from(&single);
+        let quote = format_signal_quote_with_candles(&signal, Some("24h"), Some(&single));
+        assert!(quote.contains("N/A 24h"), "{quote}");
+    }
+
+    #[test]
+    fn infinite_prices_render_as_unavailable() {
+        let mut signal = signal();
+        signal.pair.price_usd = json!("inf");
+        assert_eq!(signal_market_values(&signal, None).0, "N/A");
+    }
+
+    #[test]
+    fn pairs_without_a_chain_are_not_tokens() {
+        let mut pair = pair();
+        pair.chain_id = String::new();
+        pair.base_token.address = EVM.to_owned();
+        assert_eq!(token_from_pair(&pair), None);
+    }
+
+    #[test]
+    fn blank_pump_images_and_socials_fall_back_to_the_pair() {
+        let mut pair = pair();
+        pair.info.image_url = "https://example.test/pair.png".to_owned();
+        let pump = PumpMetadata {
+            twitter: "  ".to_owned(),
+            ..PumpMetadata::default()
+        };
+        assert_eq!(
+            token_image_url(&pair, Some(&pump)).as_deref(),
+            Some("https://example.test/pair.png")
+        );
+        assert!(!token_socials(&pair, Some(&pump)).contains_key("X"));
+        let socials = BTreeMap::from([("Other".to_owned(), String::new())]);
+        assert_eq!(
+            super::social_rows(&socials),
+            super::social_rows(&BTreeMap::new())
+        );
+    }
+
+    #[test]
+    fn candles_whose_ratio_to_the_live_price_overflows_are_rejected() {
+        let usable = super::is_usable_chart_candle;
+        assert!(!usable(&[1.0, 1e10, 1e10, 1e9, 1e10], Some(1e-320)));
+        assert!(!usable(
+            &[1.0, 1.5e-320, 2e-320, 1e-320, 1.5e-320],
+            Some(1e10)
+        ));
+    }
+
+    #[test]
+    fn captions_fall_back_to_fdv_and_price_history_and_show_partial_trades() {
+        let mut signal = signal();
+        signal.pair.market_cap = json!(null);
+        signal.pair.fdv = json!(5_000_000);
+        signal.pair.txns.h1.buys = json!(null);
+        signal.pair.txns.h1.sells = json!(4);
+        let caption = format_signal_caption_for_period(&signal, 1_720_000_000, Some("1h"));
+        assert!(caption.contains("MC <b>$5M</b>"), "{caption}");
+        assert!(caption.contains("1h: 🟩"), "{caption}");
+        signal.pair.txns.h1.sells = json!(null);
+        let caption = format_signal_caption_for_period(&signal, 1_720_000_000, Some("1h"));
+        assert!(!caption.contains("1h: 🟩"), "{caption}");
+        // Without a market cap, the ATH is the highest candle price itself.
+        signal.pair.fdv = json!(null);
+        let caption = format_signal_caption(&signal, 1_720_000_000);
+        assert!(caption.contains("ATH <b>$2.5 ("), "{caption}");
     }
 }
