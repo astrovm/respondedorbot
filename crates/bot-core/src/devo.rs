@@ -225,6 +225,7 @@ mod tests {
         plan_devo_command, render_devo_reply, render_devo_result,
     };
     use crate::locale::Locale;
+    use proptest::prelude::*;
 
     #[test]
     fn preserves_legacy_input_priority_and_validation() {
@@ -386,5 +387,48 @@ mod tests {
             unknown.map(|result| (result.profit, result.official)),
             Ok(("nan".to_owned(), "nan".to_owned()))
         );
+    }
+
+    proptest! {
+        #[test]
+        fn valid_fee_and_purchase_parse_back(fee in 0_u32..=100, cents in 0_u64..100_000_000) {
+            let purchase = cents as f64 / 100.0;
+            prop_assert_eq!(
+                parse_devo_input(&format!("{fee}, {purchase}")),
+                Ok(DevoInput::Valid { fee: f64::from(fee) / 100.0, purchase })
+            );
+        }
+
+        #[test]
+        fn a_higher_fee_never_raises_the_profit(
+            low in 0_u32..=100,
+            extra in 0_u32..=100,
+            official in 1.0_f64..5_000.0,
+            usdt in 1.0_f64..5_000.0,
+            card in 1.0_f64..5_000.0,
+        ) {
+            let quotes = DevoQuotes { official, usdt_ask: usdt, usdt_bid: usdt, card };
+            let profit = |fee: u32| -> Result<f64, TestCaseError> {
+                let result = calculate_devo(f64::from(fee) / 100.0, 0.0, quotes)
+                    .map_err(|_| TestCaseError::fail("valid quotes"))?;
+                result.profit.parse::<f64>().map_err(|_| TestCaseError::fail("numeric profit"))
+            };
+            prop_assert!(profit(low.saturating_add(extra).min(100))? <= profit(low)?);
+        }
+    }
+
+    #[test]
+    fn out_of_range_fees_and_purchases_are_input_errors() {
+        for input in ["101", "5, nan", "5, -1", "nan"] {
+            assert_eq!(parse_devo_input(input), Ok(DevoInput::InputError));
+        }
+        let quotes = DevoQuotes {
+            official: 1_000.0,
+            card: 1_600.0,
+            usdt_ask: 0.0,
+            usdt_bid: 0.0,
+        };
+        assert!(calculate_devo(0.05, 100.0, quotes).is_err());
+        assert!(calculate_devo(0.05, 0.0, quotes).is_ok());
     }
 }

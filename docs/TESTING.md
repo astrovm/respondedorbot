@@ -31,6 +31,24 @@ The source-line check avoids a [Rust/LLVM reporting bug](https://github.com/rust
 that can count uncovered generic instantiations in the summary even when all
 exported source lines are covered. It still rejects any uncovered source line.
 
+## Fuzzing
+
+`fuzz/` holds [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) targets for everything that reads untrusted input: Telegram updates, text users type, link repair, fetched web pages, OpenRouter replies (whole and streamed), and stored task records. CI runs each one for a minute. Run them longer locally:
+
+```bash
+cd fuzz
+cargo +nightly fuzz run user_text corpus/user_text seeds/user_text -- -max_total_time=900
+```
+
+## Mutation testing
+
+CI runs [cargo-mutants](https://mutants.rs/) on the `bot-core` lines a pull request changes, and fails on any mutant the tests miss. A mutant that makes the tests hang counts as caught. Run the same check locally:
+
+```bash
+git diff origin/main...HEAD -- crates/bot-core/src > pr.diff
+cargo mutants --in-diff pr.diff -p bot-core
+```
+
 ## Test layers
 
 1. Unit and property tests cover parsing, formatting, routing, accounting, idempotency, and state machines.
@@ -38,8 +56,9 @@ exported source lines are covered. It still rejects any uncovered source line.
 3. Adapter tests use fake HTTP transports and real Redis/PostgreSQL where persistence semantics matter.
 4. Integration tests cover billing replay/refund policy, scheduler claiming/advancement, Redis state, PostgreSQL schema and transactions, and real FFmpeg normalization.
 5. Lifecycle tests cover polling offsets, retries, worker failure reporting, graceful shutdown, cancellation, and restart-safe claims.
-6. Container verification builds the release image and confirms `botd` is executable.
-7. Legacy-data migration tests cover dry-run behavior, idempotent application,
+6. The end-to-end test (`crates/botd/tests/telegram_end_to_end.rs`) runs the real `botd` binary against fake Telegram and OpenRouter servers (through `TELEGRAM_API_URL` and `OPENROUTER_BASE_URL`) with real PostgreSQL and Redis. It checks the command menus, `/help`, a plain command, a billed `/ask` reply, a button press, and a clean shutdown. A dead proxy blocks every other outbound request.
+7. Container verification builds the release image and confirms `botd` is executable.
+8. Legacy-data migration tests cover dry-run behavior, idempotent application,
    record versioning, task reconstruction, and conditional Redis writes.
 
 ## Critical scenarios

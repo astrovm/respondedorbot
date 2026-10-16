@@ -2013,4 +2013,61 @@ mod tests {
         assert_eq!(super::whole_credits(150), "1.50");
         assert_eq!(super::whole_credits(5_000), "50");
     }
+
+    #[test]
+    fn successful_payment_rejects_each_mismatched_term_on_its_own() {
+        let payment = |currency: &str, payload: &str, amount: i64, charge_id: &str| {
+            evaluate_successful_payment(
+                &json!({
+                    "chat":{"id":100},
+                    "from":{"id":42},
+                    "successful_payment":{
+                        "currency":currency,
+                        "invoice_payload":payload,
+                        "telegram_payment_charge_id":charge_id,
+                        "total_amount":amount
+                    }
+                }),
+                true,
+                Some(&pack()),
+            )
+        };
+        assert!(matches!(
+            payment("XTR", "topup:p50:42:es", 25, "charge-1"),
+            Ok(SuccessfulPaymentDecision::Record { .. })
+        ));
+        for (currency, payload, amount, charge_id) in [
+            ("XTR", "topup:p100:42:es", 25, "charge-1"),
+            ("USD", "topup:p50:42:es", 25, "charge-1"),
+            ("XTR", "topup:p50:42:es", 24, "charge-1"),
+            ("XTR", "topup:p50:7:es", 25, "charge-1"),
+            ("XTR", "topup:p50:42:es", 25, ""),
+            ("XTR", "gift:p50:42:es", 25, "charge-1"),
+        ] {
+            assert!(matches!(
+                payment(currency, payload, amount, charge_id),
+                Ok(SuccessfulPaymentDecision::InvalidPayment { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn falsy_non_object_fields_count_as_missing() {
+        assert_eq!(parse_topup_payload("topup"), (None, None));
+        assert_eq!(
+            evaluate_successful_payment(&json!({"chat":0,"from":{"id":42}}), true, Some(&pack())),
+            Ok(SuccessfulPaymentDecision::Ignore)
+        );
+        assert!(matches!(
+            evaluate_successful_payment(
+                &json!({"chat":{"id":100},"from":{"id":42},"successful_payment":""}),
+                true,
+                Some(&pack())
+            ),
+            Ok(SuccessfulPaymentDecision::InvalidPayment { .. })
+        ));
+        assert!(
+            evaluate_pre_checkout(&json!({"id":"checkout","from":""}), true, Some(&pack())).is_ok()
+        );
+    }
 }

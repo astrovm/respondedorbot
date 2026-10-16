@@ -198,6 +198,7 @@ dependencies = [
  "native-tls",
  "postgres",
  "postgres-native-tls",
+ "proptest",
  "qrcode",
  "quick-xml 0.42.0",
  "redis",

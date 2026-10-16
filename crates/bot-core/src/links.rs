@@ -738,4 +738,16 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn only_profile_pages_count_as_twitter_profiles() {
+        let profile =
+            |raw: &str| url::Url::parse(raw).is_ok_and(|url| super::is_twitter_profile(&url));
+        assert!(profile("https://x.com/someone"));
+        assert!(profile("https://x.com/someone/media"));
+        assert!(!profile("https://x.com/"));
+        assert!(!profile("https://x.com/someone/status/1"));
+        assert!(!profile("https://x.com/someone/followers"));
+        assert!(!profile("https://x.com/home"));
+    }
 }

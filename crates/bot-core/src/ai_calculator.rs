@@ -6,6 +6,9 @@ use crate::locale::Locale;
 
 const MAX_SYNTAX_NODES: usize = 200;
 const MAX_INTEGER_EXPONENT: u32 = 100_000;
+/// About 301,000 decimal digits: room for `999 ** 100000`, and small enough to
+/// build and print quickly.
+const MAX_INTEGER_BITS: u64 = 1_000_000;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Number {
@@ -274,15 +277,28 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Rejects integers too large to build or print safely.
+fn bounded(value: BigInt) -> Result<Number, CalculationError> {
+    if value.bits() > MAX_INTEGER_BITS {
+        return Err(CalculationError::TooLong);
+    }
+    Ok(Number::Integer(value))
+}
+
 fn parse_number(raw: &str) -> Result<Number, CalculationError> {
     if raw.chars().any(|value| matches!(value, '.' | 'e' | 'E')) {
         raw.parse::<f64>()
             .map(Number::Float)
             .map_err(|_| CalculationError::Invalid)
     } else {
+        // Each decimal digit adds over three bits, so this skips parsing
+        // literals that could never fit.
+        if raw.len() as u64 > MAX_INTEGER_BITS / 3 {
+            return Err(CalculationError::TooLong);
+        }
         raw.parse::<BigInt>()
-            .map(Number::Integer)
             .map_err(|_| CalculationError::Invalid)
+            .and_then(bounded)
     }
 }
 
@@ -312,9 +328,7 @@ fn integer_or_float(
     float: impl FnOnce(f64, f64) -> f64,
 ) -> Result<Number, CalculationError> {
     match (left, right) {
-        (Number::Integer(left), Number::Integer(right)) => {
-            Ok(Number::Integer(integer(left, right)))
-        }
+        (Number::Integer(left), Number::Integer(right)) => bounded(integer(left, right)),
         (left, right) => Ok(Number::Float(float(left.as_float()?, right.as_float()?))),
     }
 }
@@ -381,16 +395,21 @@ fn power(left: Number, right: Number) -> Result<Number, CalculationError> {
             .to_string()
             .parse::<u32>()
             .map_err(|_| CalculationError::TooLong)?;
-        if exponent > MAX_INTEGER_EXPONENT {
+        // The result has at most `bits * exponent` bits, so check before building it.
+        if exponent > MAX_INTEGER_EXPONENT
+            || left.bits().saturating_mul(u64::from(exponent)) > MAX_INTEGER_BITS
+        {
             return Err(CalculationError::TooLong);
         }
-        return Ok(Number::Integer(left.pow(exponent)));
+        return bounded(left.pow(exponent));
     }
     Ok(Number::Float(left.as_float()?.powf(right.as_float()?)))
 }
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     #[test]
@@ -483,9 +502,99 @@ mod tests {
     }
 
     #[test]
+    fn huge_integer_results_are_rejected_before_they_are_built() {
+        // Found by fuzzing: only the exponent was capped, so a power of a power
+        // asked for billions of digits and exhausted memory.
+        for expression in [
+            "(9 ** 99999) ** 99999",
+            "17689273422521900000100000000000000000000000010**90367",
+            "(2 ** 99999) * (2 ** 99999) * (2 ** 99999) * (2 ** 99999) * (2 ** 99999) * (2 ** 99999) * (2 ** 99999) * (2 ** 99999) * (2 ** 99999) * (2 ** 99999) * (2 ** 99999)",
+            &format!("{} + 1", "9".repeat(400_000)),
+        ] {
+            assert_eq!(
+                calculate_expression(expression, Locale::En),
+                "expression is too long"
+            );
+        }
+        // The largest results still fit.
+        assert_eq!(
+            calculate_expression("2 ** 100000", Locale::En).len(),
+            30_103
+        );
+        assert_eq!(
+            calculate_expression("999 ** 100000", Locale::En).len(),
+            299_957
+        );
+    }
+
+    #[test]
+    fn integer_limits_sit_exactly_on_their_bounds() {
+        // 2 ** 999999 has exactly the maximum number of bits; one more is too many.
+        let nine_powers = "(2 ** 100000) * ".repeat(9);
+        assert_eq!(
+            calculate_expression(&format!("{nine_powers}(2 ** 99999)"), Locale::En).len(),
+            301_030
+        );
+        assert_eq!(
+            calculate_expression(&format!("{nine_powers}(2 ** 100000)"), Locale::En),
+            "expression is too long"
+        );
+        // Literal length is checked before parsing, even when the value is tiny.
+        assert_eq!(calculate_expression(&"0".repeat(333_333), Locale::En), "0");
+        assert_eq!(
+            calculate_expression(&"0".repeat(333_334), Locale::En),
+            "expression is too long"
+        );
+        // The power precheck is conservative: it rejects some results that
+        // would fit, instead of building a huge number to find out.
+        assert_eq!(
+            calculate_expression("1024 ** 95000", Locale::En),
+            "expression is too long"
+        );
+    }
+
+    #[test]
     fn integer_subtraction_and_overflowing_floats_render_exactly() {
         assert_eq!(calculate_expression("10 - 3", Locale::En), "7");
         assert_eq!(calculate_expression("1e308 * 10", Locale::En), "inf");
         assert_eq!(calculate_expression("0 - 1e308 * 10", Locale::En), "-inf");
+    }
+
+    proptest! {
+        #[test]
+        fn integer_arithmetic_is_exact(a in any::<i64>(), b in any::<i64>()) {
+            let (wide_a, wide_b) = (i128::from(a), i128::from(b));
+            for (operator, expected) in [
+                ("+", wide_a + wide_b),
+                ("-", wide_a - wide_b),
+                ("*", wide_a * wide_b),
+            ] {
+                prop_assert_eq!(
+                    calculate_expression(&format!("({a}) {operator} ({b})"), Locale::En),
+                    expected.to_string()
+                );
+            }
+        }
+
+        #[test]
+        fn addition_and_multiplication_commute(a in -1_000_000_i64..1_000_000, b in -1_000_000_i64..1_000_000) {
+            prop_assert_eq!(
+                calculate_expression(&format!("{a}+({b})"), Locale::Es),
+                calculate_expression(&format!("{b}+({a})"), Locale::Es)
+            );
+            prop_assert_eq!(
+                calculate_expression(&format!("{a}*({b})"), Locale::Es),
+                calculate_expression(&format!("{b}*({a})"), Locale::Es)
+            );
+        }
+    }
+
+    #[test]
+    fn exact_negative_division_and_float_powers() {
+        assert_eq!(calculate_expression("-6 // 3", Locale::En), "-2");
+        assert_eq!(calculate_expression("-7 // 3", Locale::En), "-3");
+        assert_eq!(calculate_expression("-6 % 3", Locale::En), "0");
+        assert_eq!(calculate_expression("-7 % 3", Locale::En), "2");
+        assert_eq!(calculate_expression("2.5 ** 2", Locale::En), "6.25");
     }
 }

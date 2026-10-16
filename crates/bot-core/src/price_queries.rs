@@ -444,4 +444,26 @@ mod tests {
             assert!(ChartPeriod::parse(input).is_none(), "{input}");
         }
     }
+
+    #[test]
+    fn conversion_amounts_accept_grouping_and_both_decimal_marks() {
+        for (raw, expected) in [
+            ("1.000", Some(1_000.0)),
+            ("1,000.5", Some(1_000.5)),
+            ("1.000,5", Some(1_000.5)),
+            ("0.001", Some(0.001)),
+            ("1,5", Some(1.5)),
+            ("12345.678", Some(12_345.678)),
+            ("1.000,", None),
+            ("1.000,x", None),
+            ("1234.000,5", None),
+            ("01.000,5", None),
+            (".5", None),
+            ("1.", None),
+            ("a.5", None),
+            ("1,a", None),
+        ] {
+            assert_eq!(super::parse_conversion_amount(raw), expected);
+        }
+    }
 }

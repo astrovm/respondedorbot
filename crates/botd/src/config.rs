@@ -9,6 +9,7 @@ use bot_adapters::postgres_connection::{
     PostgresConnectionStringError, validate_connection_string,
 };
 use bot_adapters::redis_connection::RedisEndpoint;
+use bot_adapters::telegram_http::{ApiBaseError, validate_api_base};
 use thiserror::Error;
 
 use crate::reconciliation::ReconciliationSettings;
@@ -42,6 +43,8 @@ pub struct ProductionConfig {
     pub instance_name: Option<String>,
     pub redis_endpoint: RedisEndpoint,
     pub admin_user_id: Option<i64>,
+    /// Bot API server other than api.telegram.org, such as a self-hosted one.
+    pub telegram_api_url: Option<String>,
     coinmarketcap_key: String,
     giphy_api_key: Option<String>,
     openrouter_api_key: String,
@@ -114,6 +117,7 @@ impl fmt::Debug for ProductionConfig {
                 &self.redis_endpoint.password.as_ref().map(|_| "[REDACTED]"),
             )
             .field("admin_user_id", &self.admin_user_id)
+            .field("telegram_api_url", &self.telegram_api_url)
             .field("coinmarketcap_configured", &true)
             .field("giphy_configured", &self.giphy_api_key.is_some())
             .field("openrouter_configured", &true)
@@ -167,6 +171,8 @@ pub enum ConfigError {
     MissingDatabaseUrl,
     #[error("SUPABASE_POSTGRES_URL {0}")]
     InvalidDatabaseUrl(#[from] PostgresConnectionStringError),
+    #[error("TELEGRAM_API_URL: {0}")]
+    InvalidTelegramApiUrl(ApiBaseError),
     #[error("TELEGRAM_USERNAME not set")]
     MissingTelegramUsername,
     #[error("COINMARKETCAP_KEY not set")]
@@ -373,6 +379,9 @@ impl ProductionConfig {
                     .map_err(|_| ConfigError::InvalidAdminUserId)
             })
             .transpose()?;
+        let telegram_api_url = optional_trimmed(&lookup, "TELEGRAM_API_URL")
+            .map(|value| validate_api_base(&value).map_err(ConfigError::InvalidTelegramApiUrl))
+            .transpose()?;
         let coinmarketcap_key = optional_trimmed(&lookup, "COINMARKETCAP_KEY")
             .ok_or(ConfigError::MissingCoinMarketCapKey)?;
         let openrouter_api_key = optional_trimmed(&lookup, "OPENROUTER_API_KEY")
@@ -425,6 +434,7 @@ impl ProductionConfig {
             instance_name: optional_trimmed(&lookup, "FRIENDLY_INSTANCE_NAME"),
             redis_endpoint,
             admin_user_id,
+            telegram_api_url,
             coinmarketcap_key,
             giphy_api_key: optional_trimmed(&lookup, "GIPHY_API_KEY"),
             openrouter_api_key,
@@ -499,6 +509,7 @@ mod tests {
     use std::collections::HashMap;
 
     use bot_adapters::postgres_connection::PostgresConnectionStringError;
+    use bot_adapters::telegram_http::ApiBaseError;
 
     use super::{
         ConfigError, MaintenanceConfig, ProductionConfig, RuntimeConfig, TaskVerificationConfig,
@@ -724,6 +735,26 @@ mod tests {
         assert_eq!(config.system_prompt, "soul\n\nrules");
         assert_eq!(config.trigger_words.len(), 6);
         assert_eq!(config.reconciliation_interval.as_secs(), 60);
+        assert_eq!(config.telegram_api_url, None);
+
+        let with_api = |value: &str| {
+            let mut values = base.to_vec();
+            values.push(("TELEGRAM_API_URL", value));
+            production(&values, Some("prompt")).map(|config| config.telegram_api_url)
+        };
+        assert_eq!(
+            with_api(" http://127.0.0.1:8081/ "),
+            Ok(Some("http://127.0.0.1:8081".to_owned()))
+        );
+        assert_eq!(with_api("  "), Ok(None));
+        assert_eq!(
+            with_api("http://bot-api.example.test"),
+            Err(ConfigError::InvalidTelegramApiUrl(ApiBaseError::Insecure))
+        );
+        assert_eq!(
+            ConfigError::InvalidTelegramApiUrl(ApiBaseError::Invalid).to_string(),
+            "TELEGRAM_API_URL: the Telegram API URL is not a valid URL"
+        );
         Ok(())
     }
 

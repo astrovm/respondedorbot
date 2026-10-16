@@ -16,6 +16,7 @@ use url::Url;
 use crate::http_client::shared_client;
 
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
+static CONFIGURED_API_BASE: OnceLock<String> = OnceLock::new();
 const MAX_RESPONSE_BYTES: u64 = 1_048_576;
 pub const TELEGRAM_FILE_MAX_BYTES: u64 = 20_000_000;
 
@@ -149,7 +150,10 @@ impl ReqwestTelegramTransport {
         })
         .map(|client| Self {
             client,
-            api_base: TELEGRAM_API_BASE.to_owned(),
+            api_base: CONFIGURED_API_BASE
+                .get()
+                .map_or(TELEGRAM_API_BASE, String::as_str)
+                .to_owned(),
         })
         .map_err(|_| TransportFailureKind::Request)
     }
@@ -173,10 +177,51 @@ impl ReqwestTelegramTransport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ApiBaseError {
+    #[error("the Telegram API URL is not a valid URL")]
+    Invalid,
+    #[error("the Telegram API URL must use https, or http on a loopback address")]
+    Insecure,
+    #[error("the Telegram API URL was already set")]
+    AlreadySet,
+}
+
+/// Checks a Telegram Bot API base URL. The bot token travels in the URL path,
+/// so plain http is only accepted on the loopback interface.
+pub fn validate_api_base(api_base: &str) -> Result<String, ApiBaseError> {
+    let trimmed = api_base.trim().trim_end_matches('/');
+    let url = Url::parse(trimmed).map_err(|_| ApiBaseError::Invalid)?;
+    if url.cannot_be_a_base() || url.query().is_some() || url.fragment().is_some() {
+        return Err(ApiBaseError::Invalid);
+    }
+    let loopback = match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => return Err(ApiBaseError::Invalid),
+    };
+    match url.scheme() {
+        "https" => Ok(trimmed.to_owned()),
+        "http" if loopback => Ok(trimmed.to_owned()),
+        "http" => Err(ApiBaseError::Insecure),
+        _ => Err(ApiBaseError::Invalid),
+    }
+}
+
+/// Points every Telegram transport built afterwards at another Bot API
+/// server, such as a self-hosted one. It can be set once per process.
+pub fn configure_api_base(api_base: &str) -> Result<(), ApiBaseError> {
+    let api_base = validate_api_base(api_base)?;
+    CONFIGURED_API_BASE
+        .set(api_base)
+        .map_err(|_| ApiBaseError::AlreadySet)
+}
+
 impl TelegramTransport for ReqwestTelegramTransport {
     fn send(&self, request: &TelegramRequest) -> Result<HttpResponse, TransportFailureKind> {
-        // Telegram requires the bot token in this URL path. Production uses
-        // the fixed HTTPS API base above, so this is not cleartext transport.
+        // Telegram requires the bot token in this URL path. The API base is
+        // HTTPS unless it points at loopback, so this is not cleartext transport.
         let url = self.api_url(&request.token, &request.endpoint)?;
         let mut builder = self
             .client
@@ -412,12 +457,72 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        BinaryHttpResponse, HttpResponse, MultipartUpload, ReqwestTelegramTransport,
+        ApiBaseError, BinaryHttpResponse, HttpResponse, MultipartUpload, ReqwestTelegramTransport,
         TELEGRAM_FILE_MAX_BYTES, TelegramFileOutcome, TelegramFileRequest, TelegramFileTransport,
         TelegramHttpError, TelegramHttpOutcome, TelegramMultipartRequest,
         TelegramMultipartTransport, TelegramRequest, TelegramTransport, TransportFailureKind,
-        download_file_with, multipart_request_with, read_limited, request_with, response_outcome,
+        configure_api_base, download_file_with, multipart_request_with, read_limited, request_with,
+        response_outcome, validate_api_base,
     };
+
+    #[test]
+    fn api_base_accepts_https_and_loopback_http_only() {
+        for (input, expected) in [
+            ("https://api.telegram.org", "https://api.telegram.org"),
+            (
+                " https://bot-api.example.test/ ",
+                "https://bot-api.example.test",
+            ),
+            (
+                "https://bot-api.example.test/prefix/",
+                "https://bot-api.example.test/prefix",
+            ),
+            ("http://127.0.0.1:8081", "http://127.0.0.1:8081"),
+            ("http://localhost:8081/", "http://localhost:8081"),
+            ("http://LOCALHOST", "http://LOCALHOST"),
+            ("http://[::1]:8081", "http://[::1]:8081"),
+        ] {
+            assert_eq!(validate_api_base(input), Ok(expected.to_owned()), "{input}");
+        }
+        for (input, expected) in [
+            ("http://bot-api.example.test", ApiBaseError::Insecure),
+            ("http://10.0.0.1:8081", ApiBaseError::Insecure),
+            ("http://[2001:db8::1]", ApiBaseError::Insecure),
+            ("http://localhost.example.test", ApiBaseError::Insecure),
+            ("", ApiBaseError::Invalid),
+            ("api.telegram.org", ApiBaseError::Invalid),
+            ("ftp://127.0.0.1", ApiBaseError::Invalid),
+            ("mailto:bot@example.test", ApiBaseError::Invalid),
+            ("file:///tmp/bot-api", ApiBaseError::Invalid),
+            ("https://api.telegram.org?token=x", ApiBaseError::Invalid),
+            ("https://api.telegram.org#bot", ApiBaseError::Invalid),
+        ] {
+            assert_eq!(validate_api_base(input), Err(expected), "{input}");
+        }
+    }
+
+    #[test]
+    fn api_base_is_configured_once_and_used_by_new_transports() -> TestResult {
+        // Configure the default base so other tests in this binary see no change.
+        assert_eq!(
+            configure_api_base("http://bot-api.example.test"),
+            Err(ApiBaseError::Insecure)
+        );
+        assert_eq!(configure_api_base("https://api.telegram.org/"), Ok(()));
+        assert_eq!(
+            configure_api_base("https://api.telegram.org"),
+            Err(ApiBaseError::AlreadySet)
+        );
+        let transport = ReqwestTelegramTransport::new().map_err(|error| format!("{error:?}"))?;
+        assert_eq!(
+            transport
+                .api_url("synthetic-token", "getMe")
+                .map_err(|error| format!("{error:?}"))?
+                .as_str(),
+            "https://api.telegram.org/botsynthetic-token/getMe"
+        );
+        Ok(())
+    }
 
     /// Read one HTTP/1.1 request: header lines up to the blank line, then
     /// exactly `Content-Length` body bytes.

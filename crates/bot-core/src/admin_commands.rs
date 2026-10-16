@@ -825,4 +825,17 @@ mod tests {
             "alpha=5, zeta=5"
         );
     }
+
+    #[test]
+    fn empty_and_boolean_values_render_like_python() {
+        use serde_json::json;
+        let render = |value: serde_json::Value| super::python_string(Some(&value), "?");
+        assert_eq!(render(json!("")), "?");
+        assert_eq!(render(json!([])), "?");
+        assert_eq!(render(json!({})), "?");
+        assert_eq!(render(json!(true)), "True");
+        assert_eq!(render(json!(false)), "False");
+        assert_eq!(render(json!(["a"])), "[\"a\"]");
+        assert_eq!(render(json!({"a": 1})), "{\"a\":1}");
+    }
 }

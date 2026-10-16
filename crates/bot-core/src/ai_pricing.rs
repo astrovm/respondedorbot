@@ -391,7 +391,8 @@ fn transcription_cost(
         return Ok(0);
     }
     let value = (seconds.max(minimum_seconds) * usd_micros_per_hour / 3_600.0).ceil();
-    if value > i64::MAX as f64 {
+    // `i64::MAX as f64` rounds up to 2^63, which no longer fits.
+    if value >= i64::MAX as f64 {
         return Err(AiPricingError::Overflow);
     }
     Ok(value as i64)
@@ -591,7 +592,10 @@ pub fn calculate_billing_for_segments(segments: &Value) -> Result<Value, AiPrici
 mod tests {
     use serde_json::{Value, json};
 
-    use super::{AiPricingError, ExactDecimal, calculate_billing_for_segments};
+    use super::{
+        AiPricingError, ExactDecimal, calculate_billing_for_segments, format_credit_units,
+        transcription_cost,
+    };
 
     #[test]
     fn prices_external_provider_payload_fixtures() -> Result<(), Box<dyn std::error::Error>> {
@@ -1005,5 +1009,138 @@ mod tests {
         }]))?;
         assert_eq!(output["model_breakdown"][0]["input_tokens"], i64::MAX);
         Ok(())
+    }
+
+    #[test]
+    fn signs_are_only_accepted_before_the_number() {
+        for raw in [".+5", ".-5", "1.+5", "+-1", "--1", "1e"] {
+            assert!(ExactDecimal::parse_str(raw).is_none(), "{raw}");
+        }
+        assert!(ExactDecimal::parse_str("+.5").is_some());
+    }
+
+    #[test]
+    fn fixed_strings_sign_only_negative_values() -> Result<(), AiPricingError> {
+        let parse = |raw: &str| ExactDecimal::parse_str(raw).ok_or(AiPricingError::InvalidValue);
+        assert_eq!(parse("0.00")?.fixed_string()?, "0.00");
+        assert_eq!(parse("-1.50")?.fixed_string()?, "-1.50");
+        assert_eq!(parse("1.50")?.fixed_string()?, "1.50");
+        Ok(())
+    }
+
+    #[test]
+    fn reconciled_usage_accepts_zero_but_never_a_negative_cost() -> Result<(), AiPricingError> {
+        let reconciled = |usage: Value| {
+            calculate_billing_for_segments(&json!([{
+                "kind": "chat",
+                "model": "unknown/model",
+                "usage": usage,
+                "metadata": {"provider": "openrouter", "usage_reconciled": true}
+            }]))
+        };
+        let zero = reconciled(json!({"cost": "0"}))?;
+        assert_eq!(
+            zero["segment_breakdown"][0]["pricing_basis"],
+            "provider_reported"
+        );
+        assert_eq!(zero["pricing_complete"], true);
+        for usage in [
+            json!({"cost": "-0.5"}),
+            json!({"cost_details": {"upstream_inference_cost": "-0.5"}}),
+        ] {
+            let negative = reconciled(usage)?;
+            assert_eq!(negative["segment_breakdown"][0]["pricing_basis"], "missing");
+            assert_eq!(negative["raw_usd_micros"], 0);
+            assert_eq!(negative["pricing_complete"], false);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_transcription_pricing_applies_unless_openrouter_reported_a_cost()
+    -> Result<(), AiPricingError> {
+        let price = |provider: &str, usage: Option<Value>| {
+            let mut segment = json!({
+                "kind": "transcribe",
+                "model": "whisper-large-v3",
+                "audio_seconds": 60,
+                "metadata": {"provider": provider}
+            });
+            if let Some(usage) = usage {
+                segment["usage"] = usage;
+            }
+            calculate_billing_for_segments(&json!([segment]))
+        };
+        let reported = Some(json!({"cost": "0.001"}));
+        let openrouter = price("openrouter", reported.clone())?;
+        assert_eq!(openrouter["model_breakdown"][0]["usd_micros"], 1_000);
+        assert!(
+            openrouter["model_breakdown"][0]
+                .get("audio_seconds")
+                .is_none()
+        );
+        for legacy in [price("groq", reported)?, price("openrouter", None)?] {
+            assert_eq!(legacy["model_breakdown"][0]["audio_seconds"], 60.0);
+        }
+        let not_transcription = calculate_billing_for_segments(&json!([{
+            "kind": "chat",
+            "model": "whisper-large-v3",
+            "audio_seconds": 60
+        }]))?;
+        assert!(
+            not_transcription["model_breakdown"][0]
+                .get("audio_seconds")
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn transcription_cost_rejects_values_past_the_integer_range() {
+        let two_pow_63 = 9_223_372_036_854_775_808.0;
+        assert_eq!(
+            transcription_cost(two_pow_63, 0.0, 3_600.0),
+            Err(AiPricingError::Overflow)
+        );
+        assert_eq!(
+            transcription_cost(two_pow_63 / 2.0, 0.0, 3_600.0),
+            Ok(4_611_686_018_427_387_904)
+        );
+    }
+
+    #[test]
+    fn credit_displays_have_two_decimals() -> Result<(), AiPricingError> {
+        assert_eq!(format_credit_units(0), "0.00");
+        assert_eq!(format_credit_units(5), "0.05");
+        assert_eq!(format_credit_units(1_234), "12.34");
+        let search = calculate_billing_for_segments(&json!([{
+            "kind": "web_search",
+            "source": "firecrawl",
+            "metadata": {"web_search_requests": 1, "firecrawl_credits_used": 2}
+        }]))?;
+        assert_eq!(search["charged_credits_display"], "0.34");
+        Ok(())
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn decimal_text_round_trips_at_its_own_scale(
+            whole in 0_u64..1_000_000_000_000,
+            fraction in 0_u64..1_000_000_000_000,
+            scale in 1_usize..=12,
+            negative in proptest::prelude::any::<bool>(),
+        ) {
+            let fraction = fraction % 10_u64.pow(scale as u32);
+            let text = format!("{}{whole}.{fraction:0scale$}", if negative { "-" } else { "" });
+            let parsed = ExactDecimal::parse_str(&text);
+            proptest::prop_assert!(parsed.is_some());
+            let rendered = parsed.map(ExactDecimal::fixed_string);
+            let expected = if negative && whole == 0 && fraction == 0 {
+                format!("{whole}.{fraction:0scale$}")
+            } else {
+                text.clone()
+            };
+            proptest::prop_assert_eq!(rendered, Some(Ok(expected)));
+        }
     }
 }

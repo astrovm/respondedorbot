@@ -99,4 +99,12 @@ mod tests {
         );
         assert_eq!(truncate_report("abcdef", 3, "long"), "\n\n[long]");
     }
+
+    #[test]
+    fn underscores_only_separate_digits() {
+        assert_eq!(parse_creditlog_limit("1_0"), CreditLogLimit::Valid(10));
+        for raw in ["_10", "10_", "1__0"] {
+            assert_eq!(parse_creditlog_limit(raw), CreditLogLimit::Invalid);
+        }
+    }
 }

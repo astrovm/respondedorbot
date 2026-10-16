@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 use bot_adapters::billing_schema::BillingSchemaRepository;
 use bot_adapters::chat_config::ChatConfigRepository;
 use bot_adapters::openrouter_chat::{DEFAULT_OPENROUTER_BASE_URL, OpenRouterPricingCache};
-use bot_adapters::telegram_http::{ReqwestTelegramTransport, TransportFailureKind};
+use bot_adapters::telegram_http::{
+    ReqwestTelegramTransport, TransportFailureKind, configure_api_base,
+};
 use bot_adapters::telegram_polling::PollFailure;
 use bot_core::locale::Locale;
 use bot_core::telegram_commands::{chat_command_menu_action, command_publication_actions};
@@ -351,7 +353,15 @@ impl Drop for BackgroundReports {
     }
 }
 
+/// Points every Telegram transport at the configured Bot API server.
+fn configure_telegram_api(api_url: Option<&str>) -> Result<(), String> {
+    api_url.map_or(Ok(()), |api_url| {
+        configure_api_base(api_url).map_err(|error| format!("TELEGRAM_API_URL: {error}"))
+    })
+}
+
 pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
+    configure_telegram_api(config.telegram_api_url.as_deref())?;
     BillingSchemaRepository::new(config.database_url())
         .ensure_schema()
         .map_err(|error| format!("could not initialize billing schema: {error}"))?;
@@ -461,10 +471,11 @@ mod tests {
     use bot_core::telegram_actions::TelegramAction;
 
     use super::{
-        BackgroundReports, ShutdownHandler, build_operational_reporter, install_shutdown_handler,
-        interruptible_wait, log_and_queue, opennode_options, poll_retry_report, poll_until_stopped,
-        publish_commands, refresh_chat_menus, report_best_effort, retry_delay, run_polling_until,
-        telegram_transport, update_failure_report,
+        BackgroundReports, ShutdownHandler, build_operational_reporter, configure_telegram_api,
+        install_shutdown_handler, interruptible_wait, log_and_queue, opennode_options,
+        poll_retry_report, poll_until_stopped, publish_commands, refresh_chat_menus,
+        report_best_effort, retry_delay, run_polling_until, telegram_transport,
+        update_failure_report,
     };
     use crate::config::ProductionConfig;
     use crate::dispatcher::{ActionReceipt, ActionSink};
@@ -871,6 +882,16 @@ mod tests {
         }
 
         assert!(build_operational_reporter(&config(None)).is_ok());
+        assert_eq!(configure_telegram_api(None), Ok(()));
+        // The default base, so other tests in this binary see no change.
+        assert_eq!(
+            configure_telegram_api(Some("https://api.telegram.org")),
+            Ok(())
+        );
+        assert_eq!(
+            configure_telegram_api(Some("https://api.telegram.org")),
+            Err("TELEGRAM_API_URL: the Telegram API URL was already set".to_owned())
+        );
         assert!(telegram_transport(ReqwestTelegramTransport::new(), "admin reporting").is_ok());
         let refused = telegram_transport(Err(TransportFailureKind::Request), "admin reporting");
         assert_eq!(

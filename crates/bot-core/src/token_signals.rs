@@ -2158,4 +2158,59 @@ mod tests {
         let caption = format_signal_caption(&signal, 1_700_000_000 + 3 * 86_400);
         assert!(caption.contains("#SOL, 3d\n"), "{caption}");
     }
+
+    #[test]
+    fn chart_candles_must_be_consistent_and_near_the_live_price() {
+        let usable = super::is_usable_chart_candle;
+        assert!(usable(&[1.0, 10.0, 12.0, 9.0, 11.0], Some(10.0)));
+        for candle in [
+            [1.0, 10.0, 9.0, 12.0, 11.0],
+            [1.0, 8.0, 12.0, 9.0, 11.0],
+            [1.0, 13.0, 12.0, 9.0, 11.0],
+            [1.0, 10.0, 12.0, 9.0, 8.0],
+            [1.0, 10.0, 12.0, 9.0, 13.0],
+            [1.0, 0.0, 12.0, 9.0, 11.0],
+            [1.0, f64::NAN, 12.0, 9.0, 11.0],
+            [f64::NAN, 10.0, 12.0, 9.0, 11.0],
+        ] {
+            assert!(!usable(&candle, None));
+        }
+        assert!(!usable(&[1.0, 10.0, 12.0, 9.0], None));
+        // Far from the live price in either direction.
+        assert!(!usable(&[1.0, 10.0, 12.0, 9.0, 11.0], Some(0.000_001)));
+        assert!(!usable(&[1.0, 10.0, 12.0, 9.0, 11.0], Some(100_000_000.0)));
+        // An unusable live price is ignored.
+        assert!(usable(&[1.0, 10.0, 12.0, 9.0, 11.0], Some(0.0)));
+        assert!(usable(&[1.0, 10.0, 12.0, 9.0, 11.0], Some(f64::NAN)));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn usable_candles_keep_open_and_close_inside_the_range(
+            values in proptest::array::uniform4(-10.0_f64..1_000.0),
+            reference in proptest::option::of(-10.0_f64..1_000.0),
+        ) {
+            let candle = [0.0, values[0], values[1], values[2], values[3]];
+            if super::is_usable_chart_candle(&candle, reference) {
+                let [open, high, low, close] = values;
+                proptest::prop_assert!(low > 0.0 && low <= high);
+                proptest::prop_assert!((low..=high).contains(&open));
+                proptest::prop_assert!((low..=high).contains(&close));
+            }
+        }
+    }
+
+    #[test]
+    fn token_queries_reject_spaces_and_overlong_slugs() {
+        assert_eq!(detect_signal_query("two words"), None);
+        assert_eq!(detect_signal_query("   "), None);
+        let slug = |length: usize| {
+            detect_signal_query(&format!(
+                "https://coinmarketcap.com/currencies/{}/",
+                "a".repeat(length)
+            ))
+        };
+        assert_eq!(slug(128), Some(SignalQuery::Slug("a".repeat(128))));
+        assert_eq!(slug(129), None);
+    }
 }

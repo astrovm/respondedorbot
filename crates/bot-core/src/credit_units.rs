@@ -90,9 +90,9 @@ pub fn parse_credit_units(value: &str) -> Option<CreditUnits> {
 
     let mut exponent_parts = unsigned.split(['e', 'E']);
     let mantissa = exponent_parts.next()?;
+    // An empty exponent ("1e") fails to parse, so it is rejected too.
     let exponent = match exponent_parts.next() {
-        Some(raw) if !raw.is_empty() => raw.parse::<i32>().ok()?,
-        Some(_) => return None,
+        Some(raw) => raw.parse::<i32>().ok()?,
         None => 0,
     };
     if exponent_parts.next().is_some() {
@@ -298,5 +298,14 @@ mod tests {
             assert_eq!(parse_credit_units(value), None, "{value}");
         }
         assert_eq!(parse_credit_units("+1e-2"), Some(CreditUnits::new(1)));
+    }
+
+    #[test]
+    fn signs_and_exponents_are_only_accepted_in_their_place() {
+        for raw in [".+5", ".-5", "1.+5", "1e", "1e+", "1e1e1", "1.2.3"] {
+            assert_eq!(parse_credit_units(raw), None, "{raw}");
+        }
+        assert!(parse_credit_units("1e1").is_some());
+        assert!(parse_credit_units("+.5").is_some());
     }
 }

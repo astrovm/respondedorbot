@@ -108,6 +108,8 @@ pub fn convert_base(input: &str) -> Result<BaseConversion, UnsupportedNumericInp
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::{BaseConversion, convert_base};
 
     #[test]
@@ -203,5 +205,51 @@ mod tests {
                 target: 36,
             })
         );
+    }
+
+    fn render(mut value: u128, base: u32) -> String {
+        let mut digits = Vec::new();
+        while value > 0 {
+            digits.push(char::from(
+                super::DIGITS[(value % u128::from(base)) as usize],
+            ));
+            value /= u128::from(base);
+        }
+        digits.iter().rev().collect()
+    }
+
+    proptest! {
+        #[test]
+        fn converts_any_number_between_any_two_bases(
+            value in any::<u128>(),
+            source in 2_u32..=36,
+            target in 2_u32..=36,
+            lowercase in any::<bool>(),
+        ) {
+            let mut number = render(value, source);
+            if number.is_empty() {
+                number = "0".to_owned();
+            }
+            if lowercase {
+                number = number.to_lowercase();
+            }
+            let converted = convert_base(&format!("{number}, {source}, {target}"));
+            prop_assert_eq!(
+                converted,
+                Ok(BaseConversion::Success {
+                    number,
+                    source,
+                    result: render(value, target),
+                    target,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn non_ascii_digits_in_any_field_are_unsupported() {
+        assert!(convert_base("٣, 10, 2").is_err());
+        assert!(convert_base("3, ١٠, 2").is_err());
+        assert!(convert_base("3, 10, ٢").is_err());
     }
 }

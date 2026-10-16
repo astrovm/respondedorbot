@@ -1,0 +1,1 @@
+{"id": "g", "model": "m", "choices": [{"message": {"content": "hola", "tool_calls": [{"id": "t", "type": "function", "function": {"name": "calculate", "arguments": "{\"expression\":\"1+1\"}"}}]}, "finish_reason": "tool_calls"}], "usage": {"prompt_tokens": 1, "completion_tokens": 2, "cost": 0.0001}}

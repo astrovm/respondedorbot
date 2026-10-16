@@ -83,4 +83,11 @@ mod tests {
         assert_eq!(super::group_integer_digits("123456"), "123,456");
         assert_eq!(super::group_integer_digits("-123"), "-123");
     }
+
+    #[test]
+    fn zero_or_missing_peso_prices_are_rejected() {
+        assert!(super::format_satoshi_quote(50_000.0, 0.0).is_err());
+        assert!(super::format_satoshi_quote(50_000.0, f64::NAN).is_err());
+        assert!(super::format_satoshi_quote(f64::NAN, 1.0).is_err());
+    }
 }

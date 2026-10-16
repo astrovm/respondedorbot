@@ -1007,6 +1007,11 @@ mod tests {
         ));
         for (data, requester, expected) in [
             ("chg:55:0:o:29:-180", Some(55), "This button expired"),
+            ("chg:55:21:o:29:-180", Some(55), "This button expired"),
+            ("chg:55:2:o:0:-180", Some(55), "This button expired"),
+            ("chg:55:2:o:-29:-180", Some(55), "This button expired"),
+            ("chg:55:2:o:29:841", Some(55), "This button expired"),
+            ("chg:55:2:o:29:-841", Some(55), "This button expired"),
             ("chg:55:2:x:29:-180", Some(55), "This button expired"),
             ("chg:55:2:o:29:-180", Some(99), "This history is not yours"),
         ] {
@@ -1243,6 +1248,9 @@ mod tests {
             ("2023-02-29T10:00", None),
             ("2024-02-29T10:00", Some("29/02 10:00")),
             ("2026-08-26T24:00", None),
+            ("2026-08-26T23:60", None),
+            ("1900-02-29T10:00", None),
+            ("2000-02-29T10:00", Some("29/02 10:00")),
         ] {
             for (locale, fallback) in [(Locale::Es, "sin fecha"), (Locale::En, "no date")] {
                 let page = ChargeHistoryPage {
@@ -1267,5 +1275,36 @@ mod tests {
                 assert_eq!(stamp, expected.unwrap_or(fallback), "{created_at}");
             }
         }
+    }
+
+    #[test]
+    fn page_buttons_need_both_a_flag_and_a_cursor() {
+        let page = |has_newer: bool,
+                    newer_cursor: Option<i64>,
+                    has_older: bool,
+                    older_cursor: Option<i64>| {
+            ChargeHistoryPage {
+                groups: vec![single_entry_group(
+                    1,
+                    "2026-08-26T17:00",
+                    "ai_settlement_result",
+                    json!({"settled_credit_units": 1}),
+                )],
+                has_newer,
+                has_older,
+                newer_cursor,
+                older_cursor,
+            }
+        };
+        let buttons = |page: ChargeHistoryPage| {
+            format!(
+                "{:?}",
+                render_charge_history_page(&page, 55, 10, 0, Locale::En).1
+            )
+        };
+        assert!(buttons(page(true, Some(3), true, Some(1))).contains(":n:3:"));
+        assert!(buttons(page(true, Some(3), true, Some(1))).contains(":o:1:"));
+        let without_cursors = buttons(page(true, None, true, None));
+        assert!(!without_cursors.contains(":n:") && !without_cursors.contains(":o:"));
     }
 }
