@@ -38,8 +38,9 @@ exported source lines are covered. It still rejects any uncovered source line.
 3. Adapter tests use fake HTTP transports and real Redis/PostgreSQL where persistence semantics matter.
 4. Integration tests cover billing replay/refund policy, scheduler claiming/advancement, Redis state, PostgreSQL schema and transactions, and real FFmpeg normalization.
 5. Lifecycle tests cover polling offsets, retries, worker failure reporting, graceful shutdown, cancellation, and restart-safe claims.
-6. Container verification builds the release image and confirms `botd` is executable.
-7. Legacy-data migration tests cover dry-run behavior, idempotent application,
+6. The end-to-end test (`crates/botd/tests/telegram_end_to_end.rs`) runs the real `botd` binary against fake Telegram and OpenRouter servers (through `TELEGRAM_API_URL` and `OPENROUTER_BASE_URL`) with real PostgreSQL and Redis. It checks the command menus, `/help`, a plain command, a billed `/ask` reply, a button press, and a clean shutdown. A dead proxy blocks every other outbound request.
+7. Container verification builds the release image and confirms `botd` is executable.
+8. Legacy-data migration tests cover dry-run behavior, idempotent application,
    record versioning, task reconstruction, and conditional Redis writes.
 
 ## Critical scenarios
