@@ -56,7 +56,8 @@ fn parse_duration(raw: &str) -> Option<i64> {
         return None;
     }
     let value = amount.parse::<f64>().ok()?.checked_mul(multiplier)?;
-    if value.is_finite() && value <= i64::MAX as f64 {
+    // `checked_mul` already rejected infinities, so only the range is left.
+    if value <= i64::MAX as f64 {
         Some(value.trunc() as i64)
     } else {
         None

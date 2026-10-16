@@ -391,8 +391,9 @@ pub fn signal_market_values_with_candles(
     timeframe: Option<&str>,
     candles: Option<&[Vec<f64>]>,
 ) -> (String, String) {
+    // `number` only returns finite values.
     let price = number(&signal.pair.price_usd);
-    let price = if price.is_finite() && price > 0.0 {
+    let price = if price > 0.0 {
         format_money(price, true).trim_start_matches('$').to_owned()
     } else {
         "N/A".to_owned()

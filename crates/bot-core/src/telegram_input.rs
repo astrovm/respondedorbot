@@ -800,10 +800,10 @@ mod tests {
     }
 
     #[test]
-    fn falsy_polls_are_ignored() {
+    fn falsy_poll_options_are_ignored() {
         assert_eq!(
-            extract_message_content(&json!({"text":"hola","poll":0})),
-            extract_message_content(&json!({"text":"hola"}))
+            extract_message_content(&json!({"poll":{"question":"q","options":0}})),
+            extract_message_content(&json!({"poll":{"question":"q"}}))
         );
     }
 }

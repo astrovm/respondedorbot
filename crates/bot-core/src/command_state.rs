@@ -285,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn slash_commands_without_a_mention_still_mention_the_bot() {
+    fn slash_commands_and_mentions_both_mention_the_bot() {
         let plan = prepare_incoming_command_state(IncomingCommandState {
             chat_id: ChatId(-42),
             message_id: MessageId(7),
@@ -308,13 +308,13 @@ mod tests {
             first_name: Some("Synthetic"),
             username: None,
             is_bot: false,
-            text: "hola",
+            text: "hola @bot",
             is_group: false,
             timestamp: 1_672_531_200,
         });
         assert_eq!(
             plan.ok().map(|plan| plan.message.mentions_bot).as_deref(),
-            Some("0")
+            Some("1")
         );
     }
 }
