@@ -296,7 +296,7 @@ pub const fn weekday_name(value: Weekday) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc, Weekday};
+    use chrono::{Datelike, TimeZone, Utc, Weekday};
 
     use super::{
         DueDecision, ScheduledTask, TaskId, TaskSchedule, TaskStateError, evaluate_due,
@@ -563,5 +563,112 @@ mod tests {
             next_run_after(&TaskSchedule::IntervalDays { days: 0 }, 0, 0, 10),
             Err(TaskStateError::InvalidInterval)
         );
+    }
+
+    #[test]
+    fn cron_accepts_the_last_hour_and_minute_and_rejects_the_next() {
+        let after = timestamp(2026, 8, 30, 12, 0);
+        let cron = |hour: u32, minute: u32| {
+            next_run_after(
+                &TaskSchedule::Cron {
+                    hour,
+                    minute,
+                    weekdays: Vec::new(),
+                    day: None,
+                },
+                0,
+                after,
+                after,
+            )
+        };
+        assert_eq!(cron(23, 59), Ok(Some(timestamp(2026, 8, 30, 23, 59))));
+        assert_eq!(cron(24, 0), Err(TaskStateError::InvalidCron));
+        assert_eq!(cron(0, 60), Err(TaskStateError::InvalidCron));
+    }
+
+    #[test]
+    fn cron_occurrence_at_the_reference_instant_moves_to_the_next_day() {
+        let at = timestamp(2026, 8, 30, 8, 30);
+        let schedule = TaskSchedule::Cron {
+            hour: 8,
+            minute: 30,
+            weekdays: Vec::new(),
+            day: None,
+        };
+        assert_eq!(
+            next_run_after(&schedule, 0, at, at),
+            Ok(Some(timestamp(2026, 8, 31, 8, 30)))
+        );
+    }
+
+    #[test]
+    fn a_task_is_due_exactly_at_its_scheduled_time() {
+        let at = timestamp(2026, 8, 30, 8, 30);
+        assert_eq!(
+            evaluate_due(&task(TaskSchedule::Once, Some(at)), at - 1),
+            Ok(DueDecision::Wait)
+        );
+        assert!(matches!(
+            evaluate_due(&task(TaskSchedule::Once, Some(at)), at),
+            Ok(DueDecision::Execute { scheduled_for, .. }) if scheduled_for == at
+        ));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn intervals_land_on_the_anchor_grid_just_after_now(
+            interval in 1_i64..10_000_000,
+            current in 0_i64..4_000_000_000,
+            elapsed in 0_i64..1_000_000_000,
+        ) {
+            let after = current + elapsed;
+            let next = next_run_after(&TaskSchedule::IntervalSeconds { seconds: interval }, 0, current, after);
+            let Ok(Some(next)) = next else {
+                return Err(proptest::test_runner::TestCaseError::fail(format!("{next:?}")));
+            };
+            proptest::prop_assert!(next > after);
+            proptest::prop_assert!(next - after <= interval);
+            proptest::prop_assert_eq!((next - current) % interval, 0);
+        }
+
+        #[test]
+        fn daily_cron_runs_at_its_local_time_within_a_day(
+            hour in 0_u32..24,
+            minute in 0_u32..60,
+            offset in -12_i32..=14,
+            after in 0_i64..4_000_000_000,
+        ) {
+            let schedule = TaskSchedule::Cron { hour, minute, weekdays: Vec::new(), day: None };
+            let next = next_run_after(&schedule, offset, after, after);
+            let Ok(Some(next)) = next else {
+                return Err(proptest::test_runner::TestCaseError::fail(format!("{next:?}")));
+            };
+            proptest::prop_assert!(next > after);
+            proptest::prop_assert!(next - after <= 86_400);
+            let local_seconds = (next + i64::from(offset) * 3_600).rem_euclid(86_400);
+            proptest::prop_assert_eq!(local_seconds, i64::from(hour * 3_600 + minute * 60));
+        }
+
+        #[test]
+        fn weekly_cron_runs_on_a_chosen_weekday_within_a_week(
+            days in proptest::collection::btree_set(0_u8..7, 1..7),
+            hour in 0_u32..24,
+            offset in -12_i32..=14,
+            after in 0_i64..4_000_000_000,
+        ) {
+            let weekdays = days
+                .iter()
+                .filter_map(|day| Weekday::try_from(*day).ok())
+                .collect::<Vec<_>>();
+            let schedule = TaskSchedule::Cron { hour, minute: 0, weekdays: weekdays.clone(), day: None };
+            let next = next_run_after(&schedule, offset, after, after);
+            let Ok(Some(next)) = next else {
+                return Err(proptest::test_runner::TestCaseError::fail(format!("{next:?}")));
+            };
+            proptest::prop_assert!(next > after);
+            proptest::prop_assert!(next - after <= 7 * 86_400);
+            let local = Utc.timestamp_opt(next + i64::from(offset) * 3_600, 0).single();
+            proptest::prop_assert!(local.is_some_and(|local| weekdays.contains(&local.weekday())));
+        }
     }
 }

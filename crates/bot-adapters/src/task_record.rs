@@ -309,11 +309,14 @@ pub fn encode_task_record(document: &TaskRecordDocument) -> Result<String, TaskR
 
 #[cfg(test)]
 mod tests {
-    use bot_core::scheduled_tasks::TaskSchedule;
+    use std::collections::BTreeMap;
+
+    use bot_core::scheduled_tasks::{ScheduledTask, TaskId, TaskSchedule};
     use chrono::Weekday;
+    use proptest::prelude::*;
     use serde_json::{Value, json};
 
-    use super::{TaskRecordError, decode_task_record, encode_task_record};
+    use super::{TaskRecordDocument, TaskRecordError, decode_task_record, encode_task_record};
 
     #[test]
     fn round_trips_canonical_cron_and_preserves_unknown_fields() -> Result<(), TaskRecordError> {
@@ -523,5 +526,82 @@ mod tests {
             ),
             Err(TaskRecordError::InvalidTimestamp("run_date"))
         ));
+    }
+
+    #[test]
+    fn unknown_numeric_fields_do_not_drift_across_rewrites() -> Result<(), TaskRecordError> {
+        // Found by fuzzing: an integer too large for u64 is stored as a float,
+        // and inexact float parsing changed it on every rewrite.
+        let payload = r#"{"schema_version":1,"id":"abc12345","chat_id":"1","text":"x","run_date":"2026-08-30T12:00:00Z","newer":{"big":30777277777777757707777777388888}}"#;
+        let first = encode_task_record(&decode_task_record(payload)?)?;
+        let second = encode_task_record(&decode_task_record(&first)?)?;
+        assert_eq!(second, first);
+        Ok(())
+    }
+
+    fn schedules() -> impl Strategy<Value = TaskSchedule> {
+        let weekdays = proptest::collection::btree_set(0_u8..7, 0..7).prop_map(|days| {
+            days.into_iter()
+                .filter_map(|day| Weekday::try_from(day).ok())
+                .collect::<Vec<_>>()
+        });
+        prop_oneof![
+            Just(TaskSchedule::Once),
+            (300_i64..=604_800).prop_map(|seconds| TaskSchedule::IntervalSeconds { seconds }),
+            (1_i64..=90).prop_map(|days| TaskSchedule::IntervalDays { days }),
+            (
+                0_u32..24,
+                0_u32..60,
+                weekdays,
+                proptest::option::of(1_u32..=31)
+            )
+                .prop_map(|(hour, minute, weekdays, day)| TaskSchedule::Cron {
+                    hour,
+                    minute,
+                    weekdays,
+                    day,
+                }),
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn valid_tasks_survive_encoding_and_decoding(
+            id in "[A-Za-z0-9_-]{1,32}",
+            chat_id in any::<i64>(),
+            text in "\\PC{1,200}",
+            user_name in "\\PC{0,40}",
+            user_id in proptest::option::of(any::<i64>()),
+            schedule in schedules(),
+            timezone_offset in -12_i32..=14,
+            english in any::<bool>(),
+            anchor in proptest::option::of(0_i64..4_000_000_000),
+            next_run_at in 0_i64..4_000_000_000,
+            last_execution in proptest::option::of(0_i64..4_000_000_000),
+        ) {
+            let task = ScheduledTask {
+                id: TaskId::new(id.clone()).map_err(|error| TestCaseError::fail(error.to_string()))?,
+                chat_id: chat_id.to_string(),
+                text,
+                user_name,
+                user_id,
+                schedule,
+                timezone_offset,
+                locale: if english { "en" } else { "es" }.to_owned(),
+                schedule_anchor_at: anchor,
+                next_run_at: Some(next_run_at),
+                last_execution_id: last_execution.map(|at| format!("{id}:{at}")),
+            };
+            let document = TaskRecordDocument {
+                task,
+                run_date: None,
+                extra: BTreeMap::new(),
+            };
+            let encoded = encode_task_record(&document)
+                .map_err(|error| TestCaseError::fail(error.to_string()))?;
+            let decoded = decode_task_record(&encoded)
+                .map_err(|error| TestCaseError::fail(format!("{error}: {encoded}")))?;
+            prop_assert_eq!(decoded.task, document.task);
+        }
     }
 }

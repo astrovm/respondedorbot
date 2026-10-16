@@ -488,4 +488,64 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn delays_and_intervals_accept_their_exact_maximum() {
+        let delay = |seconds: i64| {
+            parse_task_trigger(TaskTriggerInput {
+                delay_seconds: IntegerInput::Value(seconds),
+                ..input(TriggerConfigInput::Missing)
+            })
+        };
+        assert_eq!(
+            delay(315_360_000),
+            Ok(TaskTrigger::Delay {
+                seconds: 315_360_000
+            })
+        );
+        assert_eq!(delay(315_360_001), Err(TriggerError::DelayMaximum));
+        let interval = |seconds: i64| {
+            parse_task_trigger(TaskTriggerInput {
+                interval_seconds: IntegerInput::Value(seconds),
+                ..input(TriggerConfigInput::Missing)
+            })
+        };
+        assert_eq!(
+            interval(604_800),
+            Ok(TaskTrigger::IntervalSeconds { seconds: 604_800 })
+        );
+        assert_eq!(interval(604_801), Err(TriggerError::IntervalMaximum));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn delays_are_valid_from_one_second_to_ten_years(seconds in proptest::prelude::any::<i64>()) {
+            let parsed = parse_task_trigger(TaskTriggerInput {
+                delay_seconds: IntegerInput::Value(seconds),
+                ..input(TriggerConfigInput::Missing)
+            });
+            let expected = match seconds {
+                1..=315_360_000 => Ok(TaskTrigger::Delay { seconds }),
+                ..=0 => Err(TriggerError::DelayPositive),
+                _ => Err(TriggerError::DelayMaximum),
+            };
+            proptest::prop_assert_eq!(parsed, expected);
+        }
+
+        #[test]
+        fn intervals_are_valid_from_five_minutes_to_a_week(seconds in proptest::prelude::any::<i64>()) {
+            let parsed = parse_task_trigger(TaskTriggerInput {
+                interval_seconds: IntegerInput::Value(seconds),
+                ..input(TriggerConfigInput::Missing)
+            });
+            match seconds {
+                300..=604_800 => proptest::prop_assert_eq!(
+                    parsed,
+                    Ok(TaskTrigger::IntervalSeconds { seconds })
+                ),
+                605_000.. => proptest::prop_assert_eq!(parsed, Err(TriggerError::IntervalMaximum)),
+                _ => proptest::prop_assert!(parsed.is_err()),
+            }
+        }
+    }
 }

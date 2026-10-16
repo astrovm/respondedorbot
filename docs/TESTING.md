@@ -31,6 +31,24 @@ The source-line check avoids a [Rust/LLVM reporting bug](https://github.com/rust
 that can count uncovered generic instantiations in the summary even when all
 exported source lines are covered. It still rejects any uncovered source line.
 
+## Fuzzing
+
+`fuzz/` holds [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) targets for everything that reads untrusted input: Telegram updates, text users type, link repair, fetched web pages, OpenRouter replies (whole and streamed), and stored task records. CI runs each one for a minute. Run them longer locally:
+
+```bash
+cd fuzz
+cargo +nightly fuzz run user_text corpus/user_text seeds/user_text -- -max_total_time=900
+```
+
+## Mutation testing
+
+CI runs [cargo-mutants](https://mutants.rs/) on the `bot-core` lines a pull request changes, and fails on any mutant the tests miss. Run the same check locally:
+
+```bash
+git diff origin/main...HEAD -- crates/bot-core/src > pr.diff
+cargo mutants --in-diff pr.diff -p bot-core
+```
+
 ## Test layers
 
 1. Unit and property tests cover parsing, formatting, routing, accounting, idempotency, and state machines.

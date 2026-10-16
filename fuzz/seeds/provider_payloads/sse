@@ -1,0 +1,10 @@
+data: {"id":"g","choices":[{"delta":{"content":"ho"}}]}
+
+: keepalive
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"t","function":{"name":"calc","arguments":"{"}}]}}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}
+
+data: [DONE]
+

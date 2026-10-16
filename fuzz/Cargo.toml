@@ -1,0 +1,60 @@
+[package]
+name = "respondedorbot-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+bot-adapters = { path = "../crates/bot-adapters" }
+bot-core = { path = "../crates/bot-core" }
+libfuzzer-sys = "0.4.13"
+serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
+
+# Kept out of the main workspace: cargo-fuzz needs nightly.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "telegram_updates"
+path = "fuzz_targets/telegram_updates.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "user_text"
+path = "fuzz_targets/user_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "links"
+path = "fuzz_targets/links.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "web_pages"
+path = "fuzz_targets/web_pages.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "provider_payloads"
+path = "fuzz_targets/provider_payloads.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "task_records"
+path = "fuzz_targets/task_records.rs"
+test = false
+doc = false
+bench = false

@@ -652,4 +652,9 @@ mod tests {
             proptest::prop_assert_eq!(decoded, poll);
         }
     }
+
+    #[test]
+    fn polls_are_kept_for_thirty_days() {
+        assert_eq!(POLL_TTL_SECONDS, 2_592_000);
+    }
 }

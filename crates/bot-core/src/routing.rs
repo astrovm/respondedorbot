@@ -491,4 +491,33 @@ mod tests {
             let _decision = should_auto_process_media(&value);
         }
     }
+
+    #[test]
+    fn only_non_ai_command_followups_are_ignored_when_followups_are_off() {
+        let reply = |non_ai_followup: bool| {
+            evaluate_response_routing(&ResponseRoutingInput {
+                is_reply: true,
+                is_non_ai_command_followup: non_ai_followup,
+                ai_command_followups: false,
+                trigger_words: Some(Vec::new()),
+                ..response_input()
+            })
+        };
+        assert_eq!(reply(true), ResponseRoutingEvaluation::Ignore);
+        assert_eq!(reply(false), ResponseRoutingEvaluation::Respond);
+    }
+
+    #[test]
+    fn random_replies_fire_below_one_in_ten_only() {
+        let sampled = |sample: f64| {
+            evaluate_response_routing(&ResponseRoutingInput {
+                message_text: "che gordo".to_owned(),
+                trigger_words: Some(vec!["gordo".to_owned()]),
+                random_sample: Some(sample),
+                ..response_input()
+            })
+        };
+        assert_eq!(sampled(0.099), ResponseRoutingEvaluation::Respond);
+        assert_eq!(sampled(0.1), ResponseRoutingEvaluation::Ignore);
+    }
 }

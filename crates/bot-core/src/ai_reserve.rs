@@ -385,4 +385,26 @@ mod tests {
             Err(ReserveEstimateError::Overflow)
         );
     }
+
+    #[test]
+    fn vision_reserve_counts_each_structural_field() -> Result<(), ReserveEstimateError> {
+        // One credit unit per input token isolates the token count.
+        let pricing = TokenPricing {
+            input_per_million: super::CREDIT_UNIT_USD_MICROS * 1_000_000,
+            cached_input_per_million: None,
+            cache_write_per_million: None,
+            audio_input_per_million: None,
+            output_per_million: 0,
+        };
+        // "user" (1) + "input_text" (3) + "input_image" (3) tokens.
+        assert_eq!(
+            estimate_vision_reserve_credit_units_with_pricing("", 0, 0, 0, &pricing)?,
+            7
+        );
+        assert_eq!(
+            estimate_vision_reserve_credit_units_with_pricing("abcde", 0, 2, 0, &pricing)?,
+            11
+        );
+        Ok(())
+    }
 }
