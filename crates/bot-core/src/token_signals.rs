@@ -2289,4 +2289,16 @@ mod tests {
         let caption = format_signal_caption(&signal, 1_720_000_000);
         assert!(caption.contains("ATH <b>$2.5 ("), "{caption}");
     }
+
+    #[test]
+    fn candle_limits_accept_values_exactly_on_the_bounds() {
+        let usable = super::is_usable_chart_candle;
+        // A candle exactly a million times the live price, either way, still counts.
+        assert!(usable(&[1.0, 1e6, 1e6, 1e6, 1e6], Some(1.0)));
+        assert!(usable(&[1.0, 1.0, 1.0, 1.0, 1.0], Some(1e6)));
+        // A range of exactly one epsilon is still a flat chart.
+        let mut signal = signal();
+        signal.candles = vec![vec![1.0, 1.0, 1.0 + f64::EPSILON, 1.0, 1.0]; 5];
+        assert!(!has_usable_chart(&signal));
+    }
 }

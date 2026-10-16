@@ -4256,4 +4256,15 @@ mod tests {
         assert!(result.text.starts_with("BTC: 79000 USD"), "{}", result.text);
         assert!(result.selection.is_none());
     }
+
+    #[test]
+    fn slug_requests_skip_short_and_dollar_prefixed_names() {
+        let named = |name: &str| {
+            let mut asset = coin("XYZ", 1.0);
+            asset.name = name.to_owned();
+            asset
+        };
+        assert!(explicit_slug_requests("abc", &[named("Abc")]).is_empty());
+        assert!(explicit_slug_requests("$examplecoin", &[named("Examplecoin")]).is_empty());
+    }
 }
