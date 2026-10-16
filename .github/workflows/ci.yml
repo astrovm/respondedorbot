@@ -133,7 +133,9 @@ jobs:
         run: |
           for target in $(cargo +nightly fuzz list); do
             mkdir -p "corpus/$target"
-            cargo +nightly fuzz run "$target" "corpus/$target" "seeds/$target" -- \
+            # The prebuilt cargo-fuzz is a musl binary and would target musl.
+            cargo +nightly fuzz run --target x86_64-unknown-linux-gnu \
+              "$target" "corpus/$target" "seeds/$target" -- \
               -max_total_time=60 -max_len=16384 -rss_limit_mb=2048
           done
 
