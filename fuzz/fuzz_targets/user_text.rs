@@ -4,7 +4,7 @@
 #![no_main]
 
 use bot_core::ai_calculator::calculate_expression;
-use bot_core::base_conversion::convert_base;
+use bot_core::base_conversion::{BaseConversion, convert_base};
 use bot_core::command_parsing::{bang_command_as_slash, parse_command};
 use bot_core::locale::Locale;
 use bot_core::price_queries::parse_price_query;
@@ -22,7 +22,9 @@ fuzz_target!(|text: &str| {
     }
     let timeframes = ["1h".to_owned(), "24h".to_owned(), "7d".to_owned()];
     let _ = parse_price_query(text, &timeframes);
-    let _ = convert_base(text);
+    if let Ok(BaseConversion::Success { result, .. }) = convert_base(text) {
+        assert!(!result.is_empty());
+    }
     for locale in [Locale::Es, Locale::En] {
         let _ = calculate_expression(text, locale);
         let _ = plan_stateless_command(ChatId(1), MessageId(1), text, "@synthetic_bot", locale);
