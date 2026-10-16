@@ -175,7 +175,12 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: |
           git diff "origin/$BASE_REF...HEAD" -- crates/bot-core/src > pr.diff
-          cargo mutants --in-diff pr.diff -p bot-core --timeout 180 --no-shuffle
+          status=0
+          cargo mutants --in-diff pr.diff -p bot-core --timeout 180 --no-shuffle || status=$?
+          # Exit 3 means some mutants made the tests hang, which still counts as
+          # caught. It also wins over exit 2, so check the missed list directly.
+          if [ "$status" -ne 0 ] && [ "$status" -ne 3 ]; then exit "$status"; fi
+          if [ -s mutants.out/missed.txt ]; then cat mutants.out/missed.txt; exit 2; fi
 
       - name: Upload mutation report
         if: always()

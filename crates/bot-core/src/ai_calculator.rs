@@ -528,6 +528,32 @@ mod tests {
     }
 
     #[test]
+    fn integer_limits_sit_exactly_on_their_bounds() {
+        // 2 ** 999999 has exactly the maximum number of bits; one more is too many.
+        let nine_powers = "(2 ** 100000) * ".repeat(9);
+        assert_eq!(
+            calculate_expression(&format!("{nine_powers}(2 ** 99999)"), Locale::En).len(),
+            301_030
+        );
+        assert_eq!(
+            calculate_expression(&format!("{nine_powers}(2 ** 100000)"), Locale::En),
+            "expression is too long"
+        );
+        // Literal length is checked before parsing, even when the value is tiny.
+        assert_eq!(calculate_expression(&"0".repeat(333_333), Locale::En), "0");
+        assert_eq!(
+            calculate_expression(&"0".repeat(333_334), Locale::En),
+            "expression is too long"
+        );
+        // The power precheck is conservative: it rejects some results that
+        // would fit, instead of building a huge number to find out.
+        assert_eq!(
+            calculate_expression("1024 ** 95000", Locale::En),
+            "expression is too long"
+        );
+    }
+
+    #[test]
     fn integer_subtraction_and_overflowing_floats_render_exactly() {
         assert_eq!(calculate_expression("10 - 3", Locale::En), "7");
         assert_eq!(calculate_expression("1e308 * 10", Locale::En), "inf");

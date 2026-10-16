@@ -42,7 +42,7 @@ cargo +nightly fuzz run user_text corpus/user_text seeds/user_text -- -max_total
 
 ## Mutation testing
 
-CI runs [cargo-mutants](https://mutants.rs/) on the `bot-core` lines a pull request changes, and fails on any mutant the tests miss. Run the same check locally:
+CI runs [cargo-mutants](https://mutants.rs/) on the `bot-core` lines a pull request changes, and fails on any mutant the tests miss. A mutant that makes the tests hang counts as caught. Run the same check locally:
 
 ```bash
 git diff origin/main...HEAD -- crates/bot-core/src > pr.diff
