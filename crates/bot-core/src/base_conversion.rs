@@ -263,7 +263,7 @@ mod tests {
     proptest! {
         #[test]
         fn converts_any_number_between_any_two_bases(
-            value in any::<u128>(),
+            value in prop_oneof![Just(0_u128), any::<u128>()],
             source in 2_u32..=36,
             target in 2_u32..=36,
             lowercase in any::<bool>(),
