@@ -245,4 +245,11 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn non_ascii_digits_in_any_field_are_unsupported() {
+        assert!(convert_base("٣, 10, 2").is_err());
+        assert!(convert_base("3, ١٠, 2").is_err());
+        assert!(convert_base("3, 10, ٢").is_err());
+    }
 }

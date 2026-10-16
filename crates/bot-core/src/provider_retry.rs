@@ -328,4 +328,42 @@ mod tests {
         // A retry date far beyond the representable window is rejected.
         assert_eq!(parse(Some("Sun, 06 Nov 1994 08:49:37 GMT"), -1e19), None);
     }
+
+    #[test]
+    fn rejects_out_of_range_numbers_and_malformed_durations() {
+        let parse = |raw: &str| parse_retry_window_seconds(Some(raw), 0.0);
+        for raw in [
+            "inf", "1e300", "-1e300", ".5s", "5.s", "1.2.3s", "s", "-5s", "1e999h",
+        ] {
+            assert_eq!(parse(raw), None);
+        }
+        assert_eq!(parse("1.5s"), Some(1));
+        assert_eq!(parse("1500ms"), Some(1));
+        assert_eq!(parse("2m"), Some(120));
+    }
+
+    #[test]
+    fn http_dates_check_every_field_and_leap_years() {
+        // Fixed reference: 2000-01-01T00:00:00Z.
+        let now = 946_684_800.0;
+        let parse = |raw: &str| parse_retry_window_seconds(Some(raw), now);
+        for (raw, expected) in [
+            ("Tue, 29 Feb 2000 00:00:00 GMT", Some(5_097_600)),
+            ("Thu, 29 Feb 2024 00:00:00 GMT", Some(762_480_000)),
+            ("Wed, 28 Feb 1900 00:00:00 GMT", Some(0)),
+            ("Thu, 29 Feb 1900 00:00:00 GMT", None),
+            ("Wed, 29 Feb 2023 00:00:00 GMT", None),
+            ("Sat, 00 Jan 2000 00:00:00 GMT", None),
+            ("Sat, 01 Jan 2000 24:00:00 GMT", None),
+            ("Sat, 01 Jan 2000 00:60:00 GMT", None),
+            ("Sat, 01 Jan 2000 00:00:60 GMT", None),
+            ("Sat, 01 Jan 2000 00:00:00:00 GMT", None),
+            ("Sat, 01 Jan 2000 01:00:00 +01", None),
+            ("Sat, 01 Jan 2000 01:00:00 +0100", Some(0)),
+            ("Sat 01 Jan 2000 00:00:00 GMT", None),
+            ("Sat, Jan 1 00:00:00 2000", None),
+        ] {
+            assert_eq!(parse(raw), expected);
+        }
+    }
 }

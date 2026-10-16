@@ -671,4 +671,14 @@ mod tests {
             proptest::prop_assert!(local.is_some_and(|local| weekdays.contains(&local.weekday())));
         }
     }
+
+    #[test]
+    fn task_ids_are_limited_to_128_safe_characters() {
+        assert!(TaskId::new("a".repeat(128)).is_ok());
+        assert_eq!(
+            TaskId::new("a".repeat(129)),
+            Err(TaskStateError::InvalidTaskId)
+        );
+        assert_eq!(TaskId::new(""), Err(TaskStateError::InvalidTaskId));
+    }
 }

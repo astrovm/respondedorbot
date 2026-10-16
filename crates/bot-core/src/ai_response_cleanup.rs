@@ -366,4 +366,21 @@ mod tests {
             "Beto: hola"
         );
     }
+
+    #[test]
+    fn repeated_and_empty_sentences_are_dropped_and_empty_contexts_are_ignored() {
+        assert_eq!(
+            super::clean_duplicate_response("Hola. Hola. Chau"),
+            "Hola. Chau"
+        );
+        assert_eq!(
+            super::clean_duplicate_response("Hola. . Chau"),
+            "Hola. Chau"
+        );
+        assert_eq!(super::strip_leading_context("hola", &[]), "hola");
+        assert_eq!(
+            super::strip_leading_context("", &[Some("ctx".to_owned())]),
+            ""
+        );
+    }
 }

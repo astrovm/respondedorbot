@@ -416,4 +416,19 @@ mod tests {
             prop_assert!(profit(low.saturating_add(extra).min(100))? <= profit(low)?);
         }
     }
+
+    #[test]
+    fn out_of_range_fees_and_purchases_are_input_errors() {
+        for input in ["101", "5, nan", "5, -1", "nan"] {
+            assert_eq!(parse_devo_input(input), Ok(DevoInput::InputError));
+        }
+        let quotes = DevoQuotes {
+            official: 1_000.0,
+            card: 1_600.0,
+            usdt_ask: 0.0,
+            usdt_bid: 0.0,
+        };
+        assert!(calculate_devo(0.05, 100.0, quotes).is_err());
+        assert!(calculate_devo(0.05, 0.0, quotes).is_ok());
+    }
 }

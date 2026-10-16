@@ -520,4 +520,20 @@ mod tests {
         assert_eq!(sampled(0.099), ResponseRoutingEvaluation::Respond);
         assert_eq!(sampled(0.1), ResponseRoutingEvaluation::Ignore);
     }
+
+    #[test]
+    fn link_fix_replies_are_answered_when_the_chat_allows_them() {
+        let reply = |ignore: bool| {
+            evaluate_response_routing(&ResponseRoutingInput {
+                is_reply: true,
+                is_private: true,
+                reply_text: "https://fxtwitter.com/someone/status/1".to_owned(),
+                ignore_link_fix_followups: ignore,
+                trigger_words: Some(Vec::new()),
+                ..response_input()
+            })
+        };
+        assert_eq!(reply(true), ResponseRoutingEvaluation::Ignore);
+        assert_eq!(reply(false), ResponseRoutingEvaluation::Respond);
+    }
 }

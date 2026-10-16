@@ -363,4 +363,13 @@ mod tests {
         assert!(!super::contains_japanese("hola ñandú"));
         assert_eq!(super::romanize_japanese("テスト!"), "tesuto!");
     }
+
+    #[test]
+    fn enye_inside_words_and_unknown_characters_transliterate() {
+        assert_eq!(super::replace_enye("AÑO"), "ANIO");
+        assert_eq!(super::replace_enye("Ñ_"), "NI_");
+        assert_eq!(super::replace_enye("Ñ"), "ENIE");
+        assert_eq!(super::transliterate_remaining_scripts("a\u{E000}b"), "ab");
+        assert!(!super::is_word_character('-'));
+    }
 }

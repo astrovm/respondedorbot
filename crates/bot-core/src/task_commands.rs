@@ -576,6 +576,9 @@ mod tests {
         assert!(can_delete_task(true, Some(7), Some(42), true));
         assert!(!can_delete_task(true, Some(7), Some(42), false));
         assert!(can_delete_task(false, None, Some(42), false));
+        // An unknown requester never matches a task without an owner.
+        assert!(!can_delete_task(true, None, None, false));
+        assert!(can_delete_task(true, None, None, true));
     }
 
     #[test]

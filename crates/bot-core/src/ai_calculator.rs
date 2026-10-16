@@ -562,4 +562,13 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn exact_negative_division_and_float_powers() {
+        assert_eq!(calculate_expression("-6 // 3", Locale::En), "-2");
+        assert_eq!(calculate_expression("-7 // 3", Locale::En), "-3");
+        assert_eq!(calculate_expression("-6 % 3", Locale::En), "0");
+        assert_eq!(calculate_expression("-7 % 3", Locale::En), "2");
+        assert_eq!(calculate_expression("2.5 ** 2", Locale::En), "6.25");
+    }
 }

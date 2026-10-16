@@ -230,4 +230,21 @@ mod tests {
             assert_eq!(needs_reconciliation(status), expected);
         }
     }
+
+    #[test]
+    fn only_finite_positive_numbers_count() {
+        use serde_json::json;
+        for (value, expected) in [
+            (json!(1), true),
+            (json!("1.5"), true),
+            (json!(0), false),
+            (json!(-1), false),
+            (json!("inf"), false),
+            (json!("NaN"), false),
+            (json!("abc"), false),
+            (json!(null), false),
+        ] {
+            assert_eq!(super::positive_number(&value), expected);
+        }
+    }
 }
