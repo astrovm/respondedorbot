@@ -56,7 +56,8 @@ fn parse_duration(raw: &str) -> Option<i64> {
         return None;
     }
     let value = amount.parse::<f64>().ok()?.checked_mul(multiplier)?;
-    if value.is_finite() && value <= i64::MAX as f64 {
+    // `checked_mul` already rejected infinities, so only the range is left.
+    if value <= i64::MAX as f64 {
         Some(value.trunc() as i64)
     } else {
         None
@@ -365,5 +366,26 @@ mod tests {
         ] {
             assert_eq!(parse(raw), expected);
         }
+    }
+
+    #[test]
+    fn huge_durations_and_letters_in_offsets_are_rejected() {
+        assert_eq!(
+            parse_retry_window_seconds(Some("99999999999999999999h"), 0.0),
+            None
+        );
+        assert_eq!(
+            parse_retry_window_seconds(Some("Wed, 21 Oct 2015 07:28:00 +12a4"), 0.0),
+            None
+        );
+        // Month names always map to 1 to 12, but the calendar check stands alone.
+        assert_eq!(
+            super::date_time_to_unix(2026, 13, 1, "00:00:00", "GMT"),
+            None
+        );
+        assert_eq!(
+            super::date_time_to_unix(2026, 0, 1, "00:00:00", "GMT"),
+            None
+        );
     }
 }

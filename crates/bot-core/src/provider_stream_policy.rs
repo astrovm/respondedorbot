@@ -137,7 +137,8 @@ fn stream_fragment_index(value: &Value) -> Option<i64> {
             .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
             .or_else(|| {
                 value.as_f64().and_then(|number| {
-                    (number.is_finite() && number >= i64::MIN as f64 && number <= i64::MAX as f64)
+                    (i64::MIN as f64..=i64::MAX as f64)
+                        .contains(&number)
                         .then(|| number.trunc() as i64)
                 })
             }),
@@ -357,5 +358,12 @@ mod tests {
         assert_eq!(super::stream_fragment_index(&json!(false)), Some(0));
         assert_eq!(super::stream_fragment_index(&json!(u64::MAX)), None);
         assert_eq!(super::stream_fragment_index(&json!(2.0)), Some(2));
+    }
+
+    #[test]
+    fn fragment_indexes_outside_the_integer_range_are_dropped() {
+        assert_eq!(super::stream_fragment_index(&json!(-1e30)), None);
+        assert_eq!(super::stream_fragment_index(&json!(1e30)), None);
+        assert_eq!(super::stream_fragment_index(&json!(2.9)), Some(2));
     }
 }

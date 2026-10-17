@@ -798,4 +798,12 @@ mod tests {
             ""
         );
     }
+
+    #[test]
+    fn falsy_poll_options_are_ignored() {
+        assert_eq!(
+            extract_message_content(&json!({"poll":{"question":"q","options":0}})),
+            extract_message_content(&json!({"poll":{"question":"q"}}))
+        );
+    }
 }

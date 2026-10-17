@@ -300,4 +300,13 @@ mod tests {
             assert_ne!(weather_description(code, Locale::En), "unusual weather");
         }
     }
+
+    #[test]
+    fn forecast_selection_matches_the_provider_hour_alone() {
+        let hours = vec!["2026-01-02T11".to_owned()];
+        assert_eq!(
+            select_forecast_hour(&hours, Some("2026-01-02T11"), "2026-01-02T12"),
+            Some(0)
+        );
+    }
 }

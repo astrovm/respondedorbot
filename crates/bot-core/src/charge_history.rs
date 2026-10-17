@@ -525,9 +525,8 @@ fn payer_suffix(entries: &[ChargeHistoryEntry], locale: Locale) -> String {
             } else {
                 "user"
             };
-            if let Some(total) = totals.get_mut(scope) {
-                *total = total.saturating_add(integer(payer.get("credit_units")).max(0));
-            }
+            let total = totals.entry(scope).or_default();
+            *total = total.saturating_add(integer(payer.get("credit_units")).max(0));
         }
         if found {
             continue;
@@ -1306,5 +1305,48 @@ mod tests {
         assert!(buttons(page(true, Some(3), true, Some(1))).contains(":o:1:"));
         let without_cursors = buttons(page(true, None, true, None));
         assert!(!without_cursors.contains(":n:") && !without_cursors.contains(":o:"));
+    }
+
+    #[test]
+    fn audio_seconds_and_usage_tags_pick_the_activity_label() {
+        let page = ChargeHistoryPage {
+            groups: vec![
+                single_entry_group(
+                    3,
+                    "2026-08-26T17:00:00Z",
+                    "ai_settlement_result",
+                    json!({"usage_tag": "transcribe:1", "settled_credits": 1}),
+                ),
+                single_entry_group(
+                    2,
+                    "2026-08-26T17:00:00Z",
+                    "ai_settlement_result",
+                    json!({"usage_tag": "vision_question", "settled_credits": 1}),
+                ),
+                single_entry_group(
+                    1,
+                    "2026-08-26T17:00:00Z",
+                    "ai_settlement_result",
+                    json!({
+                        "charged_credit_units_total": 2,
+                        "model_breakdown": [
+                            {"kind": "chat", "audio_seconds": 5, "usd_micros": 10},
+                            {"kind": "chat", "usd_micros": 10}
+                        ]
+                    }),
+                ),
+            ],
+            has_newer: false,
+            has_older: false,
+            newer_cursor: None,
+            older_cursor: None,
+        };
+        assert_eq!(
+            render_charge_history_page(&page, 55, 3, 0, Locale::En).0,
+            "AI spending\n\n\
+             26/08 17:00 | audio: 0.01 cr\n\n\
+             26/08 17:00 | image: 0.01 cr\n\n\
+             26/08 17:00 | 0.02 cr\n  response 0.01 cr\n  audio 0.01 cr"
+        );
     }
 }

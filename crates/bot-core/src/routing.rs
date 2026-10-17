@@ -536,4 +536,16 @@ mod tests {
         assert_eq!(reply(true), ResponseRoutingEvaluation::Ignore);
         assert_eq!(reply(false), ResponseRoutingEvaluation::Respond);
     }
+
+    #[test]
+    fn command_followups_are_kept_when_the_chat_allows_them() {
+        let mut command = response_input();
+        command.is_reply = true;
+        command.is_non_ai_command_followup = true;
+        command.ai_command_followups = true;
+        assert_ne!(
+            evaluate_response_routing(&command),
+            ResponseRoutingEvaluation::Ignore
+        );
+    }
 }

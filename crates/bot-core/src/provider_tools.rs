@@ -268,4 +268,13 @@ mod tests {
         assert_eq!(parse_single_quoted_string(r"'bad\x'"), None);
         assert_eq!(parse_single_quoted_string(r"'dangling\'"), None);
     }
+
+    #[test]
+    fn identifiers_may_start_with_underscores_and_urls_may_use_http() {
+        assert!(super::is_identifier("_private"));
+        assert!(!super::is_identifier("1abc"));
+        assert!(!super::is_identifier(""));
+        assert!(super::is_http_url("http://example.test"));
+        assert!(!super::is_http_url("ftp://example.test"));
+    }
 }

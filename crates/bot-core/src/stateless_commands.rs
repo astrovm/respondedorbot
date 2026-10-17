@@ -65,6 +65,12 @@ fn render_base_conversion(result: &BaseConversion, locale: Locale) -> String {
         (Locale::En, BaseConversion::TargetRange { input }) => {
             format!("Target base '{input}' must be between 2 and 36")
         }
+        (Locale::Es, BaseConversion::DigitOutOfRange { digit, source }) => {
+            format!("El dígito '{digit}' no existe en base {source}, boludo")
+        }
+        (Locale::En, BaseConversion::DigitOutOfRange { digit, source }) => {
+            format!("Digit '{digit}' does not exist in base {source}")
+        }
         (Locale::Es, BaseConversion::NumbersRequired) => {
             "Mandate números posta, gordo, no me hagas perder el tiempo".to_owned()
         }
@@ -350,6 +356,7 @@ mod tests {
             ("10,1,10", "Source base '1' must be between 2 and 36"),
             ("10,2,40", "Target base '40' must be between 2 and 36"),
             ("10,no,2", "Send valid numbers"),
+            ("12,2,10", "Digit '2' does not exist in base 2"),
         ];
         for (input, expected) in cases {
             assert_eq!(
@@ -493,6 +500,7 @@ mod tests {
                 "10,no,2",
                 "Mandate números posta, gordo, no me hagas perder el tiempo",
             ),
+            ("12,2,10", "El dígito '2' no existe en base 2, boludo"),
         ] {
             assert_eq!(
                 plan(&format!("/convertbase {input}"), Locale::Es).as_deref(),

@@ -330,9 +330,8 @@ pub fn render_bcra(snapshot: &BcraSnapshot, locale: Locale, today_days: i64) -> 
         String::new(),
     ];
     for variable in shown {
-        if let Some(line) = variable_line(variable, locale, common_date) {
-            lines.push(line);
-        }
+        // Every shown variable matched a pattern, so it always has a line.
+        lines.extend(variable_line(variable, locale, common_date));
         if let Some((year, month, day)) = parse_date(&variable.date) {
             let candidate = days_from_civil(year, month, day);
             latest_days = Some(latest_days.map_or(candidate, |latest: i64| latest.max(candidate)));
@@ -725,5 +724,54 @@ mod tests {
         assert_eq!(super::parse_date("2025-01"), None);
         assert_eq!(super::parse_date("2025-01-15 10:00"), Some((2025, 1, 15)));
         assert_eq!(super::parse_date("15/01/25"), Some((2025, 1, 15)));
+    }
+
+    #[test]
+    fn dates_matching_the_title_or_the_value_are_not_repeated() {
+        let variable = |description: &str, value: &str, date: &str| BcraVariable {
+            description: description.to_owned(),
+            value: value.to_owned(),
+            date: date.to_owned(),
+        };
+        let snapshot = BcraSnapshot {
+            variables: vec![
+                variable("Tasa BADLAR", "10,0", "24/09/26"),
+                variable("Tasa TAMAR", "10,0", "24/09/2026"),
+                // Some sources repeat the value in the date field.
+                variable("Reservas internacionales", "25.000", "25.000"),
+            ],
+            bands: Some(BcraBands {
+                lower: 950.0,
+                upper: 1_460.0,
+                date: "24/09/2026".to_owned(),
+                lower_change: None,
+                upper_change: None,
+            }),
+            itcrm: Some(ItcrmDetails {
+                value: 123.45,
+                date: "24/09/26".to_owned(),
+            }),
+            country_risk: None,
+            stale: false,
+        };
+        let text = render_bcra(&snapshot, Locale::En, 0);
+        assert!(text.starts_with("BCRA indicators as of 24/09/26\n\n"));
+        assert!(text.contains("Reserves: USD 25,000 million\n"));
+        assert!(text.contains("ceiling $1,460\n"));
+        assert!(text.contains("TCRM: 123.45"));
+        assert!(!text.contains("(24/09"));
+    }
+
+    #[test]
+    fn old_four_digit_years_stay_verbatim() {
+        assert_eq!(super::short_year("15/01/1999"), "15/01/1999");
+    }
+
+    #[test]
+    fn civil_days_count_back_before_year_zero() {
+        assert_eq!(super::days_from_civil(1970, 1, 1), 0);
+        assert_eq!(super::days_from_civil(0, 3, 1), -719_468);
+        // January of year 0 is counted as part of year -1.
+        assert_eq!(super::days_from_civil(0, 1, 1), -719_528);
     }
 }

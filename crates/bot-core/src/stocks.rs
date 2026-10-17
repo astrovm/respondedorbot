@@ -905,4 +905,43 @@ mod tests {
             vec!["ETF", "Equity"]
         );
     }
+
+    #[test]
+    fn only_lowercase_pence_keep_the_sterling_pence_spelling() {
+        assert_eq!(super::normalize_currency("gbp"), "GBp");
+        assert_eq!(super::normalize_currency("GBP"), "GBP");
+        assert_eq!(super::normalize_currency("gxp"), "GXP");
+        assert_eq!(super::normalize_currency("usdt"), "USDT");
+    }
+
+    #[test]
+    fn yahoo_search_keeps_listings_on_other_exchanges_apart() {
+        let response = json!({"data":{"quotes":[
+            {"quoteType":"EQUITY","symbol":"EXM","exchDisp":"NYSE"},
+            {"quoteType":"EQUITY","symbol":"EXM","exchDisp":"NYSE"},
+            {"quoteType":"EQUITY","symbol":"EXM","longname":"Example Corp","exchDisp":"LSE"}
+        ]}});
+        assert_eq!(
+            select_yahoo_candidates(&response),
+            vec![
+                listing("EXM", "", "NYSE"),
+                listing("EXM", "Example Corp", "LSE")
+            ]
+        );
+    }
+
+    #[test]
+    fn blank_queries_and_dotted_symbols_without_a_base_rank_last() {
+        assert_eq!(super::yahoo_symbol_base(".L"), None);
+        assert_eq!(super::yahoo_symbol_base("ABC."), None);
+        assert_eq!(super::yahoo_relevance("  ", "ABC", "Example Corp"), 6);
+        assert!(!yahoo_candidate_name_matches_query(
+            "  ",
+            &listing("ABC", "Example Corp", "NYSE")
+        ));
+        assert!(yahoo_candidate_name_matches_query(
+            "example corp",
+            &listing("ABC", "Example Corp", "NYSE")
+        ));
+    }
 }

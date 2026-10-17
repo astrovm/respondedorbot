@@ -22,6 +22,11 @@ pub enum BaseConversion {
     TargetRange {
         input: String,
     },
+    /// A digit that the source base does not have, like `2` in binary.
+    DigitOutOfRange {
+        digit: char,
+        source: u32,
+    },
     NumbersRequired,
 }
 
@@ -59,6 +64,7 @@ pub fn convert_base(input: &str) -> Result<BaseConversion, UnsupportedNumericInp
         .chars()
         .map(|character| character.to_digit(36))
         .collect::<Option<Vec<_>>>()
+        .filter(|digits| !digits.is_empty())
     else {
         return Ok(BaseConversion::AlphanumericRequired);
     };
@@ -79,6 +85,17 @@ pub fn convert_base(input: &str) -> Result<BaseConversion, UnsupportedNumericInp
         });
     };
 
+    if let Some((digit, _)) = normalized_number
+        .chars()
+        .zip(&number_digits)
+        .find(|(_, value)| **value >= source)
+    {
+        return Ok(BaseConversion::DigitOutOfRange {
+            digit: digit.to_ascii_uppercase(),
+            source,
+        });
+    }
+
     let mut value = BigUint::from(0_u8);
     for digit in number_digits {
         value *= source;
@@ -95,6 +112,9 @@ pub fn convert_base(input: &str) -> Result<BaseConversion, UnsupportedNumericInp
         // The remainder is below `target`, which is at most 36.
         digits.push(char::from(DIGITS[remainder as usize]));
         value /= target;
+    }
+    if digits.is_empty() {
+        digits.push('0');
     }
     digits.reverse();
 
@@ -126,28 +146,47 @@ mod tests {
     }
 
     #[test]
-    fn preserves_zero_as_an_empty_legacy_result() {
-        assert_eq!(
-            convert_base("0,2,10"),
-            Ok(BaseConversion::Success {
-                number: "0".to_owned(),
-                source: 2,
-                result: String::new(),
-                target: 10,
-            })
-        );
+    fn zero_converts_to_zero() {
+        for input in ["0,2,10", "000,16,2"] {
+            assert!(matches!(
+                convert_base(input),
+                Ok(BaseConversion::Success { result, .. }) if result == "0"
+            ));
+        }
     }
 
     #[test]
-    fn preserves_legacy_digit_outside_source_base_behavior() {
+    fn rejects_digits_the_source_base_does_not_have() {
         assert_eq!(
             convert_base("2,2,10"),
-            Ok(BaseConversion::Success {
-                number: "2".to_owned(),
+            Ok(BaseConversion::DigitOutOfRange {
+                digit: '2',
                 source: 2,
-                result: "2".to_owned(),
-                target: 10,
             })
+        );
+        assert_eq!(
+            convert_base("1fg,16,10"),
+            Ok(BaseConversion::DigitOutOfRange {
+                digit: 'G',
+                source: 16,
+            })
+        );
+        // The highest digit of each base is still accepted.
+        assert!(matches!(
+            convert_base("1,2,10"),
+            Ok(BaseConversion::Success { .. })
+        ));
+        assert!(matches!(
+            convert_base("F,16,10"),
+            Ok(BaseConversion::Success { .. })
+        ));
+    }
+
+    #[test]
+    fn an_empty_number_is_not_alphanumeric() {
+        assert_eq!(
+            convert_base(" ,2,10"),
+            Ok(BaseConversion::AlphanumericRequired)
         );
     }
 
@@ -208,6 +247,9 @@ mod tests {
     }
 
     fn render(mut value: u128, base: u32) -> String {
+        if value == 0 {
+            return "0".to_owned();
+        }
         let mut digits = Vec::new();
         while value > 0 {
             digits.push(char::from(
@@ -221,15 +263,12 @@ mod tests {
     proptest! {
         #[test]
         fn converts_any_number_between_any_two_bases(
-            value in any::<u128>(),
+            value in prop_oneof![Just(0_u128), any::<u128>()],
             source in 2_u32..=36,
             target in 2_u32..=36,
             lowercase in any::<bool>(),
         ) {
             let mut number = render(value, source);
-            if number.is_empty() {
-                number = "0".to_owned();
-            }
             if lowercase {
                 number = number.to_lowercase();
             }

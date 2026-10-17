@@ -484,15 +484,7 @@ pub fn execute_market_price_candidate<C: CryptoMarketProvider>(
     if asset.slug.is_empty() {
         asset.slug.clone_from(&candidate.slug);
     }
-    for contract in &candidate.contracts {
-        if !asset.contracts.iter().any(|known| {
-            known.chain_id == contract.chain_id
-                && known.network == contract.network
-                && known.address.eq_ignore_ascii_case(&contract.address)
-        }) {
-            asset.contracts.push(contract.clone());
-        }
-    }
+    add_missing_contracts(&mut asset.contracts, candidate.contracts.iter().cloned());
     let Some(_quote) = asset
         .quotes
         .get(target_parameter)
@@ -743,9 +735,8 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
     if !crypto_only
         && selection.requested.len() == 1
         && !selection.rows.is_empty()
-        && stock_quotes.len() == 1
         && !contains_unambiguous_crypto_symbol(raw_query)
-        && let Some(quote) = stock_quotes.first()
+        && let [quote] = stock_quotes.as_slice()
         && company_matches(raw_query, quote)
         && !quote
             .symbol
@@ -959,7 +950,6 @@ fn explicit_slug_requests(raw_query: &str, listed: &[CryptoAsset]) -> Vec<String
         .filter_map(|raw| {
             let token = normalized(raw);
             if token.len() <= 3
-                || token.is_empty()
                 || raw.trim_start().starts_with('$')
                 || canonical_id_for_token(&token).is_some()
                 || listed
@@ -1028,8 +1018,7 @@ fn select_assets(text: &str, listed: &[CryptoAsset]) -> Selection {
         // quote or an identity menu.  Exact names/slugs remain direct when
         // they do not also collide with a ticker.
         if exact_symbol_matches.is_empty()
-            && exact_matches.len() == 1
-            && let Some(asset) = exact_matches.first()
+            && let [asset] = exact_matches.as_slice()
         {
             return Selection {
                 rows: vec![(*asset).clone()],
@@ -1221,13 +1210,21 @@ fn merge_asset(existing: &mut CryptoAsset, incoming: CryptoAsset) {
             existing_quote.percent_change_30d = incoming_quote.percent_change_30d;
         }
     }
-    for contract in incoming.contracts {
-        if !existing.contracts.iter().any(|known| {
+    add_missing_contracts(&mut existing.contracts, incoming.contracts);
+}
+
+/// Adds contracts not already listed; addresses compare case-insensitively.
+fn add_missing_contracts(
+    contracts: &mut Vec<TokenAddress>,
+    incoming: impl IntoIterator<Item = TokenAddress>,
+) {
+    for contract in incoming {
+        if !contracts.iter().any(|known| {
             known.chain_id == contract.chain_id
                 && known.network == contract.network
                 && known.address.eq_ignore_ascii_case(&contract.address)
         }) {
-            existing.contracts.push(contract);
+            contracts.push(contract);
         }
     }
 }
@@ -4025,5 +4022,249 @@ mod tests {
         );
         assert_eq!(result.text, "2 BTC = 100000 USD");
         assert_eq!(crypto.calls, vec!["listings USD", "quotes 1 USD false"]);
+    }
+
+    #[test]
+    fn quotes_need_a_finite_positive_price() {
+        let mut asset = coin("BTC", f64::NAN);
+        assert!(!asset.quotes["USD"].is_usable());
+        asset
+            .quotes
+            .insert("USD".to_owned(), coin("BTC", 0.0).quotes["USD"].clone());
+        assert!(!asset.quotes["USD"].is_usable());
+    }
+
+    #[test]
+    fn merging_keeps_known_values_and_adds_contracts_from_other_networks() {
+        let mut existing = coin("ABC", 0.0);
+        existing.contracts = vec![contract("mint")];
+        let mut incoming = coin("ABC", 0.0);
+        if let Some(quote) = incoming.quotes.get_mut("USD") {
+            quote.percent_change_1h = None;
+            quote.percent_change_7d = None;
+            quote.percent_change_30d = None;
+        }
+        let mut other_network = contract("mint");
+        other_network.network = "devnet".to_owned();
+        let mut other_chain = contract("mint");
+        other_chain.chain_id = "eclipse".to_owned();
+        incoming.contracts = vec![contract("MINT"), other_network, other_chain];
+        merge_asset(&mut existing, incoming);
+        let quote = &existing.quotes["USD"];
+        assert!(quote.price.abs() < f64::EPSILON);
+        assert_eq!(quote.percent_change_1h, Some(1.0));
+        assert_eq!(quote.percent_change_7d, Some(7.0));
+        assert_eq!(quote.percent_change_30d, Some(30.0));
+        assert_eq!(existing.contracts.len(), 3);
+    }
+
+    #[test]
+    fn assets_without_ids_merge_only_on_matching_symbol_and_slug() {
+        let unnamed = |symbol: &str, slug: &str| {
+            let mut asset = coin(symbol, 1.0);
+            asset.id = String::new();
+            asset.slug = slug.to_owned();
+            asset
+        };
+        let mut rows = vec![
+            unnamed("ABC", "abc"),
+            unnamed("ABC", "abc-two"),
+            unnamed("XYZ", "abc"),
+        ];
+        unique_assets(&mut rows);
+        assert_eq!(rows.len(), 3);
+        let mut rows = vec![coin("BTC", 1.0), unnamed("ABC", "abc")];
+        merge_assets(
+            &mut rows,
+            vec![unnamed("BTC", "btc"), unnamed("XYZ", "abc")],
+        );
+        assert_eq!(rows.len(), 4);
+    }
+
+    #[test]
+    fn canonical_requests_are_missing_until_their_own_id_has_a_usable_quote() {
+        assert_eq!(
+            missing_usable_tokens(&[coin("ETH", 1.0)], &["BTC".to_owned()], "USD"),
+            vec!["BTC".to_owned()]
+        );
+    }
+
+    #[test]
+    fn crypto_symbol_detection_splits_on_commas_and_knows_stablecoins() {
+        assert!(contains_unambiguous_crypto_symbol("foo,ltc"));
+        assert!(contains_unambiguous_crypto_symbol("usdt"));
+        assert!(!contains_unambiguous_crypto_symbol("foo"));
+    }
+
+    #[test]
+    fn explicit_requests_skip_bare_dollar_signs_and_match_names() {
+        assert_eq!(
+            explicit_symbol_requests("$ btc $abc", &[]),
+            vec!["ABC".to_owned()]
+        );
+        let mut asset = coin("EXC", 1.0);
+        asset.name = "Example Coin".to_owned();
+        asset.slug = "exc-other".to_owned();
+        assert_eq!(
+            explicit_slug_requests("examplecoin", &[asset]),
+            vec!["EXAMPLECOIN".to_owned()]
+        );
+    }
+
+    #[test]
+    fn top_list_counts_include_unrequested_coins_within_the_count() {
+        assert_eq!(select_assets("foo,5", &[coin("BTC", 1.0)]).rows.len(), 1);
+        assert_eq!(requested_count("inf"), 0);
+        assert_eq!(requested_count("-3"), 0);
+    }
+
+    #[test]
+    fn invalid_market_metrics_rank_after_valid_ones() {
+        assert_eq!(
+            compare_market_metric(Some(f64::NAN), Some(1.0)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_market_metric(Some(1.0), Some(f64::INFINITY)),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn conversions_with_unusable_amounts_render_nothing() {
+        for amount in ["inf", "-1"] {
+            let conversion = MarketConversion {
+                amount: amount.to_owned(),
+                source_symbol: "BTC".to_owned(),
+                target_symbol: "USD".to_owned(),
+                reverse: false,
+            };
+            assert_eq!(
+                format_selected_conversion(&coin("BTC", 1.0), "USD", &conversion),
+                ""
+            );
+        }
+    }
+
+    #[test]
+    fn stock_ranking_handles_dotted_symbols_without_a_base_and_blank_queries() {
+        let dotted = listed_stock(".L", "Dot", "LSE", "GBP");
+        let trailing = listed_stock("ABC.", "Trailing", "NYSE", "USD");
+        assert_eq!(
+            compare_stock_quotes("abc", &dotted, &trailing),
+            Ordering::Greater
+        );
+        // A blank query ranks both the same, so the tie-breakers decide.
+        assert_eq!(compare_stock_quotes("", &dotted, &trailing), Ordering::Less);
+        let other_exchange = listed_stock("ABC.", "Trailing", "LSE", "USD");
+        assert_eq!(unique_stock_quotes(vec![trailing, other_exchange]).len(), 2);
+    }
+
+    #[test]
+    fn stock_candidates_without_a_currency_show_the_target_currency() {
+        let selection = MarketSelection {
+            query: "meli".to_owned(),
+            timeframe: None,
+            target_symbol: "ARS".to_owned(),
+            target_parameter: "ARS".to_owned(),
+            conversion: None,
+            candidates: vec![candidate("stock:MELI", "MELI", "MercadoLibre")],
+        };
+        assert!(format_market_selection(&selection, Locale::En).contains(": 1 ARS ("));
+    }
+
+    #[test]
+    fn conversion_candidates_match_names_when_no_symbol_matches() {
+        let mut named = coin("EXC", 1.0);
+        named.name = "Example Coin".to_owned();
+        named.slug = "exc-slug".to_owned();
+        let candidates = conversion_candidates(
+            vec![coin("BTC", 1.0), named],
+            "examplecoin",
+            "USD",
+            &mut Scripted::default(),
+            &mut Vec::new(),
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|asset| asset.symbol.as_str())
+                .collect::<Vec<_>>(),
+            vec!["EXC"]
+        );
+    }
+
+    #[test]
+    fn short_or_canonical_missing_tickers_are_not_looked_up_as_slugs() {
+        for query in ["zzz", "bitcoin"] {
+            let mut crypto = Scripted::ok(vec![vec![coin("ETH", 1.0)]], Vec::new());
+            let result = run(
+                query,
+                MarketPriceCommand::CryptoOnly,
+                Locale::En,
+                &mut crypto,
+                &mut Stocks::default(),
+            );
+            assert!(result.no_assets_found, "{query}");
+            assert!(!crypto.calls.iter().any(|call| call.ends_with(" true")));
+        }
+    }
+
+    #[test]
+    fn stock_scope_lists_comma_queries_and_skips_charts_for_merged_duplicates() {
+        let result = run(
+            "stock: aapl, msft",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut Scripted::default(),
+            &mut stocks(vec![
+                ("aapl".to_owned(), Some(stock("AAPL"))),
+                ("msft".to_owned(), Some(stock("MSFT"))),
+            ]),
+        );
+        assert!(result.selection.is_none());
+        assert!(result.text.contains("AAPL"), "{}", result.text);
+        assert!(result.text.contains("MSFT"), "{}", result.text);
+        let result = run(
+            "stock: aapl",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut Scripted::default(),
+            &mut stocks(vec![
+                ("aapl".to_owned(), Some(stock("AAPL"))),
+                ("AAPL".to_owned(), Some(stock("AAPL"))),
+            ]),
+        );
+        assert!(result.chart.is_none());
+        assert!(result.text.starts_with("AAPL"), "{}", result.text);
+    }
+
+    #[test]
+    fn unambiguous_crypto_names_are_not_shadowed_by_a_matching_company() {
+        let mut bitcoin = coin("BTC", 79_000.0);
+        bitcoin.name = "Bitcoin".to_owned();
+        bitcoin.slug = "bitcoin".to_owned();
+        let mut company = stock("SATS");
+        company.name = "EchoStar Corporation".to_owned();
+        let result = run(
+            "sats",
+            MarketPriceCommand::Unified,
+            Locale::En,
+            &mut Scripted::ok(vec![vec![bitcoin.clone()]], vec![vec![bitcoin]]),
+            &mut stocks(vec![("sats".to_owned(), Some(company))]),
+        );
+        assert!(result.text.starts_with("BTC: 79000 USD"), "{}", result.text);
+        assert!(result.selection.is_none());
+    }
+
+    #[test]
+    fn slug_requests_skip_short_and_dollar_prefixed_names() {
+        let named = |name: &str| {
+            let mut asset = coin("XYZ", 1.0);
+            asset.name = name.to_owned();
+            asset
+        };
+        assert!(explicit_slug_requests("abc", &[named("Abc")]).is_empty());
+        assert!(explicit_slug_requests("$examplecoin", &[named("Examplecoin")]).is_empty());
     }
 }

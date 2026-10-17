@@ -107,4 +107,12 @@ mod tests {
             assert_eq!(parse_creditlog_limit(raw), CreditLogLimit::Invalid);
         }
     }
+
+    #[test]
+    fn an_underscore_after_a_sign_is_invalid() {
+        // Without the underscore check, "+_1" would parse as "+1".
+        for raw in ["+_1", "-_5"] {
+            assert_eq!(parse_creditlog_limit(raw), CreditLogLimit::Invalid);
+        }
+    }
 }

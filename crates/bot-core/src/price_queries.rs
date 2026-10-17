@@ -134,7 +134,7 @@ fn parse_conversion_amount(raw: &str) -> Option<f64> {
             && first.len() <= 3
             && !first.starts_with('0')
             && first.bytes().all(|byte| byte.is_ascii_digit())
-            && parts.clone().next().is_some()
+            // Callers only pass text that contains the separator.
             && parts.all(|part| part.len() == 3 && part.bytes().all(|byte| byte.is_ascii_digit()))
     };
     let normalized = match (raw.rfind('.'), raw.rfind(',')) {
@@ -172,9 +172,9 @@ fn parse_conversion_amount(raw: &str) -> Option<f64> {
 }
 
 fn parse_conversion_only(text: &str) -> (String, String, String) {
-    if let Some(regex) = cached_regex(&CONVERSION_ONLY_REGEX, CONVERSION_ONLY_PATTERN)
-        && let Some(captures) = regex.captures(text)
-        && let Some(target_match) = captures.get(1)
+    if let Some(target_match) = cached_regex(&CONVERSION_ONLY_REGEX, CONVERSION_ONLY_PATTERN)
+        .and_then(|regex| regex.captures(text))
+        .and_then(|captures| captures.get(1))
     {
         let target = normalize_price_symbol(target_match.as_str());
         let parameter = price_query_parameter(&target);

@@ -273,4 +273,17 @@ mod tests {
             )
         );
     }
+
+    #[test]
+    fn short_timeframes_with_history_skip_the_missing_history_note() {
+        let rates = [DollarRate {
+            name: "Oficial",
+            price: 1000.0,
+            change: Some(1.5),
+        }];
+        assert_eq!(
+            render_dollar_rates(&rates, None, 6, Locale::En).as_deref(),
+            Some("Dollar in pesos, 6h change\n\nOfficial: 1,000 (+1.5%)")
+        );
+    }
 }
