@@ -1,0 +1,25 @@
+[Unit]
+Description=respondedorbot PostgreSQL database
+After=network-online.target
+
+[Container]
+Image=docker.io/library/postgres:18.6-trixie
+ContainerName=respondedorbot-postgres
+EnvironmentFile=%h/respondedorbot/postgres.env
+# ICU sorting, like the Supabase database this replaced.
+Environment=POSTGRES_INITDB_ARGS="--locale-provider=icu --icu-locale=en-US"
+Volume=respondedorbot-postgres.volume:/var/lib/postgresql
+Network=respondedorbot.network
+ShmSize=256m
+HealthCmd=pg_isready --username=respondedorbot --dbname=respondedorbot
+HealthInterval=10s
+HealthStartPeriod=30s
+Notify=healthy
+
+[Service]
+Restart=always
+TimeoutStartSec=120
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target

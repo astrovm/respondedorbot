@@ -40,7 +40,7 @@ fn unreachable_billing_database_stops_startup_before_any_service() -> Result<(),
         .env("TELEGRAM_TOKEN", "synthetic-telegram-token")
         .env("TELEGRAM_USERNAME", "synthetic_test_bot")
         .env(
-            "SUPABASE_POSTGRES_URL",
+            "DATABASE_URL",
             "postgresql://synthetic:synthetic@127.0.0.1:1/synthetic?sslmode=disable",
         )
         .env("REDIS_HOST", "127.0.0.1")

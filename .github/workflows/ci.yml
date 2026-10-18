@@ -231,7 +231,7 @@ jobs:
           docker run --rm \
             --env TELEGRAM_TOKEN=synthetic-telegram-token \
             --env TELEGRAM_USERNAME=synthetic_test_bot \
-            --env SUPABASE_POSTGRES_URL=postgresql://synthetic-user:synthetic-password@db.synthetic.invalid:5432/postgres?sslmode=require \
+            --env DATABASE_URL=postgresql://synthetic-user:synthetic-password@db.synthetic.invalid:5432/postgres?sslmode=require \
             --env COINMARKETCAP_KEY=synthetic-coinmarketcap-key \
             --env OPENROUTER_API_KEY=synthetic-openrouter-key \
             --volume "$RUNNER_TEMP/bot-workspace:/app/workspace:ro" \
@@ -283,7 +283,7 @@ jobs:
           docker run --rm \
             --env TELEGRAM_TOKEN=synthetic-telegram-token \
             --env TELEGRAM_USERNAME=synthetic_test_bot \
-            --env SUPABASE_POSTGRES_URL=postgresql://synthetic-user:synthetic-password@db.synthetic.invalid:5432/postgres?sslmode=require \
+            --env DATABASE_URL=postgresql://synthetic-user:synthetic-password@db.synthetic.invalid:5432/postgres?sslmode=require \
             --env COINMARKETCAP_KEY=synthetic-coinmarketcap-key \
             --env OPENROUTER_API_KEY=synthetic-openrouter-key \
             --volume "$RUNNER_TEMP/bot-workspace:/app/workspace:ro" \

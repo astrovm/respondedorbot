@@ -19,6 +19,10 @@ const DEFAULT_BATCH_LIMIT: i64 = 500;
 const DEFAULT_RETRY_WINDOW_SECONDS: i64 = 3_600;
 const DEFAULT_SAFETY_CREDIT_UNITS: i64 = 10;
 const DEFAULT_STALE_SECONDS: i64 = 300;
+/// Consecutive failed reads of the unsettled operations before a run is
+/// reported. A short database stall fails one read, and the next run picks up
+/// the same operations.
+const LISTING_FAILURE_REPORT_THRESHOLD: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReconciliationSettings {
@@ -148,6 +152,7 @@ pub struct AiBillingReconciler<Store, Generations> {
     generations: Generations,
     active: ActiveOperationRegistry,
     settings: ReconciliationSettings,
+    consecutive_failed_listings: usize,
 }
 
 impl<Store, Generations> AiBillingReconciler<Store, Generations> {
@@ -163,6 +168,7 @@ impl<Store, Generations> AiBillingReconciler<Store, Generations> {
             generations,
             active,
             settings: settings.normalized(),
+            consecutive_failed_listings: 0,
         }
     }
 
@@ -203,6 +209,36 @@ where
             }
         }
         Ok(report)
+    }
+
+    /// Runs once for the background worker, which reports a failed read of
+    /// the unsettled operations only after it keeps failing.
+    pub fn run_background_cycle(
+        &mut self,
+        now_epoch_seconds: i64,
+    ) -> Result<ReconciliationReport, String> {
+        match self.run_once(now_epoch_seconds) {
+            Ok(report) => {
+                self.consecutive_failed_listings = 0;
+                Ok(report)
+            }
+            Err(error) => {
+                self.consecutive_failed_listings =
+                    self.consecutive_failed_listings.saturating_add(1);
+                if self.consecutive_failed_listings >= LISTING_FAILURE_REPORT_THRESHOLD {
+                    Err(format!(
+                        "{} consecutive reconciliation reads failed: {error}",
+                        self.consecutive_failed_listings
+                    ))
+                } else {
+                    eprintln!(
+                        "transient reconciliation read failure ({}/{LISTING_FAILURE_REPORT_THRESHOLD}): {error}",
+                        self.consecutive_failed_listings
+                    );
+                    Ok(ReconciliationReport::default())
+                }
+            }
+        }
     }
 
     fn reconcile_operation(
@@ -572,7 +608,6 @@ fn parse_timestamp(raw: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, VecDeque};
-    use std::convert::Infallible;
 
     use bot_adapters::billing_read::{BillingRepository, UnsettledAiOperation};
     use bot_adapters::openrouter_generation::{
@@ -591,15 +626,19 @@ mod tests {
         operations: Vec<UnsettledAiOperation>,
         updates: Vec<(String, String, Value)>,
         settlements: Vec<(String, i64, Map<String, Value>)>,
+        failed_listings: VecDeque<bool>,
     }
 
     impl ReconciliationStore for Store {
-        type Error = Infallible;
+        type Error = &'static str;
 
         fn list_unsettled(
             &mut self,
             _limit: i64,
         ) -> Result<Vec<UnsettledAiOperation>, Self::Error> {
+            if self.failed_listings.pop_front() == Some(true) {
+                return Err("synthetic statement timeout");
+            }
             Ok(self.operations.clone())
         }
 
@@ -1098,6 +1137,46 @@ mod tests {
         active.mark_active("");
         active.mark_inactive("");
         assert!(!active.is_active(""));
+    }
+
+    #[test]
+    fn background_runs_report_read_failures_only_after_three_in_a_row() {
+        let mut reconciler = AiBillingReconciler::new(
+            Store {
+                failed_listings: [true, true, false, true, true, true, false].into(),
+                ..Store::default()
+            },
+            Generations::default(),
+            ActiveOperationRegistry::default(),
+            ReconciliationSettings::default(),
+        );
+        let mut run = || crate::background::BackgroundWorker::run_once(&mut reconciler, 0);
+        assert_eq!(run(), Ok(()));
+        assert_eq!(run(), Ok(()));
+        assert_eq!(run(), Ok(()));
+        assert_eq!(run(), Ok(()));
+        assert_eq!(run(), Ok(()));
+        assert_eq!(
+            run(),
+            Err(
+                "3 consecutive reconciliation reads failed: synthetic statement timeout".to_owned()
+            )
+        );
+        assert_eq!(run(), Ok(()));
+
+        let mut direct = AiBillingReconciler::new(
+            Store {
+                failed_listings: [true].into(),
+                ..Store::default()
+            },
+            Generations::default(),
+            ActiveOperationRegistry::default(),
+            ReconciliationSettings::default(),
+        );
+        assert_eq!(
+            direct.run_once(0),
+            Err("synthetic statement timeout".to_owned())
+        );
     }
 
     #[test]

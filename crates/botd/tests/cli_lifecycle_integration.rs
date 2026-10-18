@@ -45,7 +45,7 @@ fn configured_botd(workspace: &Workspace, database_url: &str) -> Command {
         .env("TELEGRAM_TOKEN", "synthetic-telegram-token")
         .env("TELEGRAM_USERNAME", "synthetic_test_bot")
         .env("TELEGRAM_LONG_POLL_SECONDS", "1")
-        .env("SUPABASE_POSTGRES_URL", database_url)
+        .env("DATABASE_URL", database_url)
         .env("COINMARKETCAP_KEY", "synthetic-market-key")
         .env("OPENROUTER_API_KEY", "synthetic-ai-key")
         .env("REDIS_HOST", "127.0.0.1")

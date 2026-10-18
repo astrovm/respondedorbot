@@ -49,7 +49,7 @@ fn configured_botd(workspace: &Workspace) -> Command {
         .env("TELEGRAM_TOKEN", "synthetic-telegram-token")
         .env("TELEGRAM_USERNAME", "synthetic_test_bot")
         .env(
-            "SUPABASE_POSTGRES_URL",
+            "DATABASE_URL",
             "postgresql://synthetic:synthetic@db.example.test/database?sslmode=require",
         )
         .env("COINMARKETCAP_KEY", "synthetic-market-key")
@@ -97,7 +97,7 @@ fn operational_cli_modes_report_storage_connection_failures() -> Result<(), Box<
             .env("REDIS_HOST", "127.0.0.1")
             .env("REDIS_PORT", "1")
             .env(
-                "SUPABASE_POSTGRES_URL",
+                "DATABASE_URL",
                 "postgresql://synthetic:synthetic@db.example.test/database?sslmode=require",
             )
             .output()?;
@@ -136,7 +136,7 @@ fn operational_cli_modes_succeed_against_disposable_local_services() -> Result<(
         .env("REDIS_MAXMEMORY", "64mb")
         .env("REDIS_MAXMEMORY_POLICY", "volatile-lru")
         .env("AI_LEDGER_RETENTION_DAYS", "30")
-        .env("SUPABASE_POSTGRES_URL", database_url)
+        .env("DATABASE_URL", database_url)
         .output()?;
     assert!(
         maintenance.status.success(),
@@ -160,7 +160,7 @@ fn production_startup_composes_real_services_before_reporting_an_unavailable_cac
     let output = configured_botd(&workspace)
         .env("TELEGRAM_TOKEN", "synthetic-telegram-token")
         .env("TELEGRAM_USERNAME", "synthetic_test_bot")
-        .env("SUPABASE_POSTGRES_URL", database_url)
+        .env("DATABASE_URL", database_url)
         .env("REDIS_HOST", "127.0.0.1")
         .env("REDIS_PORT", "1")
         .env("COINMARKETCAP_KEY", "synthetic-market-key")

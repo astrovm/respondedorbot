@@ -167,9 +167,9 @@ pub enum ConfigError {
     UnsafeRedisMaxmemoryPolicy,
     #[error("AI_LEDGER_RETENTION_DAYS must be a positive integer")]
     InvalidLedgerRetention,
-    #[error("SUPABASE_POSTGRES_URL not set")]
+    #[error("DATABASE_URL not set")]
     MissingDatabaseUrl,
-    #[error("SUPABASE_POSTGRES_URL {0}")]
+    #[error("DATABASE_URL {0}")]
     InvalidDatabaseUrl(#[from] PostgresConnectionStringError),
     #[error("TELEGRAM_API_URL: {0}")]
     InvalidTelegramApiUrl(ApiBaseError),
@@ -255,7 +255,7 @@ impl MaintenanceConfig {
         F: Fn(&str) -> Option<String>,
     {
         let redis_endpoint = redis_endpoint_from_lookup(&lookup)?;
-        let database_url = lookup("SUPABASE_POSTGRES_URL").filter(|value| !value.trim().is_empty());
+        let database_url = database_url_from_lookup(&lookup);
         if let Some(database_url) = &database_url {
             validate_connection_string(database_url)?;
         }
@@ -317,6 +317,16 @@ impl RuntimeConfig {
     }
 }
 
+/// `DATABASE_URL`, or the older `SUPABASE_POSTGRES_URL` for deployments that
+/// still set it.
+fn database_url_from_lookup<F>(lookup: &F) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    optional_trimmed(lookup, "DATABASE_URL")
+        .or_else(|| optional_trimmed(lookup, "SUPABASE_POSTGRES_URL"))
+}
+
 fn optional_trimmed<F>(lookup: &F, name: &str) -> Option<String>
 where
     F: Fn(&str) -> Option<String>,
@@ -365,8 +375,8 @@ impl ProductionConfig {
     {
         let runtime = RuntimeConfig::from_lookup(&lookup)?;
         let redis_endpoint = redis_endpoint_from_lookup(&lookup)?;
-        let database_url = optional_trimmed(&lookup, "SUPABASE_POSTGRES_URL")
-            .ok_or(ConfigError::MissingDatabaseUrl)?;
+        let database_url =
+            database_url_from_lookup(&lookup).ok_or(ConfigError::MissingDatabaseUrl)?;
         validate_connection_string(&database_url)?;
         let bot_name = optional_trimmed(&lookup, "TELEGRAM_USERNAME")
             .map(|value| value.trim_start_matches('@').to_owned())
@@ -637,10 +647,7 @@ mod tests {
             ("REDIS_HOST".to_owned(), "redis.internal".to_owned()),
             ("REDIS_PORT".to_owned(), "6380".to_owned()),
             ("REDIS_PASSWORD".to_owned(), "redis-secret".to_owned()),
-            (
-                "SUPABASE_POSTGRES_URL".to_owned(),
-                SYNTHETIC_DATABASE_URL.to_owned(),
-            ),
+            ("DATABASE_URL".to_owned(), SYNTHETIC_DATABASE_URL.to_owned()),
             ("REDIS_MAXMEMORY".to_owned(), "512mb".to_owned()),
             (
                 "REDIS_MAXMEMORY_POLICY".to_owned(),
@@ -702,7 +709,7 @@ mod tests {
         let base = [
             ("TELEGRAM_TOKEN", "synthetic-telegram-secret"),
             ("TELEGRAM_USERNAME", " @test_bot "),
-            ("SUPABASE_POSTGRES_URL", SYNTHETIC_DATABASE_URL),
+            ("DATABASE_URL", SYNTHETIC_DATABASE_URL),
             ("COINMARKETCAP_KEY", "synthetic-cmc-secret"),
             ("OPENROUTER_API_KEY", "synthetic-openrouter-secret"),
         ];
@@ -718,7 +725,7 @@ mod tests {
             production(
                 &[
                     ("TELEGRAM_TOKEN", "token"),
-                    ("SUPABASE_POSTGRES_URL", "postgresql://database"),
+                    ("DATABASE_URL", "postgresql://database"),
                 ],
                 Some("prompt"),
             )
@@ -759,6 +766,45 @@ mod tests {
     }
 
     #[test]
+    fn database_url_falls_back_to_the_legacy_name() -> crate::test_env::TestResult {
+        let local = "postgresql://synthetic:synthetic@respondedorbot-postgres:5432/respondedorbot?sslmode=disable";
+        let base = [
+            ("TELEGRAM_TOKEN", "token"),
+            ("TELEGRAM_USERNAME", "bot"),
+            ("COINMARKETCAP_KEY", "cmc"),
+            ("OPENROUTER_API_KEY", "openrouter"),
+        ];
+        let with = |extra: &[(&'static str, &'static str)]| {
+            let mut values = base.to_vec();
+            values.extend_from_slice(extra);
+            production(&values, Some("prompt"))
+        };
+        let legacy = with(&[("SUPABASE_POSTGRES_URL", SYNTHETIC_DATABASE_URL)])?;
+        assert_eq!(legacy.database_url(), SYNTHETIC_DATABASE_URL);
+        let both = with(&[
+            ("DATABASE_URL", local),
+            ("SUPABASE_POSTGRES_URL", SYNTHETIC_DATABASE_URL),
+        ])?;
+        assert_eq!(both.database_url(), local);
+        let blank = with(&[
+            ("DATABASE_URL", "  "),
+            ("SUPABASE_POSTGRES_URL", SYNTHETIC_DATABASE_URL),
+        ])?;
+        assert_eq!(blank.database_url(), SYNTHETIC_DATABASE_URL);
+        assert_eq!(
+            with(&[("DATABASE_URL", " ")]).map(|_| ()),
+            Err(ConfigError::MissingDatabaseUrl)
+        );
+
+        let maintenance_config = maintenance(&HashMap::from([(
+            "SUPABASE_POSTGRES_URL".to_owned(),
+            local.to_owned(),
+        )]))?;
+        assert_eq!(maintenance_config.database_url(), Some(local));
+        Ok(())
+    }
+
+    #[test]
     fn database_connection_validation_is_early_specific_and_redacted() {
         let secret = "synthetic-database-secret";
         let invalid_url = format!(
@@ -768,7 +814,7 @@ mod tests {
             &[
                 ("TELEGRAM_TOKEN", "token"),
                 ("TELEGRAM_USERNAME", "bot"),
-                ("SUPABASE_POSTGRES_URL", &invalid_url),
+                ("DATABASE_URL", &invalid_url),
                 ("COINMARKETCAP_KEY", "cmc"),
                 ("OPENROUTER_API_KEY", "openrouter"),
             ],
@@ -782,7 +828,7 @@ mod tests {
         );
 
         let maintenance_result = maintenance(&HashMap::from([(
-            "SUPABASE_POSTGRES_URL".to_owned(),
+            "DATABASE_URL".to_owned(),
             invalid_url.clone(),
         )]));
         let rendered = format!("{maintenance_result:?}");
@@ -796,7 +842,7 @@ mod tests {
 
         let transaction_pooler = "postgres://postgres.synthetic-project:synthetic-password@aws-0-synthetic.pooler.supabase.com:6543/postgres?sslmode=require";
         let result = maintenance(&HashMap::from([(
-            "SUPABASE_POSTGRES_URL".to_owned(),
+            "DATABASE_URL".to_owned(),
             transaction_pooler.to_owned(),
         )]));
         assert_eq!(
@@ -814,7 +860,7 @@ mod tests {
             &[
                 ("TELEGRAM_TOKEN", "telegram-secret"),
                 ("TELEGRAM_USERNAME", "test_bot"),
-                ("SUPABASE_POSTGRES_URL", SYNTHETIC_DATABASE_URL),
+                ("DATABASE_URL", SYNTHETIC_DATABASE_URL),
                 ("REDIS_PASSWORD", "redis-secret"),
                 ("ADMIN_CHAT_ID", "99"),
                 ("COINMARKETCAP_KEY", "cmc-secret"),
@@ -867,7 +913,7 @@ mod tests {
         let base = [
             ("TELEGRAM_TOKEN", "token"),
             ("TELEGRAM_USERNAME", "bot"),
-            ("SUPABASE_POSTGRES_URL", SYNTHETIC_DATABASE_URL),
+            ("DATABASE_URL", SYNTHETIC_DATABASE_URL),
             ("COINMARKETCAP_KEY", "cmc"),
             ("OPENROUTER_API_KEY", "openrouter"),
             ("ADMIN_CHAT_ID", "not-a-number"),
@@ -880,7 +926,7 @@ mod tests {
             &[
                 ("TELEGRAM_TOKEN", "token"),
                 ("TELEGRAM_USERNAME", "bot"),
-                ("SUPABASE_POSTGRES_URL", SYNTHETIC_DATABASE_URL),
+                ("DATABASE_URL", SYNTHETIC_DATABASE_URL),
                 ("COINMARKETCAP_KEY", "cmc"),
                 ("OPENROUTER_API_KEY", "openrouter"),
                 ("AI_RECONCILIATION_INTERVAL_SECONDS", "invalid"),
@@ -902,7 +948,7 @@ mod tests {
         let base = [
             ("TELEGRAM_TOKEN", "token"),
             ("TELEGRAM_USERNAME", "bot"),
-            ("SUPABASE_POSTGRES_URL", SYNTHETIC_DATABASE_URL),
+            ("DATABASE_URL", SYNTHETIC_DATABASE_URL),
             ("COINMARKETCAP_KEY", "cmc"),
             ("OPENROUTER_API_KEY", "openrouter"),
         ];

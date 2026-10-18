@@ -1,7 +1,7 @@
 [Unit]
 Description=respondedorbot Telegram bot
-After=network-online.target respondedorbot-redis.service
-Requires=respondedorbot-redis.service
+After=network-online.target respondedorbot-redis.service respondedorbot-postgres.service
+Requires=respondedorbot-redis.service respondedorbot-postgres.service
 
 [Container]
 Image=ghcr.io/astrovm/respondedorbot:latest
