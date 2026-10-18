@@ -6059,20 +6059,13 @@ where
             };
             let operation_id = format!("printcredits:{}:{}", chat_id.0, message_id.0);
             let text = match sink.mint(user_id, amount, &operation_id) {
-                Ok(balance) => printcredits_result_reply(amount, balance, locale),
+                Ok(balance) => printcredits_result_reply(amount, balance),
                 Err(error) => {
                     self.state_diagnostics.push(format!(
                         "admin credit mint chat_id={} user_id={user_id} amount={amount}: {error}",
                         chat_id.0
                     ));
-                    match locale {
-                        bot_core::locale::Locale::Es => {
-                            "Se trabó imprimiendo créditos. Probá de nuevo".to_owned()
-                        }
-                        bot_core::locale::Locale::En => {
-                            "I could not mint credits. Try again".to_owned()
-                        }
-                    }
+                    "I could not mint credits. Try again".to_owned()
                 }
             };
             let mut message = SendMessage::new(chat_id, &text);
@@ -6085,26 +6078,16 @@ where
                 return Err(DispatchError::MissingService("admin credit log"));
             };
             let text = match source.load(limit) {
-                Ok(entries) if entries.is_empty() => match locale {
-                    bot_core::locale::Locale::Es => {
-                        "No hay liquidaciones de IA recientes".to_owned()
-                    }
-                    bot_core::locale::Locale::En => "There are no recent AI settlements".to_owned(),
-                },
-                Ok(entries) => render_creditlog(&entries, locale),
+                Ok(entries) if entries.is_empty() => {
+                    "There are no recent AI settlements".to_owned()
+                }
+                Ok(entries) => render_creditlog(&entries),
                 Err(error) => {
                     self.state_diagnostics.push(format!(
                         "admin creditlog chat_id={} user_id={} limit={limit}: {error}",
                         chat_id.0, sender_id.0
                     ));
-                    match locale {
-                        bot_core::locale::Locale::Es => {
-                            "Se trabó leyendo el creditlog. Probá de nuevo".to_owned()
-                        }
-                        bot_core::locale::Locale::En => {
-                            "I could not load the credit log. Try again".to_owned()
-                        }
-                    }
+                    "I could not load the credit log. Try again".to_owned()
                 }
             };
             let mut message = SendMessage::new(chat_id, &text);
@@ -10715,10 +10698,7 @@ mod tests {
         );
         assert_eq!(failed_calls.borrow().as_slice(), &[(88, 100)]);
         let message = first_sent(&failed.actions.0);
-        assert_eq!(
-            message.text,
-            "Se trabó imprimiendo créditos. Probá de nuevo"
-        );
+        assert_eq!(message.text, "I could not mint credits. Try again");
         assert!(failed.state_diagnostics()[0].contains("synthetic database failure"));
 
         let config = Config {
@@ -10802,11 +10782,11 @@ mod tests {
         for (result, expected) in [
             (
                 Ok(Vec::new()),
-                "No hay liquidaciones de IA recientes".to_owned(),
+                "There are no recent AI settlements".to_owned(),
             ),
             (
                 Err("synthetic read failure".to_owned()),
-                "Se trabó leyendo el creditlog. Probá de nuevo".to_owned(),
+                "I could not load the credit log. Try again".to_owned(),
             ),
         ] {
             let config = Config {
