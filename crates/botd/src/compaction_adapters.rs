@@ -688,7 +688,7 @@ mod tests {
         let segment = json!({
             "kind":"summary",
             "text":"synthetic summary",
-            "model":"deepseek/deepseek-v4.1-flash",
+            "model":"deepseek/deepseek-v4.1-flash-1017",
             "usage":{"prompt_tokens":4,"completion_tokens":2},
             "source":"openrouter",
             "metadata":{"provider_generation_id":format!("synthetic-generation-{nonce}")},

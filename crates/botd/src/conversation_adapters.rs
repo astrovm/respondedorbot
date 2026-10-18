@@ -1390,7 +1390,7 @@ mod tests {
             reason: "synthetic".to_owned(),
             billing_segments: vec![json!({
                 "kind": "chat",
-                "model": "deepseek/deepseek-v4.1-flash",
+                "model": "deepseek/deepseek-v4.1-flash-1017",
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5},
                 "source": "openrouter",
                 "metadata": {

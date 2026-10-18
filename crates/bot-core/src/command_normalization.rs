@@ -315,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn spanish_emoji_names_cover_unicode_seventeen_without_english_fallbacks() {
+    fn spanish_emoji_names_cover_unicode_eighteen_without_english_fallbacks() {
         let cases = [
             ("❤️", "_corazón_rojo_"),
             ("🇦🇷", "_bandera_argentina_"),
@@ -325,6 +325,8 @@ mod tests {
             ),
             ("🪉", "_arpa_"),
             ("🫆", "_huella_dactilar_"),
+            ("🫝", "_pepinillo_"),
+            ("☄️", "_cometa_espacial_"),
         ];
         for (emoji, expected) in cases {
             assert_eq!(preprocess_command_text(emoji, Locale::Es), expected);

@@ -185,7 +185,7 @@ fn route(path: &str, body: &Value, state: &FakeState) -> (&'static str, String) 
     if path_only.ends_with("/models") {
         let pricing = json!({"prompt": "0.0000003", "completion": "0.0000012"});
         let models = [
-            "deepseek/deepseek-v4.1-flash",
+            "deepseek/deepseek-v4.1-flash-1017",
             "deepseek/deepseek-v4-flash",
             "microsoft/mai-transcribe-2",
         ]
