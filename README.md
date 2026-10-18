@@ -139,7 +139,7 @@ Edit `.env` and set these values:
 | --- | --- |
 | `TELEGRAM_TOKEN` | Telegram bot token from BotFather |
 | `TELEGRAM_USERNAME` | Bot username, with or without `@` |
-| `SUPABASE_POSTGRES_URL` | PostgreSQL database URL |
+| `DATABASE_URL` | PostgreSQL database URL |
 | `COINMARKETCAP_KEY` | Crypto market data |
 | `OPENROUTER_API_KEY` | AI chat, vision, summaries, and audio transcription |
 
@@ -169,7 +169,7 @@ set +a
 Stop it with `Ctrl+C`. The bot waits for background work to finish before it exits.
 
 > [!IMPORTANT]
-> For Supabase, use the session pooler on port `5432` with `sslmode=require`.
+> For a Supabase database, use the session pooler on port `5432` with `sslmode=require`.
 > Do not use the transaction pooler on port `6543`.
 
 </details>
@@ -185,9 +185,17 @@ mkdir -p ~/.config/systemd/user
 mkdir -p ~/respondedorbot/workspace
 
 cp quadlets/* ~/.config/containers/systemd/
-cp systemd/respondedorbot-maintenance.* ~/.config/systemd/user/
-cp systemd/respondedorbot-podman-prune.* ~/.config/systemd/user/
+cp systemd/respondedorbot-* ~/.config/systemd/user/
 cp .env.example ~/respondedorbot/.env
+
+password=$(openssl rand -hex 24)
+cat > ~/respondedorbot/postgres.env <<EOF
+POSTGRES_USER=respondedorbot
+POSTGRES_PASSWORD=$password
+POSTGRES_DB=respondedorbot
+EOF
+chmod 600 ~/respondedorbot/postgres.env
+echo "DATABASE_URL=postgresql://respondedorbot:$password@respondedorbot-postgres:5432/respondedorbot?sslmode=disable"
 
 podman run --rm --env-file ~/respondedorbot/.env \
   -v ~/respondedorbot/workspace:/app/workspace:ro \
@@ -197,14 +205,58 @@ systemctl --user daemon-reload
 systemctl --user enable --now respondedorbot-maintenance.timer
 systemctl --user enable --now respondedorbot-podman-prune.timer
 systemctl --user start respondedorbot-redis.service
+systemctl --user start respondedorbot-postgres.service
 systemctl --user start respondedorbot.service
 ```
 
-Before starting, edit `~/respondedorbot/.env` and add the personality files to `~/respondedorbot/workspace/SOUL.md` and `~/respondedorbot/workspace/RULES.md`.
+Before starting, edit `~/respondedorbot/.env`, set `DATABASE_URL` to the line printed above, and add the personality files to `~/respondedorbot/workspace/SOUL.md` and `~/respondedorbot/workspace/RULES.md`.
 
 The runtime image contains `botd`, FFmpeg, and native shared libraries. CI publishes `latest` and immutable `sha-<full-commit-sha>` images.
 
 To roll back, pin the Quadlet `Image=` setting to a verified SHA tag, reload the user units, and restart the service.
+
+### Database backups
+
+`respondedorbot-backup.timer` dumps the database every hour into an encrypted
+[restic](https://restic.net) repository, such as a Cloudflare R2 bucket. It
+keeps 48 hourly and 30 daily snapshots. If a backup fails, the admin gets a
+Telegram message.
+
+Create `~/respondedorbot/backup.env` and keep a copy of `RESTIC_PASSWORD`
+somewhere safe. Without it the backups cannot be read.
+
+```bash
+cat > ~/respondedorbot/backup.env <<EOF
+RESTIC_REPOSITORY=s3:https://<account-id>.r2.cloudflarestorage.com/<bucket>
+RESTIC_PASSWORD=$(openssl rand -hex 32)
+AWS_ACCESS_KEY_ID=<r2-access-key-id>
+AWS_SECRET_ACCESS_KEY=<r2-secret-access-key>
+EOF
+chmod 600 ~/respondedorbot/backup.env
+
+restic() {
+  podman run --rm -i --env-file ~/respondedorbot/backup.env \
+    docker.io/restic/restic:0.19.1 "$@"
+}
+restic init
+systemctl --user enable --now respondedorbot-backup.timer
+```
+
+To restore the latest snapshot into an empty database:
+
+```bash
+systemctl --user stop respondedorbot.service
+restic dump latest /respondedorbot.sql --host=respondedorbot --tag=postgres \
+  | podman exec -i respondedorbot-postgres \
+    psql --username=respondedorbot --dbname=respondedorbot --set=ON_ERROR_STOP=1
+podman exec respondedorbot-postgres \
+  psql --username=respondedorbot --dbname=respondedorbot --command=ANALYZE
+systemctl --user start respondedorbot.service
+```
+
+`ANALYZE` matters: without fresh statistics the billing queries plan badly and
+can hit their timeouts. List snapshots with `restic snapshots`, and restore an
+older one by its ID instead of `latest`.
 
 > [!WARNING]
 > Never run two pollers with the same Telegram token.

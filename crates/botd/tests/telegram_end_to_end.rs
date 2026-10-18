@@ -326,7 +326,7 @@ fn start_bot(
         .env("OPENROUTER_BASE_URL", format!("{base}/api/v1"))
         .env("OPENROUTER_API_KEY", "synthetic-ai-key")
         .env("COINMARKETCAP_KEY", "synthetic-market-key")
-        .env("SUPABASE_POSTGRES_URL", database_url)
+        .env("DATABASE_URL", database_url)
         .env("REDIS_HOST", redis_host)
         .env("REDIS_PORT", redis_port)
         .env("BOT_INSTANCE_NAME", "synthetic-e2e")

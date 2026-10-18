@@ -155,9 +155,7 @@ mod tests {
             match name {
                 "TELEGRAM_TOKEN" => Some("synthetic-telegram-token"),
                 "TELEGRAM_USERNAME" => Some("synthetic_test_bot"),
-                "SUPABASE_POSTGRES_URL" => {
-                    Some("postgresql://synthetic:synthetic@db.example.test/database")
-                }
+                "DATABASE_URL" => Some("postgresql://synthetic:synthetic@db.example.test/database"),
                 "COINMARKETCAP_KEY" => Some("synthetic-market-key"),
                 "OPENROUTER_API_KEY" => Some("synthetic-ai-key"),
                 _ => None,

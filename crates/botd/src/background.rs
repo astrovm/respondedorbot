@@ -477,7 +477,7 @@ where
     Generations::Error: Display,
 {
     fn run_once(&mut self, now_epoch_seconds: i64) -> Result<(), String> {
-        let report = AiBillingReconciler::run_once(self, now_epoch_seconds)?;
+        let report = self.run_background_cycle(now_epoch_seconds)?;
         if report.failures.is_empty() {
             Ok(())
         } else {

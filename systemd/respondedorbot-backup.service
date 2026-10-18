@@ -1,0 +1,22 @@
+[Unit]
+Description=Back up the respondedorbot database to restic
+After=respondedorbot-postgres.service
+Requires=respondedorbot-postgres.service
+OnFailure=respondedorbot-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash -c 'set -euo pipefail; \
+  /usr/bin/podman exec respondedorbot-postgres \
+    pg_dump --username=respondedorbot --dbname=respondedorbot --no-owner --no-privileges \
+  | /usr/bin/podman run --rm -i --env-file=%h/respondedorbot/backup.env \
+    --volume=respondedorbot-restic-cache:/root/.cache/restic \
+    docker.io/restic/restic:0.19.1 \
+    backup --stdin --stdin-filename=respondedorbot.sql --host=respondedorbot --tag=postgres'
+ExecStart=/usr/bin/podman run --rm --env-file=%h/respondedorbot/backup.env \
+  --volume=respondedorbot-restic-cache:/root/.cache/restic \
+  docker.io/restic/restic:0.19.1 \
+  forget --host=respondedorbot --tag=postgres --keep-hourly=48 --keep-daily=30 --prune
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=Tell the admin on Telegram that %i failed
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash -c 'set -euo pipefail; \
+  env=%h/respondedorbot/.env; \
+  token=$(grep -oP "^TELEGRAM_TOKEN=\\K.*" "$env" | tr -d "\\042\\047"); \
+  chat=$(grep -oP "^ADMIN_CHAT_ID=\\K.*" "$env" | tr -d "\\042\\047"); \
+  printf "url = \\"https://api.telegram.org/bot%%s/sendMessage\\"\\n" "$token" \
+  | /usr/bin/curl --fail --silent --show-error --max-time 30 --config - \
+    --data-urlencode "chat_id=$chat" \
+    --data-urlencode "text=informe administrativo de VPS: falló %i en $(hostname)" \
+    --output /dev/null'

@@ -862,7 +862,7 @@ mod tests {
         fn config(admin: Option<&str>) -> ProductionConfig {
             let lookup = |name: &str| match name {
                 "TELEGRAM_TOKEN" => Some("synthetic-telegram-token".to_owned()),
-                "SUPABASE_POSTGRES_URL" => Some(
+                "DATABASE_URL" => Some(
                     "postgresql://synthetic:synthetic@db.example.test/database?sslmode=require"
                         .to_owned(),
                 ),

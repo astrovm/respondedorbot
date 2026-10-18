@@ -282,7 +282,7 @@ Configuration includes:
 - `TELEGRAM_LONG_POLL_SECONDS`
 - `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`
 - `REDIS_MAXMEMORY`, `REDIS_MAXMEMORY_POLICY`
-- `SUPABASE_POSTGRES_URL`
+- `DATABASE_URL`
 - `OPENROUTER_API_KEY`
 - `FIRECRAWL_API_KEY`
 - `SUPADATA_API_KEY`, `APIFY_API_KEY`
@@ -301,5 +301,5 @@ variables and must redact secret values from errors and logs.
 
 The native process is the only Telegram poller, scheduler, and billing writer.
 Rollback stops the current container before starting one immutable, previously
-verified image. Redis and PostgreSQL stay external and are never duplicated or
-rewound as part of an application rollback.
+verified image. Redis and PostgreSQL stay outside the application image and are
+never duplicated or rewound as part of an application rollback.
