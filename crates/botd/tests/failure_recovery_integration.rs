@@ -32,7 +32,7 @@ use botd::runtime::{
 };
 use serde_json::{Value, json};
 
-const TEST_MODEL: &str = "deepseek/deepseek-v4.1-flash";
+const TEST_MODEL: &str = "deepseek/deepseek-v4.1-flash-1017";
 /// Polls every 2 ms for up to 5 s; background threads can be slow under
 /// coverage instrumentation or when a panic backtrace is being captured.
 const WAIT_POLLS: usize = 2_500;

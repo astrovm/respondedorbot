@@ -870,7 +870,7 @@ mod tests {
             transport,
             "synthetic-key",
             "https://synthetic.invalid/api/v1",
-            "deepseek/deepseek-v4.1-flash",
+            "deepseek/deepseek-v4.1-flash-1017",
             "synthetic persona",
         )
         .with_web_search(Box::new(Search));
@@ -935,7 +935,7 @@ mod tests {
             transport,
             "synthetic-key",
             "https://synthetic.invalid/api/v1",
-            "deepseek/deepseek-v4.1-flash",
+            "deepseek/deepseek-v4.1-flash-1017",
             "synthetic persona",
         )
         .with_openrouter_pricing(pricing);
@@ -1005,7 +1005,7 @@ mod tests {
             transport,
             "synthetic-key",
             "https://synthetic.invalid/api/v1",
-            "deepseek/deepseek-v4.1-flash",
+            "deepseek/deepseek-v4.1-flash-1017",
             "synthetic persona",
         )
         .with_web_search(Box::new(Search));
@@ -1075,7 +1075,7 @@ mod tests {
             transport,
             "synthetic-key",
             "https://synthetic.invalid/api/v1",
-            "deepseek/deepseek-v4.1-flash",
+            "deepseek/deepseek-v4.1-flash-1017",
             "synthetic persona",
         )
         .with_web_search(Box::new(Search));
@@ -1194,7 +1194,7 @@ mod tests {
     #[test]
     fn billing_uses_stable_personal_reservation_and_persists_segments_before_settlement() {
         let mut billing =
-            PostgresTaskBilling::new(Store::default(), "deepseek/deepseek-v4.1-flash");
+            PostgresTaskBilling::new(Store::default(), "deepseek/deepseek-v4.1-flash-1017");
         let prompt = [TaskPromptMessage {
             role: "user",
             content: "synthetic prompt".to_owned(),
@@ -1212,7 +1212,7 @@ mod tests {
 
         let segment = json!({
             "kind": "chat",
-            "model": "deepseek/deepseek-v4.1-flash",
+            "model": "deepseek/deepseek-v4.1-flash-1017",
             "usage": {
                 "prompt_tokens": 10_000,
                 "completion_tokens": 5_000,
@@ -1243,7 +1243,7 @@ mod tests {
     fn task_settlement_includes_usage_persisted_by_an_earlier_attempt() {
         let earlier_segment = json!({
             "kind": "chat",
-            "model": "deepseek/deepseek-v4.1-flash",
+            "model": "deepseek/deepseek-v4.1-flash-1017",
             "usage": {"cost": "0.001"},
             "source": "openrouter",
             "metadata": {
@@ -1253,7 +1253,7 @@ mod tests {
         });
         let current_segment = json!({
             "kind": "chat",
-            "model": "deepseek/deepseek-v4.1-flash",
+            "model": "deepseek/deepseek-v4.1-flash-1017",
             "usage": {"cost": "0.002"},
             "source": "openrouter",
             "metadata": {
@@ -1269,7 +1269,7 @@ mod tests {
             })]),
             ..Store::default()
         };
-        let mut billing = PostgresTaskBilling::new(store, "deepseek/deepseek-v4.1-flash");
+        let mut billing = PostgresTaskBilling::new(store, "deepseek/deepseek-v4.1-flash-1017");
 
         let settled = billing.settle(
             &task("en"),
@@ -1292,7 +1292,7 @@ mod tests {
     fn task_refund_charges_usage_persisted_by_an_earlier_attempt() {
         let earlier_segment = json!({
             "kind": "chat",
-            "model": "deepseek/deepseek-v4.1-flash",
+            "model": "deepseek/deepseek-v4.1-flash-1017",
             "usage": {"cost": "0.001"},
             "source": "openrouter",
             "metadata": {
@@ -1308,7 +1308,7 @@ mod tests {
             })]),
             ..Store::default()
         };
-        let mut billing = PostgresTaskBilling::new(store, "deepseek/deepseek-v4.1-flash");
+        let mut billing = PostgresTaskBilling::new(store, "deepseek/deepseek-v4.1-flash-1017");
 
         let refunded = billing.refund(&task("en"), "task123:1000", "task_error");
         assert_eq!(refunded, Ok(()));
@@ -1327,7 +1327,7 @@ mod tests {
     fn task_keeps_reservation_open_until_provider_cost_is_reconciled() {
         let segment = json!({
             "kind": "chat",
-            "model": "deepseek/deepseek-v4.1-flash",
+            "model": "deepseek/deepseek-v4.1-flash-1017",
             "usage": {"prompt_tokens": 10, "completion_tokens": 5},
             "source": "openrouter",
             "metadata": {
@@ -1337,7 +1337,7 @@ mod tests {
             }
         });
         let mut billing =
-            PostgresTaskBilling::new(Store::default(), "deepseek/deepseek-v4.1-flash");
+            PostgresTaskBilling::new(Store::default(), "deepseek/deepseek-v4.1-flash-1017");
 
         let settled = billing.settle(&task("en"), "task123:1000", &[segment], "task_success");
         assert_eq!(settled, Ok(()));
@@ -1353,13 +1353,13 @@ mod tests {
             content: "synthetic prompt".to_owned(),
         }];
         let mut without_search =
-            PostgresTaskBilling::new(Store::default(), "deepseek/deepseek-v4.1-flash");
+            PostgresTaskBilling::new(Store::default(), "deepseek/deepseek-v4.1-flash-1017");
         let reserved = without_search.reserve(&task("en"), "without-search", &prompt);
         assert_eq!(reserved, Ok(TaskReserveOutcome::Authorized));
         let without_search_amount = without_search.store.charges.borrow()[0].1;
 
         let mut with_search =
-            PostgresTaskBilling::new(Store::default(), "deepseek/deepseek-v4.1-flash")
+            PostgresTaskBilling::new(Store::default(), "deepseek/deepseek-v4.1-flash-1017")
                 .with_web_search(true);
         let reserved = with_search.reserve(&task("en"), "with-search", &prompt);
         assert_eq!(reserved, Ok(TaskReserveOutcome::Authorized));
@@ -1382,7 +1382,8 @@ mod tests {
             })),
             ..Store::default()
         };
-        let mut denied = PostgresTaskBilling::new(denied_store, "deepseek/deepseek-v4.1-flash");
+        let mut denied =
+            PostgresTaskBilling::new(denied_store, "deepseek/deepseek-v4.1-flash-1017");
         let outcome = denied.reserve(&task("en"), "task123:1000", &[]);
         let Ok(outcome) = outcome else { panic!() };
         assert!(
@@ -1401,7 +1402,8 @@ mod tests {
             })),
             ..Store::default()
         };
-        let mut settled = PostgresTaskBilling::new(settled_store, "deepseek/deepseek-v4.1-flash");
+        let mut settled =
+            PostgresTaskBilling::new(settled_store, "deepseek/deepseek-v4.1-flash-1017");
         assert_eq!(
             settled.reserve(&task("es"), "task123:1000", &[]),
             Ok(TaskReserveOutcome::AlreadySettled)
@@ -1411,7 +1413,7 @@ mod tests {
     #[test]
     fn refund_is_an_exactly_once_zero_cost_settlement() {
         let mut billing =
-            PostgresTaskBilling::new(Store::default(), "deepseek/deepseek-v4.1-flash");
+            PostgresTaskBilling::new(Store::default(), "deepseek/deepseek-v4.1-flash-1017");
         let refunded = billing.refund(&task("es"), "task123:1000", "task_error");
         assert_eq!(refunded, Ok(()));
         let settlement = &billing.store.settlements.borrow()[0];
@@ -1511,7 +1513,7 @@ mod tests {
             transport,
             "synthetic-key",
             "https://synthetic.invalid/api/v1",
-            "deepseek/deepseek-v4.1-flash",
+            "deepseek/deepseek-v4.1-flash-1017",
             "synthetic persona",
         );
 
@@ -1592,7 +1594,7 @@ mod tests {
             })),
             ..Store::default()
         };
-        let mut billing = PostgresTaskBilling::new(store, "deepseek/deepseek-v4.1-flash");
+        let mut billing = PostgresTaskBilling::new(store, "deepseek/deepseek-v4.1-flash-1017");
         assert_eq!(
             billing.reserve(&task("es"), "task123:1000", &[]),
             Ok(TaskReserveOutcome::Denied {
@@ -1621,12 +1623,12 @@ mod tests {
                     fail_on: Some(fail_on),
                     ..Store::default()
                 },
-                "deepseek/deepseek-v4.1-flash",
+                "deepseek/deepseek-v4.1-flash-1017",
             )
         };
         let segment = json!({
             "kind": "chat",
-            "model": "deepseek/deepseek-v4.1-flash",
+            "model": "deepseek/deepseek-v4.1-flash-1017",
             "usage": {"cost": "0.001"},
             "source": "openrouter",
             "metadata": {"provider": "openrouter", "provider_generation_id": "generation-1"}
@@ -1671,7 +1673,8 @@ mod tests {
             })]),
             ..Store::default()
         };
-        let mut billing = PostgresTaskBilling::new(unpriceable, "deepseek/deepseek-v4.1-flash");
+        let mut billing =
+            PostgresTaskBilling::new(unpriceable, "deepseek/deepseek-v4.1-flash-1017");
         assert!(matches!(
             billing.refund(&task("en"), "task123:1000", "task_error"),
             Err(NativeTaskBillingError::Pricing(_))

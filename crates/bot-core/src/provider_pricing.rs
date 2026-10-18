@@ -1,6 +1,6 @@
 //! Provider model identifiers and non-catalog service pricing constants.
 
-pub const PRICING_VERSION: &str = "2026-09-10";
+pub const PRICING_VERSION: &str = "2026-10-17";
 /// What Telegram pays out per Star, in millionths of a US dollar.
 pub const STAR_PAYOUT_USD_MICROS: i128 = 13_000;
 /// What one credit unit sells for at the Stars payout: 25 Stars buy 5,000
@@ -13,7 +13,7 @@ pub const AI_MARKUP_PERCENT: i128 = 30;
 pub const CREDIT_UNIT_USD_MICROS: i128 =
     CREDIT_UNIT_PRICE_USD_MICROS * 100 / (100 + AI_MARKUP_PERCENT);
 
-pub const DEEPSEEK_MODEL: &str = "deepseek/deepseek-v4.1-flash";
+pub const DEEPSEEK_MODEL: &str = "deepseek/deepseek-v4.1-flash-1017";
 pub const DEEPSEEK_FLASH_MODEL: &str = "deepseek/deepseek-v4-flash";
 pub const OPENROUTER_TRANSCRIPTION_MODEL: &str = "microsoft/mai-transcribe-2";
 

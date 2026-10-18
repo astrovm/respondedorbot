@@ -266,7 +266,7 @@ mod tests {
                 &messages,
                 None,
                 0,
-                "deepseek/deepseek-v4.1-flash",
+                "deepseek/deepseek-v4.1-flash-1017",
                 &TokenPricing {
                     input_per_million: 300_000,
                     cached_input_per_million: Some(6_000),
@@ -304,7 +304,7 @@ mod tests {
     #[test]
     fn preserves_model_limits_credit_rounding_and_provider_reserves() {
         assert_eq!(
-            chat_output_token_limit("deepseek/deepseek-v4.1-flash:free"),
+            chat_output_token_limit("deepseek/deepseek-v4.1-flash-1017:free"),
             8_192
         );
         assert_eq!(chat_output_token_limit("other"), 1_024);

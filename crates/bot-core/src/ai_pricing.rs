@@ -775,7 +775,7 @@ mod tests {
     fn openrouter_model_costs_require_provider_reported_settlement() -> Result<(), AiPricingError> {
         let missing = calculate_billing_for_segments(&json!([{
             "kind": "chat",
-            "model": "deepseek/deepseek-v4.1-flash",
+            "model": "deepseek/deepseek-v4.1-flash-1017",
             "usage": {
                 "input_tokens": 1_000,
                 "input_cached_tokens": 100,
@@ -792,7 +792,7 @@ mod tests {
         assert_eq!(missing["model_breakdown"][0]["output_tokens"], 50);
         let settled = calculate_billing_for_segments(&json!([{
             "kind": "chat",
-            "model": "deepseek/deepseek-v4.1-flash",
+            "model": "deepseek/deepseek-v4.1-flash-1017",
             "usage": {
                 "input_tokens": 1_000,
                 "input_cached_tokens": 100,
