@@ -1,4 +1,6 @@
-//! Native plans and replies for privileged billing commands.
+//! Native plans and replies for privileged billing commands. Replies to the
+//! admin are always in English; only the refusal for other users follows the
+//! chat's language.
 
 use std::collections::BTreeMap;
 
@@ -79,10 +81,7 @@ pub fn plan_printcredits_command(
         return reply(
             context.chat_id,
             context.message_id,
-            match context.locale {
-                Locale::Es => "Los créditos de IA no están disponibles en este momento",
-                Locale::En => "AI credits are not available right now",
-            },
+            "AI credits are not available right now",
         );
     }
     let amount_token = parsed
@@ -94,20 +93,14 @@ pub fn plan_printcredits_command(
         return reply(
             context.chat_id,
             context.message_id,
-            match context.locale {
-                Locale::Es => "Mandalo así: /printcredits <monto>",
-                Locale::En => "Usage: /printcredits <amount>",
-            },
+            "Usage: /printcredits <amount>",
         );
     };
     if amount.value() <= 0 {
         return reply(
             context.chat_id,
             context.message_id,
-            match context.locale {
-                Locale::Es => "El monto tiene que ser mayor a 0",
-                Locale::En => "The amount must be greater than 0",
-            },
+            "The amount must be greater than 0",
         );
     }
     PrintCreditsPlan::Mint {
@@ -117,13 +110,10 @@ pub fn plan_printcredits_command(
 }
 
 #[must_use]
-pub fn printcredits_result_reply(amount: i64, balance: i64, locale: Locale) -> String {
+pub fn printcredits_result_reply(amount: i64, balance: i64) -> String {
     let amount = display_credit_units(CreditUnits::new(amount));
     let balance = display_credit_units(CreditUnits::new(balance));
-    match locale {
-        Locale::Es => format!("Listo, te imprimí {amount} créditos\nTe quedaron {balance}"),
-        Locale::En => format!("Minted {amount} credits\nYour balance is {balance}"),
-    }
+    format!("Minted {amount} credits\nYour balance is {balance}")
 }
 
 #[must_use]
@@ -145,18 +135,12 @@ pub fn plan_creditlog_command(
         });
     }
     if !context.billing_available {
-        return reply(match context.locale {
-            Locale::Es => "Los créditos de IA no están disponibles en este momento",
-            Locale::En => "AI credits are not available right now",
-        });
+        return reply("AI credits are not available right now");
     }
     match parse_creditlog_limit(&parsed.message_text) {
         CreditLogLimit::Valid(limit) => CreditLogPlan::Load { limit },
         CreditLogLimit::Invalid | CreditLogLimit::UnsupportedNumericInput => {
-            reply(match context.locale {
-                Locale::Es => "Mandalo así: /creditlog [límite]",
-                Locale::En => "Usage: /creditlog [limit]",
-            })
+            reply("Usage: /creditlog [limit]")
         }
     }
 }
@@ -208,29 +192,23 @@ fn objects(value: Option<&Value>) -> impl Iterator<Item = &Map<String, Value>> {
         .filter_map(Value::as_object)
 }
 
-fn with_hidden_count(summary: String, total: usize, visible: usize, locale: Locale) -> String {
+fn with_hidden_count(summary: String, total: usize, visible: usize) -> String {
     let hidden = total.saturating_sub(visible);
     if hidden == 0 {
         summary
     } else {
-        match locale {
-            Locale::Es => format!("{summary}, +{hidden} más"),
-            Locale::En => format!("{summary}, +{hidden} more"),
-        }
+        format!("{summary}, +{hidden} more")
     }
 }
 
-fn summarize_models(value: Option<&Value>, locale: Locale) -> String {
+fn summarize_models(value: Option<&Value>) -> String {
     let mut totals = BTreeMap::<String, i64>::new();
     for item in objects(value) {
         let name = python_string(item.get("model"), "?");
         *totals.entry(name).or_default() += value_i64(item.get("usd_micros"));
     }
     if totals.is_empty() {
-        return match locale {
-            Locale::Es => "sin modelos".to_owned(),
-            Locale::En => "no models".to_owned(),
-        };
+        return "no models".to_owned();
     }
     let mut ordered = totals.into_iter().collect::<Vec<_>>();
     ordered.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
@@ -240,10 +218,10 @@ fn summarize_models(value: Option<&Value>, locale: Locale) -> String {
         .map(|(name, usd)| format!("{name}={usd}"))
         .collect::<Vec<_>>()
         .join(", ");
-    with_hidden_count(summary, ordered.len(), visible, locale)
+    with_hidden_count(summary, ordered.len(), visible)
 }
 
-fn summarize_tools(value: Option<&Value>, locale: Locale) -> String {
+fn summarize_tools(value: Option<&Value>) -> String {
     let mut totals = BTreeMap::<String, (i64, i64)>::new();
     for item in objects(value) {
         let name = python_string(item.get("tool"), "?");
@@ -252,10 +230,7 @@ fn summarize_tools(value: Option<&Value>, locale: Locale) -> String {
         current.1 += value_i64(item.get("count"));
     }
     if totals.is_empty() {
-        return match locale {
-            Locale::Es => "sin tools".to_owned(),
-            Locale::En => "no tools".to_owned(),
-        };
+        return "no tools".to_owned();
     }
     let mut ordered = totals.into_iter().collect::<Vec<_>>();
     ordered.sort_by(|left, right| {
@@ -272,7 +247,7 @@ fn summarize_tools(value: Option<&Value>, locale: Locale) -> String {
         .map(|(name, (usd, count))| format!("{name}={usd} ({count}x)"))
         .collect::<Vec<_>>()
         .join(", ");
-    with_hidden_count(summary, ordered.len(), visible, locale)
+    with_hidden_count(summary, ordered.len(), visible)
 }
 
 fn summarize_segments(value: Option<&Value>, cache_only: bool) -> Option<String> {
@@ -297,7 +272,7 @@ fn summarize_segments(value: Option<&Value>, cache_only: bool) -> Option<String>
     })
 }
 
-fn summarize_model_cache(value: Option<&Value>, locale: Locale) -> Option<String> {
+fn summarize_model_cache(value: Option<&Value>) -> Option<String> {
     let mut cached_tokens_total = 0_i64;
     for item in objects(value) {
         let cached_tokens = value_i64(item.get("input_cached_tokens"));
@@ -306,10 +281,7 @@ fn summarize_model_cache(value: Option<&Value>, locale: Locale) -> Option<String
         }
         cached_tokens_total = cached_tokens_total.saturating_add(cached_tokens);
     }
-    (cached_tokens_total > 0).then(|| match locale {
-        Locale::Es => format!("cacheados={cached_tokens_total}"),
-        Locale::En => format!("cached_tokens={cached_tokens_total}"),
-    })
+    (cached_tokens_total > 0).then(|| format!("cached_tokens={cached_tokens_total}"))
 }
 
 fn metadata_credit(metadata: &Map<String, Value>, keys: &[&str]) -> i64 {
@@ -328,17 +300,14 @@ fn optional_id(metadata: &Map<String, Value>, key: &str, fallback: Option<i64>) 
     )
 }
 
-fn format_creditlog_entry(entry: &CreditLogEntry, locale: Locale) -> String {
+fn format_creditlog_entry(entry: &CreditLogEntry) -> String {
     let empty = Map::new();
     let metadata = entry.metadata.as_object().unwrap_or(&empty);
     let models = metadata.get("model_breakdown");
     let tools = metadata.get("tool_breakdown");
     let segments = metadata.get("billing_segments");
     let created = if entry.created_at.is_empty() {
-        match locale {
-            Locale::Es => "sin fecha".to_owned(),
-            Locale::En => "no date".to_owned(),
-        }
+        "no date".to_owned()
     } else {
         entry
             .created_at
@@ -350,10 +319,7 @@ fn format_creditlog_entry(entry: &CreditLogEntry, locale: Locale) -> String {
     let command = ["command", "usage_tag"]
         .into_iter()
         .find_map(|key| truthy(metadata.get(key)).then(|| python_string(metadata.get(key), "")))
-        .unwrap_or_else(|| match locale {
-            Locale::Es => "sin comando".to_owned(),
-            Locale::En => "no command".to_owned(),
-        });
+        .unwrap_or_else(|| "no command".to_owned());
     let status = if truthy(metadata.get("billing_zero_usage_fallback")) {
         "groq_zero_usage"
     } else if truthy(metadata.get("missing_usage_billing")) {
@@ -361,100 +327,49 @@ fn format_creditlog_entry(entry: &CreditLogEntry, locale: Locale) -> String {
     } else {
         "ok"
     };
-    let labels = match locale {
-        Locale::Es => (
-            "estado",
-            "reservado",
-            "cobrado",
-            "refund",
-            "extra",
-            "deuda",
-            "requests",
-            "sin segmentos",
-            "modelos",
-            "tools",
-        ),
-        Locale::En => (
-            "status",
-            "reserved",
-            "charged",
-            "refund",
-            "extra",
-            "debt",
-            "requests",
-            "no segments",
-            "models",
-            "tools",
-        ),
-    };
     let credit =
         |keys: &[&str]| format_credit_units(CreditUnits::new(metadata_credit(metadata, keys)));
     let mut lines = vec![
-        format!("{created} | cmd={command} | {}={status}", labels.0),
+        format!("{created} | cmd={command} | status={status}"),
         format!(
-            "chat={} user={} {}={} {}={} {}={} {}={} {}={}",
+            "chat={} user={} reserved={} charged={} refund={} extra={} debt={}",
             optional_id(metadata, "chat_id", entry.chat_id),
             optional_id(metadata, "user_id", entry.user_id),
-            labels.1,
             credit(&[
                 "reserved_credit_units_total",
                 "reserved_credit_units",
                 "reserved_credits_total",
                 "reserved_credits"
             ]),
-            labels.2,
             credit(&["settled_credit_units", "settled_credits"]),
-            labels.3,
             credit(&["refunded_credit_units", "refunded_credits"]),
-            labels.4,
             credit(&["extra_charged_credit_units", "extra_charged_credits"]),
-            labels.5,
             credit(&["debt_applied_credit_units", "debt_applied_credits"]),
         ),
         format!("usd_micros={}", value_i64(metadata.get("raw_usd_micros"))),
         format!(
-            "{}: {}",
-            labels.6,
-            summarize_segments(segments, false).unwrap_or_else(|| labels.7.to_owned())
+            "requests: {}",
+            summarize_segments(segments, false).unwrap_or_else(|| "no segments".to_owned())
         ),
     ];
     if let Some(cache_hits) = summarize_segments(segments, true) {
         lines.push(format!("cache_hits: {cache_hits}"));
     }
-    if let Some(cache) = summarize_model_cache(models, locale) {
+    if let Some(cache) = summarize_model_cache(models) {
         lines.push(cache);
     }
-    lines.push(format!(
-        "{}: {}",
-        labels.8,
-        summarize_models(models, locale)
-    ));
-    lines.push(format!("{}: {}", labels.9, summarize_tools(tools, locale)));
+    lines.push(format!("models: {}", summarize_models(models)));
+    lines.push(format!("tools: {}", summarize_tools(tools)));
     lines.join("\n")
 }
 
 #[must_use]
-pub fn render_creditlog(entries: &[CreditLogEntry], locale: Locale) -> String {
-    let title = match locale {
-        Locale::Es => "Últimas liquidaciones de IA:",
-        Locale::En => "Latest AI settlements:",
-    };
-    let text = std::iter::once(title.to_owned())
-        .chain(
-            entries
-                .iter()
-                .map(|entry| format_creditlog_entry(entry, locale)),
-        )
+pub fn render_creditlog(entries: &[CreditLogEntry]) -> String {
+    let text = std::iter::once("Latest AI settlements:".to_owned())
+        .chain(entries.iter().map(format_creditlog_entry))
         .collect::<Vec<_>>()
         .join("\n\n");
-    truncate_report(
-        &text,
-        3500,
-        match locale {
-            Locale::Es => "truncado",
-            Locale::En => "truncated",
-        },
-    )
+    truncate_report(&text, 3500, "truncated")
 }
 
 #[cfg(test)]
@@ -506,7 +421,7 @@ mod tests {
         );
         assert_eq!(
             reply_text(plan("/printcredits bad", Some(99), true, Locale::Es)),
-            Some("Mandalo así: /printcredits <monto>".to_owned())
+            Some("Usage: /printcredits <amount>".to_owned())
         );
         assert_eq!(
             reply_text(plan("/printcredits -1", Some(99), true, Locale::En)),
@@ -515,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_exact_credit_units_and_formats_bilingual_success() {
+    fn parses_exact_credit_units_and_formats_english_success() {
         assert_eq!(
             plan(
                 "/printcredits@bot 100.0 ignored",
@@ -529,11 +444,7 @@ mod tests {
             }
         );
         assert_eq!(
-            printcredits_result_reply(10_000, 12_000, Locale::Es),
-            "Listo, te imprimí 100.00 créditos\nTe quedaron 120.00"
-        );
-        assert_eq!(
-            printcredits_result_reply(10_000, 12_000, Locale::En),
+            printcredits_result_reply(10_000, 12_000),
             "Minted 100.00 credits\nYour balance is 120.00"
         );
         assert_eq!(
@@ -594,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_detailed_spanish_creditlog_with_python_parity() {
+    fn renders_detailed_english_creditlog() {
         let entry = CreditLogEntry {
             user_id: Some(99),
             chat_id: Some(202),
@@ -621,8 +532,8 @@ mod tests {
             }),
         };
         assert_eq!(
-            render_creditlog(&[entry], Locale::Es),
-            "Últimas liquidaciones de IA:\n\n2026-03-11 17:35:10 | cmd=/ask | estado=ok\nchat=202 user=99 reservado=2.00 cobrado=1.00 refund=1.00 extra=0.00 deuda=0.00\nusd_micros=390\nrequests: chat=3\ncache_hits: chat=1\ncacheados=900\nmodelos: deepseek/deepseek-v4.1-flash-1017=390\ntools: web_search=8000 (2x), python=500 (1x)"
+            render_creditlog(&[entry]),
+            "Latest AI settlements:\n\n2026-03-11 17:35:10 | cmd=/ask | status=ok\nchat=202 user=99 reserved=2.00 charged=1.00 refund=1.00 extra=0.00 debt=0.00\nusd_micros=390\nrequests: chat=3\ncache_hits: chat=1\ncached_tokens=900\nmodels: deepseek/deepseek-v4.1-flash-1017=390\ntools: web_search=8000 (2x), python=500 (1x)"
         );
     }
 
@@ -649,7 +560,7 @@ mod tests {
                 "billing_segments":[]
             }),
         };
-        let text = format_creditlog_entry(&entry, Locale::En);
+        let text = format_creditlog_entry(&entry);
         assert!(text.starts_with("no date | cmd=legacy | status=missing_usage"));
         assert!(text.contains("chat=None user=None reserved=0.02 charged=0.01"));
         assert!(text.contains("requests: no segments"));
@@ -662,7 +573,7 @@ mod tests {
             metadata: json!({"command":"x".repeat(4000),"billing_zero_usage_fallback":true}),
             ..entry
         };
-        let truncated = render_creditlog(&[huge], Locale::En);
+        let truncated = render_creditlog(&[huge]);
         assert_eq!(truncated.chars().count(), 3500);
         assert!(truncated.ends_with("\n\n[truncated]"));
     }
@@ -678,20 +589,14 @@ mod tests {
         assert_eq!(python_string(Some(&json!(false)), "x"), "False");
         assert_eq!(python_string(Some(&json!([1])), "x"), "[1]");
         assert_eq!(python_string(Some(&json!({"a":1})), "x"), "{\"a\":1}");
-        assert_eq!(
-            summarize_models(Some(&json!("bad")), Locale::Es),
-            "sin modelos"
-        );
-        assert_eq!(summarize_tools(None, Locale::En), "no tools");
+        assert_eq!(summarize_models(Some(&json!("bad"))), "no models");
+        assert_eq!(summarize_tools(None), "no tools");
         assert_eq!(
             summarize_segments(Some(&json!([null, {"kind":null}])), false),
             Some("unknown=1".to_owned())
         );
         assert_eq!(
-            summarize_model_cache(
-                Some(&json!([{"model":"unknown","input_cached_tokens":5}])),
-                Locale::En
-            ),
+            summarize_model_cache(Some(&json!([{"model":"unknown","input_cached_tokens":5}]))),
             Some("cached_tokens=5".to_owned())
         );
     }
@@ -707,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn guards_are_localized_in_both_languages_for_both_commands() {
+    fn only_the_refusal_follows_the_chat_language_for_both_commands() {
         let context = |admin_user_id, billing_available, locale| PrintCreditsContext {
             chat_id: ChatId(202),
             message_id: MessageId(12),
@@ -721,8 +626,12 @@ mod tests {
             Some("This command is only for the admin")
         );
         assert_eq!(
+            reply_text(plan("/printcredits 1", Some(1), true, Locale::Es)).as_deref(),
+            Some("Este comando es solo para el admin")
+        );
+        assert_eq!(
             reply_text(plan("/printcredits 1", Some(99), false, Locale::Es)).as_deref(),
-            Some("Los créditos de IA no están disponibles en este momento")
+            Some("AI credits are not available right now")
         );
         assert_eq!(
             reply_text(plan("/printcredits", Some(99), true, Locale::En)).as_deref(),
@@ -730,7 +639,7 @@ mod tests {
         );
         assert_eq!(
             reply_text(plan("/printcredits 0", Some(99), true, Locale::Es)).as_deref(),
-            Some("El monto tiene que ser mayor a 0")
+            Some("The amount must be greater than 0")
         );
         // A mint plan carries no reply text.
         assert_eq!(
@@ -751,11 +660,11 @@ mod tests {
         );
         assert_eq!(
             creditlog("/creditlog", Some(99), false, Locale::Es).as_deref(),
-            Some("Los créditos de IA no están disponibles en este momento")
+            Some("AI credits are not available right now")
         );
         assert_eq!(
             creditlog("/creditlog muchos", Some(99), true, Locale::Es).as_deref(),
-            Some("Mandalo así: /creditlog [límite]")
+            Some("Usage: /creditlog [limit]")
         );
         assert_eq!(
             creditlog("/creditlog ٣", Some(99), true, Locale::En).as_deref(),
@@ -765,7 +674,7 @@ mod tests {
     }
 
     #[test]
-    fn spanish_entries_without_dates_or_commands_use_readable_placeholders() {
+    fn entries_without_dates_or_commands_use_readable_placeholders() {
         let tools = (0..6)
             .map(|index| json!({"tool": format!("t{index}"), "usd_micros": 1, "count": 1}))
             .collect::<Vec<_>>();
@@ -785,26 +694,22 @@ mod tests {
                 "tool_breakdown": tools
             }),
         };
-        let text = format_creditlog_entry(&entry, Locale::Es);
+        let text = format_creditlog_entry(&entry);
         assert!(
-            text.starts_with("sin fecha | cmd=sin comando | estado=ok\nchat=-100 user=user-7 "),
+            text.starts_with("no date | cmd=no command | status=ok\nchat=-100 user=user-7 "),
             "{text}"
         );
-        assert!(!text.contains("cacheados"), "{text}");
-        assert!(text.contains("\nmodelos: m=2, 7=1\n"), "{text}");
+        assert!(!text.contains("cached_tokens"), "{text}");
+        assert!(text.contains("\nmodels: m=2, 7=1\n"), "{text}");
         assert!(
-            text.ends_with("tools: t0=1 (1x), t1=1 (1x), t2=1 (1x), t3=1 (1x), t4=1 (1x), +1 más"),
+            text.ends_with("tools: t0=1 (1x), t1=1 (1x), t2=1 (1x), t3=1 (1x), t4=1 (1x), +1 more"),
             "{text}"
         );
-        assert_eq!(summarize_tools(None, Locale::Es), "sin tools");
 
-        let english = format_creditlog_entry(
-            &CreditLogEntry {
-                metadata: json!({}),
-                ..entry
-            },
-            Locale::En,
-        );
+        let english = format_creditlog_entry(&CreditLogEntry {
+            metadata: json!({}),
+            ..entry
+        });
         assert!(
             english.starts_with("no date | cmd=no command | status=ok\nchat=6 user=5 "),
             "{english}"
@@ -815,13 +720,10 @@ mod tests {
     fn oversized_numbers_saturate_and_equal_costs_sort_by_name() {
         assert_eq!(value_i64(Some(&json!(u64::MAX))), i64::MAX);
         assert_eq!(
-            summarize_models(
-                Some(&json!([
-                    {"model": "zeta", "usd_micros": 5},
-                    {"model": "alpha", "usd_micros": 5}
-                ])),
-                Locale::En
-            ),
+            summarize_models(Some(&json!([
+                {"model": "zeta", "usd_micros": 5},
+                {"model": "alpha", "usd_micros": 5}
+            ]))),
             "alpha=5, zeta=5"
         );
     }

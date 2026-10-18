@@ -4,36 +4,24 @@ use std::collections::HashSet;
 
 use bot_adapters::telegram_actions::{ActionOutcome, execute_with};
 use bot_adapters::telegram_http::TelegramTransport;
-use bot_core::locale::Locale;
 use bot_core::telegram_actions::{SendMessage, TelegramAction};
 use bot_core::telegram_input::ChatId;
 
+/// A failure report for the admin. Admin reports are always in English.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationalReport {
-    spanish: String,
-    english: String,
+    text: String,
 }
 
 impl OperationalReport {
     #[must_use]
-    pub fn new(spanish: impl Into<String>, english: impl Into<String>) -> Self {
-        Self {
-            spanish: spanish.into(),
-            english: english.into(),
-        }
+    pub fn new(text: impl Into<String>) -> Self {
+        Self { text: text.into() }
     }
 
     #[must_use]
-    pub const fn for_locale(&self, locale: Locale) -> &str {
-        match locale {
-            Locale::Es => self.spanish.as_str(),
-            Locale::En => self.english.as_str(),
-        }
-    }
-
-    #[must_use]
-    pub const fn english(&self) -> &str {
-        self.english.as_str()
+    pub const fn text(&self) -> &str {
+        self.text.as_str()
     }
 }
 
@@ -56,7 +44,6 @@ pub struct TelegramOperationalReporter<Transport> {
     chat_id: ChatId,
     instance_name: String,
     secrets: Vec<String>,
-    locale: Locale,
 }
 
 impl<Transport> TelegramOperationalReporter<Transport> {
@@ -67,7 +54,6 @@ impl<Transport> TelegramOperationalReporter<Transport> {
         chat_id: i64,
         instance_name: Option<&str>,
         secrets: impl IntoIterator<Item = String>,
-        locale: Locale,
     ) -> Self {
         let mut seen = HashSet::new();
         let mut secrets = secrets
@@ -81,7 +67,6 @@ impl<Transport> TelegramOperationalReporter<Transport> {
             chat_id: ChatId(chat_id),
             instance_name: instance_name.unwrap_or("unknown").to_owned(),
             secrets,
-            locale,
         }
     }
 
@@ -99,44 +84,28 @@ where
     Transport: TelegramTransport + Send + Sync + 'static,
 {
     fn report(&self, report: &OperationalReport) -> Result<(), String> {
-        let message = self.redact(report.for_locale(self.locale));
-        let text = match self.locale {
-            Locale::Es => format!(
-                "informe administrativo de {}: {}",
-                self.instance_name, message
-            ),
-            Locale::En => format!("admin report from {}: {}", self.instance_name, message),
-        };
+        let text = format!(
+            "admin report from {}: {}",
+            self.instance_name,
+            self.redact(report.text())
+        );
         let action = TelegramAction::SendMessage(SendMessage::new(self.chat_id, &text));
         match execute_with(&self.transport, &self.token, action).map_err(crate::error_text)? {
             ActionOutcome::Completed { .. } => Ok(()),
             ActionOutcome::RateLimited {
                 retry_after_seconds,
-            } => Err(match self.locale {
-                Locale::Es => format!(
-                    "el informe administrativo fue limitado (retry_after={retry_after_seconds:?})"
-                ),
-                Locale::En => {
-                    format!("admin report was rate limited (retry_after={retry_after_seconds:?})")
-                }
-            }),
+            } => Err(format!(
+                "admin report was rate limited (retry_after={retry_after_seconds:?})"
+            )),
             ActionOutcome::Failed {
                 status_code,
                 description,
-            } => Err(match self.locale {
-                Locale::Es => format!(
-                    "falló el informe administrativo con estado {status_code:?}: {description}"
-                ),
-                Locale::En => {
-                    format!("admin report failed with status {status_code:?}: {description}")
-                }
-            }),
-            ActionOutcome::TransportFailed(failure) => Err(match self.locale {
-                Locale::Es => {
-                    format!("falló el transporte del informe administrativo: {failure:?}")
-                }
-                Locale::En => format!("admin report transport failed: {failure:?}"),
-            }),
+            } => Err(format!(
+                "admin report failed with status {status_code:?}: {description}"
+            )),
+            ActionOutcome::TransportFailed(failure) => {
+                Err(format!("admin report transport failed: {failure:?}"))
+            }
         }
     }
 }
@@ -148,7 +117,6 @@ mod tests {
     use bot_adapters::telegram_http::{
         HttpResponse, TelegramRequest, TelegramTransport, TransportFailureKind,
     };
-    use bot_core::locale::Locale;
     use serde_json::Value;
 
     use super::{OperationalReport, OperationalReporter, TelegramOperationalReporter};
@@ -191,13 +159,11 @@ mod tests {
             -42,
             Some("test-instance"),
             ["database-secret".to_owned(), "provider-secret".to_owned()],
-            Locale::Es,
         );
         assert!(
             reporter
                 .report(&OperationalReport::new(
-                    "el proceso falló en database-secret usando provider-secret",
-                    "worker failed at database-secret using provider-secret",
+                    "worker failed at database-secret using provider-secret"
                 ))
                 .is_ok()
         );
@@ -218,45 +184,11 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(
             text,
-            "informe administrativo de test-instance: el proceso falló en [REDACTED] usando [REDACTED]"
+            "admin report from test-instance: worker failed at [REDACTED] using [REDACTED]"
         );
         assert!(!text.contains("database-secret"));
         assert!(!text.contains("provider-secret"));
         Ok(())
-    }
-
-    #[test]
-    fn sends_the_english_report_body_without_spanish_fragments() {
-        let reporter = TelegramOperationalReporter::new(
-            transport(r#"{"ok":true,"result":{"message_id":10}}"#),
-            "token",
-            42,
-            Some("test-instance"),
-            [],
-            Locale::En,
-        );
-        assert!(
-            reporter
-                .report(&OperationalReport::new(
-                    "falló el sondeo de Telegram",
-                    "Telegram polling failed",
-                ))
-                .is_ok()
-        );
-        let requests = reporter.transport.requests.lock();
-        let text = requests
-            .as_deref()
-            .ok()
-            .and_then(|requests| requests.first())
-            .and_then(|request| request.json_payload.as_ref())
-            .and_then(|payload| payload.get("text"))
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        assert_eq!(
-            text,
-            "admin report from test-instance: Telegram polling failed"
-        );
-        assert!(!text.contains("falló"));
     }
 
     #[test]
@@ -267,71 +199,43 @@ mod tests {
             42,
             None,
             [],
-            Locale::En,
         );
-        let error = reporter.report(&OperationalReport::new("fallo", "failure"));
+        let error = reporter.report(&OperationalReport::new("failure"));
         assert!(error.is_err());
         assert!(error.err().is_some_and(|error| error.contains("forbidden")));
     }
 
     #[test]
-    fn localizes_every_telegram_reporting_failure() {
+    fn reports_every_telegram_delivery_failure_in_english() {
         let cases = [
             (
-                Locale::Es,
-                r#"{"ok":false,"error_code":429,"description":"slow","parameters":{"retry_after":3}}"#,
-                "limitado",
+                Transport {
+                    requests: Mutex::new(Vec::new()),
+                    response: Mutex::new(Some(Ok(HttpResponse {
+                        status_code: 429,
+                        body: r#"{"ok":false,"error_code":429,"description":"slow","parameters":{"retry_after":3}}"#.to_owned(),
+                    }))),
+                },
+                "admin report was rate limited (retry_after=Some(3))",
             ),
             (
-                Locale::En,
-                r#"{"ok":false,"error_code":429,"description":"slow","parameters":{"retry_after":3}}"#,
-                "rate limited",
+                transport(r#"{"ok":false,"error_code":403,"description":"forbidden"}"#),
+                "admin report failed with status Some(200): forbidden",
             ),
-            (
-                Locale::Es,
-                r#"{"ok":false,"error_code":403,"description":"forbidden"}"#,
-                "falló",
-            ),
-            (
-                Locale::En,
-                r#"{"ok":false,"error_code":403,"description":"forbidden"}"#,
-                "failed",
-            ),
+            (Transport::default(), "admin report transport failed: "),
         ];
-        for (locale, body, expected) in cases {
-            let reporter = TelegramOperationalReporter::new(
-                transport(body),
-                "synthetic-token",
-                42,
-                None,
-                [],
-                locale,
-            );
+        for (transport, expected) in cases {
+            let reporter =
+                TelegramOperationalReporter::new(transport, "synthetic-token", 42, None, []);
             let error = reporter
-                .report(&OperationalReport::new(
-                    "fallo sintético",
-                    "synthetic failure",
-                ))
+                .report(&OperationalReport::new("synthetic failure"))
                 .err();
-            assert!(error.is_some_and(|error| error.contains(expected)));
-        }
-
-        for (locale, expected) in [(Locale::Es, "transporte"), (Locale::En, "transport")] {
-            let reporter = TelegramOperationalReporter::new(
-                Transport::default(),
-                "synthetic-token",
-                42,
-                None,
-                [],
-                locale,
+            assert!(
+                error
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with(expected)),
+                "{error:?} should start with {expected:?}"
             );
-            let error = reporter
-                .report(&OperationalReport::new(
-                    "fallo sintético",
-                    "synthetic failure",
-                ))
-                .err();
-            assert!(error.is_some_and(|error| error.contains(expected)));
         }
     }
 }

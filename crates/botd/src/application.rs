@@ -59,10 +59,9 @@ where
     let mut diagnostics = Vec::new();
     for action in command_publication_actions() {
         if let Err(error) = sink.execute(action) {
-            diagnostics.push(OperationalReport::new(
-                format!("falló la publicación de comandos de Telegram: {error}"),
-                format!("Telegram command publication failed: {error}"),
-            ));
+            diagnostics.push(OperationalReport::new(format!(
+                "Telegram command publication failed: {error}"
+            )));
         }
     }
     diagnostics
@@ -85,10 +84,9 @@ where
     let chats = match chats {
         Ok(chats) => chats,
         Err(error) => {
-            return vec![OperationalReport::new(
-                format!("no pude cargar los chats para actualizar sus menús: {error}"),
-                format!("could not load chats to refresh their menus: {error}"),
-            )];
+            return vec![OperationalReport::new(format!(
+                "could not load chats to refresh their menus: {error}"
+            ))];
         }
     };
     let mut failed = 0_usize;
@@ -106,16 +104,10 @@ where
     if failed == 0 {
         return Vec::new();
     }
-    vec![OperationalReport::new(
-        format!(
-            "falló la actualización del menú de {failed} de {} chats: {last_error}",
-            chats.len()
-        ),
-        format!(
-            "chat command menu refresh failed for {failed} of {} chats: {last_error}",
-            chats.len()
-        ),
-    )]
+    vec![OperationalReport::new(format!(
+        "chat command menu refresh failed for {failed} of {} chats: {last_error}",
+        chats.len()
+    ))]
 }
 
 /// Telegram's answers for a chat the bot is no longer in or can't write to.
@@ -271,26 +263,19 @@ fn build_operational_reporter(
         admin_chat_id,
         config.instance_name.as_deref(),
         secrets,
-        Locale::Es,
     )))
 }
 
 fn poll_retry_report(failure: &PollFailure) -> OperationalReport {
-    OperationalReport::new(
-        format!("reintento del sondeo de Telegram: {failure:?}"),
-        format!("Telegram polling retry: {failure:?}"),
-    )
+    OperationalReport::new(format!("Telegram polling retry: {failure:?}"))
 }
 
 fn update_failure_report(update_id: i64, error: &str) -> OperationalReport {
-    OperationalReport::new(
-        format!("falló la actualización {update_id} de Telegram: {error}"),
-        format!("Telegram update {update_id} failed: {error}"),
-    )
+    OperationalReport::new(format!("Telegram update {update_id} failed: {error}"))
 }
 
 fn log_and_queue(reports: &BackgroundReports, report: OperationalReport) {
-    eprintln!("{}", report.english());
+    eprintln!("{}", report.text());
     reports.report(report);
 }
 
@@ -333,7 +318,7 @@ impl BackgroundReports {
         {
             eprintln!(
                 "dropped operational report, the report queue is unavailable: {}",
-                report.english()
+                report.text()
             );
         }
     }
@@ -443,10 +428,7 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
         &reports,
     );
     if let Err(error) = &polling_result {
-        let report = OperationalReport::new(
-            format!("falló el proceso de sondeo de Telegram: {error}"),
-            format!("Telegram polling runtime failed: {error}"),
-        );
+        let report = OperationalReport::new(format!("Telegram polling runtime failed: {error}"));
         reports.report(report);
     }
     runtime.shutdown();
@@ -467,7 +449,6 @@ mod tests {
     use bot_adapters::telegram_polling::{
         IncomingEvent, IncomingUpdate, PollFailure, PollOutcome, PollingError,
     };
-    use bot_core::locale::Locale;
     use bot_core::telegram_actions::TelegramAction;
 
     use super::{
@@ -615,7 +596,7 @@ mod tests {
         assert_eq!(
             reports
                 .iter()
-                .map(OperationalReport::english)
+                .map(OperationalReport::text)
                 .collect::<Vec<_>>(),
             [
                 "chat command menu refresh failed for 1 of 5 chats: Telegram action transport failed: Timeout"
@@ -635,13 +616,8 @@ mod tests {
         assert_eq!(sink.actions.len(), 1);
         assert_eq!(reports.len(), 1);
         assert_eq!(
-            reports[0].english(),
+            reports[0].text(),
             "chat command menu refresh failed for 1 of 2 chats: synthetic publication failure"
-        );
-        assert!(
-            reports[0]
-                .for_locale(Locale::Es)
-                .contains("falló la actualización del menú de 1 de 2 chats")
         );
 
         let mut untouched = Sink::default();
@@ -650,11 +626,11 @@ mod tests {
         assert_eq!(
             reports
                 .iter()
-                .map(OperationalReport::english)
+                .map(OperationalReport::text)
                 .collect::<Vec<_>>(),
             ["could not load chats to refresh their menus: db down"]
         );
-        assert!(reports[0].for_locale(Locale::Es).contains("db down"));
+        assert!(reports[0].text().contains("db down"));
     }
 
     #[test]
@@ -676,14 +652,10 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
         assert!(
             diagnostics[0]
-                .english()
+                .text()
                 .contains("synthetic publication failure")
         );
-        assert!(
-            diagnostics[0]
-                .for_locale(Locale::Es)
-                .contains("falló la publicación")
-        );
+        assert!(diagnostics[0].text().contains("command publication failed"));
     }
 
     #[test]
@@ -916,7 +888,7 @@ mod tests {
         }
         report_best_effort(
             &FailingReporter,
-            &OperationalReport::new("informe sintético", "synthetic report"),
+            &OperationalReport::new("synthetic report"),
         );
 
         let stopping = AtomicBool::new(true);
@@ -941,7 +913,7 @@ mod tests {
                     let _ = release.recv_timeout(Duration::from_secs(5));
                 }
                 if let Ok(mut delivered) = self.delivered.lock() {
-                    delivered.push(report.english().to_owned());
+                    delivered.push(report.text().to_owned());
                 }
                 Ok(())
             }
@@ -958,7 +930,7 @@ mod tests {
             }),
             1,
         );
-        let report = |text: &str| OperationalReport::new(text, text);
+        let report = |text: &str| OperationalReport::new(text);
 
         let started = std::time::Instant::now();
         reports.report(report("first"));
@@ -997,7 +969,7 @@ mod tests {
     }
 
     #[test]
-    fn polling_diagnostics_are_localized_and_queued_for_the_admin() {
+    fn polling_diagnostics_are_queued_for_the_admin() {
         #[derive(Default)]
         struct Recorder(std::sync::Mutex<Vec<OperationalReport>>);
         impl OperationalReporter for Recorder {
@@ -1011,19 +983,11 @@ mod tests {
         }
 
         let retry = poll_retry_report(&PollFailure::Conflict);
-        assert_eq!(retry.english(), "Telegram polling retry: Conflict");
-        assert_eq!(
-            retry.for_locale(Locale::Es),
-            "reintento del sondeo de Telegram: Conflict"
-        );
+        assert_eq!(retry.text(), "Telegram polling retry: Conflict");
         let update = update_failure_report(42, "synthetic failure");
         assert_eq!(
-            update.english(),
+            update.text(),
             "Telegram update 42 failed: synthetic failure"
-        );
-        assert_eq!(
-            update.for_locale(Locale::Es),
-            "falló la actualización 42 de Telegram: synthetic failure"
         );
 
         let recorder = std::sync::Arc::new(Recorder::default());
@@ -1048,7 +1012,7 @@ mod tests {
                 self.0
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(report.english().to_owned());
+                    .push(report.text().to_owned());
                 Ok(())
             }
         }

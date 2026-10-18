@@ -180,20 +180,7 @@ pub enum BackgroundError {
 
 impl BackgroundError {
     fn operational_report(&self) -> OperationalReport {
-        match self {
-            Self::InvalidInterval { name } => OperationalReport::new(
-                format!("el proceso en segundo plano {name} tiene un intervalo de cero"),
-                self.to_string(),
-            ),
-            Self::Spawn { name, error } => OperationalReport::new(
-                format!("no se pudo iniciar el proceso en segundo plano {name}: {error}"),
-                self.to_string(),
-            ),
-            Self::Panicked { name } => OperationalReport::new(
-                format!("el proceso en segundo plano {name} entró en pánico"),
-                self.to_string(),
-            ),
-        }
+        OperationalReport::new(self.to_string())
     }
 }
 
@@ -283,11 +270,10 @@ impl BackgroundSupervisor {
                         match run {
                             Ok(()) => last_reported_failure = None,
                             Err(error) => {
-                                let report = OperationalReport::new(
-                                    format!("falló el proceso en segundo plano {name}: {error}"),
-                                    format!("background worker {name} failed: {error}"),
-                                );
-                                let message = report.english().to_owned();
+                                let report = OperationalReport::new(format!(
+                                    "background worker {name} failed: {error}"
+                                ));
+                                let message = report.text().to_owned();
                                 eprintln!("{message}");
                                 let now = Instant::now();
                                 let should_report = last_reported_failure.as_ref().is_none_or(
@@ -317,13 +303,10 @@ impl BackgroundSupervisor {
                         let _woken = changed.wait_timeout(guard, interval);
                     }
                     if let Err(error) = worker.shutdown() {
-                        let report = OperationalReport::new(
-                            format!(
-                                "falló el apagado del proceso en segundo plano {name}: {error}"
-                            ),
-                            format!("background worker {name} shutdown failed: {error}"),
-                        );
-                        eprintln!("{}", report.english());
+                        let report = OperationalReport::new(format!(
+                            "background worker {name} shutdown failed: {error}"
+                        ));
+                        eprintln!("{}", report.text());
                         if let Err(report_error) = reporter.report(&report) {
                             eprintln!(
                                 "could not deliver background shutdown failure report: {report_error}"
@@ -505,7 +488,6 @@ mod tests {
 
     use bot_adapters::openrouter_chat::OpenRouterPricingCache;
     use bot_adapters::redis_connection::RedisEndpoint;
-    use bot_core::locale::Locale;
 
     use super::{
         BackgroundError, BackgroundSupervisor, BackgroundWorker, BackgroundWorkerSpec,
@@ -585,8 +567,8 @@ mod tests {
         assert!(messages.is_ok_and(|messages| {
             messages.len() == 1
                 && messages[0]
-                    .for_locale(Locale::Es)
-                    .starts_with("falló el proceso en segundo plano synthetic-worker")
+                    .text()
+                    .starts_with("background worker synthetic-worker failed")
         }));
         assert!(supervisor.stop().is_ok());
         Ok(())
@@ -654,14 +636,14 @@ mod tests {
     }
 
     #[test]
-    fn spawn_failures_have_a_localized_operational_report() {
+    fn spawn_failures_have_an_english_operational_report() {
         let failure = BackgroundError::Spawn {
             name: "synthetic-worker".to_owned(),
             error: "synthetic spawn failure".to_owned(),
         };
         let report = failure.operational_report();
-        assert!(report.for_locale(Locale::Es).contains("no se pudo iniciar"));
-        assert!(report.english().contains("synthetic spawn failure"));
+        assert!(report.text().contains("could not start background worker"));
+        assert!(report.text().contains("synthetic spawn failure"));
     }
 
     #[test]
@@ -830,8 +812,8 @@ mod tests {
             .unwrap_or_else(PoisonError::into_inner);
         assert_eq!(messages.len(), 1);
         assert_eq!(
-            messages[0].for_locale(Locale::Es),
-            "no se pudo iniciar el proceso en segundo plano unspawnable-worker: synthetic thread exhaustion"
+            messages[0].text(),
+            "could not start background worker unspawnable-worker: synthetic thread exhaustion"
         );
     }
 
@@ -875,12 +857,8 @@ mod tests {
             .unwrap_or_else(PoisonError::into_inner);
         assert_eq!(messages.len(), 1);
         assert_eq!(
-            messages[0].english(),
+            messages[0].text(),
             "background worker shutdown-panic-worker panicked"
-        );
-        assert_eq!(
-            messages[0].for_locale(Locale::Es),
-            "el proceso en segundo plano shutdown-panic-worker entró en pánico"
         );
         Ok(())
     }
@@ -922,7 +900,7 @@ mod tests {
             .unwrap_or_else(PoisonError::into_inner);
         let english = messages
             .iter()
-            .map(|message| message.english().to_owned())
+            .map(|message| message.text().to_owned())
             .collect::<Vec<_>>();
         assert_eq!(
             english,

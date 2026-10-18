@@ -10,5 +10,5 @@ ExecStart=/usr/bin/bash -c 'set -euo pipefail; \
   printf "url = \\"https://api.telegram.org/bot%%s/sendMessage\\"\\n" "$token" \
   | /usr/bin/curl --fail --silent --show-error --max-time 30 --config - \
     --data-urlencode "chat_id=$chat" \
-    --data-urlencode "text=informe administrativo de VPS: falló %i en $(hostname)" \
+    --data-urlencode "text=admin report from $(hostname): %i failed" \
     --output /dev/null'
