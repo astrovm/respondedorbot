@@ -400,6 +400,11 @@ fn real_binary_answers_commands_buttons_and_ai_chat_then_shuts_down_cleanly() ->
 
     let server = FakeServer::start()?;
     let workspace = Workspace::new()?;
+    // Enough context to make the full reservation larger than admission.
+    std::fs::write(
+        workspace.0.join("workspace/RULES.md"),
+        format!("synthetic rules\n{}", "synthetic context ".repeat(3_000)),
+    )?;
     let mut bot = start_bot(&server, &workspace, &database_url, &redis_host, &redis_port)?;
     exercise_main_flows(&server, &mut bot, &billing, user_id).map_err(|error| {
         let log = std::fs::read_to_string(workspace.log()).unwrap_or_default();
@@ -511,6 +516,53 @@ fn exercise_main_flows(
                 .iter()
                 .any(|body| body["message_id"] == 555)
     })?;
+
+    // Personal credits cover admission but leave only 0.09 for context.
+    // The funded group must pay for the whole reply instead of returning an
+    // insufficient-credit warning when the context reservation is extended.
+    let member_id = user_id + 100_000_000;
+    let funder_id = user_id + 200_000_000;
+    let group_id = -member_id;
+    bot_adapters::postgres_pool::PostgresPool::shared(&std::env::var("TEST_DATABASE_URL")?)
+        .get()?
+        .execute(
+            "INSERT INTO onboarding_grants (user_id, credits, granted_at) \
+         VALUES ($1, 0, NOW() - INTERVAL '2 days')",
+            &[&member_id],
+        )?;
+    billing.mint_user_credits(member_id, 230, None, &format!("e2e-member-mint:{user_id}"))?;
+    billing.mint_user_credits(funder_id, 4_507, None, &format!("e2e-group-mint:{user_id}"))?;
+    assert!(
+        billing
+            .transfer_user_to_chat(
+                funder_id,
+                group_id,
+                4_507,
+                &format!("e2e-group-transfer:{user_id}"),
+            )?
+            .transferred
+    );
+    let mut update = private_message(first_update + 4, member_id, "/ask group fallback");
+    update["message"]["chat"] =
+        json!({"id": group_id, "type": "supergroup", "title": "Synthetic group"});
+    server.queue_update(update);
+    server.wait_for("a group-funded AI reply", |state| {
+        state
+            .sent_texts(group_id)
+            .iter()
+            .any(|text| text == AI_REPLY)
+    })?;
+    server.wait_for("the group-funded reply to settle", |_| {
+        billing.get_balance("chat", group_id).ok() == Some(4_506)
+    })?;
+    assert_eq!(billing.get_balance("user", member_id)?, 230);
+    assert!(
+        server
+            .state
+            .sent_texts(group_id)
+            .iter()
+            .all(|text| !text.contains("Se quedaron secos"))
+    );
 
     server.state.stopping.store(true, Ordering::SeqCst);
     stop_bot(bot)

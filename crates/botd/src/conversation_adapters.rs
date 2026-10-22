@@ -377,8 +377,8 @@ pub struct PostgresConversationBilling {
     repository: BillingRepository,
     creditless_cap: Option<RedisCreditlessCap>,
     payer_by_operation: HashMap<String, PayerSource>,
-    /// Credit units held per reservation of each operation, so a group-paid
-    /// operation can move to the member in one piece.
+    /// Credit units held per reservation, so an operation can move to the
+    /// fallback payer in one piece.
     held_by_operation: HashMap<String, HashMap<String, i64>>,
     cap_key_by_operation: HashMap<String, String>,
     cap_checked_operations: HashSet<String>,
@@ -481,22 +481,37 @@ impl PostgresConversationBilling {
         Ok("chat")
     }
 
-    /// With the group paying first, a later reservation the group can't
-    /// cover moves the whole operation to the member: the group gets back
-    /// what it held and its hourly slot, and the member's credits hold all of
-    /// it. An operation settles with one payer, so it can't be split.
-    fn move_operation_to_member(
+    /// If the preferred payer can't cover a later reservation, move all holds
+    /// to the fallback payer. Settlement requires a single payer.
+    fn move_operation_to_fallback(
         &mut self,
         request: &ReserveRequest,
         amount: i32,
         refused: AiChargeResult,
+        target: PayerSource,
     ) -> Result<AiChargeResult, String> {
         let held = self
             .held_by_operation
             .get(&request.operation_id)
             .map_or(0, |holds| holds.values().sum::<i64>());
         let total = held + i64::from(amount);
-        if refused.user_balance < total {
+        let (balance, from, to, label, reason) = match target {
+            PayerSource::User => (
+                refused.user_balance,
+                "chat",
+                "user",
+                "member",
+                "group_short_moved_to_member",
+            ),
+            PayerSource::Chat => (
+                refused.chat_balance,
+                "user",
+                "chat",
+                "group",
+                "member_short_moved_to_group",
+            ),
+        };
+        if balance < total {
             return Ok(refused);
         }
         let held = i32::try_from(held)
@@ -504,23 +519,29 @@ impl PostgresConversationBilling {
         let total = i32::try_from(total)
             .map_err(|_| "AI reservation exceeds the database range".to_owned())?;
         let mut refund_metadata = request.metadata.clone();
-        refund_metadata.insert("reason".to_owned(), json!("group_short_moved_to_member"));
+        refund_metadata.insert("reason".to_owned(), json!(reason));
         self.repository
             .refund_ai_charge(
                 request.user_id,
                 request.chat_id,
                 held,
-                "chat",
+                from,
                 "ai_refund",
                 &refund_metadata,
-                Some(&format!("{}:moved_to_member", request.operation_id)),
+                Some(&format!("{}:moved_to_{label}", request.operation_id)),
                 &request.operation_id,
             )
             .map_err(error_text)?;
-        self.refund_creditless_cap(&request.operation_id)?;
-        self.cap_key_by_operation.remove(&request.operation_id);
+        if target == PayerSource::User {
+            self.refund_creditless_cap(&request.operation_id)?;
+            self.cap_key_by_operation.remove(&request.operation_id);
+        }
         self.held_by_operation.remove(&request.operation_id);
         self.payer_by_operation.remove(&request.operation_id);
+        let reservation_id = match target {
+            PayerSource::User => format!("{}:member", request.reservation_id),
+            PayerSource::Chat => request.reservation_id.clone(),
+        };
         self.repository
             .charge_ai_credits(
                 request.user_id,
@@ -528,8 +549,8 @@ impl PostgresConversationBilling {
                 total,
                 "ai_reserve",
                 &request.metadata,
-                Some("user"),
-                Some(&format!("{}:member", request.reservation_id)),
+                Some(to),
+                Some(&reservation_id),
                 &request.operation_id,
             )
             .map_err(error_text)
@@ -605,7 +626,41 @@ impl ConversationBilling for PostgresConversationBilling {
             self.cap_key_by_operation.remove(&request.operation_id);
             result = self.charge_reservation(&request, amount, Some("user"))?;
         } else if cached_source == Some("chat") && request.group_pays_first && !result.ok {
-            result = self.move_operation_to_member(&request, amount, result)?;
+            result =
+                self.move_operation_to_fallback(&request, amount, result, PayerSource::User)?;
+        } else if cached_source == Some("user")
+            && !request.group_pays_first
+            && request.chat_id.is_some()
+            && !result.ok
+            && result.reason.is_none()
+        {
+            let total = i64::from(amount)
+                + self
+                    .held_by_operation
+                    .get(&request.operation_id)
+                    .map_or(0, |holds| holds.values().sum::<i64>());
+            if result.chat_balance >= total
+                && let Some(chat_id) = request.chat_id
+                && self.group_first_source(&request, chat_id)? == "user"
+            {
+                // Keep personal holds until settlement: media or tools may
+                // already have incurred usage before this extension.
+                return Ok(ReserveDecision {
+                    authorized: false,
+                    user_balance: result.user_balance,
+                    chat_balance: result.chat_balance,
+                    source: None,
+                    denial: Some(ReserveDenial::CreditlessHourlyCap {
+                        limit: request.creditless_user_hourly_limit,
+                    }),
+                });
+            }
+            result =
+                self.move_operation_to_fallback(&request, amount, result, PayerSource::Chat)?;
+            if !result.ok {
+                self.refund_creditless_cap(&request.operation_id)?;
+                self.cap_key_by_operation.remove(&request.operation_id);
+            }
         }
         if result.ok {
             self.held_by_operation
@@ -644,7 +699,7 @@ impl ConversationBilling for PostgresConversationBilling {
                     .refund_ai_charge(
                         request.user_id,
                         request.chat_id,
-                        amount,
+                        i32::try_from(result.amount).map_err(error_text)?,
                         "chat",
                         "ai_refund",
                         &refund_metadata,

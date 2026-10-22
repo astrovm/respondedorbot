@@ -50,6 +50,158 @@ fn reserve_request(
 }
 
 #[test]
+fn personal_first_moves_all_reservations_to_the_group_when_personal_credit_runs_out()
+-> Result<(), Box<dyn Error>> {
+    let Some((database_url, endpoint)) = std::env::var("TEST_DATABASE_URL")
+        .ok()
+        .zip(redis_endpoint())
+    else {
+        return Ok(());
+    };
+    BillingSchemaRepository::new(&database_url).ensure_schema()?;
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let suffix = i64::try_from(nonce % 100_000_000)?;
+    let repository = BillingRepository::new(&database_url);
+    let cap = RedisCreditlessCap::new(&endpoint)?;
+    // The group must cover the whole operation, and its hourly limit still
+    // applies. Include the reported 0.09 personal / 45.07 group balances.
+    for (index, (group_balance, limit, authorized)) in [
+        (4_507, 2, true),
+        (150, -1, true),
+        (149, 2, false),
+        (4_507, 0, false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let user_id = 8_500_000_000_000_i64 + suffix + i64::try_from(index)? * 100_000_000;
+        let funder = user_id + 1_000_000_000;
+        let chat_id = -user_id;
+        let operation_id = format!("synthetic-personal-first:{nonce}:{index}");
+        // An existing grant prevents runtime onboarding from changing the
+        // fixture balance, independently of the shared grant rate limit.
+        bot_adapters::postgres_pool::PostgresPool::shared(&database_url)
+            .get()?
+            .execute(
+                "INSERT INTO onboarding_grants (user_id, credits, granted_at) \
+                 VALUES ($1, 0, NOW() - INTERVAL '2 days')",
+                &[&user_id],
+            )?;
+        repository.mint_user_credits(user_id, 109, None, &fresh_op())?;
+        repository.mint_user_credits(funder, group_balance, None, &fresh_op())?;
+        assert!(
+            repository
+                .transfer_user_to_chat(funder, chat_id, group_balance, &fresh_op())?
+                .transferred
+        );
+        let mut billing = PostgresConversationBilling::new(&database_url)
+            .with_creditless_cap(RedisCreditlessCap::new(&endpoint)?);
+        let base = billing.reserve(reserve_request(
+            user_id,
+            chat_id,
+            &operation_id,
+            "base",
+            60,
+            limit,
+        ))?;
+        assert!(base.authorized);
+        assert_eq!(base.source, Some(PayerSource::User));
+        let base = billing.reserve(reserve_request(
+            user_id,
+            chat_id,
+            &operation_id,
+            "media",
+            40,
+            limit,
+        ))?;
+        assert!(base.authorized);
+        assert_eq!(base.source, Some(PayerSource::User));
+        assert_eq!(base.user_balance, 9);
+        assert_eq!(base.chat_balance, i64::from(group_balance));
+        let cap_key = creditless_cap_key(&chat_id.to_string(), user_id);
+        assert_eq!(cap.count(&cap_key)?, None);
+
+        let extension = reserve_request(user_id, chat_id, &operation_id, "extension", 50, limit);
+        let decision = billing.reserve(extension.clone())?;
+        assert_eq!(
+            decision.authorized, authorized,
+            "case {index}: {decision:?}"
+        );
+        if authorized {
+            assert_eq!(decision.source, Some(PayerSource::Chat));
+            assert_eq!(decision.user_balance, 109);
+            assert_eq!(decision.chat_balance, i64::from(group_balance) - 150);
+            assert_eq!(cap.count(&cap_key)?, (limit >= 0).then_some(1));
+            // Replaying the moved reservation must not charge twice or count
+            // another message against the hourly limit.
+            let replay = billing.reserve(extension)?;
+            assert!(replay.authorized);
+            assert_eq!(replay.source, Some(PayerSource::Chat));
+            assert_eq!(replay.user_balance, decision.user_balance);
+            assert_eq!(replay.chat_balance, decision.chat_balance);
+            let later = billing.reserve(reserve_request(
+                user_id,
+                chat_id,
+                &operation_id,
+                "later",
+                10,
+                limit,
+            ))?;
+            assert_eq!(later.authorized, group_balance >= 160);
+            assert_eq!(cap.count(&cap_key)?, (limit >= 0).then_some(1));
+        } else if limit == 0 {
+            assert_eq!(
+                decision.denial,
+                Some(ReserveDenial::CreditlessHourlyCap { limit: 0 })
+            );
+            // Refusing group sponsorship preserves the personal holds for
+            // settlement of any media usage already incurred.
+            assert_eq!(decision.user_balance, 9);
+            assert_eq!(decision.chat_balance, i64::from(group_balance));
+        } else {
+            assert_eq!(decision.denial, None);
+            assert_eq!(decision.user_balance, 9);
+            assert_eq!(decision.chat_balance, i64::from(group_balance));
+            assert_eq!(cap.count(&cap_key)?, None);
+        }
+        let settlement = SettlementRequest {
+            user_id,
+            chat_id: Some(chat_id),
+            operation_id: operation_id.clone(),
+            actual_credit_units: if authorized {
+                120
+            } else if limit == 0 {
+                20
+            } else {
+                0
+            },
+            delivered: authorized,
+            reason: "synthetic".to_owned(),
+            billing_segments: Vec::new(),
+        };
+        billing.settle(settlement.clone())?;
+        billing.settle(settlement)?;
+        assert_eq!(
+            repository.get_balance("user", user_id)?,
+            if limit == 0 { 89 } else { 109 }
+        );
+        assert_eq!(
+            repository.get_balance("chat", chat_id)?,
+            i64::from(group_balance) - if authorized { 120 } else { 0 }
+        );
+        assert_eq!(
+            cap.count(&cap_key)?,
+            if limit == 0 {
+                Some(0)
+            } else {
+                (authorized && limit >= 0).then_some(1)
+            }
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn postgres_and_redis_enforce_onboarding_replay_cap_and_refund_policy() -> Result<(), Box<dyn Error>>
 {
     let Some(database_url) = std::env::var("TEST_DATABASE_URL").ok() else {
