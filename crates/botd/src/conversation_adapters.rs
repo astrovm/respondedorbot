@@ -672,8 +672,7 @@ impl ConversationBilling for PostgresConversationBilling {
                     .refund_ai_charge(
                         request.user_id,
                         request.chat_id,
-                        i32::try_from(result.amount)
-                            .map_err(|_| "AI reservation exceeds the database range".to_owned())?,
+                        i32::try_from(result.amount).map_err(error_text)?,
                         "chat",
                         "ai_refund",
                         &refund_metadata,

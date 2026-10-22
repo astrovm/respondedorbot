@@ -523,7 +523,14 @@ fn exercise_main_flows(
     let member_id = user_id + 100_000_000;
     let funder_id = user_id + 200_000_000;
     let group_id = -member_id;
-    billing.grant_onboarding_if_needed(member_id, 230)?;
+    bot_adapters::postgres_pool::PostgresPool::shared(&std::env::var("TEST_DATABASE_URL")?)
+        .get()?
+        .execute(
+            "INSERT INTO onboarding_grants (user_id, credits, granted_at) \
+         VALUES ($1, 0, NOW() - INTERVAL '2 days')",
+            &[&member_id],
+        )?;
+    billing.mint_user_credits(member_id, 230, None, &format!("e2e-member-mint:{user_id}"))?;
     billing.mint_user_credits(funder_id, 4_507, None, &format!("e2e-group-mint:{user_id}"))?;
     assert!(
         billing

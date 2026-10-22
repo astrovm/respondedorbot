@@ -78,7 +78,16 @@ fn personal_first_moves_all_reservations_to_the_group_when_personal_credit_runs_
         let funder = user_id + 1_000_000_000;
         let chat_id = -user_id;
         let operation_id = format!("synthetic-personal-first:{nonce}:{index}");
-        repository.grant_onboarding_if_needed(user_id, 109)?;
+        // An existing grant prevents runtime onboarding from changing the
+        // fixture balance, independently of the shared grant rate limit.
+        bot_adapters::postgres_pool::PostgresPool::shared(&database_url)
+            .get()?
+            .execute(
+                "INSERT INTO onboarding_grants (user_id, credits, granted_at) \
+                 VALUES ($1, 0, NOW() - INTERVAL '2 days')",
+                &[&user_id],
+            )?;
+        repository.mint_user_credits(user_id, 109, None, &fresh_op())?;
         repository.mint_user_credits(funder, group_balance, None, &fresh_op())?;
         assert!(
             repository
@@ -163,13 +172,7 @@ fn personal_first_moves_all_reservations_to_the_group_when_personal_credit_runs_
         );
         assert_eq!(
             cap.count(&cap_key)?,
-            if authorized && limit >= 0 {
-                Some(1)
-            } else if limit == 0 {
-                Some(1)
-            } else {
-                None
-            }
+            (limit == 0 || (authorized && limit >= 0)).then_some(1)
         );
     }
     Ok(())
