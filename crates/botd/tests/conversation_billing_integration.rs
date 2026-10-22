@@ -101,7 +101,17 @@ fn personal_first_moves_all_reservations_to_the_group_when_personal_credit_runs_
             chat_id,
             &operation_id,
             "base",
-            100,
+            60,
+            limit,
+        ))?;
+        assert!(base.authorized);
+        assert_eq!(base.source, Some(PayerSource::User));
+        let base = billing.reserve(reserve_request(
+            user_id,
+            chat_id,
+            &operation_id,
+            "media",
+            40,
             limit,
         ))?;
         assert!(base.authorized);
@@ -144,9 +154,9 @@ fn personal_first_moves_all_reservations_to_the_group_when_personal_credit_runs_
                 decision.denial,
                 Some(ReserveDenial::CreditlessHourlyCap { limit: 0 })
             );
-            assert_eq!(decision.user_balance, 109);
-            // The denied fallback refunds the entire moved hold, including
-            // the base reservation, rather than only the extension.
+            // Refusing group sponsorship preserves the personal holds for
+            // settlement of any media usage already incurred.
+            assert_eq!(decision.user_balance, 9);
             assert_eq!(decision.chat_balance, i64::from(group_balance));
         } else {
             assert_eq!(decision.denial, None);
@@ -158,21 +168,34 @@ fn personal_first_moves_all_reservations_to_the_group_when_personal_credit_runs_
             user_id,
             chat_id: Some(chat_id),
             operation_id: operation_id.clone(),
-            actual_credit_units: if authorized { 120 } else { 0 },
+            actual_credit_units: if authorized {
+                120
+            } else if limit == 0 {
+                20
+            } else {
+                0
+            },
             delivered: authorized,
             reason: "synthetic".to_owned(),
             billing_segments: Vec::new(),
         };
         billing.settle(settlement.clone())?;
         billing.settle(settlement)?;
-        assert_eq!(repository.get_balance("user", user_id)?, 109);
+        assert_eq!(
+            repository.get_balance("user", user_id)?,
+            if limit == 0 { 89 } else { 109 }
+        );
         assert_eq!(
             repository.get_balance("chat", chat_id)?,
             i64::from(group_balance) - if authorized { 120 } else { 0 }
         );
         assert_eq!(
             cap.count(&cap_key)?,
-            (limit == 0 || (authorized && limit >= 0)).then_some(1)
+            if limit == 0 {
+                Some(0)
+            } else {
+                (authorized && limit >= 0).then_some(1)
+            }
         );
     }
     Ok(())

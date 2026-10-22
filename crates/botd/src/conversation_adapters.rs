@@ -532,8 +532,10 @@ impl PostgresConversationBilling {
                 &request.operation_id,
             )
             .map_err(error_text)?;
-        self.refund_creditless_cap(&request.operation_id)?;
-        self.cap_key_by_operation.remove(&request.operation_id);
+        if target == PayerSource::User {
+            self.refund_creditless_cap(&request.operation_id)?;
+            self.cap_key_by_operation.remove(&request.operation_id);
+        }
         self.held_by_operation.remove(&request.operation_id);
         self.payer_by_operation.remove(&request.operation_id);
         let reservation_id = match target {
@@ -632,8 +634,33 @@ impl ConversationBilling for PostgresConversationBilling {
             && !result.ok
             && result.reason.is_none()
         {
+            let total = i64::from(amount)
+                + self
+                    .held_by_operation
+                    .get(&request.operation_id)
+                    .map_or(0, |holds| holds.values().sum::<i64>());
+            if result.chat_balance >= total
+                && let Some(chat_id) = request.chat_id
+                && self.group_first_source(&request, chat_id)? == "user"
+            {
+                // Keep personal holds until settlement: media or tools may
+                // already have incurred usage before this extension.
+                return Ok(ReserveDecision {
+                    authorized: false,
+                    user_balance: result.user_balance,
+                    chat_balance: result.chat_balance,
+                    source: None,
+                    denial: Some(ReserveDenial::CreditlessHourlyCap {
+                        limit: request.creditless_user_hourly_limit,
+                    }),
+                });
+            }
             result =
                 self.move_operation_to_fallback(&request, amount, result, PayerSource::Chat)?;
+            if !result.ok {
+                self.refund_creditless_cap(&request.operation_id)?;
+                self.cap_key_by_operation.remove(&request.operation_id);
+            }
         }
         if result.ok {
             self.held_by_operation
