@@ -1,0 +1,9 @@
+# Accepted advisories with no fix reachable through our dependencies.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0344"
+reason = "ruzstd 0.3 comes from include-bytes-zstd (via ib-romaji), which only decompresses data embedded at build time, never user input. include-bytes-zstd 0.1.0 is the latest release and pins ruzstd ^0.3."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0192"
+reason = "ttf-parser is unmaintained, not vulnerable. It comes from ab_glyph, which is already at its latest release, and only parses system fonts installed in the container image."
