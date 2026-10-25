@@ -1,8 +1,10 @@
 //! Native scheduled-task AI execution with stable billing identities.
 
+use bot_core::ai_prompt::reply_instructions;
 use bot_core::ai_response_cleanup::{
     clean_duplicate_response, remove_gordo_prefix, strip_markdown_formatting,
 };
+use bot_core::locale::Locale;
 use bot_core::polls::PollRequest;
 use bot_core::scheduled_tasks::{MISFIRE_GRACE_SECONDS, ScheduledTask};
 use serde::{Deserialize, Serialize};
@@ -587,18 +589,15 @@ where
 
 #[must_use]
 pub fn build_task_messages(text: &str, locale: &str) -> Vec<TaskPromptMessage> {
+    let locale = if locale == "en" {
+        Locale::En
+    } else {
+        Locale::Es
+    };
     vec![TaskPromptMessage {
         role: "user",
-        content: format!("{text}\n\n{}", format_prompt(locale)),
+        content: format!("{text}\n\n{}", reply_instructions(locale).join("\n")),
     }]
-}
-
-fn format_prompt(locale: &str) -> &'static str {
-    if locale == "en" {
-        "INSTRUCTIONS:\n- if the task asks for a poll or vote, call create_poll instead of writing answer options as a list\n- keep the bot persona\n- use casual English\n- respond without markdown or emojis\n- use a numbered list when the user asks for a list or there are several topics\n- leave a blank line between numbered items\n- give each item a short title and a brief explanation\n- structure the answer so it is easy to read"
-    } else {
-        "INSTRUCCIONES:\n- si la tarea pide una encuesta o votación, usá create_poll en vez de escribir las opciones como una lista\n- mantené el personaje del gordo\n- usá lenguaje coloquial argentino\n- respondé en minúsculas, sin emojis, sin punto final\n- si el usuario pide una lista o hay varios temas, usá lista numerada: 1., 2., 3.\n- dejá una línea en blanco entre cada item numerado\n- cada item debe tener título corto en su propia línea y explicación breve abajo\n- no la pongas toda en una sola frase: estructurala para que sea fácil de leer"
-    }
 }
 
 fn force_response(locale: &str) -> &'static str {
@@ -884,7 +883,19 @@ mod tests {
                 .content
                 .starts_with("recordame algo\n\nINSTRUCCIONES:")
         );
-        assert!(prompt[0].content.contains("usá lista numerada: 1., 2., 3."));
+        // Tasks answer with the same rules as chat, without forced sections.
+        assert!(prompt[0].content.ends_with(
+            &bot_core::ai_prompt::reply_instructions(bot_core::locale::Locale::Es).join("\n")
+        ));
+        assert!(!prompt[0].content.contains("lista numerada"));
+        let english = build_task_messages("remind me", "en");
+        assert_eq!(
+            english[0].content,
+            format!(
+                "remind me\n\n{}",
+                bot_core::ai_prompt::reply_instructions(bot_core::locale::Locale::En).join("\n")
+            )
+        );
         let mut executor = executor(
             Provider::default(),
             Billing::default(),
