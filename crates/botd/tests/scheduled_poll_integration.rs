@@ -171,7 +171,9 @@ fn run_weekly_poll(repair: bool) -> Result<(), Box<dyn Error>> {
         "synthetic-weekly-poll-{}-{now}-{repair}",
         std::process::id()
     );
-    let chat_id = -9_000_000_000 - i64::from(std::process::id()) * 2 - i64::from(repair);
+    // The process id repeats across container runs, so the clock keeps each
+    // run's chat apart in a reused Redis.
+    let chat_id = -9_000_000_000 - (now % 1_000_000_000) * 2 - i64::from(repair);
     let task = ScheduledTask {
         id: TaskId::new(&id)?, chat_id: chat_id.to_string(),
         text: "hacer una encuesta semanal en el chat planteando una situación ficticia con dilema moral para que voten".to_owned(),

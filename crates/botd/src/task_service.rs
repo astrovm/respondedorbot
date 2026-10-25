@@ -246,7 +246,7 @@ mod tests {
         assert!(build_task_verifier(&endpoint, "synthetic-verifier").is_ok());
         assert!(verify_tasks_once(&endpoint, "synthetic-verifier", 1_700_000_000).is_ok());
 
-        let execution_id = format!("synthetic-journal-{}", std::process::id());
+        let execution_id = crate::test_env::unique("synthetic-journal");
         let mut journal = RedisTaskStore::new(&endpoint).map_err(crate::error_text)?;
         assert!(TaskExecutionJournal::load(&mut journal, &execution_id)?.is_none());
         let state: TaskExecutionState = serde_json::from_value(serde_json::json!({

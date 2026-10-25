@@ -209,16 +209,7 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
                     .map_err(|source| TaskProviderFailure::new(source, billing_segments.clone()))?;
             billing_segments.push(task_completion_segment(&completion));
             let text = completion.text;
-            let calls = completion
-                .tool_calls
-                .into_iter()
-                .filter(|call| {
-                    matches!(
-                        NativeTool::from_name(&call.function.name),
-                        Some(NativeTool::WebSearch | NativeTool::CreatePoll)
-                    )
-                })
-                .collect::<Vec<_>>();
+            let calls = completion.tool_calls;
             if calls.is_empty() {
                 return Ok(TaskProviderReply {
                     text,
@@ -231,11 +222,30 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
             assistant.content = (!text.is_empty()).then(|| json!(text));
             request.messages.push(assistant);
             for call in calls {
-                let arguments = serde_json::from_str(&call.function.arguments)
-                    .ok()
-                    .filter(Value::is_object)
-                    .unwrap_or_else(|| json!({}));
-                if call.function.name == NativeTool::CreatePoll.name() {
+                let name = call.function.name.as_str();
+                if !matches!(
+                    NativeTool::from_name(name),
+                    Some(NativeTool::WebSearch | NativeTool::CreatePoll)
+                ) {
+                    let output = crate::chat_tool_loop::unavailable_tool_output(name);
+                    request
+                        .messages
+                        .push(ChatMessage::tool_result(call.id, output));
+                    continue;
+                }
+                let arguments =
+                    match crate::chat_tool_loop::parse_arguments(&call.function.arguments) {
+                        Ok(arguments) => arguments,
+                        Err(error) => {
+                            let output =
+                                crate::chat_tool_loop::invalid_arguments_output(name, &error);
+                            request
+                                .messages
+                                .push(ChatMessage::tool_result(call.id, output));
+                            continue;
+                        }
+                    };
+                if name == NativeTool::CreatePoll.name() {
                     match validate_request(NativeTool::CreatePoll, &arguments, locale) {
                         Ok(ExternalToolRequest::CreatePoll(poll)) => {
                             return Ok(TaskProviderReply {
@@ -771,9 +781,9 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     use super::{
-        ActionTaskMessenger, NativeTaskBillingError, NativeTool, OpenRouterTaskProvider,
-        PostgresTaskBilling, TaskAiProvider, TaskBilling, TaskCreditStore, TaskMessenger,
-        TaskPromptMessage, TaskReserveOutcome, reservation_pricing_for_model, validate_request,
+        ActionTaskMessenger, NativeTaskBillingError, OpenRouterTaskProvider, PostgresTaskBilling,
+        TaskAiProvider, TaskBilling, TaskCreditStore, TaskMessenger, TaskPromptMessage,
+        TaskReserveOutcome, reservation_pricing_for_model,
     };
     use crate::chat_tool_loop::ToolExecutionResult;
     use crate::dispatcher::{ActionReceipt, ActionSink};
@@ -1483,6 +1493,7 @@ mod tests {
                                     call("call-1", "web_search", json!({"query": "uno"})),
                                     call("call-2", "web_search", json!({"query": "dos"})),
                                     call("call-3", "web_search", json!({"query": "tres"})),
+                                    call("call-4", "web_search", json!({"query": "cuatro"})),
                                     call("call-other", "synthetic_tool", json!({})),
                                 ]
                             },
@@ -1550,13 +1561,19 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(
             assistant_calls,
-            ["call-invalid", "call-1", "call-2", "call-3"]
+            [
+                "call-invalid",
+                "call-1",
+                "call-2",
+                "call-3",
+                "call-4",
+                "call-other"
+            ]
         );
-        let validation = validate_request(NativeTool::WebSearch, &json!({}), Locale::Es)
-            .err()
-            .unwrap_or_default();
-        assert!(!validation.is_empty());
-        let tool_results = (3..7)
+        let invalid =
+            crate::chat_tool_loop::invalid_arguments_output("web_search", "expected an object");
+        let unavailable = crate::chat_tool_loop::unavailable_tool_output("synthetic_tool");
+        let tool_results = (3..9)
             .map(|index| {
                 (
                     followup["messages"][index]["tool_call_id"]
@@ -1571,13 +1588,15 @@ mod tests {
         assert_eq!(
             tool_results,
             [
-                ("call-invalid", validation.as_str()),
+                ("call-invalid", invalid.as_str()),
                 ("call-1", "web_search is unavailable"),
                 ("call-2", "web_search is unavailable"),
-                ("call-3", "web_search usage limit reached"),
+                ("call-3", "web_search is unavailable"),
+                ("call-4", "web_search usage limit reached"),
+                ("call-other", unavailable.as_str()),
             ]
         );
-        assert!(followup["messages"].get(7).is_none());
+        assert!(followup["messages"].get(9).is_none());
     }
 
     #[test]

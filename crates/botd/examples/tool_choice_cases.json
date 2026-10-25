@@ -1,0 +1,18 @@
+[
+  {"prompt": "che, qué chances tiene Milei de ganar en 2027?", "expect": [{"tool": "polymarket", "args_any": ["argentina", "milei"]}]},
+  {"prompt": "what are the odds the Fed cuts rates in December?", "locale": "en", "expect": [{"tool": "polymarket", "args_any": ["fed"]}]},
+  {"prompt": "cómo está el clima en Córdoba?", "expect": [{"tool": "weather", "args_any": ["córdoba", "cordoba"]}]},
+  {"prompt": "a cuánto está bitcoin?", "expect": [{"tool": "crypto_prices", "args_any": ["btc", "bitcoin"]}]},
+  {"prompt": "a cuánto está el blue?", "expect": [{"tool": "dollar_rates", "args_any": [""]}]},
+  {"prompt": "decime el precio de bitcoin y del dólar blue", "expect": [{"tool": "crypto_prices", "args_any": ["btc", "bitcoin"]}, {"tool": "dollar_rates", "args_any": [""]}]},
+  {"prompt": "cómo viene la acción de Apple hoy?", "expect": [{"tool": "stock_prices", "args_any": ["aapl", "apple"]}]},
+  {"prompt": "cuánto es el 15% de 2300?", "expect": [{"tool": "calculate", "args_any": ["2300"]}]},
+  {"prompt": "recordame mañana a las 10 pagar la luz", "expect": [{"tool": "task_set", "args_any": ["luz"]}]},
+  {"prompt": "qué cosas podés hacer?", "expect": [{"tool": "bot_capabilities", "args_any": [""]}]},
+  {"prompt": "qué hay de nuevo en tecnología hoy? algo de hacker news", "expect": [{"tool": "hacker_news", "args_any": [""]}]},
+  {"prompt": "leé esto y resumilo: https://example.com/articulo", "expect": [{"tool": "web_fetch", "args_any": ["example.com"]}]},
+  {"prompt": "armá una encuesta: asado o pizza el sábado?", "expect": [{"tool": "create_poll", "args_any": ["asado"]}]},
+  {"prompt": "elegí uno al azar: rojo, azul o verde", "expect": [{"tool": "random_choice", "args_any": ["rojo"]}]},
+  {"prompt": "quién ganó el último Boca-River?", "expect": [{"tool": "web_search", "args_any": ["boca"]}]},
+  {"prompt": "hola, todo bien?", "expect": []}
+]

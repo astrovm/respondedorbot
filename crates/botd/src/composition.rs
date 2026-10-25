@@ -141,6 +141,7 @@ use crate::native_tools::{NativeTool, NativeToolRegistry, StandardNativeToolBack
 use crate::poll_tools::{PollTool, PollToolContext, TelegramPollSender};
 use crate::polymarket_tool::PolymarketTool;
 use crate::random_tool::RandomChoiceTool;
+use crate::read_only_tool::read_only_tool;
 use crate::reconciliation::ActiveOperationRegistry;
 use crate::runtime::{DurableParallelUpdateHandler, PollingRuntime, UpdateSource};
 use crate::task_tools::{
@@ -3022,59 +3023,80 @@ impl ConversationToolFactory for ProductionToolFactory {
         let mut toolbox = ExternalToolbox::new(locale);
 
         if let Some(api_key) = self.coinmarketcap_key.clone().filter(|key| !key.is_empty()) {
-            let market = NativeMarketPriceSource {
-                transport: tool_transport("CoinMarketCap", ReqwestCoinMarketCapTransport::new())?,
-                cache: RedisJsonCache::new(&self.redis_endpoint).map_err(error_text)?,
-                api_key,
-                stocks: YahooStockPriceSource {
-                    yahoo_transport: tool_transport("Yahoo", ReqwestYahooFinanceTransport::new())?,
-                    finviz_transport: tool_transport("Finviz", ReqwestFinvizTransport::new())?,
-                    cache: RedisJsonCache::new(&self.redis_endpoint).map_err(error_text)?,
-                },
-            };
+            let endpoint = self.redis_endpoint.clone();
             toolbox = toolbox.with_executor(
                 NativeTool::CryptoPrices,
-                Box::new(CryptoPricesTool::new(
-                    market,
-                    current_unix_timestamp,
-                    locale,
-                )),
+                read_only_tool(NativeTool::CryptoPrices, locale, move || {
+                    let transport = ReqwestCoinMarketCapTransport::new();
+                    let market = NativeMarketPriceSource {
+                        transport: tool_transport("CoinMarketCap", transport)?,
+                        cache: RedisJsonCache::new(&endpoint).map_err(error_text)?,
+                        api_key: api_key.clone(),
+                        stocks: yahoo_stock_source(&endpoint)?,
+                    };
+                    Ok(CryptoPricesTool::new(
+                        market,
+                        current_unix_timestamp,
+                        locale,
+                    ))
+                })?,
             );
         }
 
-        let stocks = YahooStockPriceSource {
-            yahoo_transport: tool_transport("Yahoo", ReqwestYahooFinanceTransport::new())?,
-            finviz_transport: tool_transport("Finviz", ReqwestFinvizTransport::new())?,
-            cache: RedisJsonCache::new(&self.redis_endpoint).map_err(error_text)?,
-        };
+        let endpoint = self.redis_endpoint.clone();
+        let stocks = read_only_tool(NativeTool::StockPrices, locale, move || {
+            Ok(StockPricesTool::new(
+                yahoo_stock_source(&endpoint)?,
+                current_unix_timestamp,
+                locale,
+            ))
+        })?;
+        let endpoint = self.redis_endpoint.clone();
+        let dollar = read_only_tool(NativeTool::DollarRates, locale, move || {
+            Ok(DollarRatesTool::new(
+                CriptoYaDollarMarketSource {
+                    transport: tool_transport("dollar", ReqwestDollarTransport::new())?,
+                    bcra_transport: tool_transport("BCRA", ReqwestBcraTransport::new())?,
+                    cache: RedisJsonCache::new(&endpoint).map_err(error_text)?,
+                },
+                current_unix_timestamp,
+                locale,
+            ))
+        })?;
+        let endpoint = self.redis_endpoint.clone();
+        let weather = read_only_tool(NativeTool::Weather, locale, move || {
+            Ok(WeatherTool::new(
+                OpenMeteoWeatherSource {
+                    transport: tool_transport("weather", ReqwestWeatherTransport::new())?,
+                    cache: RedisJsonCache::new(&endpoint).map_err(error_text)?,
+                },
+                current_unix_timestamp,
+                locale,
+            ))
+        })?;
+        let endpoint = self.redis_endpoint.clone();
+        let hacker_news = read_only_tool(NativeTool::HackerNews, locale, move || {
+            Ok(HackerNewsTool::new(
+                ReqwestHackerNewsTransport::new().map_err(error_text)?,
+                RedisJsonCache::new(&endpoint).map_err(error_text)?,
+                locale,
+            ))
+        })?;
+        let endpoint = self.redis_endpoint.clone();
+        let polymarket = read_only_tool(NativeTool::Polymarket, locale, move || {
+            Ok(PolymarketTool::new(
+                tool_transport("Polymarket", ReqwestPolymarketTransport::new())?,
+                RedisJsonCache::new(&endpoint).map_err(error_text)?,
+                current_unix_timestamp,
+                locale,
+            ))
+        })?;
         toolbox = toolbox
-            .with_executor(
-                NativeTool::StockPrices,
-                Box::new(StockPricesTool::new(stocks, current_unix_timestamp, locale)),
-            )
-            .with_executor(
-                NativeTool::DollarRates,
-                Box::new(DollarRatesTool::new(
-                    CriptoYaDollarMarketSource {
-                        transport: tool_transport("dollar", ReqwestDollarTransport::new())?,
-                        bcra_transport: tool_transport("BCRA", ReqwestBcraTransport::new())?,
-                        cache: RedisJsonCache::new(&self.redis_endpoint).map_err(error_text)?,
-                    },
-                    current_unix_timestamp,
-                    locale,
-                )),
-            )
-            .with_executor(
-                NativeTool::Weather,
-                Box::new(WeatherTool::new(
-                    OpenMeteoWeatherSource {
-                        transport: tool_transport("weather", ReqwestWeatherTransport::new())?,
-                        cache: RedisJsonCache::new(&self.redis_endpoint).map_err(error_text)?,
-                    },
-                    current_unix_timestamp,
-                    locale,
-                )),
-            )
+            .with_executor(NativeTool::StockPrices, stocks)
+            .with_executor(NativeTool::DollarRates, dollar)
+            .with_executor(NativeTool::Weather, weather)
+            .with_executor(NativeTool::HackerNews, hacker_news)
+            .with_executor(NativeTool::Polymarket, polymarket)
             .with_executor(
                 NativeTool::WebFetch,
                 Box::new(WebFetchTool::new(
@@ -3139,23 +3161,6 @@ impl ConversationToolFactory for ProductionToolFactory {
                     &chat_id,
                     locale,
                 )),
-            )
-            .with_executor(
-                NativeTool::HackerNews,
-                Box::new(HackerNewsTool::new(
-                    ReqwestHackerNewsTransport::new().map_err(error_text)?,
-                    RedisJsonCache::new(&self.redis_endpoint).map_err(error_text)?,
-                    locale,
-                )),
-            )
-            .with_executor(
-                NativeTool::Polymarket,
-                Box::new(PolymarketTool::new(
-                    tool_transport("Polymarket", ReqwestPolymarketTransport::new())?,
-                    RedisJsonCache::new(&self.redis_endpoint).map_err(error_text)?,
-                    current_unix_timestamp,
-                    locale,
-                )),
             );
 
         if let Some(token) = self.telegram_token.as_deref() {
@@ -3180,12 +3185,14 @@ impl ConversationToolFactory for ProductionToolFactory {
         if let Some(api_key) = self.firecrawl_key.clone().filter(|key| !key.is_empty()) {
             toolbox = toolbox.with_executor(
                 NativeTool::WebSearch,
-                Box::new(FirecrawlTool::new(
-                    ReqwestFirecrawlTransport::new().map_err(error_text)?,
-                    std::thread::sleep,
-                    &api_key,
-                    locale,
-                )),
+                read_only_tool(NativeTool::WebSearch, locale, move || {
+                    Ok(FirecrawlTool::new(
+                        ReqwestFirecrawlTransport::new().map_err(error_text)?,
+                        std::thread::sleep,
+                        &api_key,
+                        locale,
+                    ))
+                })?,
             );
         }
 
@@ -3194,6 +3201,19 @@ impl ConversationToolFactory for ProductionToolFactory {
             locale,
         ))
     }
+}
+
+fn yahoo_stock_source(
+    endpoint: &RedisEndpoint,
+) -> Result<
+    YahooStockPriceSource<ReqwestYahooFinanceTransport, ReqwestFinvizTransport, RedisJsonCache>,
+    String,
+> {
+    Ok(YahooStockPriceSource {
+        yahoo_transport: tool_transport("Yahoo", ReqwestYahooFinanceTransport::new())?,
+        finviz_transport: tool_transport("Finviz", ReqwestFinvizTransport::new())?,
+        cache: RedisJsonCache::new(endpoint).map_err(error_text)?,
+    })
 }
 
 fn labeled_error(label: &str, error: Option<impl std::fmt::Display>) -> Option<String> {
@@ -6765,7 +6785,8 @@ mod tests {
             &database_url,
             Some("synthetic-market-key".to_owned()),
             Some("synthetic-search-key".to_owned()),
-        );
+        )
+        .with_telegram_token("synthetic-token");
         let input = AiConversationInput {
             chat_id: ChatId(-42),
             message_id: MessageId(7),
@@ -6793,12 +6814,43 @@ mod tests {
             spontaneous: false,
             link_context: None,
         };
-        assert!(factory.create(&input).is_ok());
+        use crate::chat_tool_loop::NativeToolRuntime;
+        let tools = factory.create(&input);
+        assert!(tools.is_ok());
+        let Ok(mut tools) = tools else { return };
+        // Fully configured, every declared tool is wired up and offered.
+        assert_eq!(
+            tools.schemas(false).len(),
+            crate::native_tools::ALL_TOOLS.len()
+        );
+        // Read-only tools run in parallel; building the call must not run it.
+        for (name, arguments) in [
+            ("crypto_prices", serde_json::json!({"assets": ["BTC"]})),
+            ("stock_prices", serde_json::json!({"queries": ["AAPL"]})),
+            ("dollar_rates", serde_json::json!({})),
+            ("weather", serde_json::json!({"location": "Synthetic City"})),
+            ("hacker_news", serde_json::json!({})),
+            ("polymarket", serde_json::json!({"query": "synthetic"})),
+            ("web_search", serde_json::json!({"query": "synthetic"})),
+            (
+                "web_fetch",
+                serde_json::json!({"url": "https://example.com"}),
+            ),
+        ] {
+            assert!(
+                tools.concurrent_call(name, &arguments, "call").is_some(),
+                "{name}"
+            );
+        }
+        assert!(
+            tools
+                .concurrent_call("task_list", &serde_json::json!({}), "call")
+                .is_none()
+        );
 
         let mut minimal = super::ProductionToolFactory::new(&endpoint, &database_url, None, None);
         assert!(minimal.create(&input).is_ok());
 
-        use crate::chat_tool_loop::NativeToolRuntime;
         let mut polls = super::ProductionToolFactory::new(&endpoint, &database_url, None, None)
             .with_telegram_token("synthetic-token");
         let tools = polls.create(&input);
@@ -7558,7 +7610,7 @@ mod tests {
         let mut tasks = super::RedisScheduledTaskSource {
             store: RedisTaskStore::new(&endpoint).map_err(super::error_text)?,
         };
-        let chat_id = format!("synthetic-wrapper-{}", std::process::id());
+        let chat_id = crate::test_env::unique("synthetic-wrapper");
         assert!(tasks.list(&chat_id)?.is_empty());
         let task_id = TaskId::new("synthetic-missing-task").map_err(super::error_text)?;
         assert!(!tasks.cancel(&task_id, &chat_id)?);

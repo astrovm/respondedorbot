@@ -9,54 +9,64 @@ use bot_core::locale::Locale;
 use crate::chat_tool_loop::{ConcurrentToolCall, NativeToolRuntime, ToolExecutionResult};
 use crate::tool_output;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum NativeTool {
-    CryptoPrices,
-    Calculate,
-    WebFetch,
-    WebSearch,
-    TaskSet,
-    TaskList,
-    TaskCancel,
-    GetChatMembers,
-    StockPrices,
-    RandomChoice,
-    DollarRates,
-    Weather,
-    HackerNews,
-    Polymarket,
-    CreatePoll,
-    GetPolls,
-    BotCapabilities,
+/// Declares every tool once: its variant, its provider-facing name, and its
+/// place in the catalog order. The enum and the catalog cannot drift apart,
+/// so a new tool is never silently left out of the schemas.
+macro_rules! native_tools {
+    ($($variant:ident => $name:literal,)+) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+        pub enum NativeTool {
+            $($variant,)+
+        }
+
+        impl NativeTool {
+            #[must_use]
+            pub const fn name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name,)+
+                }
+            }
+        }
+
+        pub(crate) const ALL_TOOLS: &[NativeTool] = &[$(NativeTool::$variant,)+];
+    };
+}
+
+native_tools! {
+    CryptoPrices => "crypto_prices",
+    Calculate => "calculate",
+    WebFetch => "web_fetch",
+    WebSearch => "web_search",
+    TaskSet => "task_set",
+    TaskList => "task_list",
+    TaskCancel => "task_cancel",
+    GetChatMembers => "get_chat_members",
+    StockPrices => "stock_prices",
+    RandomChoice => "random_choice",
+    DollarRates => "dollar_rates",
+    Weather => "weather",
+    HackerNews => "hacker_news",
+    Polymarket => "polymarket",
+    CreatePoll => "create_poll",
+    GetPolls => "get_polls",
+    BotCapabilities => "bot_capabilities",
 }
 
 impl NativeTool {
     #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::CryptoPrices => "crypto_prices",
-            Self::Calculate => "calculate",
-            Self::WebFetch => "web_fetch",
-            Self::WebSearch => "web_search",
-            Self::TaskSet => "task_set",
-            Self::TaskList => "task_list",
-            Self::TaskCancel => "task_cancel",
-            Self::GetChatMembers => "get_chat_members",
-            Self::StockPrices => "stock_prices",
-            Self::RandomChoice => "random_choice",
-            Self::DollarRates => "dollar_rates",
-            Self::Weather => "weather",
-            Self::HackerNews => "hacker_news",
-            Self::Polymarket => "polymarket",
-            Self::CreatePoll => "create_poll",
-            Self::GetPolls => "get_polls",
-            Self::BotCapabilities => "bot_capabilities",
-        }
-    }
-
-    #[must_use]
     pub const fn task_allowed(self) -> bool {
         !matches!(self, Self::TaskSet)
+    }
+
+    /// Reads whose result cannot change within one message, so a repeated
+    /// call with the same arguments reuses it. Random picks and anything
+    /// that writes state always run again.
+    #[must_use]
+    pub const fn reusable(self) -> bool {
+        !matches!(
+            self,
+            Self::RandomChoice | Self::TaskSet | Self::TaskCancel | Self::CreatePoll
+        )
     }
 
     #[must_use]
@@ -64,26 +74,6 @@ impl NativeTool {
         ALL_TOOLS.iter().copied().find(|tool| tool.name() == name)
     }
 }
-
-const ALL_TOOLS: [NativeTool; 17] = [
-    NativeTool::CryptoPrices,
-    NativeTool::Calculate,
-    NativeTool::WebFetch,
-    NativeTool::WebSearch,
-    NativeTool::TaskSet,
-    NativeTool::TaskList,
-    NativeTool::TaskCancel,
-    NativeTool::GetChatMembers,
-    NativeTool::StockPrices,
-    NativeTool::RandomChoice,
-    NativeTool::DollarRates,
-    NativeTool::Weather,
-    NativeTool::HackerNews,
-    NativeTool::Polymarket,
-    NativeTool::CreatePoll,
-    NativeTool::GetPolls,
-    NativeTool::BotCapabilities,
-];
 
 pub trait NativeToolBackend {
     fn is_available(&self, tool: NativeTool) -> bool;
@@ -226,6 +216,10 @@ impl<Backend: NativeToolBackend> NativeToolRuntime for NativeToolRegistry<Backen
         )
     }
 
+    fn reusable(&self, name: &str) -> bool {
+        NativeTool::from_name(name).is_some_and(NativeTool::reusable)
+    }
+
     fn concurrent_call(
         &mut self,
         name: &str,
@@ -235,6 +229,13 @@ impl<Backend: NativeToolBackend> NativeToolRuntime for NativeToolRegistry<Backen
         let tool = NativeTool::from_name(name)?;
         self.backend.concurrent_call(tool, arguments, tool_call_id)
     }
+}
+
+/// Every tool's provider schema, in catalog order, as a fully configured
+/// chat offers them. Used by the tool-choice evals.
+#[must_use]
+pub fn catalog_schemas() -> Vec<Value> {
+    ALL_TOOLS.iter().copied().map(tool_schema).collect()
 }
 
 pub(crate) fn tool_schema(tool: NativeTool) -> Value {
@@ -478,6 +479,17 @@ mod tests {
             false
         );
         assert_eq!(registry.schemas(true).len(), normal.len() - 1);
+        let single_use = ALL_TOOLS
+            .iter()
+            .filter(|tool| !registry.reusable(tool.name()))
+            .map(|tool| tool.name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            single_use,
+            ["task_set", "task_cancel", "random_choice", "create_poll"]
+        );
+        assert!(!registry.reusable("unknown"));
+        assert_eq!(catalog_schemas(), normal);
         assert!(!registry.contains("task_set", true));
         assert!(registry.contains("task_set", false));
     }
