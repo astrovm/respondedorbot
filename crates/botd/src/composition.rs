@@ -6792,7 +6792,8 @@ mod tests {
             &database_url,
             Some("synthetic-market-key".to_owned()),
             Some("synthetic-search-key".to_owned()),
-        );
+        )
+        .with_telegram_token("synthetic-token");
         let input = AiConversationInput {
             chat_id: ChatId(-42),
             message_id: MessageId(7),
@@ -6822,6 +6823,11 @@ mod tests {
         };
         use crate::chat_tool_loop::NativeToolRuntime;
         let mut tools = factory.create(&input)?;
+        // Fully configured, every declared tool is wired up and offered.
+        assert_eq!(
+            tools.schemas(false).len(),
+            crate::native_tools::ALL_TOOLS.len()
+        );
         // Read-only tools run in parallel; building the call must not run it.
         for (name, arguments) in [
             ("crypto_prices", serde_json::json!({"assets": ["BTC"]})),
