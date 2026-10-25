@@ -8,6 +8,7 @@ use bot_core::provider_runtime_policy::{
 };
 use bot_core::provider_stream_policy::{ProviderStreamEvent, StreamToolCall};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -15,13 +16,16 @@ use crate::chat_provider::{ChatRoundError, ChatRoundResult, OpenRouterChatStream
 
 pub const DEFAULT_MAX_TOOL_ROUNDS: usize = 5;
 /// Sent with the answer round once the tool rounds run out.
-const TOOL_LIMIT_ANSWER_PROMPT: &str = "You already used every tool call for this message. Do not call tools. Answer the user now with what you found, and briefly say what you could not confirm.";
+pub(crate) const TOOL_LIMIT_ANSWER_PROMPT: &str = "You already used every tool call for this message. Do not call tools. Answer the user now with what you found, and briefly say what you could not confirm.";
 /// Sent with the answer round after a reply came back empty.
 const EMPTY_REPLY_ANSWER_PROMPT: &str =
     "Your last reply was empty. Do not call tools. Answer the user now, briefly.";
 /// Sent with the answer round after a round reasoned past its time limit.
 const SLOW_THINKING_ANSWER_PROMPT: &str =
     "You took too long thinking. Do not call tools. Answer the user now, briefly.";
+/// Tool output past this many characters is cut before it reaches the model,
+/// so one oversized result cannot crowd out the chat context.
+const MAX_TOOL_OUTPUT_CHARS: usize = 16_000;
 const MAX_PROVIDER_RETRIES: usize = 2;
 const MAX_RATE_LIMIT_RETRY_SECONDS: u64 = 5;
 
@@ -77,6 +81,12 @@ pub trait NativeToolRuntime {
 
     fn execute(&mut self, name: &str, arguments: &Value, tool_call_id: &str)
     -> ToolExecutionResult;
+
+    /// Whether a later call with the same arguments can reuse this call's
+    /// result within one message. Only tools that read stable data say yes.
+    fn reusable(&self, _name: &str) -> bool {
+        false
+    }
 
     /// Prepare a read-only call to run concurrently with the other calls of
     /// its round. Tools with side effects (billing, tasks, configuration)
@@ -282,6 +292,7 @@ where
 {
     let schemas = tools.schemas(task_mode);
     let mut result = ChatToolLoopResult::new(initial_messages);
+    let mut reusable_results = HashMap::new();
     trace(
         operation_id,
         0,
@@ -323,13 +334,7 @@ where
         );
         record_round(&mut result, &round);
 
-        let known_calls = round
-            .tool_calls
-            .iter()
-            .filter(|call| tools.contains(&call.name, task_mode))
-            .cloned()
-            .collect::<Vec<_>>();
-        if known_calls.is_empty() {
+        if round.tool_calls.is_empty() {
             result.text.push_str(&round.text);
             if result.text.trim().is_empty() {
                 result.text.clear();
@@ -365,26 +370,27 @@ where
                 ChatToolLoopEvent::ResetToTrace,
             )?;
         }
+        let calls = &round.tool_calls;
         result
             .messages
             .push(PromptMessage::assistant_tool_calls_with_reasoning(
                 (!round.text.is_empty()).then_some(round.text.as_str()),
-                known_calls.iter().map(prompt_tool_call).collect(),
+                calls.iter().map(prompt_tool_call).collect(),
                 (!round.reasoning.is_empty()).then_some(round.reasoning.clone()),
                 round.reasoning_details.clone(),
             ));
-        let arguments = known_calls
+        let plans = calls
             .iter()
-            .map(|call| parse_arguments(&call.arguments))
+            .map(|call| plan_call(&*tools, call, task_mode, &reusable_results))
             .collect::<Vec<_>>();
-        let concurrent = prepare_concurrent_calls(tools, &known_calls, &arguments);
+        let concurrent = prepare_concurrent_calls(tools, calls, &plans);
         // Read-only calls start on their own threads right away; results are
         // still consumed in the provider's call order, so events, billing and
         // the tool messages sent back to the model keep that order.
         std::thread::scope(|scope| -> Result<(), ChatToolLoopError> {
             let mut running = concurrent
                 .into_iter()
-                .zip(&known_calls)
+                .zip(calls)
                 .map(|(prepared, call)| {
                     prepared.map(|run| {
                         let name = call.name.clone();
@@ -406,8 +412,27 @@ where
                 })
                 .collect::<Vec<_>>()
                 .into_iter();
-            for (call, arguments) in known_calls.iter().zip(&arguments) {
+            for (call, plan) in calls.iter().zip(&plans) {
                 let handle = running.next().flatten();
+                let arguments = match plan {
+                    CallPlan::Run(arguments) => arguments,
+                    CallPlan::Skip { reason, output } => {
+                        trace(
+                            operation_id,
+                            result.provider_rounds,
+                            "tool_skipped",
+                            json!({
+                                "tool": bounded(&call.name, 80),
+                                "tool_call_id": bounded(&call.id, 160),
+                                "reason": reason,
+                            }),
+                        );
+                        result
+                            .messages
+                            .push(PromptMessage::tool_result(&call.id, output.clone()));
+                        continue;
+                    }
+                };
                 emit_event(
                     &mut *on_event,
                     &result,
@@ -436,6 +461,14 @@ where
                 details["elapsed_ms"] = json!(elapsed.as_millis());
                 trace(operation_id, result.provider_rounds, "tool_result", details);
                 result.tool_calls_executed += 1;
+                let output = capped_output(&tool_result.output);
+                if !tools.reusable(&call.name) {
+                    // A tool that may change state can make any earlier
+                    // reading stale, so later calls must run again.
+                    reusable_results.clear();
+                } else if tool_result.diagnostics.is_empty() {
+                    reusable_results.insert(reuse_key(call, arguments), output.clone());
+                }
                 if let Some(segment) = tool_result.billing_segment {
                     result.billing_segments.push(segment);
                 }
@@ -450,12 +483,12 @@ where
                     ChatToolLoopEvent::ToolResult {
                         id: call.id.clone(),
                         name: call.name.clone(),
-                        output: tool_result.output.clone(),
+                        output: output.clone(),
                     },
                 )?;
                 result
                     .messages
-                    .push(PromptMessage::tool_result(&call.id, tool_result.output));
+                    .push(PromptMessage::tool_result(&call.id, output));
             }
             Ok(())
         })?;
@@ -588,21 +621,101 @@ fn stream_with_retries(
     }
 }
 
+/// What to do with one requested call. Skipped calls still answer the model,
+/// since every tool call needs a result and silence teaches it nothing.
+#[derive(Debug, Clone, PartialEq)]
+enum CallPlan {
+    Run(Value),
+    Skip {
+        reason: &'static str,
+        output: String,
+    },
+}
+
+fn plan_call<Tools: NativeToolRuntime>(
+    tools: &Tools,
+    call: &StreamToolCall,
+    task_mode: bool,
+    reusable_results: &HashMap<(String, String), String>,
+) -> CallPlan {
+    if !tools.contains(&call.name, task_mode) {
+        return CallPlan::Skip {
+            reason: "unavailable",
+            output: unavailable_tool_output(&call.name),
+        };
+    }
+    let arguments = match parse_arguments(&call.arguments) {
+        Ok(arguments) => arguments,
+        Err(error) => {
+            return CallPlan::Skip {
+                reason: "invalid_arguments",
+                output: invalid_arguments_output(&call.name, &error),
+            };
+        }
+    };
+    if let Some(output) = reusable_results.get(&reuse_key(call, &arguments)) {
+        return CallPlan::Skip {
+            reason: "repeated",
+            output: format!(
+                "You already called '{}' with these arguments for this message. Same result:\n{output}",
+                call.name
+            ),
+        };
+    }
+    CallPlan::Run(arguments)
+}
+
+pub(crate) fn unavailable_tool_output(name: &str) -> String {
+    format!("Tool '{name}' is not available here. Use only the tools you were given.")
+}
+
+pub(crate) fn invalid_arguments_output(name: &str, error: &str) -> String {
+    format!(
+        "The arguments for '{name}' were not a valid JSON object ({error}). Call it again with a JSON object that matches its schema."
+    )
+}
+
+fn reuse_key(call: &StreamToolCall, arguments: &Value) -> (String, String) {
+    (call.name.clone(), arguments.to_string())
+}
+
+fn capped_output(output: &str) -> String {
+    let total = output.chars().count();
+    if total <= MAX_TOOL_OUTPUT_CHARS {
+        return output.to_owned();
+    }
+    let kept = output
+        .chars()
+        .take(MAX_TOOL_OUTPUT_CHARS)
+        .collect::<String>();
+    format!(
+        "{kept}\n[cut {} more characters; ask for something narrower if you need them]",
+        total - MAX_TOOL_OUTPUT_CHARS
+    )
+}
+
 /// Prepared concurrent calls, aligned with `calls`. Concurrency only pays off
 /// with at least two read-only calls in the round; otherwise every call runs
 /// sequentially through `execute`.
 fn prepare_concurrent_calls<Tools: NativeToolRuntime>(
     tools: &mut Tools,
     calls: &[StreamToolCall],
-    arguments: &[Value],
+    plans: &[CallPlan],
 ) -> Vec<Option<ConcurrentToolCall>> {
-    if calls.len() < 2 {
+    let runnable = plans
+        .iter()
+        .filter(|plan| matches!(plan, CallPlan::Run(_)))
+        .count();
+    if runnable < 2 {
         return Vec::new();
     }
     let prepared = calls
         .iter()
-        .zip(arguments)
-        .map(|(call, arguments)| tools.concurrent_call(&call.name, arguments, &call.id))
+        .zip(plans)
+        .map(|(call, plan)| match plan {
+            CallPlan::Run(arguments) => tools.concurrent_call(&call.name, arguments, &call.id),
+            CallPlan::Skip { .. } => None,
+        })
         .collect::<Vec<_>>();
     if prepared.iter().filter(|call| call.is_some()).count() < 2 {
         return Vec::new();
@@ -813,11 +926,18 @@ fn record_failed_round(result: &mut ChatToolLoopResult, round: &ChatRoundResult)
     record_round(result, round);
 }
 
-fn parse_arguments(raw: &str) -> Value {
-    serde_json::from_str(raw)
-        .ok()
-        .filter(Value::is_object)
-        .unwrap_or_else(|| json!({}))
+/// Providers send `""` or `null` for tools without parameters, so both mean
+/// an empty object. Anything else must be a JSON object.
+pub(crate) fn parse_arguments(raw: &str) -> Result<Value, String> {
+    if raw.trim().is_empty() {
+        return Ok(json!({}));
+    }
+    match serde_json::from_str::<Value>(raw) {
+        Ok(Value::Null) => Ok(json!({})),
+        Ok(value) if value.is_object() => Ok(value),
+        Ok(_) => Err("expected an object".to_owned()),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 fn prompt_tool_call(call: &StreamToolCall) -> PromptToolCall {
@@ -976,7 +1096,11 @@ mod tests {
         }
 
         fn contains(&self, name: &str, _task_mode: bool) -> bool {
-            matches!(name, "calculate" | "fetch" | "record" | "explode")
+            matches!(name, "calculate" | "fetch" | "record" | "explode" | "big")
+        }
+
+        fn reusable(&self, name: &str) -> bool {
+            matches!(name, "calculate" | "fetch" | "big")
         }
 
         fn execute(
@@ -987,6 +1111,9 @@ mod tests {
         ) -> ToolExecutionResult {
             self.calls
                 .push((name.to_owned(), arguments.clone(), tool_call_id.to_owned()));
+            if name == "big" {
+                return ToolExecutionResult::output("é".repeat(MAX_TOOL_OUTPUT_CHARS + 5));
+            }
             if name != "calculate" {
                 return ToolExecutionResult::output(format!("{name} {tool_call_id}"));
             }
@@ -1203,43 +1330,190 @@ mod tests {
         assert!(order.borrow().is_empty());
     }
 
-    #[test]
-    fn skips_unknown_calls_and_normalizes_malformed_known_arguments() {
-        let provider = Provider::new(vec![Ok(round(
-            "",
-            vec![call("missing", "not-json")],
-            json!({"round": 1}),
-        ))]);
-        let mut tools = Tools::default();
+    fn call_with_id(id: &str, name: &str, arguments: &str) -> StreamToolCall {
+        StreamToolCall {
+            id: id.to_owned(),
+            ..call(name, arguments)
+        }
+    }
+
+    /// Tool results the model saw at the start of `round`.
+    fn tool_results_seen(provider: &Provider, round: usize) -> Vec<PromptMessage> {
+        provider.observed.borrow()[round]
+            .iter()
+            .filter(|message| message.role == PromptRole::Tool)
+            .cloned()
+            .collect()
+    }
+
+    fn run_rounds(
+        rounds: Vec<ChatRoundResult>,
+        tools: &mut Tools,
+    ) -> (Provider, ChatToolLoopResult) {
+        let provider = Provider::new(rounds.into_iter().map(Ok).collect());
         let result = run_chat_tool_loop(
+            "test-operation",
+            &provider,
+            tools,
+            &[],
+            false,
+            5,
+            ignore_text,
+        )
+        .unwrap_or_else(|error| *error.partial);
+        (provider, result)
+    }
+
+    #[test]
+    fn unavailable_calls_are_answered_so_the_model_can_recover() {
+        let mut tools = Tools::default();
+        let (provider, result) = run_rounds(
+            vec![
+                round(
+                    "",
+                    vec![call_with_id("call-1", "missing", "not-json")],
+                    json!({"round": 1}),
+                ),
+                round("recovered", Vec::new(), json!({"round": 2})),
+            ],
+            &mut tools,
+        );
+        assert!(tools.calls.is_empty());
+        assert_eq!(result.tool_calls_executed, 0);
+        assert_eq!(result.text, "recovered");
+        assert_eq!(
+            tool_results_seen(&provider, 1),
+            [PromptMessage::tool_result(
+                "call-1",
+                "Tool 'missing' is not available here. Use only the tools you were given."
+            )]
+        );
+        let assistant = &provider.observed.borrow()[1][0];
+        assert_eq!(assistant.tool_calls[0].name, "missing");
+    }
+
+    #[test]
+    fn malformed_arguments_are_reported_instead_of_running_with_nothing() {
+        let mut tools = Tools::default();
+        let (provider, result) = run_rounds(
+            vec![
+                round(
+                    "",
+                    vec![
+                        call_with_id("bad", "record", "not-json"),
+                        call_with_id("list", "record", "[1]"),
+                        call_with_id("empty", "record", " "),
+                        call_with_id("null", "record", "null"),
+                    ],
+                    json!({"round": 1}),
+                ),
+                round("done", Vec::new(), json!({"round": 2})),
+            ],
+            &mut tools,
+        );
+        assert_eq!(executed_ids(&tools), ["empty", "null"]);
+        assert!(tools.calls.iter().all(|call| call.1 == json!({})));
+        assert_eq!(result.tool_calls_executed, 2);
+        let invalid = |id: &str, error: &str| {
+            PromptMessage::tool_result(
+                id,
+                format!(
+                    "The arguments for 'record' were not a valid JSON object ({error}). Call it again with a JSON object that matches its schema."
+                ),
+            )
+        };
+        assert_eq!(
+            tool_results_seen(&provider, 1),
+            [
+                invalid("bad", "expected ident at line 1 column 2"),
+                invalid("list", "expected an object"),
+                PromptMessage::tool_result("empty", "record empty"),
+                PromptMessage::tool_result("null", "record null"),
+            ]
+        );
+    }
+
+    #[test]
+    fn repeated_reads_reuse_results_until_a_side_effect_runs() {
+        let mut tools = Tools::default();
+        let fetch = |id: &str| call_with_id(id, "fetch", r#"{"url":"https://example.com"}"#);
+        let (provider, result) = run_rounds(
+            vec![
+                round("", vec![fetch("first")], json!({"round": 1})),
+                round("", vec![fetch("again")], json!({"round": 2})),
+                round(
+                    "",
+                    vec![call_with_id("write", "record", "{}")],
+                    json!({"round": 3}),
+                ),
+                round("", vec![fetch("after-write")], json!({"round": 4})),
+                round("done", Vec::new(), json!({"round": 5})),
+            ],
+            &mut tools,
+        );
+        assert_eq!(executed_ids(&tools), ["first", "write", "after-write"]);
+        assert_eq!(result.tool_calls_executed, 3);
+        assert_eq!(
+            tool_results_seen(&provider, 2)[1],
+            PromptMessage::tool_result(
+                "again",
+                "You already called 'fetch' with these arguments for this message. Same result:\nfetch first"
+            )
+        );
+        assert_eq!(result.text, "done");
+    }
+
+    #[test]
+    fn results_with_diagnostics_are_not_reused() {
+        let mut tools = Tools::default();
+        let calculate = |id: &str| call_with_id(id, "calculate", r#"{"expression":"2+2"}"#);
+        let (_, result) = run_rounds(
+            vec![
+                round("", vec![calculate("first")], json!({"round": 1})),
+                round("", vec![calculate("retry")], json!({"round": 2})),
+                round("done", Vec::new(), json!({"round": 3})),
+            ],
+            &mut tools,
+        );
+        assert_eq!(executed_ids(&tools), ["first", "retry"]);
+        assert_eq!(result.tool_calls_executed, 2);
+    }
+
+    #[test]
+    fn oversized_tool_output_is_cut_before_the_model_sees_it() {
+        let mut tools = Tools::default();
+        let mut events = Vec::new();
+        let provider = Provider::new(vec![
+            Ok(round("", vec![call("big", "{}")], json!({"round": 1}))),
+            Ok(round("done", Vec::new(), json!({"round": 2}))),
+        ]);
+        let result = run_chat_tool_loop_events(
             "test-operation",
             &provider,
             &mut tools,
             &[],
             false,
             5,
-            ignore_text,
+            |event| {
+                events.push(event);
+                Ok(())
+            },
         );
         assert!(result.is_ok());
-        assert!(tools.calls.is_empty());
-
-        let provider = Provider::new(vec![Ok(round(
-            "",
-            vec![call("calculate", "not-json")],
-            json!({"round": 1}),
-        ))]);
-        let result = run_chat_tool_loop(
-            "test-operation",
-            &provider,
-            &mut tools,
-            &[],
-            false,
-            1,
-            ignore_text,
-        )
-        .unwrap_or_else(|error| *error.partial);
-        assert_eq!(tools.calls[0].1, json!({}));
-        assert!(result.stopped_at_limit);
+        let expected = format!(
+            "{}\n[cut 5 more characters; ask for something narrower if you need them]",
+            "é".repeat(MAX_TOOL_OUTPUT_CHARS)
+        );
+        assert_eq!(
+            tool_results_seen(&provider, 1),
+            [PromptMessage::tool_result("call-1", expected.clone())]
+        );
+        assert!(events.contains(&ChatToolLoopEvent::ToolResult {
+            id: "call-1".to_owned(),
+            name: "big".to_owned(),
+            output: expected.clone(),
+        }));
+        assert_eq!(capped_output("short"), "short");
     }
 
     #[test]

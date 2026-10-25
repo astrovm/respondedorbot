@@ -59,6 +59,17 @@ impl NativeTool {
         !matches!(self, Self::TaskSet)
     }
 
+    /// Reads whose result cannot change within one message, so a repeated
+    /// call with the same arguments reuses it. Random picks and anything
+    /// that writes state always run again.
+    #[must_use]
+    pub const fn reusable(self) -> bool {
+        !matches!(
+            self,
+            Self::RandomChoice | Self::TaskSet | Self::TaskCancel | Self::CreatePoll
+        )
+    }
+
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         ALL_TOOLS.iter().copied().find(|tool| tool.name() == name)
@@ -224,6 +235,10 @@ impl<Backend: NativeToolBackend> NativeToolRuntime for NativeToolRegistry<Backen
             || ToolExecutionResult::output(tool_output::unknown(self.locale, name)),
             |tool| self.backend.execute(tool, arguments, tool_call_id),
         )
+    }
+
+    fn reusable(&self, name: &str) -> bool {
+        NativeTool::from_name(name).is_some_and(NativeTool::reusable)
     }
 
     fn concurrent_call(
@@ -478,6 +493,16 @@ mod tests {
             false
         );
         assert_eq!(registry.schemas(true).len(), normal.len() - 1);
+        let single_use = ALL_TOOLS
+            .iter()
+            .filter(|tool| !registry.reusable(tool.name()))
+            .map(|tool| tool.name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            single_use,
+            ["task_set", "task_cancel", "random_choice", "create_poll"]
+        );
+        assert!(!registry.reusable("unknown"));
         assert!(!registry.contains("task_set", true));
         assert!(registry.contains("task_set", false));
     }
