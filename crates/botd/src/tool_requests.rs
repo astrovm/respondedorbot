@@ -47,6 +47,9 @@ pub enum ExternalToolRequest {
     HackerNews {
         limit: u8,
     },
+    Polymarket {
+        query: String,
+    },
     CreatePoll(PollRequest),
     GetPolls,
     BotCapabilities,
@@ -68,6 +71,7 @@ impl ExternalToolRequest {
             Self::DollarRates { .. } => NativeTool::DollarRates,
             Self::Weather { .. } => NativeTool::Weather,
             Self::HackerNews { .. } => NativeTool::HackerNews,
+            Self::Polymarket { .. } => NativeTool::Polymarket,
             Self::CreatePoll(_) => NativeTool::CreatePoll,
             Self::GetPolls => NativeTool::GetPolls,
             Self::BotCapabilities => NativeTool::BotCapabilities,
@@ -330,6 +334,18 @@ pub(crate) fn validate_request(
                 limit: u8::try_from(limit).unwrap_or(5),
             })
         }
+        NativeTool::Polymarket => {
+            let query = collapse_and_limit(&text(arguments, "query"), 200);
+            if query.is_empty() {
+                Err(localized(
+                    locale,
+                    "indicá qué buscar en Polymarket",
+                    "provide what to search on Polymarket",
+                ))
+            } else {
+                Ok(ExternalToolRequest::Polymarket { query })
+            }
+        }
         NativeTool::CreatePoll => PollRequest::new(
             &text(arguments, "question"),
             &bounded_string_list(arguments.get("options"), MAX_POLL_OPTIONS + 1),
@@ -480,6 +496,13 @@ mod tests {
                 json!({"limit": 100}),
                 ExternalToolRequest::HackerNews { limit: 10 },
             ),
+            (
+                NativeTool::Polymarket,
+                json!({"query": format!("  fed\n  rates {}", "x".repeat(300))}),
+                ExternalToolRequest::Polymarket {
+                    query: format!("fed rates {}", "x".repeat(190)),
+                },
+            ),
         ];
         let mut ports = ports(Locale::En);
         for (tool, arguments, expected) in cases {
@@ -579,6 +602,12 @@ mod tests {
                 json!({"query": " \n "}),
                 "Error de búsqueda: falta la consulta.",
                 "Search error: missing query.",
+            ),
+            (
+                NativeTool::Polymarket,
+                json!({"query": " "}),
+                "indicá qué buscar en Polymarket",
+                "provide what to search on Polymarket",
             ),
             (
                 NativeTool::TaskSet,

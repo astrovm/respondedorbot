@@ -33,7 +33,7 @@ exported source lines are covered. It still rejects any uncovered source line.
 
 ## Fuzzing
 
-`fuzz/` holds [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) targets for everything that reads untrusted input: Telegram updates, text users type, link repair, fetched web pages, OpenRouter replies (whole and streamed), and stored task records. CI runs each one for a minute. Run them longer locally:
+`fuzz/` holds [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) targets for everything that reads untrusted input: Telegram updates, text users type, link repair, fetched web pages, OpenRouter replies (whole and streamed), Polymarket search responses, and stored task records. CI runs each one for a minute. Run them longer locally:
 
 ```bash
 cd fuzz

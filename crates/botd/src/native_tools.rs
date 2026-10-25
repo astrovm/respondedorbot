@@ -24,6 +24,7 @@ pub enum NativeTool {
     DollarRates,
     Weather,
     HackerNews,
+    Polymarket,
     CreatePoll,
     GetPolls,
     BotCapabilities,
@@ -46,6 +47,7 @@ impl NativeTool {
             Self::DollarRates => "dollar_rates",
             Self::Weather => "weather",
             Self::HackerNews => "hacker_news",
+            Self::Polymarket => "polymarket",
             Self::CreatePoll => "create_poll",
             Self::GetPolls => "get_polls",
             Self::BotCapabilities => "bot_capabilities",
@@ -63,7 +65,7 @@ impl NativeTool {
     }
 }
 
-const ALL_TOOLS: [NativeTool; 16] = [
+const ALL_TOOLS: [NativeTool; 17] = [
     NativeTool::CryptoPrices,
     NativeTool::Calculate,
     NativeTool::WebFetch,
@@ -77,6 +79,7 @@ const ALL_TOOLS: [NativeTool; 16] = [
     NativeTool::DollarRates,
     NativeTool::Weather,
     NativeTool::HackerNews,
+    NativeTool::Polymarket,
     NativeTool::CreatePoll,
     NativeTool::GetPolls,
     NativeTool::BotCapabilities,
@@ -333,6 +336,15 @@ pub(crate) fn tool_schema(tool: NativeTool) -> Value {
                 "required": []
             }),
         ),
+        NativeTool::Polymarket => (
+            "Search open Polymarket prediction markets on any topic: elections, sports, crypto, economy, world events. Returns events with implied probabilities, liquidity, volume, close dates, and links. Polymarket only matches English keywords, so translate the topic into a short English query, such as 'argentina election' or 'world cup'.",
+            json!({
+                "type": "object",
+                "properties": {"query": {"type": "string", "maxLength": 200, "description": "Short English keywords for the market, such as 'fed rates' or 'lakers'."}},
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+        ),
         NativeTool::CreatePoll => (
             "Send a native Telegram poll to the current chat. Use it only when someone asks for a poll or vote. Polls are public by default so get_polls can show who voted; make one anonymous only when asked. After sending, reply briefly without repeating the options.",
             json!({
@@ -454,6 +466,7 @@ mod tests {
                 "dollar_rates",
                 "weather",
                 "hacker_news",
+                "polymarket",
                 "create_poll",
                 "get_polls",
                 "bot_capabilities"

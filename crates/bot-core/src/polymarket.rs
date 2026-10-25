@@ -4,9 +4,14 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::locale::Locale;
+
+/// Most markets shown per searched event. Sports events can carry hundreds of
+/// props, so only the most relevant ones reach the model.
+pub const SEARCH_MARKETS_PER_EVENT: usize = 8;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MarketOutcome {
@@ -38,6 +43,29 @@ pub struct ElectionEvent {
     pub quotes: Vec<ElectionQuote>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SearchOutcome {
+    pub title: String,
+    pub probability: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SearchMarket {
+    pub title: String,
+    pub outcomes: Vec<SearchOutcome>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SearchEvent {
+    pub title: String,
+    pub slug: String,
+    pub liquidity: f64,
+    pub volume: f64,
+    pub end_date: String,
+    pub markets: Vec<SearchMarket>,
+    pub hidden_markets: usize,
+}
+
 #[must_use]
 pub fn classify_election_command(command: &str) -> bool {
     matches!(
@@ -57,12 +85,20 @@ fn list(value: Option<&Value>) -> Vec<Value> {
     }
 }
 
-fn number(value: Option<&Value>) -> Option<f64> {
-    match value? {
+/// Polymarket sends numbers as JSON numbers or strings. Strings like "NaN" or
+/// "inf" parse as floats but are not prices, so only finite values count.
+#[must_use]
+pub fn provider_number(value: &Value) -> Option<f64> {
+    match value {
         Value::Number(value) => value.as_f64(),
         Value::String(value) => value.parse().ok(),
         _ => None,
     }
+    .filter(|value: &f64| value.is_finite())
+}
+
+fn number(value: Option<&Value>) -> Option<f64> {
+    provider_number(value?)
 }
 
 fn text(value: Option<&Value>) -> Option<String> {
@@ -76,15 +112,31 @@ fn text(value: Option<&Value>) -> Option<String> {
     }
 }
 
-fn quotes(event: &serde_json::Map<String, Value>) -> Vec<ElectionQuote> {
-    let Some(markets) = event.get("markets").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    markets
+fn is_open(item: &Map<String, Value>) -> bool {
+    item.get("active") != Some(&Value::Bool(false))
+        && item.get("closed") != Some(&Value::Bool(true))
+}
+
+/// Single-market events send an empty `groupItemTitle` and sports moneylines
+/// send null, so fall through to the question instead of dropping the market.
+fn market_title(market: &Map<String, Value>) -> Option<String> {
+    ["groupItemTitle", "question", "slug"]
         .iter()
+        .find_map(|key| text(market.get(*key)))
+}
+
+fn open_markets(event: &Map<String, Value>) -> impl Iterator<Item = &Map<String, Value>> {
+    event
+        .get("markets")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
         .filter_map(Value::as_object)
-        .filter(|market| market.get("active") != Some(&Value::Bool(false)))
-        .filter(|market| market.get("closed") != Some(&Value::Bool(true)))
+        .filter(|market| is_open(market))
+}
+
+fn quotes(event: &Map<String, Value>) -> Vec<ElectionQuote> {
+    open_markets(event)
         .filter_map(|market| {
             let outcomes = list(market.get("outcomes"));
             let yes_index = outcomes
@@ -92,12 +144,7 @@ fn quotes(event: &serde_json::Map<String, Value>) -> Vec<ElectionQuote> {
                 .position(|outcome| outcome.as_str() == Some("Yes"))?;
             let prices = list(market.get("outcomePrices"));
             let probability = number(prices.get(yes_index))?.clamp(0.0, 1.0);
-            let title = text(
-                market
-                    .get("groupItemTitle")
-                    .or_else(|| market.get("question"))
-                    .or_else(|| market.get("slug")),
-            )?;
+            let title = market_title(market)?;
             let token_ids = list(market.get("clobTokenIds"));
             let token_id = text(token_ids.get(yes_index));
             Some(ElectionQuote {
@@ -351,15 +398,186 @@ pub fn rank_outcomes(outcomes: &[MarketOutcome], limit: usize) -> Vec<RankedOutc
     ranked
 }
 
+fn search_market(market: &Map<String, Value>) -> Option<(SearchMarket, f64)> {
+    let names = list(market.get("outcomes"));
+    let prices = list(market.get("outcomePrices"));
+    if names.is_empty() || names.len() != prices.len() {
+        return None;
+    }
+    let outcomes = names
+        .iter()
+        .zip(&prices)
+        .map(|(name, price)| {
+            Some(SearchOutcome {
+                title: text(Some(name))?,
+                probability: number(Some(price))?.clamp(0.0, 1.0),
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let volume = ["volumeNum", "volume"]
+        .iter()
+        .find_map(|key| number(market.get(*key)))
+        .unwrap_or(0.0);
+    Some((
+        SearchMarket {
+            title: market_title(market)?,
+            outcomes,
+        },
+        volume,
+    ))
+}
+
+fn yes_probability(market: &SearchMarket) -> f64 {
+    market
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.title == "Yes")
+        .map_or(0.0, |outcome| outcome.probability)
+}
+
+fn search_event(event: &Map<String, Value>) -> Option<SearchEvent> {
+    if !is_open(event) {
+        return None;
+    }
+    let mut markets = open_markets(event)
+        .filter_map(search_market)
+        .collect::<Vec<_>>();
+    if markets.is_empty() {
+        return None;
+    }
+    // Mutually exclusive outcomes (candidates, rate decisions) read best as a
+    // leaderboard. Anything else, like sports props, keeps its busiest markets.
+    if event.get("negRisk") == Some(&Value::Bool(true)) {
+        markets.sort_by(|left, right| {
+            yes_probability(&right.0)
+                .partial_cmp(&yes_probability(&left.0))
+                .unwrap_or(Ordering::Equal)
+        });
+    } else {
+        markets.sort_by(|left, right| right.1.partial_cmp(&left.1).unwrap_or(Ordering::Equal));
+    }
+    let hidden_markets = markets.len().saturating_sub(SEARCH_MARKETS_PER_EVENT);
+    markets.truncate(SEARCH_MARKETS_PER_EVENT);
+    Some(SearchEvent {
+        title: text(event.get("title"))?,
+        slug: text(event.get("slug"))?,
+        liquidity: number(event.get("liquidity")).unwrap_or(0.0),
+        volume: number(event.get("volume")).unwrap_or(0.0),
+        end_date: text(event.get("endDate"))
+            .unwrap_or_default()
+            .chars()
+            .take(10)
+            .collect(),
+        markets: markets.into_iter().map(|(market, _)| market).collect(),
+        hidden_markets,
+    })
+}
+
+/// Parse a Gamma `public-search` response into open events in relevance order.
+#[must_use]
+pub fn parse_search_events(value: &Value) -> Vec<SearchEvent> {
+    value
+        .get("events")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .filter_map(search_event)
+        .collect()
+}
+
+#[must_use]
+pub fn market_search_error(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Es => "No pude buscar en Polymarket. Probá más tarde",
+        Locale::En => "I could not search Polymarket. Try again later",
+    }
+}
+
+fn search_market_line(event: &SearchEvent, market: &SearchMarket) -> String {
+    let outcomes = match market.outcomes.as_slice() {
+        [yes, no] if yes.title == "Yes" && no.title == "No" => std::slice::from_ref(yes),
+        outcomes => outcomes,
+    }
+    .iter()
+    .map(|outcome| {
+        format!(
+            "{} {}%",
+            outcome.title,
+            trimmed(outcome.probability * 100.0, 2)
+        )
+    })
+    .collect::<Vec<_>>()
+    .join(" / ");
+    if market.title == event.title {
+        format!("- {outcomes}")
+    } else {
+        format!("- {}: {outcomes}", market.title)
+    }
+}
+
+/// Plain-text search results for the AI tool. Prices are implied probabilities.
+#[must_use]
+pub fn render_market_search(query: &str, events: &[SearchEvent], locale: Locale) -> String {
+    let (header, empty, liquidity_label, volume_label, closes_label, more_label) = match locale {
+        Locale::Es => (
+            "Mercados de Polymarket para",
+            "No encontré mercados abiertos en Polymarket para",
+            "Liquidez",
+            "Volumen",
+            "Cierra",
+            "mercados más",
+        ),
+        Locale::En => (
+            "Polymarket markets for",
+            "No open Polymarket markets found for",
+            "Liquidity",
+            "Volume",
+            "Closes",
+            "more markets",
+        ),
+    };
+    if events.is_empty() {
+        return format!("{empty} \"{query}\"");
+    }
+    let mut lines = vec![format!("{header} \"{query}\" (%: implied probability)")];
+    for (index, event) in events.iter().enumerate() {
+        let mut details = vec![
+            format!("{liquidity_label} {}", usd_compact(event.liquidity)),
+            format!("{volume_label} {}", usd_compact(event.volume)),
+        ];
+        if !event.end_date.is_empty() {
+            details.push(format!("{closes_label} {}", event.end_date));
+        }
+        lines.push(String::new());
+        lines.push(format!("{}. {}", index + 1, event.title));
+        lines.push(format!("https://polymarket.com/event/{}", event.slug));
+        lines.push(details.join(" | "));
+        lines.extend(
+            event
+                .markets
+                .iter()
+                .map(|market| search_market_line(event, market)),
+        );
+        if event.hidden_markets > 0 {
+            lines.push(format!("- +{} {more_label}", event.hidden_markets));
+        }
+    }
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
+    use proptest::prelude::*;
     use serde_json::json;
 
     use super::{
-        MarketOutcome, RankedOutcome, classify_election_command, country_flag_from_name,
-        parse_election_events, rank_outcomes, render_elections,
+        MarketOutcome, RankedOutcome, SEARCH_MARKETS_PER_EVENT, SearchEvent, SearchMarket,
+        SearchOutcome, classify_election_command, country_flag_from_name, market_search_error,
+        parse_election_events, parse_search_events, rank_outcomes, render_elections,
+        render_market_search,
     };
     use crate::locale::Locale;
 
@@ -548,5 +766,288 @@ mod tests {
         let text = render_elections(&events, &HashMap::new(), Locale::En);
         assert!(text.contains("Linked"));
         assert!(!text.contains("No link"));
+    }
+
+    #[test]
+    fn election_titles_fall_back_past_empty_and_null_group_titles() {
+        let events = parse_election_events(&json!([{
+            "title": "Vote", "slug": "vote", "markets": [
+                {"groupItemTitle": "", "question": "Will A win?", "outcomes": ["Yes", "No"], "outcomePrices": [0.3, 0.7]},
+                {"groupItemTitle": null, "question": "Will B win?", "outcomes": ["Yes", "No"], "outcomePrices": [0.2, 0.8]}
+            ]
+        }]));
+        assert_eq!(
+            events[0]
+                .quotes
+                .iter()
+                .map(|quote| quote.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Will A win?", "Will B win?"]
+        );
+    }
+
+    fn binary(title: &str, yes: f64) -> serde_json::Value {
+        json!({"groupItemTitle": title, "outcomes": "[\"Yes\", \"No\"]", "outcomePrices": format!("[\"{yes}\", \"{}\"]", 1.0 - yes)})
+    }
+
+    #[test]
+    fn search_ranks_exclusive_outcomes_by_probability_and_caps_markets() {
+        let mut markets = (0..10)
+            .map(|index| binary(&format!("Candidate {index}"), f64::from(index) / 100.0))
+            .collect::<Vec<_>>();
+        markets.push(json!({"groupItemTitle": "Closed", "closed": true, "outcomes": ["Yes", "No"], "outcomePrices": [0.99, 0.01]}));
+        markets.push(json!({"groupItemTitle": "Inactive", "active": false, "outcomes": ["Yes", "No"], "outcomePrices": [0.98, 0.02]}));
+        let events = parse_search_events(&json!({"events": [{
+            "title": "Who wins?", "slug": "who-wins", "negRisk": true, "liquidity": "2500", "volume": 1_200_000,
+            "endDate": "2027-10-25T03:59:00Z", "markets": markets
+        }]}));
+        let event = &events[0];
+        assert_eq!(event.markets.len(), SEARCH_MARKETS_PER_EVENT);
+        assert_eq!(event.hidden_markets, 2);
+        assert_eq!(event.markets[0].title, "Candidate 9");
+        assert_eq!(event.markets[7].title, "Candidate 2");
+        assert_eq!(event.liquidity, 2500.0);
+        assert_eq!(event.end_date, "2027-10-25");
+    }
+
+    #[test]
+    fn search_keeps_busiest_props_and_non_binary_outcomes() {
+        let events = parse_search_events(&json!({"events": [{
+            "title": "Home vs. Away", "slug": "home-away", "markets": [
+                {"groupItemTitle": "Overtime?", "outcomes": ["Yes", "No"], "outcomePrices": ["0.5", "0.5"], "volumeNum": 10},
+                {"groupItemTitle": null, "question": "Home vs. Away", "outcomes": ["Home", "Away"], "outcomePrices": ["0.685", "0.315"], "volumeNum": 9000},
+                {"groupItemTitle": "O/U 210.5", "outcomes": ["Over", "Under"], "outcomePrices": ["0.52", "0.48"], "volume": "500"},
+                {"groupItemTitle": "Mismatched", "outcomes": ["Over", "Under"], "outcomePrices": ["0.52"]},
+                {"groupItemTitle": "Bad price", "outcomes": ["Yes", "No"], "outcomePrices": [true, 0.5]}
+            ]
+        }]}));
+        assert_eq!(
+            events[0]
+                .markets
+                .iter()
+                .map(|market| market.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Home vs. Away", "O/U 210.5", "Overtime?"]
+        );
+        assert_eq!(events[0].hidden_markets, 0);
+        assert_eq!(events[0].markets[0].outcomes[1].title, "Away");
+    }
+
+    #[test]
+    fn search_skips_closed_untitled_and_empty_events_and_keeps_relevance_order() {
+        let events = parse_search_events(&json!({"events": [
+            {"title": "Low liquidity", "slug": "first", "liquidity": 1, "markets": [binary("A", 0.5)]},
+            {"title": "Closed", "slug": "closed", "closed": true, "markets": [binary("A", 0.5)]},
+            {"title": "", "slug": "untitled", "markets": [binary("A", 0.5)]},
+            {"title": "No slug", "markets": [binary("A", 0.5)]},
+            {"title": "All closed", "slug": "all-closed", "markets": [{"groupItemTitle": "A", "closed": true, "outcomes": ["Yes", "No"], "outcomePrices": [0.5, 0.5]}]},
+            {"title": "No markets", "slug": "none", "markets": "not a list"},
+            "not an object",
+            {"title": "High liquidity", "slug": "second", "liquidity": 9_000_000, "markets": [binary("A", 0.5)]}
+        ]}));
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.slug.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        assert!(parse_search_events(&json!([])).is_empty());
+        assert!(parse_search_events(&json!({"events": {}})).is_empty());
+    }
+
+    fn search_event(markets: Vec<SearchMarket>, hidden_markets: usize) -> SearchEvent {
+        SearchEvent {
+            title: "Who wins?".to_owned(),
+            slug: "who-wins".to_owned(),
+            liquidity: 1_100_000.0,
+            volume: 2_500.0,
+            end_date: "2027-10-25".to_owned(),
+            markets,
+            hidden_markets,
+        }
+    }
+
+    fn search_market(title: &str, outcomes: &[(&str, f64)]) -> SearchMarket {
+        SearchMarket {
+            title: title.to_owned(),
+            outcomes: outcomes
+                .iter()
+                .map(|(title, probability)| SearchOutcome {
+                    title: (*title).to_owned(),
+                    probability: *probability,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn search_rendering_shows_links_details_and_compact_binary_odds() {
+        let events = [
+            search_event(
+                vec![
+                    search_market("Candidate A", &[("Yes", 0.485), ("No", 0.515)]),
+                    search_market("Candidate B", &[("Yes", 0.0005), ("No", 0.9995)]),
+                    search_market("Who wins?", &[("Home", 0.685), ("Away", 0.315)]),
+                    search_market("Yes only", &[("Yes", 1.0)]),
+                    search_market("Maybe", &[("Yes", 0.6825), ("Maybe", 0.3175)]),
+                    search_market("Reversed", &[("No", 0.25), ("Yes", 0.75)]),
+                ],
+                56,
+            ),
+            SearchEvent {
+                end_date: String::new(),
+                ..search_event(Vec::new(), 0)
+            },
+        ];
+        assert_eq!(
+            render_market_search("synthetic", &events, Locale::En),
+            concat!(
+                "Polymarket markets for \"synthetic\" (%: implied probability)\n\n",
+                "1. Who wins?\n",
+                "https://polymarket.com/event/who-wins\n",
+                "Liquidity US$1.1M | Volume US$2.5K | Closes 2027-10-25\n",
+                "- Candidate A: Yes 48.5%\n",
+                "- Candidate B: Yes 0.05%\n",
+                "- Home 68.5% / Away 31.5%\n",
+                "- Yes only: Yes 100%\n",
+                "- Maybe: Yes 68.25% / Maybe 31.75%\n",
+                "- Reversed: No 25% / Yes 75%\n",
+                "- +56 more markets\n\n",
+                "2. Who wins?\n",
+                "https://polymarket.com/event/who-wins\n",
+                "Liquidity US$1.1M | Volume US$2.5K"
+            )
+        );
+        assert!(
+            render_market_search("x", &events[..1], Locale::Es)
+                .contains("Liquidez US$1.1M | Volumen US$2.5K | Cierra 2027-10-25")
+        );
+        assert!(render_market_search("x", &events[..1], Locale::Es).contains("- +56 mercados más"));
+    }
+
+    #[test]
+    fn search_rendering_reports_empty_results_and_errors_per_locale() {
+        assert_eq!(
+            render_market_search("nada", &[], Locale::Es),
+            "No encontré mercados abiertos en Polymarket para \"nada\""
+        );
+        assert_eq!(
+            render_market_search("none", &[], Locale::En),
+            "No open Polymarket markets found for \"none\""
+        );
+        assert_eq!(
+            market_search_error(Locale::Es),
+            "No pude buscar en Polymarket. Probá más tarde"
+        );
+        assert_eq!(
+            market_search_error(Locale::En),
+            "I could not search Polymarket. Try again later"
+        );
+    }
+
+    #[test]
+    fn search_events_round_trip_through_the_cache_encoding() {
+        let events = vec![search_event(
+            vec![search_market("A", &[("Yes", 0.25), ("No", 0.75)])],
+            3,
+        )];
+        let encoded = serde_json::to_value(&events).unwrap_or_default();
+        assert_eq!(
+            serde_json::from_value::<Vec<SearchEvent>>(encoded).ok(),
+            Some(events)
+        );
+    }
+
+    #[test]
+    fn non_finite_provider_numbers_are_not_prices() {
+        assert_eq!(super::provider_number(&json!("0.25")), Some(0.25));
+        for value in [json!("NaN"), json!("inf"), json!("-infinity"), json!(null)] {
+            assert_eq!(super::provider_number(&value), None, "{value}");
+        }
+        let events = parse_search_events(&json!({"events": [{
+            "title": "Odd numbers", "slug": "odd", "liquidity": "inf", "volume": "NaN", "markets": [
+                {"groupItemTitle": "NaN price", "outcomes": ["Yes", "No"], "outcomePrices": ["NaN", "0.5"]},
+                {"groupItemTitle": "Fine", "outcomes": ["Yes", "No"], "outcomePrices": ["0.5", "0.5"], "volumeNum": "inf"}
+            ]
+        }]}));
+        assert_eq!(events[0].liquidity, 0.0);
+        assert_eq!(events[0].volume, 0.0);
+        assert_eq!(events[0].markets.len(), 1);
+        let elections = parse_election_events(&json!([{
+            "title": "Vote", "slug": "vote", "liquidity": "inf",
+            "markets": [{"groupItemTitle": "A", "outcomes": ["Yes"], "outcomePrices": ["NaN"]}]
+        }]));
+        assert_eq!(elections[0].liquidity, 0.0);
+        assert!(elections[0].quotes.is_empty());
+    }
+
+    /// Mostly real prices, plus the odd values Polymarket could send.
+    fn arbitrary_number() -> impl Strategy<Value = serde_json::Value> {
+        prop_oneof![
+            6 => (0.0_f64..=1.0).prop_map(|value| json!(value.to_string())),
+            2 => any::<f64>().prop_map(|value| json!(value)),
+            1 => Just(json!("NaN")),
+            1 => Just(json!(null)),
+        ]
+    }
+
+    /// Mostly open markets with one price per outcome, so ranking gets exercised.
+    fn arbitrary_market() -> impl Strategy<Value = serde_json::Value> {
+        let outcomes = prop::collection::vec(
+            prop::sample::select(vec!["Yes", "No", "Home", "Over"]),
+            0..4,
+        );
+        (
+            prop::option::of("[A-Za-z ]{0,8}"),
+            outcomes.prop_flat_map(|outcomes| {
+                let count = outcomes.len();
+                (
+                    Just(outcomes),
+                    prop::collection::vec(arbitrary_number(), count..=count + 1),
+                )
+            }),
+            arbitrary_number(),
+            (prop::bool::weighted(0.9), prop::bool::weighted(0.1)),
+        )
+            .prop_map(|(title, (outcomes, prices), volume, (active, closed))| {
+                json!({
+                    "groupItemTitle": title, "question": "Question?", "outcomes": outcomes,
+                    "outcomePrices": prices, "volumeNum": volume, "active": active, "closed": closed
+                })
+            })
+    }
+
+    proptest! {
+        #[test]
+        fn searched_events_stay_bounded_finite_and_cacheable(
+            neg_risk in any::<bool>(),
+            liquidity in arbitrary_number(),
+            markets in prop::collection::vec(arbitrary_market(), 0..20),
+        ) {
+            let open = markets
+                .iter()
+                .filter(|market| market["active"] == json!(true) && market["closed"] == json!(false))
+                .count();
+            let value = json!({"events": [{
+                "title": "Event", "slug": "event", "negRisk": neg_risk,
+                "liquidity": liquidity, "markets": markets
+            }]});
+            let events = parse_search_events(&value);
+            for event in &events {
+                prop_assert!(event.markets.len() <= SEARCH_MARKETS_PER_EVENT);
+                prop_assert!(event.markets.len() + event.hidden_markets <= open);
+                prop_assert!(event.liquidity.is_finite());
+                for outcome in event.markets.iter().flat_map(|market| &market.outcomes) {
+                    prop_assert!((0.0..=1.0).contains(&outcome.probability));
+                }
+                if neg_risk {
+                    let leaders = event.markets.iter().map(super::yes_probability).collect::<Vec<_>>();
+                    prop_assert!(leaders.windows(2).all(|pair| pair[0] >= pair[1]));
+                }
+            }
+            let encoded = serde_json::to_value(&events).unwrap_or_default();
+            prop_assert_eq!(serde_json::from_value::<Vec<SearchEvent>>(encoded).ok(), Some(events));
+        }
     }
 }
