@@ -58,3 +58,10 @@ path = "fuzz_targets/task_records.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "polymarket_search"
+path = "fuzz_targets/polymarket_search.rs"
+test = false
+doc = false
+bench = false

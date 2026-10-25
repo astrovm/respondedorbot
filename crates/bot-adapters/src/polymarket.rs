@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use bot_core::polymarket::{
-    ElectionEvent, SearchEvent, parse_election_events, parse_search_events,
+    ElectionEvent, SearchEvent, parse_election_events, parse_search_events, provider_number,
 };
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
@@ -230,14 +230,6 @@ pub struct ElectionsLoad {
     pub diagnostics: Vec<String>,
 }
 
-fn midpoint_number(value: &Value) -> Option<f64> {
-    match value {
-        Value::Number(value) => value.as_f64(),
-        Value::String(value) => value.parse().ok(),
-        _ => None,
-    }
-}
-
 #[must_use]
 pub fn load_elections<T: PolymarketTransport, C: RequestCache>(
     transport: &T,
@@ -296,7 +288,7 @@ pub fn load_elections<T: PolymarketTransport, C: RequestCache>(
                 Ok(Value::Object(values)) => values
                     .into_iter()
                     .filter_map(|(token_id, value)| {
-                        midpoint_number(&value).map(|price| (token_id, price))
+                        provider_number(&value).map(|price| (token_id, price))
                     })
                     .collect(),
                 Ok(_) => {
@@ -428,12 +420,15 @@ mod tests {
         );
         let transport = Transport {
             events: RefCell::new(VecDeque::from([response(events())])),
-            midpoints: RefCell::new(VecDeque::from([response(r#"{"a":"0.72","b":"invalid"}"#)])),
+            midpoints: RefCell::new(VecDeque::from([response(
+                r#"{"a":"0.72","b":"invalid","a-no":"NaN"}"#,
+            )])),
             requests: RefCell::default(),
         };
         let load = load_elections(&transport, &mut Cache, 100);
         assert_eq!(load.events.len(), 1);
         assert_eq!(load.live_prices.get("a"), Some(&0.72));
+        assert_eq!(load.live_prices.len(), 1);
         assert_eq!(transport.requests.borrow()[0].token_ids, ["a", "b"]);
         assert!(load.diagnostics.is_empty());
     }
@@ -475,8 +470,14 @@ mod tests {
         assert_eq!(load.events.len(), 1);
         assert!(load.live_prices.is_empty());
         assert!(transport.requests.borrow().is_empty());
-        assert_eq!(super::midpoint_number(&serde_json::json!(0.5)), Some(0.5));
-        assert_eq!(super::midpoint_number(&serde_json::json!(true)), None);
+        assert_eq!(
+            bot_core::polymarket::provider_number(&serde_json::json!(0.5)),
+            Some(0.5)
+        );
+        assert_eq!(
+            bot_core::polymarket::provider_number(&serde_json::json!(true)),
+            None
+        );
 
         for (midpoint, expected) in [
             (response("[]"), "non-object payload"),
