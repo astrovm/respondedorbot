@@ -20,6 +20,9 @@ type TestResult = Result<(), Box<dyn Error>>;
 const TOKEN: &str = "424242:synthetic-e2e-token";
 const BOT_USERNAME: &str = "synthetic_e2e_bot";
 const AI_REPLY: &str = "Respuesta sintética del modelo";
+/// A message with this text makes the fake model call `calculate` first.
+const TOOL_PROMPT: &str = "e2e tool check";
+const TOOL_REPLY_PREFIX: &str = "La herramienta devolvió ";
 const STARTING_CREDITS: i32 = 1_000;
 
 #[derive(Debug, Clone)]
@@ -226,6 +229,13 @@ fn telegram_response(method: &str, body: &Value, state: &FakeState) -> String {
 
 fn openrouter_completion(body: &Value) -> (&'static str, String) {
     let usage = json!({"prompt_tokens": 12, "completion_tokens": 6, "cost": 0.000_01});
+    let messages = body["messages"].as_array().cloned().unwrap_or_default();
+    if messages
+        .iter()
+        .any(|message| message["content"].to_string().contains(TOOL_PROMPT))
+    {
+        return tool_round(&messages, &usage);
+    }
     if body["stream"] == true {
         let chunk = json!({"id": "synthetic-generation", "model": "synthetic/model",
             "choices": [{"delta": {"content": AI_REPLY}, "finish_reason": null}]});
@@ -242,6 +252,34 @@ fn openrouter_completion(body: &Value) -> (&'static str, String) {
             "choices": [{"message": {"content": AI_REPLY}, "finish_reason": "stop"}],
             "usage": usage})
         .to_string(),
+    )
+}
+
+/// First asks for `calculate`, then answers with what the tool returned.
+fn tool_round(messages: &[Value], usage: &Value) -> (&'static str, String) {
+    let tool_output = messages
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .and_then(|message| message["content"].as_str());
+    let delta = tool_output.map_or_else(
+        || {
+            json!({"tool_calls": [{"index": 0, "id": "call-e2e", "type": "function",
+                "function": {"name": "calculate", "arguments": r#"{"expression":"21 * 2"}"#}}]})
+        },
+        |output| json!({"content": format!("{TOOL_REPLY_PREFIX}{output}")}),
+    );
+    let finish = if tool_output.is_some() {
+        "stop"
+    } else {
+        "tool_calls"
+    };
+    let chunk = json!({"id": "synthetic-generation", "model": "synthetic/model",
+        "choices": [{"delta": delta, "finish_reason": null}]});
+    let last = json!({"id": "synthetic-generation", "model": "synthetic/model",
+        "choices": [{"delta": {}, "finish_reason": finish}], "usage": usage});
+    (
+        "text/event-stream",
+        format!("data: {chunk}\n\ndata: {last}\n\ndata: [DONE]\n\n"),
     )
 }
 
@@ -563,6 +601,19 @@ fn exercise_main_flows(
             .iter()
             .all(|text| !text.contains("Se quedaron secos"))
     );
+
+    // A tool call runs for real and its result reaches the reply.
+    server.queue_update(private_message(
+        first_update + 5,
+        user_id,
+        &format!("/ask {TOOL_PROMPT}"),
+    ));
+    server.wait_for("a reply built from a tool result", |state| {
+        state
+            .sent_texts(user_id)
+            .iter()
+            .any(|text| text == &format!("{TOOL_REPLY_PREFIX}42"))
+    })?;
 
     server.state.stopping.store(true, Ordering::SeqCst);
     stop_bot(bot)

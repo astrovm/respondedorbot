@@ -231,6 +231,13 @@ impl<Backend: NativeToolBackend> NativeToolRuntime for NativeToolRegistry<Backen
     }
 }
 
+/// Every tool's provider schema, in catalog order, as a fully configured
+/// chat offers them. Used by the tool-choice evals.
+#[must_use]
+pub fn catalog_schemas() -> Vec<Value> {
+    ALL_TOOLS.iter().copied().map(tool_schema).collect()
+}
+
 pub(crate) fn tool_schema(tool: NativeTool) -> Value {
     let (description, parameters) = match tool {
         NativeTool::CryptoPrices => (
@@ -482,6 +489,7 @@ mod tests {
             ["task_set", "task_cancel", "random_choice", "create_poll"]
         );
         assert!(!registry.reusable("unknown"));
+        assert_eq!(catalog_schemas(), normal);
         assert!(!registry.contains("task_set", true));
         assert!(registry.contains("task_set", false));
     }
