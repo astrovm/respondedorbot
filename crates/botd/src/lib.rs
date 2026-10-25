@@ -64,16 +64,20 @@ pub(crate) mod test_env {
     /// A credit command operation id that is unique across test runs, so reruns
     /// against the same database never replay an earlier run's operation.
     pub(crate) fn fresh_op() -> String {
+        unique("synthetic-operation")
+    }
+
+    /// An id unique across test runs. The process id alone repeats: inside a
+    /// container the test binary gets the same one every run, so reruns
+    /// against the same Redis would find the last run's keys.
+    pub(crate) fn unique(prefix: &str) -> String {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
         let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        format!(
-            "synthetic-operation-{}-{nanos}-{sequence}",
-            std::process::id()
-        )
+        format!("{prefix}-{}-{nanos}-{sequence}", std::process::id())
     }
 
     pub(crate) fn database_url() -> Option<String> {

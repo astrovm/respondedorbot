@@ -7610,7 +7610,7 @@ mod tests {
         let mut tasks = super::RedisScheduledTaskSource {
             store: RedisTaskStore::new(&endpoint).map_err(super::error_text)?,
         };
-        let chat_id = format!("synthetic-wrapper-{}", std::process::id());
+        let chat_id = crate::test_env::unique("synthetic-wrapper");
         assert!(tasks.list(&chat_id)?.is_empty());
         let task_id = TaskId::new("synthetic-missing-task").map_err(super::error_text)?;
         assert!(!tasks.cancel(&task_id, &chat_id)?);
