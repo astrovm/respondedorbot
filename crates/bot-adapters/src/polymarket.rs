@@ -716,6 +716,8 @@ mod tests {
             load.diagnostics
         );
         assert!(transport.queries.borrow().is_empty());
+        assert_eq!(cache.take("synthetic"), Ok(None));
+        assert_eq!(cache.claim("synthetic", "1", 60), Ok(true));
     }
 
     #[test]
@@ -736,11 +738,12 @@ mod tests {
                 assert!(request.contains(parameter), "{request}");
             }
             let body = r#"{"events":[]}"#;
-            write!(
+            let written = write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
-            )?;
+            );
+            written?;
             Ok(())
         });
         let transport =

@@ -179,4 +179,11 @@ mod tests {
         );
         assert!(tool.transport.queries.borrow().is_empty());
     }
+
+    #[test]
+    fn cache_stub_keeps_the_empty_contract() {
+        assert_eq!(Cache.set("synthetic", "1", 60), Ok(()));
+        assert_eq!(Cache.take("synthetic"), Ok(None));
+        assert_eq!(Cache.claim("synthetic", "1", 60), Ok(true));
+    }
 }

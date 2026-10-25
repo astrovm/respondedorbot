@@ -282,11 +282,6 @@ fn html_escape(value: &str) -> String {
         .replace('\'', "&#x27;")
 }
 
-fn percent(percentage: f64) -> String {
-    let decimals = if percentage < 10.0 { 2 } else { 1 };
-    format!("{}%", trimmed(percentage, decimals))
-}
-
 fn usd_compact(value: f64) -> String {
     for (divisor, suffix) in [(1_000_000_000.0, "B"), (1_000_000.0, "M"), (1_000.0, "K")] {
         if value >= divisor {
@@ -339,10 +334,11 @@ pub fn render_elections(
         let outcomes = rank_outcomes(&outcomes, 2)
             .into_iter()
             .map(|outcome| {
+                let decimals = if outcome.percentage < 10.0 { 2 } else { 1 };
                 format!(
-                    "{} {}",
+                    "{} {}%",
                     html_escape(&outcome.title),
-                    percent(outcome.percentage)
+                    trimmed(outcome.percentage, decimals)
                 )
             })
             .collect::<Vec<_>>();
@@ -504,7 +500,13 @@ fn search_market_line(event: &SearchEvent, market: &SearchMarket) -> String {
         outcomes => outcomes,
     }
     .iter()
-    .map(|outcome| format!("{} {}", outcome.title, percent(outcome.probability * 100.0)))
+    .map(|outcome| {
+        format!(
+            "{} {}%",
+            outcome.title,
+            trimmed(outcome.probability * 100.0, 2)
+        )
+    })
     .collect::<Vec<_>>()
     .join(" / ");
     if market.title == event.title {
@@ -888,6 +890,8 @@ mod tests {
                     search_market("Candidate B", &[("Yes", 0.0005), ("No", 0.9995)]),
                     search_market("Who wins?", &[("Home", 0.685), ("Away", 0.315)]),
                     search_market("Yes only", &[("Yes", 1.0)]),
+                    search_market("Maybe", &[("Yes", 0.6825), ("Maybe", 0.3175)]),
+                    search_market("Reversed", &[("No", 0.25), ("Yes", 0.75)]),
                 ],
                 56,
             ),
@@ -907,6 +911,8 @@ mod tests {
                 "- Candidate B: Yes 0.05%\n",
                 "- Home 68.5% / Away 31.5%\n",
                 "- Yes only: Yes 100%\n",
+                "- Maybe: Yes 68.25% / Maybe 31.75%\n",
+                "- Reversed: No 25% / Yes 75%\n",
                 "- +56 more markets\n\n",
                 "2. Who wins?\n",
                 "https://polymarket.com/event/who-wins\n",
@@ -976,27 +982,35 @@ mod tests {
         assert!(elections[0].quotes.is_empty());
     }
 
+    /// Mostly real prices, plus the odd values Polymarket could send.
     fn arbitrary_number() -> impl Strategy<Value = serde_json::Value> {
         prop_oneof![
-            any::<f64>().prop_map(|value| json!(value)),
-            any::<f64>().prop_map(|value| json!(value.to_string())),
-            Just(json!("NaN")),
-            Just(json!(null)),
+            6 => (0.0_f64..=1.0).prop_map(|value| json!(value.to_string())),
+            2 => any::<f64>().prop_map(|value| json!(value)),
+            1 => Just(json!("NaN")),
+            1 => Just(json!(null)),
         ]
     }
 
+    /// Mostly open markets with one price per outcome, so ranking gets exercised.
     fn arbitrary_market() -> impl Strategy<Value = serde_json::Value> {
+        let outcomes = prop::collection::vec(
+            prop::sample::select(vec!["Yes", "No", "Home", "Over"]),
+            0..4,
+        );
         (
             prop::option::of("[A-Za-z ]{0,8}"),
-            prop::collection::vec(
-                prop::sample::select(vec!["Yes", "No", "Home", "Over"]),
-                0..4,
-            ),
-            prop::collection::vec(arbitrary_number(), 0..4),
+            outcomes.prop_flat_map(|outcomes| {
+                let count = outcomes.len();
+                (
+                    Just(outcomes),
+                    prop::collection::vec(arbitrary_number(), count..=count + 1),
+                )
+            }),
             arbitrary_number(),
-            any::<(bool, bool)>(),
+            (prop::bool::weighted(0.9), prop::bool::weighted(0.1)),
         )
-            .prop_map(|(title, outcomes, prices, volume, (active, closed))| {
+            .prop_map(|(title, (outcomes, prices), volume, (active, closed))| {
                 json!({
                     "groupItemTitle": title, "question": "Question?", "outcomes": outcomes,
                     "outcomePrices": prices, "volumeNum": volume, "active": active, "closed": closed
