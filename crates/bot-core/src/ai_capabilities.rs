@@ -17,6 +17,7 @@ const CAPABILITIES_ES: &str = r#"CAPACIDADES DEL BOT:
 - /petroleo, /oil: precio Brent y WTI
 - /bcra, /variables: variables económicas del BCRA
 - /eleccion, /elecciones, /election, /elections: top 10 de elecciones globales en Polymarket por liquidez
+- polymarket: en mensajes normales busco mercados de predicción de Polymarket sobre cualquier tema (elecciones, deportes, crypto, economía) con sus probabilidades
 - /rulo, /devo, /powerlaw, /rainbow, /satoshi, /sat, /sats: rulo desde oficial, arbitraje tarjeta/crypto, power law, rainbow chart y sats
 - /transcribe, /transcript, /describe: transcribo voice/audio/video/video_note o subtítulos de YouTube y describo fotos, stickers o GIF respondiendo al mensaje; también puedo procesar media cuando me hablan
 - links: arreglo links de X/Twitter, Bluesky, Instagram y Reddit según config; leo metadata, tweets y transcripts de YouTube como contexto
@@ -46,6 +47,7 @@ const CAPABILITIES_EN: &str = r#"BOT CAPABILITIES:
 - /petroleo, /oil: Brent and WTI oil prices
 - /bcra, /variables: economic variables from Argentina's central bank
 - /eleccion, /elecciones, /election, /elections: top global election markets on Polymarket by liquidity
+- polymarket: in normal messages I search Polymarket prediction markets on any topic (elections, sports, crypto, economy) with their odds
 - /rulo, /devo, /powerlaw, /rainbow, /satoshi, /sat, /sats: official-rate, card/crypto, power-law, rainbow-chart, and satoshi tools
 - /transcribe, /transcript, /describe: transcribe audio, video, or YouTube captions; describe images, stickers, or GIFs
 - links: fix supported social links and read linked content as context

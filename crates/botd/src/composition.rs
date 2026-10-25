@@ -139,6 +139,7 @@ use crate::media_adapters::{
 };
 use crate::native_tools::{NativeTool, NativeToolRegistry, StandardNativeToolBackend};
 use crate::poll_tools::{PollTool, PollToolContext, TelegramPollSender};
+use crate::polymarket_tool::PolymarketTool;
 use crate::random_tool::RandomChoiceTool;
 use crate::reconciliation::ActiveOperationRegistry;
 use crate::runtime::{DurableParallelUpdateHandler, PollingRuntime, UpdateSource};
@@ -3144,6 +3145,15 @@ impl ConversationToolFactory for ProductionToolFactory {
                 Box::new(HackerNewsTool::new(
                     ReqwestHackerNewsTransport::new().map_err(error_text)?,
                     RedisJsonCache::new(&self.redis_endpoint).map_err(error_text)?,
+                    locale,
+                )),
+            )
+            .with_executor(
+                NativeTool::Polymarket,
+                Box::new(PolymarketTool::new(
+                    tool_transport("Polymarket", ReqwestPolymarketTransport::new())?,
+                    RedisJsonCache::new(&self.redis_endpoint).map_err(error_text)?,
+                    current_unix_timestamp,
                     locale,
                 )),
             );
