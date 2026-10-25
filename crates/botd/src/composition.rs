@@ -3027,11 +3027,9 @@ impl ConversationToolFactory for ProductionToolFactory {
             toolbox = toolbox.with_executor(
                 NativeTool::CryptoPrices,
                 read_only_tool(NativeTool::CryptoPrices, locale, move || {
+                    let transport = ReqwestCoinMarketCapTransport::new();
                     let market = NativeMarketPriceSource {
-                        transport: tool_transport(
-                            "CoinMarketCap",
-                            ReqwestCoinMarketCapTransport::new(),
-                        )?,
+                        transport: tool_transport("CoinMarketCap", transport)?,
                         cache: RedisJsonCache::new(&endpoint).map_err(error_text)?,
                         api_key: api_key.clone(),
                         stocks: yahoo_stock_source(&endpoint)?,
@@ -6779,14 +6777,9 @@ mod tests {
     }
 
     #[test]
-    fn production_tool_factory_exposes_all_configured_tools_with_local_stores()
-    -> crate::test_env::TestResult {
-        let Some(endpoint) = redis_env() else {
-            return Ok(());
-        };
-        let Some(database_url) = db_env() else {
-            return Ok(());
-        };
+    fn production_tool_factory_exposes_all_configured_tools_with_local_stores() {
+        let Some(endpoint) = redis_env() else { return };
+        let Some(database_url) = db_env() else { return };
         let mut factory = super::ProductionToolFactory::new(
             &endpoint,
             &database_url,
@@ -6822,7 +6815,9 @@ mod tests {
             link_context: None,
         };
         use crate::chat_tool_loop::NativeToolRuntime;
-        let mut tools = factory.create(&input)?;
+        let tools = factory.create(&input);
+        assert!(tools.is_ok());
+        let Ok(mut tools) = tools else { return };
         // Fully configured, every declared tool is wired up and offered.
         assert_eq!(
             tools.schemas(false).len(),
@@ -6872,7 +6867,6 @@ mod tests {
                 .create(&input)
                 .is_ok_and(|tools| !tools.contains("create_poll", false))
         );
-        Ok(())
     }
 
     #[test]
