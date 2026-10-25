@@ -179,6 +179,28 @@ pub fn build_system_prompt(
     )
 }
 
+/// How the bot answers, shared by chat replies and scheduled tasks so both
+/// keep the same voice and only run long when the content needs it.
+#[must_use]
+pub const fn reply_instructions(locale: Locale) -> &'static [&'static str] {
+    match locale {
+        Locale::Es => &[
+            "INSTRUCCIONES:",
+            "- mantené el personaje del gordo",
+            "- usá lenguaje coloquial argentino",
+            "- respondé en minúsculas, sin emojis, sin punto final",
+            "- respondé en una sola frase salvo que sea necesario explicar algo complejo",
+        ],
+        Locale::En => &[
+            "INSTRUCTIONS:",
+            "- stay in the gordo character",
+            "- use casual English",
+            "- respond without emojis or a final period",
+            "- use one sentence unless a complex explanation needs more",
+        ],
+    }
+}
+
 #[must_use]
 pub fn build_conversation_prompt(input: &ConversationPromptInput) -> Vec<PromptMessage> {
     let mut messages = Vec::new();
@@ -295,29 +317,13 @@ pub fn build_conversation_prompt(input: &ConversationPromptInput) -> Vec<PromptM
     {
         parts.extend([String::new(), links.to_owned()]);
     }
-    let instructions = match input.locale {
-        Locale::Es => [
-            "INSTRUCCIONES:",
-            "- mantené el personaje del gordo",
-            "- usá lenguaje coloquial argentino",
-            "- respondé en minúsculas, sin emojis, sin punto final",
-            "- respondé en una sola frase salvo que sea necesario explicar algo complejo",
-        ],
-        Locale::En => [
-            "INSTRUCTIONS:",
-            "- stay in the gordo character",
-            "- use casual English",
-            "- respond without emojis or a final period",
-            "- use one sentence unless a complex explanation needs more",
-        ],
-    };
     parts.extend([
         String::new(),
         message_header.to_owned(),
         truncate_text(Some(&input.message_text), PROMPT_TEXT_LIMIT),
         String::new(),
     ]);
-    parts.extend(instructions.into_iter().map(str::to_owned));
+    parts.push(reply_instructions(input.locale).join("\n"));
     if input.enable_web_search {
         parts.push(
             match input.locale {

@@ -1,8 +1,10 @@
 //! Native scheduled-task AI execution with stable billing identities.
 
+use bot_core::ai_prompt::reply_instructions;
 use bot_core::ai_response_cleanup::{
     clean_duplicate_response, remove_gordo_prefix, strip_markdown_formatting,
 };
+use bot_core::locale::Locale;
 use bot_core::polls::PollRequest;
 use bot_core::scheduled_tasks::{MISFIRE_GRACE_SECONDS, ScheduledTask};
 use serde::{Deserialize, Serialize};
@@ -338,10 +340,7 @@ where
                     "delivery_abandoned",
                     "scheduled-task result reached its delivery retry limit",
                 );
-            } else if let Err(error) = self
-                .messenger
-                .send(&task.chat_id, &task_result(task, response))
-            {
+            } else if let Err(error) = self.messenger.send(&task.chat_id, response) {
                 let message = error.to_string();
                 state.delivery_attempts = state.delivery_attempts.saturating_add(1);
                 self.journal
@@ -587,18 +586,15 @@ where
 
 #[must_use]
 pub fn build_task_messages(text: &str, locale: &str) -> Vec<TaskPromptMessage> {
+    let locale = if locale == "en" {
+        Locale::En
+    } else {
+        Locale::Es
+    };
     vec![TaskPromptMessage {
         role: "user",
-        content: format!("{text}\n\n{}", format_prompt(locale)),
+        content: format!("{text}\n\n{}", reply_instructions(locale).join("\n")),
     }]
-}
-
-fn format_prompt(locale: &str) -> &'static str {
-    if locale == "en" {
-        "INSTRUCTIONS:\n- if the task asks for a poll or vote, call create_poll instead of writing answer options as a list\n- keep the bot persona\n- use casual English\n- respond without markdown or emojis\n- use a numbered list when the user asks for a list or there are several topics\n- leave a blank line between numbered items\n- give each item a short title and a brief explanation\n- structure the answer so it is easy to read"
-    } else {
-        "INSTRUCCIONES:\n- si la tarea pide una encuesta o votación, usá create_poll en vez de escribir las opciones como una lista\n- mantené el personaje del gordo\n- usá lenguaje coloquial argentino\n- respondé en minúsculas, sin emojis, sin punto final\n- si el usuario pide una lista o hay varios temas, usá lista numerada: 1., 2., 3.\n- dejá una línea en blanco entre cada item numerado\n- cada item debe tener título corto en su propia línea y explicación breve abajo\n- no la pongas toda en una sola frase: estructurala para que sea fácil de leer"
-    }
 }
 
 fn force_response(locale: &str) -> &'static str {
@@ -625,25 +621,35 @@ fn credit_user_message(locale: &str) -> &'static str {
     }
 }
 
-fn execute_failed(task: &ScheduledTask, error: &str) -> String {
-    if task.locale == "en" {
-        format!(
-            "{}, I could not run the task “{}”:\n{error}",
-            task.user_name, task.text
-        )
-    } else {
-        format!(
-            "{}, no pude ejecutar la tarea «{}»:\n{error}",
-            task.user_name, task.text
-        )
+/// The task text cut at a word boundary, for quoting it in a notice.
+fn short_task_text(text: &str) -> String {
+    if text.chars().count() <= FAILED_TASK_TEXT_CHARS {
+        return text.to_owned();
     }
+    let cut = text
+        .chars()
+        .take(FAILED_TASK_TEXT_CHARS)
+        .collect::<String>();
+    let words = cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head);
+    format!("{}…", words.trim_end())
 }
 
-fn task_result(task: &ScheduledTask, response: &str) -> String {
+/// Longest task text quoted in a failure notice, so a long task doesn't bury
+/// the error.
+const FAILED_TASK_TEXT_CHARS: usize = 40;
+
+fn execute_failed(task: &ScheduledTask, error: &str) -> String {
+    let text = short_task_text(&task.text);
     if task.locale == "en" {
-        format!("{}, task “{}”:\n{response}", task.user_name, task.text)
+        format!(
+            "{}, I could not run the task “{text}”:\n{error}",
+            task.user_name
+        )
     } else {
-        format!("{}, tarea «{}»:\n{response}", task.user_name, task.text)
+        format!(
+            "{}, no pude ejecutar la tarea «{text}»:\n{error}",
+            task.user_name
+        )
     }
 }
 
@@ -682,7 +688,7 @@ mod tests {
         TaskBilling, TaskDiagnostics, TaskExecutionDisposition, TaskExecutionJournal,
         TaskExecutionKind, TaskExecutionState, TaskMessenger, TaskPollDeliveryError,
         TaskPromptMessage, TaskProviderFailure, TaskProviderReply, TaskReserveOutcome,
-        build_task_messages, clean_task_response, diagnostic_line,
+        build_task_messages, clean_task_response, diagnostic_line, execute_failed,
     };
 
     #[derive(Default)]
@@ -884,7 +890,19 @@ mod tests {
                 .content
                 .starts_with("recordame algo\n\nINSTRUCCIONES:")
         );
-        assert!(prompt[0].content.contains("usá lista numerada: 1., 2., 3."));
+        // Tasks answer with the same rules as chat, without forced sections.
+        assert!(prompt[0].content.ends_with(
+            &bot_core::ai_prompt::reply_instructions(bot_core::locale::Locale::Es).join("\n")
+        ));
+        assert!(!prompt[0].content.contains("lista numerada"));
+        let english = build_task_messages("remind me", "en");
+        assert_eq!(
+            english[0].content,
+            format!(
+                "remind me\n\n{}",
+                bot_core::ai_prompt::reply_instructions(bot_core::locale::Locale::En).join("\n")
+            )
+        );
         let mut executor = executor(
             Provider::default(),
             Billing::default(),
@@ -898,10 +916,7 @@ mod tests {
         assert_eq!(provider.execution_ids, ["task123:1000"]);
         assert_eq!(billing.reserve_ids, ["task123:1000"]);
         assert_eq!(billing.settlements[0].2, "task_success");
-        assert_eq!(
-            messenger.messages[0].1,
-            "synthetic-user, tarea «synthetic task»:\nsynthetic answer"
-        );
+        assert_eq!(messenger.messages[0].1, "synthetic answer");
     }
 
     #[test]
@@ -978,10 +993,7 @@ mod tests {
         assert!(provider.prompts.is_empty());
         assert!(billing.reserve_ids.is_empty());
         assert!(billing.settlements.is_empty());
-        assert_eq!(
-            messenger.messages[0].1,
-            "synthetic-user, task “synthetic task”:\nsaved answer"
-        );
+        assert_eq!(messenger.messages[0].1, "saved answer");
     }
 
     #[test]
@@ -1061,10 +1073,7 @@ mod tests {
             "you must provide a real answer"
         );
         assert_eq!(billing.settlements[0].1.len(), 3);
-        assert_eq!(
-            messenger.messages[0].1,
-            "synthetic-user, task “synthetic task”:\npaid answer"
-        );
+        assert_eq!(messenger.messages[0].1, "paid answer");
     }
 
     #[test]
@@ -1200,6 +1209,24 @@ mod tests {
         };
         let mut settlement = executor(Provider::default(), billing, Messenger::default());
         assert!(settlement.execute(&task("es"), "task123:1000").is_err());
+    }
+
+    #[test]
+    fn failure_notice_quotes_only_the_start_of_a_long_task() {
+        let mut long = task("es");
+        long.text = "reportar cómo vienen las elecciones de brasil en polymarket".to_owned();
+        assert_eq!(
+            execute_failed(&long, "saldo insuficiente"),
+            "synthetic-user, no pude ejecutar la tarea «reportar cómo vienen las elecciones de…»:\nsaldo insuficiente"
+        );
+        long.text = "x".repeat(50);
+        assert!(execute_failed(&long, "e").contains(&format!("«{}…»", "x".repeat(40))));
+        long.text = "reportar cómo vienen las elecciones de brasil en polymarket".to_owned();
+        long.locale = "en".to_owned();
+        assert_eq!(
+            execute_failed(&long, "no credit"),
+            "synthetic-user, I could not run the task “reportar cómo vienen las elecciones de…”:\nno credit"
+        );
     }
 
     #[test]
