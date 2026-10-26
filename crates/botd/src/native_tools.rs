@@ -298,7 +298,7 @@ pub(crate) fn tool_schema(tool: NativeTool) -> Value {
             empty_parameters(),
         ),
         NativeTool::StockPrices => (
-            "Get prices for stocks, ETFs, indexes, or futures from Yahoo Finance. Use exact Yahoo symbols when known; company names are also accepted.",
+            "Get prices for stocks, ETFs, indexes, or futures from Yahoo Finance. Use exact Yahoo symbols when known; company names are also accepted. Each change is from the previous regular-session close and is labeled as live while the market is open or as the last close after it. Outside regular hours, listings that trade then also show the latest pre-market or after-hours price.",
             json!({
                 "type": "object",
                 "properties": {"queries": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 20, "description": "Yahoo symbols or company names."}},

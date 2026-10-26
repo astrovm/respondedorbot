@@ -9658,6 +9658,8 @@ mod tests {
             exchange: "NMS".to_owned(),
             asset_type: String::new(),
             variation: 1.25,
+            session: None,
+            extended: None,
         };
         let config = Config {
             value: Ok(ChatConfig {
@@ -9696,7 +9698,7 @@ mod tests {
         let message = first_sent(&dispatcher.actions.0);
         assert_eq!(
             message.text,
-            "AAPL: 205.5 USD (+1.25% 24h)\nUnknown: not found"
+            "AAPL: 205.5 USD (+1.25% 1d)\nUnknown: not found"
         );
         assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
         assert_eq!(dispatcher.state.incoming.len(), 1);
@@ -9839,6 +9841,8 @@ mod tests {
             exchange: String::new(),
             asset_type: String::new(),
             variation,
+            session: None,
+            extended: None,
         };
         let config = Config {
             value: Ok(ChatConfig {
@@ -9872,7 +9876,7 @@ mod tests {
         let message = first_sent(&dispatcher.actions.0);
         assert_eq!(
             message.text,
-            "Brent: 98.15 USD (-8.78% 24h)\nWTI: 95.45 USD (+1.25% 24h)"
+            "Brent: 98.15 USD (-8.78% 1d)\nWTI: 95.45 USD (+1.25% 1d)"
         );
         assert_eq!(message.reply_to_message_id, Some(MessageId(7)));
         assert_eq!(dispatcher.state.incoming.len(), 1);
@@ -13066,6 +13070,8 @@ mod tests {
             exchange: "TEST".to_owned(),
             asset_type: String::new(),
             variation: 0.0,
+            session: None,
+            extended: None,
         };
         assert_eq!(
             BareStock.render_chart(&quote, 1_700_000_000),
@@ -16510,6 +16516,8 @@ mod tests {
                             exchange: "NMS".into(),
                             asset_type: String::new(),
                             variation: 1.0,
+                            session: None,
+                            extended: None,
                         }),
                     )]),
                     diagnostics: vec![],

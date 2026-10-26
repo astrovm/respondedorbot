@@ -726,15 +726,13 @@ where
             &load.candles,
             chart.timeframe.as_deref().unwrap_or("5d"),
         )?;
-        let period = chart.timeframe.as_deref().unwrap_or("24h");
-        Ok(crate::dispatcher::MarketChartRender {
-            photo,
-            caption: Some(bot_adapters::token_signal::market_chart_caption(
-                &quote,
-                &load.candles,
-                period,
-            )),
-        })
+        // Without a timeframe the candles span five days, so their change is
+        // not a daily one. The quote text already carries the daily change and
+        // any extended-hours price.
+        let caption = chart.timeframe.as_deref().map(|period| {
+            bot_adapters::token_signal::market_chart_caption(&quote, &load.candles, period)
+        });
+        Ok(crate::dispatcher::MarketChartRender { photo, caption })
     }
 }
 
@@ -7607,7 +7605,9 @@ mod tests {
             .push(response());
         let png = source.render_chart(&chart, 1_700_000_000)?;
         assert!(png.photo.starts_with(b"\x89PNG"));
-        assert_eq!(png.caption.as_deref(), Some("EXM: 42 USD (+5% 24h)"));
+        // The five-day candles are not a daily change, so the quote text
+        // stays the caption.
+        assert_eq!(png.caption, None);
         let mut ranged_chart = chart.clone();
         ranged_chart.timeframe = Some("1m".to_owned());
         source
@@ -7637,6 +7637,8 @@ mod tests {
             exchange: "TEST".into(),
             asset_type: String::new(),
             variation: 5.0,
+            session: None,
+            extended: None,
         };
         assert!(source.stocks.render_chart(&quote, 1_700_000_000).is_err());
         source
@@ -8539,6 +8541,8 @@ mod tests {
             exchange: exchange.to_owned(),
             asset_type: asset_type.to_owned(),
             variation: 0.0,
+            session: None,
+            extended: None,
         };
         let unique = super::unique_discovered_quotes(vec![
             quote("EXM", "NASDAQ", "Equity"),

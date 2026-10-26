@@ -4,8 +4,8 @@ use std::thread;
 use std::time::Duration;
 
 use bot_core::stocks::{
-    StockQuote, StockSearchCandidate, parse_yahoo_quote, rank_yahoo_candidates,
-    select_yahoo_candidates,
+    MarketSession, StockQuote, StockSearchCandidate, parse_yahoo_extended_quote, parse_yahoo_quote,
+    rank_yahoo_candidates, select_yahoo_candidates, yahoo_has_extended_hours,
 };
 use reqwest::blocking::Client;
 use serde_json::json;
@@ -27,6 +27,8 @@ const MAX_SEARCH_CANDIDATES: usize = 10;
 pub struct YahooChartRequest {
     pub symbol: String,
     pub window: Option<(i64, i64, String)>,
+    /// Ask for the latest day's intraday bars, pre- and post-market included.
+    pub extended_hours: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,6 +125,11 @@ impl YahooFinanceTransport for ReqwestYahooFinanceTransport {
                 ("period1", start.to_string()),
                 ("period2", end.to_string()),
                 ("interval", interval.clone()),
+            ],
+            None if request.extended_hours => vec![
+                ("range", "1d".into()),
+                ("interval", "5m".into()),
+                ("includePrePost", "true".into()),
             ],
             None => vec![("range", "5d".into()), ("interval", "1d".into())],
         };
@@ -227,6 +234,7 @@ pub fn load_chart<T: YahooFinanceTransport, C: RequestCache>(
     let request = YahooChartRequest {
         symbol: symbol.to_owned(),
         window,
+        extended_hours: false,
     };
     let key = match timeframe {
         Some(period) => format!("{}:history:{period}", cache_key(symbol)),
@@ -252,7 +260,7 @@ pub fn load_chart<T: YahooFinanceTransport, C: RequestCache>(
     let mut quote = load
         .data
         .as_ref()
-        .and_then(|data| parse_yahoo_quote(&json!({"data": data}), symbol));
+        .and_then(|data| parse_yahoo_quote(&json!({"data": data}), symbol, now_unix));
     let candles = load.data.as_ref().map(parse_candles).unwrap_or_default();
     if timeframe.is_some()
         && let Some(quote) = quote.as_mut()
@@ -273,6 +281,13 @@ pub fn load_chart<T: YahooFinanceTransport, C: RequestCache>(
             .unwrap_or(f64::NAN);
     }
     let mut diagnostics = load.diagnostics;
+    if let (Some(quote), Some(data)) = (quote.as_mut(), load.data.as_ref())
+        && quote.session == Some(MarketSession::Closed)
+        && yahoo_has_extended_hours(data)
+    {
+        quote.extended = load_extended_hours(transport, cache, symbol, now_unix, &mut diagnostics)
+            .and_then(|data| parse_yahoo_extended_quote(&data, quote.price));
+    }
     if quote.is_none() {
         diagnostics.push(format!("Yahoo chart had no usable quote for {symbol}"));
     }
@@ -281,6 +296,42 @@ pub fn load_chart<T: YahooFinanceTransport, C: RequestCache>(
         quote,
         diagnostics,
     }
+}
+
+/// Load the latest day's intraday bars with pre- and post-market trades. Only
+/// requested while the regular session is closed, so open-market quotes cost
+/// one request as before.
+fn load_extended_hours<T: YahooFinanceTransport, C: RequestCache>(
+    transport: &T,
+    cache: &mut C,
+    symbol: &str,
+    now_unix: i64,
+    diagnostics: &mut Vec<String>,
+) -> Option<serde_json::Value> {
+    let request = YahooChartRequest {
+        symbol: symbol.to_owned(),
+        window: None,
+        extended_hours: true,
+    };
+    let load = load_cached_json(
+        cache,
+        &format!("{}:extended-hours", cache_key(symbol)),
+        CACHE_TTL_SECONDS,
+        now_unix,
+        &format!("Yahoo extended-hours request symbol={symbol}"),
+        || {
+            transport
+                .chart(&request)
+                .map(|response| JsonHttpResponse {
+                    status_code: response.status_code,
+                    body: response.body,
+                })
+                .map_err(|error| format!("transport {error:?}"))
+        },
+        || transport.before_retry(),
+    );
+    diagnostics.extend(load.diagnostics);
+    load.data
 }
 
 fn parse_candles(value: &serde_json::Value) -> Vec<Vec<f64>> {
@@ -430,6 +481,8 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
 
+    use bot_core::stocks::{ExtendedHoursQuote, ExtendedSession, MarketSession};
+
     use crate::request_cache::RequestCache;
 
     use super::{
@@ -503,6 +556,108 @@ mod tests {
             status_code: 200,
             body: body.to_owned(),
         })
+    }
+
+    // A synthetic US listing: the regular session runs from 5,000 to 9,000,
+    // with pre-market before and after-hours after it.
+    fn session_chart(regular_time: i64, timestamps: &[i64], closes: &[f64]) -> String {
+        serde_json::json!({"chart": {"result": [{
+            "meta": {
+                "symbol": "EXM",
+                "regularMarketPrice": 20.0,
+                "regularMarketTime": regular_time,
+                "regularMarketChangePercent": 2.5,
+                "hasPrePostMarketData": true,
+                "currentTradingPeriod": {
+                    "pre": {"start": 4_000, "end": 5_000},
+                    "regular": {"start": 5_000, "end": 9_000},
+                    "post": {"start": 9_000, "end": 10_000}
+                }
+            },
+            "timestamp": timestamps,
+            "indicators": {"quote": [{
+                "open": closes, "high": closes, "low": closes, "close": closes
+            }]}
+        }]}})
+        .to_string()
+    }
+
+    #[test]
+    fn closed_market_quote_adds_the_latest_extended_hours_trade() -> TestResult {
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::from([
+                response(&session_chart(1_000, &[500], &[20.0])),
+                response(&session_chart(1_000, &[4_000, 4_300], &[16.0, 15.0])),
+            ])),
+            requests: RefCell::default(),
+            searches: RefCell::default(),
+        };
+        let mut cache = Cache::default();
+        let load = load_quote(&transport, &mut cache, "EXM", 4_400);
+        let quote = load.quote.ok_or("missing quote")?;
+        assert_eq!(quote.variation, 2.5);
+        assert_eq!(quote.session, Some(MarketSession::Closed));
+        assert_eq!(
+            quote.extended,
+            Some(ExtendedHoursQuote {
+                session: ExtendedSession::PreMarket,
+                price: 15.0,
+                variation: -25.0,
+                time: 4_300,
+            })
+        );
+        let requests = transport.requests.borrow();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.extended_hours)
+                .collect::<Vec<_>>(),
+            [false, true]
+        );
+        assert_eq!(
+            cache.writes[1].0,
+            format!("{}:extended-hours", cache_key("EXM"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn open_market_and_failed_extended_hours_keep_the_regular_quote() -> TestResult {
+        // During the regular session only the daily chart is requested.
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::from([response(&session_chart(
+                5_500,
+                &[500],
+                &[20.0],
+            ))])),
+            requests: RefCell::default(),
+            searches: RefCell::default(),
+        };
+        let load = load_quote(&transport, &mut Cache::default(), "EXM", 6_000);
+        let quote = load.quote.ok_or("missing quote")?;
+        assert_eq!(quote.session, Some(MarketSession::Open));
+        assert_eq!(quote.extended, None);
+        assert_eq!(transport.requests.borrow().len(), 1);
+        // A failed extended-hours request is reported but keeps the close.
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::from([response(&session_chart(
+                1_000,
+                &[500],
+                &[20.0],
+            ))])),
+            requests: RefCell::default(),
+            searches: RefCell::default(),
+        };
+        let load = load_quote(&transport, &mut Cache::default(), "EXM", 4_400);
+        let quote = load.quote.ok_or("missing quote")?;
+        assert_eq!(quote.price, 20.0);
+        assert_eq!(quote.extended, None);
+        assert!(
+            load.diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("Yahoo extended-hours request"))
+        );
+        Ok(())
     }
 
     #[test]
@@ -817,6 +972,7 @@ mod tests {
                 "/search?q=Synthetic+Company&quotesCount=5&newsCount=0",
                 "/chart/EXM?period1=100&period2=200&interval=1h",
                 "/search?q=Synthetic+Company&quotesCount=20&newsCount=0",
+                "/chart/EXM?range=1d&interval=5m&includePrePost=true",
             ] {
                 let (mut stream, _) = listener.accept()?;
                 let mut request = [0_u8; 2_048];
@@ -850,6 +1006,7 @@ mod tests {
                 .chart(&YahooChartRequest {
                     symbol: "EXM".to_owned(),
                     window: None,
+                    extended_hours: false,
                 })
                 .map(|response| response.status_code),
             Ok(200)
@@ -867,6 +1024,7 @@ mod tests {
                 .chart(&YahooChartRequest {
                     symbol: "EXM".to_owned(),
                     window: Some((100, 200, "1h".to_owned())),
+                    extended_hours: false,
                 })
                 .map(|response| response.status_code),
             Ok(200)
@@ -879,6 +1037,16 @@ mod tests {
                     },
                     20,
                 )
+                .map(|response| response.status_code),
+            Ok(200)
+        );
+        assert_eq!(
+            transport
+                .chart(&YahooChartRequest {
+                    symbol: "EXM".to_owned(),
+                    window: None,
+                    extended_hours: true,
+                })
                 .map(|response| response.status_code),
             Ok(200)
         );
@@ -895,6 +1063,7 @@ mod tests {
                 .chart(&YahooChartRequest {
                     symbol: "EXM".to_owned(),
                     window: None,
+                    extended_hours: false,
                 })
                 .is_err()
         );

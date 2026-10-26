@@ -18,7 +18,36 @@ pub struct StockQuote {
     pub currency: String,
     pub exchange: String,
     pub asset_type: String,
+    /// Percent change of `price` from the previous regular-session close.
     pub variation: f64,
+    /// Whether `price` is live or the last close. `None` when the provider
+    /// did not report its trading hours.
+    pub session: Option<MarketSession>,
+    /// The latest pre-market or after-hours trade, newer than `price`.
+    pub extended: Option<ExtendedHoursQuote>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum MarketSession {
+    /// The regular session is trading, so `price` is live.
+    Open,
+    /// The regular session is over, so `price` is the last close.
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum ExtendedSession {
+    PreMarket,
+    AfterHours,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ExtendedHoursQuote {
+    pub session: ExtendedSession,
+    pub price: f64,
+    /// Percent change from the last regular-session price.
+    pub variation: f64,
+    pub time: i64,
 }
 
 /// A provider search result before its current quote is loaded.
@@ -62,6 +91,51 @@ pub fn classify_stock_command(command: &str) -> bool {
     )
 }
 
+/// Label a quote's change by session, so a weekend close is not read as a
+/// live 24-hour move.
+#[must_use]
+pub fn stock_change_period(quote: &StockQuote, locale: Locale) -> &'static str {
+    match (quote.session, locale) {
+        (Some(MarketSession::Open), Locale::Es) => "hoy",
+        (Some(MarketSession::Open), Locale::En) => "today",
+        (Some(MarketSession::Closed), Locale::Es) => "al cierre",
+        (Some(MarketSession::Closed), Locale::En) => "at close",
+        (None, _) => "1d",
+    }
+}
+
+/// Render one quote line. A requested timeframe keeps its own label, and an
+/// extended-hours trade follows the regular price.
+#[must_use]
+pub fn render_stock_quote(
+    label: &str,
+    quote: &StockQuote,
+    timeframe: Option<&str>,
+    locale: Locale,
+) -> String {
+    let period = timeframe.unwrap_or_else(|| stock_change_period(quote, locale));
+    let mut line = crate::output_format::quote(
+        label,
+        quote.price,
+        &quote.currency,
+        Some(quote.variation),
+        period,
+    );
+    if let Some(extended) = &quote.extended {
+        let session = match extended.session {
+            ExtendedSession::PreMarket => "pre-market",
+            ExtendedSession::AfterHours => "after-hours",
+        };
+        line.push_str(&format!(
+            " | {session}: {} {} ({})",
+            crate::output_format::price(extended.price),
+            quote.currency,
+            crate::output_format::change(Some(extended.variation)),
+        ));
+    }
+    line
+}
+
 #[must_use]
 pub fn render_stock_quotes(
     quotes: Option<&[(String, Option<StockQuote>)]>,
@@ -76,13 +150,7 @@ pub fn render_stock_quotes(
     let lines = quotes
         .iter()
         .map(|(query, quote)| match quote {
-            Some(quote) => crate::output_format::quote(
-                &quote.symbol,
-                quote.price,
-                &quote.currency,
-                Some(quote.variation),
-                "24h",
-            ),
+            Some(quote) => render_stock_quote(&quote.symbol, quote, None, locale),
             None => match locale {
                 Locale::Es => format!("{query}: no lo encontré"),
                 Locale::En => format!("{query}: not found"),
@@ -110,13 +178,7 @@ pub fn render_oil_quotes(
         let Some(quote) = quote else {
             continue;
         };
-        lines.push(crate::output_format::quote(
-            name,
-            quote.price,
-            &quote.currency,
-            Some(quote.variation),
-            "24h",
-        ));
+        lines.push(render_stock_quote(name, quote, None, locale));
     }
     if lines.is_empty() {
         match locale {
@@ -162,15 +224,79 @@ fn closing_values(result: &serde_json::Map<String, Value>) -> Option<Vec<&Value>
     }
 }
 
-#[must_use]
-pub fn parse_yahoo_quote(response: &Value, fallback_symbol: &str) -> Option<StockQuote> {
-    let result = response
-        .get("data")?
+fn integer(value: Option<&Value>) -> Option<i64> {
+    value?.as_i64()
+}
+
+fn chart_result(chart: &Value) -> Option<&serde_json::Map<String, Value>> {
+    chart
         .get("chart")?
         .get("result")?
         .as_array()?
         .first()?
-        .as_object()?;
+        .as_object()
+}
+
+/// Pair each bar's timestamp with its close, skipping bars without a trade.
+fn timed_closes(result: &serde_json::Map<String, Value>) -> Vec<(i64, f64)> {
+    let timestamps = result.get("timestamp").and_then(Value::as_array);
+    let closes = result
+        .get("indicators")
+        .and_then(|indicators| indicators.get("quote"))
+        .and_then(Value::as_array)
+        .and_then(|quotes| quotes.first())
+        .and_then(|quote| quote.get("close"))
+        .and_then(Value::as_array);
+    let (Some(timestamps), Some(closes)) = (timestamps, closes) else {
+        return Vec::new();
+    };
+    timestamps
+        .iter()
+        .zip(closes)
+        .filter_map(|(time, close)| Some((time.as_i64()?, number(Some(close))?)))
+        .filter(|(_, close)| close.is_finite() && *close > 0.0)
+        .collect()
+}
+
+/// Yahoo's `chartPreviousClose` is the close before the whole requested range,
+/// which for the default five-day chart is days old. The previous session's
+/// close is the last daily bar from an earlier exchange-local day than the
+/// latest regular trade.
+fn previous_session_close(
+    result: &serde_json::Map<String, Value>,
+    meta: &serde_json::Map<String, Value>,
+) -> Option<f64> {
+    let regular_time = integer(meta.get("regularMarketTime"))?;
+    let offset = integer(meta.get("gmtoffset")).unwrap_or(0);
+    let day = |time: i64| (time + offset).div_euclid(86_400);
+    timed_closes(result)
+        .into_iter()
+        .filter(|(time, _)| day(*time) < day(regular_time))
+        .max_by_key(|(time, _)| *time)
+        .map(|(_, close)| close)
+}
+
+fn market_session(meta: &serde_json::Map<String, Value>, now_unix: i64) -> Option<MarketSession> {
+    let regular = meta.get("currentTradingPeriod")?.get("regular")?;
+    let start = integer(regular.get("start"))?;
+    let end = integer(regular.get("end"))?;
+    // A cached chart from before the open still holds the last close.
+    let traded_this_session =
+        integer(meta.get("regularMarketTime")).is_none_or(|time| time >= start);
+    Some(if (start..end).contains(&now_unix) && traded_this_session {
+        MarketSession::Open
+    } else {
+        MarketSession::Closed
+    })
+}
+
+#[must_use]
+pub fn parse_yahoo_quote(
+    response: &Value,
+    fallback_symbol: &str,
+    now_unix: i64,
+) -> Option<StockQuote> {
+    let result = chart_result(response.get("data")?)?;
     let meta = match result.get("meta") {
         Some(Value::Object(meta)) => Some(meta),
         Some(_) => return None,
@@ -178,19 +304,34 @@ pub fn parse_yahoo_quote(response: &Value, fallback_symbol: &str) -> Option<Stoc
     };
     let closes = closing_values(result)?;
 
-    let current = number(meta.and_then(|value| value.get("regularMarketPrice")))
-        .or_else(|| number(closes.last().copied()))?;
-    let previous_close =
-        number(meta.and_then(|value| value.get("chartPreviousClose"))).or_else(|| {
-            closes
-                .len()
-                .checked_sub(2)
-                .and_then(|index| closes.get(index))
-                .and_then(|value| number(Some(value)))
-        })?;
-    if previous_close == 0.0 {
-        return None;
-    }
+    let regular_price = number(meta.and_then(|value| value.get("regularMarketPrice")));
+    let current = regular_price.or_else(|| number(closes.last().copied()))?;
+    // Yahoo's own daily change also covers futures rolling to a new contract.
+    let reported_variation = regular_price
+        .and(number(
+            meta.and_then(|value| value.get("regularMarketChangePercent")),
+        ))
+        .filter(|variation| variation.is_finite());
+    let variation = match reported_variation {
+        Some(variation) => variation,
+        None => {
+            let previous_close = meta
+                .and_then(|meta| previous_session_close(result, meta))
+                .or_else(|| number(meta.and_then(|value| value.get("previousClose"))))
+                .or_else(|| number(meta.and_then(|value| value.get("chartPreviousClose"))))
+                .or_else(|| {
+                    closes
+                        .len()
+                        .checked_sub(2)
+                        .and_then(|index| closes.get(index))
+                        .and_then(|value| number(Some(value)))
+                })?;
+            if previous_close == 0.0 {
+                return None;
+            }
+            ((current - previous_close) / previous_close) * 100.0
+        }
+    };
     let symbol = text(meta.and_then(|value| value.get("symbol")))
         .filter(|value| !value.is_empty())
         .unwrap_or(fallback_symbol)
@@ -213,7 +354,85 @@ pub fn parse_yahoo_quote(response: &Value, fallback_symbol: &str) -> Option<Stoc
         currency,
         exchange,
         asset_type: String::new(),
-        variation: ((current - previous_close) / previous_close) * 100.0,
+        variation,
+        session: meta.and_then(|meta| market_session(meta, now_unix)),
+        extended: None,
+    })
+}
+
+/// Whether the listing trades before and after the regular session.
+#[must_use]
+pub fn yahoo_has_extended_hours(chart: &Value) -> bool {
+    chart_result(chart)
+        .and_then(|result| result.get("meta"))
+        .and_then(|meta| meta.get("hasPrePostMarketData"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Collect the session windows Yahoo reports, nested per day in
+/// `tradingPeriods` or single in `currentTradingPeriod`.
+fn trading_periods(meta: &serde_json::Map<String, Value>, name: &str) -> Vec<(i64, i64)> {
+    fn collect(value: &Value, periods: &mut Vec<(i64, i64)>) {
+        match value {
+            Value::Array(values) => values.iter().for_each(|value| collect(value, periods)),
+            Value::Object(period) => {
+                if let (Some(start), Some(end)) =
+                    (integer(period.get("start")), integer(period.get("end")))
+                {
+                    periods.push((start, end));
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut periods = Vec::new();
+    for source in ["tradingPeriods", "currentTradingPeriod"] {
+        if let Some(value) = meta.get(source).and_then(|periods| periods.get(name)) {
+            collect(value, &mut periods);
+        }
+        if !periods.is_empty() {
+            break;
+        }
+    }
+    periods
+}
+
+/// Read the latest pre-market or after-hours trade from an intraday chart
+/// requested with extended hours. Trades from the regular session, or not
+/// newer than the last regular trade, are not extended-hours prices.
+#[must_use]
+pub fn parse_yahoo_extended_quote(chart: &Value, regular_price: f64) -> Option<ExtendedHoursQuote> {
+    if !(regular_price.is_finite() && regular_price > 0.0) {
+        return None;
+    }
+    let result = chart_result(chart)?;
+    let meta = result.get("meta")?.as_object()?;
+    let regular_time = integer(meta.get("regularMarketTime"))?;
+    let (time, price) = timed_closes(result)
+        .into_iter()
+        .max_by_key(|(time, _)| *time)?;
+    if time <= regular_time {
+        return None;
+    }
+    let within = |name: &str| {
+        trading_periods(meta, name)
+            .into_iter()
+            // The last after-hours bar can be stamped at the session's end.
+            .any(|(start, end)| start <= time && (time < end || (name == "post" && time == end)))
+    };
+    let session = if within("pre") {
+        ExtendedSession::PreMarket
+    } else if within("post") {
+        ExtendedSession::AfterHours
+    } else {
+        return None;
+    };
+    Some(ExtendedHoursQuote {
+        session,
+        price,
+        variation: (price / regular_price - 1.0) * 100.0,
+        time,
     })
 }
 
@@ -480,10 +699,12 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        StockQuery, StockQueryPlan, StockQuote, StockSearchCandidate, classify_oil_command,
-        classify_stock_command, parse_yahoo_quote, plan_stock_query, rank_stock_quotes,
-        rank_yahoo_candidates, render_oil_quotes, render_stock_quotes, select_yahoo_candidates,
-        select_yahoo_symbol, yahoo_candidate_name_matches_query,
+        ExtendedHoursQuote, ExtendedSession, MarketSession, StockQuery, StockQueryPlan, StockQuote,
+        StockSearchCandidate, classify_oil_command, classify_stock_command,
+        parse_yahoo_extended_quote, parse_yahoo_quote, plan_stock_query, rank_stock_quotes,
+        rank_yahoo_candidates, render_oil_quotes, render_stock_quote, render_stock_quotes,
+        select_yahoo_candidates, select_yahoo_symbol, yahoo_candidate_name_matches_query,
+        yahoo_has_extended_hours,
     };
     use crate::locale::Locale;
 
@@ -493,6 +714,7 @@ mod tests {
             parse_yahoo_quote(
                 &json!({"data":{"chart":{"result":[{"meta":{"symbol":"exm.ba","shortName":"Example","regularMarketPrice":123.45,"chartPreviousClose":120,"currency":"ars","exchangeName":"Synthetic"},"indicators":{"quote":[{"close":[118,120,123.45]}]}}]}}}),
                 "fallback",
+                0,
             ),
             Some(super::StockQuote {
                 symbol: "EXM.BA".to_owned(),
@@ -502,6 +724,8 @@ mod tests {
                 exchange: "Synthetic".to_owned(),
                 asset_type: String::new(),
                 variation: 2.875000000000002,
+                session: None,
+                extended: None,
             })
         );
     }
@@ -512,6 +736,7 @@ mod tests {
             parse_yahoo_quote(
                 &json!({"data":{"chart":{"result":[{"meta":{},"indicators":{"quote":[{"close":[null,"10","12"]}]}}]}}}),
                 "alt",
+                0,
             ),
             Some(super::StockQuote {
                 symbol: "ALT".to_owned(),
@@ -521,17 +746,20 @@ mod tests {
                 exchange: String::new(),
                 asset_type: String::new(),
                 variation: 20.0,
+                session: None,
+                extended: None,
             })
         );
     }
 
     #[test]
     fn quote_parser_rejects_missing_results_and_zero_previous_close() {
-        assert_eq!(parse_yahoo_quote(&json!({}), "EXM"), None);
+        assert_eq!(parse_yahoo_quote(&json!({}), "EXM", 0), None);
         assert_eq!(
             parse_yahoo_quote(
                 &json!({"data":{"chart":{"result":[{"meta":{"regularMarketPrice":10,"chartPreviousClose":0}}]}}}),
                 "EXM",
+                0,
             ),
             None
         );
@@ -539,6 +767,7 @@ mod tests {
             parse_yahoo_quote(
                 &json!({"data":{"chart":{"result":[{"meta":[],"indicators":{"quote":[{"close":[10,12]}]}}]}}}),
                 "EXM",
+                0,
             ),
             None
         );
@@ -546,6 +775,7 @@ mod tests {
             parse_yahoo_quote(
                 &json!({"data":{"chart":{"result":[{"meta":{"regularMarketPrice":12,"chartPreviousClose":10},"indicators":{"quote":[]}}]}}}),
                 "EXM",
+                0,
             ),
             None
         );
@@ -602,6 +832,7 @@ mod tests {
         let quote = parse_yahoo_quote(
             &json!({"data":{"chart":{"result":[{"meta":{"symbol":"RKH.L","regularMarketPrice":12.5,"chartPreviousClose":10,"currency":"GBp","exchangeName":"London"},"indicators":{"quote":[{"close":[10,12.5]}]}}]}}}),
             "RKH.L",
+            0,
         );
         assert_eq!(
             quote.as_ref().map(|quote| quote.currency.as_str()),
@@ -661,6 +892,8 @@ mod tests {
             exchange: String::new(),
             asset_type: String::new(),
             variation: -8.782_527_881_040_9,
+            session: None,
+            extended: None,
         };
         let wti = super::StockQuote {
             symbol: "CL=F".to_owned(),
@@ -670,14 +903,16 @@ mod tests {
             exchange: String::new(),
             asset_type: String::new(),
             variation: 0.0,
+            session: None,
+            extended: None,
         };
         assert_eq!(
             render_oil_quotes(Some(&brent), Some(&wti), Locale::Es),
-            "Brent: 98.15 USD (-8.78% 24h)\nWTI: 95 USD (+0% 24h)"
+            "Brent: 98.15 USD (-8.78% 1d)\nWTI: 95 USD (+0% 1d)"
         );
         assert_eq!(
             render_oil_quotes(Some(&brent), None, Locale::En),
-            "Brent: 98.15 USD (-8.78% 24h)"
+            "Brent: 98.15 USD (-8.78% 1d)"
         );
         assert_eq!(
             render_oil_quotes(None, None, Locale::Es),
@@ -705,6 +940,8 @@ mod tests {
             exchange: "Synthetic".to_owned(),
             asset_type: String::new(),
             variation: -1.25,
+            session: None,
+            extended: None,
         };
         let entries = vec![
             ("EXM".to_owned(), Some(quote)),
@@ -712,7 +949,7 @@ mod tests {
         ];
         assert_eq!(
             render_stock_quotes(Some(&entries), Locale::Es),
-            "EXM: 12.5 USD (-1.25% 24h)\nMissing Corp: no lo encontré"
+            "EXM: 12.5 USD (-1.25% 1d)\nMissing Corp: no lo encontré"
         );
         assert_eq!(
             render_stock_quotes(Some(&[("Unknown".to_owned(), None)]), Locale::En),
@@ -744,7 +981,7 @@ mod tests {
             json!({"meta": {"regularMarketPrice": 12, "chartPreviousClose": 10}, "indicators": {"quote": {}}}),
             json!({"meta": {"regularMarketPrice": 12, "chartPreviousClose": 10}, "indicators": {"quote": [{"close": 5}]}}),
         ] {
-            assert_eq!(parse_yahoo_quote(&chart(malformed), "EXM"), None);
+            assert_eq!(parse_yahoo_quote(&chart(malformed), "EXM", 0), None);
         }
         // Metadata alone is enough when the close series is absent.
         let quote = parse_yahoo_quote(
@@ -753,6 +990,7 @@ mod tests {
                 "indicators": {"quote": [{}]}
             })),
             "exm",
+            0,
         );
         assert_eq!(
             quote.map(|quote| (quote.symbol, quote.name, quote.variation)),
@@ -763,7 +1001,7 @@ mod tests {
             json!({"indicators": {"quote": [{"close": [8, 10]}]}}),
             json!({"meta": {"regularMarketPrice": true}, "indicators": {"quote": [{"close": [8, 10]}]}}),
         ] {
-            let quote = parse_yahoo_quote(&chart(result), "exm");
+            let quote = parse_yahoo_quote(&chart(result), "exm", 0);
             assert_eq!(
                 quote.map(|quote| (quote.price, quote.variation, quote.currency)),
                 Some((10.0, 25.0, "USD".to_owned()))
@@ -842,6 +1080,8 @@ mod tests {
             exchange: exchange.to_owned(),
             asset_type: asset_type.to_owned(),
             variation: 0.0,
+            session: None,
+            extended: None,
         };
         let mut quotes = vec![
             quote("ROCKY", "Rocky Mountain", "X", "Equity"),
@@ -882,8 +1122,240 @@ mod tests {
                     json!({"meta": {"regularMarketPrice": 10}, "indicators": {"quote": [{"close": [10]}]}})
                 ),
                 "EXM",
+                0,
             ),
             None
+        );
+    }
+
+    // A synthetic US listing on a Monday morning: the last regular trade was
+    // Friday's close, and `chartPreviousClose` is the close before the
+    // five-day window, as Yahoo reports it for `range=5d`.
+    const DAY: i64 = 86_400;
+    const OFFSET: i64 = -4 * 3_600;
+    const FRIDAY_CLOSE: i64 = 4 * DAY + 20 * 3_600;
+    const MONDAY_PRE: i64 = 7 * DAY + 8 * 3_600;
+    const MONDAY_OPEN: i64 = 7 * DAY + 13 * 3_600 + 1_800;
+    const MONDAY_CLOSE: i64 = 7 * DAY + 20 * 3_600;
+    const MONDAY_POST_END: i64 = 8 * DAY;
+
+    fn five_day_chart(extra_meta: serde_json::Value) -> serde_json::Value {
+        let mut meta = json!({
+            "symbol": "EXM",
+            "regularMarketPrice": 20.0,
+            "regularMarketTime": FRIDAY_CLOSE,
+            "chartPreviousClose": 15.0,
+            "gmtoffset": OFFSET,
+            "currentTradingPeriod": {
+                "pre": {"start": MONDAY_PRE, "end": MONDAY_OPEN},
+                "regular": {"start": MONDAY_OPEN, "end": MONDAY_CLOSE},
+                "post": {"start": MONDAY_CLOSE, "end": MONDAY_POST_END}
+            }
+        });
+        if let (Some(meta), Some(extra)) = (meta.as_object_mut(), extra_meta.as_object()) {
+            meta.extend(extra.clone());
+        }
+        let opens = [0, 1, 2, 3, 4].map(|day| day * DAY + 13 * 3_600 + 1_800);
+        chart(json!({
+            "meta": meta,
+            "timestamp": opens,
+            "indicators": {"quote": [{"close": [15.5, 16.0, 17.0, 16.0, 20.0]}]}
+        }))
+    }
+
+    #[test]
+    fn daily_change_uses_the_previous_session_not_the_five_day_window() {
+        // Thursday closed at 16, so Friday's 20 is +25%. The old window base
+        // of 15 would have reported +33.33% as the daily move.
+        let quote = parse_yahoo_quote(&five_day_chart(json!({})), "EXM", MONDAY_PRE + 60);
+        assert_eq!(quote.map(|quote| quote.variation), Some(25.0));
+    }
+
+    #[test]
+    fn daily_change_prefers_the_change_yahoo_reports() {
+        // A futures roll makes the previous daily bar a different contract,
+        // so Yahoo's own daily change wins over the bars.
+        let quote = parse_yahoo_quote(
+            &five_day_chart(json!({"regularMarketChangePercent": -0.5})),
+            "EXM",
+            MONDAY_PRE + 60,
+        );
+        assert_eq!(quote.map(|quote| quote.variation), Some(-0.5));
+        // A change without a regular price is not trusted.
+        let quote = parse_yahoo_quote(
+            &chart(json!({
+                "meta": {"regularMarketChangePercent": -0.5},
+                "indicators": {"quote": [{"close": [8, 10]}]}
+            })),
+            "EXM",
+            0,
+        );
+        assert_eq!(quote.map(|quote| quote.variation), Some(25.0));
+    }
+
+    #[test]
+    fn session_is_open_only_after_a_trade_in_the_current_regular_session() {
+        let session = |extra: serde_json::Value, now: i64| {
+            parse_yahoo_quote(&five_day_chart(extra), "EXM", now).and_then(|quote| quote.session)
+        };
+        assert_eq!(
+            session(json!({}), MONDAY_PRE + 60),
+            Some(MarketSession::Closed)
+        );
+        // A chart cached just before the open still holds Friday's close.
+        assert_eq!(
+            session(json!({}), MONDAY_OPEN + 60),
+            Some(MarketSession::Closed)
+        );
+        let live = json!({"regularMarketTime": MONDAY_OPEN + 30});
+        assert_eq!(
+            session(live.clone(), MONDAY_OPEN + 60),
+            Some(MarketSession::Open)
+        );
+        assert_eq!(session(live, MONDAY_CLOSE), Some(MarketSession::Closed));
+        // Without trading hours the session is unknown.
+        let quote = parse_yahoo_quote(
+            &chart(json!({"meta": {"regularMarketPrice": 12, "chartPreviousClose": 10}})),
+            "EXM",
+            MONDAY_OPEN + 60,
+        );
+        assert_eq!(quote.and_then(|quote| quote.session), None);
+    }
+
+    fn intraday_chart(
+        periods: serde_json::Value,
+        timestamps: &[i64],
+        closes: serde_json::Value,
+    ) -> serde_json::Value {
+        json!({"chart": {"result": [{
+            "meta": {
+                "symbol": "EXM",
+                "regularMarketPrice": 20.0,
+                "regularMarketTime": FRIDAY_CLOSE,
+                "hasPrePostMarketData": true,
+                "tradingPeriods": periods
+            },
+            "timestamp": timestamps,
+            "indicators": {"quote": [{"close": closes}]}
+        }]}})
+    }
+
+    fn monday_periods() -> serde_json::Value {
+        json!({
+            "pre": [[{"start": MONDAY_PRE, "end": MONDAY_OPEN}]],
+            "regular": [[{"start": MONDAY_OPEN, "end": MONDAY_CLOSE}]],
+            "post": [[{"start": MONDAY_CLOSE, "end": MONDAY_POST_END}]]
+        })
+    }
+
+    #[test]
+    fn extended_quote_reads_the_latest_pre_market_trade() {
+        let response = intraday_chart(
+            monday_periods(),
+            &[MONDAY_PRE, MONDAY_PRE + 300, MONDAY_PRE + 600],
+            json!([16.0, 15.0, null]),
+        );
+        assert!(yahoo_has_extended_hours(&response));
+        assert_eq!(
+            parse_yahoo_extended_quote(&response, 20.0),
+            Some(ExtendedHoursQuote {
+                session: ExtendedSession::PreMarket,
+                price: 15.0,
+                variation: -25.0,
+                time: MONDAY_PRE + 300,
+            })
+        );
+    }
+
+    #[test]
+    fn extended_quote_reads_after_hours_from_either_period_shape() {
+        let timestamps = [MONDAY_CLOSE - 300, MONDAY_POST_END];
+        let closes = json!([20.0, 25.0]);
+        let nested = intraday_chart(monday_periods(), &timestamps, closes.clone());
+        // Without `tradingPeriods`, the current period is used.
+        let mut current = intraday_chart(json!(null), &timestamps, closes);
+        current["chart"]["result"][0]["meta"]["currentTradingPeriod"] = json!({
+            "pre": {"start": MONDAY_PRE, "end": MONDAY_OPEN},
+            "regular": {"start": MONDAY_OPEN, "end": MONDAY_CLOSE},
+            "post": {"start": MONDAY_CLOSE, "end": MONDAY_POST_END}
+        });
+        for response in [nested, current] {
+            let extended = parse_yahoo_extended_quote(&response, 20.0);
+            assert_eq!(
+                extended.map(|extended| (extended.session, extended.price, extended.variation)),
+                Some((ExtendedSession::AfterHours, 25.0, 25.0))
+            );
+        }
+    }
+
+    #[test]
+    fn extended_quote_ignores_regular_stale_and_unusable_trades() {
+        let periods = monday_periods();
+        // The latest trade is from the regular session.
+        let regular = intraday_chart(periods.clone(), &[MONDAY_OPEN + 60], json!([19.0]));
+        // The latest trade is not newer than the last regular trade.
+        let stale = intraday_chart(periods.clone(), &[FRIDAY_CLOSE], json!([19.0]));
+        // No trades, or no trading periods to classify them.
+        let empty = intraday_chart(periods.clone(), &[], json!([]));
+        let unclassified = intraday_chart(json!(null), &[MONDAY_PRE], json!([19.0]));
+        for response in [&regular, &stale, &empty, &unclassified] {
+            assert_eq!(parse_yahoo_extended_quote(response, 20.0), None);
+        }
+        let pre = intraday_chart(periods, &[MONDAY_PRE], json!([19.0]));
+        assert_eq!(parse_yahoo_extended_quote(&pre, 0.0), None);
+        assert_eq!(parse_yahoo_extended_quote(&pre, f64::NAN), None);
+        assert_eq!(parse_yahoo_extended_quote(&json!({}), 20.0), None);
+        assert!(!yahoo_has_extended_hours(&json!({})));
+    }
+
+    #[test]
+    fn quote_lines_label_the_session_and_add_extended_hours() {
+        let mut quote = StockQuote {
+            symbol: "EXM".to_owned(),
+            name: "Example".to_owned(),
+            price: 20.0,
+            currency: "USD".to_owned(),
+            exchange: "NYSE".to_owned(),
+            asset_type: "Equity".to_owned(),
+            variation: 2.5,
+            session: Some(MarketSession::Closed),
+            extended: Some(ExtendedHoursQuote {
+                session: ExtendedSession::PreMarket,
+                price: 15.0,
+                variation: -25.0,
+                time: MONDAY_PRE,
+            }),
+        };
+        assert_eq!(
+            render_stock_quotes(Some(&[("EXM".to_owned(), Some(quote.clone()))]), Locale::Es),
+            "EXM: 20 USD (+2.5% al cierre) | pre-market: 15 USD (-25%)"
+        );
+        assert_eq!(
+            render_stock_quote("EXM", &quote, Some("7d"), Locale::En),
+            "EXM: 20 USD (+2.5% 7d) | pre-market: 15 USD (-25%)"
+        );
+        quote.extended = quote.extended.map(|extended| ExtendedHoursQuote {
+            session: ExtendedSession::AfterHours,
+            ..extended
+        });
+        assert_eq!(
+            render_stock_quote("EXM", &quote, None, Locale::En),
+            "EXM: 20 USD (+2.5% at close) | after-hours: 15 USD (-25%)"
+        );
+        quote.extended = None;
+        quote.session = Some(MarketSession::Open);
+        assert_eq!(
+            render_stock_quote("EXM", &quote, None, Locale::Es),
+            "EXM: 20 USD (+2.5% hoy)"
+        );
+        assert_eq!(
+            render_stock_quote("EXM", &quote, None, Locale::En),
+            "EXM: 20 USD (+2.5% today)"
+        );
+        quote.session = None;
+        assert_eq!(
+            render_stock_quote("EXM", &quote, None, Locale::En),
+            "EXM: 20 USD (+2.5% 1d)"
         );
     }
 
