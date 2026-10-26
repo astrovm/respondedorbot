@@ -3011,15 +3011,15 @@ impl ProductionToolFactory {
     }
 }
 
-impl ConversationToolFactory for ProductionToolFactory {
-    type Tools = ProductionConversationTools;
-
-    fn create(
-        &mut self,
-        input: &crate::ai_dispatch::AiConversationInput,
-    ) -> Result<Self::Tools, String> {
-        let locale = input.locale;
-        let chat_id = input.chat_id.0.to_string();
+impl ProductionToolFactory {
+    /// The tools that only read data, shared by chat replies and scheduled
+    /// tasks. Anything that writes (tasks, polls) or bills (web search) is
+    /// added per caller.
+    fn read_toolbox(
+        &self,
+        locale: bot_core::locale::Locale,
+        chat_id: &str,
+    ) -> Result<ExternalToolbox, String> {
         let mut toolbox = ExternalToolbox::new(locale);
 
         if let Some(api_key) = self.coinmarketcap_key.clone().filter(|key| !key.is_empty()) {
@@ -3110,6 +3110,38 @@ impl ConversationToolFactory for ProductionToolFactory {
                 Box::new(RandomChoiceTool::new(SystemRandomSource, locale)),
             )
             .with_executor(
+                NativeTool::TaskList,
+                Box::new(TaskListTool::new(
+                    RedisTaskStore::new(&self.redis_endpoint).map_err(error_text)?,
+                    chat_id,
+                    locale,
+                )),
+            )
+            .with_executor(
+                NativeTool::GetChatMembers,
+                Box::new(ChatMembersTool::new(
+                    RedisMessageState::new(&self.redis_endpoint).map_err(error_text)?,
+                    current_unix_timestamp,
+                    chat_id,
+                    locale,
+                )),
+            );
+        Ok(toolbox)
+    }
+}
+
+impl ConversationToolFactory for ProductionToolFactory {
+    type Tools = ProductionConversationTools;
+
+    fn create(
+        &mut self,
+        input: &crate::ai_dispatch::AiConversationInput,
+    ) -> Result<Self::Tools, String> {
+        let locale = input.locale;
+        let chat_id = input.chat_id.0.to_string();
+        let mut toolbox = self
+            .read_toolbox(locale, &chat_id)?
+            .with_executor(
                 NativeTool::TaskSet,
                 Box::new({
                     let tool = TaskSetTool::new(
@@ -3138,26 +3170,9 @@ impl ConversationToolFactory for ProductionToolFactory {
                 }),
             )
             .with_executor(
-                NativeTool::TaskList,
-                Box::new(TaskListTool::new(
-                    RedisTaskStore::new(&self.redis_endpoint).map_err(error_text)?,
-                    &chat_id,
-                    locale,
-                )),
-            )
-            .with_executor(
                 NativeTool::TaskCancel,
                 Box::new(TaskCancelTool::new(
                     RedisTaskStore::new(&self.redis_endpoint).map_err(error_text)?,
-                    &chat_id,
-                    locale,
-                )),
-            )
-            .with_executor(
-                NativeTool::GetChatMembers,
-                Box::new(ChatMembersTool::new(
-                    RedisMessageState::new(&self.redis_endpoint).map_err(error_text)?,
-                    current_unix_timestamp,
                     &chat_id,
                     locale,
                 )),
@@ -3200,6 +3215,24 @@ impl ConversationToolFactory for ProductionToolFactory {
             StandardNativeToolBackend::new(ValidatedNativeToolPorts::new(toolbox, locale), locale),
             locale,
         ))
+    }
+}
+
+impl crate::native_ai::TaskToolFactory for ProductionToolFactory {
+    fn create(
+        &mut self,
+        task: &bot_core::scheduled_tasks::ScheduledTask,
+    ) -> Result<Box<dyn crate::chat_tool_loop::NativeToolRuntime>, String> {
+        let locale = if task.locale == "en" {
+            bot_core::locale::Locale::En
+        } else {
+            bot_core::locale::Locale::Es
+        };
+        let toolbox = self.read_toolbox(locale, &task.chat_id)?;
+        Ok(Box::new(NativeToolRegistry::new(
+            StandardNativeToolBackend::new(ValidatedNativeToolPorts::new(toolbox, locale), locale),
+            locale,
+        )))
     }
 }
 
@@ -6866,6 +6899,56 @@ mod tests {
             no_token
                 .create(&input)
                 .is_ok_and(|tools| !tools.contains("create_poll", false))
+        );
+
+        // Scheduled tasks get the read-only tools only: their web search and
+        // polls go through the task's own billed paths.
+        let mut task = bot_core::scheduled_tasks::ScheduledTask {
+            id: bot_core::scheduled_tasks::TaskId::new("synthetic-task")
+                .unwrap_or_else(|_| unreachable!("synthetic id is valid")),
+            chat_id: "-42".to_owned(),
+            text: "synthetic task".to_owned(),
+            user_name: "synthetic_user".to_owned(),
+            user_id: Some(9),
+            schedule: bot_core::scheduled_tasks::TaskSchedule::Once,
+            timezone_offset: -3,
+            locale: "en".to_owned(),
+            schedule_anchor_at: None,
+            next_run_at: None,
+            last_execution_id: None,
+        };
+        let task_tools = crate::native_ai::TaskToolFactory::create(&mut factory, &task);
+        let names = task_tools
+            .map(|tools| {
+                tools
+                    .schemas(true)
+                    .iter()
+                    .filter_map(|schema| schema["function"]["name"].as_str().map(str::to_owned))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            names,
+            [
+                "crypto_prices",
+                "calculate",
+                "web_fetch",
+                "task_list",
+                "get_chat_members",
+                "stock_prices",
+                "random_choice",
+                "dollar_rates",
+                "weather",
+                "hacker_news",
+                "polymarket",
+                "bot_capabilities",
+            ]
+        );
+        task.locale = "es".to_owned();
+        assert!(
+            crate::native_ai::TaskToolFactory::create(&mut minimal, &task)
+                .is_ok_and(|tools| tools.contains("polymarket", true)
+                    && !tools.contains("crypto_prices", true))
         );
     }
 

@@ -53,6 +53,16 @@ pub struct SearchOutcome {
 pub struct SearchMarket {
     pub title: String,
     pub outcomes: Vec<SearchOutcome>,
+    /// How far the first outcome's price moved over the last day and week,
+    /// as a 0-1 fraction. Older cache entries lack them.
+    #[serde(default)]
+    pub day_change: Option<f64>,
+    #[serde(default)]
+    pub week_change: Option<f64>,
+    /// UMA resolution status ("proposed", "disputed", "resolved"), empty
+    /// while nobody has proposed a result yet.
+    #[serde(default)]
+    pub resolution: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -422,6 +432,9 @@ fn search_market(market: &Map<String, Value>) -> Option<(SearchMarket, f64)> {
         SearchMarket {
             title: market_title(market)?,
             outcomes,
+            day_change: number(market.get("oneDayPriceChange")),
+            week_change: number(market.get("oneWeekPriceChange")),
+            resolution: text(market.get("umaResolutionStatus")).unwrap_or_default(),
         },
         volume,
     ))
@@ -494,25 +507,70 @@ pub fn market_search_error(locale: Locale) -> &'static str {
     }
 }
 
-fn search_market_line(event: &SearchEvent, market: &SearchMarket) -> String {
+/// A price move in percentage points, always signed.
+fn points(change: f64) -> String {
+    // Round first, so a move too small to show reads +0, never -0.
+    let points = (change * 10_000.0).round() / 100.0;
+    if points < 0.0 {
+        format!("-{}", trimmed(-points, 2))
+    } else {
+        format!("+{}", trimmed(points.abs(), 2))
+    }
+}
+
+/// The moves Polymarket reports for the first outcome, like `(24h +5, 7d -2)`.
+fn price_moves(market: &SearchMarket) -> String {
+    let moves = [("24h", market.day_change), ("7d", market.week_change)]
+        .into_iter()
+        .filter_map(|(label, change)| Some(format!("{label} {}", points(change?))))
+        .collect::<Vec<_>>();
+    if moves.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", moves.join(", "))
+    }
+}
+
+fn resolution_label(resolution: &str, locale: Locale) -> String {
+    let label = match (resolution, locale) {
+        ("", _) => return String::new(),
+        ("proposed", Locale::Es) => "resultado propuesto, todavía sin confirmar",
+        ("proposed", Locale::En) => "result proposed, not confirmed yet",
+        ("disputed", Locale::Es) => "resultado en disputa",
+        ("disputed", Locale::En) => "result disputed",
+        ("resolved", Locale::Es) => "resuelto",
+        ("resolved", Locale::En) => "resolved",
+        (other, _) => other,
+    };
+    format!(" [{label}]")
+}
+
+fn search_market_line(event: &SearchEvent, market: &SearchMarket, locale: Locale) -> String {
     let outcomes = match market.outcomes.as_slice() {
         [yes, no] if yes.title == "Yes" && no.title == "No" => std::slice::from_ref(yes),
         outcomes => outcomes,
     }
     .iter()
-    .map(|outcome| {
+    .enumerate()
+    .map(|(index, outcome)| {
+        let moves = if index == 0 {
+            price_moves(market)
+        } else {
+            String::new()
+        };
         format!(
-            "{} {}%",
+            "{} {}%{moves}",
             outcome.title,
             trimmed(outcome.probability * 100.0, 2)
         )
     })
     .collect::<Vec<_>>()
     .join(" / ");
+    let resolution = resolution_label(&market.resolution, locale);
     if market.title == event.title {
-        format!("- {outcomes}")
+        format!("- {outcomes}{resolution}")
     } else {
-        format!("- {}: {outcomes}", market.title)
+        format!("- {}: {outcomes}{resolution}", market.title)
     }
 }
 
@@ -557,7 +615,7 @@ pub fn render_market_search(query: &str, events: &[SearchEvent], locale: Locale)
             event
                 .markets
                 .iter()
-                .map(|market| search_market_line(event, market)),
+                .map(|market| search_market_line(event, market, locale)),
         );
         if event.hidden_markets > 0 {
             lines.push(format!("- +{} {more_label}", event.hidden_markets));
@@ -878,6 +936,9 @@ mod tests {
                     probability: *probability,
                 })
                 .collect(),
+            day_change: None,
+            week_change: None,
+            resolution: String::new(),
         }
     }
 
@@ -924,6 +985,86 @@ mod tests {
                 .contains("Liquidez US$1.1M | Volumen US$2.5K | Cierra 2027-10-25")
         );
         assert!(render_market_search("x", &events[..1], Locale::Es).contains("- +56 mercados más"));
+    }
+
+    #[test]
+    fn search_rendering_shows_price_moves_and_resolution_status() {
+        let moved =
+            |title: &str, outcomes: &[(&str, f64)], day, week, resolution: &str| SearchMarket {
+                day_change: day,
+                week_change: week,
+                resolution: resolution.to_owned(),
+                ..search_market(title, outcomes)
+            };
+        let events = [search_event(
+            vec![
+                moved(
+                    "A",
+                    &[("Yes", 0.9985), ("No", 0.0015)],
+                    Some(0.8235),
+                    Some(-0.786),
+                    "proposed",
+                ),
+                moved(
+                    "B",
+                    &[("Home", 0.6), ("Away", 0.4)],
+                    Some(-0.05),
+                    None,
+                    "disputed",
+                ),
+                moved(
+                    "C",
+                    &[("Yes", 0.5), ("No", 0.5)],
+                    None,
+                    Some(0.0),
+                    "resolved",
+                ),
+                moved(
+                    "D",
+                    &[("Yes", 0.5), ("No", 0.5)],
+                    Some(-0.00001),
+                    None,
+                    "paused",
+                ),
+            ],
+            0,
+        )];
+        let english = render_market_search("x", &events, Locale::En);
+        for line in [
+            "- A: Yes 99.85% (24h +82.35, 7d -78.6) [result proposed, not confirmed yet]",
+            "- B: Home 60% (24h -5) / Away 40% [result disputed]",
+            "- C: Yes 50% (7d +0) [resolved]",
+            "- D: Yes 50% (24h +0) [paused]",
+        ] {
+            assert!(english.contains(line), "{line} in {english}");
+        }
+        let spanish = render_market_search("x", &events, Locale::Es);
+        for label in [
+            "[resultado propuesto, todavía sin confirmar]",
+            "[resultado en disputa]",
+            "[resuelto]",
+        ] {
+            assert!(spanish.contains(label), "{label} in {spanish}");
+        }
+        let parsed = parse_search_events(&json!({"events": [{
+            "title": "Vote", "slug": "vote", "markets": [{
+                "groupItemTitle": "Lula", "outcomes": ["Yes", "No"], "outcomePrices": ["0.99", "0.01"],
+                "oneDayPriceChange": 0.82, "oneWeekPriceChange": "-0.1", "umaResolutionStatus": "proposed"
+            }, {
+                "groupItemTitle": "Other", "outcomes": ["Yes", "No"], "outcomePrices": ["0.01", "0.99"]
+            }]
+        }]}));
+        assert_eq!(parsed[0].markets[0].day_change, Some(0.82));
+        assert_eq!(parsed[0].markets[0].week_change, Some(-0.1));
+        assert_eq!(parsed[0].markets[0].resolution, "proposed");
+        assert_eq!(parsed[0].markets[1].day_change, None);
+        assert_eq!(parsed[0].markets[1].resolution, "");
+        // Cache entries written before these fields existed still load.
+        let old = json!([{"title": "Vote", "slug": "vote", "liquidity": 0.0, "volume": 0.0,
+            "end_date": "", "hidden_markets": 0,
+            "markets": [{"title": "Lula", "outcomes": [{"title": "Yes", "probability": 0.5}]}]}]);
+        let old = serde_json::from_value::<Vec<SearchEvent>>(old).unwrap_or_default();
+        assert_eq!(old[0].markets[0].resolution, "");
     }
 
     #[test]

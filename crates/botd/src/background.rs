@@ -68,6 +68,7 @@ pub fn build_production_background_specs(
             openrouter_base_url: options.openrouter_base_url,
             openrouter_pricing: Arc::clone(&options.openrouter_pricing),
             firecrawl_api_key: options.firecrawl_api_key,
+            coinmarketcap_key: options.coinmarketcap_key,
             system_prompt: options.system_prompt,
             owner_token: options.owner_token,
             mode: options.scheduler_mode,

@@ -46,11 +46,28 @@ where
             ));
         };
         let load = search_markets(&self.transport, &mut self.cache, &query, (self.now)());
-        let output = load.events.map_or_else(
+        let mut output = load.events.map_or_else(
             || market_search_error(self.locale).to_owned(),
             |events| render_market_search(&query, &events, self.locale),
         );
+        if let Some(age) = load.stale_seconds {
+            output = format!("{}\n\n{output}", stale_warning(age, self.locale));
+        }
         ToolExecutionResult::with_diagnostics(output, load.diagnostics)
+    }
+}
+
+/// Old prices read like live ones, so say plainly when Polymarket failed and
+/// an expired cache entry stood in.
+fn stale_warning(age_seconds: i64, locale: Locale) -> String {
+    let minutes = age_seconds / 60;
+    match locale {
+        Locale::Es => format!(
+            "Ojo: Polymarket no respondió. Estos datos son de hace {minutes} min, no los presentes como actuales"
+        ),
+        Locale::En => format!(
+            "Warning: Polymarket did not respond. This data is {minutes} min old; do not present it as current"
+        ),
     }
 }
 
@@ -74,13 +91,14 @@ mod tests {
         }
     }
 
-    struct Cache;
+    /// Holds at most one cached entry, returned for every key.
+    struct Cache(Option<String>);
 
     impl RequestCache for Cache {
         type Error = std::convert::Infallible;
 
         fn get(&mut self, _key: &str) -> Result<Option<String>, Self::Error> {
-            Ok(None)
+            Ok(self.0.clone())
         }
 
         fn set(&mut self, _key: &str, _value: &str, _ttl_seconds: i64) -> Result<(), Self::Error> {
@@ -110,7 +128,7 @@ mod tests {
                 response,
                 queries: RefCell::default(),
             },
-            Cache,
+            Cache(None),
             || 1_700_000_000,
             locale,
         )
@@ -171,6 +189,31 @@ mod tests {
     }
 
     #[test]
+    fn stale_cached_markets_come_with_their_age() {
+        let events = r#"[{"title":"Vote","slug":"vote","liquidity":0.0,"volume":0.0,"end_date":"","hidden_markets":0,"markets":[{"title":"Vote","outcomes":[{"title":"Yes","probability":0.77}]}]}]"#;
+        for (fetched_at, locale, warning) in [
+            (
+                1_699_999_000,
+                Locale::Es,
+                "Ojo: Polymarket no respondió. Estos datos son de hace 16 min, no los presentes como actuales\n\n",
+            ),
+            (
+                1_699_999_930,
+                Locale::En,
+                "Warning: Polymarket did not respond. This data is 1 min old; do not present it as current\n\n",
+            ),
+        ] {
+            let mut stale = tool(Err(TransportFailureKind::Timeout), locale);
+            stale.cache = Cache(Some(format!(
+                r#"{{"timestamp":{fetched_at},"data":{events}}}"#
+            )));
+            let output = stale.execute(request("vote"), "call").output;
+            assert!(output.starts_with(warning), "{output}");
+            assert!(output.ends_with("- Yes 77%"), "{output}");
+        }
+    }
+
+    #[test]
     fn incompatible_requests_are_explicit() {
         let mut tool = tool(Err(TransportFailureKind::Request), Locale::En);
         assert_eq!(
@@ -182,8 +225,8 @@ mod tests {
 
     #[test]
     fn cache_stub_keeps_the_empty_contract() {
-        assert_eq!(Cache.set("synthetic", "1", 60), Ok(()));
-        assert_eq!(Cache.take("synthetic"), Ok(None));
-        assert_eq!(Cache.claim("synthetic", "1", 60), Ok(true));
+        assert_eq!(Cache(None).set("synthetic", "1", 60), Ok(()));
+        assert_eq!(Cache(None).take("synthetic"), Ok(None));
+        assert_eq!(Cache(None).claim("synthetic", "1", 60), Ok(true));
     }
 }

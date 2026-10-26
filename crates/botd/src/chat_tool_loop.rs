@@ -679,7 +679,7 @@ fn reuse_key(call: &StreamToolCall, arguments: &Value) -> (String, String) {
     (call.name.clone(), arguments.to_string())
 }
 
-fn capped_output(output: &str) -> String {
+pub(crate) fn capped_output(output: &str) -> String {
     let total = output.chars().count();
     if total <= MAX_TOOL_OUTPUT_CHARS {
         return output.to_owned();

@@ -15,7 +15,7 @@ use bot_core::locale::Locale;
 use bot_core::scheduled_tasks::ScheduledTask;
 use thiserror::Error;
 
-use crate::composition::{TelegramActionSink, TelegramDeliveryCoordinator};
+use crate::composition::{ProductionToolFactory, TelegramActionSink, TelegramDeliveryCoordinator};
 use crate::firecrawl_tool::FirecrawlScheduledWebSearch;
 use crate::native_ai::{
     ActionTaskMessenger, OpenRouterTaskProvider, PRIMARY_CHAT_MODEL, PostgresTaskBilling,
@@ -87,6 +87,7 @@ pub struct TaskServiceOptions<'a> {
     pub openrouter_base_url: &'a str,
     pub openrouter_pricing: Arc<OpenRouterPricingCache>,
     pub firecrawl_api_key: Option<&'a str>,
+    pub coinmarketcap_key: Option<&'a str>,
     pub system_prompt: &'a str,
     pub owner_token: &'a str,
     pub mode: SchedulerMode,
@@ -141,7 +142,15 @@ pub fn build_task_scheduler(
         PRIMARY_CHAT_MODEL,
         options.system_prompt,
     )
-    .with_openrouter_pricing(Arc::clone(&pricing));
+    .with_openrouter_pricing(Arc::clone(&pricing))
+    // Web search stays with the task's own billed search; the factory adds
+    // the read-only tools chat uses.
+    .with_tools(Box::new(ProductionToolFactory::new(
+        options.redis_endpoint,
+        options.database_url,
+        options.coinmarketcap_key.map(str::to_owned),
+        None,
+    )));
     let firecrawl_api_key = options.firecrawl_api_key.filter(|key| !key.is_empty());
     if let Some(api_key) = firecrawl_api_key {
         provider = provider.with_web_search(Box::new(FirecrawlScheduledWebSearch::new(
@@ -222,6 +231,7 @@ mod tests {
                 openrouter_base_url: "https://synthetic.invalid/api/v1",
                 openrouter_pricing: Arc::clone(&pricing),
                 firecrawl_api_key,
+                coinmarketcap_key: firecrawl_api_key,
                 system_prompt: "synthetic persona",
                 owner_token: "synthetic-owner",
                 mode: SchedulerMode::Authoritative,
@@ -306,6 +316,7 @@ mod tests {
             openrouter_base_url: "https://synthetic.invalid/api/v1",
             openrouter_pricing: pricing,
             firecrawl_api_key: None,
+            coinmarketcap_key: None,
             system_prompt: "synthetic persona",
             owner_token: "",
             mode: SchedulerMode::Authoritative,

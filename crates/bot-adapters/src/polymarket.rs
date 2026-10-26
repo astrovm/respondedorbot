@@ -176,6 +176,9 @@ fn slim_search_body(body: String) -> String {
 pub struct MarketSearchLoad {
     /// `None` when Polymarket could not be reached and nothing was cached.
     pub events: Option<Vec<SearchEvent>>,
+    /// How old `events` are when Polymarket failed and an expired cache
+    /// entry stood in. `None` for fresh data.
+    pub stale_seconds: Option<i64>,
     pub diagnostics: Vec<String>,
 }
 
@@ -208,6 +211,10 @@ pub fn search_markets<T: PolymarketSearchTransport, C: RequestCache>(
         || transport.before_retry(),
     );
     let mut diagnostics = load.diagnostics;
+    let stale_seconds = load
+        .fetched_at
+        .map(|fetched_at| now_unix.saturating_sub(fetched_at))
+        .filter(|age| *age > CACHE_TTL_SECONDS);
     let events = load.data.and_then(|data| {
         serde_json::from_value::<Vec<SearchEvent>>(data)
             .map_err(|error| {
@@ -219,6 +226,7 @@ pub fn search_markets<T: PolymarketSearchTransport, C: RequestCache>(
     });
     MarketSearchLoad {
         events,
+        stale_seconds,
         diagnostics,
     }
 }
@@ -663,9 +671,18 @@ mod tests {
         assert!(!value.contains("rules"), "{value}");
         assert!(!value.contains("pagination"), "{value}");
 
+        assert_eq!(load.stale_seconds, None);
+
         let cached = search_markets(&transport, &mut cache, "synthetic vote", 160);
-        assert_eq!(cached.events, Some(events));
+        assert_eq!(cached.events, Some(events.clone()));
+        assert_eq!(cached.stale_seconds, None);
         assert_eq!(transport.queries.borrow().len(), 1);
+
+        // Polymarket is down once the entry expires: the old events stand in,
+        // labeled with their age.
+        let stale = search_markets(&transport, &mut cache, "synthetic vote", 161);
+        assert_eq!(stale.events, Some(events));
+        assert_eq!(stale.stale_seconds, Some(61));
     }
 
     #[test]
