@@ -183,8 +183,9 @@ database and values are decoded as UTF-8 strings.
 
 The RediSearch index name is `idx:chat_messages`, with prefix `chatmsg:`. Its
 schema includes TAG fields for chat/role/user/reply/mention, TEXT fields for
-username/text, and a sortable numeric timestamp. Redis Stack and `FT.CREATE` /
-`FT.SEARCH` support remain deployment requirements until intentionally changed.
+username/text, and a sortable numeric timestamp. Redis 8 or newer (its Query Engine
+provides `FT.CREATE` / `FT.SEARCH`) remains a deployment requirement until
+intentionally changed.
 
 Message save is atomic through a Lua script. It deduplicates, assigns a
 sequence, trims history and the sorted index, writes the search hash, and sets

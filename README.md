@@ -111,7 +111,7 @@ You need:
 
 - Rust 1.98
 - PostgreSQL
-- Redis Stack with RediSearch
+- Redis 8 (includes the Query Engine, formerly RediSearch)
 - FFmpeg
 
 > [!WARNING]
@@ -124,7 +124,7 @@ You need:
 
 - Rust 1.98
 - PostgreSQL
-- Redis Stack with RediSearch
+- Redis 8 (includes the Query Engine, formerly RediSearch)
 - FFmpeg
 
 ### 2. Create the configuration
@@ -215,6 +215,15 @@ The runtime image contains `botd`, FFmpeg, and native shared libraries. CI publi
 
 To roll back, pin the Quadlet `Image=` setting to a verified SHA tag, reload the user units, and restart the service.
 
+Upgrading from the old Redis Stack image: Redis 8 reads its data as is, but runs as the `redis` user, so fix the file owner once before starting it:
+
+```bash
+systemctl --user stop respondedorbot.service respondedorbot-redis.service
+podman run --rm -v systemd-respondedorbot-redis:/data docker.io/library/redis:8-trixie chown -R redis:redis /data
+systemctl --user daemon-reload
+systemctl --user start respondedorbot-redis.service respondedorbot.service
+```
+
 ### Database backups
 
 `respondedorbot-backup.timer` dumps the database every hour into an encrypted
@@ -297,7 +306,7 @@ cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
 ```
 
-Integration tests use synthetic data. Set `TEST_DATABASE_URL`, `TEST_REDIS_HOST`, and `TEST_REDIS_PORT` to include PostgreSQL and Redis Stack tests.
+Integration tests use synthetic data. Set `TEST_DATABASE_URL`, `TEST_REDIS_HOST`, and `TEST_REDIS_PORT` to include PostgreSQL and Redis tests.
 
 Coverage requirements:
 
