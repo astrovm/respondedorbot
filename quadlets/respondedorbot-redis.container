@@ -3,11 +3,13 @@ Description=respondedorbot Redis cache
 After=network-online.target
 
 [Container]
-Image=docker.io/redis/redis-stack-server:7.4.0-v8
+# Redis 8 includes the Query Engine (RediSearch) and JSON that the bot needs
+Image=docker.io/library/redis:8-trixie
 ContainerName=respondedorbot-redis
+AutoUpdate=registry
 Volume=respondedorbot-redis.volume:/data
 Network=respondedorbot.network
-Environment="REDIS_ARGS=--maxmemory 256mb --maxmemory-policy volatile-lru --appendonly yes --appendfsync always"
+Exec=redis-server --maxmemory 256mb --maxmemory-policy volatile-lru --appendonly yes --appendfsync always
 
 [Service]
 Restart=always

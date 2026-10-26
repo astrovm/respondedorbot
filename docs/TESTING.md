@@ -9,7 +9,7 @@ cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
 ```
 
-CI supplies PostgreSQL and Redis Stack and sets `TEST_DATABASE_URL`, `TEST_REDIS_HOST`, and `TEST_REDIS_PORT`. Tests that need a service return early when its variable is missing, so set all three locally to run them (plus `TEST_REDIS_PASSWORD` if your Redis needs one); in CI a guard test fails if any is missing. Tests use synthetic identities, fixed clocks, injected randomness, fake HTTP transports, and reserved database ranges. Tests that rerun global billing migrations do so in a schema of their own, so the suite runs in parallel and can be rerun against the same database.
+CI supplies PostgreSQL and Redis 8 and sets `TEST_DATABASE_URL`, `TEST_REDIS_HOST`, and `TEST_REDIS_PORT`. Tests that need a service return early when its variable is missing, so set all three locally to run them (plus `TEST_REDIS_PASSWORD` if your Redis needs one); in CI a guard test fails if any is missing. Tests use synthetic identities, fixed clocks, injected randomness, fake HTTP transports, and reserved database ranges. Tests that rerun global billing migrations do so in a schema of their own, so the suite runs in parallel and can be rerun against the same database.
 
 ## Coverage gates
 
