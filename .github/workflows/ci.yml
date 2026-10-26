@@ -204,7 +204,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
+          fetch-depth: 0
 
       - name: Find changed bot-core lines
         id: diff
@@ -240,6 +240,9 @@ jobs:
         env:
           SHARD: ${{ matrix.shard }}
         run: |
+          # Each mutant rebuilds bot-core, and incremental builds reuse most of
+          # the previous one. rust-cache turns them off for the whole job.
+          export CARGO_INCREMENTAL=1
           status=0
           # The coverage job already runs the unmutated tests, so skip the
           # baseline and mutate the checkout in place on the cached build.
