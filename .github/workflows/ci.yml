@@ -95,8 +95,8 @@ jobs:
 
       - name: Install media test dependencies
         run: |
-          # Azure's Ubuntu mirror sometimes stalls for minutes. Time out and
-          # retry instead of hanging the job.
+          # Azure's Ubuntu mirror sometimes slows to a crawl for minutes. Time
+          # out and retry from the main Ubuntu mirrors instead of hanging the job.
           apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
           for attempt in 1 2 3; do
             if sudo timeout 120 apt-get "${apt_options[@]}" update \
@@ -105,6 +105,8 @@ jobs:
             fi
             echo "::warning::Installing ffmpeg failed on attempt $attempt"
             sudo dpkg --configure -a || true
+            # apt only moves to the next mirror on errors, not when one is slow
+            sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
           done
           exit 1
 
