@@ -1181,6 +1181,12 @@ mod tests {
             MONDAY_PRE + 60,
         );
         assert_eq!(quote.map(|quote| quote.variation), Some(-0.5));
+        let quote = parse_yahoo_quote(
+            &five_day_chart(json!({"regularMarketChangePercent": "NaN"})),
+            "EXM",
+            MONDAY_PRE + 60,
+        );
+        assert_eq!(quote.map(|quote| quote.variation), Some(25.0));
         // A change without a regular price is not trusted.
         let quote = parse_yahoo_quote(
             &chart(json!({
@@ -1207,7 +1213,7 @@ mod tests {
             session(json!({}), MONDAY_OPEN + 60),
             Some(MarketSession::Closed)
         );
-        let live = json!({"regularMarketTime": MONDAY_OPEN + 30});
+        let live = json!({"regularMarketTime": MONDAY_OPEN});
         assert_eq!(
             session(live.clone(), MONDAY_OPEN + 60),
             Some(MarketSession::Open)
@@ -1250,10 +1256,16 @@ mod tests {
 
     #[test]
     fn extended_quote_reads_the_latest_pre_market_trade() {
+        // Bars without a usable trade are skipped.
         let response = intraday_chart(
             monday_periods(),
-            &[MONDAY_PRE, MONDAY_PRE + 300, MONDAY_PRE + 600],
-            json!([16.0, 15.0, null]),
+            &[
+                MONDAY_PRE,
+                MONDAY_PRE + 150,
+                MONDAY_PRE + 300,
+                MONDAY_PRE + 600,
+            ],
+            json!([16.0, null, 15.0, 0.0]),
         );
         assert!(yahoo_has_extended_hours(&response));
         assert_eq!(
@@ -1279,7 +1291,9 @@ mod tests {
             "regular": {"start": MONDAY_OPEN, "end": MONDAY_CLOSE},
             "post": {"start": MONDAY_CLOSE, "end": MONDAY_POST_END}
         });
-        for response in [nested, current] {
+        // The first after-hours bar starts with the session.
+        let first = intraday_chart(monday_periods(), &[MONDAY_CLOSE], json!([25.0]));
+        for response in [nested, current, first] {
             let extended = parse_yahoo_extended_quote(&response, 20.0);
             assert_eq!(
                 extended.map(|extended| (extended.session, extended.price, extended.variation)),
@@ -1291,14 +1305,31 @@ mod tests {
     #[test]
     fn extended_quote_ignores_regular_stale_and_unusable_trades() {
         let periods = monday_periods();
-        // The latest trade is from the regular session.
-        let regular = intraday_chart(periods.clone(), &[MONDAY_OPEN + 60], json!([19.0]));
+        // The latest trade is from the regular session, which starts where
+        // the pre-market ends.
+        let regular = intraday_chart(periods.clone(), &[MONDAY_OPEN], json!([19.0]));
         // The latest trade is not newer than the last regular trade.
         let stale = intraday_chart(periods.clone(), &[FRIDAY_CLOSE], json!([19.0]));
         // No trades, or no trading periods to classify them.
         let empty = intraday_chart(periods.clone(), &[], json!([]));
         let unclassified = intraday_chart(json!(null), &[MONDAY_PRE], json!([19.0]));
-        for response in [&regular, &stale, &empty, &unclassified] {
+        let malformed = intraday_chart(
+            json!({"pre": "soon", "post": [[{"start": MONDAY_CLOSE}]]}),
+            &[MONDAY_PRE],
+            json!([19.0]),
+        );
+        let mut untimed = intraday_chart(periods.clone(), &[MONDAY_PRE], json!([19.0]));
+        if let Some(result) = untimed["chart"]["result"][0].as_object_mut() {
+            result.remove("timestamp");
+        }
+        for response in [
+            &regular,
+            &stale,
+            &empty,
+            &unclassified,
+            &malformed,
+            &untimed,
+        ] {
             assert_eq!(parse_yahoo_extended_quote(response, 20.0), None);
         }
         let pre = intraday_chart(periods, &[MONDAY_PRE], json!([19.0]));
