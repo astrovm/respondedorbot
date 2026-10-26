@@ -55,6 +55,8 @@ impl SchedulerSettings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskExecutionDisposition {
     Complete,
+    /// Done, and the task asked not to run again.
+    Finished,
     Retry,
 }
 
@@ -459,9 +461,11 @@ where
                 continue;
             }
 
+            let mut finished = false;
             if matches!(observation, TaskObservation::Execute { .. }) {
                 match self.executor.execute(&document.task, &execution_id) {
                     Ok(TaskExecutionDisposition::Complete) => {}
+                    Ok(TaskExecutionDisposition::Finished) => finished = true,
                     Ok(TaskExecutionDisposition::Retry) => {
                         if let Err(error) = self.store.release_occurrence(
                             document.task.id.as_str(),
@@ -502,7 +506,9 @@ where
                 }
             }
 
-            let next_document = Self::next_document(&document, next_run_at, &execution_id);
+            // No next document removes the task, as after a one-time run.
+            let next_document =
+                Self::next_document(&document, next_run_at, &execution_id).filter(|_| !finished);
             match self.store.complete_occurrence(&SchedulerCompletion {
                 task_id: document.task.id.as_str(),
                 chat_id: &document.task.chat_id,
@@ -874,6 +880,44 @@ mod tests {
             .expect("recurring task must advance");
         assert_eq!(next.task.next_run_at, Some(1_600));
         assert_eq!(next.task.last_execution_id.as_deref(), Some("repeat1:1000"));
+    }
+
+    #[test]
+    fn a_finished_recurring_task_is_removed_while_others_keep_running() {
+        let mut store = Store {
+            due: vec!["done1".to_owned(), "repeat1".to_owned()],
+            ..Store::default()
+        };
+        for id in ["done1", "repeat1"] {
+            store.documents.insert(
+                id.to_owned(),
+                document(id, TaskSchedule::IntervalSeconds { seconds: 300 }, 1_000),
+            );
+        }
+        let executor = Executor {
+            outcomes: VecDeque::from([
+                Ok(TaskExecutionDisposition::Finished),
+                Ok(TaskExecutionDisposition::Complete),
+            ]),
+            ..Executor::default()
+        };
+        let mut scheduler = scheduler(store, executor, SchedulerMode::Authoritative);
+        assert!(matches!(
+            scheduler.step(1_100),
+            Ok(SchedulerStep::Observed { failures, .. }) if failures.is_empty()
+        ));
+        let (store, _) = scheduler.parts();
+        assert_eq!(store.completed.len(), 2);
+        assert_eq!(store.completed[0].task_id, "done1");
+        assert!(store.completed[0].next.is_none());
+        assert_eq!(store.completed[1].task_id, "repeat1");
+        assert_eq!(
+            store.completed[1]
+                .next
+                .as_ref()
+                .and_then(|next| next.task.next_run_at),
+            Some(1_300)
+        );
     }
 
     #[test]

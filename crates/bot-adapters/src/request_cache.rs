@@ -58,6 +58,9 @@ pub struct CachedJsonLoad {
     pub diagnostics: Vec<String>,
     /// True only when this call fetched and persisted a new provider response.
     pub refreshed: bool,
+    /// When `data` came from the provider, so callers can tell a stale
+    /// fallback apart from a fresh answer.
+    pub fetched_at: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,6 +147,7 @@ where
             data: Some(cached.data.clone()),
             diagnostics,
             refreshed: false,
+            fetched_at: Some(cached.timestamp),
         };
     }
 
@@ -169,6 +173,7 @@ where
                     data: Some(data),
                     diagnostics,
                     refreshed: true,
+                    fetched_at: Some(now_unix),
                 };
             }
             Err(error) => diagnostics.push(format!(
@@ -180,10 +185,12 @@ where
             before_retry();
         }
     }
+    let fetched_at = cached.as_ref().map(|cached| cached.timestamp);
     CachedJsonLoad {
         data: cached.map(|cached| cached.data),
         diagnostics,
         refreshed: false,
+        fetched_at,
     }
 }
 
@@ -322,6 +329,7 @@ mod tests {
             assert_eq!(loaded.load.data, Some(serde_json::json!({"value": 1})));
             assert!(loaded.load.diagnostics.is_empty());
             assert!(!loaded.load.refreshed);
+            assert_eq!(loaded.load.fetched_at, Some(timestamp));
             assert_eq!(loaded.fetches, 0);
             assert!(cache.writes.is_empty());
         }
@@ -332,6 +340,7 @@ mod tests {
         let mut cache = Cache::default();
         let loaded = load(&mut cache, 10, 123, vec![response(200, r#"{"value":2}"#)]);
         assert_eq!(loaded.load.data, Some(serde_json::json!({"value": 2})));
+        assert_eq!(loaded.load.fetched_at, Some(123));
         assert_eq!(loaded.fetches, 1);
         assert_eq!(cache.writes[0].0, "request_cache:key");
         assert_eq!(cache.writes[0].2, 60);
@@ -353,6 +362,7 @@ mod tests {
         let loaded = load(&mut cache, 60, 1_000, failures);
         assert_eq!(loaded.load.data, Some(serde_json::json!({"stale": true})));
         assert!(!loaded.load.refreshed);
+        assert_eq!(loaded.load.fetched_at, Some(1));
         assert_eq!((loaded.fetches, loaded.retries), (2, 1));
         assert!(loaded.load.diagnostics[0].contains("HTTP 503"));
         assert!(loaded.load.diagnostics[1].contains("timeout"));
@@ -364,6 +374,7 @@ mod tests {
         let mut cache = Cache::default();
         let loaded = load(&mut cache, 60, 1_000, Vec::new());
         assert_eq!(loaded.load.data, None);
+        assert_eq!(loaded.load.fetched_at, None);
         assert_eq!((loaded.fetches, loaded.retries), (2, 1));
         assert_eq!(
             loaded.load.diagnostics,

@@ -28,6 +28,8 @@ pub struct TaskProviderReply {
     pub text: String,
     pub poll: Option<PollRequest>,
     pub fallback: bool,
+    /// The model ended the task: this run is its last.
+    pub finish: bool,
     pub billing_segments: Vec<Value>,
 }
 
@@ -149,6 +151,9 @@ pub struct TaskExecutionState {
     delivered: bool,
     #[serde(default)]
     delivery_attempts: u8,
+    /// Saved with the answer, so a delivery retry still ends the task.
+    #[serde(default)]
+    finish: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -411,7 +416,11 @@ where
                 self.send_nonfatal(task, &execute_failed(task, &error.to_string()));
             }
         }
-        Ok(TaskExecutionDisposition::Complete)
+        Ok(if state.finish {
+            TaskExecutionDisposition::Finished
+        } else {
+            TaskExecutionDisposition::Complete
+        })
     }
 
     fn execute_task(
@@ -487,6 +496,7 @@ where
                         billing_finalized: false,
                         delivered: true,
                         delivery_attempts: 0,
+                        finish: false,
                     };
                     self.journal
                         .save(execution_id, &state)
@@ -515,6 +525,7 @@ where
                     billing_finalized: false,
                     delivered: true,
                     delivery_attempts: 0,
+                    finish: false,
                 };
                 self.journal
                     .save(execution_id, &state)
@@ -545,6 +556,7 @@ where
                 billing_finalized: false,
                 delivered: false,
                 delivery_attempts: 0,
+                finish: reply.finish,
             };
             self.journal
                 .save(execution_id, &state)
@@ -713,6 +725,7 @@ mod tests {
                 poll: None,
                 text: "synthetic answer".to_owned(),
                 fallback: false,
+                finish: false,
                 billing_segments: vec![json!({"kind": "chat"})],
             }))
         }
@@ -968,6 +981,7 @@ mod tests {
                 poll: None,
                 poll_attempted: false,
                 poll_delivery_attempts: 0,
+                finish: false,
                 poll_retry_at: None,
                 response: Some("saved answer".to_owned()),
                 billing_segments: vec![json!({"kind": "chat"})],
@@ -994,6 +1008,42 @@ mod tests {
         assert!(billing.reserve_ids.is_empty());
         assert!(billing.settlements.is_empty());
         assert_eq!(messenger.messages[0].1, "saved answer");
+    }
+
+    #[test]
+    fn a_finishing_reply_ends_the_task_only_after_its_message_is_delivered() {
+        let execution_id = "task123:1000";
+        let provider = Provider {
+            replies: VecDeque::from([Ok(TaskProviderReply {
+                poll: None,
+                text: "resultado final".to_owned(),
+                fallback: false,
+                finish: true,
+                billing_segments: vec![json!({"kind": "chat"})],
+            })]),
+            ..Provider::default()
+        };
+        let messenger = Messenger {
+            fail: true,
+            ..Messenger::default()
+        };
+        let mut executor = executor(provider, Billing::default(), messenger);
+        assert_eq!(
+            executor.execute(&task("es"), execution_id),
+            Err(NativeTaskExecutorError::Delivery {
+                message: "delivery failed".to_owned(),
+            })
+        );
+        // The saved answer keeps the decision, so the retry still ends it.
+        executor.messenger.fail = false;
+        assert_eq!(
+            executor.execute(&task("es"), execution_id),
+            Ok(TaskExecutionDisposition::Finished)
+        );
+        let (provider, _, messenger, _) = executor.parts();
+        assert_eq!(provider.prompts.len(), 1);
+        assert_eq!(messenger.messages.len(), 2);
+        assert_eq!(messenger.messages[1].1, "resultado final");
     }
 
     #[test]
@@ -1046,18 +1096,21 @@ mod tests {
                     poll: None,
                     text: String::new(),
                     fallback: false,
+                    finish: false,
                     billing_segments: vec![json!({"attempt": 1})],
                 }),
                 Ok(TaskProviderReply {
                     poll: None,
                     text: "fallback".to_owned(),
                     fallback: true,
+                    finish: false,
                     billing_segments: vec![json!({"attempt": 2})],
                 }),
                 Ok(TaskProviderReply {
                     poll: None,
                     text: "paid answer".to_owned(),
                     fallback: false,
+                    finish: false,
                     billing_segments: vec![json!({"attempt": 3})],
                 }),
             ]),
@@ -1085,12 +1138,14 @@ mod tests {
                         poll: None,
                         text: "fallback one".to_owned(),
                         fallback: true,
+                        finish: false,
                         billing_segments: segments.clone(),
                     }),
                     Ok(TaskProviderReply {
                         poll: None,
                         text: "fallback two".to_owned(),
                         fallback: true,
+                        finish: false,
                         billing_segments: segments.clone(),
                     }),
                 ]),
@@ -1148,12 +1203,14 @@ mod tests {
                     poll: None,
                     text: String::new(),
                     fallback: false,
+                    finish: false,
                     billing_segments: Vec::new(),
                 }),
                 Ok(TaskProviderReply {
                     poll: None,
                     text: "   ".to_owned(),
                     fallback: false,
+                    finish: false,
                     billing_segments: Vec::new(),
                 }),
             ]),
@@ -1368,12 +1425,14 @@ mod tests {
                     poll: None,
                     text: " ".to_owned(),
                     fallback: false,
+                    finish: false,
                     billing_segments: Vec::new(),
                 }),
                 Ok(TaskProviderReply {
                     poll: None,
                     text: String::new(),
                     fallback: false,
+                    finish: false,
                     billing_segments: Vec::new(),
                 }),
             ]),
@@ -1472,6 +1531,7 @@ mod tests {
                 poll: None,
                 poll_attempted: false,
                 poll_delivery_attempts: 0,
+                finish: false,
                 poll_retry_at: None,
                 response: None,
                 billing_segments: vec![json!({"kind": "chat"})],
@@ -1519,6 +1579,7 @@ mod tests {
                     multiple_answers: false,
                 }),
                 fallback: false,
+                finish: false,
                 billing_segments: vec![json!({"kind": "chat"})],
             })]),
             ..Provider::default()

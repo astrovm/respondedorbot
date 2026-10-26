@@ -21,7 +21,7 @@ use bot_core::polls::PollRequest;
 #[cfg(test)]
 use bot_core::provider_pricing::DEEPSEEK_FLASH_MODEL;
 use bot_core::provider_pricing::{DEEPSEEK_MODEL, TokenPricing};
-use bot_core::scheduled_tasks::ScheduledTask;
+use bot_core::scheduled_tasks::{ScheduledTask, TaskSchedule};
 use bot_core::telegram_actions::{SendMessage, TelegramAction};
 use bot_core::telegram_input::ChatId;
 use chrono::{DateTime, FixedOffset, Offset, Utc};
@@ -44,6 +44,17 @@ pub const OPENROUTER_TRANSCRIPTION_MODEL: &str =
     bot_core::provider_pricing::OPENROUTER_TRANSCRIPTION_MODEL;
 const SYSTEM_CONTEXT_EXTRA_TOKENS_ESTIMATE: i64 = 4_000;
 const TASK_WEB_SEARCH_MAX_USES: usize = 3;
+/// Lets a recurring task end itself once its stop condition is met.
+pub const FINISH_TASK_TOOL: &str = "finish_task";
+
+/// Builds the read-only chat tools (prices, Polymarket, web fetch, ...) for
+/// one scheduled-task run, so tasks read live data the same way chat does.
+pub trait TaskToolFactory: Send {
+    fn create(
+        &mut self,
+        task: &ScheduledTask,
+    ) -> Result<Box<dyn crate::chat_tool_loop::NativeToolRuntime>, String>;
+}
 
 pub fn reservation_pricing_for_model(
     model: &str,
@@ -120,6 +131,7 @@ pub struct OpenRouterTaskProvider<Transport> {
     persona: String,
     pricing: Option<Arc<OpenRouterPricingCache>>,
     web_search: Option<Box<dyn ScheduledWebSearch>>,
+    tools: Option<Box<dyn TaskToolFactory>>,
 }
 
 impl<Transport> OpenRouterTaskProvider<Transport> {
@@ -139,6 +151,7 @@ impl<Transport> OpenRouterTaskProvider<Transport> {
             persona: persona.to_owned(),
             pricing: None,
             web_search: None,
+            tools: None,
         }
     }
 
@@ -154,10 +167,17 @@ impl<Transport> OpenRouterTaskProvider<Transport> {
         self
     }
 
+    #[must_use]
+    pub fn with_tools(mut self, tools: Box<dyn TaskToolFactory>) -> Self {
+        self.tools = Some(tools);
+        self
+    }
+
     fn request(
         &self,
         messages: &[TaskPromptMessage],
         task: &ScheduledTask,
+        tools: Option<&dyn crate::chat_tool_loop::NativeToolRuntime>,
     ) -> Result<ChatCompletionRequest, OpenRouterChatError> {
         let mut request_messages = Vec::with_capacity(messages.len() + 1);
         request_messages.push(ChatMessage::text(
@@ -180,7 +200,33 @@ impl<Transport> OpenRouterTaskProvider<Transport> {
             "Create a native Telegram poll for this scheduled task, only when the task asks for a poll or vote. Include the situation in the question, or explain it in the same assistant message's content. Use short options; do not repeat them in content. Calling this tool finishes the task; the saved poll is delivered after billing. Do not claim it was already sent."
         );
         request.tools.push(poll_schema);
+        if let Some(tools) = tools {
+            request.tools.extend(tools.schemas(true));
+        }
+        if task.schedule != TaskSchedule::Once {
+            request.tools.push(finish_task_schema());
+        }
         Ok(request)
+    }
+}
+
+fn finish_task_schema() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": FINISH_TASK_TOOL,
+            "description": "Stop this recurring task after this run. Call it only when the task says to stop once something happens (for example \"until the result is final\") and a tool in this run confirmed it happened. Still write the final message: it is sent, then the task stops.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+        }
+    })
+}
+
+fn finish_task_output(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Es => {
+            "Listo: esta es la última vez que corre la tarea. Escribí el mensaje final ahora"
+        }
+        Locale::En => "Done: this is the task's last run. Write the final message now",
     }
 }
 
@@ -193,9 +239,21 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
         task: &ScheduledTask,
         _execution_id: &str,
     ) -> Result<TaskProviderReply, TaskProviderFailure<Self::Error>> {
+        let mut tools = self.tools.as_mut().and_then(|factory| {
+            factory
+                .create(task)
+                .map_err(|error| {
+                    eprintln!(
+                        "scheduled task {} tools unavailable: {error}",
+                        task.id.as_str()
+                    );
+                })
+                .ok()
+        });
         let mut request = self
-            .request(messages, task)
+            .request(messages, task, tools.as_deref())
             .map_err(|source| TaskProviderFailure::new(source, Vec::new()))?;
+        let mut finish = false;
         let mut billing_segments = Vec::new();
         let mut search_uses = 0_usize;
         let locale = if task.locale == "en" {
@@ -215,6 +273,7 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
                     text,
                     poll: None,
                     fallback: false,
+                    finish,
                     billing_segments,
                 });
             }
@@ -223,10 +282,22 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
             request.messages.push(assistant);
             for call in calls {
                 let name = call.function.name.as_str();
-                if !matches!(
+                if name == FINISH_TASK_TOOL && task.schedule != TaskSchedule::Once {
+                    finish = true;
+                    request.messages.push(ChatMessage::tool_result(
+                        call.id,
+                        finish_task_output(locale).to_owned(),
+                    ));
+                    continue;
+                }
+                let own = matches!(
                     NativeTool::from_name(name),
                     Some(NativeTool::WebSearch | NativeTool::CreatePoll)
-                ) {
+                );
+                let shared = tools
+                    .as_ref()
+                    .filter(|tools| !own && tools.contains(name, true));
+                if !own && shared.is_none() {
                     let output = crate::chat_tool_loop::unavailable_tool_output(name);
                     request
                         .messages
@@ -245,6 +316,15 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
                             continue;
                         }
                     };
+                if let Some(tools) = tools.as_mut().filter(|_| !own) {
+                    let result = tools.execute(name, &arguments, &call.id);
+                    billing_segments.extend(result.billing_segment);
+                    request.messages.push(ChatMessage::tool_result(
+                        call.id,
+                        crate::chat_tool_loop::capped_output(&result.output),
+                    ));
+                    continue;
+                }
                 if name == NativeTool::CreatePoll.name() {
                     match validate_request(NativeTool::CreatePoll, &arguments, locale) {
                         Ok(ExternalToolRequest::CreatePoll(poll)) => {
@@ -252,6 +332,7 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
                                 text,
                                 poll: Some(poll),
                                 fallback: false,
+                                finish,
                                 billing_segments,
                             });
                         }
@@ -785,7 +866,7 @@ mod tests {
         TaskAiProvider, TaskBilling, TaskCreditStore, TaskMessenger, TaskPromptMessage,
         TaskReserveOutcome, reservation_pricing_for_model,
     };
-    use crate::chat_tool_loop::ToolExecutionResult;
+    use crate::chat_tool_loop::{NativeToolRuntime, ToolExecutionResult};
     use crate::dispatcher::{ActionReceipt, ActionSink};
     use crate::firecrawl_tool::ScheduledWebSearch;
     use crate::tool_requests::ExternalToolRequest;
@@ -1597,6 +1678,216 @@ mod tests {
             ]
         );
         assert!(followup["messages"].get(9).is_none());
+    }
+
+    /// The chat tools a task gets, reduced to one read-only tool.
+    struct SharedTools;
+
+    impl crate::chat_tool_loop::NativeToolRuntime for SharedTools {
+        fn schemas(&self, task_mode: bool) -> Vec<Value> {
+            vec![
+                json!({"type": "function", "function": {"name": "polymarket", "task_mode": task_mode}}),
+            ]
+        }
+
+        fn contains(&self, name: &str, task_mode: bool) -> bool {
+            task_mode && name == "polymarket"
+        }
+
+        fn execute(
+            &mut self,
+            name: &str,
+            arguments: &Value,
+            tool_call_id: &str,
+        ) -> ToolExecutionResult {
+            ToolExecutionResult {
+                output: format!("{name} {arguments} {tool_call_id}"),
+                failure_fallback: None,
+                billing_segment: Some(json!({"kind": "synthetic_tool"})),
+                diagnostics: Vec::new(),
+            }
+        }
+    }
+
+    struct Factory(Result<(), String>);
+
+    impl super::TaskToolFactory for Factory {
+        fn create(
+            &mut self,
+            _task: &ScheduledTask,
+        ) -> Result<Box<dyn crate::chat_tool_loop::NativeToolRuntime>, String> {
+            self.0.clone()?;
+            Ok(Box::new(SharedTools))
+        }
+    }
+
+    fn completion(message: Value) -> HttpResponse {
+        HttpResponse {
+            status_code: 200,
+            body: json!({
+                "id": "generation",
+                "model": "resolved/model",
+                "choices": [{"message": message, "finish_reason": "stop"}],
+                "usage": {"cost": 0.0001}
+            })
+            .to_string(),
+            headers: BTreeMap::new(),
+        }
+    }
+
+    /// One tool-call round, then a final answer.
+    fn tool_round_transport(calls: &[(&str, &str)]) -> Transport {
+        let calls = calls
+            .iter()
+            .map(|(id, name)| {
+                json!({
+                    "id": id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": "{\"query\":\"brasil\"}"}
+                })
+            })
+            .collect::<Vec<_>>();
+        Transport {
+            requests: RefCell::new(Vec::new()),
+            responses: RefCell::new(VecDeque::from([
+                completion(json!({"content": null, "tool_calls": calls})),
+                completion(json!({"content": "lula 99%"})),
+            ])),
+        }
+    }
+
+    fn tool_names(body: &Value) -> Vec<String> {
+        body["tools"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    fn tool_results(body: &Value) -> Vec<(String, String)> {
+        body["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|message| message["role"] == "tool")
+            .map(|message| {
+                (
+                    message["tool_call_id"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                    message["content"].as_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn recurring_tasks_use_shared_chat_tools_and_can_finish_themselves() {
+        let mut provider = OpenRouterTaskProvider::new(
+            tool_round_transport(&[
+                ("call-market", "polymarket"),
+                ("call-finish", "finish_task"),
+                ("call-set", "task_set"),
+            ]),
+            "synthetic-key",
+            "https://synthetic.invalid/api/v1",
+            "deepseek/deepseek-v4.1-flash-1017",
+            "synthetic persona",
+        )
+        .with_tools(Box::new(Factory(Ok(()))));
+        let mut recurring = task("es");
+        recurring.schedule = TaskSchedule::IntervalSeconds { seconds: 300 };
+        let prompt = [TaskPromptMessage {
+            role: "user",
+            content: "reportá polymarket hasta que haya resultado".to_owned(),
+        }];
+        let reply = provider.complete(&prompt, &recurring, "task123:1000");
+        let reply = match reply {
+            Ok(reply) => reply,
+            Err(error) => panic!("{error}"),
+        };
+        assert_eq!(reply.text, "lula 99%");
+        assert!(reply.finish);
+        // Two model rounds plus whatever the shared tool billed.
+        assert_eq!(reply.billing_segments.len(), 3);
+        assert_eq!(reply.billing_segments[1], json!({"kind": "synthetic_tool"}));
+
+        let requests = provider.transport.requests.borrow();
+        let first = serde_json::from_str::<Value>(&requests[0].body).unwrap_or_default();
+        assert_eq!(
+            tool_names(&first),
+            ["create_poll", "polymarket", "finish_task"]
+        );
+        assert_eq!(first["tools"][1]["function"]["task_mode"], true);
+        let second = serde_json::from_str::<Value>(&requests[1].body).unwrap_or_default();
+        assert_eq!(
+            tool_results(&second),
+            [
+                (
+                    "call-market".to_owned(),
+                    "polymarket {\"query\":\"brasil\"} call-market".to_owned()
+                ),
+                (
+                    "call-finish".to_owned(),
+                    "Listo: esta es la última vez que corre la tarea. Escribí el mensaje final ahora"
+                        .to_owned()
+                ),
+                (
+                    "call-set".to_owned(),
+                    crate::chat_tool_loop::unavailable_tool_output("task_set")
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn one_time_tasks_cannot_finish_and_run_without_tools_that_failed_to_build() {
+        let mut provider = OpenRouterTaskProvider::new(
+            tool_round_transport(&[
+                ("call-finish", "finish_task"),
+                ("call-market", "polymarket"),
+            ]),
+            "synthetic-key",
+            "https://synthetic.invalid/api/v1",
+            "deepseek/deepseek-v4.1-flash-1017",
+            "synthetic persona",
+        )
+        .with_tools(Box::new(Factory(Err("redis down".to_owned()))));
+        let prompt = [TaskPromptMessage {
+            role: "user",
+            content: "do it".to_owned(),
+        }];
+        let reply = provider.complete(&prompt, &task("en"), "task123:1000");
+        let Ok(reply) = reply else { panic!() };
+        assert!(!reply.finish);
+        let requests = provider.transport.requests.borrow();
+        let first = serde_json::from_str::<Value>(&requests[0].body).unwrap_or_default();
+        assert_eq!(tool_names(&first), ["create_poll"]);
+        let second = serde_json::from_str::<Value>(&requests[1].body).unwrap_or_default();
+        assert_eq!(
+            tool_results(&second),
+            [
+                (
+                    "call-finish".to_owned(),
+                    crate::chat_tool_loop::unavailable_tool_output("finish_task")
+                ),
+                (
+                    "call-market".to_owned(),
+                    crate::chat_tool_loop::unavailable_tool_output("polymarket")
+                ),
+            ]
+        );
+        assert_eq!(
+            super::finish_task_output(Locale::En),
+            "Done: this is the task's last run. Write the final message now"
+        );
+        assert_eq!(
+            SharedTools.schemas(false)[0]["function"]["task_mode"],
+            false
+        );
+        assert!(!SharedTools.contains("polymarket", false));
     }
 
     #[test]
