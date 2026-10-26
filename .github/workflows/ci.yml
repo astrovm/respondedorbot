@@ -22,6 +22,7 @@ jobs:
   # from a cold build.
   quality:
     runs-on: ubuntu-26.04
+    timeout-minutes: 15
     permissions:
       contents: read
 
@@ -45,6 +46,7 @@ jobs:
 
   coverage:
     runs-on: ubuntu-26.04
+    timeout-minutes: 20
     permissions:
       contents: read
     services:
@@ -93,8 +95,18 @@ jobs:
 
       - name: Install media test dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends ffmpeg
+          # Azure's Ubuntu mirror sometimes stalls for minutes. Time out and
+          # retry instead of hanging the job.
+          apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
+          for attempt in 1 2 3; do
+            if sudo timeout 120 apt-get "${apt_options[@]}" update \
+              && sudo timeout 240 apt-get "${apt_options[@]}" install --yes --no-install-recommends ffmpeg; then
+              exit 0
+            fi
+            echo "::warning::Installing ffmpeg failed on attempt $attempt"
+            sudo dpkg --configure -a || true
+          done
+          exit 1
 
       - name: Check Rust coverage
         run: |
@@ -111,6 +123,7 @@ jobs:
     # Short smoke run of every fuzz target; long runs stay local. On main this
     # only builds, to keep the cache warm.
     runs-on: ubuntu-26.04
+    timeout-minutes: 15
     permissions:
       contents: read
     strategy:
@@ -191,6 +204,7 @@ jobs:
     # Mutation testing of the domain logic this pull request changes, split
     # across runners. On main this only builds, to keep the cache warm.
     runs-on: ubuntu-26.04
+    timeout-minutes: 30
     permissions:
       contents: read
     strategy:
@@ -264,6 +278,7 @@ jobs:
   image:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-26.04
+    timeout-minutes: 20
     permissions:
       contents: read
 
