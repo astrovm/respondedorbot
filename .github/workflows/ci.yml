@@ -17,9 +17,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Pull requests can only restore build caches saved on main, so the Rust jobs
+  # also run on main and only main saves. Otherwise every pull request starts
+  # from a cold build.
   quality:
-    # Main is protected by the PR checks; avoid running this validation again after merge.
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-26.04
     permissions:
       contents: read
@@ -33,6 +34,8 @@ jobs:
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
@@ -41,8 +44,6 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
   coverage:
-    # Main is protected by the PR checks; avoid running this validation again after merge.
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-26.04
     permissions:
       contents: read
@@ -82,6 +83,8 @@ jobs:
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
@@ -105,88 +108,154 @@ jobs:
           cargo llvm-cov report -p botd --fail-uncovered-lines 0 --show-missing-lines
 
   fuzz:
-    # Short smoke run of every fuzz target; long runs stay local.
-    if: github.event_name == 'pull_request'
+    # Short smoke run of every fuzz target; long runs stay local. On main this
+    # only builds, to keep the cache warm.
     runs-on: ubuntu-26.04
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(github.event_name == 'pull_request' && '[0, 1]' || '[0]') }}
+    env:
+      # A floating nightly changes the cache key every day, so pin one.
+      FUZZ_TOOLCHAIN: nightly-2026-10-26
+      FUZZ_SHARDS: 2
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up nightly Rust
-        run: rustup toolchain install nightly --profile minimal
+        run: rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal
 
       - name: Cache fuzz build
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: fuzz -> target
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install cargo-fuzz
         uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-fuzz@0.13.2
 
-      - name: Fuzz every target for a minute
+      - name: Build fuzz targets
         working-directory: fuzz
+        # The prebuilt cargo-fuzz is a musl binary and would target musl.
+        run: cargo +"$FUZZ_TOOLCHAIN" fuzz build --target x86_64-unknown-linux-gnu
+
+      - name: Fuzz this shard's targets for a minute
+        if: github.event_name == 'pull_request'
+        working-directory: fuzz
+        env:
+          SHARD: ${{ matrix.shard }}
         run: |
-          for target in $(cargo +nightly fuzz list); do
+          # Fuzz the shard's targets side by side, at most one per runner CPU.
+          logs="$RUNNER_TEMP/fuzz-logs"
+          mkdir -p "$logs"
+          targets=()
+          pids=()
+          for target in $(cargo +"$FUZZ_TOOLCHAIN" fuzz list | awk -v shard="$SHARD" -v shards="$FUZZ_SHARDS" '(NR - 1) % shards == shard'); do
             mkdir -p "corpus/$target"
-            # The prebuilt cargo-fuzz is a musl binary and would target musl.
-            cargo +nightly fuzz run --target x86_64-unknown-linux-gnu \
+            cargo +"$FUZZ_TOOLCHAIN" fuzz run --target x86_64-unknown-linux-gnu \
               "$target" "corpus/$target" "seeds/$target" -- \
-              -max_total_time=60 -max_len=16384 -rss_limit_mb=2048
+              -max_total_time=60 -max_len=16384 -rss_limit_mb=2048 \
+              > "$logs/$target.log" 2>&1 &
+            targets+=("$target")
+            pids+=("$!")
           done
+          status=0
+          for index in "${!pids[@]}"; do
+            target="${targets[$index]}"
+            if wait "${pids[$index]}"; then
+              echo "::group::$target"
+              tail -n 5 "$logs/$target.log"
+              echo "::endgroup::"
+            else
+              status=1
+              echo "::error::Fuzz target $target failed"
+              cat "$logs/$target.log"
+            fi
+          done
+          exit "$status"
 
       - name: Upload crashing inputs
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: fuzz-artifacts
+          name: fuzz-artifacts-${{ matrix.shard }}
           path: fuzz/artifacts
 
   mutants:
-    # Mutation testing of the domain logic this pull request changes.
-    if: github.event_name == 'pull_request'
+    # Mutation testing of the domain logic this pull request changes, split
+    # across runners. On main this only builds, to keep the cache warm.
     runs-on: ubuntu-26.04
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(github.event_name == 'pull_request' && '[0, 1, 2, 3, 4, 5, 6, 7]' || '[0]') }}
+    env:
+      MUTANT_SHARDS: 8
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
 
-      - name: Set up Rust toolchain
-        run: rustup show
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-
-      - name: Install cargo-mutants
-        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
-        with:
-          tool: cargo-mutants@27.1.0
-
-      - name: Mutate changed bot-core lines
+      - name: Find changed bot-core lines
+        id: diff
+        if: github.event_name == 'pull_request'
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
           git diff "origin/$BASE_REF...HEAD" -- crates/bot-core/src > pr.diff
+          if [ -s pr.diff ]; then echo "changed=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Set up Rust toolchain
+        if: github.event_name == 'push' || steps.diff.outputs.changed == 'true'
+        run: rustup show
+
+      - name: Cache Rust build
+        if: github.event_name == 'push' || steps.diff.outputs.changed == 'true'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build bot-core tests
+        if: github.event_name == 'push'
+        run: cargo test --locked -p bot-core --no-run
+
+      - name: Install cargo-mutants
+        if: steps.diff.outputs.changed == 'true'
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-mutants@27.1.0
+
+      - name: Mutate this shard of the changed bot-core lines
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
           status=0
-          cargo mutants --in-diff pr.diff -p bot-core --timeout 180 --no-shuffle || status=$?
+          # The coverage job already runs the unmutated tests, so skip the
+          # baseline and mutate the checkout in place on the cached build.
+          cargo mutants --in-diff pr.diff -p bot-core --in-place --baseline=skip \
+            --shard "$SHARD/$MUTANT_SHARDS" --sharding round-robin \
+            --timeout 180 --no-shuffle || status=$?
           # Exit 3 means some mutants made the tests hang, which still counts as
           # caught. It also wins over exit 2, so check the missed list directly.
           if [ "$status" -ne 0 ] && [ "$status" -ne 3 ]; then exit "$status"; fi
           if [ -s mutants.out/missed.txt ]; then cat mutants.out/missed.txt; exit 2; fi
 
       - name: Upload mutation report
-        if: always()
+        if: always() && steps.diff.outputs.changed == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: mutants-report
+          name: mutants-report-${{ matrix.shard }}
           path: mutants.out
 
   image:
