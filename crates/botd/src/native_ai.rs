@@ -1804,10 +1804,7 @@ mod tests {
             content: "reportá polymarket hasta que haya resultado".to_owned(),
         }];
         let reply = provider.complete(&prompt, &recurring, "task123:1000");
-        let reply = match reply {
-            Ok(reply) => reply,
-            Err(error) => panic!("{error}"),
-        };
+        let Ok(reply) = reply else { panic!() };
         assert_eq!(reply.text, "lula 99%");
         assert!(reply.finish);
         // Two model rounds plus whatever the shared tool billed.
