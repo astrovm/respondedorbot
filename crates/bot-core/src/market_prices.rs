@@ -162,7 +162,7 @@ pub fn format_market_selection(selection: &MarketSelection, locale: Locale) -> S
                 shorten(&candidate.symbol, 24),
                 shorten(&candidate.price, 32),
                 display_currency,
-                shorten(&candidate.change, 16),
+                shorten(&candidate.change, 24),
                 identity,
             )
         })
@@ -300,14 +300,14 @@ pub struct MarketChart {
     pub candidate: Option<MarketCandidate>,
 }
 
-fn stock_chart(quote: &StockQuote, timeframe: Option<&str>) -> MarketChart {
+fn stock_chart(quote: &StockQuote, timeframe: Option<&str>, locale: Locale) -> MarketChart {
     MarketChart {
         timeframe: timeframe.map(str::to_owned),
         symbol: quote.symbol.clone(),
         name: quote.name.clone(),
         yahoo_symbol: quote.symbol.clone(),
         token: None,
-        candidate: Some(market_stock_candidate(quote, timeframe)),
+        candidate: Some(market_stock_candidate(quote, timeframe, locale)),
     }
 }
 
@@ -567,10 +567,10 @@ pub fn execute_stock_candidate<S: UnifiedStockProvider>(
         };
     };
     MarketPriceExecution {
-        chart: Some(stock_chart(&quote, timeframe)),
+        chart: Some(stock_chart(&quote, timeframe, locale)),
         selection: None,
         no_assets_found: false,
-        text: format_stocks(std::slice::from_ref(&quote), timeframe),
+        text: format_stocks(std::slice::from_ref(&quote), timeframe, locale),
         diagnostics,
     }
 }
@@ -745,8 +745,8 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
         if conversion_requested {
             return stock_conversion_error(raw_query, locale);
         }
-        *chart = Some(stock_chart(quote, timeframe));
-        return format_stocks(std::slice::from_ref(quote), timeframe);
+        *chart = Some(stock_chart(quote, timeframe, locale));
+        return format_stocks(std::slice::from_ref(quote), timeframe, locale);
     }
     let stock_search_is_ambiguous = stock_quotes.len() > 1;
     if !raw_query.contains(',')
@@ -764,7 +764,7 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
         stock_quotes.sort_by(|left, right| compare_stock_quotes(raw_query, left, right));
         let stock_candidates = stock_quotes
             .iter()
-            .map(|quote| market_stock_candidate(quote, timeframe))
+            .map(|quote| market_stock_candidate(quote, timeframe, locale))
             .collect::<Vec<_>>();
         candidates.extend(stock_candidates);
         candidates.truncate(10);
@@ -799,7 +799,7 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
         } else {
             stock_quotes
                 .first()
-                .map(|quote| stock_chart(quote, timeframe))
+                .map(|quote| stock_chart(quote, timeframe, locale))
         };
     }
     if !stock_quotes.is_empty() && conversion_requested {
@@ -841,7 +841,7 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
     if !crypto_text.is_empty() {
         parts.push(crypto_text);
     }
-    let stock_text = format_stocks(&stock_quotes, timeframe);
+    let stock_text = format_stocks(&stock_quotes, timeframe, locale);
     if !stock_text.is_empty() {
         parts.push(stock_text);
     }
@@ -1597,8 +1597,12 @@ fn market_candidate(
     }
 }
 
-fn market_stock_candidate(quote: &StockQuote, timeframe: Option<&str>) -> MarketCandidate {
-    let period = timeframe.unwrap_or("24h");
+fn market_stock_candidate(
+    quote: &StockQuote,
+    timeframe: Option<&str>,
+    locale: Locale,
+) -> MarketCandidate {
+    let period = timeframe.unwrap_or_else(|| crate::stocks::stock_change_period(quote, locale));
     MarketCandidate {
         id: format!("stock:{}", quote.symbol),
         symbol: quote.symbol.clone(),
@@ -1762,7 +1766,7 @@ fn stock_only<S: UnifiedStockProvider>(
         quotes.sort_by(|left, right| compare_stock_quotes(query, left, right));
         let mut candidates = quotes
             .iter()
-            .map(|quote| market_stock_candidate(quote, timeframe))
+            .map(|quote| market_stock_candidate(quote, timeframe, locale))
             .collect::<Vec<_>>();
         candidates.truncate(10);
         *selection_result = Some(MarketSelection {
@@ -1776,10 +1780,12 @@ fn stock_only<S: UnifiedStockProvider>(
         return String::new();
     }
     if quotes.len() == 1 && resolved.iter().filter(|(_, quote)| quote.is_some()).count() == 1 {
-        *chart = quotes.first().map(|quote| stock_chart(quote, timeframe));
+        *chart = quotes
+            .first()
+            .map(|quote| stock_chart(quote, timeframe, locale));
     }
     let mut parts = Vec::new();
-    let text = format_stocks(&quotes, timeframe);
+    let text = format_stocks(&quotes, timeframe, locale);
     if !text.is_empty() {
         parts.push(text);
     }
@@ -1814,19 +1820,10 @@ fn unique_stock_quotes(quotes: Vec<StockQuote>) -> Vec<StockQuote> {
     unique
 }
 
-fn format_stocks(quotes: &[StockQuote], timeframe: Option<&str>) -> String {
-    let period = timeframe.unwrap_or("24h");
+fn format_stocks(quotes: &[StockQuote], timeframe: Option<&str>, locale: Locale) -> String {
     quotes
         .iter()
-        .map(|quote| {
-            crate::output_format::quote(
-                &quote.symbol,
-                quote.price,
-                &quote.currency,
-                Some(quote.variation),
-                period,
-            )
-        })
+        .map(|quote| crate::stocks::render_stock_quote(&quote.symbol, quote, timeframe, locale))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -1988,6 +1985,8 @@ mod tests {
             exchange: "Synthetic".to_owned(),
             asset_type: String::new(),
             variation: 1.25,
+            session: None,
+            extended: None,
         }
     }
 
@@ -2339,6 +2338,8 @@ mod tests {
                 exchange: String::new(),
                 asset_type: String::new(),
                 variation: 1.25,
+                session: None,
+                extended: None,
             }),
         )]);
         let result = execute_market_price_command(
@@ -2557,7 +2558,7 @@ mod tests {
         );
         assert_eq!(
             result.text,
-            "BTC: 50000 USD (+2.5% 24h)\nMELI: 123.45 USD (+1.25% 24h)"
+            "BTC: 50000 USD (+2.5% 24h)\nMELI: 123.45 USD (+1.25% 1d)"
         );
     }
 
@@ -2570,7 +2571,7 @@ mod tests {
             &mut Scripted::default(),
             &mut stocks(vec![("META".to_owned(), Some(stock("META")))]),
         );
-        assert_eq!(result.text, "META: 123.45 USD (+1.25% 24h)");
+        assert_eq!(result.text, "META: 123.45 USD (+1.25% 1d)");
 
         let result = execute_market_price_command(
             "stock:NVDA in EUR",
@@ -2975,7 +2976,7 @@ mod tests {
             &mut Scripted::failing(),
             &mut stocks(vec![("nvda".to_owned(), Some(stock("NVDA")))]),
         );
-        assert_eq!(result.text, "NVDA: 123.45 USD (+1.25% 24h)");
+        assert_eq!(result.text, "NVDA: 123.45 USD (+1.25% 1d)");
         assert_eq!(
             result.diagnostics,
             vec!["CoinMarketCap listings: synthetic failure"]
@@ -3490,7 +3491,7 @@ mod tests {
             &mut Scripted::default(),
             &mut stocks,
         );
-        assert_eq!(result.text, "NVDA: 123.45 USD (+1.25% 24h)");
+        assert_eq!(result.text, "NVDA: 123.45 USD (+1.25% 1d)");
         let chart = result.chart.map(|chart| chart.yahoo_symbol);
         assert_eq!(chart.as_deref(), Some("NVDA"));
         assert_eq!(stocks.queries, vec!["NVDA"]);
@@ -3787,7 +3788,15 @@ mod tests {
 
         let mut odd = stock("ODD");
         odd.variation = f64::NAN;
-        assert_eq!(market_stock_candidate(&odd, None).change, "N/A 24h");
+        assert_eq!(
+            market_stock_candidate(&odd, None, Locale::Es).change,
+            "N/A 1d"
+        );
+        odd.session = Some(crate::stocks::MarketSession::Closed);
+        assert_eq!(
+            market_stock_candidate(&odd, None, Locale::En).change,
+            "N/A at close"
+        );
     }
 
     #[test]
@@ -3858,7 +3867,7 @@ mod tests {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        assert_eq!(changes, vec!["+1.25% 24h", "N/A 24h"]);
+        assert_eq!(changes, vec!["+1.25% 1d", "N/A 1d"]);
     }
 
     #[test]
@@ -4003,7 +4012,7 @@ mod tests {
         );
         assert_eq!(
             result.text,
-            "ZZZ: 123.45 USD (+1.25% 24h)\nI could not find these assets: YYY. Try the full name, an exchange-qualified ticker or the contract"
+            "ZZZ: 123.45 USD (+1.25% 1d)\nI could not find these assets: YYY. Try the full name, an exchange-qualified ticker or the contract"
         );
         assert!(!result.no_assets_found);
     }

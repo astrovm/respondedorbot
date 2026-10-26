@@ -289,6 +289,8 @@ mod tests {
             exchange: "NMS".to_owned(),
             asset_type: String::new(),
             variation: 1.5,
+            session: None,
+            extended: None,
         };
         let mut tool = StockPricesTool::new(
             StockSource(StockQuotesLoad {
@@ -306,7 +308,7 @@ mod tests {
         };
         assert_eq!(
             tool.execute(request.clone(), "call").output,
-            "AAPL: 200 USD (+1.5% 24h)\nmissing: not found"
+            "AAPL: 200 USD (+1.5% 1d)\nmissing: not found"
         );
         tool.source.0.quotes = None;
         assert_eq!(
