@@ -244,7 +244,9 @@ Canonical task fields currently are:
 - `locale`
 
 Trigger variants are delay seconds, interval seconds, interval days, and cron
-with hour/minute plus optional weekday list or day of month.
+with hour/minute plus optional weekday list or day of month. Intervals up to 7
+days are stored as interval seconds and longer ones, up to 90 days, as whole
+interval days.
 
 The authoritative version 1 schema includes next-run state, schedule anchors,
 and execution idempotency. The claim protocol is defined in

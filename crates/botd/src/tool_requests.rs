@@ -387,11 +387,23 @@ fn required_text(arguments: &Value, key: &str) -> Option<String> {
 }
 
 fn integer(arguments: &Value, key: &str) -> Option<i64> {
-    arguments.get(key).and_then(|value| {
-        value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    })
+    arguments.get(key).and_then(json_integer)
+}
+
+/// Read a whole number the model sent as an integer, a whole float such as
+/// `10800.0`, or a numeric string.
+pub(crate) fn json_integer(value: &Value) -> Option<i64> {
+    if let Some(integer) = value.as_i64() {
+        return Some(integer);
+    }
+    if let Some(text) = value.as_str() {
+        return text.trim().parse().ok();
+    }
+    value
+        .as_f64()
+        .filter(|float| float.fract() == 0.0 && float.abs() < 9.0e18)
+        // The filter keeps whole floats inside the i64 range.
+        .map(|float| float as i64)
 }
 
 fn bounded_string_list(value: Option<&Value>, limit: usize) -> Vec<String> {
@@ -451,6 +463,24 @@ mod tests {
 
     fn ports(locale: Locale) -> ValidatedNativeToolPorts<Services> {
         ValidatedNativeToolPorts::new(Services::default(), locale)
+    }
+
+    #[test]
+    fn json_integers_accept_whole_floats_and_numeric_strings() {
+        for (value, expected) in [
+            (json!(10_800), Some(10_800)),
+            (json!(10_800.0), Some(10_800)),
+            (json!(" 10800 "), Some(10_800)),
+            (json!(-5.0), Some(-5)),
+            (json!(10_800.5), None),
+            (json!(1.0e19), None),
+            (json!(u64::MAX), None),
+            (json!("3h"), None),
+            (json!(true), None),
+            (json!(null), None),
+        ] {
+            assert_eq!(json_integer(&value), expected, "{value}");
+        }
     }
 
     #[test]
