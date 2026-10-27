@@ -261,7 +261,7 @@ impl MaintenanceConfig {
         }
         let redis_maxmemory = lookup("REDIS_MAXMEMORY")
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "256mb".to_owned());
+            .unwrap_or_else(|| "512mb".to_owned());
         let redis_maxmemory_policy = lookup("REDIS_MAXMEMORY_POLICY")
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "volatile-lru".to_owned());
@@ -671,13 +671,29 @@ mod tests {
     }
 
     #[test]
+    fn env_example_redis_settings_are_accepted_and_match_defaults() -> crate::test_env::TestResult {
+        let values = include_str!("../../../.env.example")
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .filter(|(key, _)| key.starts_with("REDIS_MAXMEMORY"))
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(values.len(), 2);
+        let example = maintenance(&values)?;
+        let defaults = maintenance(&HashMap::new())?;
+        assert_eq!(example.redis_maxmemory, defaults.redis_maxmemory);
+        assert_eq!(example.redis_maxmemory_policy, defaults.redis_maxmemory_policy);
+        Ok(())
+    }
+
+    #[test]
     fn maintenance_defaults_and_retention_validation_match_python() -> crate::test_env::TestResult {
         let config = maintenance(&HashMap::new());
         let config = config?;
         assert_eq!(config.redis_endpoint.host, "localhost");
         assert_eq!(config.redis_endpoint.port, 6379);
         assert_eq!(config.database_url(), None);
-        assert_eq!(config.redis_maxmemory, "256mb");
+        assert_eq!(config.redis_maxmemory, "512mb");
         assert_eq!(config.redis_maxmemory_policy, "volatile-lru");
         assert_eq!(config.ai_ledger_retention_days, 30);
         for unsafe_policy in ["allkeys-lru", "allkeys-lfu", "allkeys-random", "unknown"] {

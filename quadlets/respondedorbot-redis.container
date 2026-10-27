@@ -9,7 +9,7 @@ ContainerName=respondedorbot-redis
 AutoUpdate=registry
 Volume=respondedorbot-redis.volume:/data
 Network=respondedorbot.network
-Exec=redis-server --maxmemory 256mb --maxmemory-policy volatile-lru --appendonly yes --appendfsync always
+Exec=redis-server --maxmemory 512mb --maxmemory-policy volatile-lru --appendonly yes --appendfsync always
 
 [Service]
 Restart=always
