@@ -1291,13 +1291,9 @@ mod tests {
             notes[1],
             r#"record {"bad":true} → bad argument | for record"#
         );
-        assert!(
-            notes[2].starts_with(
-                "record not json → The arguments for 'record' were not a valid JSON object"
-            ),
-            "{}",
-            notes[2]
-        );
+        assert!(notes[2].starts_with(
+            "record not json → The arguments for 'record' were not a valid JSON object"
+        ));
         let (arguments, output) = notes[3]
             .strip_prefix("record ")
             .and_then(|note| note.split_once(" → "))

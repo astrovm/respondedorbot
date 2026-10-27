@@ -1041,12 +1041,8 @@ mod tests {
         let mut state = RedisConversationState::new(&endpoint)?;
         let spanish = conversation_input(chat_id, 2, Locale::Es);
         state.record_incoming(&spanish)?;
-        state.record_outgoing(
-            &spanish,
-            Some(3),
-            "synthetic assistant reply",
-            &["task_set {} → created".to_owned()],
-        )?;
+        let notes = ["task_set {} → created".to_owned()];
+        state.record_outgoing(&spanish, Some(3), "synthetic assistant reply", &notes)?;
 
         let english = conversation_input(chat_id, 4, Locale::En);
         state.record_incoming(&english)?;
