@@ -569,7 +569,7 @@ fn trigger_error(error: TriggerError, locale: Locale) -> String {
         (TriggerError::IntervalUnitsRequired, Locale::Es) => "para repetir cada tantos minutos, horas o días usá interval_seconds (3 h = 10800)".to_owned(),
         (TriggerError::IntervalUnitsRequired, Locale::En) => "to repeat every few minutes, hours, or days, use interval_seconds (3 h = 10800)".to_owned(),
         (TriggerError::IntervalUnitInvalid, Locale::Es) => "days, hours, minutes y seconds tienen que ser enteros de 0 para arriba. Mejor usá interval_seconds (3 h = 10800)".to_owned(),
-        (TriggerError::IntervalUnitInvalid, Locale::En) => "days, hours, minutes, and seconds must be whole numbers from 0 up. Use interval_seconds instead (3 h = 10800)".to_owned(),
+        (TriggerError::IntervalUnitInvalid, Locale::En) => "days, hours, minutes, and seconds must be whole numbers from 0 up. Use interval_seconds (3 h = 10800) instead".to_owned(),
         (TriggerError::HourRequired, Locale::Es) => "hour es requerido para trigger cron".to_owned(),
         (TriggerError::HourRequired, Locale::En) => "hour is required for a cron trigger".to_owned(),
         (TriggerError::HourRange, Locale::Es) => "hour debe ser 0-23".to_owned(),
