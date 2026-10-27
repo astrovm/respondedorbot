@@ -9,11 +9,16 @@ ContainerName=respondedorbot-redis
 AutoUpdate=registry
 Volume=respondedorbot-redis.volume:/data
 Network=respondedorbot.network
-Exec=redis-server --maxmemory 256mb --maxmemory-policy volatile-lru --appendonly yes --appendfsync always
+Exec=redis-server --maxmemory 512mb --maxmemory-policy volatile-lru --appendonly yes --appendfsync always
+# Healthy only once the dataset is loaded (PING answers LOADING until then), so the bot waits for it
+HealthCmd=redis-cli ping | grep -q PONG
+HealthInterval=5s
+HealthStartPeriod=120s
+Notify=healthy
 
 [Service]
 Restart=always
-TimeoutStartSec=30
+TimeoutStartSec=180
 
 [Install]
 WantedBy=default.target
