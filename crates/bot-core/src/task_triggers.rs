@@ -22,6 +22,11 @@ pub enum TriggerConfigInput {
     Missing,
     /// A mapping with an unsupported trigger type was supplied.
     Unsupported,
+    /// A mapping with a field its trigger type does not use.
+    UnknownField {
+        /// The unused field name.
+        name: String,
+    },
     /// A cron trigger configuration.
     Cron {
         /// Hour input.
@@ -33,10 +38,16 @@ pub enum TriggerConfigInput {
         /// Optional day-of-month input.
         day: IntegerInput,
     },
-    /// A day-based interval configuration.
-    IntervalDays {
+    /// A repeating interval split into units that are added together.
+    Interval {
         /// Day count input.
         days: IntegerInput,
+        /// Hour count input.
+        hours: IntegerInput,
+        /// Minute count input.
+        minutes: IntegerInput,
+        /// Second count input.
+        seconds: IntegerInput,
     },
 }
 
@@ -47,7 +58,7 @@ pub struct TaskTriggerInput {
     pub delay_seconds: IntegerInput,
     /// Repeating second interval. A present value takes priority over config.
     pub interval_seconds: IntegerInput,
-    /// Cron or day-interval configuration.
+    /// Cron or unit-interval configuration.
     pub config: TriggerConfigInput,
 }
 
@@ -58,7 +69,7 @@ pub enum TaskTrigger {
     Delay { seconds: i64 },
     /// Repeat after a number of seconds.
     IntervalSeconds { seconds: i64 },
-    /// Repeat after a number of days.
+    /// Repeat after a whole number of days longer than a week.
     IntervalDays { days: i64 },
     /// Run on a cron-like calendar schedule.
     Cron {
@@ -78,13 +89,14 @@ pub enum TaskTrigger {
 pub enum TriggerError {
     Required,
     UnsupportedType,
+    UnknownField { name: String },
     DelayPositive,
     DelayMaximum,
     IntervalMinimum,
     IntervalMaximum,
-    DaysRequired,
-    DaysPositive,
-    DaysMaximum,
+    IntervalWholeDays,
+    IntervalUnitsRequired,
+    IntervalUnitInvalid,
     HourRequired,
     HourRange,
     MinuteRequired,
@@ -96,8 +108,9 @@ pub enum TriggerError {
 
 const MAX_DELAY_SECONDS: i64 = 86_400 * 3_650;
 const MIN_INTERVAL_SECONDS: i64 = 300;
-const MAX_INTERVAL_SECONDS: i64 = 86_400 * 7;
-const MAX_INTERVAL_DAYS: i64 = 90;
+/// Longer intervals are stored as whole days.
+const MAX_SECOND_INTERVAL: i64 = 86_400 * 7;
+const MAX_INTERVAL_SECONDS: i64 = 86_400 * 90;
 
 /// Validate and normalize one task trigger with the legacy input precedence.
 pub fn parse_task_trigger(input: TaskTriggerInput) -> Result<TaskTrigger, TriggerError> {
@@ -111,7 +124,13 @@ pub fn parse_task_trigger(input: TaskTriggerInput) -> Result<TaskTrigger, Trigge
     match input.config {
         TriggerConfigInput::Missing => Err(TriggerError::Required),
         TriggerConfigInput::Unsupported => Err(TriggerError::UnsupportedType),
-        TriggerConfigInput::IntervalDays { days } => parse_interval_days(days),
+        TriggerConfigInput::UnknownField { name } => Err(TriggerError::UnknownField { name }),
+        TriggerConfigInput::Interval {
+            days,
+            hours,
+            minutes,
+            seconds,
+        } => parse_interval_units([(days, 86_400), (hours, 3_600), (minutes, 60), (seconds, 1)]),
         TriggerConfigInput::Cron {
             hour,
             minute,
@@ -141,6 +160,15 @@ fn parse_interval_seconds(input: IntegerInput) -> Result<TaskTrigger, TriggerErr
             Err(TriggerError::IntervalMaximum)
         }
         IntegerInput::AboveRange => Err(TriggerError::IntervalMaximum),
+        IntegerInput::Value(seconds) if seconds > MAX_SECOND_INTERVAL => {
+            if seconds % 86_400 == 0 {
+                Ok(TaskTrigger::IntervalDays {
+                    days: seconds / 86_400,
+                })
+            } else {
+                Err(TriggerError::IntervalWholeDays)
+            }
+        }
         IntegerInput::Value(seconds) if seconds >= MIN_INTERVAL_SECONDS => {
             Ok(TaskTrigger::IntervalSeconds { seconds })
         }
@@ -151,16 +179,31 @@ fn parse_interval_seconds(input: IntegerInput) -> Result<TaskTrigger, TriggerErr
     }
 }
 
-fn parse_interval_days(input: IntegerInput) -> Result<TaskTrigger, TriggerError> {
-    match input {
-        IntegerInput::Missing => Err(TriggerError::DaysRequired),
-        IntegerInput::Value(days) if days > MAX_INTERVAL_DAYS => Err(TriggerError::DaysMaximum),
-        IntegerInput::AboveRange => Err(TriggerError::DaysMaximum),
-        IntegerInput::Value(days) if days >= 1 => Ok(TaskTrigger::IntervalDays { days }),
-        IntegerInput::Invalid | IntegerInput::BelowRange | IntegerInput::Value(_) => {
-            Err(TriggerError::DaysPositive)
-        }
+/// Add up `(amount, seconds per unit)` pairs into one interval.
+fn parse_interval_units(units: [(IntegerInput, i64); 4]) -> Result<TaskTrigger, TriggerError> {
+    if units
+        .iter()
+        .all(|(amount, _)| *amount == IntegerInput::Missing)
+    {
+        return Err(TriggerError::IntervalUnitsRequired);
     }
+    let mut total: i64 = 0;
+    for (amount, unit_seconds) in units {
+        let seconds = match amount {
+            IntegerInput::Missing => 0,
+            IntegerInput::AboveRange => return Err(TriggerError::IntervalMaximum),
+            IntegerInput::Value(amount) if amount >= 0 => amount
+                .checked_mul(unit_seconds)
+                .ok_or(TriggerError::IntervalMaximum)?,
+            IntegerInput::Invalid | IntegerInput::BelowRange | IntegerInput::Value(_) => {
+                return Err(TriggerError::IntervalUnitInvalid);
+            }
+        };
+        total = total
+            .checked_add(seconds)
+            .ok_or(TriggerError::IntervalMaximum)?;
+    }
+    parse_interval_seconds(IntegerInput::Value(total))
 }
 
 fn required_bounded_integer(
@@ -303,19 +346,108 @@ mod tests {
         );
     }
 
-    #[test]
-    fn day_intervals_distinguish_missing_invalid_and_excessive_values() {
-        for (days, expected) in [
-            (IntegerInput::Missing, TriggerError::DaysRequired),
-            (IntegerInput::Invalid, TriggerError::DaysPositive),
-            (IntegerInput::Value(0), TriggerError::DaysPositive),
-            (IntegerInput::Value(91), TriggerError::DaysMaximum),
-        ] {
-            assert_eq!(
-                parse_task_trigger(input(TriggerConfigInput::IntervalDays { days })),
-                Err(expected)
-            );
+    fn units(days: i64, hours: i64, minutes: i64) -> TriggerConfigInput {
+        let unit = |value| {
+            if value == 0 {
+                IntegerInput::Missing
+            } else {
+                IntegerInput::Value(value)
+            }
+        };
+        TriggerConfigInput::Interval {
+            days: unit(days),
+            hours: unit(hours),
+            minutes: unit(minutes),
+            seconds: IntegerInput::Missing,
         }
+    }
+
+    #[test]
+    fn unit_intervals_add_up_hours_minutes_and_days() {
+        assert_eq!(
+            parse_task_trigger(input(units(0, 3, 0))),
+            Ok(TaskTrigger::IntervalSeconds { seconds: 10_800 })
+        );
+        assert_eq!(
+            parse_task_trigger(input(units(1, 2, 30))),
+            Ok(TaskTrigger::IntervalSeconds { seconds: 95_400 })
+        );
+        assert_eq!(
+            parse_task_trigger(input(units(30, 0, 0))),
+            Ok(TaskTrigger::IntervalDays { days: 30 })
+        );
+        assert_eq!(
+            parse_task_trigger(input(TriggerConfigInput::Interval {
+                days: IntegerInput::Value(0),
+                hours: IntegerInput::Missing,
+                minutes: IntegerInput::Missing,
+                seconds: IntegerInput::Value(600),
+            })),
+            Ok(TaskTrigger::IntervalSeconds { seconds: 600 })
+        );
+    }
+
+    #[test]
+    fn unit_intervals_distinguish_missing_invalid_and_excessive_values() {
+        let days = |days| TriggerConfigInput::Interval {
+            days,
+            hours: IntegerInput::Missing,
+            minutes: IntegerInput::Missing,
+            seconds: IntegerInput::Missing,
+        };
+        for (config, expected) in [
+            (
+                days(IntegerInput::Missing),
+                TriggerError::IntervalUnitsRequired,
+            ),
+            (
+                days(IntegerInput::Invalid),
+                TriggerError::IntervalUnitInvalid,
+            ),
+            (
+                days(IntegerInput::BelowRange),
+                TriggerError::IntervalUnitInvalid,
+            ),
+            (
+                days(IntegerInput::Value(-1)),
+                TriggerError::IntervalUnitInvalid,
+            ),
+            (days(IntegerInput::Value(0)), TriggerError::IntervalMinimum),
+            (days(IntegerInput::Value(91)), TriggerError::IntervalMaximum),
+            (
+                days(IntegerInput::AboveRange),
+                TriggerError::IntervalMaximum,
+            ),
+            (
+                days(IntegerInput::Value(i64::MAX)),
+                TriggerError::IntervalMaximum,
+            ),
+            (units(0, 0, 4), TriggerError::IntervalMinimum),
+            (units(8, 1, 0), TriggerError::IntervalWholeDays),
+        ] {
+            assert_eq!(parse_task_trigger(input(config)), Err(expected));
+        }
+        assert_eq!(
+            parse_task_trigger(input(TriggerConfigInput::Interval {
+                days: IntegerInput::Value(i64::MAX / 86_400),
+                hours: IntegerInput::Missing,
+                minutes: IntegerInput::Missing,
+                seconds: IntegerInput::Value(i64::MAX),
+            })),
+            Err(TriggerError::IntervalMaximum)
+        );
+    }
+
+    #[test]
+    fn unknown_config_fields_are_reported_by_name() {
+        assert_eq!(
+            parse_task_trigger(input(TriggerConfigInput::UnknownField {
+                name: "weekdays".to_owned()
+            })),
+            Err(TriggerError::UnknownField {
+                name: "weekdays".to_owned()
+            })
+        );
     }
 
     #[test]
@@ -407,7 +539,8 @@ mod tests {
             ..input(TriggerConfigInput::Missing)
         };
         for above in [
-            IntegerInput::Value(86_400 * 7 + 1),
+            IntegerInput::Value(86_400 * 90 + 1),
+            IntegerInput::Value(86_400 * 91),
             IntegerInput::AboveRange,
         ] {
             assert_eq!(
@@ -416,17 +549,15 @@ mod tests {
             );
         }
         assert_eq!(
-            parse_task_trigger(input(TriggerConfigInput::IntervalDays {
-                days: IntegerInput::AboveRange
-            })),
-            Err(TriggerError::DaysMaximum)
+            parse_task_trigger(interval(IntegerInput::Value(86_400 * 7 + 1))),
+            Err(TriggerError::IntervalWholeDays)
         );
-        assert_eq!(
-            parse_task_trigger(input(TriggerConfigInput::IntervalDays {
-                days: IntegerInput::Value(90)
-            })),
-            Ok(TaskTrigger::IntervalDays { days: 90 })
-        );
+        for invalid in [IntegerInput::Invalid, IntegerInput::BelowRange] {
+            assert_eq!(
+                parse_task_trigger(interval(invalid)),
+                Err(TriggerError::IntervalMinimum)
+            );
+        }
     }
 
     #[test]
@@ -514,7 +645,12 @@ mod tests {
             interval(604_800),
             Ok(TaskTrigger::IntervalSeconds { seconds: 604_800 })
         );
-        assert_eq!(interval(604_801), Err(TriggerError::IntervalMaximum));
+        assert_eq!(interval(691_200), Ok(TaskTrigger::IntervalDays { days: 8 }));
+        assert_eq!(
+            interval(7_776_000),
+            Ok(TaskTrigger::IntervalDays { days: 90 })
+        );
+        assert_eq!(interval(7_776_001), Err(TriggerError::IntervalMaximum));
     }
 
     proptest::proptest! {
@@ -533,19 +669,40 @@ mod tests {
         }
 
         #[test]
-        fn intervals_are_valid_from_five_minutes_to_a_week(seconds in proptest::prelude::any::<i64>()) {
+        fn intervals_are_valid_from_five_minutes_to_ninety_days(seconds in proptest::prelude::any::<i64>()) {
             let parsed = parse_task_trigger(TaskTriggerInput {
                 interval_seconds: IntegerInput::Value(seconds),
                 ..input(TriggerConfigInput::Missing)
             });
-            match seconds {
-                300..=604_800 => proptest::prop_assert_eq!(
-                    parsed,
-                    Ok(TaskTrigger::IntervalSeconds { seconds })
-                ),
-                605_000.. => proptest::prop_assert_eq!(parsed, Err(TriggerError::IntervalMaximum)),
-                _ => proptest::prop_assert!(parsed.is_err()),
-            }
+            let expected = match seconds {
+                ..=299 => Err(TriggerError::IntervalMinimum),
+                300..=604_800 => Ok(TaskTrigger::IntervalSeconds { seconds }),
+                604_801..=7_776_000 if seconds % 86_400 == 0 => {
+                    Ok(TaskTrigger::IntervalDays { days: seconds / 86_400 })
+                }
+                604_801..=7_776_000 => Err(TriggerError::IntervalWholeDays),
+                _ => Err(TriggerError::IntervalMaximum),
+            };
+            proptest::prop_assert_eq!(parsed, expected);
+        }
+
+        #[test]
+        fn unit_intervals_match_the_same_total_in_seconds(
+            days in 0_i64..200,
+            hours in 0_i64..5_000,
+            minutes in 0_i64..300_000,
+        ) {
+            let by_units = parse_task_trigger(input(TriggerConfigInput::Interval {
+                days: IntegerInput::Value(days),
+                hours: IntegerInput::Value(hours),
+                minutes: IntegerInput::Value(minutes),
+                seconds: IntegerInput::Missing,
+            }));
+            let by_seconds = parse_task_trigger(TaskTriggerInput {
+                interval_seconds: IntegerInput::Value(days * 86_400 + hours * 3_600 + minutes * 60),
+                ..input(TriggerConfigInput::Missing)
+            });
+            proptest::prop_assert_eq!(by_units, by_seconds);
         }
     }
 }

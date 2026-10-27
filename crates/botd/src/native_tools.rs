@@ -278,7 +278,7 @@ pub(crate) fn tool_schema(tool: NativeTool) -> Value {
             }),
         ),
         NativeTool::TaskSet => (
-            "Create a scheduled task. Put only the future instruction in text and preserve its subject, perspective, and pronouns. Put time or frequency only in delay_seconds, interval_seconds, or trigger_config. For example, 'tomorrow remind me to pay' uses text='remind me to pay' plus a delay; 'every day at 20:30 tell me the score' uses text='tell me the score' plus a cron trigger. Choose a reasonable hour if the user omits one.",
+            "Create a scheduled task. Put only the future instruction in text and preserve its subject, perspective, and pronouns. Put time or frequency only in delay_seconds (run once), interval_seconds (repeat every few minutes, hours, or days), or trigger_config (repeat at a clock time). For example, 'tomorrow remind me to pay' uses text='remind me to pay' plus a delay; 'every 3 hours tell me the score' uses text='tell me the score' plus interval_seconds=10800; 'every day at 20:30 tell me the score' uses text='tell me the score' plus a cron trigger. Choose a reasonable hour if the user omits one. To change a task, cancel the old one with task_cancel first.",
             task_set_parameters(),
         ),
         NativeTool::TaskList => (
@@ -389,18 +389,19 @@ fn task_set_parameters() -> Value {
         "properties": {
             "text": {"type": "string", "description": "Content-only future instruction the bot will execute later. Preserve perspective, subject, and pronouns, but exclude scheduling/time expressions that belong in delay_seconds, interval_seconds, or trigger_config."},
             "delay_seconds": {"type": "integer", "description": "Delay in seconds for one-shot task. 60=1min, 3600=1h, 86400=1d. Max 315360000 (10y)."},
-            "interval_seconds": {"type": "integer", "description": "Interval in seconds for recurring task. 300=5min, 3600=1h, 86400=1d, 604800=1w."},
+            "interval_seconds": {"type": "integer", "minimum": 300, "maximum": 7776000, "description": "Repeat every N seconds, from 5 minutes to 90 days. 300=5min, 3600=1h, 10800=3h, 86400=1d, 604800=1w. Over 7 days, use whole days."},
             "trigger_config": {
                 "type": "object",
-                "description": "Advanced trigger config with type=interval/cron. interval: {type:'interval', days:N}. cron: {type:'cron', hour:0-23, minute:0-59, day_of_week:'mon,wed' or 'lun,mie', day:1-31}",
+                "description": "Only for a clock time: {type:'cron', hour:0-23, minute:0-59, day_of_week:'mon,wed' or 'lun,mie', day:1-31}. For every N minutes, hours, or days, use interval_seconds instead.",
                 "properties": {
-                    "type": {"type": "string", "enum": ["interval", "cron"]},
-                    "days": {"type": "integer", "description": "For interval type: number of days between runs"},
-                    "hour": {"type": "integer", "description": "For cron type: hour (0-23)"},
-                    "minute": {"type": "integer", "description": "For cron type: minute (0-59)"},
-                    "day_of_week": {"type": "string", "description": "For cron type: days of week in English or Spanish abbreviations (mon,wed,fri or lun,mie,vie)"},
-                    "day": {"type": "integer", "description": "For cron type: day of month (1-31)"}
-                }
+                    "type": {"type": "string", "enum": ["cron"]},
+                    "hour": {"type": "integer", "description": "Hour (0-23)"},
+                    "minute": {"type": "integer", "description": "Minute (0-59)"},
+                    "day_of_week": {"type": "string", "description": "Optional days of week in English or Spanish abbreviations (mon,wed,fri or lun,mie,vie)"},
+                    "day": {"type": "integer", "description": "Optional day of month (1-31)"}
+                },
+                "required": ["type", "hour", "minute"],
+                "additionalProperties": false
             }
         },
         "required": ["text"]

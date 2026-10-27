@@ -17,13 +17,13 @@ use bot_core::task_triggers::{
     IntegerInput, TaskTrigger, TaskTriggerInput, TriggerConfigInput, TriggerError,
     parse_task_trigger,
 };
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, Utc, Weekday};
 use serde_json::Value;
 
 use crate::chat_tool_loop::ToolExecutionResult;
 use crate::native_ai::estimate_task_reserve_credit_units;
 use crate::tool_output;
-use crate::tool_requests::{ExternalToolExecutor, ExternalToolRequest};
+use crate::tool_requests::{ExternalToolExecutor, ExternalToolRequest, json_integer};
 
 const TASK_RECORD_TTL_SECONDS: i64 = 86_400 * 3_650;
 
@@ -168,6 +168,26 @@ where
         let Some(user_id) = self.context.user_id else {
             return ToolExecutionResult::output(credit_user(self.context.locale));
         };
+        let schedule = task_schedule(&trigger);
+        // Chat history keeps only reply text, so a later message cannot see
+        // which tasks an earlier one created. Check the stored tasks instead.
+        let same_text = match self.store.list(&self.context.chat_id) {
+            Ok(tasks) => tasks
+                .into_iter()
+                .filter(|task| same_task_text(&task.text, &text))
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                return ToolExecutionResult::with_diagnostics(
+                    list_error(self.context.locale),
+                    vec![format!("task duplicate check failed: {error}")],
+                );
+            }
+        };
+        if let Some(existing) = same_text.iter().find(|task| {
+            task.schedule != TaskSchedule::Once && same_schedule(&task.schedule, &schedule)
+        }) {
+            return ToolExecutionResult::output(task_exists(existing, self.context.locale));
+        }
         let locale_code = locale_code(self.context.locale);
         let required = match estimate_task_reserve_credit_units(
             &text,
@@ -200,7 +220,6 @@ where
         }
 
         let now = (self.now)();
-        let schedule = task_schedule(&trigger);
         let delay = match trigger {
             TaskTrigger::Delay { seconds } => Some(seconds),
             _ => None,
@@ -259,11 +278,67 @@ where
                 vec![format!("task persistence failed: {error}")],
             );
         }
-        ToolExecutionResult::confirmed_output(created(
+        let mut result = ToolExecutionResult::confirmed_output(created(
             &describe_trigger(&trigger, self.context.locale),
             &text,
             self.context.locale,
-        ))
+        ));
+        if !same_text.is_empty() {
+            result
+                .output
+                .push_str(&same_text_note(&same_text, self.context.locale));
+        }
+        result
+    }
+}
+
+fn same_task_text(left: &str, right: &str) -> bool {
+    left.split_whitespace()
+        .map(str::to_lowercase)
+        .eq(right.split_whitespace().map(str::to_lowercase))
+}
+
+fn same_schedule(left: &TaskSchedule, right: &TaskSchedule) -> bool {
+    match (left, right) {
+        (
+            TaskSchedule::Cron {
+                hour: left_hour,
+                minute: left_minute,
+                weekdays: left_weekdays,
+                day: left_day,
+            },
+            TaskSchedule::Cron {
+                hour: right_hour,
+                minute: right_minute,
+                weekdays: right_weekdays,
+                day: right_day,
+            },
+        ) => {
+            let sorted = |weekdays: &[Weekday]| {
+                let mut days = weekdays
+                    .iter()
+                    .map(Weekday::num_days_from_monday)
+                    .collect::<Vec<_>>();
+                days.sort_unstable();
+                days.dedup();
+                days
+            };
+            (left_hour, left_minute, left_day) == (right_hour, right_minute, right_day)
+                && sorted(left_weekdays) == sorted(right_weekdays)
+        }
+        _ => match (interval_length(left), interval_length(right)) {
+            (Some(left), Some(right)) => left == right,
+            _ => left == right,
+        },
+    }
+}
+
+/// Day and second intervals of the same length repeat the same way.
+fn interval_length(schedule: &TaskSchedule) -> Option<i64> {
+    match schedule {
+        TaskSchedule::IntervalSeconds { seconds } => Some(*seconds),
+        TaskSchedule::IntervalDays { days } => days.checked_mul(86_400),
+        TaskSchedule::Once | TaskSchedule::Cron { .. } => None,
     }
 }
 
@@ -309,11 +384,7 @@ impl<Store: TaskToolStore> ExternalToolExecutor for TaskListTool<Store> {
                     .join("\n"),
             ),
             Err(error) => ToolExecutionResult::with_diagnostics(
-                bot_core::menu_ui::localized(
-                    self.locale,
-                    "No pude cargar las tareas. Probá de nuevo",
-                    "I could not load tasks. Try again",
-                ),
+                list_error(self.locale),
                 vec![format!("task list failed: {error}")],
             ),
         }
@@ -360,11 +431,7 @@ impl<Store: TaskToolStore> ExternalToolExecutor for TaskCancelTool<Store> {
             Ok(tasks) => tasks,
             Err(error) => {
                 return ToolExecutionResult::with_diagnostics(
-                    bot_core::menu_ui::localized(
-                        self.locale,
-                        "No pude cargar las tareas. Probá de nuevo",
-                        "I could not load tasks. Try again",
-                    ),
+                    list_error(self.locale),
                     vec![format!("task cancel list failed: {error}")],
                 );
             }
@@ -394,30 +461,53 @@ fn optional_integer(value: Option<i64>) -> IntegerInput {
 fn value_integer(value: Option<&Value>) -> IntegerInput {
     match value {
         None | Some(Value::Null) => IntegerInput::Missing,
-        Some(value) => value
-            .as_i64()
-            .map_or(IntegerInput::Invalid, IntegerInput::Value),
+        Some(value) => json_integer(value).map_or(IntegerInput::Invalid, IntegerInput::Value),
     }
 }
+
+const INTERVAL_FIELDS: [&str; 5] = ["type", "days", "hours", "minutes", "seconds"];
+const CRON_FIELDS: [&str; 5] = ["type", "hour", "minute", "day_of_week", "day"];
 
 fn trigger_config_input(config: Option<&Value>) -> TriggerConfigInput {
     let Some(config) = config.and_then(Value::as_object) else {
         return TriggerConfigInput::Missing;
     };
-    match config.get("type").and_then(Value::as_str) {
-        Some("interval") => TriggerConfigInput::IntervalDays {
+    let interval = match config.get("type").and_then(Value::as_str) {
+        Some("interval") => true,
+        Some("cron") => false,
+        _ => return TriggerConfigInput::Unsupported,
+    };
+    let fields = if interval {
+        &INTERVAL_FIELDS
+    } else {
+        &CRON_FIELDS
+    };
+    // Some models send every schema field and leave the unused ones null.
+    // A real unused value, such as `weekdays` instead of `day_of_week`,
+    // would otherwise be dropped and change the schedule without a word.
+    if let Some(name) = config
+        .iter()
+        .find(|(name, value)| !value.is_null() && !fields.contains(&name.as_str()))
+        .map(|(name, _)| name.clone())
+    {
+        return TriggerConfigInput::UnknownField { name };
+    }
+    if interval {
+        return TriggerConfigInput::Interval {
             days: value_integer(config.get("days")),
-        },
-        Some("cron") => TriggerConfigInput::Cron {
-            hour: value_integer(config.get("hour")),
-            minute: value_integer(config.get("minute")),
-            weekdays: config
-                .get("day_of_week")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
-            day: value_integer(config.get("day")),
-        },
-        _ => TriggerConfigInput::Unsupported,
+            hours: value_integer(config.get("hours")),
+            minutes: value_integer(config.get("minutes")),
+            seconds: value_integer(config.get("seconds")),
+        };
+    }
+    TriggerConfigInput::Cron {
+        hour: value_integer(config.get("hour")),
+        minute: value_integer(config.get("minute")),
+        weekdays: config
+            .get("day_of_week")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        day: value_integer(config.get("day")),
     }
 }
 
@@ -460,24 +550,26 @@ fn locale_code(locale: Locale) -> &'static str {
 
 fn trigger_error(error: TriggerError, locale: Locale) -> String {
     match (error, locale) {
-        (TriggerError::Required, Locale::Es) => "necesito usar algún parámetro de tiempo: delay_seconds (una vez), interval_seconds (repetir), o trigger_config.".to_owned(),
-        (TriggerError::Required, Locale::En) => "provide delay_seconds, interval_seconds, or trigger_config".to_owned(),
-        (TriggerError::UnsupportedType, Locale::Es) => "trigger_config.type debe ser 'interval' o 'cron'".to_owned(),
-        (TriggerError::UnsupportedType, Locale::En) => "trigger_config.type must be 'interval' or 'cron'".to_owned(),
+        (TriggerError::Required, Locale::Es) => "necesito usar algún parámetro de tiempo: delay_seconds (una vez), interval_seconds (repetir cada tantos segundos) o trigger_config (cron a una hora fija).".to_owned(),
+        (TriggerError::Required, Locale::En) => "provide delay_seconds (once), interval_seconds (repeat every few seconds), or trigger_config (cron at a clock time)".to_owned(),
+        (TriggerError::UnsupportedType, Locale::Es) => "trigger_config.type tiene que ser 'cron'. Para repetir cada tantos minutos, horas o días usá interval_seconds (3 h = 10800)".to_owned(),
+        (TriggerError::UnsupportedType, Locale::En) => "trigger_config.type must be 'cron'. To repeat every few minutes, hours, or days, use interval_seconds (3 h = 10800)".to_owned(),
+        (TriggerError::UnknownField { name }, Locale::Es) => format!("trigger_config no usa '{name}'. Para cron los campos son hour, minute, day_of_week y day. Para repetir cada tantos minutos, horas o días usá interval_seconds (3 h = 10800)"),
+        (TriggerError::UnknownField { name }, Locale::En) => format!("trigger_config does not use '{name}'. Cron fields are hour, minute, day_of_week, and day. To repeat every few minutes, hours, or days, use interval_seconds (3 h = 10800)"),
         (TriggerError::DelayPositive, Locale::Es) => "delay_seconds debe ser un entero positivo".to_owned(),
         (TriggerError::DelayPositive, Locale::En) => "delay_seconds must be a positive integer".to_owned(),
         (TriggerError::DelayMaximum, Locale::Es) => "el máximo es 10 años".to_owned(),
         (TriggerError::DelayMaximum, Locale::En) => "the maximum delay is 10 years".to_owned(),
         (TriggerError::IntervalMinimum, Locale::Es) => "el intervalo mínimo es 300 segundos (5 min)".to_owned(),
         (TriggerError::IntervalMinimum, Locale::En) => "the minimum interval is 300 seconds (5 minutes)".to_owned(),
-        (TriggerError::IntervalMaximum, Locale::Es) => "el intervalo máximo es 7 días".to_owned(),
-        (TriggerError::IntervalMaximum, Locale::En) => "the maximum interval is 7 days".to_owned(),
-        (TriggerError::DaysRequired, Locale::Es) => "days es requerido para trigger interval".to_owned(),
-        (TriggerError::DaysRequired, Locale::En) => "days is required for an interval trigger".to_owned(),
-        (TriggerError::DaysPositive, Locale::Es) => "days debe ser un entero positivo".to_owned(),
-        (TriggerError::DaysPositive, Locale::En) => "days must be a positive integer".to_owned(),
-        (TriggerError::DaysMaximum, Locale::Es) => "el máximo son 90 días".to_owned(),
-        (TriggerError::DaysMaximum, Locale::En) => "the maximum interval is 90 days".to_owned(),
+        (TriggerError::IntervalMaximum, Locale::Es) => "el intervalo máximo es 90 días (7776000 segundos)".to_owned(),
+        (TriggerError::IntervalMaximum, Locale::En) => "the maximum interval is 90 days (7776000 seconds)".to_owned(),
+        (TriggerError::IntervalWholeDays, Locale::Es) => "los intervalos de más de 7 días tienen que ser días enteros (múltiplos de 86400 segundos)".to_owned(),
+        (TriggerError::IntervalWholeDays, Locale::En) => "intervals over 7 days must be whole days (multiples of 86400 seconds)".to_owned(),
+        (TriggerError::IntervalUnitsRequired, Locale::Es) => "para repetir cada tantos minutos, horas o días usá interval_seconds (3 h = 10800)".to_owned(),
+        (TriggerError::IntervalUnitsRequired, Locale::En) => "to repeat every few minutes, hours, or days, use interval_seconds (3 h = 10800)".to_owned(),
+        (TriggerError::IntervalUnitInvalid, Locale::Es) => "days, hours, minutes y seconds tienen que ser enteros de 0 para arriba. Mejor usá interval_seconds (3 h = 10800)".to_owned(),
+        (TriggerError::IntervalUnitInvalid, Locale::En) => "days, hours, minutes, and seconds must be whole numbers from 0 up. Use interval_seconds instead (3 h = 10800)".to_owned(),
         (TriggerError::HourRequired, Locale::Es) => "hour es requerido para trigger cron".to_owned(),
         (TriggerError::HourRequired, Locale::En) => "hour is required for a cron trigger".to_owned(),
         (TriggerError::HourRange, Locale::Es) => "hour debe ser 0-23".to_owned(),
@@ -651,6 +743,42 @@ fn created(schedule: &str, text: &str, locale: Locale) -> String {
     match locale {
         Locale::Es => format!("Tarea programada: {schedule}\n{text}"),
         Locale::En => format!("Task scheduled: {schedule}\n{text}"),
+    }
+}
+
+fn list_error(locale: Locale) -> &'static str {
+    if locale == Locale::En {
+        "I could not load tasks. Try again"
+    } else {
+        "No pude cargar las tareas. Probá de nuevo"
+    }
+}
+
+fn task_exists(task: &ScheduledTask, locale: Locale) -> String {
+    let summary = format_task_summary(task, locale);
+    match locale {
+        Locale::Es => format!(
+            "Esa tarea ya existe, no creé otra:\n{summary}\nPara cambiarla, cancelala con task_cancel y creá la nueva"
+        ),
+        Locale::En => format!(
+            "That task already exists, so I did not create another:\n{summary}\nTo change it, cancel it with task_cancel and create the new one"
+        ),
+    }
+}
+
+fn same_text_note(tasks: &[ScheduledTask], locale: Locale) -> String {
+    let summaries = tasks
+        .iter()
+        .map(|task| format_task_summary(task, locale))
+        .collect::<Vec<_>>()
+        .join("\n");
+    match locale {
+        Locale::Es => format!(
+            "\nEste chat ya tenía otra tarea con el mismo texto:\n{summaries}\nSi la nueva la reemplaza, cancelá la vieja con task_cancel"
+        ),
+        Locale::En => format!(
+            "\nThis chat already had a task with the same text:\n{summaries}\nIf the new one replaces it, cancel the old one with task_cancel"
+        ),
     }
 }
 
@@ -997,6 +1125,222 @@ mod tests {
         );
     }
 
+    #[test]
+    fn interval_configs_in_hours_create_second_intervals_instead_of_failing() {
+        let state = Rc::new(RefCell::new(StoreState::default()));
+        let mut tool = set_tool(Rc::clone(&state), Ok(i64::MAX), Locale::Es);
+        let result = tool.execute(
+            set_request(None, None, Some(json!({"type":"interval", "hours":3}))),
+            "call",
+        );
+        assert_eq!(
+            result.output,
+            "Tarea programada: cada 3 horas\ncheck the synthetic result"
+        );
+        assert_eq!(
+            state.borrow().saved[0].0.task.schedule,
+            TaskSchedule::IntervalSeconds { seconds: 10_800 }
+        );
+        assert_eq!(
+            state.borrow().saved[0].0.task.next_run_at,
+            Some(1_700_010_800)
+        );
+    }
+
+    #[test]
+    fn long_second_intervals_are_stored_as_whole_days() {
+        let state = Rc::new(RefCell::new(StoreState::default()));
+        let mut tool = set_tool(Rc::clone(&state), Ok(i64::MAX), Locale::En);
+        let result = tool.execute(set_request(None, Some(86_400 * 30), None), "call");
+        assert_eq!(
+            result.output,
+            "Task scheduled: every 30 days\ncheck the synthetic result"
+        );
+        assert_eq!(
+            state.borrow().saved[0].0.task.schedule,
+            TaskSchedule::IntervalDays { days: 30 }
+        );
+    }
+
+    #[test]
+    fn wrong_trigger_shapes_point_the_model_at_interval_seconds() {
+        let state = Rc::new(RefCell::new(StoreState::default()));
+        for (config, needle) in [
+            (json!({"type":"interval"}), "interval_seconds (3 h = 10800)"),
+            (
+                json!({"type":"interval", "days":"x"}),
+                "interval_seconds (3 h = 10800)",
+            ),
+            (
+                json!({"type":"every", "hours":3}),
+                "interval_seconds (3 h = 10800)",
+            ),
+            (
+                json!({"type":"cron", "hour":9, "minute":0, "weekdays":"mon"}),
+                "does not use 'weekdays'",
+            ),
+        ] {
+            let mut tool = set_tool(Rc::clone(&state), Ok(i64::MAX), Locale::En);
+            let output = tool
+                .execute(set_request(None, None, Some(config)), "call")
+                .output;
+            assert!(output.contains(needle), "{output}");
+        }
+        assert!(state.borrow().saved.is_empty());
+    }
+
+    fn stored_task(id: &str, text: &str, schedule: TaskSchedule) -> Option<ScheduledTask> {
+        let mut task = task(id, "-100")?;
+        text.clone_into(&mut task.text);
+        task.schedule = schedule;
+        Some(task)
+    }
+
+    #[test]
+    fn repeating_the_same_task_returns_the_existing_one_instead_of_a_copy() {
+        let daily = TaskSchedule::IntervalDays { days: 1 };
+        let state = Rc::new(RefCell::new(StoreState {
+            tasks: stored_task("old12345", "Check the  synthetic RESULT", daily)
+                .into_iter()
+                .collect(),
+            ..StoreState::default()
+        }));
+        let mut tool = set_tool(Rc::clone(&state), Ok(i64::MAX), Locale::En);
+        let result = tool.execute(set_request(None, Some(86_400), None), "call");
+        assert!(
+            result
+                .output
+                .starts_with("That task already exists, so I did not create another:\n[old12345]"),
+            "{}",
+            result.output
+        );
+        assert!(result.output.contains("task_cancel"));
+        assert!(result.failure_fallback.is_none());
+        assert!(state.borrow().saved.is_empty());
+    }
+
+    #[test]
+    fn same_cron_with_reordered_weekdays_is_a_duplicate() {
+        let cron = TaskSchedule::Cron {
+            hour: 9,
+            minute: 5,
+            weekdays: vec![Weekday::Wed, Weekday::Mon],
+            day: None,
+        };
+        let state = Rc::new(RefCell::new(StoreState {
+            tasks: stored_task("old12345", "check the synthetic result", cron)
+                .into_iter()
+                .collect(),
+            ..StoreState::default()
+        }));
+        let mut tool = set_tool(Rc::clone(&state), Ok(i64::MAX), Locale::Es);
+        let output = tool
+            .execute(
+                set_request(
+                    None,
+                    None,
+                    Some(json!({"type":"cron", "hour":9, "minute":5, "day_of_week":"lun,mie"})),
+                ),
+                "call",
+            )
+            .output;
+        assert!(output.starts_with("Esa tarea ya existe"), "{output}");
+        assert!(state.borrow().saved.is_empty());
+    }
+
+    #[test]
+    fn same_text_on_a_new_schedule_is_created_with_a_note_for_the_model() {
+        let state = Rc::new(RefCell::new(StoreState {
+            tasks: [
+                stored_task(
+                    "old12345",
+                    "check the synthetic result",
+                    TaskSchedule::IntervalDays { days: 1 },
+                ),
+                stored_task("once1234", "check the synthetic result", TaskSchedule::Once),
+                stored_task(
+                    "other123",
+                    "something else",
+                    TaskSchedule::IntervalSeconds { seconds: 10_800 },
+                ),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+            ..StoreState::default()
+        }));
+        let mut tool = set_tool(Rc::clone(&state), Ok(i64::MAX), Locale::En);
+        let result = tool.execute(set_request(None, Some(10_800), None), "call");
+        assert!(result.output.starts_with(
+            "Task scheduled: every 3 hours\ncheck the synthetic result\nThis chat already had a task with the same text:\n[old12345]"
+        ));
+        assert!(result.output.contains("[once1234]"));
+        assert!(!result.output.contains("[other123]"));
+        assert_eq!(
+            result.failure_fallback.as_deref(),
+            Some("Task scheduled: every 3 hours\ncheck the synthetic result")
+        );
+        assert_eq!(state.borrow().saved.len(), 1);
+
+        // One-shot tasks with the same text are never treated as copies.
+        let mut tool = set_tool(Rc::clone(&state), Ok(i64::MAX), Locale::Es);
+        let output = tool
+            .execute(set_request(Some(60), None, None), "call")
+            .output;
+        assert!(output.contains("Este chat ya tenía otra tarea"), "{output}");
+        assert_eq!(state.borrow().saved.len(), 2);
+    }
+
+    #[test]
+    fn duplicate_check_failures_stop_before_creating_a_task() {
+        let state = Rc::new(RefCell::new(StoreState {
+            list_error: Some("synthetic list failure".to_owned()),
+            ..StoreState::default()
+        }));
+        let mut tool = set_tool(Rc::clone(&state), Ok(i64::MAX), Locale::En);
+        let result = tool.execute(set_request(Some(60), None, None), "call");
+        assert_eq!(result.output, "I could not load tasks. Try again");
+        assert!(result.diagnostics[0].contains("synthetic list failure"));
+        assert!(state.borrow().saved.is_empty());
+    }
+
+    #[test]
+    fn schedules_compare_by_how_they_repeat() {
+        let cron = |weekdays: Vec<Weekday>, day| TaskSchedule::Cron {
+            hour: 9,
+            minute: 0,
+            weekdays,
+            day,
+        };
+        assert!(same_schedule(
+            &TaskSchedule::IntervalDays { days: 1 },
+            &TaskSchedule::IntervalSeconds { seconds: 86_400 }
+        ));
+        assert!(!same_schedule(
+            &TaskSchedule::IntervalDays { days: 1 },
+            &TaskSchedule::IntervalSeconds { seconds: 10_800 }
+        ));
+        assert!(!same_schedule(
+            &TaskSchedule::IntervalSeconds { seconds: 86_400 },
+            &cron(Vec::new(), None)
+        ));
+        assert!(same_schedule(&TaskSchedule::Once, &TaskSchedule::Once));
+        assert!(same_schedule(
+            &cron(vec![Weekday::Fri, Weekday::Mon, Weekday::Mon], None),
+            &cron(vec![Weekday::Mon, Weekday::Fri], None)
+        ));
+        assert!(!same_schedule(
+            &cron(vec![Weekday::Mon], None),
+            &cron(vec![Weekday::Tue], None)
+        ));
+        assert!(!same_schedule(
+            &cron(Vec::new(), Some(1)),
+            &cron(Vec::new(), Some(2))
+        ));
+        assert!(same_task_text(" Check  the result ", "check the RESULT"));
+        assert!(!same_task_text("check the result", "check the results"));
+    }
+
     fn task(id: &str, chat_id: &str) -> Option<ScheduledTask> {
         Some(ScheduledTask {
             id: TaskId::new(id).ok()?,
@@ -1214,11 +1558,14 @@ mod tests {
             TriggerError::UnsupportedType,
             TriggerError::DelayPositive,
             TriggerError::DelayMaximum,
+            TriggerError::UnknownField {
+                name: "synthetic".to_owned(),
+            },
             TriggerError::IntervalMinimum,
             TriggerError::IntervalMaximum,
-            TriggerError::DaysRequired,
-            TriggerError::DaysPositive,
-            TriggerError::DaysMaximum,
+            TriggerError::IntervalWholeDays,
+            TriggerError::IntervalUnitsRequired,
+            TriggerError::IntervalUnitInvalid,
             TriggerError::HourRequired,
             TriggerError::HourRange,
             TriggerError::MinuteRequired,
@@ -1235,11 +1582,52 @@ mod tests {
         }
 
         assert_eq!(
-            trigger_config_input(Some(&json!({"type":"interval", "days":2}))),
-            TriggerConfigInput::IntervalDays {
-                days: IntegerInput::Value(2)
+            trigger_config_input(Some(
+                &json!({"type":"interval", "days":2, "hours":"3", "minutes":4.0})
+            )),
+            TriggerConfigInput::Interval {
+                days: IntegerInput::Value(2),
+                hours: IntegerInput::Value(3),
+                minutes: IntegerInput::Value(4),
+                seconds: IntegerInput::Missing,
             }
         );
+        assert_eq!(
+            trigger_config_input(Some(&json!({"type":"interval", "hours":2.5}))),
+            TriggerConfigInput::Interval {
+                days: IntegerInput::Missing,
+                hours: IntegerInput::Invalid,
+                minutes: IntegerInput::Missing,
+                seconds: IntegerInput::Missing,
+            }
+        );
+        // Null fields from models that fill in the whole schema are ignored.
+        assert_eq!(
+            trigger_config_input(Some(
+                &json!({"type":"cron", "hour":9, "minute":0, "days":null})
+            )),
+            TriggerConfigInput::Cron {
+                hour: IntegerInput::Value(9),
+                minute: IntegerInput::Value(0),
+                weekdays: None,
+                day: IntegerInput::Missing,
+            }
+        );
+        for (config, name) in [
+            (
+                json!({"type":"cron", "hour":9, "minute":0, "weekdays":"mon"}),
+                "weekdays",
+            ),
+            (json!({"type":"interval", "hour":3}), "hour"),
+            (json!({"type":"interval", "every":"3h"}), "every"),
+        ] {
+            assert_eq!(
+                trigger_config_input(Some(&config)),
+                TriggerConfigInput::UnknownField {
+                    name: name.to_owned()
+                }
+            );
+        }
         assert_eq!(
             trigger_config_input(Some(&json!({"type":"synthetic"}))),
             TriggerConfigInput::Unsupported
