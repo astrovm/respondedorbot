@@ -54,6 +54,10 @@ struct HistoryEntry<'a> {
     text: &'a str,
     timestamp: i64,
     role: &'a str,
+    /// One line per tool call behind an assistant reply that changed
+    /// something. Readers that predate it ignore the field.
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    tools: &'a [String],
 }
 
 #[derive(Serialize)]
@@ -232,6 +236,73 @@ pub fn prepare_message_write(
     reply_to_message_id: Option<&str>,
     mentions_bot: bool,
 ) -> Result<MessageWritePlan, serde_json::Error> {
+    prepare_write(
+        MessageFields {
+            chat_id,
+            message_id,
+            text,
+            timestamp,
+            role,
+            user_id,
+            username,
+            reply_to_message_id,
+            mentions_bot,
+        },
+        &[],
+    )
+}
+
+/// Prepare a bot reply together with notes on the tool calls behind it.
+pub fn prepare_assistant_message_write(
+    chat_id: &str,
+    message_id: &str,
+    text: &str,
+    timestamp: i64,
+    tool_notes: &[String],
+) -> Result<MessageWritePlan, serde_json::Error> {
+    prepare_write(
+        MessageFields {
+            chat_id,
+            message_id,
+            text,
+            timestamp,
+            role: Some("assistant"),
+            user_id: None,
+            username: None,
+            reply_to_message_id: None,
+            mentions_bot: false,
+        },
+        tool_notes,
+    )
+}
+
+struct MessageFields<'a> {
+    chat_id: &'a str,
+    message_id: &'a str,
+    text: &'a str,
+    timestamp: i64,
+    role: Option<&'a str>,
+    user_id: Option<&'a str>,
+    username: Option<&'a str>,
+    reply_to_message_id: Option<&'a str>,
+    mentions_bot: bool,
+}
+
+fn prepare_write(
+    fields: MessageFields<'_>,
+    tool_notes: &[String],
+) -> Result<MessageWritePlan, serde_json::Error> {
+    let MessageFields {
+        chat_id,
+        message_id,
+        text,
+        timestamp,
+        role,
+        user_id,
+        username,
+        reply_to_message_id,
+        mentions_bot,
+    } = fields;
     let default_role = if message_id.starts_with("bot_") {
         "assistant"
     } else {
@@ -247,6 +318,7 @@ pub fn prepare_message_write(
         text: &text,
         timestamp,
         role,
+        tools: tool_notes,
     })?;
 
     Ok(MessageWritePlan {
@@ -350,6 +422,23 @@ mod tests {
         let explicit = explicit_result?;
         assert_eq!(explicit.role, "tool");
         assert_eq!(explicit.mentions_bot, "0");
+        Ok(())
+    }
+
+    #[test]
+    fn assistant_replies_keep_their_tool_notes_and_others_omit_the_field()
+    -> Result<(), serde_json::Error> {
+        let notes = ["task_set {} → created".to_owned()];
+        let reply = prepare_assistant_message_write("1", "bot_2", "done", 10, &notes)?;
+        assert_eq!(reply.role, "assistant");
+        assert_eq!(reply.text, "done");
+        let entry = serde_json::from_str::<serde_json::Value>(&reply.history_entry)?;
+        assert_eq!(entry["tools"], serde_json::json!(["task_set {} → created"]));
+        assert_eq!(entry["role"], "assistant");
+
+        let plain = prepare_assistant_message_write("1", "bot_3", "done", 10, &[])?;
+        let entry = serde_json::from_str::<serde_json::Value>(&plain.history_entry)?;
+        assert!(entry.get("tools").is_none());
         Ok(())
     }
 

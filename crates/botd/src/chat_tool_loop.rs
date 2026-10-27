@@ -26,6 +26,10 @@ const SLOW_THINKING_ANSWER_PROMPT: &str =
 /// Tool output past this many characters is cut before it reaches the model,
 /// so one oversized result cannot crowd out the chat context.
 const MAX_TOOL_OUTPUT_CHARS: usize = 16_000;
+/// Calls that change something or pick at random are kept as one-line notes
+/// with the reply, so a later message can see what this one did.
+const MAX_TOOL_NOTES: usize = 8;
+const MAX_TOOL_NOTE_PART_CHARS: usize = 300;
 const MAX_PROVIDER_RETRIES: usize = 2;
 const MAX_RATE_LIMIT_RETRY_SECONDS: u64 = 5;
 
@@ -86,6 +90,12 @@ pub trait NativeToolRuntime {
     /// result within one message. Only tools that read stable data say yes.
     fn reusable(&self, _name: &str) -> bool {
         false
+    }
+
+    /// Check and normalize a call's arguments before it runs. An error goes
+    /// back to the model as the call's result instead of running the tool.
+    fn check_arguments(&self, _name: &str, arguments: Value) -> Result<Value, String> {
+        Ok(arguments)
     }
 
     /// Prepare a read-only call to run concurrently with the other calls of
@@ -188,6 +198,8 @@ pub struct ChatToolLoopResult {
     pub tool_calls_executed: usize,
     pub diagnostics: Vec<String>,
     pub failure_fallbacks: Vec<String>,
+    /// One line per call that changed something or picked at random.
+    pub tool_notes: Vec<String>,
     pub stopped_at_limit: bool,
 }
 
@@ -201,9 +213,39 @@ impl ChatToolLoopResult {
             tool_calls_executed: 0,
             diagnostics: Vec::new(),
             failure_fallbacks: Vec::new(),
+            tool_notes: Vec::new(),
             stopped_at_limit: false,
         }
     }
+
+    fn note_tool_call(&mut self, name: &str, arguments: &str, output: &str) {
+        if self.tool_notes.len() < MAX_TOOL_NOTES {
+            self.tool_notes.push(format!(
+                "{name} {} → {}",
+                note_part(arguments),
+                note_part(output)
+            ));
+        }
+    }
+}
+
+/// Fold a tool's arguments or output into one bounded line.
+fn note_part(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    if line.chars().count() <= MAX_TOOL_NOTE_PART_CHARS {
+        return line;
+    }
+    let mut cut = line
+        .chars()
+        .take(MAX_TOOL_NOTE_PART_CHARS - 1)
+        .collect::<String>();
+    cut.push('…');
+    cut
 }
 
 #[derive(Debug, Error)]
@@ -417,6 +459,9 @@ where
                 let arguments = match plan {
                     CallPlan::Run(arguments) => arguments,
                     CallPlan::Skip { reason, output } => {
+                        if *reason == "invalid_arguments" && !tools.reusable(&call.name) {
+                            result.note_tool_call(&call.name, &call.arguments, output);
+                        }
                         trace(
                             operation_id,
                             result.provider_rounds,
@@ -466,6 +511,7 @@ where
                     // A tool that may change state can make any earlier
                     // reading stale, so later calls must run again.
                     reusable_results.clear();
+                    result.note_tool_call(&call.name, &arguments.to_string(), &output);
                 } else if tool_result.diagnostics.is_empty() {
                     reusable_results.insert(reuse_key(call, arguments), output.clone());
                 }
@@ -650,6 +696,15 @@ fn plan_call<Tools: NativeToolRuntime>(
             return CallPlan::Skip {
                 reason: "invalid_arguments",
                 output: invalid_arguments_output(&call.name, &error),
+            };
+        }
+    };
+    let arguments = match tools.check_arguments(&call.name, arguments) {
+        Ok(arguments) => arguments,
+        Err(output) => {
+            return CallPlan::Skip {
+                reason: "invalid_arguments",
+                output,
             };
         }
     };
@@ -1103,6 +1158,14 @@ mod tests {
             matches!(name, "calculate" | "fetch" | "big")
         }
 
+        fn check_arguments(&self, name: &str, arguments: Value) -> Result<Value, String> {
+            if arguments.get("bad").is_some() {
+                Err(format!("bad argument\n  for {name}"))
+            } else {
+                Ok(arguments)
+            }
+        }
+
         fn execute(
             &mut self,
             name: &str,
@@ -1173,6 +1236,77 @@ mod tests {
             name: name.to_owned(),
             arguments: arguments.to_owned(),
         }
+    }
+
+    #[test]
+    fn calls_that_change_something_are_kept_as_bounded_notes() {
+        let with_id = |name: &str, arguments: &str, id: &str| StreamToolCall {
+            id: id.to_owned(),
+            ..call(name, arguments)
+        };
+        let long_value = "x".repeat(400);
+        let provider = Provider::new(vec![
+            Ok(round(
+                "",
+                vec![
+                    with_id("record", r#"{"value":1}"#, "call-1"),
+                    with_id("record", r#"{"bad":true}"#, "call-2"),
+                    with_id("calculate", r#"{"expression":"2+2"}"#, "call-3"),
+                    with_id("record", "not json", "call-4"),
+                    with_id(
+                        "record",
+                        &format!(r#"{{"value":"{long_value}"}}"#),
+                        "call-5",
+                    ),
+                ],
+                json!({"round": 1}),
+            )),
+            Ok(round(
+                "",
+                (6..=12)
+                    .map(|id| with_id("record", "{}", &format!("call-{id}")))
+                    .collect(),
+                json!({"round": 2}),
+            )),
+            Ok(round("answer", Vec::new(), json!({"round": 3}))),
+        ]);
+        let mut tools = Tools::default();
+        let result = run_chat_tool_loop(
+            "test-operation",
+            &provider,
+            &mut tools,
+            &[],
+            false,
+            DEFAULT_MAX_TOOL_ROUNDS,
+            ignore_text,
+        )
+        .unwrap_or_else(|error| *error.partial);
+
+        // A rejected call never reaches the tool.
+        assert!(!executed_ids(&tools).contains(&"call-2"));
+        let notes = &result.tool_notes;
+        assert_eq!(notes.len(), MAX_TOOL_NOTES);
+        assert_eq!(notes[0], r#"record {"value":1} → record call-1"#);
+        assert_eq!(
+            notes[1],
+            r#"record {"bad":true} → bad argument | for record"#
+        );
+        assert!(
+            notes[2].starts_with(
+                "record not json → The arguments for 'record' were not a valid JSON object"
+            ),
+            "{}",
+            notes[2]
+        );
+        let (arguments, output) = notes[3]
+            .strip_prefix("record ")
+            .and_then(|note| note.split_once(" → "))
+            .unwrap_or_default();
+        assert_eq!(arguments.chars().count(), MAX_TOOL_NOTE_PART_CHARS);
+        assert!(arguments.ends_with("xx…"));
+        assert_eq!(output, "record call-5");
+        assert_eq!(notes[7], "record {} → record call-9");
+        assert!(!notes.iter().any(|note| note.starts_with("calculate")));
     }
 
     #[test]
