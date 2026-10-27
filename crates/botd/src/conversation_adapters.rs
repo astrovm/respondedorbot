@@ -1041,11 +1041,16 @@ mod tests {
         let mut state = RedisConversationState::new(&endpoint)?;
         let spanish = conversation_input(chat_id, 2, Locale::Es);
         state.record_incoming(&spanish)?;
-        state.record_outgoing(&spanish, Some(3), "synthetic assistant reply")?;
+        state.record_outgoing(
+            &spanish,
+            Some(3),
+            "synthetic assistant reply",
+            &["task_set {} → created".to_owned()],
+        )?;
 
         let english = conversation_input(chat_id, 4, Locale::En);
         state.record_incoming(&english)?;
-        state.record_outgoing(&english, None, "second synthetic reply")?;
+        state.record_outgoing(&english, None, "second synthetic reply", &[])?;
 
         let memory = state.load_memory(&chat_id.to_string(), "synthetic", Some("2"), None, 20)?;
         assert_eq!(memory.history.len(), 4);
@@ -1056,8 +1061,11 @@ mod tests {
         assert_eq!(capped.history.len(), 2);
         assert_eq!(capped.history[1].text, "second synthetic reply");
         assert!(memory.history.iter().any(|entry| {
-            entry.role == PromptRole::Assistant && entry.text == "synthetic assistant reply"
+            entry.role == PromptRole::Assistant
+                && entry.text == "synthetic assistant reply"
+                && entry.tool_notes == ["task_set {} → created"]
         }));
+        assert!(capped.history[1].tool_notes.is_empty());
         assert_eq!(
             state.reply_metadata(&chat_id.to_string(), "3")?,
             Some(crate::ai_dispatch::AiReplyMetadata {
@@ -1486,7 +1494,7 @@ mod tests {
             state.load_memory("-100", "", None, None, 20).err(),
             state.load_summary_memory("-100", 20).err(),
             state.record_incoming(&input).err(),
-            state.record_outgoing(&input, Some(3), "reply").err(),
+            state.record_outgoing(&input, Some(3), "reply", &[]).err(),
         ];
         for failure in failures {
             assert!(

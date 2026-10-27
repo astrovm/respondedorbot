@@ -348,9 +348,9 @@ mod tests {
     use super::{
         CHAT_MEMBER_SCHEMA_VERSION, MESSAGE_HISTORY_SCHEMA_VERSION, SearchCandidate,
         bot_message_metadata_key, chat_compacted_until_key, chat_members_key, chat_summary_key,
-        escape_search_tag, escape_search_text, prepare_chat_member_payload, prepare_message_write,
-        rank_search_candidates, truncate_text, user_chat_compacted_until_key,
-        user_chat_summary_key,
+        escape_search_tag, escape_search_text, prepare_assistant_message_write,
+        prepare_chat_member_payload, prepare_message_write, rank_search_candidates, truncate_text,
+        user_chat_compacted_until_key, user_chat_summary_key,
     };
 
     #[test]
