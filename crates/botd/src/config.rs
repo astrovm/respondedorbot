@@ -682,7 +682,10 @@ mod tests {
         let example = maintenance(&values)?;
         let defaults = maintenance(&HashMap::new())?;
         assert_eq!(example.redis_maxmemory, defaults.redis_maxmemory);
-        assert_eq!(example.redis_maxmemory_policy, defaults.redis_maxmemory_policy);
+        assert_eq!(
+            example.redis_maxmemory_policy,
+            defaults.redis_maxmemory_policy
+        );
         Ok(())
     }
 
