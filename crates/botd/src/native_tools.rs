@@ -7,6 +7,7 @@ use bot_core::ai_capabilities::render_ai_capabilities;
 use bot_core::locale::Locale;
 
 use crate::chat_tool_loop::{ConcurrentToolCall, NativeToolRuntime, ToolExecutionResult};
+use crate::tool_arguments::check_arguments;
 use crate::tool_output;
 
 /// Declares every tool once: its variant, its provider-facing name, and its
@@ -218,6 +219,17 @@ impl<Backend: NativeToolBackend> NativeToolRuntime for NativeToolRegistry<Backen
 
     fn reusable(&self, name: &str) -> bool {
         NativeTool::from_name(name).is_some_and(NativeTool::reusable)
+    }
+
+    fn check_arguments(&self, name: &str, arguments: Value) -> Result<Value, String> {
+        match NativeTool::from_name(name) {
+            Some(tool) => check_arguments(
+                name,
+                &tool_schema(tool)["function"]["parameters"],
+                arguments,
+            ),
+            None => Ok(arguments),
+        }
     }
 
     fn concurrent_call(
@@ -442,6 +454,55 @@ mod tests {
             },
             Locale::En,
         )
+    }
+
+    #[test]
+    fn arguments_are_checked_against_each_tools_own_schema() {
+        let registry = registry(None);
+        // The privacy case: a string "true" must not become a public poll.
+        assert_eq!(
+            registry.check_arguments(
+                "create_poll",
+                json!({"question": "synthetic?", "options": ["a", "b"], "anonymous": "true"}),
+            ),
+            Ok(json!({"question": "synthetic?", "options": ["a", "b"], "anonymous": true}))
+        );
+        assert_eq!(
+            registry.check_arguments("dollar_rates", json!({"timeframe": "6H"})),
+            Ok(json!({"timeframe": "6h"}))
+        );
+        let rejected = registry.check_arguments(
+            "task_set",
+            json!({"text": "synthetic", "interval_seconds": "3h", "interval_hours": 3}),
+        );
+        assert!(
+            rejected.as_ref().is_err_and(|error| error
+                .contains("'interval_seconds' must be a whole number")
+                && error.contains("'interval_hours' is not a parameter")),
+            "{rejected:?}"
+        );
+        assert_eq!(
+            registry.check_arguments("synthetic_unknown", json!({"any": 1})),
+            Ok(json!({"any": 1}))
+        );
+    }
+
+    #[test]
+    fn every_schema_field_has_a_type_the_argument_check_understands() {
+        for schema in catalog_schemas() {
+            let name = &schema["function"]["name"];
+            let parameters = &schema["function"]["parameters"];
+            assert_eq!(parameters["type"], "object", "{name}");
+            for (field, property) in parameters["properties"].as_object().into_iter().flatten() {
+                assert!(
+                    matches!(
+                        property["type"].as_str(),
+                        Some("string" | "integer" | "boolean" | "array" | "object")
+                    ),
+                    "{name}.{field}"
+                );
+            }
+        }
     }
 
     #[test]

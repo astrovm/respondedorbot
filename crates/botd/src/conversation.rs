@@ -66,11 +66,14 @@ pub trait ConversationState {
 
     fn record_incoming(&mut self, input: &AiConversationInput) -> Result<(), String>;
 
+    /// Save a delivered reply. `tool_notes` lists the calls behind it that
+    /// changed something, so later messages can see what it did.
     fn record_outgoing(
         &mut self,
         input: &AiConversationInput,
         sent_message_id: Option<i64>,
         text: &str,
+        tool_notes: &[String],
     ) -> Result<(), String>;
 
     fn load_summary_memory(
@@ -157,6 +160,11 @@ struct PendingConversation {
     kind: PendingKind,
     compaction_plan: Option<MemoryCompactionPlan>,
     compaction_payer: Option<PayerSource>,
+    tool_notes: Vec<String>,
+    /// The reply is the confirmation of a tool that already ran, sent in
+    /// place of an answer the model failed to give. It is true, so it is
+    /// kept in the history even though the model did not write it.
+    tool_fallback: bool,
 }
 
 /// A partial answer at least this long is delivered when the stream fails.
@@ -844,6 +852,8 @@ where
                 kind: PendingKind::MediaCommand,
                 compaction_plan: None,
                 compaction_payer: None,
+                tool_notes: Vec::new(),
+                tool_fallback: false,
             },
         );
         AiPreparation::Reply {
@@ -969,6 +979,8 @@ where
                     },
                     compaction_plan: None,
                     compaction_payer: None,
+                    tool_notes: Vec::new(),
+                    tool_fallback: false,
                 },
             );
             on_event(AiStreamEvent::FinalText(text.clone()))?;
@@ -1054,6 +1066,8 @@ where
                 kind: PendingKind::SummaryCommand { provider_failed },
                 compaction_plan: None,
                 compaction_payer: None,
+                tool_notes: Vec::new(),
+                tool_fallback: false,
             },
         );
         Ok(AiPreparation::Reply {
@@ -1194,6 +1208,8 @@ where
                     },
                     compaction_plan: None,
                     compaction_payer: None,
+                    tool_notes: Vec::new(),
+                    tool_fallback: false,
                 },
             );
             return Ok(AiPreparation::Reply {
@@ -1301,33 +1317,40 @@ where
                 on_event(event).map_err(bot_adapters::openrouter_chat::OpenRouterChatError::Stream)
             },
         );
-        let (raw_text, chat_segments, chat_diagnostics, provider_failed, failure_fallbacks) =
-            match loop_result {
-                Ok(mut result) => {
-                    if result.stopped_at_limit {
-                        let diagnostic = tool_limit_diagnostic(
-                            &operation_id,
-                            result.provider_rounds,
-                            result.tool_calls_executed,
-                        );
-                        eprintln!("{diagnostic}");
-                        result.diagnostics.push(diagnostic);
-                    }
-                    // The loop already ran an answer round after the
-                    // limit, so only an empty reply needs the fallback.
-                    (
-                        result.text,
-                        result.billing_segments,
-                        result.diagnostics,
-                        false,
-                        result.failure_fallbacks,
-                    )
+        let (
+            raw_text,
+            chat_segments,
+            chat_diagnostics,
+            provider_failed,
+            failure_fallbacks,
+            tool_notes,
+        ) = match loop_result {
+            Ok(mut result) => {
+                if result.stopped_at_limit {
+                    let diagnostic = tool_limit_diagnostic(
+                        &operation_id,
+                        result.provider_rounds,
+                        result.tool_calls_executed,
+                    );
+                    eprintln!("{diagnostic}");
+                    result.diagnostics.push(diagnostic);
                 }
-                Err(error) => {
-                    eprintln!("{}", provider_failure_diagnostic(&operation_id, &error));
-                    partial_failure(error)
-                }
-            };
+                // The loop already ran an answer round after the
+                // limit, so only an empty reply needs the fallback.
+                (
+                    result.text,
+                    result.billing_segments,
+                    result.diagnostics,
+                    false,
+                    result.failure_fallbacks,
+                    result.tool_notes,
+                )
+            }
+            Err(error) => {
+                eprintln!("{}", provider_failure_diagnostic(&operation_id, &error));
+                partial_failure(error)
+            }
+        };
         segments.extend(chat_segments);
         diagnostics.extend(chat_diagnostics);
         let identity = user_identity(&input);
@@ -1381,6 +1404,8 @@ where
                 },
                 compaction_plan,
                 compaction_payer: base.source,
+                tool_notes,
+                tool_fallback: fallback && has_failure_fallback,
             },
         );
         Ok(AiPreparation::Reply {
@@ -1583,19 +1608,22 @@ where
             waive_charge.then_some(0),
         )?;
         // Error and fallback replies stay out of the history, so the model
-        // never reads them back as something it said.
+        // never reads them back as something it said. A tool's own
+        // confirmation is the exception: it is true, and without it a later
+        // message would not know the tool ran.
         if delivery.delivered
-            && matches!(
-                pending.kind,
-                PendingKind::Conversation {
-                    provider_failed: false
+            && match pending.kind {
+                PendingKind::Conversation { provider_failed } => {
+                    !provider_failed || pending.tool_fallback
                 }
-            )
+                PendingKind::MediaCommand | PendingKind::SummaryCommand { .. } => false,
+            }
         {
             self.state.record_outgoing(
                 &pending.input,
                 delivery.sent_message_id.map(|id| id.0),
                 &pending.text,
+                &pending.tool_notes,
             )?;
             if let (Some(plan), Some(scheduler)) =
                 (pending.compaction_plan, self.compaction_scheduler.as_mut())
@@ -1836,7 +1864,14 @@ fn append_image_context(messages: &mut [PromptMessage], image: &PromptImage, loc
 
 fn partial_failure(
     error: ChatToolLoopError,
-) -> (String, Vec<Value>, Vec<String>, bool, Vec<String>) {
+) -> (
+    String,
+    Vec<Value>,
+    Vec<String>,
+    bool,
+    Vec<String>,
+    Vec<String>,
+) {
     let mut diagnostics = error.partial.diagnostics.clone();
     diagnostics.push(format!("AI provider stream: {}", error.source));
     (
@@ -1845,6 +1880,7 @@ fn partial_failure(
         diagnostics,
         true,
         error.partial.failure_fallbacks.clone(),
+        error.partial.tool_notes.clone(),
     )
 }
 
@@ -2481,6 +2517,7 @@ mod tests {
         memory_lookups: Vec<(String, Option<String>, Option<String>)>,
         incoming: Vec<AiConversationInput>,
         outgoing: Vec<(AiConversationInput, Option<i64>, String)>,
+        outgoing_notes: Vec<Vec<String>>,
         outgoing_error: Option<String>,
     }
 
@@ -2521,9 +2558,11 @@ mod tests {
             input: &AiConversationInput,
             sent_message_id: Option<i64>,
             text: &str,
+            tool_notes: &[String],
         ) -> Result<(), String> {
             self.outgoing
                 .push((input.clone(), sent_message_id, text.to_owned()));
+            self.outgoing_notes.push(tool_notes.to_vec());
             self.outgoing_error.clone().map_or(Ok(()), Err)
         }
     }
@@ -2711,6 +2750,7 @@ mod tests {
                     history: vec![HistoryMessage {
                         role: PromptRole::Assistant,
                         text: "prior answer".to_owned(),
+                        tool_notes: Vec::new(),
                     }],
                     retrieved: Vec::new(),
                     compaction_plan: None,
@@ -2956,6 +2996,26 @@ mod tests {
                 service.provider.prompts.borrow().len(),
                 if empty_success { 3 } else { 4 }
             );
+
+            // The confirmation is true, so the history keeps it and the call
+            // behind it even though the model never answered.
+            let (_, completion_id, _) = pending(reply(preparation));
+            assert_eq!(
+                service.complete_delivery(AiDelivery {
+                    completion_id,
+                    delivered: true,
+                    sent_message_id: Some(MessageId(77)),
+                }),
+                Ok(())
+            );
+            assert_eq!(service.state.outgoing[0].2, "synthetic task confirmation");
+            assert_eq!(
+                service.state.outgoing_notes,
+                [vec![
+                    r#"task_set {"delay_seconds":3600,"text":"synthetic task"} → synthetic task confirmation"#
+                        .to_owned()
+                ]]
+            );
         }
     }
 
@@ -3121,6 +3181,7 @@ mod tests {
                 tool_calls_executed: 0,
                 diagnostics: Vec::new(),
                 failure_fallbacks: Vec::new(),
+                tool_notes: Vec::new(),
                 stopped_at_limit: false,
             }),
         };
@@ -3894,6 +3955,8 @@ mod tests {
                     kind,
                     compaction_plan: None,
                     compaction_payer: None,
+                    tool_notes: Vec::new(),
+                    tool_fallback: false,
                 },
             );
             assert!(
@@ -3952,6 +4015,7 @@ mod tests {
         extension_denied.state.memory.history = vec![HistoryMessage {
             role: PromptRole::User,
             text: "synthetic context ".repeat(1_000),
+            tool_notes: Vec::new(),
         }];
         assert!(matches!(
             extension_denied.prepare(input()),
@@ -4789,6 +4853,7 @@ mod tests {
         extension_denied.state.memory.history = vec![HistoryMessage {
             role: PromptRole::User,
             text: "synthetic context ".repeat(1_000),
+            tool_notes: Vec::new(),
         }];
         assert!(matches!(
             extension_denied.prepare_summary_command_streaming(input(), &mut ignore_token),
@@ -4965,6 +5030,7 @@ mod tests {
             vec![HistoryMessage {
                 role: PromptRole::User,
                 text: "synthetic context ".repeat(1_000),
+                tool_notes: Vec::new(),
             }]
         };
         let mut unsettled = conversation(
@@ -5080,6 +5146,7 @@ mod tests {
                     history: vec![HistoryMessage {
                         role: PromptRole::User,
                         text: "hi".to_owned(),
+                        tool_notes: Vec::new(),
                     }],
                     ..ConversationMemory::default()
                 },

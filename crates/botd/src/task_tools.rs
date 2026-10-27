@@ -255,6 +255,8 @@ where
                 );
             }
         };
+        // The model needs the ID to cancel or change the task later.
+        let id_line = format!("\nID: {}", task_id.as_str());
         let document = TaskRecordDocument {
             task: ScheduledTask {
                 id: task_id,
@@ -283,6 +285,7 @@ where
             &text,
             self.context.locale,
         ));
+        result.output.push_str(&id_line);
         if !same_text.is_empty() {
             result
                 .output
@@ -440,7 +443,9 @@ impl<Store: TaskToolStore> ExternalToolExecutor for TaskCancelTool<Store> {
             return ToolExecutionResult::output(task_not_found(self.locale));
         }
         match self.store.cancel(&task_id, &self.chat_id) {
-            Ok(true) => ToolExecutionResult::output(task_canceled(&task_id, self.locale)),
+            // Confirmed, so the user still learns it is gone if the model
+            // fails to answer afterwards.
+            Ok(true) => ToolExecutionResult::confirmed_output(task_canceled(&task_id, self.locale)),
             Ok(false) => ToolExecutionResult::output(task_not_found(self.locale)),
             Err(error) => ToolExecutionResult::with_diagnostics(
                 bot_core::menu_ui::localized(
@@ -1026,7 +1031,7 @@ mod tests {
         let result = tool.execute(set_request(Some(3_600), None, None), "call");
         assert_eq!(
             result.output,
-            "Task scheduled: in 1 hour\ncheck the synthetic result"
+            "Task scheduled: in 1 hour\ncheck the synthetic result\nID: abc12345"
         );
         assert_eq!(
             result.failure_fallback.as_deref(),
@@ -1056,7 +1061,7 @@ mod tests {
             interval
                 .execute(set_request(None, Some(86_400), None), "call")
                 .output,
-            "Tarea programada: cada día\ncheck the synthetic result"
+            "Tarea programada: cada día\ncheck the synthetic result\nID: abc12345"
         );
         assert_eq!(
             state.borrow().saved[0].0.task.schedule,
@@ -1075,7 +1080,7 @@ mod tests {
                 "call"
             )
             .output,
-            "Tarea programada: los lun, mié a las 09:05\ncheck the synthetic result"
+            "Tarea programada: los lun, mié a las 09:05\ncheck the synthetic result\nID: abc12345"
         );
         assert!(matches!(
             state.borrow().saved[1].0.task.schedule,
@@ -1135,7 +1140,7 @@ mod tests {
         );
         assert_eq!(
             result.output,
-            "Tarea programada: cada 3 horas\ncheck the synthetic result"
+            "Tarea programada: cada 3 horas\ncheck the synthetic result\nID: abc12345"
         );
         assert_eq!(
             state.borrow().saved[0].0.task.schedule,
@@ -1154,7 +1159,7 @@ mod tests {
         let result = tool.execute(set_request(None, Some(86_400 * 30), None), "call");
         assert_eq!(
             result.output,
-            "Task scheduled: every 30 days\ncheck the synthetic result"
+            "Task scheduled: every 30 days\ncheck the synthetic result\nID: abc12345"
         );
         assert_eq!(
             state.borrow().saved[0].0.task.schedule,
@@ -1272,7 +1277,7 @@ mod tests {
         let mut tool = set_tool(Rc::clone(&state), Ok(i64::MAX), Locale::En);
         let result = tool.execute(set_request(None, Some(10_800), None), "call");
         assert!(result.output.starts_with(
-            "Task scheduled: every 3 hours\ncheck the synthetic result\nThis chat already had a task with the same text:\n[old12345]"
+            "Task scheduled: every 3 hours\ncheck the synthetic result\nID: abc12345\nThis chat already had a task with the same text:\n[old12345]"
         ));
         assert!(result.output.contains("[once1234]"));
         assert!(!result.output.contains("[other123]"));
@@ -1369,16 +1374,16 @@ mod tests {
         assert!(output.starts_with("[abc12345] synthetic task (Owner) - "));
 
         let mut cancel = TaskCancelTool::new(Store(Rc::clone(&state)), "-100", Locale::En);
+        let canceled = cancel.execute(
+            ExternalToolRequest::TaskCancel {
+                task_id: "abc12345".to_owned(),
+            },
+            "call",
+        );
+        assert_eq!(canceled.output, "Task abc12345 canceled");
         assert_eq!(
-            cancel
-                .execute(
-                    ExternalToolRequest::TaskCancel {
-                        task_id: "abc12345".to_owned(),
-                    },
-                    "call"
-                )
-                .output,
-            "Task abc12345 canceled"
+            canceled.failure_fallback.as_deref(),
+            Some("Task abc12345 canceled")
         );
         assert_eq!(
             state.borrow().canceled,
@@ -1779,7 +1784,7 @@ mod tests {
                 "call"
             )
             .output,
-            "Task scheduled: on mon, fri at 07:30\ncheck the synthetic result"
+            "Task scheduled: on mon, fri at 07:30\ncheck the synthetic result\nID: abc12345"
         );
         assert_eq!(state.borrow().saved.len(), 1);
     }

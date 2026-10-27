@@ -17,8 +17,8 @@ use bot_core::command_state::{
 };
 use bot_core::message_state::{
     CHAT_HISTORY_MAX_MESSAGES, MESSAGE_HISTORY_SCHEMA_VERSION, bot_message_metadata_key,
-    chat_compacted_until_key, chat_members_key, chat_summary_key, prepare_chat_member_payload,
-    prepare_message_write,
+    chat_compacted_until_key, chat_members_key, chat_summary_key, prepare_assistant_message_write,
+    prepare_chat_member_payload, prepare_message_write,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -61,6 +61,8 @@ struct StoredHistoryEntry {
     timestamp: i64,
     #[serde(default)]
     role: String,
+    #[serde(default)]
+    tools: Vec<String>,
 }
 
 impl ConversationState for RedisConversationState {
@@ -138,6 +140,7 @@ impl ConversationState for RedisConversationState {
                 } else {
                     entry.text
                 },
+                tool_notes: entry.tools,
             })
             .collect();
         let retrieved = if search_text.trim().is_empty() {
@@ -246,19 +249,16 @@ impl ConversationState for RedisConversationState {
         input: &AiConversationInput,
         sent_message_id: Option<i64>,
         text: &str,
+        tool_notes: &[String],
     ) -> Result<(), String> {
         let chat_id = input.chat_id.0.to_string();
         let stored_id = format!("bot_{}", sent_message_id.unwrap_or(input.message_id.0));
-        let plan = prepare_message_write(
+        let plan = prepare_assistant_message_write(
             &chat_id,
             &stored_id,
             text,
             input.timestamp,
-            Some("assistant"),
-            None,
-            None,
-            None,
-            false,
+            tool_notes,
         )
         .map_err(error_text)?;
         let _stored = self
@@ -303,6 +303,8 @@ fn decode_summary_memory(
             } else {
                 entry.text
             },
+            // Chat summaries cover what people said, not tool bookkeeping.
+            tool_notes: Vec::new(),
         })
         .collect();
     ConversationMemory {
@@ -1039,11 +1041,12 @@ mod tests {
         let mut state = RedisConversationState::new(&endpoint)?;
         let spanish = conversation_input(chat_id, 2, Locale::Es);
         state.record_incoming(&spanish)?;
-        state.record_outgoing(&spanish, Some(3), "synthetic assistant reply")?;
+        let notes = ["task_set {} → created".to_owned()];
+        state.record_outgoing(&spanish, Some(3), "synthetic assistant reply", &notes)?;
 
         let english = conversation_input(chat_id, 4, Locale::En);
         state.record_incoming(&english)?;
-        state.record_outgoing(&english, None, "second synthetic reply")?;
+        state.record_outgoing(&english, None, "second synthetic reply", &[])?;
 
         let memory = state.load_memory(&chat_id.to_string(), "synthetic", Some("2"), None, 20)?;
         assert_eq!(memory.history.len(), 4);
@@ -1054,8 +1057,11 @@ mod tests {
         assert_eq!(capped.history.len(), 2);
         assert_eq!(capped.history[1].text, "second synthetic reply");
         assert!(memory.history.iter().any(|entry| {
-            entry.role == PromptRole::Assistant && entry.text == "synthetic assistant reply"
+            entry.role == PromptRole::Assistant
+                && entry.text == "synthetic assistant reply"
+                && entry.tool_notes == ["task_set {} → created"]
         }));
+        assert!(capped.history[1].tool_notes.is_empty());
         assert_eq!(
             state.reply_metadata(&chat_id.to_string(), "3")?,
             Some(crate::ai_dispatch::AiReplyMetadata {
@@ -1197,7 +1203,8 @@ mod tests {
         let entries = decode_history(vec![
             r#"{"schema_version":1,"id":"10","text":"later","timestamp":10,"role":"user"}"#
                 .to_owned(),
-            r#"{"schema_version":1,"id":"bot_9","text":"answer","timestamp":9}"#.to_owned(),
+            r#"{"schema_version":1,"id":"bot_9","text":"answer","timestamp":9,"tools":["task_set {} → done"]}"#
+                .to_owned(),
             r#"{"schema_version":1,"id":"9","text":"question","timestamp":9}"#.to_owned(),
             r#"{"id":"8","text":"old","timestamp":8,"role":"user"}"#.to_owned(),
             "malformed".to_owned(),
@@ -1210,6 +1217,8 @@ mod tests {
             role(&entries[1].role, &entries[1].id),
             PromptRole::Assistant
         );
+        assert_eq!(entries[1].tools, ["task_set {} → done"]);
+        assert!(entries[0].tools.is_empty());
         assert!(history_sort_key(&entries[0]) < history_sort_key(&entries[1]));
     }
 
@@ -1246,6 +1255,7 @@ mod tests {
                 text: format!("message {id}"),
                 timestamp: id,
                 role: "user".to_owned(),
+                tools: Vec::new(),
             })
             .collect::<Vec<_>>();
         let (first_visible, first_plan) = build_compaction_view(&history, &None, &None, "chat");
@@ -1480,7 +1490,7 @@ mod tests {
             state.load_memory("-100", "", None, None, 20).err(),
             state.load_summary_memory("-100", 20).err(),
             state.record_incoming(&input).err(),
-            state.record_outgoing(&input, Some(3), "reply").err(),
+            state.record_outgoing(&input, Some(3), "reply", &[]).err(),
         ];
         for failure in failures {
             assert!(

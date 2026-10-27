@@ -105,6 +105,9 @@ impl PromptMessage {
 pub struct HistoryMessage {
     pub role: PromptRole,
     pub text: String,
+    /// For assistant replies: one line per tool call behind the reply that
+    /// changed something, such as a task it created.
+    pub tool_notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,14 +217,34 @@ pub fn build_conversation_prompt(input: &ConversationPromptInput) -> Vec<PromptM
             format!("{header}\n{summary}"),
         ));
     }
-    messages.extend(input.history.iter().map(|message| PromptMessage {
-        role: message.role,
-        content: PromptContent::TextParts(vec![message.text.clone()]),
-        tool_call_id: None,
-        tool_calls: Vec::new(),
-        reasoning: None,
-        reasoning_details: Vec::new(),
-    }));
+    let notes_header = match input.locale {
+        Locale::Es => "HERRAMIENTAS QUE USASTE PARA EL MENSAJE ANTERIOR:",
+        Locale::En => "TOOLS YOU USED FOR THE PREVIOUS MESSAGE:",
+    };
+    for message in &input.history {
+        messages.push(PromptMessage {
+            role: message.role,
+            content: PromptContent::TextParts(vec![message.text.clone()]),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+            reasoning: None,
+            reasoning_details: Vec::new(),
+        });
+        // Chat history keeps only reply text, so without this a later
+        // message cannot tell which tasks or polls a reply created.
+        if message.role == PromptRole::Assistant && !message.tool_notes.is_empty() {
+            let notes = message
+                .tool_notes
+                .iter()
+                .map(|note| format!("- {note}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            messages.push(PromptMessage::text(
+                PromptRole::System,
+                format!("{notes_header}\n{notes}"),
+            ));
+        }
+    }
     let last_is_assistant = input
         .history
         .last()
@@ -372,6 +395,7 @@ mod tests {
             history: vec![HistoryMessage {
                 role: PromptRole::User,
                 text: "recent history".to_owned(),
+                tool_notes: Vec::new(),
             }],
             retrieved: vec![RetrievedMessage {
                 role: "assistant".to_owned(),
@@ -444,11 +468,59 @@ mod tests {
     }
 
     #[test]
+    fn tool_notes_follow_the_assistant_reply_they_belong_to() {
+        for (locale, header) in [
+            (Locale::En, "TOOLS YOU USED FOR THE PREVIOUS MESSAGE:"),
+            (
+                Locale::Es,
+                "HERRAMIENTAS QUE USASTE PARA EL MENSAJE ANTERIOR:",
+            ),
+        ] {
+            let mut value = input(locale);
+            value.summary = None;
+            value.retrieved.clear();
+            value.history = vec![
+                HistoryMessage {
+                    role: PromptRole::User,
+                    text: "remind me every 3 hours".to_owned(),
+                    // Notes only belong to assistant replies.
+                    tool_notes: vec!["ignored".to_owned()],
+                },
+                HistoryMessage {
+                    role: PromptRole::Assistant,
+                    text: "done".to_owned(),
+                    tool_notes: vec![
+                        "task_set {} → created abc12345".to_owned(),
+                        "create_poll {} → sent".to_owned(),
+                    ],
+                },
+            ];
+            let messages = build_conversation_prompt(&value);
+            assert_eq!(messages[1].role, PromptRole::Assistant);
+            assert_eq!(
+                messages[2],
+                PromptMessage::text(
+                    PromptRole::System,
+                    format!(
+                        "{header}\n- task_set {{}} → created abc12345\n- create_poll {{}} → sent"
+                    )
+                )
+            );
+            assert!(
+                !messages
+                    .iter()
+                    .any(|message| text_of(message).contains("ignored"))
+            );
+        }
+    }
+
+    #[test]
     fn retrieval_after_assistant_history_still_suppresses_reply_context() {
         let mut value = input(Locale::En);
         value.history = vec![HistoryMessage {
             role: PromptRole::Assistant,
             text: "last answer".to_owned(),
+            tool_notes: Vec::new(),
         }];
         let messages = build_conversation_prompt(&value);
         assert_eq!(messages.len(), 4);
@@ -475,6 +547,7 @@ mod tests {
         value.history = vec![HistoryMessage {
             role: PromptRole::Assistant,
             text: "last answer".to_owned(),
+            tool_notes: Vec::new(),
         }];
         value.summary = None;
         value.retrieved.clear();
