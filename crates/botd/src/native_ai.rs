@@ -237,8 +237,9 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
         &mut self,
         messages: &[TaskPromptMessage],
         task: &ScheduledTask,
-        _execution_id: &str,
+        execution_id: &str,
     ) -> Result<TaskProviderReply, TaskProviderFailure<Self::Error>> {
+        let trace_id = operation_id(execution_id);
         let mut tools = self.tools.as_mut().and_then(|factory| {
             factory
                 .create(task)
@@ -261,10 +262,16 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
         } else {
             Locale::Es
         };
-        for _ in 0..crate::chat_tool_loop::DEFAULT_MAX_TOOL_ROUNDS {
+        for round in 1..=crate::chat_tool_loop::DEFAULT_MAX_TOOL_ROUNDS {
             let completion =
                 complete_with(&self.transport, &self.api_key, &self.base_url, &request)
                     .map_err(|source| TaskProviderFailure::new(source, billing_segments.clone()))?;
+            crate::chat_tool_loop::trace(
+                &trace_id,
+                round,
+                "provider_round",
+                task_round_trace(&completion),
+            );
             billing_segments.push(task_completion_segment(&completion));
             let text = completion.text;
             let calls = completion.tool_calls;
@@ -318,6 +325,17 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
                     };
                 if let Some(tools) = tools.as_mut().filter(|_| !own) {
                     let result = tools.execute(name, &arguments, &call.id);
+                    crate::chat_tool_loop::trace(
+                        &trace_id,
+                        round,
+                        "tool_result",
+                        crate::chat_tool_loop::tool_trace(
+                            name,
+                            &call.id,
+                            &arguments,
+                            Some(&result),
+                        ),
+                    );
                     billing_segments.extend(result.billing_segment);
                     request.messages.push(ChatMessage::tool_result(
                         call.id,
@@ -365,6 +383,12 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
                         },
                     )
                 };
+                crate::chat_tool_loop::trace(
+                    &trace_id,
+                    round,
+                    "tool_result",
+                    crate::chat_tool_loop::tool_trace(name, &call.id, &arguments, Some(&result)),
+                );
                 if let Some(segment) = result.billing_segment {
                     billing_segments.push(segment);
                 }
@@ -378,6 +402,17 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
             billing_segments,
         ))
     }
+}
+
+/// What a task's model round did, without its text.
+fn task_round_trace(completion: &ChatCompletion) -> Value {
+    json!({
+        "model": crate::chat_tool_loop::bounded(&completion.model, 160),
+        "generation_id": completion.generation_id.as_deref().map(|id| crate::chat_tool_loop::bounded(id, 160)),
+        "finish_reason": completion.finish_reason.as_deref().map(|reason| crate::chat_tool_loop::bounded(reason, 80)),
+        "text_chars": completion.text.chars().count(),
+        "tool_calls": completion.tool_calls.iter().take(20).map(|call| crate::chat_tool_loop::bounded(&call.function.name, 80)).collect::<Vec<_>>(),
+    })
 }
 
 fn task_completion_segment(completion: &ChatCompletion) -> Value {

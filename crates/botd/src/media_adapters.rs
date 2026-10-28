@@ -67,7 +67,7 @@ where
         )
         .map_err(error_text)?;
         let TelegramHttpOutcome::Response { status_code, body } = outcome else {
-            eprintln!(
+            println!(
                 "Media trace: {}",
                 json!({
                     "event": "telegram_file_metadata_empty",
@@ -78,7 +78,7 @@ where
             return Ok(None);
         };
         if !(200..300).contains(&status_code) {
-            eprintln!(
+            println!(
                 "Media trace: {}",
                 json!({
                     "event": "telegram_file_metadata_failure",
@@ -90,7 +90,7 @@ where
             return Ok(None);
         }
         let payload = serde_json::from_str::<Value>(&body).map_err(|error| {
-            eprintln!(
+            println!(
                 "Media trace: {}",
                 json!({
                     "event": "telegram_file_metadata_invalid",
@@ -108,7 +108,7 @@ where
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty());
         let Some(file_path) = file_path else {
-            eprintln!(
+            println!(
                 "Media trace: {}",
                 json!({
                     "event": "telegram_file_metadata_missing_path",
@@ -131,7 +131,7 @@ where
         .map_err(error_text)?
         {
             TelegramFileOutcome::Downloaded(bytes) => {
-                eprintln!(
+                println!(
                     "Media trace: {}",
                     json!({
                         "event": "telegram_file_download_result",
@@ -142,7 +142,7 @@ where
                 Ok(Some(bytes))
             }
             TelegramFileOutcome::HttpError { status_code, .. } => {
-                eprintln!(
+                println!(
                     "Media trace: {}",
                     json!({
                         "event": "telegram_file_download_failure",
@@ -154,7 +154,7 @@ where
                 Ok(None)
             }
             TelegramFileOutcome::TransportError { kind } => {
-                eprintln!(
+                println!(
                     "Media trace: {}",
                     json!({
                         "event": "telegram_file_download_failure",
@@ -516,7 +516,7 @@ impl FfmpegMediaProcessor {
             Ok(_) | Err(()) => None,
         };
         let Some(extracted) = extracted else {
-            eprintln!(
+            println!(
                 "Media trace: {}",
                 json!({
                     "event": "audio_prepare_invalid",
@@ -534,7 +534,7 @@ impl FfmpegMediaProcessor {
             .or_else(|| self.duration(input));
         match duration_seconds {
             Some(duration_seconds) => {
-                eprintln!(
+                println!(
                     "Media trace: {}",
                     json!({
                         "event": "audio_prepare_result",
@@ -551,7 +551,7 @@ impl FfmpegMediaProcessor {
                 }))
             }
             None => {
-                eprintln!(
+                println!(
                     "Media trace: {}",
                     json!({
                         "event": "audio_prepare_invalid",

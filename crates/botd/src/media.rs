@@ -301,7 +301,7 @@ where
         duration_hint_seconds: Option<f64>,
     ) -> Result<PreparedMedia, String> {
         if let Ok(Some(text)) = self.cache.get(kind.cache_prefix(), file_id) {
-            eprintln!(
+            println!(
                 "Media trace: {}",
                 serde_json::json!({
                     "event": "media_cache_hit",
@@ -321,7 +321,7 @@ where
             .download(file_id)?
             .filter(|bytes| !bytes.is_empty())
             .ok_or_else(|| {
-                eprintln!(
+                println!(
                     "Media trace: {}",
                     serde_json::json!({
                         "event": "media_download_empty",
@@ -332,7 +332,7 @@ where
                 );
                 MediaPipelineError::Download.to_string()
             })?;
-        eprintln!(
+        println!(
             "Media trace: {}",
             serde_json::json!({
                 "event": "media_download_result",
@@ -366,7 +366,7 @@ where
                         audio.duration_seconds.is_finite() && audio.duration_seconds > 0.0
                     })
                     .ok_or_else(|| {
-                        eprintln!(
+                        println!(
                             "Media trace: {}",
                             serde_json::json!({
                                 "event": "media_audio_invalid",
@@ -380,7 +380,7 @@ where
                 let reserve_credit_units = self
                     .estimate_audio_reserve_credit_units(audio.duration_seconds)
                     .map_err(|error| {
-                        eprintln!(
+                        println!(
                             "Media trace: {}",
                             serde_json::json!({
                                 "event": "media_reserve_estimate_failure",
@@ -392,7 +392,7 @@ where
                         );
                         MediaPipelineError::ReserveEstimate(error).to_string()
                     })?;
-                eprintln!(
+                println!(
                     "Media trace: {}",
                     serde_json::json!({
                         "event": "media_audio_prepared",
@@ -452,7 +452,7 @@ where
             }
         };
         let result = result.ok_or_else(|| {
-            eprintln!(
+            println!(
                 "Media trace: {}",
                 serde_json::json!({
                     "event": "media_provider_empty",
@@ -462,7 +462,7 @@ where
             );
             MediaPipelineError::ProviderUnavailable.to_string()
         })?;
-        eprintln!(
+        println!(
             "Media trace: {}",
             serde_json::json!({
                 "event": "media_provider_result",
