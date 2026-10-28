@@ -112,7 +112,15 @@ impl<Transport> OpenRouterChatStreamer<Transport> {
         request.prefer_fast_providers();
         request.tools = tools.to_vec();
         request.max_tokens = u64::try_from(chat_output_token_limit(&self.model)).ok();
-        request.reasoning = Some(reasoning_config(messages));
+        // Every round reasons at the provider's default depth. Rounds after a
+        // tool result turn the fetched data into the reply, and at `low`
+        // effort they misread it (a 24h move came out as "in one hour").
+        // Reasoning stays enabled so tool-call reasoning details keep
+        // round-tripping.
+        request.reasoning = Some(ReasoningConfig {
+            enabled: true,
+            effort: None,
+        });
         if answer_only {
             // The answer round must spend its output on the reply, so it
             // keeps reasoning short and may not start new tool calls.
@@ -126,29 +134,6 @@ impl<Transport> OpenRouterChatStreamer<Transport> {
         }
         request.stream = true;
         Ok(request)
-    }
-}
-
-/// Reasoning policy, tuned for reply latency.
-///
-/// The first round of a turn keeps the provider's default reasoning depth:
-/// that is where the model decides what the user wants and which tools to
-/// call. Once a tool result follows the latest user message, the remaining
-/// rounds mostly phrase an answer from data already fetched, so they ask for
-/// `low` effort instead of re-deriving the plan at full depth. Reasoning stays
-/// enabled in every round so tool-call reasoning details keep round-tripping.
-/// Message length is deliberately not used as a signal: a short message can
-/// still be a hard question, and the final user turn also carries the prompt
-/// context block, so its size says little about the request.
-fn reasoning_config(messages: &[PromptMessage]) -> ReasoningConfig {
-    let after_tool_result = messages
-        .iter()
-        .rev()
-        .take_while(|message| message.role != PromptRole::User)
-        .any(|message| message.role == PromptRole::Tool);
-    ReasoningConfig {
-        enabled: true,
-        effort: after_tool_result.then(|| "low".to_owned()),
     }
 }
 
@@ -506,7 +491,7 @@ mod tests {
     use bot_core::provider_stream_policy::ProviderStreamEvent;
     use serde_json::{Map, Value, json};
 
-    use super::{OpenRouterChatStreamer, reasoning_config};
+    use super::OpenRouterChatStreamer;
 
     struct Transport {
         chunks: Vec<Vec<u8>>,
@@ -605,34 +590,33 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_effort_drops_to_low_only_after_a_tool_result() {
+    fn rounds_that_read_tool_results_keep_the_default_reasoning_depth()
+    -> crate::test_env::TestResult {
+        let provider = OpenRouterChatStreamer::new(
+            Transport {
+                chunks: stream_body(false),
+                failure: None,
+                requests: RefCell::new(Vec::new()),
+            },
+            "synthetic-key",
+            "https://synthetic.invalid/api/v1",
+            "requested/model",
+        );
         let mut conversation = messages();
-        assert_eq!(reasoning_config(&conversation).effort, None);
-        conversation.push(PromptMessage {
-            role: PromptRole::Assistant,
-            content: PromptContent::Text(String::new()),
-            tool_call_id: None,
-            tool_calls: Vec::new(),
-            reasoning: None,
-            reasoning_details: Vec::new(),
-        });
-        assert_eq!(reasoning_config(&conversation).effort, None);
         conversation.push(PromptMessage {
             role: PromptRole::Tool,
-            content: PromptContent::Text("result".to_owned()),
+            content: PromptContent::Text("Netanyahu 50.5% (24h +24)".to_owned()),
             tool_call_id: Some("call-1".to_owned()),
             tool_calls: Vec::new(),
             reasoning: None,
             reasoning_details: Vec::new(),
         });
-        let config = reasoning_config(&conversation);
-        assert!(config.enabled);
-        assert_eq!(config.effort.as_deref(), Some("low"));
-        let body = serde_json::to_value(&config).unwrap_or_default();
-        assert_eq!(body, json!({"enabled": true, "effort": "low"}));
-
-        conversation.push(PromptMessage::text(PromptRole::User, "follow-up"));
-        assert_eq!(reasoning_config(&conversation).effort, None);
+        let request = provider.request(&conversation, &[json!({"type": "function"})], false)?;
+        assert_eq!(
+            serde_json::to_value(&request.reasoning)?,
+            json!({"enabled": true})
+        );
+        Ok(())
     }
 
     #[test]

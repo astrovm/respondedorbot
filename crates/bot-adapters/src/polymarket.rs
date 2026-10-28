@@ -18,7 +18,7 @@ const EVENTS_URL: &str = "https://gamma-api.polymarket.com/events";
 const MIDPOINTS_URL: &str = "https://clob.polymarket.com/midpoints";
 const SEARCH_URL: &str = "https://gamma-api.polymarket.com/public-search";
 /// Events returned per search. Each one can carry hundreds of markets.
-const SEARCH_EVENT_LIMIT: &str = "5";
+const SEARCH_EVENT_LIMIT: &str = "10";
 const CACHE_TTL_SECONDS: i64 = 60;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -749,7 +749,7 @@ mod tests {
             assert!(request.starts_with("GET /public-search?"), "{request}");
             for parameter in [
                 "q=fed+rates+%26+cuts",
-                "limit_per_type=5",
+                "limit_per_type=10",
                 "events_status=active",
             ] {
                 assert!(request.contains(parameter), "{request}");

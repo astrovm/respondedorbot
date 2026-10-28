@@ -180,14 +180,7 @@ pub fn parse_election_events(value: &Value) -> Vec<ElectionEvent> {
                 .chars()
                 .take(10)
                 .collect();
-            let tags = event
-                .get("tags")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_object)
-                .filter_map(|tag| text(tag.get("slug")))
-                .collect();
+            let tags = tag_slugs(event);
             ElectionEvent {
                 title: text(event.get("title")).unwrap_or_default(),
                 slug: text(event.get("slug")).unwrap_or_default(),
@@ -486,17 +479,61 @@ fn search_event(event: &Map<String, Value>) -> Option<SearchEvent> {
     })
 }
 
+fn tag_slugs(event: &Map<String, Value>) -> Vec<String> {
+    event
+        .get("tags")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .filter_map(|tag| text(tag.get("slug")))
+        .collect()
+}
+
+/// Search ranking tiers, best first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum SearchTier {
+    MainElection,
+    Regular,
+    Combo,
+}
+
+fn search_tier(event: &Map<String, Value>) -> SearchTier {
+    let tags = tag_slugs(event);
+    if tags
+        .iter()
+        .any(|tag| tag == "parlays" || tag.ends_with("combos"))
+    {
+        SearchTier::Combo
+    } else if tags.iter().any(|tag| tag == "main-election") {
+        SearchTier::MainElection
+    } else {
+        SearchTier::Regular
+    }
+}
+
 /// Parse a Gamma `public-search` response into open events in relevance order.
+///
+/// A combo matches a search for any one of its legs, and its legs read like
+/// real odds (a Netanyahu search once answered with "Lula, Netanyahu, Dems"),
+/// so combos only stay when the search found nothing else. An election's main
+/// market answers most questions about it, so it goes first.
 #[must_use]
 pub fn parse_search_events(value: &Value) -> Vec<SearchEvent> {
-    value
+    let mut events = value
         .get("events")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(Value::as_object)
-        .filter_map(search_event)
-        .collect()
+        .filter_map(|event| Some((search_tier(event), search_event(event)?)))
+        .collect::<Vec<_>>();
+    if events.iter().any(|(tier, _)| *tier != SearchTier::Combo) {
+        events.retain(|(tier, _)| *tier != SearchTier::Combo);
+    }
+    // Stable, so relevance order holds within each tier.
+    events.sort_by_key(|(tier, _)| *tier);
+    events.into_iter().map(|(_, event)| event).collect()
 }
 
 #[must_use]
@@ -583,7 +620,7 @@ pub fn render_market_search(query: &str, events: &[SearchEvent], locale: Locale)
             "No encontré mercados abiertos en Polymarket para",
             "Liquidez",
             "Volumen",
-            "Cierra",
+            "Cierran las apuestas",
             "mercados más",
         ),
         Locale::En => (
@@ -591,7 +628,7 @@ pub fn render_market_search(query: &str, events: &[SearchEvent], locale: Locale)
             "No open Polymarket markets found for",
             "Liquidity",
             "Volume",
-            "Closes",
+            "Betting closes",
             "more markets",
         ),
     };
@@ -629,7 +666,7 @@ mod tests {
     use std::collections::HashMap;
 
     use proptest::prelude::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::{
         MarketOutcome, RankedOutcome, SEARCH_MARKETS_PER_EVENT, SearchEvent, SearchMarket,
@@ -914,6 +951,50 @@ mod tests {
         assert!(parse_search_events(&json!({"events": {}})).is_empty());
     }
 
+    #[test]
+    fn search_drops_combos_and_puts_the_main_election_market_first() {
+        let event = |slug: &str, tags: &[&str]| {
+            json!({
+                "title": slug,
+                "slug": slug,
+                "tags": tags.iter().map(|tag| json!({"slug": tag})).collect::<Vec<_>>(),
+                "markets": [binary("A", 0.5)]
+            })
+        };
+        let slugs = |value: Value| {
+            parse_search_events(&value)
+                .into_iter()
+                .map(|event| event.slug)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            slugs(json!({"events": [
+                event("arrested", &["israel", "netanyahu"]),
+                event("fall-combo", &["israel", "midterm-combos"]),
+                event("fed-parlay", &["fed", "parlays"]),
+                event("legislative-winner", &["israel", "main-election"]),
+                event("seats", &["israel"]),
+                event("prime-minister", &["main-election", "israel-election"]),
+                {"title": "untagged", "slug": "untagged", "tags": "none", "markets": [binary("A", 0.5)]}
+            ]})),
+            [
+                "legislative-winner",
+                "prime-minister",
+                "arrested",
+                "seats",
+                "untagged"
+            ]
+        );
+        // A search that only finds combos still answers with them.
+        assert_eq!(
+            slugs(json!({"events": [
+                event("senate-combo", &["midterm-combos"]),
+                event("blue-wave", &["parlays", "midterms"])
+            ]})),
+            ["senate-combo", "blue-wave"]
+        );
+    }
+
     fn search_event(markets: Vec<SearchMarket>, hidden_markets: usize) -> SearchEvent {
         SearchEvent {
             title: "Who wins?".to_owned(),
@@ -967,7 +1048,7 @@ mod tests {
                 "Polymarket markets for \"synthetic\" (%: implied probability)\n\n",
                 "1. Who wins?\n",
                 "https://polymarket.com/event/who-wins\n",
-                "Liquidity US$1.1M | Volume US$2.5K | Closes 2027-10-25\n",
+                "Liquidity US$1.1M | Volume US$2.5K | Betting closes 2027-10-25\n",
                 "- Candidate A: Yes 48.5%\n",
                 "- Candidate B: Yes 0.05%\n",
                 "- Home 68.5% / Away 31.5%\n",
@@ -982,7 +1063,7 @@ mod tests {
         );
         assert!(
             render_market_search("x", &events[..1], Locale::Es)
-                .contains("Liquidez US$1.1M | Volumen US$2.5K | Cierra 2027-10-25")
+                .contains("Liquidez US$1.1M | Volumen US$2.5K | Cierran las apuestas 2027-10-25")
         );
         assert!(render_market_search("x", &events[..1], Locale::Es).contains("- +56 mercados más"));
     }

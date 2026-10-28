@@ -1,6 +1,7 @@
 [
   {"prompt": "che, qué chances tiene Milei de ganar en 2027?", "expect": [{"tool": "polymarket", "args_any": ["argentina", "milei"]}]},
   {"prompt": "what are the odds the Fed cuts rates in December?", "locale": "en", "expect": [{"tool": "polymarket", "args_any": ["fed"]}]},
+  {"prompt": "cómo viene bibi en polymarket con las elecciones?", "expect": [{"tool": "polymarket", "args_any": ["israel"]}]},
   {"prompt": "cómo está el clima en Córdoba?", "expect": [{"tool": "weather", "args_any": ["córdoba", "cordoba"]}]},
   {"prompt": "a cuánto está bitcoin?", "expect": [{"tool": "crypto_prices", "args_any": ["btc", "bitcoin"]}]},
   {"prompt": "a cuánto está el blue?", "expect": [{"tool": "dollar_rates", "args_any": [""]}]},

@@ -350,7 +350,7 @@ pub(crate) fn tool_schema(tool: NativeTool) -> Value {
             }),
         ),
         NativeTool::Polymarket => (
-            "Search open Polymarket prediction markets on any topic: elections, sports, crypto, economy, world events. Returns events with implied probabilities, liquidity, volume, close dates, and links. Polymarket only matches English keywords, so translate the topic into a short English query, such as 'argentina election' or 'world cup'.",
+            "Search open Polymarket prediction markets on any topic: elections, sports, crypto, economy, world events. Returns events with implied probabilities, 24h and 7d moves, liquidity, volume, the date betting closes (not when the event happens), and links. Polymarket only matches English keywords, so translate the topic into a short English query, such as 'argentina election' or 'world cup'. Search for the event, not only a person: 'israel election' finds the election markets, while 'netanyahu' alone mostly finds side bets.",
             json!({
                 "type": "object",
                 "properties": {"query": {"type": "string", "maxLength": 200, "description": "Short English keywords for the market, such as 'fed rates' or 'lakers'."}},

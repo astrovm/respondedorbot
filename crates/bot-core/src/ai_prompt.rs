@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, FixedOffset, Utc};
+
 use crate::locale::Locale;
 use crate::message_state::truncate_text;
 use serde_json::Value;
@@ -114,6 +116,8 @@ pub struct HistoryMessage {
 pub struct RetrievedMessage {
     pub role: String,
     pub text: String,
+    /// Unix seconds, or 0 when the stored message has none.
+    pub timestamp: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,8 +128,13 @@ pub struct ConversationPromptInput {
     pub first_name: String,
     pub username: String,
     pub formatted_time: String,
+    /// Shifts retrieved message dates into the chat's time zone.
+    pub timezone_offset_hours: i64,
     pub message_text: String,
     pub reply_context: Option<String>,
+    /// The replied-to message is the newest history entry, so quoting it
+    /// again would only repeat it.
+    pub reply_target_is_latest: bool,
     pub link_context: Option<String>,
     pub enable_web_search: bool,
     pub summary: Option<String>,
@@ -245,12 +254,10 @@ pub fn build_conversation_prompt(input: &ConversationPromptInput) -> Vec<PromptM
             ));
         }
     }
-    let last_is_assistant = input
-        .history
-        .last()
-        .is_some_and(|message| message.role == PromptRole::Assistant);
     // Retrieved messages change every turn, so they go after the history to
     // keep the summary + history prefix stable for provider prompt caching.
+    // That puts old messages right before the question, so each one carries
+    // its date and the header says they can be out of date.
     let retrieved = input
         .retrieved
         .iter()
@@ -258,12 +265,21 @@ pub fn build_conversation_prompt(input: &ConversationPromptInput) -> Vec<PromptM
         .collect::<Vec<_>>();
     if !retrieved.is_empty() {
         let header = match input.locale {
-            Locale::Es => "MENSAJES ANTERIORES RELEVANTES:",
-            Locale::En => "RELEVANT EARLIER MESSAGES:",
+            Locale::Es => {
+                "MENSAJES ANTERIORES RELEVANTES (encontrados por búsqueda, pueden ser viejos y estar desactualizados; lo más reciente es el historial de arriba):"
+            }
+            Locale::En => {
+                "RELEVANT EARLIER MESSAGES (found by search, they can be old and out of date; the history above is the most recent):"
+            }
         };
         let body = retrieved
             .iter()
-            .map(|message| format!("- {}: {}", message.role, message.text))
+            .map(|message| {
+                let date = message_date(message.timestamp, input.timezone_offset_hours)
+                    .map(|date| format!("[{date}] "))
+                    .unwrap_or_default();
+                format!("- {date}{}: {}", message.role, message.text)
+            })
             .collect::<Vec<_>>()
             .join("\n");
         messages.push(PromptMessage::text(
@@ -321,7 +337,7 @@ pub fn build_conversation_prompt(input: &ConversationPromptInput) -> Vec<PromptM
         format!("- {user_label}: {first_name}{username}"),
         format!("- {time_label}: {}", input.formatted_time),
     ];
-    if !last_is_assistant
+    if !input.reply_target_is_latest
         && let Some(reply) = input
             .reply_context
             .as_deref()
@@ -360,6 +376,19 @@ pub fn build_conversation_prompt(input: &ConversationPromptInput) -> Vec<PromptM
     messages
 }
 
+/// Day and time of a stored message in the chat's time zone, such as
+/// `27/10/2026 23:36`.
+fn message_date(timestamp: i64, timezone_offset_hours: i64) -> Option<String> {
+    let utc = DateTime::<Utc>::from_timestamp(timestamp, 0).filter(|_| timestamp > 0)?;
+    let seconds = i32::try_from(timezone_offset_hours.clamp(-23, 23) * 3_600).ok()?;
+    let offset = FixedOffset::east_opt(seconds)?;
+    Some(
+        utc.with_timezone(&offset)
+            .format("%d/%m/%Y %H:%M")
+            .to_string(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use crate::locale::Locale;
@@ -387,8 +416,10 @@ mod tests {
             first_name: "Synthetic".to_owned(),
             username: "tester".to_owned(),
             formatted_time: "12:34".to_owned(),
+            timezone_offset_hours: -3,
             message_text: "what happened?".to_owned(),
             reply_context: Some("earlier message".to_owned()),
+            reply_target_is_latest: false,
             link_context: Some("LINKS:\n- https://example.test".to_owned()),
             enable_web_search: true,
             summary: Some("prior summary".to_owned()),
@@ -400,6 +431,7 @@ mod tests {
             retrieved: vec![RetrievedMessage {
                 role: "assistant".to_owned(),
                 text: "older answer".to_owned(),
+                timestamp: 1_700_000_000,
             }],
         }
     }
@@ -452,7 +484,7 @@ mod tests {
                 },
                 PromptMessage::text(
                     PromptRole::System,
-                    "RELEVANT EARLIER MESSAGES:\n- assistant: older answer"
+                    "RELEVANT EARLIER MESSAGES (found by search, they can be old and out of date; the history above is the most recent):\n- [14/11/2023 19:13] assistant: older answer"
                 ),
             ]
         );
@@ -515,18 +547,63 @@ mod tests {
     }
 
     #[test]
-    fn retrieval_after_assistant_history_still_suppresses_reply_context() {
+    fn a_reply_to_the_newest_history_entry_is_not_quoted_again() {
         let mut value = input(Locale::En);
         value.history = vec![HistoryMessage {
             role: PromptRole::Assistant,
             text: "last answer".to_owned(),
             tool_notes: Vec::new(),
         }];
+        value.reply_target_is_latest = true;
         let messages = build_conversation_prompt(&value);
         assert_eq!(messages.len(), 4);
         assert_eq!(messages[2].role, PromptRole::System);
         let prompt = messages.last().map(text_of).unwrap_or_default();
         assert!(!prompt.contains("MESSAGE BEING REPLIED TO"));
+    }
+
+    #[test]
+    fn a_reply_to_an_older_message_is_quoted_even_after_a_bot_reply() {
+        let mut value = input(Locale::En);
+        value.history = vec![
+            HistoryMessage {
+                role: PromptRole::Assistant,
+                text: "the runoff is coming".to_owned(),
+                tool_notes: Vec::new(),
+            },
+            HistoryMessage {
+                role: PromptRole::Assistant,
+                text: "exit polls show a tie".to_owned(),
+                tool_notes: Vec::new(),
+            },
+        ];
+        value.reply_context = Some("Gordo: the runoff is coming".to_owned());
+        let messages = build_conversation_prompt(&value);
+        let prompt = messages.last().map(text_of).unwrap_or_default();
+        assert!(prompt.contains("MESSAGE BEING REPLIED TO:\nGordo: the runoff is coming"));
+    }
+
+    #[test]
+    fn retrieved_messages_show_their_date_in_the_chat_time_zone() {
+        let mut value = input(Locale::Es);
+        value.timezone_offset_hours = 2;
+        value.retrieved = vec![
+            RetrievedMessage {
+                role: "user".to_owned(),
+                text: "Franco: el ballotage es el domingo".to_owned(),
+                timestamp: 1_761_436_800,
+            },
+            RetrievedMessage {
+                role: "user".to_owned(),
+                text: "sin fecha".to_owned(),
+                timestamp: 0,
+            },
+        ];
+        let messages = build_conversation_prompt(&value);
+        assert_eq!(
+            text_of(&messages[2]),
+            "MENSAJES ANTERIORES RELEVANTES (encontrados por búsqueda, pueden ser viejos y estar desactualizados; lo más reciente es el historial de arriba):\n- [26/10/2025 02:00] user: Franco: el ballotage es el domingo\n- user: sin fecha"
+        );
     }
 
     #[test]
@@ -541,7 +618,7 @@ mod tests {
     }
 
     #[test]
-    fn assistant_tail_suppresses_duplicate_reply_context_and_private_title() {
+    fn latest_reply_target_suppresses_duplicate_reply_context_and_private_title() {
         let mut value = input(Locale::Es);
         value.chat_type = "private".to_owned();
         value.history = vec![HistoryMessage {
@@ -549,6 +626,7 @@ mod tests {
             text: "last answer".to_owned(),
             tool_notes: Vec::new(),
         }];
+        value.reply_target_is_latest = true;
         value.summary = None;
         value.retrieved.clear();
         value.link_context = None;
