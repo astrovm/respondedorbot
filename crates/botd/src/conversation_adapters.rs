@@ -104,7 +104,7 @@ impl ConversationState for RedisConversationState {
         &mut self,
         chat_id: &str,
         search_text: &str,
-        _reply_to_message_id: Option<&str>,
+        reply_to_message_id: Option<&str>,
         current_message_id: Option<&str>,
         max_history_messages: usize,
     ) -> Result<ConversationMemory, String> {
@@ -130,6 +130,13 @@ impl ConversationState for RedisConversationState {
             .chain(current_message_id.map(str::to_owned))
             .filter(|id| !id.is_empty())
             .collect::<std::collections::HashSet<_>>();
+        let reply_target_is_latest = reply_to_message_id.is_some_and(|reply| {
+            visible
+                .iter()
+                .rev()
+                .find(|entry| !entry.text.is_empty())
+                .is_some_and(|latest| is_stored_message(&latest.id, reply))
+        });
         let history = visible
             .into_iter()
             .filter(|entry| !entry.text.is_empty())
@@ -156,6 +163,7 @@ impl ConversationState for RedisConversationState {
             history,
             retrieved,
             compaction_plan,
+            reply_target_is_latest,
         })
     }
 
@@ -312,6 +320,7 @@ fn decode_summary_memory(
         history,
         retrieved: Vec::new(),
         compaction_plan: None,
+        reply_target_is_latest: false,
     }
 }
 
@@ -895,9 +904,20 @@ fn decode_retrieved(
                     .cloned()
                     .unwrap_or_else(|| "user".to_owned()),
                 text,
+                timestamp: row
+                    .fields
+                    .get("timestamp")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or_default(),
             })
         })
         .collect()
+}
+
+/// Whether a history entry is the Telegram message `message_id`. Replies the
+/// bot sent are stored as `bot_<id>`.
+fn is_stored_message(stored_id: &str, message_id: &str) -> bool {
+    stored_id == message_id || stored_id.strip_prefix("bot_") == Some(message_id)
 }
 
 fn user_identity(input: &AiConversationInput) -> String {
@@ -923,7 +943,7 @@ mod tests {
         MESSAGE_HISTORY_SCHEMA_VERSION, PayerSource, PostgresConversationBilling,
         RedisConversationState, StoredHistoryEntry, build_compaction_view, copy_pricing_metadata,
         decode_history, decode_retrieved, decode_summary_memory, history_sort_key,
-        prompt_history_window, role, user_identity,
+        is_stored_message, prompt_history_window, role, user_identity,
     };
     use crate::ai_dispatch::AiConversationInput;
     use crate::conversation::{
@@ -1043,6 +1063,10 @@ mod tests {
         state.record_incoming(&spanish)?;
         let notes = ["task_set {} → created".to_owned()];
         state.record_outgoing(&spanish, Some(3), "synthetic assistant reply", &notes)?;
+        let reply_to_bot = state.load_memory(&chat_id.to_string(), "", Some("3"), None, 20)?;
+        assert!(reply_to_bot.reply_target_is_latest);
+        let reply_to_user = state.load_memory(&chat_id.to_string(), "", Some("2"), None, 20)?;
+        assert!(!reply_to_user.reply_target_is_latest);
 
         let english = conversation_input(chat_id, 4, Locale::En);
         state.record_incoming(&english)?;
@@ -1050,6 +1074,7 @@ mod tests {
 
         let memory = state.load_memory(&chat_id.to_string(), "synthetic", Some("2"), None, 20)?;
         assert_eq!(memory.history.len(), 4);
+        assert!(!memory.reply_target_is_latest);
         let current =
             state.load_memory(&chat_id.to_string(), "synthetic", Some("2"), Some("4"), 20)?;
         assert_eq!(current.history.len(), 3);
@@ -1157,18 +1182,38 @@ mod tests {
                 fields: BTreeMap::from([("text".to_owned(), "useful result".to_owned())]),
             },
             bot_adapters::redis_message_state::SearchRow {
+                key: "dated".to_owned(),
+                fields: BTreeMap::from([
+                    ("role".to_owned(), "assistant".to_owned()),
+                    ("text".to_owned(), "dated result".to_owned()),
+                    ("timestamp".to_owned(), "1700000000".to_owned()),
+                ]),
+            },
+            bot_adapters::redis_message_state::SearchRow {
                 key: "empty".to_owned(),
                 fields: BTreeMap::from([("text".to_owned(), String::new())]),
             },
         ];
         let decoded = decode_retrieved(rows, &HashSet::from(["2".to_owned()]));
-        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded.len(), 2);
         assert_eq!(decoded[0].role, "user");
         assert_eq!(decoded[0].text, "useful result");
+        assert_eq!(decoded[0].timestamp, 0);
+        assert_eq!(decoded[1].role, "assistant");
+        assert_eq!(decoded[1].timestamp, 1_700_000_000);
 
         let mut input = conversation_input(1, 2, Locale::En);
         input.sender_username.clear();
         assert_eq!(user_identity(&input), "Synthetic");
+    }
+
+    #[test]
+    fn stored_ids_match_their_telegram_message() {
+        assert!(is_stored_message("42", "42"));
+        assert!(is_stored_message("bot_42", "42"));
+        assert!(!is_stored_message("bot_42", "4"));
+        assert!(!is_stored_message("421", "42"));
+        assert!(!is_stored_message("user_42", "42"));
     }
 
     #[test]

@@ -157,7 +157,7 @@ mod tests {
                 "Polymarket markets for \"synthetic vote\" (%: implied probability)\n\n",
                 "1. Synthetic vote\n",
                 "https://polymarket.com/event/synthetic-vote\n",
-                "Liquidity US$1.5K | Volume US$2M | Closes 2027-01-01\n",
+                "Liquidity US$1.5K | Volume US$2M | Betting closes 2027-01-01\n",
                 "- Yes 12.5%"
             )
         );

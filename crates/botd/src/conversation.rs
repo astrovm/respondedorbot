@@ -46,6 +46,8 @@ pub struct ConversationMemory {
     pub history: Vec<HistoryMessage>,
     pub retrieved: Vec<RetrievedMessage>,
     pub compaction_plan: Option<MemoryCompactionPlan>,
+    /// The message being replied to is the last entry of `history`.
+    pub reply_target_is_latest: bool,
 }
 
 pub trait ConversationState {
@@ -474,8 +476,10 @@ where
             first_name: input.sender_first_name.clone(),
             username: input.sender_username.clone(),
             formatted_time: formatted_time(input.timestamp, input.timezone_offset_hours),
+            timezone_offset_hours: input.timezone_offset_hours,
             message_text: input.message_text.clone(),
             reply_context: input.reply_context.clone(),
+            reply_target_is_latest: memory.reply_target_is_latest,
             link_context: link_context.map(str::to_owned),
             enable_web_search: true,
             summary: memory.summary,
@@ -961,6 +965,7 @@ where
             history,
             retrieved: _,
             compaction_plan: _,
+            reply_target_is_latest: _,
         } = memory;
         if history.is_empty() {
             let text = summary.filter(|summary| !summary.is_empty()).map_or_else(
@@ -2754,6 +2759,7 @@ mod tests {
                     }],
                     retrieved: Vec::new(),
                     compaction_plan: None,
+                    reply_target_is_latest: false,
                 },
                 ..State::default()
             },
