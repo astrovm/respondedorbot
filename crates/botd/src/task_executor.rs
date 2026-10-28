@@ -592,8 +592,35 @@ where
         task: &ScheduledTask,
         execution_id: &str,
     ) -> Result<TaskExecutionDisposition, Self::Error> {
-        self.execute_task(task, execution_id)
+        let outcome = self.execute_task(task, execution_id);
+        println!(
+            "Task trace: {}",
+            task_run_trace(task, execution_id, &outcome)
+        );
+        outcome
     }
+}
+
+/// One line per run, so a message a task sent can be found in the logs. Goes
+/// to stdout like the AI traces; failures also reach stderr as diagnostics.
+fn task_run_trace(
+    task: &ScheduledTask,
+    execution_id: &str,
+    outcome: &Result<TaskExecutionDisposition, NativeTaskExecutorError>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "event": "task_run",
+        "task_id": task.id.as_str(),
+        "chat_id": task.chat_id,
+        "execution_id": execution_id,
+        "outcome": match outcome {
+            Ok(TaskExecutionDisposition::Complete) => "complete",
+            Ok(TaskExecutionDisposition::Finished) => "finished",
+            Ok(TaskExecutionDisposition::Retry) => "retry",
+            Err(_) => "error",
+        },
+        "error": outcome.as_ref().err().map(ToString::to_string),
+    })
 }
 
 #[must_use]
@@ -700,7 +727,7 @@ mod tests {
         TaskBilling, TaskDiagnostics, TaskExecutionDisposition, TaskExecutionJournal,
         TaskExecutionKind, TaskExecutionState, TaskMessenger, TaskPollDeliveryError,
         TaskPromptMessage, TaskProviderFailure, TaskProviderReply, TaskReserveOutcome,
-        build_task_messages, clean_task_response, diagnostic_line, execute_failed,
+        build_task_messages, clean_task_response, diagnostic_line, execute_failed, task_run_trace,
     };
 
     #[derive(Default)]
@@ -878,6 +905,44 @@ mod tests {
             next_run_at: Some(1_000),
             last_execution_id: None,
         }
+    }
+
+    #[test]
+    fn task_runs_trace_their_outcome_without_the_task_text() {
+        let task = task("es");
+        let outcomes = [
+            (Ok(TaskExecutionDisposition::Complete), "complete"),
+            (Ok(TaskExecutionDisposition::Finished), "finished"),
+            (Ok(TaskExecutionDisposition::Retry), "retry"),
+            (
+                Err(NativeTaskExecutorError::Delivery {
+                    message: "synthetic outage".to_owned(),
+                }),
+                "error",
+            ),
+        ];
+        for (outcome, expected) in outcomes {
+            let trace = task_run_trace(&task, "exec-1", &outcome);
+            assert_eq!(trace["event"], "task_run");
+            assert_eq!(trace["task_id"], "task123");
+            assert_eq!(trace["chat_id"], "-100123");
+            assert_eq!(trace["execution_id"], "exec-1");
+            assert_eq!(trace["outcome"], expected);
+            assert!(!trace.to_string().contains("synthetic task"));
+        }
+        let failed = task_run_trace(
+            &task,
+            "exec-1",
+            &Err(NativeTaskExecutorError::Delivery {
+                message: "synthetic outage".to_owned(),
+            }),
+        );
+        assert_eq!(
+            failed["error"],
+            "scheduled-task delivery failed: synthetic outage"
+        );
+        let done = task_run_trace(&task, "exec-1", &Ok(TaskExecutionDisposition::Complete));
+        assert!(done["error"].is_null());
     }
 
     fn executor(

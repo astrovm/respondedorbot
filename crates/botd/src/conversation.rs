@@ -603,7 +603,7 @@ where
         {
             Ok(prepared) => prepared,
             Err(error) => {
-                eprintln!(
+                println!(
                     "Media trace: {}",
                     serde_json::json!({
                         "event": "ai_media_preparation_failure",
@@ -663,7 +663,7 @@ where
             Err(error) => Ok(PreparedConversationMedia {
                 reserve_decision: decision,
                 diagnostics: {
-                    eprintln!(
+                    println!(
                         "Media trace: {}",
                         serde_json::json!({
                             "event": "ai_media_provider_failure",
@@ -718,7 +718,7 @@ where
         {
             Ok(prepared) => prepared,
             Err(error) => {
-                eprintln!(
+                println!(
                     "Media trace: {}",
                     serde_json::json!({
                         "event": "media_command_preparation_failure",
@@ -759,7 +759,7 @@ where
                         AiPreparation::reply(sanitize_summary_text(&execution.text), None)
                     }
                     Err(error) => {
-                        eprintln!(
+                        println!(
                             "Media trace: {}",
                             serde_json::json!({
                                 "event": "media_command_cached_failure",
@@ -814,7 +814,7 @@ where
                 )
             }
             Err(error) => {
-                eprintln!(
+                println!(
                     "Media trace: {}",
                     serde_json::json!({
                         "event": "media_command_provider_failure",

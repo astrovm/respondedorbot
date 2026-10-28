@@ -492,7 +492,7 @@ where
                     operation_id,
                     result.provider_rounds,
                     "tool_start",
-                    tool_trace(call, arguments, None),
+                    tool_trace(&call.name, &call.id, arguments, None),
                 );
                 let joined = handle.and_then(|handle| handle.join().ok());
                 let (tool_result, elapsed) = if let Some(joined) = joined {
@@ -502,7 +502,7 @@ where
                     let tool_result = tools.execute(&call.name, arguments, &call.id);
                     (tool_result, started.elapsed())
                 };
-                let mut details = tool_trace(call, arguments, Some(&tool_result));
+                let mut details = tool_trace(&call.name, &call.id, arguments, Some(&tool_result));
                 details["elapsed_ms"] = json!(elapsed.as_millis());
                 trace(operation_id, result.provider_rounds, "tool_result", details);
                 result.tool_calls_executed += 1;
@@ -793,8 +793,10 @@ fn emit_event(
 }
 
 // Keep traces separate from user-facing diagnostics. JSON escapes embedded newlines.
-fn trace(operation_id: &str, round: usize, event: &str, details: Value) {
-    eprintln!(
+// Traces go to stdout, which the journal keeps at info level; stderr is for
+// real warnings and errors.
+pub(crate) fn trace(operation_id: &str, round: usize, event: &str, details: Value) {
+    println!(
         "AI trace: {}",
         json!({
             "operation_id": bounded(operation_id, 160),
@@ -805,7 +807,7 @@ fn trace(operation_id: &str, round: usize, event: &str, details: Value) {
     );
 }
 
-fn bounded(text: &str, limit: usize) -> String {
+pub(crate) fn bounded(text: &str, limit: usize) -> String {
     let mut chars = text.chars();
     let mut result: String = chars.by_ref().take(limit).collect();
     if chars.next().is_some() {
@@ -842,15 +844,16 @@ fn source_location(raw: &str) -> String {
     bounded(url.as_str(), 500)
 }
 
-fn tool_trace(
-    call: &StreamToolCall,
+pub(crate) fn tool_trace(
+    name: &str,
+    call_id: &str,
     arguments: &Value,
     result: Option<&ToolExecutionResult>,
 ) -> Value {
-    let mut details =
-        json!({"tool": bounded(&call.name, 80), "tool_call_id": bounded(&call.id, 160)});
-    match call.name.as_str() {
-        "web_search" => {
+    let mut details = json!({"tool": bounded(name, 80), "tool_call_id": bounded(call_id, 160)});
+    match name {
+        // Search terms, so a wrong answer can be traced back to what was looked up.
+        "web_search" | "polymarket" => {
             details["query"] = json!(bounded(
                 arguments
                     .get("query")
@@ -872,7 +875,7 @@ fn tool_trace(
     if let Some(result) = result {
         details["output_chars"] = json!(result.output.chars().count());
         details["diagnostic_count"] = json!(result.diagnostics.len());
-        if call.name == "web_search" {
+        if name == "web_search" {
             let payload = serde_json::from_str::<Value>(&result.output).ok();
             if let Some(results) = payload
                 .as_ref()
@@ -1025,7 +1028,8 @@ mod tests {
             .to_string(),
         );
         let trace = tool_trace(
-            &call,
+            &call.name,
+            &call.id,
             &json!({"query": "boca river 2026\npróximo", "api_key": "secret-key"}),
             Some(&result),
         );
@@ -1050,12 +1054,12 @@ mod tests {
         let call = call("web_search", "{}");
         let mut result = ToolExecutionResult::output(r#"{"results":[]}"#);
         result.billing_segment = Some(json!({"metadata": {"provider_request_id": "request-123"}}));
-        let empty = tool_trace(&call, &json!({}), Some(&result));
+        let empty = tool_trace(&call.name, &call.id, &json!({}), Some(&result));
         assert_eq!(empty["result_count"], 0);
         assert_eq!(empty["provider_request_id"], "request-123");
         assert!(empty.get("search_error").is_none());
         result.output = "Search error: timed out".to_owned();
-        let error = tool_trace(&call, &json!({}), Some(&result));
+        let error = tool_trace(&call.name, &call.id, &json!({}), Some(&result));
         assert_eq!(error["search_error"], "Search error: timed out");
         assert!(error.get("result_count").is_none());
     }
@@ -1064,7 +1068,12 @@ mod tests {
     fn traces_do_not_dump_private_tool_contents_or_assistant_text() {
         let call = call("task_set", "{}");
         let result = ToolExecutionResult::output("private reminder");
-        let trace = tool_trace(&call, &json!({"text": "private reminder"}), Some(&result));
+        let trace = tool_trace(
+            &call.name,
+            &call.id,
+            &json!({"text": "private reminder"}),
+            Some(&result),
+        );
         assert!(!trace.to_string().contains("private reminder"));
         assert_eq!(trace["output_chars"], 16);
         let trace = round_trace(&round(
@@ -2391,14 +2400,31 @@ mod tests {
     #[test]
     fn fetch_traces_keep_only_the_page_location() {
         let trace = tool_trace(
-            &call("web_fetch", "{}"),
+            "web_fetch",
+            "call-1",
             &json!({"url": "https://user:secret@example.com/page?token=private#section"}),
             None,
         );
         assert_eq!(trace["url"], "https://example.com/page");
         assert!(trace.get("output_chars").is_none());
-        let missing = tool_trace(&call("web_fetch", "{}"), &json!({}), None);
+        let missing = tool_trace("web_fetch", "call-1", &json!({}), None);
         assert_eq!(missing["url"], "[invalid URL]");
+    }
+
+    #[test]
+    fn polymarket_traces_keep_the_search_query() {
+        let result = ToolExecutionResult::output("Polymarket markets for \"israel election\"");
+        let trace = tool_trace(
+            "polymarket",
+            "call-1",
+            &json!({"query": "israel election"}),
+            Some(&result),
+        );
+        assert_eq!(trace["query"], "israel election");
+        assert_eq!(trace["output_chars"], 40);
+        // Only web search results carry sources.
+        assert!(trace.get("result_count").is_none());
+        assert!(trace.get("search_error").is_none());
     }
 
     #[test]
