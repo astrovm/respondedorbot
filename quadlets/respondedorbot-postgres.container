@@ -3,8 +3,11 @@ Description=respondedorbot PostgreSQL database
 After=network-online.target
 
 [Container]
-Image=docker.io/library/postgres:18.6-trixie
+# Major version and Debian release pinned: a new Debian brings a new ICU, which changes text
+# sort order and needs a REINDEX. Minor updates come in through AutoUpdate.
+Image=docker.io/library/postgres:18-trixie
 ContainerName=respondedorbot-postgres
+AutoUpdate=registry
 EnvironmentFile=%h/respondedorbot/postgres.env
 # ICU sorting, like the Supabase database this replaced.
 Environment=POSTGRES_INITDB_ARGS="--locale-provider=icu --icu-locale=en-US"

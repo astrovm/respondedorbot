@@ -51,10 +51,12 @@ jobs:
       contents: read
     services:
       postgres:
-        image: mirror.gcr.io/library/postgres:18-alpine
+        # The production image and sort order (quadlets/respondedorbot-postgres.container).
+        image: mirror.gcr.io/library/postgres:18-trixie
         env:
           POSTGRES_DB: respondedorbot_test
           POSTGRES_PASSWORD: synthetic-password
+          POSTGRES_INITDB_ARGS: --locale-provider=icu --icu-locale=en-US
         ports:
           - 5432:5432
         options: >-
