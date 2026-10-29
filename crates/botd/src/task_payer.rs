@@ -330,10 +330,8 @@ mod tests {
         let mut store = ChatBanRepository::new(&url);
         let _cleared = ChatBanStore::unban(&mut store, chat_id, 9);
         assert!(!ChatIgnoredMembers::new(repository(), admins(false)).ignored(&group, 9));
-        assert_eq!(
-            ChatBanStore::ban(&mut store, chat_id, 9, "Ana", 1),
-            Ok(true)
-        );
+        let banned = ChatBanStore::ban(&mut store, chat_id, 9, "Ana", 1);
+        assert_eq!(banned, Ok(true));
         assert!(ChatIgnoredMembers::new(repository(), admins(false)).ignored(&group, 9));
         assert!(!ChatIgnoredMembers::new(repository(), admins(true)).ignored(&group, 9));
         let _cleared = ChatBanStore::unban(&mut store, chat_id, 9);
