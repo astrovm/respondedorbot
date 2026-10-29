@@ -134,6 +134,43 @@ fn disable_link_preview(payload: &mut Map<String, Value>) {
 
 fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
     let (endpoint, method, params, json_payload) = match action {
+        TelegramAction::Ephemeral {
+            receiver_user_id,
+            ephemeral_message_id,
+            action,
+        } => {
+            let mut prepared = prepare(*action)?;
+            let payload = prepared
+                .json_payload
+                .as_mut()
+                .and_then(Value::as_object_mut)
+                .ok_or(ActionError::InvalidAction)?;
+            prepared.endpoint = match prepared.endpoint {
+                "sendMessage" => {
+                    payload.remove("reply_parameters");
+                    payload.insert(
+                        "ephemeral_message_parameters".into(),
+                        json!({"receiver_user_id": receiver_user_id}),
+                    );
+                    "sendMessage"
+                }
+                "editMessageText" | "deleteMessage" => {
+                    payload.remove("message_id");
+                    payload.insert("receiver_user_id".into(), json!(receiver_user_id));
+                    payload.insert(
+                        "ephemeral_message_id".into(),
+                        json!(ephemeral_message_id.ok_or(ActionError::InvalidAction)?),
+                    );
+                    if prepared.endpoint == "deleteMessage" {
+                        "deleteEphemeralMessage"
+                    } else {
+                        "editEphemeralMessageText"
+                    }
+                }
+                _ => return Err(ActionError::InvalidAction),
+            };
+            return Ok(prepared);
+        }
         TelegramAction::SetCommands {
             commands,
             language_code,
@@ -381,6 +418,48 @@ fn parse_response(
             .description
             .unwrap_or_else(|| "telegram request failed".to_owned()),
     })
+}
+
+/// Create a native Telegram checkout link without publishing an invoice.
+pub fn create_invoice_link_with<T: TelegramTransport>(
+    transport: &T,
+    token: &str,
+    invoice: TelegramAction,
+) -> Result<Option<String>, ActionError> {
+    if !matches!(invoice, TelegramAction::SendInvoice { .. }) {
+        return Err(ActionError::InvalidAction);
+    }
+    let mut prepared = prepare(invoice)?;
+    prepared
+        .json_payload
+        .as_mut()
+        .and_then(Value::as_object_mut)
+        .ok_or(ActionError::InvalidAction)?
+        .remove("chat_id");
+    let outcome = send_with(
+        transport,
+        &TelegramRequest {
+            token: token.to_owned(),
+            endpoint: "createInvoiceLink".into(),
+            method: Method::POST,
+            params: None,
+            json_payload: prepared.json_payload,
+            timeout: Duration::from_secs(ACTION_TIMEOUT_SECONDS),
+        },
+    );
+    let TelegramHttpOutcome::Response { status_code, body } = outcome else {
+        return Ok(None);
+    };
+    if !(200..300).contains(&status_code) {
+        return Ok(None);
+    }
+    let envelope: ApiEnvelope =
+        serde_json::from_str(&body).map_err(|_| ActionError::InvalidResponse)?;
+    Ok(envelope.result.filter(|_| envelope.ok).and_then(|v| {
+        v.as_str()
+            .filter(|s| s.starts_with("https://t.me/$"))
+            .map(str::to_owned)
+    }))
 }
 
 pub fn execute_with<T: TelegramTransport>(

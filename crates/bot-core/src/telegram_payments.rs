@@ -8,9 +8,7 @@ use crate::chat_config::ChatConfig;
 use crate::command_parsing::parse_command;
 use crate::credit_units::{CREDIT_SCALE, CreditUnits, display_credit_units};
 use crate::locale::Locale;
-use crate::telegram_actions::{
-    InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, SendMessage, TelegramAction,
-};
+use crate::telegram_actions::{InlineKeyboardMarkup, LabeledPrice, SendMessage, TelegramAction};
 use crate::telegram_input::{ChatId, MessageId, python_string, python_truthy};
 
 const DEFAULT_BILLING_PACKS: [(&str, i64, i64); 6] = [
@@ -253,7 +251,7 @@ pub fn plan_topup_command(
     message_text: &str,
     bot_name: &str,
     locale: Locale,
-    chat_type: &str,
+    _chat_type: &str,
     billing_available: bool,
     lightning_available: bool,
 ) -> Option<TelegramAction> {
@@ -269,31 +267,6 @@ pub fn plan_topup_command(
         (
             crate::billing_commands::billing_unavailable(locale).to_owned(),
             None,
-        )
-    } else if chat_type != "private" {
-        let username = bot_name.trim().trim_start_matches('@');
-        (
-            match (locale, username.is_empty()) {
-                (Locale::Es, false) => format!("La recarga va por privado: abrime en @{username}"),
-                (Locale::En, false) => format!("Top-ups happen in private: open @{username}"),
-                (Locale::Es, true) => {
-                    "La recarga va por privado: escribime por mensaje directo".to_owned()
-                }
-                (Locale::En, true) => {
-                    "Top-ups happen in private: send me a direct message".to_owned()
-                }
-            },
-            (!username.is_empty()).then(|| InlineKeyboardMarkup {
-                inline_keyboard: vec![vec![InlineKeyboardButton {
-                    text: match locale {
-                        Locale::Es => "Abrir chat privado".to_owned(),
-                        Locale::En => "Open private chat".to_owned(),
-                    },
-                    url: Some(format!("https://t.me/{username}")),
-                    callback_data: None,
-                    copy_text: None,
-                }]],
-            }),
         )
     } else {
         let (text, keyboard) = topup_menu(locale, credits, lightning_available);
@@ -512,7 +485,7 @@ pub fn plan_topup_callback(
     callback_id: Option<&str>,
     data: &str,
     chat_id: ChatId,
-    chat_type: &str,
+    _chat_type: &str,
     user_id: Option<i64>,
     billing_available: bool,
     locale: Locale,
@@ -522,12 +495,6 @@ pub fn plan_topup_callback(
     };
     if !billing_available {
         return alert(crate::billing_commands::billing_unavailable(locale));
-    }
-    if chat_type != "private" {
-        return alert(match locale {
-            Locale::Es => "Cargá por privado, maestro",
-            Locale::En => "Open this in a private chat",
-        });
     }
     if let Some(credits) = data
         .strip_prefix("topup:amt:")
@@ -758,7 +725,7 @@ pub fn evaluate_pre_checkout(
         pack_id.as_deref() == Some(pack.id.as_str())
             && currency == "XTR"
             && total_amount == pack.xtr_amount
-            && payload_user_id.is_none_or(|payload_user_id| payload_user_id == user_id)
+            && payload_user_id == Some(user_id)
     });
     Ok(if valid {
         PreCheckoutDecision::Approve { query_id }
@@ -867,7 +834,7 @@ pub fn evaluate_successful_payment(
             pack_id.as_deref() == Some(pack.id.as_str())
                 && currency == "XTR"
                 && total_amount == pack.xtr_amount
-                && payload_user_id.is_none_or(|payload_user_id| payload_user_id == user_id)
+                && payload_user_id == Some(user_id)
         });
     let Some(pack) = expected_pack.filter(|_| valid) else {
         return Ok(SuccessfulPaymentDecision::InvalidPayment {

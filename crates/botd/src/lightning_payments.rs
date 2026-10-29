@@ -200,7 +200,16 @@ where
                 // The credit is already committed; a failed notice only
                 // loses the message, never the credits.
                 self.actions
-                    .execute(TelegramAction::SendMessage(message))
+                    .execute(if charge.chat_id < 0 {
+                        message.reply_to_message_id = None;
+                        TelegramAction::Ephemeral {
+                            receiver_user_id: charge.user_id,
+                            ephemeral_message_id: None,
+                            action: Box::new(TelegramAction::SendMessage(message)),
+                        }
+                    } else {
+                        TelegramAction::SendMessage(message)
+                    })
                     .map(|_receipt| ())
                     .map_err(|error| format!("payment notice: {error}"))
             }
@@ -483,6 +492,7 @@ mod tests {
         overdue: bool,
     ) -> PendingLightningCharge {
         PendingLightningCharge {
+            user_id: 42,
             charge_id: charge_id.to_owned(),
             chat_id: 88,
             message_id,

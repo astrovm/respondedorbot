@@ -25,9 +25,38 @@ pub struct CallbackContext {
     pub chat_id: String,
     pub chat_type: String,
     pub message_id: i64,
+    pub ephemeral_message_id: Option<i64>,
+    pub receiver_user_id: Option<i64>,
     pub user_id: Option<i64>,
     pub user_language_code: Option<String>,
     pub route: CallbackRoute,
+}
+
+impl CallbackContext {
+    pub fn personal_menu_allowed(&self) -> bool {
+        match self.user_id {
+            Some(_) if self.chat_type == "private" => true,
+            Some(user) => {
+                self.ephemeral_message_id.is_some() && self.receiver_user_id == Some(user)
+            }
+            None => false,
+        }
+    }
+
+    pub fn personal_action(
+        &self,
+        action: crate::telegram_actions::TelegramAction,
+    ) -> crate::telegram_actions::TelegramAction {
+        if self.chat_type == "private" {
+            action
+        } else {
+            crate::telegram_actions::TelegramAction::Ephemeral {
+                receiver_user_id: self.user_id.unwrap_or_default(),
+                ephemeral_message_id: self.ephemeral_message_id,
+                action: Box::new(action),
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -104,7 +133,11 @@ pub fn parse_callback_context(
     let Some(chat_id_value) = chat.get("id").filter(|value| !value.is_null()) else {
         return Ok(CallbackContextOutcome::Guard);
     };
-    let Some(message_id_value) = message.get("message_id").filter(|value| !value.is_null()) else {
+    let Some(message_id_value) = message
+        .get("ephemeral_message_id")
+        .or_else(|| message.get("message_id"))
+        .filter(|value| !value.is_null())
+    else {
         return Ok(CallbackContextOutcome::Guard);
     };
     let message_id =
@@ -120,6 +153,11 @@ pub fn parse_callback_context(
             chat_id: python_string(chat_id_value),
             chat_type: chat.get("type").map_or_else(String::new, python_string),
             message_id,
+            ephemeral_message_id: message.get("ephemeral_message_id").and_then(Value::as_i64),
+            receiver_user_id: message
+                .get("receiver_user")
+                .and_then(|u| u.get("id"))
+                .and_then(Value::as_i64),
             user_id,
             user_language_code,
         },
@@ -151,6 +189,8 @@ mod tests {
                     chat_id: "-10042".to_owned(),
                     chat_type: "supergroup".to_owned(),
                     message_id: 7,
+                    ephemeral_message_id: None,
+                    receiver_user_id: None,
                     user_id: Some(99),
                     user_language_code: Some("es".to_owned()),
                     route: CallbackRoute::Config,
@@ -203,6 +243,8 @@ mod tests {
                     chat_id: "True".to_owned(),
                     chat_type: String::new(),
                     message_id: 2,
+                    ephemeral_message_id: None,
+                    receiver_user_id: None,
                     user_id: None,
                     user_language_code: None,
                     route: CallbackRoute::Unknown,

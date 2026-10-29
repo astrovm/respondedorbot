@@ -17,6 +17,8 @@ struct CommandGroup {
 pub struct TelegramCommand {
     pub command: &'static str,
     pub description: &'static str,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub is_ephemeral: bool,
 }
 
 const COMMAND_GROUPS: &[CommandGroup] = &[
@@ -220,6 +222,7 @@ pub fn telegram_commands(locale: Locale) -> Vec<TelegramCommand> {
                 Locale::En => group.description_en,
             };
             group.aliases.iter().map(move |command| TelegramCommand {
+                is_ephemeral: *command == "topup",
                 command,
                 description,
             })
@@ -289,6 +292,7 @@ pub fn primary_telegram_commands(locale: Locale) -> Vec<TelegramCommand> {
                 .iter()
                 .find(|group| group.aliases.contains(command))
                 .map(|group| TelegramCommand {
+                    is_ephemeral: *command == "topup",
                     command,
                     description: match locale {
                         Locale::Es => group.description_es,

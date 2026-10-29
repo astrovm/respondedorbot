@@ -1614,6 +1614,7 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 fn telegram_action_chat_id(action: &TelegramAction) -> Option<i64> {
     match action {
+        TelegramAction::Ephemeral { action, .. } => telegram_action_chat_id(action),
         TelegramAction::SendMessage(message) => Some(message.chat_id.0),
         TelegramAction::SendDocument { chat_id, .. }
         | TelegramAction::SendAnimation { chat_id, .. }
@@ -2621,6 +2622,15 @@ impl<Transport: TelegramTransport> ActionSink for TelegramActionSink<Transport> 
             self.execute_with_retry(action)?,
             ActionOutcome::Completed { .. }
         ))
+    }
+
+    fn invoice_link(&mut self, action: TelegramAction) -> Result<Option<String>, Self::Error> {
+        bot_adapters::telegram_actions::create_invoice_link_with(
+            &self.transport,
+            &self.token,
+            action,
+        )
+        .map_err(Into::into)
     }
 
     fn try_invoice(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {

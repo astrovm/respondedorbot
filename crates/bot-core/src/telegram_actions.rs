@@ -66,6 +66,13 @@ pub enum CommandScope {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TelegramAction {
+    /// Restrict a text send, edit or delete to one Telegram user. The inner
+    /// action must never be sent as a public fallback.
+    Ephemeral {
+        receiver_user_id: i64,
+        ephemeral_message_id: Option<i64>,
+        action: Box<TelegramAction>,
+    },
     SetCommands {
         commands: Vec<TelegramCommand>,
         language_code: Option<String>,

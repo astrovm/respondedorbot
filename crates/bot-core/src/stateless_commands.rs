@@ -99,6 +99,29 @@ pub fn plan_stateless_command_with_reply(
     locale: Locale,
 ) -> StatelessCommandPlan {
     let parsed = parse_command(message_text, bot_name);
+    if parsed.command == "/start" && parsed.message_text.is_empty() {
+        let (text, mut keyboard) = render_help_page(locale, "home");
+        keyboard.inline_keyboard.insert(
+            0,
+            vec![
+                crate::menu_ui::button(
+                    crate::telegram_payments::topup_menu_title(locale),
+                    "topup:open",
+                ),
+                crate::menu_ui::button(
+                    match locale {
+                        Locale::Es => "Ayuda",
+                        Locale::En => "Help",
+                    },
+                    "help:home",
+                ),
+            ],
+        );
+        let mut message = SendMessage::new(chat_id, &text);
+        message.reply_markup = Some(keyboard);
+        message.reply_to_message_id = Some(message_id);
+        return StatelessCommandPlan::Action(TelegramAction::SendMessage(message));
+    }
     if parsed.command == "/help" {
         let (text, keyboard) = render_help_page(locale, "home");
         let mut message = SendMessage::new(chat_id, &text);

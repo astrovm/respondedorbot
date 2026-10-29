@@ -171,6 +171,7 @@ fn parse_event(object: &mut Map<String, Value>) -> Result<IncomingEvent, Polling
 fn parse_message(payload: &Map<String, Value>) -> IncomingMessage {
     let message_id = payload
         .get("message_id")
+        .or_else(|| payload.get("ephemeral_message_id"))
         .and_then(normalize_numeric_id)
         .map(MessageId);
     let chat = payload.get("chat").and_then(Value::as_object);

@@ -1573,12 +1573,10 @@ mod tests {
         )
         .with_payer_policy(Box::new(FixedPayer(payer)));
         let outcome = billing.reserve(&task(locale), "task123:1000", &[]);
-        let message = format!("{outcome:?}");
-        assert!(
-            matches!(outcome, Ok(TaskReserveOutcome::Denied { .. })),
-            "expected a denial"
-        );
-        message
+        match outcome {
+            Ok(TaskReserveOutcome::Denied { message }) => message,
+            _ => panic!("expected a denial"),
+        }
     }
 
     #[test]
@@ -1590,7 +1588,7 @@ mod tests {
             group_pays_first: false,
         };
         let both = denied_text_in("en", group, None);
-        assert!(both.contains("Neither your personal credits"), "{both}");
+        assert!(both.contains("Neither your personal credits"));
         let off = denied_text_in(
             "en",
             TaskPayer {
@@ -1599,7 +1597,7 @@ mod tests {
             },
             None,
         );
-        assert!(off.contains("Tasks on group credits"), "{off}");
+        assert!(off.contains("Tasks on group credits"));
     }
 
     #[test]
@@ -1611,14 +1609,14 @@ mod tests {
             group_pays_first: false,
         };
         let off = denied_text(group(false), None);
-        assert!(off.contains("Tareas con créditos del grupo"), "{off}");
-        assert!(off.contains("hay 4.56"), "{off}");
+        assert!(off.contains("Tareas con créditos del grupo"));
+        assert!(off.contains("hay 4.56"));
         let both = denied_text(group(true), None);
-        assert!(both.contains("el grupo tiene 4.56"), "{both}");
+        assert!(both.contains("el grupo tiene 4.56"));
         let limited = denied_text(group(true), Some(3));
-        assert!(limited.contains("3 mensajes por hora"), "{limited}");
+        assert!(limited.contains("3 mensajes por hora"));
         let private = denied_text(TaskPayer::PERSONAL, None);
-        assert!(private.contains("Saldo: 1.23"), "{private}");
+        assert!(private.contains("Saldo: 1.23"));
     }
 
     #[test]
