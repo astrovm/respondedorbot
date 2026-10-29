@@ -100,9 +100,9 @@ use bot_core::telegram_payments::{
     BalanceCommandContext, BalanceCommandPlan, BillingPackTerms, DEFAULT_TOPUP_CREDITS,
     MAX_TOPUP_CREDITS, MIN_TOPUP_CREDITS, StarPaymentRecord, SuccessfulPaymentDecision,
     TopupCallbackPlan, balance_reply, evaluate_default_successful_payment, invoice_payload_locale,
-    parse_topup_amount, payment_record, plan_balance_command, plan_pre_checkout,
-    plan_topup_callback, plan_topup_command, successful_payment_reply, topup_menu,
-    topup_menu_title,
+    menu_stars_invoice, parse_topup_amount, payment_record, plan_balance_command,
+    plan_pre_checkout, plan_topup_callback, plan_topup_command, set_stars_link,
+    successful_payment_reply, topup_menu, topup_menu_title,
 };
 use bot_core::token_signals::{
     SIGNAL_REFRESH_COOLDOWN_SECONDS, SignalQuery, SignalState, TokenAddress, TokenSignal,
@@ -613,6 +613,29 @@ fn sent_link_fix_key(chat_id: ChatId, message_id: MessageId) -> String {
 
 fn topup_invoice_claim_key(user_id: i64, pack_id: &str) -> String {
     format!("topup_invoice:{user_id}:{pack_id}")
+}
+
+/// How long a top-up menu's Stars link is reused, so stepping between
+/// amounts doesn't wait on a new link each time.
+const TOPUP_LINK_TTL_SECONDS: i64 = 3600;
+
+fn topup_link_key(user_id: i64, pack_id: &str, locale: bot_core::locale::Locale) -> String {
+    format!("topup_link:{user_id}:{pack_id}:{}", locale.code())
+}
+
+/// The keyboard of a message being sent or edited, with the chat it's in.
+fn action_keyboard(action: &mut TelegramAction) -> Option<(ChatId, &mut InlineKeyboardMarkup)> {
+    match action {
+        TelegramAction::SendMessage(message) => {
+            Some((message.chat_id, message.reply_markup.as_mut()?))
+        }
+        TelegramAction::EditMessage {
+            chat_id,
+            reply_markup,
+            ..
+        } => Some((*chat_id, reply_markup.as_mut()?)),
+        _ => None,
+    }
 }
 
 fn market_selection_key(selection_id: &str) -> String {
@@ -3926,7 +3949,7 @@ where
             return Ok(DispatchOutcome::Handled);
         }
         if context.data == "topup:open" {
-            let (Ok(chat_id), Some(_user_id)) = (context.chat_id.parse::<i64>(), context.user_id)
+            let (Ok(chat_id), Some(user_id)) = (context.chat_id.parse::<i64>(), context.user_id)
             else {
                 self.answer_callback_best_effort(context.callback_id.as_deref());
                 return Ok(DispatchOutcome::Handled);
@@ -3950,10 +3973,12 @@ where
                 self.billing_available,
                 self.lightning_checkout.is_some(),
             );
-            action
-                .map(|action| self.actions.execute(context.personal_action(action)))
-                .transpose()
-                .map_err(DispatchError::Action)?;
+            if let Some(action) = action {
+                let action = self.with_stars_link(action, Some(user_id), locale);
+                self.actions
+                    .execute(context.personal_action(action))
+                    .map_err(DispatchError::Action)?;
+            }
             self.answer_callback_best_effort(context.callback_id.as_deref());
             return Ok(DispatchOutcome::Handled);
         }
@@ -4093,16 +4118,18 @@ where
                     self.answer_callback_best_effort(context.callback_id.as_deref());
                     let (text, keyboard) =
                         topup_menu(locale, credits, self.lightning_checkout.is_some());
+                    let edit = TelegramAction::EditMessage {
+                        chat_id: ChatId(chat_id),
+                        message_id: MessageId(context.message_id),
+                        text,
+                        reply_markup: Some(keyboard),
+                    };
+                    let edit = self.with_stars_link(edit, context.user_id, locale);
                     // Tapping the amount already shown changes nothing, and
                     // Telegram refuses that edit, so its result is ignored.
                     let _edited = self
                         .actions
-                        .try_edit(context.personal_action(TelegramAction::EditMessage {
-                            chat_id: ChatId(chat_id),
-                            message_id: MessageId(context.message_id),
-                            text,
-                            reply_markup: Some(keyboard),
-                        }))
+                        .try_edit(context.personal_action(edit))
                         .map_err(DispatchError::Action)?;
                     Ok(DispatchOutcome::Handled)
                 }
@@ -4188,8 +4215,7 @@ where
                                 pack.credits_awarded / 100,
                                 self.lightning_checkout.is_some(),
                             );
-                            keyboard.inline_keyboard[2][0].callback_data = None;
-                            keyboard.inline_keyboard[2][0].url = Some(url);
+                            set_stars_link(&mut keyboard, url);
                             self.actions
                                 .try_edit(context.personal_action(TelegramAction::EditMessage {
                                     chat_id: ChatId(chat_id),
@@ -4560,13 +4586,18 @@ where
             _ => {
                 self.answer_callback_best_effort(callback_id);
                 let (text, keyboard) = topup_menu(locale, DEFAULT_TOPUP_CREDITS, true);
-                self.actions
-                    .try_edit(context.personal_action(TelegramAction::EditMessage {
+                let edit = self.with_stars_link(
+                    TelegramAction::EditMessage {
                         chat_id,
                         message_id,
                         text,
                         reply_markup: Some(keyboard),
-                    }))
+                    },
+                    Some(user_id),
+                    locale,
+                );
+                self.actions
+                    .try_edit(context.personal_action(edit))
                     .map_err(DispatchError::Action)?;
                 return Ok(DispatchOutcome::Handled);
             }
@@ -4668,6 +4699,55 @@ where
                 .map_err(DispatchError::Action)?;
         }
         Ok(DispatchOutcome::Handled)
+    }
+
+    /// Puts the Stars payment link on a top-up menu, so the first tap opens
+    /// checkout. Without a link the button keeps its callback, which makes
+    /// one when tapped.
+    fn with_stars_link(
+        &mut self,
+        mut action: TelegramAction,
+        user_id: Option<i64>,
+        locale: bot_core::locale::Locale,
+    ) -> TelegramAction {
+        let Some((user_id, keyboard, (pack_id, invoice))) = user_id
+            .zip(action_keyboard(&mut action))
+            .and_then(|(user_id, (chat_id, keyboard))| {
+                let invoice = menu_stars_invoice(keyboard, chat_id, user_id, locale)?;
+                Some((user_id, keyboard, invoice))
+            })
+        else {
+            return action;
+        };
+        let key = topup_link_key(user_id, &pack_id, locale);
+        let cached = self
+            .market_price_source
+            .as_mut()
+            .and_then(|source| source.load_selection(&key).ok().flatten())
+            .filter(|url| url.starts_with("https://t.me/$"));
+        let url = match cached {
+            Some(url) => Some(url),
+            None => match self.actions.invoice_link(invoice) {
+                Ok(url) => url.inspect(|url| {
+                    if let Some(source) = self.market_price_source.as_mut()
+                        && let Err(error) = source.save_selection(&key, url, TOPUP_LINK_TTL_SECONDS)
+                    {
+                        self.state_diagnostics
+                            .push(format!("topup link cache failed key={key}: {error}"));
+                    }
+                }),
+                Err(error) => {
+                    self.state_diagnostics.push(format!(
+                        "topup link user_id={user_id} pack={pack_id}: {error}"
+                    ));
+                    None
+                }
+            },
+        };
+        if let Some(url) = url {
+            set_stars_link(keyboard, url);
+        }
+        action
     }
 
     fn answer_callback_alert(
@@ -5808,10 +5888,12 @@ where
                 self.billing_available,
                 self.lightning_checkout.is_some(),
             );
-            let _receipt = menu
-                .map(|action| self.actions.execute(action))
-                .transpose()
-                .map_err(DispatchError::Action)?;
+            if let Some(action) = menu {
+                let action = self.with_stars_link(action, Some(sender_id.0), locale);
+                self.actions
+                    .execute(action)
+                    .map_err(DispatchError::Action)?;
+            }
             return Ok(DispatchOutcome::Handled);
         }
         if message.has_reply && self.ai_conversation_source.is_none() {
@@ -6010,7 +6092,7 @@ where
             self.lightning_checkout.is_some(),
         ) {
             StatelessCommandPlan::Action(personal_topup_action(
-                action,
+                self.with_stars_link(action, Some(sender_id.0), locale),
                 message.chat_type.as_deref().unwrap_or_default(),
                 sender_id.0,
                 message.ephemeral_message_id,
@@ -18140,18 +18222,30 @@ mod tests {
             dispatcher.dispatch(update("/topup", Some("en"))),
             Ok(DispatchOutcome::Handled)
         );
-        let command = first_sent(&dispatcher.actions.0);
+        // The menu arrives with its Stars link, so one tap opens checkout.
+        assert!(matches!(
+            &dispatcher.actions.0[0],
+            TelegramAction::SendInvoice { payload, .. } if payload == "topup:c100:88:es"
+        ));
+        let command = last_sent(&dispatcher.actions.0);
         assert!(command.text.starts_with("Cargar créditos\n\n"));
+        let keyboard = command
+            .reply_markup
+            .as_ref()
+            .map(|markup| markup.inline_keyboard.clone())
+            .unwrap_or_default();
+        assert_eq!(keyboard.len(), 4);
         assert_eq!(
-            command
-                .reply_markup
-                .as_ref()
-                .map(|markup| markup.inline_keyboard.len()),
-            Some(4)
+            (
+                keyboard[2][0].url.as_deref(),
+                keyboard[2][0].callback_data.as_deref()
+            ),
+            (Some("https://t.me/$synthetic-checkout"), None)
         );
         assert_eq!(dispatcher.state.incoming.len(), 1);
         assert_eq!(dispatcher.state.outgoing.len(), 1);
 
+        // A menu sent before links were attached still pays from its callback.
         assert_eq!(
             dispatcher.dispatch(callback_update("topup:p50", "private", Some("en"))),
             Ok(DispatchOutcome::Handled)
@@ -18159,6 +18253,7 @@ mod tests {
         assert!(matches!(
             dispatcher.actions.0.as_slice(),
             [
+                TelegramAction::SendInvoice { .. },
                 TelegramAction::SendMessage(_),
                 TelegramAction::SendInvoice { payload, .. },
                 TelegramAction::EditMessage { .. },
@@ -18253,7 +18348,9 @@ mod tests {
             .iter()
             .filter(|action| matches!(action, TelegramAction::SendInvoice { .. }))
             .count();
-        assert_eq!(invoices, 1);
+        // One link for the double-tapped 50 pack, reused when it comes back,
+        // and one drawn onto the 500 menu.
+        assert_eq!(invoices, 2);
         assert!(dispatcher.actions.0.iter().any(|action| matches!(
             action,
             TelegramAction::AnswerCallback {
@@ -18262,7 +18359,8 @@ mod tests {
                 ..
             } if text == "Invoice ready"
         )));
-        assert_eq!(stored.borrow().len(), 1);
+        // The tapped pack's claim, plus the link kept for the 500 menu.
+        assert_eq!(stored.borrow().len(), 2);
         Ok(())
     }
 
@@ -18504,7 +18602,7 @@ mod tests {
                 dispatcher.dispatch(update("/topup", Some("en"))),
                 Ok(DispatchOutcome::Handled)
             );
-            first_sent(&dispatcher.actions.0)
+            last_sent(&dispatcher.actions.0)
                 .reply_markup
                 .as_ref()
                 .is_some_and(|markup| {
@@ -18692,7 +18790,7 @@ mod tests {
                 Ok(DispatchOutcome::Handled)
             );
             assert!(
-                first_sent(&dispatcher.actions.0)
+                last_sent(&dispatcher.actions.0)
                     .text
                     .starts_with(&format!("Add credits\n\n{expected}")),
                 "{text}"
@@ -18707,7 +18805,7 @@ mod tests {
             Ok(DispatchOutcome::Handled)
         );
         assert!(
-            first_sent(&dispatcher.actions.0)
+            last_sent(&dispatcher.actions.0)
                 .text
                 .contains("200 credits")
         );
@@ -24352,7 +24450,7 @@ mod tests {
             });
             assert_eq!(bot.dispatch(update), Ok(DispatchOutcome::Handled));
             assert!(
-                matches!(&bot.actions.0[0],TelegramAction::Ephemeral {receiver_user_id:88,ephemeral_message_id:None,action,..} if matches!(action.as_ref(),TelegramAction::SendMessage(m) if m.text.contains("50 credits") && m.reply_markup.as_ref().is_some_and(|k|k.inline_keyboard[2][0].callback_data.as_deref()==Some("topup:c50"))))
+                matches!(&bot.actions.0[1],TelegramAction::Ephemeral {receiver_user_id:88,ephemeral_message_id:None,action,..} if matches!(action.as_ref(),TelegramAction::SendMessage(m) if m.text.contains("50 credits") && m.reply_markup.as_ref().is_some_and(|k|k.inline_keyboard[2][0].url.as_deref()==Some("https://t.me/$synthetic-checkout"))))
             );
         }
         let mut bot = configured(english(), Actions::default());
@@ -24375,9 +24473,25 @@ mod tests {
         );
         assert!(bot.actions.0.iter().any(|a|matches!(a,TelegramAction::Ephemeral{receiver_user_id:88,ephemeral_message_id:Some(71),action,..} if matches!(action.as_ref(),TelegramAction::EditMessage{text,..} if text.contains("50 credits")))));
         let wire = topup_wire(&bot.actions.0);
-        assert_eq!(wire[1].0, "editEphemeralMessageText");
-        assert_eq!(wire[1].1["ephemeral_message_id"], 71);
-        assert_eq!(wire[1].1["receiver_user_id"], 88);
+        let endpoints = wire
+            .iter()
+            .map(|(endpoint, _)| endpoint.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            endpoints,
+            [
+                "answerCallbackQuery",
+                "sendInvoice",
+                "editEphemeralMessageText"
+            ]
+        );
+        assert_eq!(wire[2].1["ephemeral_message_id"], 71);
+        assert_eq!(wire[2].1["receiver_user_id"], 88);
+        // The redrawn menu already carries the requester's checkout link.
+        assert_eq!(
+            wire[2].1["reply_markup"]["inline_keyboard"][2][0]["url"],
+            "https://t.me/$synthetic-checkout"
+        );
         bot.actions.0.clear();
         assert_eq!(
             bot.dispatch(ephemeral_topup_callback("topup:c50", 88, 88)),
@@ -24439,8 +24553,13 @@ mod tests {
                 Ok(DispatchOutcome::Handled)
             );
             let wire = topup_wire(&bot.actions.0);
-            assert_eq!(wire[0].0, "sendMessage");
-            let send = &wire[0];
+            assert_eq!(wire[0].0, "sendInvoice");
+            assert_eq!(wire[1].0, "sendMessage");
+            let send = &wire[1];
+            assert_eq!(
+                send.1["reply_markup"]["inline_keyboard"][2][0]["url"],
+                "https://t.me/$synthetic-checkout"
+            );
             if chat == "private" {
                 assert!(send.1.get("ephemeral_message_parameters").is_none());
             } else {
@@ -24451,6 +24570,123 @@ mod tests {
                 assert!(send.1.get("reply_parameters").is_none());
             }
         }
+    }
+
+    /// The last menu's Stars button as (link, callback).
+    fn stars_button(actions: &[TelegramAction]) -> (Option<String>, Option<String>) {
+        last_sent(actions)
+            .reply_markup
+            .as_ref()
+            .map(|keyboard| keyboard.inline_keyboard[2][0].clone())
+            .map(|button| (button.url, button.callback_data))
+            .unwrap_or_default()
+    }
+
+    fn invoice_count(actions: &[TelegramAction]) -> usize {
+        actions
+            .iter()
+            .filter(|action| matches!(action, TelegramAction::SendInvoice { .. }))
+            .count()
+    }
+
+    #[test]
+    fn topup_menus_reuse_the_requesters_stars_link() {
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let mut bot = configured(english(), Actions::default()).with_market_price_source(Box::new(
+            SelectableMarketPrices {
+                initial: market_selection_load(None),
+                candidate: market_candidate_quote(),
+                stored: Rc::clone(&stored),
+                selected: Rc::new(RefCell::new(Vec::new())),
+            },
+        ));
+        for _ in 0..2 {
+            assert_eq!(
+                bot.dispatch(update("/topup", Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert_eq!(
+                stars_button(&bot.actions.0),
+                (Some("https://t.me/$synthetic-checkout".to_owned()), None)
+            );
+        }
+        assert_eq!(invoice_count(&bot.actions.0), 1);
+        assert_eq!(
+            stored
+                .borrow()
+                .get("topup_link:88:c100:en")
+                .map(String::as_str),
+            Some("https://t.me/$synthetic-checkout")
+        );
+    }
+
+    #[test]
+    fn topup_menu_keeps_the_pay_callback_when_no_link_is_made() {
+        for (invoice, diagnostic) in [
+            (Attempt::Skip, None),
+            (
+                Attempt::Fail,
+                Some("topup link user_id=88 pack=c100: synthetic invoice transport failure"),
+            ),
+        ] {
+            let mut bot = configured(
+                english(),
+                Actions::scripted(ActionScript {
+                    invoice,
+                    ..ActionScript::default()
+                }),
+            );
+            assert_eq!(
+                bot.dispatch(update("/topup", Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert_eq!(
+                stars_button(&bot.actions.0),
+                (None, Some("topup:c100".to_owned()))
+            );
+            assert_eq!(
+                bot.state_diagnostics().first().map(String::as_str),
+                diagnostic
+            );
+        }
+    }
+
+    #[test]
+    fn topup_menu_keeps_a_fresh_link_when_it_cannot_be_cached() {
+        struct NoStorage;
+        impl MarketPriceSource for NoStorage {
+            fn load(
+                &mut self,
+                _: &str,
+                _: bot_core::market_prices::MarketPriceCommand,
+                _: bot_core::locale::Locale,
+                _: i64,
+            ) -> MarketPriceLoad {
+                MarketPriceLoad {
+                    chart: None,
+                    selection: None,
+                    no_assets_found: true,
+                    text: String::new(),
+                    diagnostics: Vec::new(),
+                }
+            }
+        }
+        let mut bot =
+            configured(english(), Actions::default()).with_market_price_source(Box::new(NoStorage));
+        assert_eq!(
+            bot.dispatch(update("/topup", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            stars_button(&bot.actions.0),
+            (Some("https://t.me/$synthetic-checkout".to_owned()), None)
+        );
+        assert_eq!(
+            bot.state_diagnostics(),
+            [
+                "topup link cache failed key=topup_link:88:c100:en: market selection storage unavailable"
+            ]
+        );
     }
 
     #[test]

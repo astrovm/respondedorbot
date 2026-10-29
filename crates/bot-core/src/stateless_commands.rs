@@ -100,10 +100,13 @@ pub fn plan_stateless_command_with_reply(
 ) -> StatelessCommandPlan {
     let parsed = parse_command(message_text, bot_name);
     if parsed.command == "/start" && parsed.message_text.is_empty() {
-        let (text, mut keyboard) = render_help_page(locale, "home");
-        keyboard.inline_keyboard.insert(
-            0,
-            vec![
+        let title = match locale {
+            Locale::Es => "Qué querés, gordo",
+            Locale::En => "What do you want, gordo",
+        };
+        let text = format!("{title}\n\n{}", crate::help_catalog::help_intro(locale));
+        let keyboard = crate::telegram_actions::InlineKeyboardMarkup {
+            inline_keyboard: vec![vec![
                 crate::menu_ui::button(
                     crate::telegram_payments::topup_menu_title(locale),
                     "topup:open",
@@ -115,8 +118,8 @@ pub fn plan_stateless_command_with_reply(
                     },
                     "help:home",
                 ),
-            ],
-        );
+            ]],
+        };
         let mut message = SendMessage::new(chat_id, &text);
         message.reply_markup = Some(keyboard);
         message.reply_to_message_id = Some(message_id);
@@ -198,7 +201,7 @@ mod tests {
         plan_stateless_command, plan_stateless_command_with_reply,
     };
     use crate::locale::Locale;
-    use crate::telegram_actions::TelegramAction;
+    use crate::telegram_actions::{SendMessage, TelegramAction};
     use crate::telegram_input::{ChatId, MessageId};
 
     fn message_text(plan: StatelessCommandPlan) -> Option<String> {
@@ -574,22 +577,26 @@ mod tests {
     }
 
     #[test]
-    fn start_offers_credits_and_help_in_both_languages() {
-        for (locale, credits, help) in [
-            (Locale::Es, "Cargar créditos", "Ayuda"),
-            (Locale::En, "Add credits", "Help"),
+    fn start_greets_in_character_with_credits_and_help() {
+        for (locale, title, credits, help) in [
+            (Locale::Es, "Qué querés, gordo", "Cargar créditos", "Ayuda"),
+            (Locale::En, "What do you want, gordo", "Add credits", "Help"),
         ] {
-            let plan =
-                super::plan_stateless_command(ChatId(42), MessageId(7), "/start", "", locale);
-            assert!(matches!(plan,
-                StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
-                if message.reply_markup.as_ref().is_some_and(|keyboard|
-                    keyboard.inline_keyboard.len() > 1
-                    && keyboard.inline_keyboard[0][0].text == credits
-                    && keyboard.inline_keyboard[0][0].callback_data.as_deref() == Some("topup:open")
-                    && keyboard.inline_keyboard[0][1].text == help
-                    && keyboard.inline_keyboard[0][1].callback_data.as_deref() == Some("help:home"))
-            ));
+            let mut expected = SendMessage::new(
+                ChatId(42),
+                &format!("{title}\n\n{}", crate::help_catalog::help_intro(locale)),
+            );
+            expected.reply_to_message_id = Some(MessageId(7));
+            expected.reply_markup = Some(crate::telegram_actions::InlineKeyboardMarkup {
+                inline_keyboard: vec![vec![
+                    crate::menu_ui::button(credits, "topup:open"),
+                    crate::menu_ui::button(help, "help:home"),
+                ]],
+            });
+            assert_eq!(
+                super::plan_stateless_command(ChatId(42), MessageId(7), "/start", "", locale),
+                StatelessCommandPlan::Action(TelegramAction::SendMessage(expected))
+            );
         }
     }
 }
