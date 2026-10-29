@@ -5914,6 +5914,16 @@ mod tests {
             "token",
         );
         assert_eq!(delivered.try_invoice(invoice()), Ok(true));
+        let mut linked = TelegramActionSink::new(
+            transport(200, r#"{"ok":true,"result":"https://t.me/$synthetic"}"#),
+            "token",
+        );
+        assert_eq!(
+            linked.invoice_link(invoice()),
+            Ok(Some("https://t.me/$synthetic".to_owned()))
+        );
+        let mut rejected = TelegramActionSink::new(transport(400, r#"{"ok":false}"#), "token");
+        assert_eq!(rejected.invoice_link(invoice()), Ok(None));
     }
 
     #[test]

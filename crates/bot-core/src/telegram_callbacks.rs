@@ -35,10 +35,11 @@ pub struct CallbackContext {
 impl CallbackContext {
     pub fn personal_menu_allowed(&self) -> bool {
         match self.user_id {
-            Some(_) if self.chat_type == "private" => true,
-            Some(user) => {
+            Some(user) if self.chat_type == "private" => self.chat_id == user.to_string(),
+            Some(user) if matches!(self.chat_type.as_str(), "group" | "supergroup") => {
                 self.ephemeral_message_id.is_some() && self.receiver_user_id == Some(user)
             }
+            Some(_) => false,
             None => false,
         }
     }
@@ -284,5 +285,61 @@ mod tests {
             parse_callback_context(&json!({"data":"cfg:x:y","message":0})),
             parse_callback_context(&json!({"data":"cfg:x:y"}))
         );
+    }
+
+    #[test]
+    fn personal_menu_authorization_requires_the_actual_receiver()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::telegram_actions::{SendMessage, TelegramAction};
+        use crate::telegram_input::ChatId;
+        for chat_type in ["private", "group", "supergroup", "channel", ""] {
+            for user in [None, Some(42), Some(99)] {
+                for receiver in [None, Some(42), Some(99)] {
+                    for ephemeral in [None, Some(71)] {
+                        let context = CallbackContext {
+                            callback_id: None,
+                            data: "topup:amt:50".into(),
+                            chat_id: if chat_type == "private" { "42" } else { "-7" }.into(),
+                            chat_type: chat_type.into(),
+                            message_id: 7,
+                            user_id: user,
+                            receiver_user_id: receiver,
+                            ephemeral_message_id: ephemeral,
+                            user_language_code: None,
+                            route: CallbackRoute::Topup,
+                        };
+                        let expected = match chat_type {
+                            "private" => user == Some(42),
+                            "group" | "supergroup" => {
+                                user.is_some() && receiver == user && ephemeral.is_some()
+                            }
+                            _ => false,
+                        };
+                        assert_eq!(
+                            context.personal_menu_allowed(),
+                            expected,
+                            "{chat_type} sender={user:?} receiver={receiver:?} ephemeral={ephemeral:?}"
+                        );
+                        let action = TelegramAction::SendMessage(SendMessage::new(
+                            ChatId(-7),
+                            "personal menu",
+                        ));
+                        if chat_type == "private" {
+                            assert_eq!(context.personal_action(action.clone()), action);
+                        } else {
+                            assert_eq!(
+                                context.personal_action(action.clone()),
+                                TelegramAction::Ephemeral {
+                                    receiver_user_id: user.unwrap_or_default(),
+                                    ephemeral_message_id: ephemeral,
+                                    action: Box::new(action)
+                                }
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }

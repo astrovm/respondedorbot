@@ -713,7 +713,7 @@ pub fn evaluate_pre_checkout(
     if !billing_available {
         return Ok(PreCheckoutDecision::BillingUnavailable { query_id });
     }
-    let user_id = strict_python_int(sender(query)?.get("id"));
+    let user_id = strict_python_int(sender(query)?.get("id")).filter(|id| *id > 0);
     let Some(user_id) = user_id else {
         return Ok(PreCheckoutDecision::InvalidUser { query_id });
     };
@@ -817,6 +817,7 @@ pub fn successful_payment_user(message: &Value) -> Option<i64> {
         sender
             .get("id")
             .and_then(crate::telegram_input::normalize_numeric_id)
+            .filter(|id| *id > 0)
     }
 }
 
@@ -2068,5 +2069,29 @@ mod tests {
             ));
         }
         Ok(())
+    }
+
+    #[test]
+    fn exported_invoice_buyer_id_must_be_positive() {
+        for id in [0, -1, i64::MIN] {
+            assert_eq!(
+                super::successful_payment_user(
+                    &json!({"from":{"id":id,"is_bot":false},"chat":{"id":id,"type":"private"}})
+                ),
+                None
+            );
+            assert_eq!(
+                super::successful_payment_user(
+                    &json!({"from":{"id":999,"is_bot":true},"chat":{"id":id,"type":"private"}})
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            super::successful_payment_user(
+                &json!({"from":{"id":999,"is_bot":true},"chat":{"id":1,"type":"private"}})
+            ),
+            Some(1)
+        );
     }
 }

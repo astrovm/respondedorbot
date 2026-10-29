@@ -7572,7 +7572,7 @@ mod tests {
                 "message".to_owned(),
                 json!({
                     "message_id": message_id,
-                    "chat": {"id": -42, "type": chat_type},
+                    "chat": {"id": if data.starts_with("topup:") && chat_type == "private" {88}else{-42}, "type": chat_type},
                 }),
             ),
         ]);
@@ -18532,7 +18532,7 @@ mod tests {
         );
         assert_eq!(
             *log.borrow(),
-            ["create 88 -42 p50 En", "attach charge-1 700"]
+            ["create 88 88 p50 En", "attach charge-1 700"]
         );
         let photos = dispatcher
             .actions
@@ -18551,7 +18551,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(photos.len(), 1);
         let (chat_id, photo, caption, reply_markup) = photos[0];
-        assert_eq!(*chat_id, ChatId(-42));
+        assert_eq!(*chat_id, ChatId(88));
         assert!(photo.starts_with(&[0x89, b'P', b'N', b'G']));
         assert!(caption.starts_with("Lightning invoice ⚡"));
         // The invoice is in the copy button, not the caption.
@@ -18618,7 +18618,7 @@ mod tests {
         );
         assert_eq!(
             *log.borrow(),
-            ["create 88 -42 c300 En", "attach charge-1 700"]
+            ["create 88 88 c300 En", "attach charge-1 700"]
         );
         let invoice = first_sent(&dispatcher.actions.0);
         assert!(
@@ -18970,7 +18970,7 @@ mod tests {
             dispatcher.dispatch(callback_update("topup:p50", "private", Some("es"))),
             Ok(DispatchOutcome::Handled)
         );
-        assert_eq!(dispatcher.config.chat_ids, ["-42", "-42"]);
+        assert_eq!(dispatcher.config.chat_ids, ["88", "88"]);
         assert!(matches!(
             dispatcher.actions.0.as_slice(),
             [
@@ -22043,6 +22043,7 @@ mod tests {
         let message = || TelegramAction::SendMessage(SendMessage::new(ChatId(-42), "synthetic"));
         assert_eq!(sink.try_edit(message()), Ok(true));
         assert_eq!(sink.try_invoice(message()), Ok(true));
+        assert_eq!(sink.invoice_link(message()), Ok(None));
         assert_eq!(sink.try_animation(message()), Ok(true));
         let confirmed = Some(ActionReceipt {
             message_id: Some(MessageId(9)),
@@ -22317,10 +22318,7 @@ mod tests {
             )),
             Ok(DispatchOutcome::Handled)
         );
-        assert_eq!(
-            topup.state_diagnostics(),
-            ["invalid top-up callback chat id"]
-        );
+        assert!(topup.state_diagnostics().is_empty());
     }
 
     #[test]
@@ -22398,7 +22396,7 @@ mod tests {
             Ok(DispatchOutcome::Handled)
         );
         assert!(dispatcher.state_diagnostics().iter().any(|entry| entry
-            == "topup invoice claim release failed chat_id=-42 key=topup_invoice:88:p50: synthetic release failure"));
+            == "topup invoice claim release failed chat_id=88 key=topup_invoice:88:p50: synthetic release failure"));
         assert!(matches!(
             dispatcher.actions.0.as_slice(),
             [

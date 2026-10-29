@@ -562,4 +562,24 @@ mod tests {
             ));
         }
     }
+
+    #[test]
+    fn primary_command_menu_marks_only_topup_ephemeral() {
+        for locale in [Locale::Es, Locale::En] {
+            let commands = super::primary_telegram_commands(locale);
+            assert_eq!(
+                commands
+                    .iter()
+                    .filter(|c| c.is_ephemeral)
+                    .map(|c| c.command)
+                    .collect::<Vec<_>>(),
+                ["topup"]
+            );
+            assert!(
+                commands
+                    .iter()
+                    .any(|c| c.command == "help" && !c.is_ephemeral)
+            );
+        }
+    }
 }
