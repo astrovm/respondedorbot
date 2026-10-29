@@ -3,8 +3,8 @@ Description=Back up the respondedorbot database every hour
 
 [Timer]
 OnCalendar=hourly
-Persistent=true
 RandomizedDelaySec=5m
+Persistent=true
 
 [Install]
 WantedBy=timers.target
