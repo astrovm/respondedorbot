@@ -3974,10 +3974,10 @@ where
                 self.lightning_checkout.is_some(),
             );
             if let Some(action) = action {
-                let action = self.with_stars_link(action, Some(user_id), locale);
-                self.actions
-                    .execute(context.personal_action(action))
-                    .map_err(DispatchError::Action)?;
+                let action =
+                    context.personal_action(self.with_stars_link(action, Some(user_id), locale));
+                let receipt = self.actions.execute(action);
+                receipt.map_err(DispatchError::Action)?;
             }
             self.answer_callback_best_effort(context.callback_id.as_deref());
             return Ok(DispatchOutcome::Handled);
@@ -5890,9 +5890,8 @@ where
             );
             if let Some(action) = menu {
                 let action = self.with_stars_link(action, Some(sender_id.0), locale);
-                self.actions
-                    .execute(action)
-                    .map_err(DispatchError::Action)?;
+                let receipt = self.actions.execute(action);
+                receipt.map_err(DispatchError::Action)?;
             }
             return Ok(DispatchOutcome::Handled);
         }
@@ -24654,27 +24653,34 @@ mod tests {
     }
 
     #[test]
+    fn stars_link_leaves_anything_but_a_menu_alone() {
+        let mut bot = configured(english(), Actions::default());
+        let delete = TelegramAction::DeleteMessage {
+            chat_id: ChatId(-42),
+            message_id: MessageId(7),
+        };
+        assert_eq!(
+            bot.with_stars_link(delete.clone(), Some(88), bot_core::locale::Locale::En),
+            delete
+        );
+        assert!(bot.actions.0.is_empty());
+    }
+
+    #[test]
     fn topup_menu_keeps_a_fresh_link_when_it_cannot_be_cached() {
-        struct NoStorage;
-        impl MarketPriceSource for NoStorage {
-            fn load(
-                &mut self,
-                _: &str,
-                _: bot_core::market_prices::MarketPriceCommand,
-                _: bot_core::locale::Locale,
-                _: i64,
-            ) -> MarketPriceLoad {
-                MarketPriceLoad {
+        // This fake keeps the trait's selection storage, which always fails.
+        let mut bot = configured(english(), Actions::default()).with_market_price_source(Box::new(
+            MarketPrices {
+                result: MarketPriceLoad {
                     chart: None,
                     selection: None,
                     no_assets_found: true,
                     text: String::new(),
                     diagnostics: Vec::new(),
-                }
-            }
-        }
-        let mut bot =
-            configured(english(), Actions::default()).with_market_price_source(Box::new(NoStorage));
+                },
+                calls: Rc::new(RefCell::new(Vec::new())),
+            },
+        ));
         assert_eq!(
             bot.dispatch(update("/topup", Some("en"))),
             Ok(DispatchOutcome::Handled)
