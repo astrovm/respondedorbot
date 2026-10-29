@@ -148,6 +148,13 @@ fn real_redis_scheduler_claims_executes_advances_and_deletes() -> Result<(), Box
         "synthetic-execution",
         "synthetic-claim"
     )?);
+    assert!(!SchedulerStore::hold_occurrence(
+        &mut direct,
+        &boundary_id,
+        "synthetic-execution",
+        "synthetic-claim",
+        5
+    )?);
     assert!(!SchedulerStore::complete_occurrence(
         &mut direct,
         &SchedulerCompletion {

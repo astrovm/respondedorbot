@@ -28,6 +28,23 @@ pub(crate) fn classify_error(error: reqwest::Error) -> TransportFailureKind {
     }
 }
 
+/// Renders an error with the causes behind it. `reqwest` names only the step
+/// that failed, such as "error decoding response body", and keeps the reason,
+/// such as a timeout or a reset connection, in its source chain.
+pub(crate) fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !text.contains(&cause_text) {
+            text.push_str(": ");
+            text.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    text
+}
+
 /// Serializes first builds so dispatchers composed in parallel wait for one
 /// client instead of each loading the certificate store.
 static BUILD: Mutex<()> = Mutex::new(());
@@ -52,7 +69,7 @@ mod tests {
 
     use reqwest::blocking::Client;
 
-    use super::{TransportFailureKind, classify_error, shared_client};
+    use super::{TransportFailureKind, classify_error, error_chain, shared_client};
 
     static SLOT: OnceLock<Client> = OnceLock::new();
     static BUILDS: AtomicUsize = AtomicUsize::new(0);
@@ -85,5 +102,35 @@ mod tests {
             fixtures::request().map(classify_error),
             Some(TransportFailureKind::Request)
         );
+    }
+
+    #[test]
+    fn error_chains_keep_the_cause_behind_the_failed_step() -> Result<(), String> {
+        use crate::web_fetch::reqwest_error_fixtures as fixtures;
+        let timeout = fixtures::timeout().ok_or("the silent listener did not time out")?;
+        assert!(!timeout.to_string().contains("timed out"));
+        let text = error_chain(&timeout);
+        assert!(text.starts_with(&timeout.to_string()), "{text}");
+        assert!(text.ends_with(": operation timed out"), "{text}");
+
+        // A cause the message already spells out is not repeated.
+        let spelled_out = SpelledOut(std::io::Error::other("connection reset"));
+        assert_eq!(error_chain(&spelled_out), "read failed: connection reset");
+        Ok(())
+    }
+
+    #[derive(Debug)]
+    struct SpelledOut(std::io::Error);
+
+    impl std::fmt::Display for SpelledOut {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "read failed: {}", self.0)
+        }
+    }
+
+    impl std::error::Error for SpelledOut {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
     }
 }

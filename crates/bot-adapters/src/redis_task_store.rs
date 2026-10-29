@@ -357,6 +357,22 @@ impl RedisTaskStore {
         self.release_lease(&task_claim_key(task_id, execution_id), claim_token)
     }
 
+    /// Keeps a claimed occurrence for `ttl_seconds` from now, so no worker
+    /// claims it again before then.
+    pub fn hold_occurrence(
+        &self,
+        task_id: &str,
+        execution_id: &str,
+        claim_token: &str,
+        ttl_seconds: i64,
+    ) -> Result<bool, RedisTaskStoreError> {
+        self.renew_lease(
+            &task_claim_key(task_id, execution_id),
+            claim_token,
+            ttl_seconds,
+        )
+    }
+
     pub fn remove_due_task_id(&self, task_id: &str) -> Result<bool, RedisTaskStoreError> {
         Ok(self.zrem(TASK_DUE_INDEX_KEY, &[task_id.to_owned()])? > 0)
     }
@@ -685,6 +701,17 @@ mod tests {
                     ],
                     ":1\r\n",
                 ),
+                (
+                    vec![
+                        "EVAL",
+                        RENEW_LEASE_SCRIPT,
+                        "1",
+                        "task:claim:t1:t1:42",
+                        "claim",
+                        "5",
+                    ],
+                    ":1\r\n",
+                ),
                 (vec!["ZREM", TASK_DUE_INDEX_KEY, "stale"], ":1\r\n"),
                 (
                     vec![
@@ -728,6 +755,7 @@ mod tests {
             ttl_seconds: 60,
         })?);
         assert!(store.release_occurrence("t1", "t1:42", "claim")?);
+        assert!(store.hold_occurrence("t1", "t1:42", "claim", 5)?);
         assert!(store.remove_due_task_id("stale")?);
         assert!(store.cancel_task("t1", "c1")?);
         server

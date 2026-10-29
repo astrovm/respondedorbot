@@ -1,5 +1,6 @@
 //! Interruptible lifecycle for native background services.
 
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
@@ -34,6 +35,7 @@ const TASK_WORKER_COUNT: usize = 4;
 const COMPACTION_INTERVAL: Duration = Duration::from_secs(2);
 const LIGHTNING_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const PRICE_REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
+const OPENROUTER_PRICING_INTERVAL: Duration = Duration::from_secs(60);
 const REPEATED_FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 pub struct ProductionBackgroundOptions<'a> {
@@ -94,6 +96,13 @@ pub fn build_production_background_specs(
         production_price_refresh_worker(options.redis_endpoint, options.coinmarketcap_key)?;
     task_workers.extend([
         BackgroundWorkerSpec::new(
+            "openrouter-pricing",
+            OPENROUTER_PRICING_INTERVAL,
+            Box::new(OpenRouterPricingWarmer(Arc::clone(
+                &options.openrouter_pricing,
+            ))),
+        ),
+        BackgroundWorkerSpec::new(
             "memory-compaction",
             COMPACTION_INTERVAL,
             Box::new(compaction),
@@ -138,6 +147,18 @@ fn compaction_worker(
         options.system_prompt,
         options.owner_token,
     )
+}
+
+/// Keeps OpenRouter prices loaded from startup on, so no reply or task waits
+/// on the catalog download, or fails when that one download does.
+struct OpenRouterPricingWarmer(Arc<OpenRouterPricingCache>);
+
+impl BackgroundWorker for OpenRouterPricingWarmer {
+    fn run_once(&mut self, _now_epoch_seconds: i64) -> Result<(), String> {
+        self.0
+            .keep_warm()
+            .map_err(|error| format!("could not load OpenRouter prices: {error}"))
+    }
 }
 
 pub trait BackgroundWorker: Send + 'static {
@@ -185,6 +206,27 @@ impl BackgroundError {
     }
 }
 
+/// Failures already reported, by error text. Workers of one kind see the same
+/// failure, such as a task that keeps failing whichever worker runs it, and
+/// passes in between that fail nothing do not make it news again.
+#[derive(Default)]
+struct ReportedFailures(Mutex<HashMap<String, Instant>>);
+
+impl ReportedFailures {
+    fn first_in_interval(&self, error: &str, now: Instant) -> bool {
+        // The map holds no invariant a panicking worker could break.
+        let mut reported = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        reported.retain(|_, reported_at| {
+            now.duration_since(*reported_at) < REPEATED_FAILURE_REPORT_INTERVAL
+        });
+        let first = !reported.contains_key(error);
+        if first {
+            reported.insert(error.to_owned(), now);
+        }
+        first
+    }
+}
+
 type WorkerBody = Box<dyn FnOnce() + Send + 'static>;
 
 fn spawn_named_thread(name: String, body: WorkerBody) -> std::io::Result<JoinHandle<()>> {
@@ -219,6 +261,7 @@ impl BackgroundSupervisor {
     ) -> Result<Self, BackgroundError> {
         let stopping = Arc::new(AtomicBool::new(false));
         let wake = Arc::new((Mutex::new(()), Condvar::new()));
+        let reported_failures = Arc::new(ReportedFailures::default());
         let mut supervisor = Self {
             stopping,
             wake,
@@ -239,12 +282,12 @@ impl BackgroundSupervisor {
             let wake = supervisor.wake.clone();
             let reporter = supervisor.reporter.clone();
             let failure = supervisor.failure.clone();
+            let reported_failures = reported_failures.clone();
             let mut worker = spec.worker;
             let interval = spec.interval;
             let handle = spawn(
                 thread_name,
                 Box::new(move || {
-                    let mut last_reported_failure: Option<(String, Instant)> = None;
                     while !stopping.load(Ordering::Acquire) {
                         let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             worker.run_once(now_epoch_seconds())
@@ -268,30 +311,17 @@ impl BackgroundSupervisor {
                                 break;
                             }
                         };
-                        match run {
-                            Ok(()) => last_reported_failure = None,
-                            Err(error) => {
-                                let report = OperationalReport::new(format!(
-                                    "background worker {name} failed: {error}"
-                                ));
-                                let message = report.text().to_owned();
-                                eprintln!("{message}");
-                                let now = Instant::now();
-                                let should_report = last_reported_failure.as_ref().is_none_or(
-                                    |(previous, reported_at)| {
-                                        previous != &message
-                                            || now.duration_since(*reported_at)
-                                                >= REPEATED_FAILURE_REPORT_INTERVAL
-                                    },
+                        if let Err(error) = run {
+                            let report = OperationalReport::new(format!(
+                                "background worker {name} failed: {error}"
+                            ));
+                            eprintln!("{}", report.text());
+                            if reported_failures.first_in_interval(&error, Instant::now())
+                                && let Err(report_error) = reporter.report(&report)
+                            {
+                                eprintln!(
+                                    "could not deliver background failure report: {report_error}"
                                 );
-                                if should_report {
-                                    if let Err(report_error) = reporter.report(&report) {
-                                        eprintln!(
-                                            "could not deliver background failure report: {report_error}"
-                                        );
-                                    }
-                                    last_reported_failure = Some((message, now));
-                                }
                             }
                         }
                         // The wake mutex guards no data, so a poisoned lock
@@ -492,14 +522,15 @@ mod tests {
 
     use super::{
         BackgroundError, BackgroundSupervisor, BackgroundWorker, BackgroundWorkerSpec,
-        ProductionBackgroundOptions, build_production_background_specs, spawn_named_thread,
+        OpenRouterPricingWarmer, ProductionBackgroundOptions, REPEATED_FAILURE_REPORT_INTERVAL,
+        ReportedFailures, build_production_background_specs, spawn_named_thread,
     };
     use crate::composition::TelegramDeliveryCoordinator;
     use crate::lightning_payments::OpenNodeOptions;
     use crate::operational_reporting::{OperationalReport, OperationalReporter};
     use crate::reconciliation::{ActiveOperationRegistry, ReconciliationSettings};
     use crate::scheduler::SchedulerMode;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     struct Worker {
         ran: mpsc::Sender<i64>,
@@ -573,6 +604,91 @@ mod tests {
         }));
         assert!(supervisor.stop().is_ok());
         Ok(())
+    }
+
+    /// Runs through its results once, then passes.
+    struct ScriptedWorker {
+        results: std::collections::VecDeque<Result<(), String>>,
+        done: mpsc::Sender<()>,
+    }
+
+    impl BackgroundWorker for ScriptedWorker {
+        fn run_once(&mut self, _now_epoch_seconds: i64) -> Result<(), String> {
+            let Some(result) = self.results.pop_front() else {
+                return Ok(());
+            };
+            if self.results.is_empty() {
+                let _ = self.done.send(());
+            }
+            result
+        }
+    }
+
+    #[test]
+    fn a_failure_seen_by_several_workers_is_reported_once_per_interval() -> TestResult {
+        let (done_tx, done_rx) = mpsc::channel();
+        let task_failure = "task t1 failed at execute: synthetic outage";
+        let worker = |name: &str, results: Vec<Result<(), String>>| {
+            BackgroundWorkerSpec::new(
+                name,
+                Duration::from_millis(5),
+                Box::new(ScriptedWorker {
+                    results: results.into(),
+                    done: done_tx.clone(),
+                }),
+            )
+        };
+        let failing_then_passing = || {
+            vec![
+                Err(task_failure.to_owned()),
+                Ok(()),
+                Err(task_failure.to_owned()),
+            ]
+        };
+        let reporter = Arc::new(Reporter::default());
+        let mut supervisor = BackgroundSupervisor::start(
+            vec![
+                worker("task-scheduler-1", failing_then_passing()),
+                worker("task-scheduler-2", failing_then_passing()),
+                worker("memory-compaction", vec![Err("synthetic other".to_owned())]),
+            ],
+            reporter.clone(),
+        )?;
+        for _ in 0..3 {
+            done_rx.recv_timeout(Duration::from_secs(1))?;
+        }
+        assert!(supervisor.stop().is_ok());
+        let messages = reporter
+            .messages
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|report| report.text().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.ends_with(task_failure))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.ends_with("synthetic other"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_reported_failure_is_news_again_after_the_repeat_interval() {
+        let reported = ReportedFailures::default();
+        let start = Instant::now();
+        assert!(reported.first_in_interval("synthetic outage", start));
+        assert!(!reported.first_in_interval("synthetic outage", start + Duration::from_secs(1)));
+        assert!(
+            reported
+                .first_in_interval("synthetic outage", start + REPEATED_FAILURE_REPORT_INTERVAL)
+        );
     }
 
     #[test]
@@ -684,7 +800,18 @@ mod tests {
         assert!(build("not-a-url").is_err());
         let result = build("https://openrouter.example.test/api/v1");
         assert!(result.is_ok());
-        assert_eq!(result.map(|specs| specs.len()), Ok(8));
+        assert_eq!(result.map(|specs| specs.len()), Ok(9));
+        Ok(())
+    }
+
+    #[test]
+    fn the_pricing_warmer_reports_only_a_catalog_it_cannot_load() -> TestResult {
+        let unreachable = OpenRouterPricingCache::new("synthetic-openrouter-key", "not-a-url")?;
+        let mut warmer = OpenRouterPricingWarmer(Arc::new(unreachable));
+        assert_eq!(
+            warmer.run_once(0),
+            Err("could not load OpenRouter prices: OpenRouter base URL is invalid".to_owned())
+        );
         Ok(())
     }
 

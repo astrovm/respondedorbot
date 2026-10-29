@@ -8,6 +8,8 @@ use reqwest::blocking::Client;
 use serde_json::{Value, json};
 use thiserror::Error;
 
+use crate::http_client::error_chain;
+
 const SUPADATA_URL: &str = "https://api.supadata.ai/v1/transcript";
 const APIFY_URL: &str =
     "https://api.apify.com/v2/acts/apihq~youtube-transcript-scraper/run-sync-get-dataset-items";
@@ -170,7 +172,7 @@ fn response_from(
     response
         .take(RESPONSE_MAX_BYTES + 1)
         .read_to_end(&mut body)
-        .map_err(|error| TranscriptTransportError::Other(error.to_string()))?;
+        .map_err(|error| TranscriptTransportError::Other(error_chain(&error)))?;
     if body.len() as u64 > RESPONSE_MAX_BYTES {
         return Err(TranscriptTransportError::Other(
             "transcript provider response exceeded the size limit".to_owned(),
@@ -189,7 +191,7 @@ fn classify_reqwest_error(error: reqwest::Error) -> TranscriptTransportError {
     } else if error.is_connect() {
         TranscriptTransportError::Connection
     } else {
-        TranscriptTransportError::Other(error.to_string())
+        TranscriptTransportError::Other(error_chain(&error))
     }
 }
 

@@ -9,6 +9,7 @@ use reqwest::blocking::Client;
 use std::sync::OnceLock;
 use thiserror::Error;
 
+use crate::http_client::error_chain;
 use crate::redis_json_cache::RedisJsonCache;
 
 pub const PRIMARY_URL: &str = "https://hnrss.org/best";
@@ -76,7 +77,7 @@ impl HackerNewsTransport for ReqwestHackerNewsTransport {
             status_code: response.status().as_u16(),
             body: response
                 .text()
-                .map_err(|error| HackerNewsTransportError::Other(error.to_string()))?,
+                .map_err(|error| HackerNewsTransportError::Other(error_chain(&error)))?,
         })
     }
 }
@@ -87,7 +88,7 @@ fn classify_error(error: reqwest::Error) -> HackerNewsTransportError {
     } else if error.is_connect() {
         HackerNewsTransportError::Connection
     } else {
-        HackerNewsTransportError::Other(error.to_string())
+        HackerNewsTransportError::Other(error_chain(&error))
     }
 }
 

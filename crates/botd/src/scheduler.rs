@@ -13,6 +13,11 @@ const DEFAULT_BATCH_LIMIT: usize = 100;
 const DEFAULT_OWNER_TTL_SECONDS: i64 = 30;
 const DEFAULT_CLAIM_TTL_SECONDS: i64 = 1_800;
 const DEFAULT_RECORD_TTL_SECONDS: i64 = 86_400 * 3_650;
+// A failed run keeps its claim this long before any worker runs it again. The
+// wait follows how late the occurrence already is, so it doubles with each
+// failure in a row.
+const RETRY_HOLD_MIN_SECONDS: i64 = 5;
+const RETRY_HOLD_MAX_SECONDS: i64 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchedulerMode {
@@ -97,6 +102,13 @@ pub trait SchedulerStore {
         execution_id: &str,
         claim_token: &str,
     ) -> Result<bool, Self::Error>;
+    fn hold_occurrence(
+        &mut self,
+        task_id: &str,
+        execution_id: &str,
+        claim_token: &str,
+        ttl_seconds: i64,
+    ) -> Result<bool, Self::Error>;
     fn complete_occurrence(
         &mut self,
         completion: &SchedulerCompletion<'_>,
@@ -170,6 +182,16 @@ impl SchedulerStore for RedisTaskStore {
         claim_token: &str,
     ) -> Result<bool, Self::Error> {
         RedisTaskStore::release_occurrence(self, task_id, execution_id, claim_token)
+    }
+
+    fn hold_occurrence(
+        &mut self,
+        task_id: &str,
+        execution_id: &str,
+        claim_token: &str,
+        ttl_seconds: i64,
+    ) -> Result<bool, Self::Error> {
+        RedisTaskStore::hold_occurrence(self, task_id, execution_id, claim_token, ttl_seconds)
     }
 
     fn complete_occurrence(
@@ -486,20 +508,24 @@ where
                         continue;
                     }
                     Err(error) => {
-                        let release_error = self
+                        // Keep the claim through a backoff instead of
+                        // releasing it, or the next worker tick reruns a
+                        // failing task at once.
+                        let hold_error = self
                             .store
-                            .release_occurrence(
+                            .hold_occurrence(
                                 document.task.id.as_str(),
                                 &execution_id,
                                 &self.claim_token,
+                                retry_hold_seconds(&document, now),
                             )
                             .err()
-                            .map(|release| format!("; claim release failed: {release}"))
+                            .map(|hold| format!("; claim hold failed: {hold}"))
                             .unwrap_or_default();
                         failures.push(TaskFailure {
                             task_id,
                             stage: "execute",
-                            error: format!("{error}{release_error}"),
+                            error: format!("{error}{hold_error}"),
                         });
                         continue;
                     }
@@ -557,6 +583,14 @@ where
     }
 }
 
+fn retry_hold_seconds(document: &TaskRecordDocument, now: i64) -> i64 {
+    document
+        .task
+        .next_run_at
+        .map_or(0, |scheduled_for| now.saturating_sub(scheduled_for))
+        .clamp(RETRY_HOLD_MIN_SECONDS, RETRY_HOLD_MAX_SECONDS)
+}
+
 #[cfg(test)]
 #[allow(clippy::panic, clippy::expect_used)]
 mod tests {
@@ -589,6 +623,7 @@ mod tests {
         renewed: usize,
         owner_releases: usize,
         occurrence_releases: usize,
+        occurrence_holds: Vec<i64>,
         stale_removed: Vec<String>,
         saved: Vec<TaskRecordDocument>,
         completed: Vec<Completed>,
@@ -600,6 +635,7 @@ mod tests {
         fail_save: bool,
         fail_claim: bool,
         fail_release_occurrence: bool,
+        fail_hold_occurrence: bool,
         fail_release_owner: bool,
     }
 
@@ -616,6 +652,7 @@ mod tests {
                 renewed: 0,
                 owner_releases: 0,
                 occurrence_releases: 0,
+                occurrence_holds: Vec::new(),
                 stale_removed: Vec::new(),
                 saved: Vec::new(),
                 completed: Vec::new(),
@@ -627,6 +664,7 @@ mod tests {
                 fail_save: false,
                 fail_claim: false,
                 fail_release_occurrence: false,
+                fail_hold_occurrence: false,
                 fail_release_owner: false,
             }
         }
@@ -716,6 +754,20 @@ mod tests {
                 return Err("occurrence release failed");
             }
             self.occurrence_releases += 1;
+            Ok(true)
+        }
+
+        fn hold_occurrence(
+            &mut self,
+            _task_id: &str,
+            _execution_id: &str,
+            _claim_token: &str,
+            ttl_seconds: i64,
+        ) -> Result<bool, Self::Error> {
+            if self.fail_hold_occurrence {
+                return Err("occurrence hold failed");
+            }
+            self.occurrence_holds.push(ttl_seconds);
             Ok(true)
         }
 
@@ -991,7 +1043,7 @@ mod tests {
     }
 
     #[test]
-    fn retry_and_executor_failure_release_the_occurrence_claim() {
+    fn a_retry_releases_the_claim_and_a_failure_holds_it_for_a_growing_backoff() {
         let retry = document("retry1", TaskSchedule::Once, 1_000);
         let failed = document("failed1", TaskSchedule::Once, 1_000);
         let mut store = Store {
@@ -1016,8 +1068,20 @@ mod tests {
                     && failures.len() == 1
                     && failures[0].stage == "execute"
         ));
+        assert_eq!(scheduler.parts().0.occurrence_releases, 1);
+
+        // The failed occurrence stays due. Each later failure waits about as
+        // long as the occurrence is already late, within the hold bounds.
+        scheduler.store.due = vec!["failed1".to_owned()];
+        scheduler.executor.outcomes = VecDeque::from([
+            Err("synthetic execution failure"),
+            Err("synthetic execution failure"),
+        ]);
+        assert!(scheduler.step(1_020).is_ok());
+        assert!(scheduler.step(1_100).is_ok());
         let (store, _) = scheduler.parts();
-        assert_eq!(store.occurrence_releases, 2);
+        assert_eq!(store.occurrence_holds, [5, 20, 60]);
+        assert_eq!(store.occurrence_releases, 1);
         assert!(store.completed.is_empty());
     }
 
@@ -1187,6 +1251,7 @@ mod tests {
             let mut store = Store {
                 due: vec!["release1".to_owned()],
                 fail_release_occurrence: true,
+                fail_hold_occurrence: true,
                 ..Store::default()
             };
             store.documents.insert(

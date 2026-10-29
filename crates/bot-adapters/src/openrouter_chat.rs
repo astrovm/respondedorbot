@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use bot_core::provider_pricing::{OPENROUTER_TRANSCRIPTION_MODEL, TokenPricing};
@@ -13,13 +13,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use thiserror::Error;
 
+use crate::http_client::error_chain;
+
 pub const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 const OPENROUTER_PRICING_TTL: Duration = Duration::from_secs(300);
-const OPENROUTER_PRICING_RETRY_INITIAL: Duration = Duration::from_secs(30);
+// Until the first catalog loads every priced request fails, so a failed load
+// is retried soon. The delay doubles on each failure in a row.
+const OPENROUTER_CATALOG_RETRY_INITIAL: Duration = Duration::from_secs(5);
 const OPENROUTER_PRICING_RETRY_MAX: Duration = Duration::from_secs(15 * 60);
+const OPENROUTER_ENDPOINT_RETRY: Duration = Duration::from_secs(30);
 const USD_MICROS_PER_MILLION_TOKENS: i128 = 1_000_000_000_000;
 const OPENROUTER_MAX_RESPONSE_BYTES: u64 = 1_048_576;
+// The full catalog is already about 1 MB and grows with every model OpenRouter
+// adds, so it gets a bound of its own instead of the chat response one.
+const OPENROUTER_MAX_CATALOG_BYTES: u64 = 16 * 1_048_576;
 
 #[derive(Default)]
 struct OpenRouterPricingState {
@@ -48,6 +56,9 @@ pub struct OpenRouterPricingCache {
     api_key: String,
     base_url: String,
     state: Arc<Mutex<OpenRouterPricingState>>,
+    // Held for a whole catalog download, so callers that queue behind one
+    // reuse its result instead of starting their own.
+    refresh_lock: Arc<Mutex<()>>,
     refreshing: Arc<AtomicBool>,
     endpoint_refreshing: Arc<AtomicBool>,
 }
@@ -64,6 +75,7 @@ impl OpenRouterPricingCache {
             api_key: api_key.to_owned(),
             base_url: base_url.to_owned(),
             state: Arc::new(Mutex::new(OpenRouterPricingState::default())),
+            refresh_lock: Arc::new(Mutex::new(())),
             refreshing: Arc::new(AtomicBool::new(false)),
             endpoint_refreshing: Arc::new(AtomicBool::new(false)),
         })
@@ -104,7 +116,46 @@ impl OpenRouterPricingCache {
     }
 
     pub fn refresh(&self) -> Result<(), OpenRouterChatError> {
-        let result = self.refresh_catalog();
+        let _refresh = self.lock_refresh();
+        self.refresh_locked()
+    }
+
+    /// Loads the catalog when it is stale, off the request path, so a request
+    /// pays for the download only when no catalog ever loaded. Fails only
+    /// while there is no catalog to price from.
+    pub fn keep_warm(&self) -> Result<(), OpenRouterChatError> {
+        let _refresh = self.lock_refresh();
+        if !self.refresh_is_due()? {
+            return Ok(());
+        }
+        let result = self.refresh_locked();
+        let state = self.lock_state()?;
+        match result {
+            Err(error) if state.models.is_empty() && state.transcription_models.is_empty() => {
+                Err(error)
+            }
+            Err(error) => {
+                eprintln!("could not refresh OpenRouter pricing: {error}");
+                Ok(())
+            }
+            Ok(()) => Ok(()),
+        }
+    }
+
+    // A poisoned lock is still usable: it guards no data, only the download.
+    fn lock_refresh(&self) -> MutexGuard<'_, ()> {
+        self.refresh_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn refresh_locked(&self) -> Result<(), OpenRouterChatError> {
+        // A dropped connection or a stalled body usually clears on a new
+        // connection, so one quick retry saves a request from failing.
+        let result = match self.refresh_catalog() {
+            Err(OpenRouterChatError::Transport(_)) => self.refresh_catalog(),
+            result => result,
+        };
         match result {
             Ok(()) => {
                 self.record_refresh_success()?;
@@ -139,7 +190,7 @@ impl OpenRouterPricingCache {
                     .map(|value| (name.as_str().to_ascii_lowercase(), value.to_owned()))
             })
             .collect::<BTreeMap<_, _>>();
-        let body = read_bounded_body(&mut response)?;
+        let body = read_bounded_body(&mut response, OPENROUTER_MAX_CATALOG_BYTES)?;
         if status_code >= 400 {
             return Err(http_error(status_code, &body, &headers));
         }
@@ -258,7 +309,7 @@ impl OpenRouterPricingCache {
                 let mut state = self.lock_state()?;
                 state.endpoint_retry_at.insert(
                     base_model.to_owned(),
-                    Instant::now() + OPENROUTER_PRICING_RETRY_INITIAL,
+                    Instant::now() + OPENROUTER_ENDPOINT_RETRY,
                 );
             }
         }
@@ -308,7 +359,7 @@ impl OpenRouterPricingCache {
                     .map(|value| (name.as_str().to_ascii_lowercase(), value.to_owned()))
             })
             .collect::<BTreeMap<_, _>>();
-        let body = read_bounded_body(&mut response)?;
+        let body = read_bounded_body(&mut response, OPENROUTER_MAX_RESPONSE_BYTES)?;
         if status_code >= 400 {
             return Err(http_error(status_code, &body, &headers));
         }
@@ -348,10 +399,12 @@ impl OpenRouterPricingCache {
             }
             return Ok(cached);
         }
-        if self.refresh_is_due()?
-            && let Err(error) = self.refresh()
-        {
-            return Err(error);
+        if self.refresh_is_due()? {
+            let _refresh = self.lock_refresh();
+            // Another caller may have loaded or failed while this one waited.
+            if self.refresh_is_due()? {
+                self.refresh_locked()?;
+            }
         }
         let state = self.lock_state()?;
         if let Some(current) = lookup(&state, model) {
@@ -397,7 +450,7 @@ impl OpenRouterPricingCache {
     ) -> Result<(), OpenRouterChatError> {
         let mut state = self.lock_state()?;
         let delay = if state.refresh_retry_delay.is_zero() {
-            OPENROUTER_PRICING_RETRY_INITIAL
+            OPENROUTER_CATALOG_RETRY_INITIAL
         } else {
             state
                 .refresh_retry_delay
@@ -935,7 +988,7 @@ impl OpenRouterTransport for ReqwestOpenRouterTransport {
                     .map(|value| (name.as_str().to_ascii_lowercase(), value.to_owned()))
             })
             .collect();
-        let body = read_bounded_body(&mut response)?;
+        let body = read_bounded_body(&mut response, OPENROUTER_MAX_RESPONSE_BYTES)?;
         Ok(HttpResponse {
             status_code,
             body,
@@ -970,7 +1023,7 @@ impl OpenRouterStreamTransport for ReqwestOpenRouterTransport {
             })
             .collect::<BTreeMap<_, _>>();
         if status_code >= 400 {
-            let body = read_bounded_body(&mut response)?;
+            let body = read_bounded_body(&mut response, OPENROUTER_MAX_RESPONSE_BYTES)?;
             return Err(http_error(status_code, &body, &headers));
         }
         let mut buffer = [0_u8; 8_192];
@@ -1146,8 +1199,8 @@ fn retry_after_seconds(headers: &BTreeMap<String, String>) -> Option<u64> {
         .and_then(|value| value.trim().parse::<u64>().ok())
 }
 
-fn transport_error(error: impl std::fmt::Display) -> OpenRouterChatError {
-    OpenRouterChatError::Transport(error.to_string())
+fn transport_error(error: impl std::error::Error + 'static) -> OpenRouterChatError {
+    OpenRouterChatError::Transport(error_chain(&error))
 }
 
 fn invalid_json(error: serde_json::Error) -> OpenRouterChatError {
@@ -1178,14 +1231,15 @@ fn http_error(
 
 fn read_bounded_body(
     response: &mut reqwest::blocking::Response,
+    limit: u64,
 ) -> Result<String, OpenRouterChatError> {
     let mut body = Vec::new();
     response
         .by_ref()
-        .take(OPENROUTER_MAX_RESPONSE_BYTES + 1)
+        .take(limit + 1)
         .read_to_end(&mut body)
         .map_err(transport_error)?;
-    if body.len() as u64 > OPENROUTER_MAX_RESPONSE_BYTES {
+    if body.len() as u64 > limit {
         return Err(OpenRouterChatError::ResponseTooLarge);
     }
     Ok(String::from_utf8_lossy(&body).into_owned())
@@ -2106,7 +2160,7 @@ mod tests {
                 .ok()
                 .ok_or("unexpected error")?
                 .refresh_retry_delay,
-            Duration::from_secs(60)
+            super::OPENROUTER_CATALOG_RETRY_INITIAL * 2
         );
         let retry_at = cache
             .state
@@ -2129,6 +2183,182 @@ mod tests {
                 .refresh_retry_at,
             Some(retry_at)
         );
+        server.join().ok().ok_or("server thread panicked")??;
+        Ok(())
+    }
+
+    fn synthetic_catalog(description_bytes: usize) -> String {
+        json!({
+            "data": [{
+                "id": OPENROUTER_TRANSCRIPTION_MODEL,
+                "description": "x".repeat(description_bytes),
+                "architecture": {"output_modalities": ["transcription"]},
+                "pricing": {"prompt": "0.1", "completion": "0"}
+            }]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn a_catalog_larger_than_a_chat_reply_loads_and_is_requested_compressed() -> TestResult {
+        let catalog = synthetic_catalog(OPENROUTER_MAX_RESPONSE_BYTES as usize);
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> Result<String, String> {
+            let (mut stream, _) = listener.accept().map_err(|error| error.to_string())?;
+            let mut request = [0_u8; 8_192];
+            let read = stream
+                .read(&mut request)
+                .map_err(|error| error.to_string())?;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{catalog}",
+                catalog.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .map_err(|error| error.to_string())?;
+            Ok(String::from_utf8_lossy(&request[..read]).to_ascii_lowercase())
+        });
+        let cache = OpenRouterPricingCache::new("synthetic-key", &format!("http://{address}"))?;
+        cache.refresh()?;
+        assert!(
+            cache
+                .transcription_pricing(OPENROUTER_TRANSCRIPTION_MODEL)?
+                .is_some()
+        );
+        let request = server.join().ok().ok_or("server thread panicked")??;
+        assert!(request.contains("accept-encoding: gzip"), "{request}");
+        Ok(())
+    }
+
+    /// Answers each connection with its own raw HTTP response, in order.
+    fn serve_raw(
+        responses: Vec<String>,
+    ) -> Result<(String, thread::JoinHandle<TestResult>), Box<dyn std::error::Error + Send + Sync>>
+    {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
+            for response in responses {
+                let (mut stream, _) = listener.accept()?;
+                let _ = stream.read(&mut [0_u8; 8_192]);
+                stream.write_all(response.as_bytes())?;
+            }
+            Ok(())
+        });
+        Ok((format!("http://{address}"), server))
+    }
+
+    fn catalog_response(catalog: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{catalog}",
+            catalog.len()
+        )
+    }
+
+    // The body stops short of its length, as when a connection drops mid-read.
+    const DROPPED_BODY: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{\"data\"";
+
+    #[test]
+    fn a_dropped_catalog_download_is_retried_once_and_reports_its_cause() -> TestResult {
+        let (base_url, server) = serve_raw(vec![
+            DROPPED_BODY.to_owned(),
+            catalog_response(&synthetic_catalog(0)),
+            DROPPED_BODY.to_owned(),
+            DROPPED_BODY.to_owned(),
+        ])?;
+        let cache = OpenRouterPricingCache::new("synthetic-key", &base_url)?;
+        assert!(
+            cache
+                .transcription_pricing(OPENROUTER_TRANSCRIPTION_MODEL)?
+                .is_some()
+        );
+
+        let failed = OpenRouterPricingCache::new("synthetic-key", &base_url)?.refresh();
+        let Err(OpenRouterChatError::Transport(message)) = failed else {
+            return Err(format!("expected a transport failure, got {failed:?}").into());
+        };
+        // reqwest names only the failed step; the cause comes from its source.
+        assert!(
+            message.starts_with("error decoding response body: "),
+            "{message}"
+        );
+        server.join().ok().ok_or("server thread panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_cold_lookups_share_one_catalog_download() -> TestResult {
+        let catalog = catalog_response(&synthetic_catalog(0));
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
+            let (mut stream, _) = listener.accept()?;
+            let _ = stream.read(&mut [0_u8; 8_192]);
+            // Every lookup arrives while this one download is still running.
+            thread::sleep(Duration::from_millis(200));
+            stream.write_all(catalog.as_bytes())?;
+            Ok(())
+        });
+        let cache = OpenRouterPricingCache::new("synthetic-key", &format!("http://{address}"))?;
+        let lookups = (0..4)
+            .map(|_| {
+                let cache = cache.clone();
+                thread::spawn(move || cache.transcription_pricing(OPENROUTER_TRANSCRIPTION_MODEL))
+            })
+            .collect::<Vec<_>>();
+        for lookup in lookups {
+            let pricing = lookup.join().ok().ok_or("lookup thread panicked")??;
+            assert!(pricing.is_some());
+        }
+        server.join().ok().ok_or("server thread panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn keeping_the_catalog_warm_fails_only_while_nothing_is_cached() -> TestResult {
+        let outage = (
+            "503 Service Unavailable".to_owned(),
+            "application/json".to_owned(),
+            "{\"error\":{\"message\":\"synthetic outage\"}}".to_owned(),
+        );
+        let (base_url, server) = serve_sequence(vec![
+            outage.clone(),
+            (
+                "200 OK".to_owned(),
+                "application/json".to_owned(),
+                synthetic_catalog(0),
+            ),
+            outage,
+        ])?;
+        let cache = OpenRouterPricingCache::new("synthetic-key", &base_url)?;
+        assert!(matches!(
+            cache.keep_warm(),
+            Err(OpenRouterChatError::Http {
+                status_code: 503,
+                ..
+            })
+        ));
+        cache
+            .state
+            .lock()
+            .ok()
+            .ok_or("pricing state")?
+            .refresh_retry_at = None;
+        cache.keep_warm()?;
+        // A fresh catalog needs no download.
+        cache.keep_warm()?;
+        cache.state.lock().ok().ok_or("pricing state")?.fetched_at =
+            Some(Instant::now() - Duration::from_secs(301));
+        cache.keep_warm()?;
+        let state = cache.state.lock().ok().ok_or("pricing state")?;
+        assert!(state.last_refresh_error.is_some());
+        assert!(
+            state
+                .transcription_models
+                .contains_key(OPENROUTER_TRANSCRIPTION_MODEL)
+        );
+        drop(state);
         server.join().ok().ok_or("server thread panicked")??;
         Ok(())
     }
