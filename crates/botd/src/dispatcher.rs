@@ -3923,8 +3923,12 @@ where
                 self.answer_callback_best_effort(context.callback_id.as_deref());
                 return Ok(DispatchOutcome::Handled);
             };
+            let config = self
+                .config
+                .get(&context.chat_id)
+                .map_err(DispatchError::Config)?;
             let locale = resolve_locale(
-                None,
+                Some(&config.language),
                 context.user_language_code.as_deref(),
                 &context.chat_type,
             );
