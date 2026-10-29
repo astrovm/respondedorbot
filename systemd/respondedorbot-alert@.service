@@ -4,7 +4,7 @@ Description=Tell the admin on Telegram that %i failed
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/bash -c 'set -euo pipefail; \
-  env=%h/respondedorbot/.env; \
+  env=%h/secrets/app.env; \
   token=$(grep -oP "^TELEGRAM_TOKEN=\\K.*" "$env" | tr -d "\\042\\047"); \
   chat=$(grep -oP "^ADMIN_CHAT_ID=\\K.*" "$env" | tr -d "\\042\\047"); \
   printf "url = \\"https://api.telegram.org/bot%%s/sendMessage\\"\\n" "$token" \

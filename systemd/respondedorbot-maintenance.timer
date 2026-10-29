@@ -3,8 +3,8 @@ Description=Run respondedorbot maintenance daily
 
 [Timer]
 OnCalendar=*-*-* 03:00:00
-Persistent=true
 RandomizedDelaySec=10m
+Persistent=true
 
 [Install]
 WantedBy=timers.target

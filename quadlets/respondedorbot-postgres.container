@@ -1,6 +1,8 @@
 [Unit]
 Description=respondedorbot PostgreSQL database
 After=network-online.target
+# Waits until the secrets are in place
+ConditionPathExists=%h/secrets/postgres.env
 
 [Container]
 # Major version and Debian release pinned: a new Debian brings a new ICU, which changes text
@@ -8,7 +10,7 @@ After=network-online.target
 Image=docker.io/library/postgres:18-trixie
 ContainerName=respondedorbot-postgres
 AutoUpdate=registry
-EnvironmentFile=%h/respondedorbot/postgres.env
+EnvironmentFile=%h/secrets/postgres.env
 # ICU sorting, like the Supabase database this replaced.
 Environment=POSTGRES_INITDB_ARGS="--locale-provider=icu --icu-locale=en-US"
 Volume=respondedorbot-postgres.volume:/var/lib/postgresql

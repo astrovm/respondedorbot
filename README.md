@@ -182,34 +182,38 @@ podman build --tag respondedorbot:local .
 
 mkdir -p ~/.config/containers/systemd
 mkdir -p ~/.config/systemd/user
-mkdir -p ~/respondedorbot/workspace
+mkdir -p ~/secrets ~/workspace
 
 cp quadlets/* ~/.config/containers/systemd/
-cp systemd/respondedorbot-* ~/.config/systemd/user/
-cp .env.example ~/respondedorbot/.env
+cp -r systemd/respondedorbot-* systemd/podman-auto-update.timer.d ~/.config/systemd/user/
+cp .env.example ~/secrets/app.env
+chmod 600 ~/secrets/app.env
 
 password=$(openssl rand -hex 24)
-cat > ~/respondedorbot/postgres.env <<EOF
+cat > ~/secrets/postgres.env <<EOF
 POSTGRES_USER=respondedorbot
 POSTGRES_PASSWORD=$password
 POSTGRES_DB=respondedorbot
 EOF
-chmod 600 ~/respondedorbot/postgres.env
+chmod 600 ~/secrets/postgres.env
 echo "DATABASE_URL=postgresql://respondedorbot:$password@respondedorbot-postgres:5432/respondedorbot?sslmode=disable"
 
-podman run --rm --env-file ~/respondedorbot/.env \
-  -v ~/respondedorbot/workspace:/app/workspace:ro \
+podman run --rm --env-file ~/secrets/app.env \
+  -v ~/workspace:/app/workspace:ro \
   respondedorbot:local /usr/local/bin/botd --check-config
 
 systemctl --user daemon-reload
 systemctl --user enable --now respondedorbot-maintenance.timer
 systemctl --user enable --now respondedorbot-podman-prune.timer
+systemctl --user enable --now podman-auto-update.timer
 systemctl --user start respondedorbot-redis.service
 systemctl --user start respondedorbot-postgres.service
 systemctl --user start respondedorbot.service
 ```
 
-Before starting, edit `~/respondedorbot/.env`, set `DATABASE_URL` to the line printed above, and add the personality files to `~/respondedorbot/workspace/SOUL.md` and `~/respondedorbot/workspace/RULES.md`.
+Before starting, edit `~/secrets/app.env`, set `DATABASE_URL` to the line printed above, and add the personality files to `~/workspace/SOUL.md` and `~/workspace/RULES.md`. Each unit waits until its secrets file exists.
+
+`podman-auto-update.timer` checks the registry every 5 minutes and restarts the bot on a new `latest` image.
 
 The runtime image contains `botd`, FFmpeg, and native shared libraries. CI publishes `latest` and immutable `sha-<full-commit-sha>` images.
 
@@ -231,24 +235,25 @@ systemctl --user start respondedorbot-redis.service respondedorbot.service
 keeps 48 hourly and 30 daily snapshots. If a backup fails, the admin gets a
 Telegram message.
 
-Create `~/respondedorbot/backup.env` and keep a copy of `RESTIC_PASSWORD`
-somewhere safe. Without it the backups cannot be read.
+Create `~/secrets/restic.env` and keep a copy of `RESTIC_PASSWORD`
+somewhere safe. Without it the backups cannot be read. The first backup creates
+the restic repository.
 
 ```bash
-cat > ~/respondedorbot/backup.env <<EOF
+cat > ~/secrets/restic.env <<EOF
 RESTIC_REPOSITORY=s3:https://<account-id>.r2.cloudflarestorage.com/<bucket>
 RESTIC_PASSWORD=$(openssl rand -hex 32)
 AWS_ACCESS_KEY_ID=<r2-access-key-id>
 AWS_SECRET_ACCESS_KEY=<r2-secret-access-key>
 EOF
-chmod 600 ~/respondedorbot/backup.env
+chmod 600 ~/secrets/restic.env
+systemctl --user enable --now respondedorbot-backup.timer
 
 restic() {
-  podman run --rm -i --env-file ~/respondedorbot/backup.env \
-    docker.io/restic/restic:0.19.1 "$@"
+  podman run --rm -i --env-file ~/secrets/restic.env \
+    --volume=restic-cache:/root/.cache/restic \
+    docker.io/restic/restic:latest "$@"
 }
-restic init
-systemctl --user enable --now respondedorbot-backup.timer
 ```
 
 To restore the latest snapshot into an empty database:

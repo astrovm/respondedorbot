@@ -2,16 +2,18 @@
 Description=respondedorbot Telegram bot
 After=network-online.target respondedorbot-redis.service respondedorbot-postgres.service
 Requires=respondedorbot-redis.service respondedorbot-postgres.service
+# Waits until the secrets are in place
+ConditionPathExists=%h/secrets/app.env
 
 [Container]
 Image=ghcr.io/astrovm/respondedorbot:latest
 ContainerName=respondedorbot
-EnvironmentFile=%h/respondedorbot/.env
+AutoUpdate=registry
+EnvironmentFile=%h/secrets/app.env
 Environment=REDIS_HOST=respondedorbot-redis
 Environment=REDIS_PORT=6379
 Network=respondedorbot.network
-Volume=%h/respondedorbot/workspace:/app/workspace:ro
-AutoUpdate=registry
+Volume=%h/workspace:/app/workspace:ro
 StopTimeout=600
 
 [Service]
