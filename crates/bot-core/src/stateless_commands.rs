@@ -100,23 +100,7 @@ pub fn plan_stateless_command_with_reply(
 ) -> StatelessCommandPlan {
     let parsed = parse_command(message_text, bot_name);
     if parsed.command == "/start" && parsed.message_text.is_empty() {
-        let (text, mut keyboard) = render_help_page(locale, "home");
-        keyboard.inline_keyboard.insert(
-            0,
-            vec![
-                crate::menu_ui::button(
-                    crate::telegram_payments::topup_menu_title(locale),
-                    "topup:open",
-                ),
-                crate::menu_ui::button(
-                    match locale {
-                        Locale::Es => "Ayuda",
-                        Locale::En => "Help",
-                    },
-                    "help:home",
-                ),
-            ],
-        );
+        let (text, keyboard) = render_help_page(locale, "start");
         let mut message = SendMessage::new(chat_id, &text);
         message.reply_markup = Some(keyboard);
         message.reply_to_message_id = Some(message_id);
@@ -574,22 +558,64 @@ mod tests {
     }
 
     #[test]
-    fn start_offers_credits_and_help_in_both_languages() {
-        for (locale, credits, help) in [
-            (Locale::Es, "Cargar créditos", "Ayuda"),
-            (Locale::En, "Add credits", "Help"),
+    fn start_has_welcome_title_and_only_the_help_menu() {
+        for (locale, title) in [
+            (Locale::Es, "Hola, soy el Respondedor"),
+            (Locale::En, "Hi, I'm the Respondedor"),
         ] {
-            let plan =
-                super::plan_stateless_command(ChatId(42), MessageId(7), "/start", "", locale);
-            assert!(matches!(plan,
-                StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
-                if message.reply_markup.as_ref().is_some_and(|keyboard|
-                    keyboard.inline_keyboard.len() > 1
-                    && keyboard.inline_keyboard[0][0].text == credits
-                    && keyboard.inline_keyboard[0][0].callback_data.as_deref() == Some("topup:open")
-                    && keyboard.inline_keyboard[0][1].text == help
-                    && keyboard.inline_keyboard[0][1].callback_data.as_deref() == Some("help:home"))
-            ));
+            let (help, keyboard) = crate::help_catalog::render_help_page(locale, "home");
+            let body = help.split_once("\n\n").unwrap_or_default().1;
+            let mut expected = crate::telegram_actions::SendMessage::new(
+                ChatId(42),
+                &format!("{title}\n\n{body}"),
+            );
+            expected.reply_markup = Some(keyboard.clone());
+            expected.reply_to_message_id = Some(MessageId(7));
+            for command in ["/start", "!start", "/start@bot"] {
+                assert_eq!(
+                    super::plan_stateless_command(
+                        ChatId(42),
+                        MessageId(7),
+                        command,
+                        "@bot",
+                        locale
+                    ),
+                    StatelessCommandPlan::Action(TelegramAction::SendMessage(expected.clone()))
+                );
+            }
+            let callbacks = keyboard
+                .inline_keyboard
+                .iter()
+                .flatten()
+                .map(|button| button.callback_data.as_deref())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                callbacks,
+                vec![
+                    Some("help:markets"),
+                    Some("help:ai"),
+                    Some("help:tasks"),
+                    Some("help:credits"),
+                    Some("help:tools"),
+                    Some("help:settings"),
+                    Some("help:close")
+                ]
+            );
+            assert!(
+                crate::help_catalog::render_help_page(locale, "credits")
+                    .0
+                    .contains("/topup")
+            );
+            assert_eq!(
+                super::plan_stateless_command(
+                    ChatId(42),
+                    MessageId(7),
+                    "/start unknown",
+                    "",
+                    locale
+                ),
+                StatelessCommandPlan::NotHandled
+            );
         }
     }
 }

@@ -27,7 +27,7 @@ Rust is the sole billing reader and writer. PostgreSQL remains the system of rec
 - Telegram Stars checkout uses `createInvoiceLink` and a native checkout URL button. It never publishes an invoice to the group or redirects the buyer to a private chat.
 - New Stars payloads bind the amount and intended buyer. Checkout and settlement reject another payer or a changed amount. Exact legacy pack-only payloads credit the actual payer; malformed user bindings are rejected.
 - Exported-invoice bot-origin receipts identify the buyer through the positive private chat id, never through the bot sender id or the payload alone. Charge-id ledger writes remain idempotent.
-- Plain `/start` includes **Cargar créditos** and **Ayuda**, or **Add credits** and **Help**, alongside the existing help controls.
+- Plain `/start` shows the same menu as `/help`, with the welcome title **Hola, soy el Respondedor** or **Hi, I'm the Respondedor**. Open **Créditos** / **Credits** for `/topup`; there is no separate top-up row or checkout deep link.
 
 ## Scheduled tasks
 

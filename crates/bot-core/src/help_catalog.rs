@@ -71,12 +71,20 @@ pub fn render_help_page(
         .collect::<Vec<_>>();
     rows.push(vec![close(locale, "help:close")]);
     (
-        localized(
-            locale,
-            "Ayuda\n\nHablame con /ask, mencionándome o respondiendo a un mensaje mío.\nTodos los comandos también funcionan con ! en vez de /.",
-            "Help\n\nTalk to me with /ask, by mentioning me or by replying to one of my messages.\nEvery command also works with ! instead of /.",
-        )
-        .to_owned(),
+        format!(
+            "{}\n\n{}",
+            match (page, locale) {
+                ("start", Locale::Es) => "Hola, soy el Respondedor",
+                ("start", Locale::En) => "Hi, I'm the Respondedor",
+                (_, Locale::Es) => "Ayuda",
+                (_, Locale::En) => "Help",
+            },
+            localized(
+                locale,
+                "Hablame con /ask, mencionándome o respondiendo a un mensaje mío.\nTodos los comandos también funcionan con ! en vez de /.",
+                "Talk to me with /ask, by mentioning me or by replying to one of my messages.\nEvery command also works with ! instead of /.",
+            )
+        ),
         crate::telegram_actions::InlineKeyboardMarkup {
             inline_keyboard: rows,
         },
