@@ -1905,6 +1905,99 @@ mod tests {
     }
 
     #[test]
+    fn billing_funds_reads_personal_group_and_hourly_balances() -> TestResult {
+        crate::test_env::database_url()
+            .zip(crate::test_env::redis_endpoint())
+            .map_or(Ok(()), billing_funds_scenario)
+    }
+
+    fn billing_funds_scenario((database_url, endpoint): (String, RedisEndpoint)) -> TestResult {
+        use bot_adapters::billing_schema::BillingSchemaRepository;
+        use bot_adapters::chat_config::ChatConfigRepository;
+        use bot_adapters::chat_limits::ChatLimitRepository;
+        use bot_core::chat_config::ChatConfig;
+
+        BillingSchemaRepository::new(&database_url).ensure_schema()?;
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let user_id = 6_710_000_000_000_i64 + i64::try_from(nonce % 100_000_000)?;
+        let group_id = -user_id;
+        let chat_id = group_id.to_string();
+        let operation = crate::test_env::unique("task-funds");
+        let repository = BillingRepository::new(&database_url);
+        repository.mint_user_credits(user_id, 900, None, &format!("{operation}:mint"))?;
+        assert!(
+            repository
+                .transfer_user_to_chat(user_id, group_id, 700, &format!("{operation}:transfer"))?
+                .transferred
+        );
+        let config = ChatConfig {
+            group_pays_tasks: true,
+            creditless_user_hourly_limit: 5,
+            ..ChatConfig::default()
+        };
+        let configs = ChatConfigRepository::new(&database_url);
+        configs.set(&chat_id, &config)?;
+        ChatLimitRepository::new(&database_url).set(group_id, user_id, "synthetic", 3, user_id)?;
+
+        let mut source = BillingTaskFunds::new(&database_url, RedisCreditlessCap::new(&endpoint)?);
+        let payer = TaskPayer::for_group(group_id, &config, Some(3));
+        let initial = TaskFunds {
+            personal: 200,
+            group: 700,
+            hourly_used: 0,
+        };
+        assert_eq!(source.funds(&chat_id, user_id)?, (payer, initial));
+        let cap = RedisCreditlessCap::new(&endpoint)?;
+        let key = creditless_cap_key(&chat_id, user_id);
+        assert_eq!(cap.admit_once(&key, &operation, 60)?, 1);
+        assert_eq!(
+            source.funds(&chat_id, user_id)?,
+            (
+                payer,
+                TaskFunds {
+                    hourly_used: 1,
+                    ..initial
+                }
+            )
+        );
+
+        let mut offline = BillingTaskFunds::new(
+            &database_url,
+            RedisCreditlessCap::new(&RedisEndpoint {
+                host: "127.0.0.1".to_owned(),
+                port: 1,
+                password: None,
+            })?,
+        );
+        let error = offline.funds(&chat_id, user_id);
+        assert!(
+            matches!(&error, Err(message) if message.contains("Redis")),
+            "{error:?}"
+        );
+        // Private chats and groups with task funding off never need Redis.
+        assert_eq!(
+            offline.funds(&user_id.to_string(), user_id)?,
+            (
+                TaskPayer::PERSONAL,
+                TaskFunds {
+                    group: 0,
+                    ..initial
+                }
+            )
+        );
+        let disabled = ChatConfig {
+            group_pays_tasks: false,
+            ..config
+        };
+        configs.set(&chat_id, &disabled)?;
+        assert_eq!(
+            offline.funds(&chat_id, user_id)?,
+            (TaskPayer::for_group(group_id, &disabled, Some(3)), initial)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn billing_funds_source_surfaces_repository_failures_as_text() {
         let endpoint = crate::test_env::redis_endpoint().unwrap_or(RedisEndpoint {
             host: "127.0.0.1".to_owned(),
