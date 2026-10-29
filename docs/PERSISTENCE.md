@@ -142,7 +142,7 @@ Primary key: (`chat_id`, `user_id`), both `BIGINT`. Also stores
   only use their own credits. The chat config is never changed.
 - The hourly counter is the same Redis `creditless_cap` key; only the limit
   it is compared to changes.
-- Group admins always get the group's limit, even with a row.
+- A group admin's row counts only when it's above the group's limit, so it can raise an admin's limit but never lower it. `/limit` refuses a lower one for an admin.
 - When a member runs out of their own limit, the reply says an admin set it,
   so it is not read as the group's limit for everyone.
 - Setting again replaces the row and moves it to the end of `/limited`.

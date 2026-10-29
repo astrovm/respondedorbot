@@ -27,9 +27,9 @@ use bot_core::chat_bans::{
 };
 use bot_core::chat_config::ChatConfig;
 use bot_core::chat_limits::{
-    LimitCommand, LimitCommandContext, LimitCommandPlan, LimitedUser, classify_limit_command,
-    limit_admin_target, limit_result_reply, plan_limit_command, render_limit_list,
-    unlimit_result_reply,
+    LimitCommand, LimitCommandContext, LimitCommandPlan, LimitedUser, admin_own_limit,
+    classify_limit_command, limit_admin_target, limit_result_reply, plan_limit_command,
+    render_limit_list, unlimit_result_reply,
 };
 use bot_core::command_parsing::{bang_command_as_slash, parse_command};
 use bot_core::command_state::{
@@ -4926,9 +4926,9 @@ where
     }
 
     /// A member's own limit replaces the group's for AI messages the group
-    /// pays for. Admins keep the group's limit, so a limit left from before
-    /// they were promoted can't hold them back, and a failed lookup keeps it
-    /// too rather than blocking the member.
+    /// pays for. An admin's own limit only counts above the group's, so a
+    /// limit left from before they were promoted can't hold them back, and a
+    /// failed lookup keeps the group's rather than blocking the member.
     fn creditless_limit(
         &mut self,
         message: &IncomingMessage,
@@ -4949,11 +4949,12 @@ where
                     .authorization
                     .authorize(&chat_id.0.to_string(), &sender_id.0.to_string());
                 self.state_diagnostics.extend(authorization.diagnostics);
-                if authorization.is_admin {
-                    group_limit
+                let own_limit = if authorization.is_admin {
+                    admin_own_limit(own_limit, config.creditless_user_hourly_limit)
                 } else {
-                    CreditlessLimit::Member(own_limit)
-                }
+                    Some(own_limit)
+                };
+                own_limit.map_or(group_limit, CreditlessLimit::Member)
             }
             Err(error) => {
                 self.state_diagnostics.push(format!(
@@ -5098,8 +5099,16 @@ where
                             self.authorization.authorize(&chat, &user_id.to_string());
                         self.state_diagnostics
                             .extend(target_authorization.diagnostics);
-                        if target_authorization.is_admin {
-                            reply(limit_admin_target(locale))
+                        let group_limit = if target_authorization.is_admin {
+                            let config = self.config.get(&chat).map_err(DispatchError::Config)?;
+                            Some(config.creditless_user_hourly_limit)
+                        } else {
+                            None
+                        };
+                        if let Some(group_limit) = group_limit
+                            .filter(|group| admin_own_limit(hourly_limit, *group).is_none())
+                        {
+                            reply(&limit_admin_target(group_limit, locale))
                         } else {
                             match store.set(chat_id.0, user_id, &name, hourly_limit, sender_id.0) {
                                 Ok(()) => reply(&limit_result_reply(&name, hourly_limit, locale)),
@@ -23824,11 +23833,21 @@ mod tests {
             limits: Option<Limits>,
             ai: AiSource,
         ) -> NativeDispatcher<Config, Actions, State, Values, Samples, Admins> {
+            build_with_group_limit(language, admins, limits, ai, -1)
+        }
+
+        fn build_with_group_limit(
+            language: &str,
+            admins: &[i64],
+            limits: Option<Limits>,
+            ai: AiSource,
+            group_limit: i64,
+        ) -> NativeDispatcher<Config, Actions, State, Values, Samples, Admins> {
             let dispatcher = NativeDispatcher::new(
                 Config {
                     value: Ok(ChatConfig {
                         language: language.to_owned(),
-                        creditless_user_hourly_limit: -1,
+                        creditless_user_hourly_limit: group_limit,
                         ..ChatConfig::default()
                     }),
                     chat_ids: Vec::new(),
@@ -23934,13 +23953,13 @@ mod tests {
                     "es",
                     "Esto funciona solo en grupos",
                     "Este comando es solo para admins del grupo",
-                    "A los admins no los puedo limitar",
+                    "Los admins ya no tienen límite en este grupo",
                 ),
                 (
                     "en",
                     "This only works in groups",
                     "Only group admins can use this command",
-                    "I can't limit admins",
+                    "Admins already have no limit in this group",
                 ),
             ] {
                 let limits = Limits::default();
@@ -24087,6 +24106,50 @@ mod tests {
             assert!(diagnostics.contains(
                 &"chat limit check chat_id=-42 user_id=88: synthetic database failure".to_owned()
             ));
+        }
+
+        #[test]
+        fn admins_can_only_get_an_own_limit_above_the_groups() {
+            for (language, locale, refused) in [
+                (
+                    "es",
+                    bot_core::locale::Locale::Es,
+                    "A los admins solo les puedo dar más que el límite del grupo (2)",
+                ),
+                (
+                    "en",
+                    bot_core::locale::Locale::En,
+                    "I can only give admins more than the group's limit (2)",
+                ),
+            ] {
+                let limits = Limits::default();
+                let rows = Rc::clone(&limits.rows);
+                let mut dispatcher =
+                    build_with_group_limit(language, &[88, 77], Some(limits), silent_ai(), 2);
+                for command in ["/limit 1", "/limit 2"] {
+                    assert_eq!(replies(&mut dispatcher, replying(command)), refused);
+                }
+                assert!(rows.borrow().is_empty());
+                assert_eq!(
+                    replies(&mut dispatcher, replying("/limit 5")),
+                    bot_core::chat_limits::limit_result_reply("Ana", 5, locale)
+                );
+                assert_eq!(rows.borrow().len(), 1);
+            }
+            // An admin's own limit is used only when it's the higher one.
+            for (own_limit, expected) in [
+                (5, CreditlessLimit::Member(5)),
+                (1, CreditlessLimit::Group(2)),
+            ] {
+                let (ai, (prepared, _, _)) = ai_source(Ok(AiPreparation::silent()));
+                let mut dispatcher =
+                    build_with_group_limit("es", &[88], Some(limited(88, own_limit)), ai, 2);
+                assert_eq!(
+                    dispatcher.dispatch(group("@mybot hola", |_| {})),
+                    Ok(DispatchOutcome::Handled)
+                );
+                assert_eq!(prepared.borrow()[0].creditless_limit, expected);
+            }
         }
 
         #[test]

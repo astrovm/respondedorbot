@@ -90,19 +90,23 @@ impl ChatTaskPayerPolicy {
     }
 }
 
-/// A member's own /limit replaces the group's limit, except for chat admins
-/// (and when the admin lookup fails the member limit stays, as for messages).
-/// The lookup only happens when the member has an own limit.
+/// A member's own /limit replaces the group's limit, and a chat admin's only
+/// counts above it, as for messages (when the admin lookup fails the member
+/// limit stays). The lookup only happens when the member has an own limit.
 fn member_limit(
     chat_id: &str,
     user_id: i64,
-    own_limit: Option<i64>,
+    (own_limit, group_limit): (Option<i64>, i64),
     admins: Option<&mut dyn GroupAuthorizer>,
 ) -> Option<i64> {
     let own_limit = own_limit?;
     let is_admin =
         admins.is_some_and(|admins| admins.authorize(chat_id, &user_id.to_string()).is_admin);
-    if is_admin { None } else { Some(own_limit) }
+    if is_admin {
+        bot_core::chat_limits::admin_own_limit(own_limit, group_limit)
+    } else {
+        Some(own_limit)
+    }
 }
 
 impl TaskPayerPolicy for ChatTaskPayerPolicy {
@@ -122,7 +126,7 @@ impl TaskPayerPolicy for ChatTaskPayerPolicy {
         let own_limit = member_limit(
             chat_id,
             user_id,
-            own_limit,
+            (own_limit, config.creditless_user_hourly_limit),
             self.admins
                 .as_mut()
                 .map(|admins| &mut **admins as &mut dyn GroupAuthorizer),
@@ -344,21 +348,29 @@ mod tests {
             asked: Vec::new(),
         };
         assert_eq!(
-            super::member_limit("-7", 9, Some(1), Some(&mut admin)),
+            super::member_limit("-7", 9, (Some(1), 5), Some(&mut admin)),
             None
         );
         assert_eq!(admin.asked, [("-7".to_owned(), "9".to_owned())]);
+        // An admin's own limit counts only above the group's.
+        assert_eq!(
+            super::member_limit("-7", 9, (Some(10), 5), Some(&mut admin)),
+            Some(10)
+        );
         let mut member = Admins {
             is_admin: false,
             asked: Vec::new(),
         };
         assert_eq!(
-            super::member_limit("-7", 9, Some(1), Some(&mut member)),
+            super::member_limit("-7", 9, (Some(1), 5), Some(&mut member)),
             Some(1)
         );
-        assert_eq!(super::member_limit("-7", 9, Some(1), None), Some(1));
+        assert_eq!(super::member_limit("-7", 9, (Some(1), 5), None), Some(1));
         // No own limit: nobody is looked up.
-        assert_eq!(super::member_limit("-7", 9, None, Some(&mut member)), None);
+        assert_eq!(
+            super::member_limit("-7", 9, (None, 5), Some(&mut member)),
+            None
+        );
         assert_eq!(member.asked.len(), 1);
     }
 

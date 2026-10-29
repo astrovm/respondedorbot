@@ -115,11 +115,29 @@ pub fn plan_limit_command(command: LimitCommand, context: LimitCommandContext) -
     }
 }
 
+/// An admin's own limit counts only above the group's, so /limit can raise
+/// what the group pays for an admin but never hold them back. A negative
+/// group limit means no limit, which nothing is above.
 #[must_use]
-pub const fn limit_admin_target(locale: Locale) -> &'static str {
-    match locale {
-        Locale::Es => "A los admins no los puedo limitar",
-        Locale::En => "I can't limit admins",
+pub const fn admin_own_limit(own_limit: i64, group_limit: i64) -> Option<i64> {
+    if group_limit >= 0 && own_limit > group_limit {
+        Some(own_limit)
+    } else {
+        None
+    }
+}
+
+#[must_use]
+pub fn limit_admin_target(group_limit: i64, locale: Locale) -> String {
+    match (group_limit < 0, locale) {
+        (true, Locale::Es) => "Los admins ya no tienen límite en este grupo".to_owned(),
+        (true, Locale::En) => "Admins already have no limit in this group".to_owned(),
+        (false, Locale::Es) => {
+            format!("A los admins solo les puedo dar más que el límite del grupo ({group_limit})")
+        }
+        (false, Locale::En) => {
+            format!("I can only give admins more than the group's limit ({group_limit})")
+        }
     }
 }
 
@@ -192,9 +210,9 @@ pub fn render_limit_list(users: &[LimitedUser], locale: Locale) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        LimitCommand, LimitCommandContext, LimitCommandPlan, LimitedUser, classify_limit_command,
-        limit_admin_target, limit_result_reply, plan_limit_command, render_limit_list,
-        unlimit_result_reply,
+        LimitCommand, LimitCommandContext, LimitCommandPlan, LimitedUser, admin_own_limit,
+        classify_limit_command, limit_admin_target, limit_result_reply, plan_limit_command,
+        render_limit_list, unlimit_result_reply,
     };
     use crate::chat_bans::BanTarget;
     use crate::locale::Locale;
@@ -334,12 +352,38 @@ mod tests {
     }
 
     #[test]
+    fn an_admins_own_limit_only_raises_the_groups() {
+        assert_eq!(admin_own_limit(10, 5), Some(10));
+        assert_eq!(admin_own_limit(5, 5), None);
+        assert_eq!(admin_own_limit(2, 5), None);
+        assert_eq!(admin_own_limit(0, 0), None);
+        assert_eq!(admin_own_limit(1, 0), Some(1));
+        // No group limit: nothing is above it.
+        assert_eq!(admin_own_limit(100, -1), None);
+    }
+
+    #[test]
     fn localized_replies() {
-        assert_eq!(
-            limit_admin_target(Locale::Es),
-            "A los admins no los puedo limitar"
-        );
-        assert_eq!(limit_admin_target(Locale::En), "I can't limit admins");
+        for (group_limit, locale, expected) in [
+            (
+                5,
+                Locale::Es,
+                "A los admins solo les puedo dar más que el límite del grupo (5)",
+            ),
+            (
+                5,
+                Locale::En,
+                "I can only give admins more than the group's limit (5)",
+            ),
+            (
+                -1,
+                Locale::Es,
+                "Los admins ya no tienen límite en este grupo",
+            ),
+            (-1, Locale::En, "Admins already have no limit in this group"),
+        ] {
+            assert_eq!(limit_admin_target(group_limit, locale), expected);
+        }
         for (hourly_limit, locale, expected) in [
             (
                 0,
