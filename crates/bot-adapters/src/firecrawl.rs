@@ -22,14 +22,7 @@ const MAX_DESCRIPTION_CHARS: usize = 1_200;
 pub struct SearchRequest {
     pub query: String,
     pub api_key: String,
-    pub sources: &'static [&'static str],
 }
-
-/// Web results rank by relevance, so a story from the last few hours loses to
-/// older pages; news results bring it in with a date.
-const NEWS_AND_WEB: &[&str] = &["news", "web"];
-const NEWS: &[&str] = &["news"];
-const WEB: &[&str] = &["web"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpResponse {
@@ -121,7 +114,9 @@ impl FirecrawlTransport for ReqwestFirecrawlTransport {
             .json(&json!({
                 "query": request.query,
                 "limit": MAX_RESULTS,
-                "sources": request.sources,
+                // Web results rank by relevance, so a story from the last few
+                // hours loses to older pages; news results bring it in with a date.
+                "sources": ["news", "web"],
                 "timeout": API_TIMEOUT_MS,
             }))
             .send()
@@ -260,70 +255,13 @@ where
     T: FirecrawlTransport,
     S: Fn(Duration),
 {
-    let request = |query: &str, sources| SearchRequest {
+    let request = SearchRequest {
         query: query.to_owned(),
         api_key: api_key.to_owned(),
-        sources,
     };
-    let news_query = news_query(query);
-    if news_query.is_empty() || news_query == query {
-        return post_with_retries(transport, &request(query, NEWS_AND_WEB), &sleep);
-    }
-    // News search needs every word to match and only covers recent stories,
-    // so dates the model adds, such as "October 2026", just leave it empty.
-    // Web search keeps them to rule out older events with the same name.
-    let web = post_with_retries(transport, &request(query, WEB), &sleep)?;
-    let news = post_with_retries(transport, &request(&news_query, NEWS), &sleep);
-    Ok(match (web, news) {
-        (
-            SearchOutcome::Success {
-                results,
-                credits_used,
-                request_id,
-                ..
-            },
-            Ok(SearchOutcome::Success {
-                results: news,
-                credits_used: news_credits,
-                ..
-            }),
-        ) => SearchOutcome::Success {
-            query: query.to_owned(),
-            results: news.into_iter().chain(results).collect(),
-            credits_used: add_credits(&credits_used, &news_credits),
-            request_id,
-        },
-        (web @ SearchOutcome::Success { .. }, _) => web,
-        (
-            _,
-            Ok(SearchOutcome::Success {
-                results,
-                credits_used,
-                request_id,
-                ..
-            }),
-        ) => SearchOutcome::Success {
-            query: query.to_owned(),
-            results,
-            credits_used,
-            request_id,
-        },
-        (web, _) => web,
-    })
-}
-
-fn post_with_retries<T, S>(
-    transport: &T,
-    request: &SearchRequest,
-    sleep: &S,
-) -> Result<SearchOutcome, TransportError>
-where
-    T: FirecrawlTransport,
-    S: Fn(Duration),
-{
     let mut attempt = 0;
     loop {
-        match transport.post(request) {
+        match transport.post(&request) {
             Ok(response) => {
                 let retryable =
                     matches!(response.status_code, 408 | 409 | 429) || response.status_code >= 500;
@@ -332,7 +270,7 @@ where
                     attempt += 1;
                     continue;
                 }
-                return Ok(parse_response(response, &request.query));
+                return Ok(parse_response(response, query));
             }
             Err(TransportError::Timeout) => {
                 if attempt + 1 == MAX_ATTEMPTS {
@@ -350,111 +288,6 @@ where
             }
             Err(error) => return Err(error),
         }
-    }
-}
-
-/// Drops years, month names, day numbers next to a month, and the words that
-/// only frame a date ("news", "today", "de"), in English and Spanish.
-#[must_use]
-pub fn news_query(query: &str) -> String {
-    let words = query.split_whitespace().collect::<Vec<_>>();
-    let bare_words = words
-        .iter()
-        .map(|word| {
-            word.trim_matches(|character: char| !character.is_alphanumeric())
-                .to_lowercase()
-        })
-        .collect::<Vec<_>>();
-    let numeric = |index: usize| {
-        bare_words
-            .get(index)
-            .is_some_and(|word| is_day(word) || is_year(word))
-    };
-    // "may" is only a month next to a number, so "binance may be hacked" keeps it.
-    let months = bare_words
-        .iter()
-        .enumerate()
-        .map(|(index, word)| {
-            is_month(word)
-                || (word == "may" && ((index > 0 && numeric(index - 1)) || numeric(index + 1)))
-        })
-        .collect::<Vec<_>>();
-    let has_month = months.contains(&true);
-    let dated = bare_words
-        .iter()
-        .zip(&months)
-        .map(|(word, month)| *month || is_year(word) || (has_month && is_day(word)))
-        .collect::<Vec<_>>();
-    words
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| {
-            let word = &bare_words[*index];
-            let next_to_date =
-                (*index > 0 && dated[index - 1]) || dated.get(index + 1) == Some(&true);
-            !dated[*index]
-                && !matches!(
-                    word.as_str(),
-                    "news" | "noticias" | "today" | "hoy" | "latest" | "últimas" | "ultimas"
-                )
-                && !(next_to_date && matches!(word.as_str(), "de" | "del" | "of" | "in" | "en"))
-        })
-        .map(|(_, word)| *word)
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn is_year(word: &str) -> bool {
-    word.len() == 4
-        && (word.starts_with("19") || word.starts_with("20"))
-        && word.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-fn is_day(word: &str) -> bool {
-    let digits = word.trim_end_matches(|character: char| character.is_ascii_alphabetic());
-    let suffix = &word[digits.len()..];
-    matches!(suffix, "" | "st" | "nd" | "rd" | "th")
-        && digits
-            .parse::<u8>()
-            .is_ok_and(|day| (1..=31).contains(&day))
-}
-
-fn is_month(word: &str) -> bool {
-    matches!(
-        word,
-        "january"
-            | "february"
-            | "march"
-            | "april"
-            | "june"
-            | "july"
-            | "august"
-            | "september"
-            | "october"
-            | "november"
-            | "december"
-            | "enero"
-            | "febrero"
-            | "marzo"
-            | "abril"
-            | "mayo"
-            | "junio"
-            | "julio"
-            | "agosto"
-            | "septiembre"
-            | "setiembre"
-            | "octubre"
-            | "noviembre"
-            | "diciembre"
-    )
-}
-
-fn add_credits(first: &Value, second: &Value) -> Value {
-    let credits = |value: &Value| value.as_u64().or_else(|| value.as_str()?.parse().ok());
-    match (credits(first), credits(second)) {
-        (Some(first), Some(second)) => json!(first + second),
-        (None, Some(_)) => second.clone(),
-        _ => first.clone(),
     }
 }
 
@@ -676,191 +509,6 @@ mod tests {
     }
 
     #[test]
-    fn news_queries_drop_dates_and_the_words_that_frame_them() {
-        for (query, expected) in [
-            ("binance hack news October 2026", "binance hack"),
-            ("binance hack octubre 2026", "binance hack"),
-            (
-                "Binance BNB drop news today October 29 2026 hack",
-                "Binance BNB drop hack",
-            ),
-            (
-                "noticias del 29 de octubre de 2026 sobre binance",
-                "sobre binance",
-            ),
-            ("binance hack 29th, november", "binance hack"),
-            ("top 10 crypto hacks 2026", "top 10 crypto hacks"),
-            ("binance hack", "binance hack"),
-            ("may 5 binance", "binance"),
-            ("binance may 2026", "binance"),
-            ("binance may be hacked", "binance may be hacked"),
-            ("may", "may"),
-            ("news today", ""),
-            ("binance 32 october 0 2099 1899", "binance 32 0 1899"),
-        ] {
-            assert_eq!(super::news_query(query), expected, "{query}");
-        }
-    }
-
-    fn news_payload(
-        credits: Value,
-        news: &[&str],
-        web: &[&str],
-    ) -> Result<HttpResponse, TransportError> {
-        let entries = |urls: &[&str]| {
-            urls.iter()
-                .map(|url| json!({"title": "Synthetic", "url": url, "snippet": "s", "date": "1 hour ago"}))
-                .collect::<Vec<_>>()
-        };
-        response(
-            200,
-            json!({"success": true, "id": "request-1", "creditsUsed": credits,
-                "data": {"news": entries(news), "web": entries(web)}}),
-        )
-    }
-
-    fn search_query(
-        transport: &FakeTransport,
-        query: &str,
-    ) -> Result<SearchOutcome, TransportError> {
-        search_with(transport, "key", query, |_| {})
-    }
-
-    fn urls(outcome: &Result<SearchOutcome, TransportError>) -> Vec<String> {
-        match outcome {
-            Ok(SearchOutcome::Success { results, .. }) => {
-                results.iter().map(|result| result.url.clone()).collect()
-            }
-            _ => Vec::new(),
-        }
-    }
-
-    #[test]
-    fn dated_queries_search_news_without_the_dates_and_web_with_them() {
-        let transport = FakeTransport {
-            responses: RefCell::new(vec![
-                news_payload(json!(2), &[], &["https://example.com/old"]),
-                news_payload(json!("2"), &["https://example.com/new"], &[]),
-            ]),
-            requests: RefCell::new(Vec::new()),
-        };
-        let outcome = search_query(&transport, "binance hack October 2026");
-        assert_eq!(
-            urls(&outcome),
-            ["https://example.com/new", "https://example.com/old"]
-        );
-        assert!(matches!(
-            &outcome,
-            Ok(SearchOutcome::Success { query, credits_used, request_id, .. })
-                if query == "binance hack October 2026"
-                    && *credits_used == json!(4)
-                    && *request_id == json!("request-1")
-        ));
-        let requests = transport.requests.borrow();
-        assert_eq!(requests[0].query, "binance hack October 2026");
-        assert_eq!(requests[0].sources, ["web"]);
-        assert_eq!(requests[1].query, "binance hack");
-        assert_eq!(requests[1].sources, ["news"]);
-    }
-
-    #[test]
-    fn undated_queries_make_one_combined_request() {
-        for query in ["binance hack", "October 2026"] {
-            let transport = FakeTransport {
-                responses: RefCell::new(vec![news_payload(
-                    json!(2),
-                    &["https://example.com/new"],
-                    &[],
-                )]),
-                requests: RefCell::new(Vec::new()),
-            };
-            assert_eq!(
-                urls(&search_query(&transport, query)),
-                ["https://example.com/new"]
-            );
-            let requests = transport.requests.borrow();
-            assert_eq!(requests.len(), 1, "{query}");
-            assert_eq!(requests[0].query, query);
-            assert_eq!(requests[0].sources, ["news", "web"]);
-        }
-    }
-
-    #[test]
-    fn a_failed_side_of_a_dated_search_keeps_the_other_side() {
-        let down = || response(500, json!({"error": "down"}));
-        for (responses, expected_urls, expected_credits) in [
-            (
-                vec![
-                    news_payload(json!(2), &[], &["https://example.com/old"]),
-                    response(400, json!({"error": "bad"})),
-                ],
-                vec!["https://example.com/old"],
-                json!(2),
-            ),
-            (
-                vec![
-                    news_payload(json!(2), &[], &["https://example.com/old"]),
-                    Err(TransportError::Other("tls".to_owned())),
-                ],
-                vec!["https://example.com/old"],
-                json!(2),
-            ),
-            (
-                vec![
-                    down(),
-                    down(),
-                    down(),
-                    news_payload(json!(2), &["https://example.com/new"], &[]),
-                ],
-                vec!["https://example.com/new"],
-                json!(2),
-            ),
-        ] {
-            let transport = FakeTransport {
-                responses: RefCell::new(responses),
-                requests: RefCell::new(Vec::new()),
-            };
-            let outcome = search_query(&transport, "binance hack 2026");
-            assert_eq!(urls(&outcome), expected_urls);
-            assert!(matches!(
-                outcome,
-                Ok(SearchOutcome::Success { query, credits_used, .. })
-                    if query == "binance hack 2026" && credits_used == expected_credits
-            ));
-        }
-
-        let transport = FakeTransport {
-            responses: RefCell::new(vec![down(), down(), down(), down(), down(), down()]),
-            requests: RefCell::new(Vec::new()),
-        };
-        assert!(matches!(
-            search_query(&transport, "binance hack 2026"),
-            Ok(SearchOutcome::HttpError {
-                status_code: 500,
-                ..
-            })
-        ));
-        let transport = FakeTransport {
-            responses: RefCell::new(vec![Err(TransportError::Other("tls".to_owned()))]),
-            requests: RefCell::new(Vec::new()),
-        };
-        assert_eq!(
-            search_query(&transport, "binance hack 2026"),
-            Err(TransportError::Other("tls".to_owned()))
-        );
-        assert_eq!(transport.requests.borrow().len(), 1);
-    }
-
-    #[test]
-    fn credits_add_up_when_both_are_known() {
-        use super::add_credits;
-        assert_eq!(add_credits(&json!(2), &json!("2")), json!(4));
-        assert_eq!(add_credits(&Value::Null, &json!(2)), json!(2));
-        assert_eq!(add_credits(&json!(2), &Value::Null), json!(2));
-        assert_eq!(add_credits(&Value::Null, &Value::Null), Value::Null);
-    }
-
-    #[test]
     fn reqwest_transport_sends_authenticated_bounded_search_payload() -> TestResult {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
@@ -888,7 +536,6 @@ mod tests {
         let response = transport.post(&SearchRequest {
             query: "synthetic query".to_owned(),
             api_key: "synthetic-key".to_owned(),
-            sources: super::NEWS_AND_WEB,
         })?;
         assert_eq!(response.status_code, 200);
         assert_eq!(response.body, r#"{"success":true,"data":[]}"#);
@@ -899,7 +546,6 @@ mod tests {
                 .post(&SearchRequest {
                     query: "synthetic query".to_owned(),
                     api_key: "synthetic-key".to_owned(),
-                    sources: super::NEWS_AND_WEB,
                 })
                 .is_err()
         );
@@ -908,7 +554,6 @@ mod tests {
             malformed.post(&SearchRequest {
                 query: "synthetic query".to_owned(),
                 api_key: "synthetic-key".to_owned(),
-                sources: super::NEWS,
             }),
             Err(TransportError::Other(_))
         ));
