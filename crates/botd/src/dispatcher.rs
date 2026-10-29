@@ -24374,12 +24374,23 @@ mod tests {
             Ok(DispatchOutcome::Handled)
         );
         assert!(bot.actions.0.iter().any(|a|matches!(a,TelegramAction::Ephemeral{receiver_user_id:88,ephemeral_message_id:Some(71),action,..} if matches!(action.as_ref(),TelegramAction::EditMessage{text,..} if text.contains("50 credits")))));
+        let wire = topup_wire(&bot.actions.0);
+        assert_eq!(wire[1].0, "editEphemeralMessageText");
+        assert_eq!(wire[1].1["ephemeral_message_id"], 71);
+        assert_eq!(wire[1].1["receiver_user_id"], 88);
         bot.actions.0.clear();
         assert_eq!(
             bot.dispatch(ephemeral_topup_callback("topup:c50", 88, 88)),
             Ok(DispatchOutcome::Handled)
         );
         assert!(bot.actions.0.iter().any(|a|matches!(a,TelegramAction::Ephemeral{receiver_user_id:88,ephemeral_message_id:Some(71),action,..} if matches!(action.as_ref(),TelegramAction::EditMessage{reply_markup:Some(k),..} if k.inline_keyboard[2][0].url.as_deref()==Some("https://t.me/$synthetic-checkout")))));
+        let wire = topup_wire(&bot.actions.0);
+        assert_eq!(wire[1].0, "editEphemeralMessageText");
+        assert_eq!(wire[1].1["ephemeral_message_id"], 71);
+        assert_eq!(
+            wire[1].1["reply_markup"]["inline_keyboard"][2][0]["url"],
+            "https://t.me/$synthetic-checkout"
+        );
         assert!(!bot.actions.0.iter().any(|a| matches!(
             a,
             TelegramAction::SendMessage(_) | TelegramAction::EditMessage { .. }
