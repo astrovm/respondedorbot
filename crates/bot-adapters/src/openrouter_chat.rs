@@ -2280,7 +2280,8 @@ mod tests {
         };
         // reqwest names only the failed step; the cause comes from its source.
         assert!(
-            message.starts_with("error decoding response body: "),
+            message.starts_with("request or response body error: ")
+                && message.ends_with("end of file before message length reached"),
             "{message}"
         );
         server.join().ok().ok_or("server thread panicked")??;
