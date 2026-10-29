@@ -3973,12 +3973,13 @@ where
                 self.billing_available,
                 self.lightning_checkout.is_some(),
             );
-            if let Some(action) = action {
-                let action =
-                    context.personal_action(self.with_stars_link(action, Some(user_id), locale));
-                let receipt = self.actions.execute(action);
-                receipt.map_err(DispatchError::Action)?;
-            }
+            action
+                .map(|action| {
+                    let action = self.with_stars_link(action, Some(user_id), locale);
+                    self.actions.execute(context.personal_action(action))
+                })
+                .transpose()
+                .map_err(DispatchError::Action)?;
             self.answer_callback_best_effort(context.callback_id.as_deref());
             return Ok(DispatchOutcome::Handled);
         }
@@ -5888,11 +5889,13 @@ where
                 self.billing_available,
                 self.lightning_checkout.is_some(),
             );
-            if let Some(action) = menu {
-                let action = self.with_stars_link(action, Some(sender_id.0), locale);
-                let receipt = self.actions.execute(action);
-                receipt.map_err(DispatchError::Action)?;
-            }
+            let _receipt = menu
+                .map(|action| {
+                    let action = self.with_stars_link(action, Some(sender_id.0), locale);
+                    self.actions.execute(action)
+                })
+                .transpose()
+                .map_err(DispatchError::Action)?;
             return Ok(DispatchOutcome::Handled);
         }
         if message.has_reply && self.ai_conversation_source.is_none() {
