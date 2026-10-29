@@ -510,6 +510,20 @@ mod tests {
                 },
             ),
             (
+                "cfg:answermedia:toggle",
+                ChatConfig {
+                    ignore_media_replies: true,
+                    ..current.clone()
+                },
+            ),
+            (
+                "cfg:grouptasks:off",
+                ChatConfig {
+                    group_pays_tasks: false,
+                    ..current.clone()
+                },
+            ),
+            (
                 "cfg:timezone:-999999999999999999999999999999999999",
                 ChatConfig {
                     timezone_offset: super::TIMEZONE_OFFSET_MIN,
