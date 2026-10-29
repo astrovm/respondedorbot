@@ -29,6 +29,7 @@ pub struct SearchRequest {
 /// older pages; news results bring it in with a date.
 const NEWS_AND_WEB: &[&str] = &["news", "web"];
 const NEWS: &[&str] = &["news"];
+const WEB: &[&str] = &["web"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpResponse {
@@ -58,8 +59,6 @@ pub struct SearchResult {
     /// Publication age of a news result, such as "2 hours ago".
     #[serde(skip_serializing_if = "String::is_empty")]
     pub date: String,
-    #[serde(skip)]
-    pub news: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -192,14 +191,8 @@ fn extract_results(payload: &Value) -> Vec<SearchResult> {
     };
     ["news", "web"]
         .into_iter()
-        .filter_map(|source| Some((source, sources.get(source)?)))
-        .flat_map(|(source, raw_results)| {
-            let mut results = source_results(raw_results);
-            for result in &mut results {
-                result.news = source == "news";
-            }
-            results
-        })
+        .filter_map(|source| sources.get(source))
+        .flat_map(source_results)
         .collect()
 }
 
@@ -228,7 +221,6 @@ fn source_results(raw_results: &Value) -> Vec<SearchResult> {
                     MAX_DESCRIPTION_CHARS,
                 ),
                 date: clean_text(object.get("date").unwrap_or(&Value::Null), 100),
-                news: false,
             })
         })
         .collect()
@@ -268,62 +260,55 @@ where
     T: FirecrawlTransport,
     S: Fn(Duration),
 {
-    let outcome = post_with_retries(
-        transport,
-        &SearchRequest {
-            query: query.to_owned(),
-            api_key: api_key.to_owned(),
-            sources: NEWS_AND_WEB,
-        },
-        &sleep,
-    )?;
-    let SearchOutcome::Success {
-        query: outcome_query,
-        results,
-        credits_used,
-        request_id,
-    } = outcome
-    else {
-        return Ok(outcome);
+    let request = |query: &str, sources| SearchRequest {
+        query: query.to_owned(),
+        api_key: api_key.to_owned(),
+        sources,
     };
     let news_query = news_query(query);
-    if results.iter().any(|result| result.news) || news_query.is_empty() || news_query == query {
-        return Ok(SearchOutcome::Success {
-            query: outcome_query,
-            results,
-            credits_used,
-            request_id,
-        });
+    if news_query.is_empty() || news_query == query {
+        return post_with_retries(transport, &request(query, NEWS_AND_WEB), &sleep);
     }
-    // News search needs every word to match, so dates the model adds, such
-    // as "October 2026", leave it empty. Ask again for news without them.
-    let retry = post_with_retries(
-        transport,
-        &SearchRequest {
-            query: news_query,
-            api_key: api_key.to_owned(),
-            sources: NEWS,
+    // News search needs every word to match and only covers recent stories,
+    // so dates the model adds, such as "October 2026", just leave it empty.
+    // Web search keeps them to rule out older events with the same name.
+    let web = post_with_retries(transport, &request(query, WEB), &sleep)?;
+    let news = post_with_retries(transport, &request(&news_query, NEWS), &sleep);
+    Ok(match (web, news) {
+        (
+            SearchOutcome::Success {
+                results,
+                credits_used,
+                request_id,
+                ..
+            },
+            Ok(SearchOutcome::Success {
+                results: news,
+                credits_used: news_credits,
+                ..
+            }),
+        ) => SearchOutcome::Success {
+            query: query.to_owned(),
+            results: news.into_iter().chain(results).collect(),
+            credits_used: add_credits(&credits_used, &news_credits),
+            request_id,
         },
-        &sleep,
-    );
-    let Ok(SearchOutcome::Success {
-        results: news,
-        credits_used: news_credits,
-        ..
-    }) = retry
-    else {
-        return Ok(SearchOutcome::Success {
-            query: outcome_query,
+        (web @ SearchOutcome::Success { .. }, _) => web,
+        (
+            _,
+            Ok(SearchOutcome::Success {
+                results,
+                credits_used,
+                request_id,
+                ..
+            }),
+        ) => SearchOutcome::Success {
+            query: query.to_owned(),
             results,
             credits_used,
             request_id,
-        });
-    };
-    Ok(SearchOutcome::Success {
-        query: outcome_query,
-        results: news.into_iter().chain(results).collect(),
-        credits_used: add_credits(&credits_used, &news_credits),
-        request_id,
+        },
+        (web, _) => web,
     })
 }
 
@@ -546,7 +531,6 @@ mod tests {
                     url: "https://example.com".to_owned(),
                     description: "summary".to_owned(),
                     date: String::new(),
-                    news: false,
                 }],
                 credits_used: json!(2),
                 request_id: json!("request-1"),
@@ -671,14 +655,12 @@ mod tests {
                     url: "https://example.com/new".to_owned(),
                     description: "news summary".to_owned(),
                     date: "2 hours ago".to_owned(),
-                    news: true,
                 },
                 super::SearchResult {
                     title: "Older page".to_owned(),
                     url: "https://example.com/old".to_owned(),
                     description: "web summary".to_owned(),
                     date: String::new(),
-                    news: false,
                 },
             ]
         );
@@ -754,7 +736,7 @@ mod tests {
     }
 
     #[test]
-    fn dated_queries_without_news_ask_again_for_news_without_the_dates() {
+    fn dated_queries_search_news_without_the_dates_and_web_with_them() {
         let transport = FakeTransport {
             responses: RefCell::new(vec![
                 news_payload(json!(2), &[], &["https://example.com/old"]),
@@ -776,62 +758,97 @@ mod tests {
         ));
         let requests = transport.requests.borrow();
         assert_eq!(requests[0].query, "binance hack October 2026");
-        assert_eq!(requests[0].sources, ["news", "web"]);
+        assert_eq!(requests[0].sources, ["web"]);
         assert_eq!(requests[1].query, "binance hack");
         assert_eq!(requests[1].sources, ["news"]);
     }
 
     #[test]
-    fn news_retry_only_runs_when_it_can_help_and_never_loses_the_first_results() {
-        for (query, first, expected_requests) in [
-            (
-                "binance hack 2026",
-                news_payload(json!(2), &["https://example.com/new"], &[]),
-                1,
-            ),
-            (
-                "binance hack",
-                news_payload(json!(2), &[], &["https://example.com/old"]),
-                1,
-            ),
-            (
-                "October 2026",
-                news_payload(json!(2), &[], &["https://example.com/old"]),
-                1,
-            ),
-            ("binance 2026", response(500, json!({"error": "down"})), 3),
-        ] {
+    fn undated_queries_make_one_combined_request() {
+        for query in ["binance hack", "October 2026"] {
             let transport = FakeTransport {
-                responses: RefCell::new(vec![first.clone(), first.clone(), first]),
+                responses: RefCell::new(vec![news_payload(
+                    json!(2),
+                    &["https://example.com/new"],
+                    &[],
+                )]),
                 requests: RefCell::new(Vec::new()),
             };
-            let outcome = search_query(&transport, query);
-            assert!(outcome.is_ok(), "{query}");
             assert_eq!(
-                transport.requests.borrow().len(),
-                expected_requests,
-                "{query}"
+                urls(&search_query(&transport, query)),
+                ["https://example.com/new"]
             );
+            let requests = transport.requests.borrow();
+            assert_eq!(requests.len(), 1, "{query}");
+            assert_eq!(requests[0].query, query);
+            assert_eq!(requests[0].sources, ["news", "web"]);
         }
+    }
 
-        for retry in [
-            response(400, json!({"error": "bad"})),
-            Err(TransportError::Other("tls".to_owned())),
+    #[test]
+    fn a_failed_side_of_a_dated_search_keeps_the_other_side() {
+        let down = || response(500, json!({"error": "down"}));
+        for (responses, expected_urls, expected_credits) in [
+            (
+                vec![
+                    news_payload(json!(2), &[], &["https://example.com/old"]),
+                    response(400, json!({"error": "bad"})),
+                ],
+                vec!["https://example.com/old"],
+                json!(2),
+            ),
+            (
+                vec![
+                    news_payload(json!(2), &[], &["https://example.com/old"]),
+                    Err(TransportError::Other("tls".to_owned())),
+                ],
+                vec!["https://example.com/old"],
+                json!(2),
+            ),
+            (
+                vec![
+                    down(),
+                    down(),
+                    down(),
+                    news_payload(json!(2), &["https://example.com/new"], &[]),
+                ],
+                vec!["https://example.com/new"],
+                json!(2),
+            ),
         ] {
             let transport = FakeTransport {
-                responses: RefCell::new(vec![
-                    news_payload(json!(2), &[], &["https://example.com/old"]),
-                    retry,
-                ]),
+                responses: RefCell::new(responses),
                 requests: RefCell::new(Vec::new()),
             };
             let outcome = search_query(&transport, "binance hack 2026");
-            assert_eq!(urls(&outcome), ["https://example.com/old"]);
+            assert_eq!(urls(&outcome), expected_urls);
             assert!(matches!(
                 outcome,
-                Ok(SearchOutcome::Success { credits_used, .. }) if credits_used == json!(2)
+                Ok(SearchOutcome::Success { query, credits_used, .. })
+                    if query == "binance hack 2026" && credits_used == expected_credits
             ));
         }
+
+        let transport = FakeTransport {
+            responses: RefCell::new(vec![down(), down(), down(), down(), down(), down()]),
+            requests: RefCell::new(Vec::new()),
+        };
+        assert!(matches!(
+            search_query(&transport, "binance hack 2026"),
+            Ok(SearchOutcome::HttpError {
+                status_code: 500,
+                ..
+            })
+        ));
+        let transport = FakeTransport {
+            responses: RefCell::new(vec![Err(TransportError::Other("tls".to_owned()))]),
+            requests: RefCell::new(Vec::new()),
+        };
+        assert_eq!(
+            search_query(&transport, "binance hack 2026"),
+            Err(TransportError::Other("tls".to_owned()))
+        );
+        assert_eq!(transport.requests.borrow().len(), 1);
     }
 
     #[test]
