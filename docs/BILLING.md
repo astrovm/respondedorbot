@@ -22,12 +22,12 @@ Rust is the sole billing reader and writer. PostgreSQL remains the system of rec
 
 - `/topup` opens the full amount and payment-method menu. `/topup 50` starts at 50 credits.
 - Group and supergroup menus, their controls, Lightning invoices, and payment notices are ephemeral and visible only to the requester. Private chats retain the same controls and typed amount replies.
-- Non-admin bots can reply within Telegram's 15-second window to an ephemeral command (using its incoming ephemeral ID) or a button press (using its callback query ID). The **Add credits** start button provides an eligible trigger even on a public start message.
-- An ordinary public `/topup` command has no eligible reply target: sending its personal menu requires the bot to be a group administrator. Use the start button or the configured ephemeral `/topup` command otherwise. Late replies and asynchronous group payment notices also require administrator rights, and ephemeral delivery is never guaranteed. Rejected sends never fall back to a public message; credited payments remain credited if their notice fails.
-- Telegram Stars checkout uses `createInvoiceLink` and a native checkout URL button. It never publishes an invoice to the group or redirects the buyer to a private chat.
+- Non-admin bots can reply within Telegram's 15-second window to an ephemeral command (using its incoming ephemeral ID) or a button press (using its callback query ID). The **Add credits** button on `/start` and in `/help` → **Credits** provides an eligible trigger even on a public message.
+- An ordinary public `/topup` command has no eligible reply target: sending its personal menu requires the bot to be a group administrator. Use the **Add credits** button or the configured ephemeral `/topup` command otherwise. Late replies and asynchronous group payment notices also require administrator rights, and ephemeral delivery is never guaranteed. Rejected sends never fall back to a public message; credited payments remain credited if their notice fails.
+- Telegram Stars checkout uses `createInvoiceLink` and a native checkout URL button. The menu is drawn with the requester's link already on the Stars button, so one tap opens checkout; links are reused for an hour per user, amount and language. If no link can be made, the button falls back to creating one when tapped. It never publishes an invoice to the group or redirects the buyer to a private chat.
 - New Stars payloads bind the amount and intended buyer. Checkout and settlement reject another payer or a changed amount. Exact legacy pack-only payloads credit the actual payer; malformed user bindings are rejected.
 - Exported-invoice bot-origin receipts identify the buyer through the positive private chat id, never through the bot sender id or the payload alone. Charge-id ledger writes remain idempotent.
-- Plain `/start` includes **Cargar créditos** and **Ayuda**, or **Add credits** and **Help**, alongside the existing help controls.
+- Plain `/start` greets with **Qué querés, gordo** or **What do you want, gordo** and offers only **Cargar créditos** and **Ayuda**, or **Add credits** and **Help**. **Ayuda** opens the `/help` menu in place.
 
 ## Scheduled tasks
 

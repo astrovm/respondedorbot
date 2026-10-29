@@ -2,6 +2,19 @@
 
 use crate::locale::Locale;
 
+/// How to talk to the bot, shown under both the welcome and the help menu.
+#[must_use]
+pub const fn help_intro(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Es => {
+            "Hablame con /ask, mencionándome o respondiendo a un mensaje mío.\nTodos los comandos también funcionan con ! en vez de /."
+        }
+        Locale::En => {
+            "Talk to me with /ask, by mentioning me or by replying to one of my messages.\nEvery command also works with ! instead of /."
+        }
+    }
+}
+
 /// Compact help pages. Full aliases remain available through the command parser.
 #[must_use]
 pub fn render_help_page(
@@ -53,7 +66,17 @@ pub fn render_help_page(
             "/config: settings for this chat\n/language: change the language\n\nAdmins\n/ignore: reply to someone, or add their @, so I ignore them in the group\n/unignore: stop ignoring them\n/ignored: see who I ignore\n/limit: reply to someone, or add their @, with how many messages per hour the group pays for, or off to remove it\n/limited: see who has their own limit\n/groupcharges: who spent the group's credits [days]\n\nI fix X, Bluesky, Instagram and Reddit links so they preview properly in Telegram. Choose how in /config.",
         ),
     ];
-    if let Some((_, es, en, body_es, body_en)) = entries.iter().find(|entry| entry.0 == page) {
+    if let Some((id, es, en, body_es, body_en)) = entries.iter().find(|entry| entry.0 == page) {
+        let mut rows = vec![vec![back(locale, "help:home"), close(locale, "help:close")]];
+        if *id == "credits" {
+            rows.insert(
+                0,
+                vec![button(
+                    crate::telegram_payments::topup_menu_title(locale),
+                    "topup:open",
+                )],
+            );
+        }
         return (
             format!(
                 "{}\n\n{}",
@@ -61,7 +84,7 @@ pub fn render_help_page(
                 localized(locale, body_es, body_en)
             ),
             crate::telegram_actions::InlineKeyboardMarkup {
-                inline_keyboard: vec![vec![back(locale, "help:home"), close(locale, "help:close")]],
+                inline_keyboard: rows,
             },
         );
     }
@@ -71,12 +94,11 @@ pub fn render_help_page(
         .collect::<Vec<_>>();
     rows.push(vec![close(locale, "help:close")]);
     (
-        localized(
-            locale,
-            "Ayuda\n\nHablame con /ask, mencionándome o respondiendo a un mensaje mío.\nTodos los comandos también funcionan con ! en vez de /.",
-            "Help\n\nTalk to me with /ask, by mentioning me or by replying to one of my messages.\nEvery command also works with ! instead of /.",
-        )
-        .to_owned(),
+        format!(
+            "{}\n\n{}",
+            localized(locale, "Ayuda", "Help"),
+            help_intro(locale)
+        ),
         crate::telegram_actions::InlineKeyboardMarkup {
             inline_keyboard: rows,
         },
@@ -119,15 +141,36 @@ mod tests {
                 let (text, keyboard) = render_help_page(locale, page);
                 assert!(text.contains('/'));
                 assert!(text.chars().count() < 1000);
+                let navigation = keyboard.inline_keyboard.last().cloned().unwrap_or_default();
+                let callbacks = navigation
+                    .iter()
+                    .map(|button| button.callback_data.as_deref())
+                    .collect::<Vec<_>>();
+                assert_eq!(callbacks, [Some("help:home"), Some("help:close")]);
                 assert_eq!(
-                    keyboard.inline_keyboard[0][0].callback_data.as_deref(),
-                    Some("help:home")
-                );
-                assert_eq!(
-                    keyboard.inline_keyboard[0][1].callback_data.as_deref(),
-                    Some("help:close")
+                    keyboard.inline_keyboard.len(),
+                    1 + usize::from(page == "credits")
                 );
             }
+        }
+    }
+
+    #[test]
+    fn credits_help_offers_a_top_up_button() {
+        for (locale, label) in [(Locale::Es, "Cargar créditos"), (Locale::En, "Add credits")] {
+            let (_, keyboard) = render_help_page(locale, "credits");
+            let first = &keyboard.inline_keyboard[0];
+            assert_eq!(first.len(), 1);
+            assert_eq!(first[0].text, label);
+            assert_eq!(first[0].callback_data.as_deref(), Some("topup:open"));
+        }
+    }
+
+    #[test]
+    fn help_home_opens_with_the_shared_intro() {
+        for (locale, title) in [(Locale::Es, "Ayuda"), (Locale::En, "Help")] {
+            let (text, _) = render_help_page(locale, "home");
+            assert_eq!(text, format!("{title}\n\n{}", help_intro(locale)));
         }
     }
 }

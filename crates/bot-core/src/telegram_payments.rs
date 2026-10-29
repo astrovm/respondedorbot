@@ -448,6 +448,48 @@ fn callback_answer(
     })
 }
 
+/// The Stars invoice behind a top-up menu's pay button, so the menu can
+/// carry its payment link and open checkout on the first tap.
+#[must_use]
+pub fn menu_stars_invoice(
+    keyboard: &InlineKeyboardMarkup,
+    chat_id: ChatId,
+    user_id: i64,
+    locale: Locale,
+) -> Option<(String, TelegramAction)> {
+    keyboard
+        .inline_keyboard
+        .iter()
+        .flatten()
+        .filter_map(|button| button.callback_data.as_deref()?.strip_prefix("topup:"))
+        .find_map(default_billing_pack)
+        .map(|pack| {
+            let invoice = invoice_action(chat_id, user_id, &pack, locale);
+            (pack.id, invoice)
+        })
+}
+
+/// Turns a top-up menu's Stars pay button into a link straight to checkout.
+pub fn set_stars_link(keyboard: &mut InlineKeyboardMarkup, url: String) -> bool {
+    keyboard
+        .inline_keyboard
+        .iter_mut()
+        .flatten()
+        .find(|button| {
+            button
+                .callback_data
+                .as_deref()
+                .and_then(|data| data.strip_prefix("topup:"))
+                .and_then(default_billing_pack)
+                .is_some()
+        })
+        .map(|button| {
+            button.callback_data = None;
+            button.url = Some(url);
+        })
+        .is_some()
+}
+
 fn invoice_action(
     chat_id: ChatId,
     user_id: i64,
@@ -884,14 +926,40 @@ mod tests {
         PreCheckoutDecision, StarPaymentRecord, SuccessfulPaymentDecision, TopupCallbackPlan,
         balance_reply, default_billing_pack, estimated_messages,
         evaluate_default_successful_payment, evaluate_pre_checkout, evaluate_successful_payment,
-        invoice_payload_locale, parse_topup_amount, parse_topup_payload, payer_order,
-        payment_record, plan_balance_command, plan_pre_checkout, plan_topup_callback,
-        plan_topup_command, successful_payment_reply, topup_menu, topup_menu_title,
+        invoice_payload_locale, menu_stars_invoice, parse_topup_amount, parse_topup_payload,
+        payer_order, payment_record, plan_balance_command, plan_pre_checkout, plan_topup_callback,
+        plan_topup_command, set_stars_link, successful_payment_reply, topup_menu, topup_menu_title,
     };
     use crate::chat_config::ChatConfig;
     use crate::locale::Locale;
     use crate::telegram_actions::{InlineKeyboardButton, LabeledPrice, TelegramAction};
     use crate::telegram_input::{ChatId, MessageId};
+
+    #[test]
+    fn menu_pay_button_becomes_a_checkout_link() {
+        let (_, mut keyboard) = topup_menu(Locale::Es, 300, true);
+        let found = menu_stars_invoice(&keyboard, ChatId(5), 9, Locale::Es);
+        assert!(matches!(
+            &found,
+            Some((id, TelegramAction::SendInvoice { payload, currency, .. }))
+                if *payload == format!("topup:{id}:9:es") && currency == "XTR"
+        ));
+        assert!(set_stars_link(&mut keyboard, "https://t.me/$x".to_owned()));
+        let linked = keyboard
+            .inline_keyboard
+            .iter()
+            .flatten()
+            .filter(|button| button.url.is_some())
+            .map(|button| (button.text.contains('⭐'), button.callback_data.is_none()))
+            .collect::<Vec<_>>();
+        assert_eq!(linked, [(true, true)]);
+        // The button is a link now, so there is nothing left to swap.
+        assert!(!set_stars_link(&mut keyboard, "https://t.me/$y".to_owned()));
+        assert_eq!(
+            menu_stars_invoice(&keyboard, ChatId(5), 9, Locale::Es),
+            None
+        );
+    }
 
     fn sent(action: Option<TelegramAction>) -> Option<crate::telegram_actions::SendMessage> {
         match action {
