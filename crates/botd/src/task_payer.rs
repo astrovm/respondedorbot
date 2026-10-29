@@ -6,8 +6,9 @@ use bot_core::chat_config::ChatConfig;
 use bot_core::credit_units::{CreditUnits, display_credit_units};
 use bot_core::locale::Locale;
 
-use crate::dispatcher::GroupAuthorizer;
+use crate::dispatcher::{ChatBanStore, GroupAuthorizer};
 use crate::error_text;
+use crate::task_executor::TaskMemberFilter;
 use crate::task_tools::task_credit_insufficient;
 
 /// How one member's task is paid for in the chat it runs in.
@@ -89,19 +90,23 @@ impl ChatTaskPayerPolicy {
     }
 }
 
-/// A member's own /limit replaces the group's limit, except for chat admins
-/// (and when the admin lookup fails the member limit stays, as for messages).
-/// The lookup only happens when the member has an own limit.
+/// A member's own /limit replaces the group's limit, and a chat admin's only
+/// counts above it, as for messages (when the admin lookup fails the member
+/// limit stays). The lookup only happens when the member has an own limit.
 fn member_limit(
     chat_id: &str,
     user_id: i64,
-    own_limit: Option<i64>,
+    (own_limit, group_limit): (Option<i64>, i64),
     admins: Option<&mut dyn GroupAuthorizer>,
 ) -> Option<i64> {
     let own_limit = own_limit?;
     let is_admin =
         admins.is_some_and(|admins| admins.authorize(chat_id, &user_id.to_string()).is_admin);
-    if is_admin { None } else { Some(own_limit) }
+    if is_admin {
+        bot_core::chat_limits::admin_own_limit(own_limit, group_limit)
+    } else {
+        Some(own_limit)
+    }
 }
 
 impl TaskPayerPolicy for ChatTaskPayerPolicy {
@@ -121,12 +126,51 @@ impl TaskPayerPolicy for ChatTaskPayerPolicy {
         let own_limit = member_limit(
             chat_id,
             user_id,
-            own_limit,
+            (own_limit, config.creditless_user_hourly_limit),
             self.admins
                 .as_mut()
                 .map(|admins| &mut **admins as &mut dyn GroupAuthorizer),
         );
         Ok(TaskPayer::for_group(group, &config, own_limit))
+    }
+}
+
+/// Members ignored with /ignore in a group, whose tasks there stop running.
+/// As with their messages, admins are never treated as ignored and a failed
+/// lookup lets the task run.
+pub struct ChatIgnoredMembers {
+    bans: Box<dyn ChatBanStore + Send>,
+    admins: Box<dyn GroupAuthorizer + Send>,
+}
+
+impl ChatIgnoredMembers {
+    #[must_use]
+    pub fn new(
+        bans: Box<dyn ChatBanStore + Send>,
+        admins: Box<dyn GroupAuthorizer + Send>,
+    ) -> Self {
+        Self { bans, admins }
+    }
+}
+
+impl TaskMemberFilter for ChatIgnoredMembers {
+    fn ignored(&mut self, chat_id: &str, user_id: i64) -> bool {
+        let Some(group) = group_chat_id(chat_id) else {
+            return false;
+        };
+        match self.bans.is_banned(group, user_id) {
+            Ok(banned) => {
+                banned
+                    && !self
+                        .admins
+                        .authorize(chat_id, &user_id.to_string())
+                        .is_admin
+            }
+            Err(error) => {
+                eprintln!("task ignore check chat_id={chat_id}: {error}");
+                false
+            }
+        }
     }
 }
 
@@ -256,6 +300,47 @@ mod tests {
         }
     }
 
+    fn database_url() -> Option<String> {
+        std::env::var("TEST_DATABASE_URL").ok()
+    }
+
+    #[test]
+    fn ignored_members_tasks_stop_unless_they_are_admins() {
+        use bot_adapters::chat_bans::ChatBanRepository;
+
+        use super::ChatIgnoredMembers;
+        use crate::dispatcher::ChatBanStore;
+        use crate::task_executor::TaskMemberFilter;
+
+        let admins = |is_admin| {
+            Box::new(Admins {
+                is_admin,
+                asked: Vec::new(),
+            })
+        };
+        let unreachable = || {
+            Box::new(ChatBanRepository::new(
+                "postgres://synthetic@127.0.0.1:1/none",
+            ))
+        };
+        // A failed lookup lets the task run, as it lets a message through.
+        assert!(!ChatIgnoredMembers::new(unreachable(), admins(false)).ignored("-7", 9));
+        // Private chats have no ignore list, so nothing is looked up.
+        assert!(!ChatIgnoredMembers::new(unreachable(), admins(false)).ignored("9", 9));
+        let Some(url) = database_url() else { return };
+        let repository = || Box::new(ChatBanRepository::new(&url));
+        let chat_id = -100_900_301;
+        let group = chat_id.to_string();
+        let mut store = ChatBanRepository::new(&url);
+        let _cleared = ChatBanStore::unban(&mut store, chat_id, 9);
+        assert!(!ChatIgnoredMembers::new(repository(), admins(false)).ignored(&group, 9));
+        let banned = ChatBanStore::ban(&mut store, chat_id, 9, "Ana", 1);
+        assert_eq!(banned, Ok(true));
+        assert!(ChatIgnoredMembers::new(repository(), admins(false)).ignored(&group, 9));
+        assert!(!ChatIgnoredMembers::new(repository(), admins(true)).ignored(&group, 9));
+        let _cleared = ChatBanStore::unban(&mut store, chat_id, 9);
+    }
+
     #[test]
     fn admins_keep_the_group_limit_and_members_keep_their_own() {
         let mut admin = Admins {
@@ -263,21 +348,29 @@ mod tests {
             asked: Vec::new(),
         };
         assert_eq!(
-            super::member_limit("-7", 9, Some(1), Some(&mut admin)),
+            super::member_limit("-7", 9, (Some(1), 5), Some(&mut admin)),
             None
         );
         assert_eq!(admin.asked, [("-7".to_owned(), "9".to_owned())]);
+        // An admin's own limit counts only above the group's.
+        assert_eq!(
+            super::member_limit("-7", 9, (Some(10), 5), Some(&mut admin)),
+            Some(10)
+        );
         let mut member = Admins {
             is_admin: false,
             asked: Vec::new(),
         };
         assert_eq!(
-            super::member_limit("-7", 9, Some(1), Some(&mut member)),
+            super::member_limit("-7", 9, (Some(1), 5), Some(&mut member)),
             Some(1)
         );
-        assert_eq!(super::member_limit("-7", 9, Some(1), None), Some(1));
+        assert_eq!(super::member_limit("-7", 9, (Some(1), 5), None), Some(1));
         // No own limit: nobody is looked up.
-        assert_eq!(super::member_limit("-7", 9, None, Some(&mut member)), None);
+        assert_eq!(
+            super::member_limit("-7", 9, (None, 5), Some(&mut member)),
+            None
+        );
         assert_eq!(member.asked.len(), 1);
     }
 
