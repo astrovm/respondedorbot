@@ -18360,6 +18360,7 @@ mod tests {
             [
                 TelegramAction::SendInvoice { .. },
                 TelegramAction::AnswerCallback { .. },
+                TelegramAction::AnswerCallback { .. },
                 TelegramAction::DeleteMessage {
                     message_id: MessageId(7),
                     ..
@@ -24197,10 +24198,9 @@ mod tests {
         let mut update = callback_update(data, "supergroup", Some("en"));
         if let IncomingEvent::CallbackQuery(ref mut callback) = update.event {
             callback["from"]["id"] = json!(sender);
-            callback["message"]
-                .as_object_mut()
-                .unwrap()
-                .remove("message_id");
+            if let Some(message) = callback["message"].as_object_mut() {
+                message.remove("message_id");
+            }
             callback["message"]["ephemeral_message_id"] = json!(71);
             callback["message"]["receiver_user"] = json!({"id":receiver});
         }
@@ -24216,7 +24216,7 @@ mod tests {
             });
             assert_eq!(bot.dispatch(update), Ok(DispatchOutcome::Handled));
             assert!(
-                matches!(&bot.actions.0[0],TelegramAction::Ephemeral {receiver_user_id:88,ephemeral_message_id:None,action} if matches!(action.as_ref(),TelegramAction::SendMessage(m) if m.text.contains("50 credits") && m.reply_markup.as_ref().unwrap().inline_keyboard[2][0].callback_data.as_deref()==Some("topup:c50")))
+                matches!(&bot.actions.0[0],TelegramAction::Ephemeral {receiver_user_id:88,ephemeral_message_id:None,action} if matches!(action.as_ref(),TelegramAction::SendMessage(m) if m.text.contains("50 credits") && m.reply_markup.as_ref().is_some_and(|k|k.inline_keyboard[2][0].callback_data.as_deref()==Some("topup:c50"))))
             );
         }
         let mut bot = configured(english(), Actions::default());

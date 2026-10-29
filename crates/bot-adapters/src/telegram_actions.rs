@@ -1520,7 +1520,8 @@ mod tests {
     }
 
     #[test]
-    fn ephemeral_actions_never_use_public_edit_or_delete_endpoints() {
+    fn ephemeral_actions_never_use_public_edit_or_delete_endpoints()
+    -> Result<(), Box<dyn std::error::Error>> {
         let wrap = |action, id| TelegramAction::Ephemeral {
             receiver_user_id: 42,
             ephemeral_message_id: id,
@@ -1529,10 +1530,9 @@ mod tests {
         let sent = prepare(wrap(
             TelegramAction::SendMessage(SendMessage::new(ChatId(-7), "private menu")),
             None,
-        ))
-        .unwrap();
+        ))?;
         assert_eq!(sent.endpoint, "sendMessage");
-        let payload = sent.json_payload.unwrap();
+        let payload = sent.json_payload.ok_or("missing send payload")?;
         assert_eq!(
             payload["ephemeral_message_parameters"],
             serde_json::json!({"receiver_user_id":42})
@@ -1560,9 +1560,9 @@ mod tests {
                 prepare(wrap(inner.clone(), None)),
                 Err(ActionError::InvalidAction)
             ));
-            let prepared = prepare(wrap(inner, Some(9))).unwrap();
+            let prepared = prepare(wrap(inner, Some(9)))?;
             assert_eq!(prepared.endpoint, endpoint);
-            let payload = prepared.json_payload.unwrap();
+            let payload = prepared.json_payload.ok_or("missing edit payload")?;
             assert_eq!(payload["receiver_user_id"], 42);
             assert_eq!(payload["ephemeral_message_id"], 9);
             assert!(payload.get("message_id").is_none());
@@ -1576,10 +1576,12 @@ mod tests {
             )),
             Err(ActionError::InvalidAction)
         ));
+        Ok(())
     }
 
     #[test]
-    fn invoice_links_preserve_stars_terms_and_fail_closed() {
+    fn invoice_links_preserve_stars_terms_and_fail_closed() -> Result<(), Box<dyn std::error::Error>>
+    {
         let invoice = TelegramAction::SendInvoice {
             chat_id: ChatId(-7),
             title: "50 credits".into(),
@@ -1608,14 +1610,16 @@ mod tests {
         ] {
             let transport = transport_with_status(status, body);
             assert_eq!(
-                super::create_invoice_link_with(&transport, "synthetic", invoice.clone())
-                    .unwrap()
+                super::create_invoice_link_with(&transport, "synthetic", invoice.clone())?
                     .as_deref(),
                 expected
             );
             let requests = transport.requests.borrow();
             assert_eq!(requests[0].endpoint, "createInvoiceLink");
-            let payload = requests[0].json_payload.as_ref().unwrap();
+            let payload = requests[0]
+                .json_payload
+                .as_ref()
+                .ok_or("missing invoice payload")?;
             assert!(payload.get("chat_id").is_none());
             assert_eq!(payload["payload"], "topup:c50:42:en");
             assert_eq!(payload["currency"], "XTR");
@@ -1640,5 +1644,6 @@ mod tests {
             )
             .is_err()
         );
+        Ok(())
     }
 }

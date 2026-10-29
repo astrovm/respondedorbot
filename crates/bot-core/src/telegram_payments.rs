@@ -1830,7 +1830,12 @@ mod tests {
         .ok_or("english redirect")?;
         assert!(group.text.starts_with("Add credits\n\n100 credits"));
         assert_eq!(
-            group.reply_markup.as_ref().unwrap().inline_keyboard.len(),
+            group
+                .reply_markup
+                .as_ref()
+                .ok_or("group keyboard")?
+                .inline_keyboard
+                .len(),
             4
         );
 
@@ -1917,12 +1922,20 @@ mod tests {
                 }),
             }))
         );
-        for (data, chat_type, locale, expected) in [(
-            "other:p50",
-            "private",
-            Locale::En,
-            "That credit pack is invalid, choose another one",
-        )] {
+        for (data, chat_type, locale, expected) in [
+            (
+                "other:p50",
+                "private",
+                Locale::En,
+                "That credit pack is invalid, choose another one",
+            ),
+            (
+                "topup:invalid",
+                "group",
+                Locale::Es,
+                "Ese pack es fruta, elegí otro",
+            ),
+        ] {
             assert_eq!(
                 plan_topup_callback(
                     Some("cb"),
@@ -2030,28 +2043,30 @@ mod tests {
     }
 
     #[test]
-    fn exported_invoice_receipts_bind_to_the_private_chat_buyer() {
+    fn exported_invoice_receipts_bind_to_the_private_chat_buyer()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut message = json!({"chat":{"id":42,"type":"private"},"from":{"id":999,"is_bot":true},"successful_payment":{"invoice_payload":"topup:p50:42:en","currency":"XTR","total_amount":25,"telegram_payment_charge_id":"synthetic-charge"}});
         assert!(matches!(
-            evaluate_default_successful_payment(&message, true).unwrap(),
+            evaluate_default_successful_payment(&message, true)?,
             SuccessfulPaymentDecision::Record { user_id: 42, .. }
         ));
         message["chat"]["id"] = json!(43);
         assert!(matches!(
-            evaluate_default_successful_payment(&message, true).unwrap(),
+            evaluate_default_successful_payment(&message, true)?,
             SuccessfulPaymentDecision::InvalidPayment { .. }
         ));
         message["chat"]["type"] = json!("group");
         assert_eq!(
-            evaluate_default_successful_payment(&message, true).unwrap(),
+            evaluate_default_successful_payment(&message, true)?,
             SuccessfulPaymentDecision::Ignore
         );
         for payload in ["topup:p50:garbage", "topup:p50:43:en"] {
             let query = json!({"id":"checkout","from":{"id":42},"invoice_payload":payload,"currency":"XTR","total_amount":25});
             assert!(matches!(
-                evaluate_pre_checkout(&query, true, Some(&pack())).unwrap(),
+                evaluate_pre_checkout(&query, true, Some(&pack()))?,
                 PreCheckoutDecision::InvalidPayment { .. }
             ));
         }
+        Ok(())
     }
 }

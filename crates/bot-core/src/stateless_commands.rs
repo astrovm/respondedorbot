@@ -574,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn start_offers_credits_and_help_in_both_languages() {
+    fn start_offers_credits_and_help_in_both_languages() -> Result<(), Box<dyn std::error::Error>> {
         for (locale, credits, help) in [
             (Locale::Es, "Cargar créditos", "Ayuda"),
             (Locale::En, "Add credits", "Help"),
@@ -582,9 +582,9 @@ mod tests {
             let super::StatelessCommandPlan::Action(TelegramAction::SendMessage(message)) =
                 super::plan_stateless_command(ChatId(42), MessageId(7), "/start", "", locale)
             else {
-                panic!("start menu missing")
+                return Err("start menu missing".into());
             };
-            let keyboard = message.reply_markup.unwrap();
+            let keyboard = message.reply_markup.ok_or("missing keyboard")?;
             assert_eq!(keyboard.inline_keyboard[0][0].text, credits);
             assert_eq!(
                 keyboard.inline_keyboard[0][0].callback_data.as_deref(),
@@ -597,5 +597,6 @@ mod tests {
             );
             assert!(keyboard.inline_keyboard.len() > 1);
         }
+        Ok(())
     }
 }
