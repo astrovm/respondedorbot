@@ -163,7 +163,7 @@ impl TaskMemberFilter for ChatIgnoredMembers {
                         .is_admin
             }
             Err(error) => {
-                eprintln!("task ignore check chat_id={chat_id} user_id={user_id}: {error}");
+                eprintln!("task ignore check chat_id={chat_id}: {error}");
                 false
             }
         }
