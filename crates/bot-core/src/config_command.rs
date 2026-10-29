@@ -79,20 +79,22 @@ fn render_config_keyboard(
     locale: Locale,
     is_group: bool,
 ) -> InlineKeyboardMarkup {
-    let language = match config.language.as_str() {
-        "es" => Locale::Es,
-        "en" => Locale::En,
-        _ => locale,
-    };
     let mut rows = vec![
         vec![
             button(
-                selected_label(language == Locale::Es, "Español"),
+                selected_label(config.language == "es", "Español"),
                 "cfg:language:es".to_owned(),
             ),
             button(
-                selected_label(language == Locale::En, "English"),
+                selected_label(config.language == "en", "English"),
                 "cfg:language:en".to_owned(),
+            ),
+            button(
+                selected_label(
+                    !matches!(config.language.as_str(), "es" | "en"),
+                    localized(locale, "Automático", "Automatic"),
+                ),
+                "cfg:language:auto".to_owned(),
             ),
         ],
         ["reply", "delete", "off"]
@@ -105,7 +107,7 @@ fn render_config_keyboard(
             })
             .collect(),
         toggle_buttons("followups", config.ai_command_followups, locale),
-        toggle_buttons("linkfixfollowups", config.ignore_link_fix_followups, locale),
+        toggle_buttons("answerlinks", !config.ignore_link_fix_followups, locale),
         vec![
             button(
                 "-1 h".to_owned(),
@@ -136,16 +138,6 @@ fn render_config_keyboard(
     if is_group {
         rows.push(toggle_buttons("random", config.ai_random_replies, locale));
         rows.push(vec![
-            button("0".to_owned(), "cfg:creditless:none".to_owned()),
-            button("-1".to_owned(), "cfg:creditless:decrease".to_owned()),
-            button(
-                format!("{}/h", creditless_text(config.creditless_user_hourly_limit)),
-                "cfg:creditless:current".to_owned(),
-            ),
-            button("+1".to_owned(), "cfg:creditless:increase".to_owned()),
-            button("∞".to_owned(), "cfg:creditless:unlimited".to_owned()),
-        ]);
-        rows.push(vec![
             button(
                 selected_label(config.group_pays_first, payer_text(true, locale)),
                 "cfg:payer:group".to_owned(),
@@ -155,9 +147,24 @@ fn render_config_keyboard(
                 "cfg:payer:members".to_owned(),
             ),
         ]);
+        rows.push(vec![
+            button("0".to_owned(), "cfg:creditless:none".to_owned()),
+            button("-1".to_owned(), "cfg:creditless:decrease".to_owned()),
+            button(
+                format!("{}/h", creditless_text(config.creditless_user_hourly_limit)),
+                "cfg:creditless:current".to_owned(),
+            ),
+            button("+1".to_owned(), "cfg:creditless:increase".to_owned()),
+            button("∞".to_owned(), "cfg:creditless:unlimited".to_owned()),
+        ]);
         rows.push(toggle_buttons(
-            "mediareplies",
-            config.ignore_media_replies,
+            "grouptasks",
+            config.group_pays_tasks,
+            locale,
+        ));
+        rows.push(toggle_buttons(
+            "answermedia",
+            !config.ignore_media_replies,
             locale,
         ));
     }
@@ -166,68 +173,76 @@ fn render_config_keyboard(
     }
 }
 
-const PAGES: [&str; 9] = [
+/// The first `PRIVATE_PAGES` pages also exist in private chats.
+const PRIVATE_PAGES: usize = 5;
+
+const PAGES: [&str; 10] = [
     "language",
     "link",
     "followups",
-    "linkfixfollowups",
+    "answerlinks",
     "timezone",
     "random",
-    "creditless",
     "payer",
-    "mediareplies",
+    "creditless",
+    "grouptasks",
+    "answermedia",
 ];
 
-fn titles(locale: Locale) -> [&'static str; 9] {
+fn titles(locale: Locale) -> [&'static str; 10] {
     match locale {
         Locale::Es => [
             "Idioma",
             "Links",
             "Seguir conversaciones",
-            "Ignorar replies a links",
+            "Contestar replies a links",
             "Zona horaria",
             "Respuestas random",
-            "Mensajes gratis por hora",
             "Quién paga primero",
-            "Ignorar replies con multimedia",
+            "Mensajes por hora con créditos del grupo",
+            "Tareas con créditos del grupo",
+            "Contestar replies con solo multimedia",
         ],
         Locale::En => [
             "Language",
             "Links",
             "Follow conversations",
-            "Ignore replies to links",
+            "Answer replies to links",
             "Timezone",
             "Random replies",
-            "Free messages per hour",
             "Who pays first",
-            "Ignore media replies",
+            "Messages per hour on group credits",
+            "Tasks on group credits",
+            "Answer media-only replies",
         ],
     }
 }
 
-fn descriptions(locale: Locale) -> [&'static str; 9] {
+fn descriptions(locale: Locale) -> [&'static str; 10] {
     match locale {
         Locale::Es => [
             "El idioma de mis mensajes, menús y respuestas.",
             "Qué hago cuando alguien manda un link de X, Bluesky, Instagram o Reddit.\n\n• Responder con link: contesto con el link arreglado.\n• Reemplazar original: borro el mensaje y lo vuelvo a mandar arreglado.\n• Desactivado: no toco los links.",
             "Si respondés a una respuesta mía de un comando, sigo la conversación sin que tengas que usar /ask.",
-            "Si alguien responde a un link que arreglé, no lo tomo como una pregunta para mí.",
+            "Si alguien responde a un link que arreglé, lo tomo como una pregunta para mí.\n\n• Activado: contesto.\n• Desactivado: lo ignoro.",
             "La hora que uso para tareas, recordatorios y fechas.",
             "De vez en cuando me meto en la charla del grupo aunque nadie me llame.",
-            "Cuántos mensajes de IA por hora puede usar cada persona con el saldo del grupo.\n\n0 = nadie, ∞ = sin límite",
             "Quién paga los mensajes de IA de alguien que tiene créditos propios.\n\n• Grupo: paga el grupo hasta el límite por hora, después sus créditos.\n• Cada uno: paga con sus créditos, y el grupo cuando no le alcanzan.",
-            "Si alguien me responde solo con multimedia, como un sticker, GIF, foto, video o videomensaje, sin texto, no le contesto. Los audios y las notas de voz los sigo escuchando, y /describe y /transcribe andan igual.",
+            "Cuántos mensajes de IA por hora puede usar cada persona con los créditos del grupo.\n\n0 = nadie, ∞ = sin límite",
+            "Si está activado, las tareas programadas se pagan igual que un mensaje de IA de quien las creó: cuenta para su límite por hora y sigue la opción de quién paga primero. Si no, las tareas usan solo los créditos personales de quien las creó.",
+            "Si alguien me responde solo con multimedia, como un sticker, GIF, foto, video o videomensaje, sin texto, le contesto.\n\n• Activado: contesto.\n• Desactivado: no contesto.\n\nLos audios y las notas de voz los sigo escuchando, y /describe y /transcribe andan igual.",
         ],
         Locale::En => [
             "The language of my messages, menus and replies.",
             "What I do when someone sends an X, Bluesky, Instagram or Reddit link.\n\n• Reply with link: I reply with the fixed link.\n• Replace original: I delete the message and send it again, fixed.\n• Off: I leave links alone.",
             "When you reply to one of my command answers, I keep the conversation going without /ask.",
-            "When someone replies to a link I fixed, I do not treat it as a question for me.",
+            "When someone replies to a link I fixed, I treat it as a question for me.\n\n• On: I answer.\n• Off: I ignore it.",
             "The time I use for tasks, reminders and dates.",
             "Every now and then I join the group conversation without being called.",
-            "How many AI messages per hour each person can use from the group balance.\n\n0 = nobody, ∞ = no limit",
             "Who pays for the AI messages of someone with their own credits.\n\n• Group: the group pays up to the hourly limit, then their credits.\n• Members: they pay with their credits, and the group when theirs run out.",
-            "When someone replies to me with only media, like a sticker, GIF, photo, video or video message, and no text, I don't answer. I still listen to audio and voice messages, and /describe and /transcribe keep working.",
+            "How many AI messages per hour each person can use from the group credits.\n\n0 = nobody, ∞ = no limit",
+            "When on, scheduled tasks are paid like an AI message from whoever created them: they count toward their hourly limit and follow the who pays first option. When off, tasks use only the personal credits of whoever created them.",
+            "When someone replies to me with only media, like a sticker, GIF, photo, video or video message, and no text, I answer.\n\n• On: I answer.\n• Off: I don't answer.\n\nI still listen to audio and voice messages, and /describe and /transcribe keep working.",
         ],
     }
 }
@@ -268,7 +283,7 @@ pub fn render_config_page(
     let index = PAGES
         .iter()
         .position(|name| *name == page)
-        .filter(|index| is_group || *index < 5);
+        .filter(|index| is_group || *index < PRIVATE_PAGES);
     if let Some(index) = index {
         let descriptions = descriptions(locale);
         let options = render_config_keyboard(config, locale, is_group)
@@ -293,20 +308,21 @@ pub fn render_config_page(
     let language = match config.language.as_str() {
         "en" => "English",
         "es" => "Español",
-        _ => localized(locale, "Español", "English"),
+        _ => localized(locale, "Automático", "Automatic"),
     };
     let values = [
         language.to_owned(),
         link_mode_text(&config.link_mode, locale).to_owned(),
         on_off_text(config.ai_command_followups, locale).to_owned(),
-        on_off_text(config.ignore_link_fix_followups, locale).to_owned(),
+        on_off_text(!config.ignore_link_fix_followups, locale).to_owned(),
         offset_text(config.timezone_offset),
         on_off_text(config.ai_random_replies, locale).to_owned(),
-        creditless_text(config.creditless_user_hourly_limit),
         payer_text(config.group_pays_first, locale).to_owned(),
-        on_off_text(config.ignore_media_replies, locale).to_owned(),
+        creditless_text(config.creditless_user_hourly_limit),
+        on_off_text(config.group_pays_tasks, locale).to_owned(),
+        on_off_text(!config.ignore_media_replies, locale).to_owned(),
     ];
-    let mut rows = (0..if is_group { 9 } else { 5 })
+    let mut rows = (0..if is_group { PAGES.len() } else { PRIVATE_PAGES })
         .map(|i| {
             vec![button(
                 format!("{}: {}", names[i], values[i]),
@@ -366,7 +382,7 @@ mod tests {
                 let (text, keyboard) = render_config(&ChatConfig::default(), locale, group);
                 assert!(text.lines().count() <= 3);
                 assert!(!text.contains("UTC"));
-                assert_eq!(keyboard.inline_keyboard.len(), if group { 10 } else { 6 });
+                assert_eq!(keyboard.inline_keyboard.len(), if group { 11 } else { 6 });
                 assert!(keyboard.inline_keyboard[4][0].text.contains("UTC-3"));
                 assert_eq!(
                     keyboard.inline_keyboard[0][0].callback_data.as_deref(),
@@ -378,7 +394,10 @@ mod tests {
                         .as_deref(),
                     Some("cfg:page:close")
                 );
-                for page in PAGES.iter().take(if group { 9 } else { 5 }) {
+                for page in PAGES
+                    .iter()
+                    .take(if group { PAGES.len() } else { PRIVATE_PAGES })
+                {
                     let (detail, keyboard) =
                         render_config_page(&ChatConfig::default(), locale, group, page);
                     assert!(!detail.contains("Elegí"));
@@ -410,7 +429,7 @@ mod tests {
             Some("cfg:timezone:14")
         );
         let (_, home) = render_config(&config, Locale::En, true);
-        assert!(home.inline_keyboard[6][0].text.ends_with('∞'));
+        assert!(home.inline_keyboard[7][0].text.ends_with('∞'));
         let config = ChatConfig {
             timezone_offset: TIMEZONE_OFFSET_MIN,
             ..config
@@ -461,51 +480,106 @@ mod tests {
             assert!(!options[1 - selected].text.starts_with('✓'));
             for (locale, label) in [(Locale::Es, es), (Locale::En, en)] {
                 let (_, home) = render_config(&config, locale, true);
-                assert_eq!(home.inline_keyboard[7][0].text, label);
+                assert_eq!(home.inline_keyboard[6][0].text, label);
             }
         }
     }
 
     #[test]
-    fn media_replies_page_marks_whether_they_are_ignored() {
+    fn media_replies_page_shows_answering_not_ignoring() {
         for (ignore_media_replies, selected, es, en) in [
             (
                 false,
-                1,
-                "Ignorar replies con multimedia: Desactivado",
-                "Ignore media replies: Off",
+                0,
+                "Contestar replies con solo multimedia: Activado",
+                "Answer media-only replies: On",
             ),
             (
                 true,
-                0,
-                "Ignorar replies con multimedia: Activado",
-                "Ignore media replies: On",
+                1,
+                "Contestar replies con solo multimedia: Desactivado",
+                "Answer media-only replies: Off",
             ),
         ] {
             let config = ChatConfig {
                 ignore_media_replies,
                 ..ChatConfig::default()
             };
-            let (text, page) = render_config_page(&config, Locale::En, true, "mediareplies");
-            assert_eq!(
-                text,
-                "Ignore media replies\n\nWhen someone replies to me with only media, like a sticker, GIF, photo, video or video message, and no text, I don't answer. I still listen to audio and voice messages, and /describe and /transcribe keep working."
-            );
-            let (spanish, _) = render_config_page(&config, Locale::Es, true, "mediareplies");
-            assert_eq!(
-                spanish,
-                "Ignorar replies con multimedia\n\nSi alguien me responde solo con multimedia, como un sticker, GIF, foto, video o videomensaje, sin texto, no le contesto. Los audios y las notas de voz los sigo escuchando, y /describe y /transcribe andan igual."
-            );
+            let (text, page) = render_config_page(&config, Locale::En, true, "answermedia");
+            assert!(text.starts_with("Answer media-only replies\n\nWhen someone replies to me"));
+            let (spanish, _) = render_config_page(&config, Locale::Es, true, "answermedia");
+            assert!(spanish.starts_with("Contestar replies con solo multimedia\n\nSi alguien me"));
             let options = &page.inline_keyboard[0];
             assert_eq!(
                 options
                     .iter()
                     .map(|b| b.callback_data.as_deref())
                     .collect::<Vec<_>>(),
-                [Some("cfg:mediareplies:on"), Some("cfg:mediareplies:off")]
+                [Some("cfg:answermedia:on"), Some("cfg:answermedia:off")]
             );
             assert!(options[selected].text.starts_with('✓'));
             assert!(!options[1 - selected].text.starts_with('✓'));
+            for (locale, label) in [(Locale::Es, es), (Locale::En, en)] {
+                let (_, home) = render_config(&config, locale, true);
+                assert_eq!(home.inline_keyboard[9][0].text, label);
+            }
+        }
+    }
+
+    #[test]
+    fn link_replies_page_shows_answering_not_ignoring() {
+        for (ignore, selected, label) in [
+            (true, 1, "Answer replies to links: Off"),
+            (false, 0, "Answer replies to links: On"),
+        ] {
+            let config = ChatConfig {
+                ignore_link_fix_followups: ignore,
+                ..ChatConfig::default()
+            };
+            let (_, page) = render_config_page(&config, Locale::En, false, "answerlinks");
+            assert!(page.inline_keyboard[0][selected].text.starts_with('✓'));
+            assert_eq!(
+                page.inline_keyboard[0][0].callback_data.as_deref(),
+                Some("cfg:answerlinks:on")
+            );
+            let (_, home) = render_config(&config, Locale::En, false);
+            assert_eq!(home.inline_keyboard[3][0].text, label);
+        }
+    }
+
+    #[test]
+    fn group_tasks_page_marks_whether_the_group_pays() {
+        for (group_pays_tasks, selected, es, en) in [
+            (
+                true,
+                0,
+                "Tareas con créditos del grupo: Activado",
+                "Tasks on group credits: On",
+            ),
+            (
+                false,
+                1,
+                "Tareas con créditos del grupo: Desactivado",
+                "Tasks on group credits: Off",
+            ),
+        ] {
+            let config = ChatConfig {
+                group_pays_tasks,
+                ..ChatConfig::default()
+            };
+            let (text, page) = render_config_page(&config, Locale::En, true, "grouptasks");
+            assert!(text.starts_with("Tasks on group credits\n\nWhen on, scheduled tasks"));
+            let (spanish, _) = render_config_page(&config, Locale::Es, true, "grouptasks");
+            assert!(spanish.starts_with("Tareas con créditos del grupo\n\nSi está activado"));
+            let options = &page.inline_keyboard[0];
+            assert_eq!(
+                options
+                    .iter()
+                    .map(|b| b.callback_data.as_deref())
+                    .collect::<Vec<_>>(),
+                [Some("cfg:grouptasks:on"), Some("cfg:grouptasks:off")]
+            );
+            assert!(options[selected].text.starts_with('✓'));
             for (locale, label) in [(Locale::Es, es), (Locale::En, en)] {
                 let (_, home) = render_config(&config, locale, true);
                 assert_eq!(home.inline_keyboard[8][0].text, label);
@@ -514,9 +588,41 @@ mod tests {
     }
 
     #[test]
+    fn language_page_offers_automatic() {
+        for (language, selected, home_label) in [
+            ("auto", 2, "Idioma: Automático"),
+            ("es", 0, "Idioma: Español"),
+            ("en", 1, "Idioma: English"),
+        ] {
+            let config = ChatConfig {
+                language: language.to_owned(),
+                ..ChatConfig::default()
+            };
+            let (_, page) = render_config_page(&config, Locale::Es, false, "language");
+            let options = &page.inline_keyboard[0];
+            assert_eq!(
+                options[2].callback_data.as_deref(),
+                Some("cfg:language:auto")
+            );
+            assert!(options[selected].text.starts_with('✓'));
+            let (_, home) = render_config(&config, Locale::Es, false);
+            assert_eq!(home.inline_keyboard[0][0].text, home_label);
+        }
+        let (_, page) = render_config_page(&ChatConfig::default(), Locale::En, false, "language");
+        assert_eq!(page.inline_keyboard[0][2].text, "✓ Automatic");
+    }
+
+    #[test]
     fn unavailable_group_pages_return_home() {
         let config = ChatConfig::default();
-        for page in ["random", "creditless", "payer", "mediareplies", "unknown"] {
+        for page in [
+            "random",
+            "payer",
+            "creditless",
+            "grouptasks",
+            "answermedia",
+            "unknown",
+        ] {
             assert_eq!(
                 render_config_page(&config, Locale::En, false, page),
                 render_config(&config, Locale::En, false)

@@ -4,10 +4,10 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::thread;
 
-use bot_adapters::billing_read::BillingRepository;
 use bot_adapters::firecrawl::ReqwestFirecrawlTransport;
 use bot_adapters::openrouter_chat::{OpenRouterPricingCache, ReqwestOpenRouterTransport};
 use bot_adapters::redis_connection::RedisEndpoint;
+use bot_adapters::redis_creditless_cap::RedisCreditlessCap;
 use bot_adapters::redis_poll_store::RedisPollStore;
 use bot_adapters::redis_task_store::{RedisTaskStore, task_execution_key};
 use bot_adapters::telegram_http::ReqwestTelegramTransport;
@@ -16,6 +16,7 @@ use bot_core::scheduled_tasks::ScheduledTask;
 use thiserror::Error;
 
 use crate::composition::{ProductionToolFactory, TelegramActionSink, TelegramDeliveryCoordinator};
+use crate::conversation_adapters::PostgresConversationBilling;
 use crate::firecrawl_tool::FirecrawlScheduledWebSearch;
 use crate::native_ai::{
     ActionTaskMessenger, OpenRouterTaskProvider, PRIMARY_CHAT_MODEL, PostgresTaskBilling,
@@ -29,6 +30,8 @@ use crate::task_executor::{
     NativeTaskExecutor, StderrTaskDiagnostics, TaskExecutionJournal, TaskExecutionState,
     current_unix_timestamp,
 };
+
+use crate::task_payer::ChatTaskPayerPolicy;
 
 const TASK_EXECUTION_TTL_SECONDS: i64 = 86_400 * 7;
 
@@ -71,7 +74,7 @@ pub type TaskVerifier = TaskScheduler<RedisTaskStore, VerificationExecutor>;
 
 type ConcreteExecutor = NativeTaskExecutor<
     OpenRouterTaskProvider<ReqwestOpenRouterTransport>,
-    PostgresTaskBilling<BillingRepository>,
+    PostgresTaskBilling<PostgresConversationBilling>,
     ActionTaskMessenger<TelegramActionSink<ReqwestTelegramTransport>>,
     RedisTaskStore,
     StderrTaskDiagnostics,
@@ -98,6 +101,8 @@ pub struct TaskServiceOptions<'a> {
 pub enum TaskServiceError {
     #[error("could not construct the scheduled-task Redis store: {0}")]
     Redis(#[from] bot_adapters::redis_task_store::RedisTaskStoreError),
+    #[error("could not construct the hourly allowance Redis store: {0}")]
+    Allowance(#[from] bot_adapters::redis_creditless_cap::RedisCreditlessCapError),
     #[error("could not construct the scheduled-poll Redis store: {0}")]
     PollStore(#[from] bot_adapters::redis_poll_store::RedisPollStoreError),
     #[error("could not construct the OpenRouter transport: {0}")]
@@ -160,9 +165,11 @@ pub fn build_task_scheduler(
         )));
     }
     let billing = PostgresTaskBilling::new(
-        BillingRepository::new(options.database_url),
+        PostgresConversationBilling::new(options.database_url)
+            .with_creditless_cap(RedisCreditlessCap::new(options.redis_endpoint)?),
         PRIMARY_CHAT_MODEL,
     )
+    .with_payer_policy(Box::new(ChatTaskPayerPolicy::new(options.database_url)))
     .with_openrouter_pricing(pricing)
     .with_web_search(firecrawl_api_key.is_some());
     let action_transport = ReqwestTelegramTransport::new().map_err(TaskServiceError::Telegram)?;

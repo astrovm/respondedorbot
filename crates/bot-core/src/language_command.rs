@@ -157,7 +157,7 @@ mod tests {
                     .as_ref()
                     .and_then(|markup| markup.inline_keyboard.first())
                     .map(Vec::len),
-                Some(2)
+                Some(3)
             );
         }
     }

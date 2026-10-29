@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use bot_adapters::billing_read::BillingRepository;
 use bot_adapters::openrouter_chat::OpenRouterPricingCache;
+use bot_adapters::redis_creditless_cap::{RedisCreditlessCap, creditless_cap_key};
 use bot_adapters::redis_task_store::RedisTaskStore;
 use bot_adapters::task_record::TaskRecordDocument;
 use bot_core::credit_units::{CreditUnits, display_credit_units};
@@ -22,6 +23,10 @@ use serde_json::Value;
 
 use crate::chat_tool_loop::ToolExecutionResult;
 use crate::native_ai::estimate_task_reserve_credit_units;
+use crate::task_payer::{
+    ChatTaskPayerPolicy, TaskFunds, TaskPayer, TaskPayerPolicy, task_shortfall,
+    task_shortfall_message,
+};
 use crate::tool_output;
 use crate::tool_requests::{ExternalToolExecutor, ExternalToolRequest, json_integer};
 
@@ -57,14 +62,59 @@ impl TaskToolStore for RedisTaskStore {
     }
 }
 
-pub trait PersonalBalanceSource {
-    fn balance(&mut self, user_id: i64) -> Result<i64, String>;
+/// How a member's task would be paid in this chat, and what they have to pay
+/// with. Scheduled runs read the same settings again when they happen.
+pub trait TaskFundsSource {
+    fn funds(&mut self, chat_id: &str, user_id: i64) -> Result<(TaskPayer, TaskFunds), String>;
 }
 
-impl PersonalBalanceSource for BillingRepository {
-    fn balance(&mut self, user_id: i64) -> Result<i64, String> {
-        self.get_balance("user", user_id)
-            .map_err(|error| error.to_string())
+pub struct BillingTaskFunds {
+    repository: BillingRepository,
+    cap: RedisCreditlessCap,
+    policy: ChatTaskPayerPolicy,
+}
+
+impl BillingTaskFunds {
+    #[must_use]
+    pub fn new(database_url: &str, cap: RedisCreditlessCap) -> Self {
+        Self {
+            repository: BillingRepository::new(database_url),
+            cap,
+            policy: ChatTaskPayerPolicy::new(database_url),
+        }
+    }
+}
+
+impl TaskFundsSource for BillingTaskFunds {
+    fn funds(&mut self, chat_id: &str, user_id: i64) -> Result<(TaskPayer, TaskFunds), String> {
+        let payer = self.policy.payer(chat_id, user_id)?;
+        let personal = self
+            .repository
+            .get_balance("user", user_id)
+            .map_err(|error| error.to_string())?;
+        let group = match payer.group_chat_id {
+            Some(group) => self
+                .repository
+                .get_balance("chat", group)
+                .map_err(|error| error.to_string())?,
+            None => 0,
+        };
+        let hourly_used = match payer.paying_chat() {
+            Some(group) => self
+                .cap
+                .count(&creditless_cap_key(&group.to_string(), user_id))
+                .map_err(|error| error.to_string())?
+                .unwrap_or(0),
+            None => 0,
+        };
+        Ok((
+            payer,
+            TaskFunds {
+                personal,
+                group,
+                hourly_used,
+            },
+        ))
     }
 }
 
@@ -131,7 +181,7 @@ impl<Store, Balance, Ids, Now> TaskSetTool<Store, Balance, Ids, Now> {
 impl<Store, Balance, Ids, Now> ExternalToolExecutor for TaskSetTool<Store, Balance, Ids, Now>
 where
     Store: TaskToolStore,
-    Balance: PersonalBalanceSource,
+    Balance: TaskFundsSource,
     Ids: TaskIdSource,
     Now: FnMut() -> i64,
 {
@@ -202,8 +252,8 @@ where
                 );
             }
         };
-        let balance = match self.balance.balance(user_id) {
-            Ok(balance) => balance,
+        let (payer, funds) = match self.balance.funds(&self.context.chat_id, user_id) {
+            Ok(funds) => funds,
             Err(error) => {
                 return ToolExecutionResult::with_diagnostics(
                     task_credit_check(self.context.locale),
@@ -211,9 +261,10 @@ where
                 );
             }
         };
-        if balance < required {
-            return ToolExecutionResult::output(task_credit_insufficient(
-                balance,
+        if let Some(shortfall) = task_shortfall(&payer, &funds, required) {
+            return ToolExecutionResult::output(task_shortfall_message(
+                shortfall,
+                &funds,
                 required,
                 self.context.locale,
             ));
@@ -953,12 +1004,39 @@ mod tests {
     struct Balance {
         result: Result<i64, String>,
         calls: Rc<RefCell<Vec<i64>>>,
+        payer: TaskPayer,
+        group: i64,
+        hourly_used: i64,
     }
 
-    impl PersonalBalanceSource for Balance {
-        fn balance(&mut self, user_id: i64) -> Result<i64, String> {
+    impl Balance {
+        fn personal(result: Result<i64, String>) -> Self {
+            Self {
+                result,
+                calls: Rc::new(RefCell::new(Vec::new())),
+                payer: TaskPayer::PERSONAL,
+                group: 0,
+                hourly_used: 0,
+            }
+        }
+    }
+
+    impl TaskFundsSource for Balance {
+        fn funds(
+            &mut self,
+            _chat_id: &str,
+            user_id: i64,
+        ) -> Result<(TaskPayer, TaskFunds), String> {
             self.calls.borrow_mut().push(user_id);
-            self.result.clone()
+            let personal = self.result.clone()?;
+            Ok((
+                self.payer,
+                TaskFunds {
+                    personal,
+                    group: self.group,
+                    hourly_used: self.hourly_used,
+                },
+            ))
         }
     }
 
@@ -998,10 +1076,7 @@ mod tests {
     ) -> TaskSetTool<Store, Balance, Ids, Clock> {
         TaskSetTool::new(
             Store(state),
-            Balance {
-                result: balance,
-                calls: Rc::new(RefCell::new(Vec::new())),
-            },
+            Balance::personal(balance),
             Ids(vec![Ok("abc12345")]),
             fixed_clock,
             context(locale),
@@ -1494,10 +1569,7 @@ mod tests {
 
         let mut id_failure = TaskSetTool::new(
             Store(Rc::clone(&state)),
-            Balance {
-                result: Ok(i64::MAX),
-                calls: Rc::new(RefCell::new(Vec::new())),
-            },
+            Balance::personal(Ok(i64::MAX)),
             Ids(vec![Err("synthetic ID failure")]),
             fixed_clock as Clock,
             context(Locale::Es),
@@ -1508,10 +1580,7 @@ mod tests {
 
         let mut timestamp_failure = TaskSetTool::new(
             Store(Rc::clone(&state)),
-            Balance {
-                result: Ok(i64::MAX),
-                calls: Rc::new(RefCell::new(Vec::new())),
-            },
+            Balance::personal(Ok(i64::MAX)),
             Ids(vec![Ok("synthetic")]),
             (|| i64::MAX - 60) as Clock,
             context(Locale::En),
@@ -1694,8 +1763,8 @@ mod tests {
             let mut tool = TaskSetTool::new(
                 Store(Rc::clone(&state)),
                 Balance {
-                    result: Ok(i64::MAX),
                     calls: Rc::clone(&calls),
+                    ..Balance::personal(Ok(i64::MAX))
                 },
                 Ids(Vec::new()),
                 fixed_clock as Clock,
@@ -1722,10 +1791,7 @@ mod tests {
         let state = Rc::new(RefCell::new(StoreState::default()));
         let mut tool = TaskSetTool::new(
             Store(Rc::clone(&state)),
-            Balance {
-                result: Ok(i64::MAX),
-                calls: Rc::new(RefCell::new(Vec::new())),
-            },
+            Balance::personal(Ok(i64::MAX)),
             Ids(vec![Err("the ID source must not be consulted")]),
             (|| i64::MAX) as Clock,
             context(Locale::En),
@@ -1831,11 +1897,25 @@ mod tests {
     }
 
     #[test]
-    fn billing_balance_source_surfaces_repository_failures_as_text() {
-        let mut repository = BillingRepository::new(
+    fn billing_funds_source_surfaces_repository_failures_as_text() {
+        let endpoint = crate::test_env::redis_endpoint().unwrap_or(RedisEndpoint {
+            host: "127.0.0.1".to_owned(),
+            port: 1,
+            password: None,
+        });
+        let cap = RedisCreditlessCap::new(&endpoint);
+        assert!(cap.is_ok());
+        let Ok(cap) = cap else { return };
+        let mut funds = BillingTaskFunds::new(
             "postgresql://synthetic:synthetic@127.0.0.1:1/synthetic?sslmode=disable",
+            cap,
         );
-        let error = PersonalBalanceSource::balance(&mut repository, 7);
+        let error = funds.funds("-100", 7);
+        assert!(
+            matches!(&error, Err(message) if !message.is_empty()),
+            "{error:?}"
+        );
+        let error = funds.funds("7", 7);
         assert!(
             matches!(&error, Err(message) if !message.is_empty()),
             "{error:?}"

@@ -10890,7 +10890,7 @@ mod tests {
                 .as_ref()
                 .and_then(|markup| markup.inline_keyboard.first())
                 .map(Vec::len),
-            Some(2)
+            Some(3)
         );
     }
 
@@ -11043,7 +11043,7 @@ mod tests {
                 .reply_markup
                 .as_ref()
                 .map(|markup| markup.inline_keyboard.len()),
-            Some(10)
+            Some(11)
         );
         assert_eq!(dispatcher.state.incoming.len(), 1);
         assert_eq!(dispatcher.state.outgoing.len(), 1);

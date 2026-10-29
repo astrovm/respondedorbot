@@ -145,7 +145,8 @@ use crate::read_only_tool::read_only_tool;
 use crate::reconciliation::ActiveOperationRegistry;
 use crate::runtime::{DurableParallelUpdateHandler, PollingRuntime, UpdateSource};
 use crate::task_tools::{
-    RandomTaskIdSource, TaskCancelTool, TaskListTool, TaskSetTool, TaskToolContext,
+    BillingTaskFunds, RandomTaskIdSource, TaskCancelTool, TaskListTool, TaskSetTool,
+    TaskToolContext,
 };
 use crate::tool_requests::{ExternalToolbox, ValidatedNativeToolPorts};
 use crate::web_fetch_tool::WebFetchTool;
@@ -3144,7 +3145,10 @@ impl ConversationToolFactory for ProductionToolFactory {
                 Box::new({
                     let tool = TaskSetTool::new(
                         RedisTaskStore::new(&self.redis_endpoint).map_err(error_text)?,
-                        BillingRepository::new(&self.database_url),
+                        BillingTaskFunds::new(
+                            &self.database_url,
+                            RedisCreditlessCap::new(&self.redis_endpoint).map_err(error_text)?,
+                        ),
                         RandomTaskIdSource,
                         current_unix_timestamp,
                         TaskToolContext {

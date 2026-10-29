@@ -18,6 +18,13 @@ Rust is the sole billing reader and writer. PostgreSQL remains the system of rec
 - `/transfer` and `/printcredits` carry an operation id from their Telegram message, so a retried update applies them once. A `/transfer` that replies to a person moves personal credits to that person instead of the group.
 - Reconciliation reads durable operation and segment state and cannot duplicate completed settlement.
 
+## Scheduled tasks
+
+- A task run is paid like an AI message from the member who created it. Private chats use personal credits only.
+- In a group, the chat setting "Tareas con créditos del grupo" (`group_pays_tasks`, default on) decides whether the group's credits can pay. When on, the run follows `group_pays_first`, counts toward the member's hourly allowance (`creditless_user_hourly_limit`, or their `/limit` override), and goes member then group, or group then member.
+- The setting is read each time a task runs, so turning it off also changes existing tasks. A run already reserved still settles against the payer that held it.
+- `task_set` checks credits when the task is created with the same rules: personal plus group credits when on, personal only when off. The message says which case applies.
+
 ## Compatibility
 
 Schema creation and upgrades are additive and idempotent. Existing account scopes, ledger metadata, timestamps, usage tags, and payment identifiers remain readable. Rollbacks use an immutable previously verified container image and never permit two billing writers at once.

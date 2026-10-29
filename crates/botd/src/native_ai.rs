@@ -3,7 +3,6 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bot_adapters::billing_read::{AiChargeResult, BillingRepository};
 use bot_adapters::openrouter_chat::{
     ChatCompletion, ChatCompletionRequest, ChatMessage, ChatRole, OpenRouterChatError,
     OpenRouterPricingCache, OpenRouterTransport, complete_with,
@@ -35,6 +34,9 @@ use crate::poll_tools::ScheduledPollDelivery;
 use crate::task_executor::{
     TaskAiProvider, TaskBilling, TaskMessenger, TaskPollDeliveryError, TaskPromptMessage,
     TaskProviderFailure, TaskProviderReply, TaskReserveOutcome, build_task_messages,
+};
+use crate::task_payer::{
+    TaskFunds, TaskPayer, TaskPayerPolicy, TaskShortfall, group_chat_id, task_shortfall_message,
 };
 use crate::tool_requests::{ExternalToolRequest, validate_request};
 
@@ -498,72 +500,52 @@ fn formatted_date(timezone_offset_hours: i64, locale: Locale) -> String {
     format_date(utc.with_timezone(&offset).date_naive(), locale)
 }
 
+/// What the database said about reserving credits for one task run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskCharge {
+    pub ok: bool,
+    pub reason: Option<String>,
+    pub user_balance: i64,
+    pub chat_balance: i64,
+    /// The member used their hourly allowance of group-paid messages.
+    pub hourly_limit: Option<i64>,
+}
+
+/// A task run is paid like an AI message from its creator: the same
+/// reservation, hourly allowance and who-pays-first rules apply.
 pub trait TaskCreditStore {
     type Error: std::fmt::Display;
 
     fn charge(
-        &self,
+        &mut self,
         user_id: i64,
+        payer: &TaskPayer,
         amount: i32,
         metadata: &Map<String, Value>,
-        idempotency_key: &str,
+        ids: (&str, &str),
+    ) -> Result<TaskCharge, Self::Error>;
+
+    fn record_segment(
+        &mut self,
+        user_id: i64,
+        chat_id: Option<i64>,
+        metadata: &Value,
+    ) -> Result<bool, Self::Error>;
+
+    fn list_segments(
+        &mut self,
+        user_id: i64,
         operation_id: &str,
-    ) -> Result<AiChargeResult, Self::Error>;
-
-    fn record_segment(&self, user_id: i64, metadata: &Value) -> Result<bool, Self::Error>;
-
-    fn list_segments(&self, user_id: i64, operation_id: &str) -> Result<Vec<Value>, Self::Error>;
+    ) -> Result<Vec<Value>, Self::Error>;
 
     fn settle_once(
-        &self,
+        &mut self,
         user_id: i64,
+        chat_id: Option<i64>,
         operation_id: &str,
         actual_credit_units: i64,
         metadata: &Map<String, Value>,
     ) -> Result<bool, Self::Error>;
-}
-
-impl TaskCreditStore for BillingRepository {
-    type Error = bot_adapters::billing_read::BillingError;
-
-    fn charge(
-        &self,
-        user_id: i64,
-        amount: i32,
-        metadata: &Map<String, Value>,
-        idempotency_key: &str,
-        operation_id: &str,
-    ) -> Result<AiChargeResult, Self::Error> {
-        self.charge_ai_credits(
-            user_id,
-            None,
-            amount,
-            "ai_reserve",
-            metadata,
-            Some("user"),
-            Some(idempotency_key),
-            operation_id,
-        )
-    }
-
-    fn record_segment(&self, user_id: i64, metadata: &Value) -> Result<bool, Self::Error> {
-        self.record_ai_provider_usage(user_id, None, metadata)
-    }
-
-    fn list_segments(&self, user_id: i64, operation_id: &str) -> Result<Vec<Value>, Self::Error> {
-        self.list_ai_provider_segments(user_id, operation_id)
-    }
-
-    fn settle_once(
-        &self,
-        user_id: i64,
-        operation_id: &str,
-        actual_credit_units: i64,
-        metadata: &Map<String, Value>,
-    ) -> Result<bool, Self::Error> {
-        self.settle_ai_operation_once(user_id, None, operation_id, actual_credit_units, metadata)
-            .map(|result| result.applied)
-    }
 }
 
 #[derive(Debug, PartialEq, Eq, Error)]
@@ -595,6 +577,8 @@ pub struct PostgresTaskBilling<Store> {
     model: String,
     pricing: Option<Arc<OpenRouterPricingCache>>,
     web_search_enabled: bool,
+    /// Without it every run is paid from the creator's personal credits.
+    payer_policy: Option<Box<dyn TaskPayerPolicy>>,
 }
 
 impl<Store> PostgresTaskBilling<Store> {
@@ -605,6 +589,7 @@ impl<Store> PostgresTaskBilling<Store> {
             model: model.to_owned(),
             pricing: None,
             web_search_enabled: false,
+            payer_policy: None,
         }
     }
 
@@ -615,13 +600,19 @@ impl<Store> PostgresTaskBilling<Store> {
     }
 
     #[must_use]
+    pub fn with_payer_policy(mut self, policy: Box<dyn TaskPayerPolicy>) -> Self {
+        self.payer_policy = Some(policy);
+        self
+    }
+
+    #[must_use]
     pub const fn with_web_search(mut self, enabled: bool) -> Self {
         self.web_search_enabled = enabled;
         self
     }
 
     fn settle_amount(
-        &self,
+        &mut self,
         task: &ScheduledTask,
         execution_id: &str,
         segments: &[Value],
@@ -645,14 +636,22 @@ impl<Store> PostgresTaskBilling<Store> {
         if let Some(pricing) = pricing {
             copy_task_pricing_metadata(&mut settlement, pricing);
         }
+        // The group is named even when the setting changed since the
+        // reservation, so settling can always reach whichever payer held it.
         self.store
-            .settle_once(user_id, &operation_id, amount, &settlement)
+            .settle_once(
+                user_id,
+                group_chat_id(&task.chat_id),
+                &operation_id,
+                amount,
+                &settlement,
+            )
             .map_err(NativeTaskBillingError::store)?;
         Ok(())
     }
 
     fn finalize(
-        &self,
+        &mut self,
         task: &ScheduledTask,
         execution_id: &str,
         new_segments: &[Value],
@@ -672,7 +671,7 @@ impl<Store> PostgresTaskBilling<Store> {
                 "segment": segment,
             });
             self.store
-                .record_segment(user_id, &metadata)
+                .record_segment(user_id, group_chat_id(&task.chat_id), &metadata)
                 .map_err(NativeTaskBillingError::store)?;
         }
         let durable_segments = self
@@ -767,14 +766,20 @@ impl<Store: TaskCreditStore> TaskBilling for PostgresTaskBilling<Store> {
             ("reserved_credit_units".to_owned(), json!(amount)),
             ("model".to_owned(), json!(self.model)),
         ]);
+        let payer = match self.payer_policy.as_mut() {
+            Some(policy) => policy
+                .payer(&task.chat_id, user_id)
+                .map_err(NativeTaskBillingError::Store)?,
+            None => TaskPayer::PERSONAL,
+        };
         let result = self
             .store
             .charge(
                 user_id,
+                &payer,
                 amount_i32,
                 &metadata,
-                &idempotency_key,
-                &operation_id,
+                (&idempotency_key, &operation_id),
             )
             .map_err(NativeTaskBillingError::store)?;
         if result.ok {
@@ -787,7 +792,7 @@ impl<Store: TaskCreditStore> TaskBilling for PostgresTaskBilling<Store> {
             return Ok(TaskReserveOutcome::AlreadySettled);
         }
         Ok(TaskReserveOutcome::Denied {
-            message: insufficient_credits_message(task.locale.as_str(), result.user_balance),
+            message: denied_message(task, &payer, &result, amount),
         })
     }
 
@@ -813,6 +818,43 @@ impl<Store: TaskCreditStore> TaskBilling for PostgresTaskBilling<Store> {
 
 fn operation_id(execution_id: &str) -> String {
     format!("task:{execution_id}")
+}
+
+/// A run the group would pay for names whose credits fell short, like task
+/// creation does. Anything else keeps the personal wording.
+fn denied_message(
+    task: &ScheduledTask,
+    payer: &TaskPayer,
+    result: &TaskCharge,
+    amount: i64,
+) -> String {
+    let shortfall = match (
+        result.hourly_limit,
+        payer.paying_chat(),
+        payer.group_chat_id,
+    ) {
+        (Some(limit), _, _) => TaskShortfall::HourlyLimit { limit },
+        (None, Some(_), _) => TaskShortfall::Both,
+        (None, None, Some(_)) => TaskShortfall::GroupOff,
+        (None, None, None) => {
+            return insufficient_credits_message(task.locale.as_str(), result.user_balance);
+        }
+    };
+    let funds = TaskFunds {
+        personal: result.user_balance,
+        group: result.chat_balance,
+        hourly_used: 0,
+    };
+    let locale = if task.locale == "en" {
+        Locale::En
+    } else {
+        Locale::Es
+    };
+    format!(
+        "{}: {}",
+        task.user_name,
+        task_shortfall_message(shortfall, &funds, amount, locale)
+    )
 }
 
 fn insufficient_credits_message(locale: &str, balance: i64) -> String {
@@ -886,7 +928,8 @@ mod tests {
     use std::collections::{BTreeMap, VecDeque};
     use std::sync::Arc;
 
-    use bot_adapters::billing_read::AiChargeResult;
+    use crate::native_ai::TaskCharge;
+    use crate::task_payer::TaskPayer;
     use bot_adapters::openrouter_chat::{
         HttpRequest, HttpResponse, OpenRouterChatError, OpenRouterPricingCache, OpenRouterTransport,
     };
@@ -1230,7 +1273,7 @@ mod tests {
     struct Store {
         /// Name of the store operation that fails, if any.
         fail_on: Option<&'static str>,
-        charge_result: RefCell<Option<AiChargeResult>>,
+        charge_result: RefCell<Option<TaskCharge>>,
         charges: RefCell<Vec<CapturedCharge>>,
         segments: RefCell<Vec<Value>>,
         settlements: RefCell<Vec<CapturedSettlement>>,
@@ -1240,13 +1283,13 @@ mod tests {
         type Error = &'static str;
 
         fn charge(
-            &self,
+            &mut self,
             user_id: i64,
+            _payer: &TaskPayer,
             amount: i32,
             metadata: &Map<String, Value>,
-            idempotency_key: &str,
-            operation_id: &str,
-        ) -> Result<AiChargeResult, Self::Error> {
+            (idempotency_key, operation_id): (&str, &str),
+        ) -> Result<TaskCharge, Self::Error> {
             if self.fail_on == Some("charge") {
                 return Err("synthetic charge failure");
             }
@@ -1261,18 +1304,21 @@ mod tests {
                 .charge_result
                 .borrow_mut()
                 .take()
-                .unwrap_or(AiChargeResult {
+                .unwrap_or(TaskCharge {
                     ok: true,
-                    applied: true,
                     reason: None,
-                    source: Some("user".to_owned()),
-                    amount: i64::from(amount),
                     user_balance: 900,
                     chat_balance: 0,
+                    hourly_limit: None,
                 }))
         }
 
-        fn record_segment(&self, _user_id: i64, metadata: &Value) -> Result<bool, Self::Error> {
+        fn record_segment(
+            &mut self,
+            _user_id: i64,
+            _chat_id: Option<i64>,
+            metadata: &Value,
+        ) -> Result<bool, Self::Error> {
             if self.fail_on == Some("record") {
                 return Err("synthetic record failure");
             }
@@ -1281,7 +1327,7 @@ mod tests {
         }
 
         fn list_segments(
-            &self,
+            &mut self,
             _user_id: i64,
             operation_id: &str,
         ) -> Result<Vec<Value>, Self::Error> {
@@ -1298,8 +1344,9 @@ mod tests {
         }
 
         fn settle_once(
-            &self,
+            &mut self,
             user_id: i64,
+            _chat_id: Option<i64>,
             operation_id: &str,
             actual_credit_units: i64,
             metadata: &Map<String, Value>,
@@ -1494,17 +1541,84 @@ mod tests {
         assert!(with_search_amount > without_search_amount);
     }
 
+    struct FixedPayer(TaskPayer);
+
+    impl crate::task_payer::TaskPayerPolicy for FixedPayer {
+        fn payer(&mut self, _chat_id: &str, _user_id: i64) -> Result<TaskPayer, String> {
+            Ok(self.0)
+        }
+    }
+
+    fn short_store(hourly_limit: Option<i64>) -> Store {
+        Store {
+            charge_result: RefCell::new(Some(TaskCharge {
+                ok: false,
+                reason: None,
+                user_balance: 123,
+                chat_balance: 456,
+                hourly_limit,
+            })),
+            ..Store::default()
+        }
+    }
+
+    fn denied_text(payer: TaskPayer, hourly_limit: Option<i64>) -> String {
+        let mut billing = PostgresTaskBilling::new(
+            short_store(hourly_limit),
+            "deepseek/deepseek-v4.1-flash-1017",
+        )
+        .with_payer_policy(Box::new(FixedPayer(payer)));
+        match billing.reserve(&task("es"), "task123:1000", &[]) {
+            Ok(TaskReserveOutcome::Denied { message }) => message,
+            other => panic!("expected a denial, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn group_task_denials_name_the_setting_both_balances_or_the_hourly_limit() {
+        let group = |group_pays| TaskPayer {
+            group_chat_id: Some(-100_123),
+            group_pays,
+            hourly_limit: 3,
+            group_pays_first: false,
+        };
+        let off = denied_text(group(false), None);
+        assert!(off.contains("Tareas con créditos del grupo"), "{off}");
+        assert!(off.contains("hay 4.56"), "{off}");
+        let both = denied_text(group(true), None);
+        assert!(both.contains("el grupo tiene 4.56"), "{both}");
+        let limited = denied_text(group(true), Some(3));
+        assert!(limited.contains("3 mensajes por hora"), "{limited}");
+        let private = denied_text(TaskPayer::PERSONAL, None);
+        assert!(private.contains("Saldo: 1.23"), "{private}");
+    }
+
+    #[test]
+    fn a_failing_payer_policy_is_a_store_error() {
+        struct Broken;
+        impl crate::task_payer::TaskPayerPolicy for Broken {
+            fn payer(&mut self, _chat_id: &str, _user_id: i64) -> Result<TaskPayer, String> {
+                Err("settings unavailable".to_owned())
+            }
+        }
+        let mut billing =
+            PostgresTaskBilling::new(Store::default(), "deepseek/deepseek-v4.1-flash-1017")
+                .with_payer_policy(Box::new(Broken));
+        assert!(matches!(
+            billing.reserve(&task("es"), "task123:1000", &[]),
+            Err(NativeTaskBillingError::Store(_))
+        ));
+    }
+
     #[test]
     fn billing_distinguishes_denial_from_a_durably_finished_execution() {
         let denied_store = Store {
-            charge_result: RefCell::new(Some(AiChargeResult {
+            charge_result: RefCell::new(Some(TaskCharge {
                 ok: false,
-                applied: false,
                 reason: None,
-                source: None,
-                amount: 0,
                 user_balance: 123,
                 chat_balance: 0,
+                hourly_limit: None,
             })),
             ..Store::default()
         };
@@ -1517,14 +1631,12 @@ mod tests {
         );
 
         let settled_store = Store {
-            charge_result: RefCell::new(Some(AiChargeResult {
+            charge_result: RefCell::new(Some(TaskCharge {
                 ok: false,
-                applied: false,
                 reason: Some("operation_settled".to_owned()),
-                source: None,
-                amount: 0,
                 user_balance: 123,
                 chat_balance: 0,
+                hourly_limit: None,
             })),
             ..Store::default()
         };
@@ -1925,14 +2037,12 @@ mod tests {
     #[test]
     fn spanish_credit_denials_use_the_localized_top_up_message() {
         let store = Store {
-            charge_result: RefCell::new(Some(AiChargeResult {
+            charge_result: RefCell::new(Some(TaskCharge {
                 ok: false,
-                applied: false,
                 reason: None,
-                source: None,
-                amount: 0,
                 user_balance: 123,
                 chat_balance: 0,
+                hourly_limit: None,
             })),
             ..Store::default()
         };

@@ -20,8 +20,9 @@ pub struct ConfigCallbackInput {
 pub enum ToggleField {
     RandomReplies,
     CommandFollowups,
-    IgnoreLinkFixFollowups,
-    IgnoreMediaReplies,
+    AnswerLinkReplies,
+    AnswerMediaReplies,
+    GroupPaysTasks,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -56,8 +57,9 @@ fn toggle_field(action: &str) -> Option<ToggleField> {
     match action {
         "random" => Some(ToggleField::RandomReplies),
         "followups" => Some(ToggleField::CommandFollowups),
-        "linkfixfollowups" => Some(ToggleField::IgnoreLinkFixFollowups),
-        "mediareplies" => Some(ToggleField::IgnoreMediaReplies),
+        "answerlinks" => Some(ToggleField::AnswerLinkReplies),
+        "answermedia" => Some(ToggleField::AnswerMediaReplies),
+        "grouptasks" => Some(ToggleField::GroupPaysTasks),
         _ => None,
     }
 }
@@ -90,7 +92,7 @@ fn evaluate_creditless(input: &ConfigCallbackInput) -> ConfigCallbackEvaluation 
 #[must_use]
 pub fn evaluate_config_callback(input: &ConfigCallbackInput) -> ConfigCallbackEvaluation {
     match (input.action.as_str(), input.value.as_str()) {
-        ("language", value @ ("es" | "en")) => {
+        ("language", value @ ("es" | "en" | "auto")) => {
             ConfigCallbackEvaluation::SetLanguage(value.to_owned())
         }
         ("link", value @ ("reply" | "delete" | "off")) => {
@@ -152,8 +154,9 @@ pub fn plan_config_callback(
     let current_toggle = match action {
         "random" => Some(current.ai_random_replies),
         "followups" => Some(current.ai_command_followups),
-        "linkfixfollowups" => Some(current.ignore_link_fix_followups),
-        "mediareplies" => Some(current.ignore_media_replies),
+        "answerlinks" => Some(!current.ignore_link_fix_followups),
+        "answermedia" => Some(!current.ignore_media_replies),
+        "grouptasks" => Some(current.group_pays_tasks),
         _ => None,
     };
     if action == "creditless"
@@ -211,10 +214,10 @@ pub fn plan_config_callback(
             match field {
                 ToggleField::RandomReplies => config.ai_random_replies = value,
                 ToggleField::CommandFollowups => config.ai_command_followups = value,
-                ToggleField::IgnoreLinkFixFollowups => {
-                    config.ignore_link_fix_followups = value;
-                }
-                ToggleField::IgnoreMediaReplies => config.ignore_media_replies = value,
+                // The stored keys say "ignore", the menu says "answer".
+                ToggleField::AnswerLinkReplies => config.ignore_link_fix_followups = !value,
+                ToggleField::AnswerMediaReplies => config.ignore_media_replies = !value,
+                ToggleField::GroupPaysTasks => config.group_pays_tasks = value,
             }
             None
         }
@@ -493,14 +496,14 @@ mod tests {
                 },
             ),
             (
-                "cfg:linkfixfollowups:toggle",
+                "cfg:answerlinks:toggle",
                 ChatConfig {
                     ignore_link_fix_followups: false,
                     ..current.clone()
                 },
             ),
             (
-                "cfg:mediareplies:on",
+                "cfg:answermedia:off",
                 ChatConfig {
                     ignore_media_replies: true,
                     ..current.clone()
