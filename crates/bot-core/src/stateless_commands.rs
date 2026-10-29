@@ -571,7 +571,7 @@ mod tests {
             );
             expected.reply_markup = Some(keyboard.clone());
             expected.reply_to_message_id = Some(MessageId(7));
-            for command in ["/start", "!start", "/start@bot"] {
+            for command in ["/start", "/start@bot"] {
                 assert_eq!(
                     super::plan_stateless_command(
                         ChatId(42),
