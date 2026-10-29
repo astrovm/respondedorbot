@@ -1638,15 +1638,20 @@ mod tests {
                     .as_ref()
             );
             assert!(payload.get("ephemeral_message_id").is_none());
-            let denied = transport_with_status(
-                400,
-                r#"{"ok":false,"description":"eligible action required"}"#,
-            );
-            assert!(matches!(
-                execute_with(&denied, "synthetic", action)?,
-                ActionOutcome::Failed { .. }
-            ));
-            assert_eq!(denied.requests.borrow().len(), 1);
+            for description in [
+                "eligible action required",
+                "Bad Request: message is not modified",
+            ] {
+                let denied = transport_with_status(
+                    400,
+                    &serde_json::json!({"ok":false,"description":description}).to_string(),
+                );
+                assert!(matches!(
+                    execute_with(&denied, "synthetic", action.clone())?,
+                    ActionOutcome::Failed { .. }
+                ));
+                assert_eq!(denied.requests.borrow().len(), 1);
+            }
         }
         for delete in [false, true] {
             let action = TelegramAction::Ephemeral {
