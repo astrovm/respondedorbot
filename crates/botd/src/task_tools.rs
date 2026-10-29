@@ -98,23 +98,17 @@ impl BillingTaskFunds {
 impl TaskFundsSource for BillingTaskFunds {
     fn funds(&mut self, chat_id: &str, user_id: i64) -> Result<(TaskPayer, TaskFunds), String> {
         let payer = self.policy.payer(chat_id, user_id)?;
-        let personal = self
-            .repository
-            .get_balance("user", user_id)
-            .map_err(|error| error.to_string())?;
+        let personal = as_text(self.repository.get_balance("user", user_id))?;
         let group = match payer.group_chat_id {
-            Some(group) => self
-                .repository
-                .get_balance("chat", group)
-                .map_err(|error| error.to_string())?,
+            Some(group) => as_text(self.repository.get_balance("chat", group))?,
             None => 0,
         };
         let hourly_used = match payer.paying_chat() {
-            Some(group) => self
-                .cap
-                .count(&creditless_cap_key(&group.to_string(), user_id))
-                .map_err(|error| error.to_string())?
-                .unwrap_or(0),
+            Some(group) => as_text(
+                self.cap
+                    .count(&creditless_cap_key(&group.to_string(), user_id)),
+            )?
+            .unwrap_or(0),
             None => 0,
         };
         Ok((
@@ -126,6 +120,10 @@ impl TaskFundsSource for BillingTaskFunds {
             },
         ))
     }
+}
+
+fn as_text<T, E: std::fmt::Display>(result: Result<T, E>) -> Result<T, String> {
+    result.map_err(|error| error.to_string())
 }
 
 pub trait TaskIdSource {

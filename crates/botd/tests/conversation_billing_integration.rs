@@ -280,6 +280,23 @@ fn postgres_and_redis_enforce_onboarding_replay_cap_and_refund_policy() -> Resul
         &Map::from_iter([("reason".to_owned(), json!("synthetic_task"))]),
     )?);
 
+    // A denied task charge must not leave its operation marked active.
+    let denied_operation = format!("{task_operation}:denied");
+    let denied_active = ActiveOperationRegistry::default();
+    let mut denied_billing = PostgresConversationBilling::new(&database_url)
+        .with_active_operations(denied_active.clone());
+    let denied = TaskCreditStore::charge(
+        &mut denied_billing,
+        task_user_id,
+        &TaskPayer::PERSONAL,
+        1_000_000,
+        &Map::new(),
+        (&format!("{denied_operation}:reserve"), &denied_operation),
+    )?;
+    assert!(!denied.ok);
+    assert_eq!(denied.hourly_limit, None);
+    assert!(!denied_active.is_active(&denied_operation));
+
     let cap_reader = RedisCreditlessCap::new(&endpoint)?;
     let cap_key = creditless_cap_key(&chat_id.to_string(), user_id);
     let active = ActiveOperationRegistry::default();

@@ -1563,15 +1563,43 @@ mod tests {
     }
 
     fn denied_text(payer: TaskPayer, hourly_limit: Option<i64>) -> String {
+        denied_text_in("es", payer, hourly_limit)
+    }
+
+    fn denied_text_in(locale: &str, payer: TaskPayer, hourly_limit: Option<i64>) -> String {
         let mut billing = PostgresTaskBilling::new(
             short_store(hourly_limit),
             "deepseek/deepseek-v4.1-flash-1017",
         )
         .with_payer_policy(Box::new(FixedPayer(payer)));
-        match billing.reserve(&task("es"), "task123:1000", &[]) {
-            Ok(TaskReserveOutcome::Denied { message }) => message,
-            other => panic!("expected a denial, got {other:?}"),
-        }
+        let outcome = billing.reserve(&task(locale), "task123:1000", &[]);
+        let message = format!("{outcome:?}");
+        assert!(
+            matches!(outcome, Ok(TaskReserveOutcome::Denied { .. })),
+            "expected a denial"
+        );
+        message
+    }
+
+    #[test]
+    fn english_group_task_denials_use_the_english_messages() {
+        let group = TaskPayer {
+            group_chat_id: Some(-100_123),
+            group_pays: true,
+            hourly_limit: 3,
+            group_pays_first: false,
+        };
+        let both = denied_text_in("en", group, None);
+        assert!(both.contains("Neither your personal credits"), "{both}");
+        let off = denied_text_in(
+            "en",
+            TaskPayer {
+                group_pays: false,
+                ..group
+            },
+            None,
+        );
+        assert!(off.contains("Tasks on group credits"), "{off}");
     }
 
     #[test]
