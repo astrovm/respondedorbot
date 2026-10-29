@@ -427,13 +427,20 @@ pub trait GroupSpendingSource {
 /// The member a ban or limit command replies to, bots included so the
 /// planner can refuse them.
 /// A number typed in private as a reply to the bot's top-up menu.
-fn personal_topup_action(action: TelegramAction, chat_type: &str, user_id: i64) -> TelegramAction {
+fn personal_topup_action(
+    action: TelegramAction,
+    chat_type: &str,
+    user_id: i64,
+    reply_to_ephemeral_message_id: Option<i64>,
+) -> TelegramAction {
     if chat_type == "private" {
         action
     } else {
         TelegramAction::Ephemeral {
             receiver_user_id: user_id,
             ephemeral_message_id: None,
+            callback_query_id: None,
+            reply_to_ephemeral_message_id,
             action: Box::new(action),
         }
     }
@@ -1791,6 +1798,7 @@ where
                     Some(user) => user,
                     None => return Ok(DispatchOutcome::Handled),
                 },
+                None,
             ))
             .map_err(DispatchError::Action)?;
         Ok(DispatchOutcome::Handled)
@@ -3918,7 +3926,7 @@ where
             return Ok(DispatchOutcome::Handled);
         }
         if context.data == "topup:open" {
-            let (Ok(chat_id), Some(user_id)) = (context.chat_id.parse::<i64>(), context.user_id)
+            let (Ok(chat_id), Some(_user_id)) = (context.chat_id.parse::<i64>(), context.user_id)
             else {
                 self.answer_callback_best_effort(context.callback_id.as_deref());
                 return Ok(DispatchOutcome::Handled);
@@ -3944,7 +3952,7 @@ where
             );
             if let Some(action) = action {
                 self.actions
-                    .execute(personal_topup_action(action, &context.chat_type, user_id))
+                    .execute(context.personal_action(action))
                     .map_err(DispatchError::Action)?;
             }
             self.answer_callback_best_effort(context.callback_id.as_deref());
@@ -6003,6 +6011,7 @@ where
                 action,
                 message.chat_type.as_deref().unwrap_or_default(),
                 sender_id.0,
+                message.ephemeral_message_id,
             ))
         } else if matches!(
             parsed.command.as_str(),
@@ -7534,6 +7543,7 @@ mod tests {
     fn incoming_message(text: &str, language: Option<&str>) -> IncomingMessage {
         IncomingMessage {
             message_id: Some(MessageId(7)),
+            ephemeral_message_id: None,
             chat_id: Some(ChatId(-42)),
             chat_type: Some("private".to_owned()),
             chat_title: None,
@@ -8298,6 +8308,7 @@ mod tests {
             update_id: 100,
             event: IncomingEvent::Message(Box::new(IncomingMessage {
                 message_id: None,
+                ephemeral_message_id: None,
                 chat_id: None,
                 chat_type: None,
                 chat_title: None,
@@ -24217,6 +24228,78 @@ mod tests {
         }
     }
 
+    /// Serialize dispatched actions through the real adapter and a fake Telegram server.
+    fn topup_wire(actions: &[TelegramAction]) -> Vec<(String, Value)> {
+        use bot_adapters::telegram_http::{
+            HttpResponse, TelegramRequest, TelegramTransport, TransportFailureKind,
+        };
+        struct Wire(RefCell<Vec<(String, Value)>>);
+        impl TelegramTransport for Wire {
+            fn send(
+                &self,
+                request: &TelegramRequest,
+            ) -> Result<HttpResponse, TransportFailureKind> {
+                self.0.borrow_mut().push((
+                    request.endpoint.clone(),
+                    request
+                        .json_payload
+                        .clone()
+                        .or_else(|| request.params.clone())
+                        .unwrap_or(Value::Null),
+                ));
+                Ok(HttpResponse {
+                    status_code: 200,
+                    body: r#"{"ok":true,"result":{"message_id":0,"ephemeral_message_id":81}}"#
+                        .into(),
+                })
+            }
+        }
+        let wire = Wire(RefCell::new(Vec::new()));
+        for action in actions {
+            assert!(
+                bot_adapters::telegram_actions::execute_with(&wire, "synthetic", action.clone())
+                    .is_ok()
+            );
+        }
+        wire.0.into_inner()
+    }
+
+    #[test]
+    fn incoming_ephemeral_command_survives_polling_dispatch_and_send()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use bot_adapters::telegram_polling::{PollOutcome, parse_response};
+        for ordinary_id in [None, Some(0), Some(999)] {
+            let mut message = json!({"ephemeral_message_id":71,"chat":{"id":-42,"type":"supergroup"},"from":{"id":88,"language_code":"en"},"text":"/topup 50"});
+            if let Some(id) = ordinary_id {
+                message["message_id"] = json!(id);
+            }
+            let response =
+                json!({"ok":true,"result":[{"update_id":100,"message":message}]}).to_string();
+            let PollOutcome::Updates(updates) = parse_response(200, &response)? else {
+                return Err("updates".into());
+            };
+            let update = updates.into_iter().next().ok_or("update")?;
+            let IncomingEvent::Message(ref incoming) = update.event else {
+                return Err("message".into());
+            };
+            assert_eq!(incoming.message_id, Some(MessageId(71)));
+            assert_eq!(incoming.ephemeral_message_id, Some(71));
+            let mut bot = configured(english(), Actions::default());
+            assert_eq!(bot.dispatch(update), Ok(DispatchOutcome::Handled));
+            let wire = topup_wire(&bot.actions.0);
+            assert_eq!(wire[0].0, "sendMessage");
+            assert_eq!(
+                wire[0].1["reply_parameters"],
+                json!({"ephemeral_message_id":71})
+            );
+            assert_eq!(
+                wire[0].1["ephemeral_message_parameters"],
+                json!({"receiver_user_id":88})
+            );
+        }
+        Ok(())
+    }
+
     fn ephemeral_topup_callback(data: &str, sender: i64, receiver: i64) -> IncomingUpdate {
         let mut update = callback_update(data, "supergroup", Some("en"));
         if let IncomingEvent::CallbackQuery(ref mut callback) = update.event {
@@ -24239,7 +24322,7 @@ mod tests {
             });
             assert_eq!(bot.dispatch(update), Ok(DispatchOutcome::Handled));
             assert!(
-                matches!(&bot.actions.0[0],TelegramAction::Ephemeral {receiver_user_id:88,ephemeral_message_id:None,action} if matches!(action.as_ref(),TelegramAction::SendMessage(m) if m.text.contains("50 credits") && m.reply_markup.as_ref().is_some_and(|k|k.inline_keyboard[2][0].callback_data.as_deref()==Some("topup:c50"))))
+                matches!(&bot.actions.0[0],TelegramAction::Ephemeral {receiver_user_id:88,ephemeral_message_id:None,action,..} if matches!(action.as_ref(),TelegramAction::SendMessage(m) if m.text.contains("50 credits") && m.reply_markup.as_ref().is_some_and(|k|k.inline_keyboard[2][0].callback_data.as_deref()==Some("topup:c50"))))
             );
         }
         let mut bot = configured(english(), Actions::default());
@@ -24260,13 +24343,13 @@ mod tests {
             bot.dispatch(ephemeral_topup_callback("topup:amt:50", 88, 88)),
             Ok(DispatchOutcome::Handled)
         );
-        assert!(bot.actions.0.iter().any(|a|matches!(a,TelegramAction::Ephemeral{receiver_user_id:88,ephemeral_message_id:Some(71),action} if matches!(action.as_ref(),TelegramAction::EditMessage{text,..} if text.contains("50 credits")))));
+        assert!(bot.actions.0.iter().any(|a|matches!(a,TelegramAction::Ephemeral{receiver_user_id:88,ephemeral_message_id:Some(71),action,..} if matches!(action.as_ref(),TelegramAction::EditMessage{text,..} if text.contains("50 credits")))));
         bot.actions.0.clear();
         assert_eq!(
             bot.dispatch(ephemeral_topup_callback("topup:c50", 88, 88)),
             Ok(DispatchOutcome::Handled)
         );
-        assert!(bot.actions.0.iter().any(|a|matches!(a,TelegramAction::Ephemeral{receiver_user_id:88,ephemeral_message_id:Some(71),action} if matches!(action.as_ref(),TelegramAction::EditMessage{reply_markup:Some(k),..} if k.inline_keyboard[2][0].url.as_deref()==Some("https://t.me/$synthetic-checkout")))));
+        assert!(bot.actions.0.iter().any(|a|matches!(a,TelegramAction::Ephemeral{receiver_user_id:88,ephemeral_message_id:Some(71),action,..} if matches!(action.as_ref(),TelegramAction::EditMessage{reply_markup:Some(k),..} if k.inline_keyboard[2][0].url.as_deref()==Some("https://t.me/$synthetic-checkout")))));
         assert!(!bot.actions.0.iter().any(|a| matches!(
             a,
             TelegramAction::SendMessage(_) | TelegramAction::EditMessage { .. }
@@ -24288,6 +24371,16 @@ mod tests {
             Ok(DispatchOutcome::Handled)
         );
         assert!(bot.actions.0.iter().any(|a|matches!(a,TelegramAction::Ephemeral{receiver_user_id:88,action,..} if matches!(action.as_ref(),TelegramAction::SendMessage(_)))));
+        let wire = topup_wire(&bot.actions.0);
+        let send = wire
+            .iter()
+            .find(|(endpoint, _)| endpoint == "sendMessage")
+            .unwrap_or_else(|| panic!("missing menu send"));
+        assert_eq!(
+            send.1["ephemeral_message_parameters"],
+            json!({"receiver_user_id":88,"callback_query_id":"callback-1"})
+        );
+        assert!(send.1.get("reply_parameters").is_none());
         assert!(!bot.actions.0.iter().any(|a| matches!(
             a,
             TelegramAction::SendPhoto { .. } | TelegramAction::SendMessage(_)
@@ -24302,6 +24395,20 @@ mod tests {
                 bot.dispatch(callback_update("topup:open", chat, Some("en"))),
                 Ok(DispatchOutcome::Handled)
             );
+            let wire = topup_wire(&bot.actions.0);
+            let send = wire
+                .iter()
+                .find(|(endpoint, _)| endpoint == "sendMessage")
+                .unwrap_or_else(|| panic!("missing menu send"));
+            if chat == "private" {
+                assert!(send.1.get("ephemeral_message_parameters").is_none());
+            } else {
+                assert_eq!(
+                    send.1["ephemeral_message_parameters"],
+                    json!({"receiver_user_id":88,"callback_query_id":"callback-1"})
+                );
+                assert!(send.1.get("reply_parameters").is_none());
+            }
             assert!(bot.actions.0.iter().any(|a| match a {
                 TelegramAction::Ephemeral{receiver_user_id:88,action,..} => matches!(action.as_ref(),TelegramAction::SendMessage(m) if m.reply_markup.is_some()),
                 TelegramAction::SendMessage(m) => chat=="private" && m.reply_markup.is_some(),

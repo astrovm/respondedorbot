@@ -52,6 +52,9 @@ pub enum IncomingEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IncomingMessage {
     pub message_id: Option<MessageId>,
+    /// Incoming private command identifier, separate from ordinary message IDs.
+    #[serde(default)]
+    pub ephemeral_message_id: Option<i64>,
     pub chat_id: Option<ChatId>,
     pub chat_type: Option<String>,
     pub chat_title: Option<String>,
@@ -169,9 +172,12 @@ fn parse_event(object: &mut Map<String, Value>) -> Result<IncomingEvent, Polling
 }
 
 fn parse_message(payload: &Map<String, Value>) -> IncomingMessage {
+    let ephemeral_message_id = payload
+        .get("ephemeral_message_id")
+        .and_then(normalize_numeric_id);
     let message_id = payload
-        .get("message_id")
-        .or_else(|| payload.get("ephemeral_message_id"))
+        .get("ephemeral_message_id")
+        .or_else(|| payload.get("message_id"))
         .and_then(normalize_numeric_id)
         .map(MessageId);
     let chat = payload.get("chat").and_then(Value::as_object);
@@ -260,6 +266,7 @@ fn parse_message(payload: &Map<String, Value>) -> IncomingMessage {
         });
     IncomingMessage {
         message_id,
+        ephemeral_message_id,
         chat_id,
         chat_type,
         chat_title,

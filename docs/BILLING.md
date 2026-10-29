@@ -22,6 +22,8 @@ Rust is the sole billing reader and writer. PostgreSQL remains the system of rec
 
 - `/topup` opens the full amount and payment-method menu. `/topup 50` starts at 50 credits.
 - Group and supergroup menus, their controls, Lightning invoices, and payment notices are ephemeral and visible only to the requester. Private chats retain the same controls and typed amount replies.
+- Non-admin bots can reply within Telegram's 15-second window to an ephemeral command (using its incoming ephemeral ID) or a button press (using its callback query ID). The **Add credits** start button provides an eligible trigger even on a public start message.
+- An ordinary public `/topup` command has no eligible reply target: sending its personal menu requires the bot to be a group administrator. Use the start button or the configured ephemeral `/topup` command otherwise. Late replies and asynchronous group payment notices also require administrator rights, and ephemeral delivery is never guaranteed. Rejected sends never fall back to a public message; credited payments remain credited if their notice fails.
 - Telegram Stars checkout uses `createInvoiceLink` and a native checkout URL button. It never publishes an invoice to the group or redirects the buyer to a private chat.
 - New Stars payloads bind the amount and intended buyer. Checkout and settlement reject another payer or a changed amount. Exact legacy pack-only payloads credit the actual payer; malformed user bindings are rejected.
 - Exported-invoice bot-origin receipts identify the buyer through the positive private chat id, never through the bot sender id or the payload alone. Charge-id ledger writes remain idempotent.

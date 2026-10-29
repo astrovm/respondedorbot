@@ -54,6 +54,8 @@ impl CallbackContext {
             crate::telegram_actions::TelegramAction::Ephemeral {
                 receiver_user_id: self.user_id.unwrap_or_default(),
                 ephemeral_message_id: self.ephemeral_message_id,
+                callback_query_id: self.callback_id.clone(),
+                reply_to_ephemeral_message_id: None,
                 action: Box::new(action),
             }
         }
@@ -332,6 +334,8 @@ mod tests {
                                 TelegramAction::Ephemeral {
                                     receiver_user_id: user.unwrap_or_default(),
                                     ephemeral_message_id: ephemeral,
+                                    callback_query_id: None,
+                                    reply_to_ephemeral_message_id: None,
                                     action: Box::new(action)
                                 }
                             );

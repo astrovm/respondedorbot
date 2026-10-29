@@ -9308,6 +9308,8 @@ mod tests {
             sink.execute(TelegramAction::Ephemeral {
                 receiver_user_id: 42,
                 ephemeral_message_id: None,
+                callback_query_id: None,
+                reply_to_ephemeral_message_id: None,
                 action: Box::new(TelegramAction::SendMessage(SendMessage::new(
                     ChatId(-7),
                     "personal menu"

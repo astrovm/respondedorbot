@@ -205,6 +205,8 @@ where
                         TelegramAction::Ephemeral {
                             receiver_user_id: charge.user_id,
                             ephemeral_message_id: None,
+                            callback_query_id: None,
+                            reply_to_ephemeral_message_id: None,
                             action: Box::new(TelegramAction::SendMessage(message)),
                         }
                     } else {

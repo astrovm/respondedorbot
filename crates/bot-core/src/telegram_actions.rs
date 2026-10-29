@@ -70,7 +70,10 @@ pub enum TelegramAction {
     /// action must never be sent as a public fallback.
     Ephemeral {
         receiver_user_id: i64,
+        /// Target for edit/delete only, never a reply target.
         ephemeral_message_id: Option<i64>,
+        callback_query_id: Option<String>,
+        reply_to_ephemeral_message_id: Option<i64>,
         action: Box<TelegramAction>,
     },
     SetCommands {
