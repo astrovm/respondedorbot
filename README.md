@@ -279,10 +279,10 @@ Foreground AI conversations emit single-line `AI trace:` JSON records to stderr,
 
 - Each record includes the operation ID and provider round.
 - Events show available tools, provider generation IDs, requested tool calls, execution duration, and the final executed-tool count (including zero).
-- Search events include the query, up to five source URLs/titles/snippets, empty results or an error, and the provider request ID when available.
+- Search events include the query, up to ten source URLs/titles/snippets (news results first, with their date), empty results or an error, and the provider request ID when available.
 
 ```bash
-podman logs --since 15m --timestamps systemd-respondedorbot 2>&1 | grep 'AI trace:'
+podman logs --since 15m --timestamps respondedorbot 2>&1 | grep 'AI trace:'
 ```
 
 Match `operation_id` across records to follow one conversation turn.

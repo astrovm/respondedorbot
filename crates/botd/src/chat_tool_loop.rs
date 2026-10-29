@@ -883,10 +883,11 @@ pub(crate) fn tool_trace(
                 .and_then(Value::as_array)
             {
                 details["result_count"] = json!(results.len());
-                details["sources"] = json!(results.iter().take(5).map(|source| json!({
+                details["sources"] = json!(results.iter().take(10).map(|source| json!({
                     "url": source_location(source.get("url").and_then(Value::as_str).unwrap_or_default()),
                     "title": bounded(source.get("title").and_then(Value::as_str).unwrap_or_default(), 300),
                     "description": bounded(source.get("description").and_then(Value::as_str).unwrap_or_default(), 1200),
+                    "date": source.get("date").and_then(Value::as_str).map(|date| bounded(date, 100)),
                 })).collect::<Vec<_>>());
             } else {
                 details["search_error"] = json!(bounded(&result.output, 500));

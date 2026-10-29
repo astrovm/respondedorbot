@@ -15,7 +15,10 @@ use url::{Host, Url};
 
 use crate::http_client::{BROWSER_USER_AGENT, error_chain};
 
-pub const FETCH_MAX_BYTES: usize = 262_144;
+/// News pages often put most of a megabyte of inline scripts before the
+/// article, so the byte cap has to reach past them; `FETCH_MAX_CHARS` still
+/// bounds what the model reads.
+pub const FETCH_MAX_BYTES: usize = 2_097_152;
 pub const FETCH_MAX_CHARS: usize = 12_000;
 pub const FETCH_MAX_REDIRECTS: usize = 5;
 
@@ -558,7 +561,6 @@ struct VisibleTextParser {
     lines: Vec<String>,
     current: String,
     title: String,
-    skip_depth: usize,
     in_title: bool,
 }
 
@@ -575,17 +577,22 @@ impl VisibleTextParser {
                 }
                 return;
             }
-            let Some(end) = remaining.find('>') else {
+            let Some(end) = tag_end(remaining) else {
                 self.text(remaining);
                 return;
             };
-            self.tag(&remaining[1..end]);
+            let raw_text = self.tag(&remaining[1..end]);
             remaining = &remaining[end + 1..];
+            if let Some(name) = raw_text {
+                remaining = skip_raw_text(remaining, name);
+            }
         }
         self.text(remaining);
     }
 
-    fn tag(&mut self, raw: &str) {
+    /// Handles one tag and returns the element name when its body is raw text
+    /// to skip.
+    fn tag(&mut self, raw: &str) -> Option<&'static str> {
         let raw = raw.trim();
         let closing = raw.starts_with('/');
         let name = raw
@@ -594,27 +601,23 @@ impl VisibleTextParser {
             .next()
             .unwrap_or_default()
             .to_ascii_lowercase();
-        if matches!(name.as_str(), "script" | "style" | "noscript") {
-            if closing {
-                self.skip_depth = self.skip_depth.saturating_sub(1);
-            } else {
-                self.skip_depth += 1;
-            }
-            return;
+        if let Some(raw_text) = ["script", "style", "noscript"]
+            .into_iter()
+            .find(|raw_text| *raw_text == name)
+        {
+            return (!closing).then_some(raw_text);
         }
         if name == "title" {
             self.in_title = !closing;
-            return;
+            return None;
         }
-        if is_block_tag(&name) && self.skip_depth == 0 {
+        if is_block_tag(&name) {
             self.flush();
         }
+        None
     }
 
     fn text(&mut self, raw: &str) {
-        if self.skip_depth > 0 {
-            return;
-        }
         let decoded = decode_html_entities(raw);
         let cleaned = collapse_whitespace(&decoded);
         if cleaned.is_empty() {
@@ -644,6 +647,52 @@ impl VisibleTextParser {
         let title = (!self.title.is_empty()).then_some(self.title);
         (title, self.lines.join("\n"))
     }
+}
+
+/// Finds the `>` that ends the tag at the start of `html`, skipping quoted
+/// attribute values, which may contain `>` themselves.
+fn tag_end(html: &str) -> Option<usize> {
+    let bytes = html.as_bytes();
+    let mut cursor = 1;
+    while let Some(&byte) = bytes.get(cursor) {
+        match byte {
+            b'>' => return Some(cursor),
+            b'"' | b'\'' if bytes[..cursor].trim_ascii_end().ends_with(b"=") => {
+                match html[cursor + 1..].find(char::from(byte)) {
+                    Some(offset) => cursor += offset + 2,
+                    // An unclosed quote is broken markup; end at the next `>`.
+                    None => return html[cursor..].find('>').map(|offset| cursor + offset),
+                }
+            }
+            _ => cursor += 1,
+        }
+    }
+    None
+}
+
+/// Skips a script, style or noscript body up to its closing tag, the way
+/// browsers do. The body is raw text, so markup inside it, such as
+/// `document.write('<script src=...>')`, opens nothing.
+fn skip_raw_text<'a>(html: &'a str, name: &str) -> &'a str {
+    let bytes = html.as_bytes();
+    let mut cursor = 0;
+    while let Some(offset) = html[cursor..].find("</") {
+        let start = cursor + offset;
+        let name_end = start + 2 + name.len();
+        let closes = bytes
+            .get(start + 2..name_end)
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name.as_bytes()))
+            && bytes
+                .get(name_end)
+                .is_none_or(|next| next.is_ascii_whitespace() || matches!(next, b'/' | b'>'));
+        if closes {
+            return html[name_end..]
+                .find('>')
+                .map_or("", |end| &html[name_end + end + 1..]);
+        }
+        cursor = start + 2;
+    }
+    ""
 }
 
 fn is_block_tag(name: &str) -> bool {
@@ -998,6 +1047,31 @@ mod tests {
         assert_eq!(page.content, "one two");
         assert_eq!(page.title, None);
         Ok(())
+    }
+
+    #[test]
+    fn markup_inside_scripts_does_not_hide_the_rest_of_the_page() {
+        let html = concat!(
+            "<script>if(!window.fetch){document.write('<script src=\"polyfill.js\"><\\/script>')}</script>",
+            "<SCRIPT type=\"module\">for (i = 0; i<n; i++) x('</scriptx>')</SCRIPT >",
+            "<style>p > a { color: red }</style>",
+            "<noscript><iframe src=\"tracker\"></iframe></noscript>",
+            "<script src=\"self-closing.js\" /></script>",
+            "<article><p>Article body</p></article>"
+        );
+        let (_, text) = extract_text_from_html(html);
+        assert_eq!(text, "Article body");
+
+        let (_, text) = extract_text_from_html("<p>before</p><script>never closed <p>hidden</p>");
+        assert_eq!(text, "before");
+        let (_, text) = extract_text_from_html("<p>kept</p></script><p>still kept</p>");
+        assert_eq!(text, "kept\nstill kept");
+        let (_, text) = extract_text_from_html("<style>a{}</style");
+        assert_eq!(text, "");
+        let (_, text) = extract_text_from_html(
+            "<nav data-settings='{\"icon\":\"<i>\"}' title = \"a > b\">menu</nav><p alt='x>y>Broken</p>",
+        );
+        assert_eq!(text, "menu\ny>Broken");
     }
 
     #[test]
