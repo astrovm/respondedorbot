@@ -646,14 +646,15 @@ mod tests {
             ]
         };
         let reporter = Arc::new(Reporter::default());
-        let mut supervisor = BackgroundSupervisor::start(
+        let started = BackgroundSupervisor::start(
             vec![
                 worker("task-scheduler-1", failing_then_passing()),
                 worker("task-scheduler-2", failing_then_passing()),
                 worker("memory-compaction", vec![Err("synthetic other".to_owned())]),
             ],
             reporter.clone(),
-        )?;
+        );
+        let mut supervisor = started?;
         for _ in 0..3 {
             done_rx.recv_timeout(Duration::from_secs(1))?;
         }

@@ -2261,12 +2261,13 @@ mod tests {
 
     #[test]
     fn a_dropped_catalog_download_is_retried_once_and_reports_its_cause() -> TestResult {
-        let (base_url, server) = serve_raw(vec![
+        let responses = vec![
             DROPPED_BODY.to_owned(),
             catalog_response(&synthetic_catalog(0)),
             DROPPED_BODY.to_owned(),
             DROPPED_BODY.to_owned(),
-        ])?;
+        ];
+        let (base_url, server) = serve_raw(responses)?;
         let cache = OpenRouterPricingCache::new("synthetic-key", &base_url)?;
         assert!(
             cache
@@ -2275,15 +2276,13 @@ mod tests {
         );
 
         let failed = OpenRouterPricingCache::new("synthetic-key", &base_url)?.refresh();
-        let Err(OpenRouterChatError::Transport(message)) = failed else {
-            return Err(format!("expected a transport failure, got {failed:?}").into());
-        };
         // reqwest names only the failed step; the cause comes from its source.
-        assert!(
-            message.starts_with("request or response body error: ")
-                && message.ends_with("end of file before message length reached"),
-            "{message}"
-        );
+        assert!(matches!(
+            failed,
+            Err(OpenRouterChatError::Transport(message))
+                if message.starts_with("request or response body error: ")
+                    && message.ends_with("end of file before message length reached")
+        ));
         server.join().ok().ok_or("server thread panicked")??;
         Ok(())
     }
@@ -2323,7 +2322,7 @@ mod tests {
             "application/json".to_owned(),
             "{\"error\":{\"message\":\"synthetic outage\"}}".to_owned(),
         );
-        let (base_url, server) = serve_sequence(vec![
+        let responses = vec![
             outage.clone(),
             (
                 "200 OK".to_owned(),
@@ -2331,7 +2330,8 @@ mod tests {
                 synthetic_catalog(0),
             ),
             outage,
-        ])?;
+        ];
+        let (base_url, server) = serve_sequence(responses)?;
         let cache = OpenRouterPricingCache::new("synthetic-key", &base_url)?;
         assert!(matches!(
             cache.keep_warm(),
