@@ -381,6 +381,12 @@ mod tests {
                 "Los admins ya no tienen límite en este grupo",
             ),
             (-1, Locale::En, "Admins already have no limit in this group"),
+            // A group limit of 0 is still one an admin can be given more than.
+            (
+                0,
+                Locale::En,
+                "I can only give admins more than the group's limit (0)",
+            ),
         ] {
             assert_eq!(limit_admin_target(group_limit, locale), expected);
         }
