@@ -172,6 +172,12 @@ pub trait TaskExecutionJournal {
     fn save(&mut self, execution_id: &str, state: &TaskExecutionState) -> Result<(), Self::Error>;
 }
 
+/// Whether a task's creator is ignored in the chat it runs in. Their tasks
+/// there stop running until they are unignored.
+pub trait TaskMemberFilter {
+    fn ignored(&mut self, chat_id: &str, user_id: i64) -> bool;
+}
+
 pub trait TaskDiagnostics {
     fn record(&mut self, task_id: &str, stage: &'static str, message: &str);
 }
@@ -213,6 +219,7 @@ pub struct NativeTaskExecutor<Provider, Billing, Messenger, Journal, Diagnostics
     diagnostics: Diagnostics,
     now: fn() -> i64,
     pending_poll_retries: HashMap<String, TaskExecutionState>,
+    members: Option<Box<dyn TaskMemberFilter + Send>>,
 }
 
 impl<Provider, Billing, Messenger, Journal, Diagnostics>
@@ -240,7 +247,16 @@ where
             diagnostics,
             now: current_unix_timestamp,
             pending_poll_retries: HashMap::new(),
+            members: None,
         }
+    }
+
+    /// Checked on every run, so ignoring a member stops their tasks and
+    /// unignoring them lets the tasks run again.
+    #[must_use]
+    pub fn with_member_filter(mut self, members: Box<dyn TaskMemberFilter + Send>) -> Self {
+        self.members = Some(members);
+        self
     }
 
     #[must_use]
@@ -454,6 +470,20 @@ where
             self.send_nonfatal(
                 task,
                 &execute_failed(task, credit_user_message(task.locale.as_str())),
+            );
+            return Ok(TaskExecutionDisposition::Complete);
+        }
+        let chat_id = task.chat_id.as_str();
+        let ignored = self.members.as_mut().is_some_and(|members| {
+            task.user_id
+                .is_some_and(|user_id| members.ignored(chat_id, user_id))
+        });
+        if ignored {
+            // Skipped quietly: nothing is charged or posted in the group.
+            self.diagnostics.record(
+                task.id.as_str(),
+                "ignored",
+                "creator is ignored in this chat",
             );
             return Ok(TaskExecutionDisposition::Complete);
         }
@@ -994,6 +1024,52 @@ mod tests {
         assert_eq!(provider.execution_ids, ["task123:1000"]);
         assert_eq!(billing.reserve_ids, ["task123:1000"]);
         assert_eq!(billing.settlements[0].2, "task_success");
+        assert_eq!(messenger.messages[0].1, "synthetic answer");
+    }
+
+    /// Ignores member 42 in the synthetic group.
+    struct IgnoresAna;
+
+    impl super::TaskMemberFilter for IgnoresAna {
+        fn ignored(&mut self, chat_id: &str, user_id: i64) -> bool {
+            chat_id == "-100123" && user_id == 42
+        }
+    }
+
+    #[test]
+    fn an_ignored_creators_task_is_skipped_without_charge_or_message() {
+        let mut executor = executor(
+            Provider::default(),
+            Billing::default(),
+            Messenger::default(),
+        )
+        .with_member_filter(Box::new(IgnoresAna));
+        assert_eq!(
+            executor.execute(&task("es"), "task123:1000"),
+            Ok(TaskExecutionDisposition::Complete)
+        );
+        let (provider, billing, messenger, diagnostics) = executor.parts();
+        assert!(provider.prompts.is_empty());
+        assert!(billing.reserve_ids.is_empty());
+        assert!(messenger.messages.is_empty());
+        assert_eq!(
+            diagnostics.0,
+            [(
+                "task123".to_owned(),
+                "ignored",
+                "creator is ignored in this chat".to_owned()
+            )]
+        );
+
+        // Anyone else's task in the same group still runs.
+        let mut other = task("es");
+        other.user_id = Some(7);
+        assert_eq!(
+            executor.execute(&other, "task123:2000"),
+            Ok(TaskExecutionDisposition::Complete)
+        );
+        let (_, billing, messenger, _) = executor.parts();
+        assert_eq!(billing.reserve_ids, ["task123:2000"]);
         assert_eq!(messenger.messages[0].1, "synthetic answer");
     }
 

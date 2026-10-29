@@ -4,6 +4,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::thread;
 
+use bot_adapters::chat_bans::ChatBanRepository;
 use bot_adapters::firecrawl::ReqwestFirecrawlTransport;
 use bot_adapters::openrouter_chat::{OpenRouterPricingCache, ReqwestOpenRouterTransport};
 use bot_adapters::redis_connection::RedisEndpoint;
@@ -33,7 +34,7 @@ use crate::task_executor::{
     current_unix_timestamp,
 };
 
-use crate::task_payer::ChatTaskPayerPolicy;
+use crate::task_payer::{ChatIgnoredMembers, ChatTaskPayerPolicy};
 
 const TASK_EXECUTION_TTL_SECONDS: i64 = 86_400 * 7;
 
@@ -199,7 +200,15 @@ pub fn build_task_scheduler(
     )));
     let journal = RedisTaskStore::new(options.redis_endpoint)?;
     let executor =
-        NativeTaskExecutor::new(provider, billing, messenger, journal, StderrTaskDiagnostics);
+        NativeTaskExecutor::new(provider, billing, messenger, journal, StderrTaskDiagnostics)
+            .with_member_filter(Box::new(ChatIgnoredMembers::new(
+                Box::new(ChatBanRepository::new(options.database_url)),
+                Box::new(TelegramGroupAuthorizer::new(
+                    ReqwestTelegramTransport::new().map_err(TaskServiceError::Telegram)?,
+                    options.telegram_token,
+                    options.redis_endpoint,
+                )),
+            )));
     Ok(TaskScheduler::new(
         RedisTaskStore::new(options.redis_endpoint)?,
         executor,

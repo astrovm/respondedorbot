@@ -33,6 +33,7 @@ Rust is the sole billing reader and writer. PostgreSQL remains the system of rec
 
 - A task run is paid like an AI message from the member who created it. Private chats use personal credits only.
 - In a group, the chat setting "Tareas con créditos del grupo" (`group_pays_tasks`, default on) decides whether the group's credits can pay. When on, the run follows `group_pays_first`, counts toward the member's hourly allowance (`creditless_user_hourly_limit`, or their `/limit` override), and goes member then group, or group then member.
+- A task whose creator is ignored with `/ignore` in that group is skipped on every run, so nothing is charged or posted; it runs again once they're unignored. Admins are never treated as ignored, and a failed lookup lets the task run, as for messages.
 - The setting is read each time a task runs, so turning it off also changes existing tasks. A run already reserved still settles against the payer that held it.
 - `task_set` checks credits when the task is created with the same rules: personal plus group credits when on, personal only when off. The message says which case applies.
 

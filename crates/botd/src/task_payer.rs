@@ -6,8 +6,9 @@ use bot_core::chat_config::ChatConfig;
 use bot_core::credit_units::{CreditUnits, display_credit_units};
 use bot_core::locale::Locale;
 
-use crate::dispatcher::GroupAuthorizer;
+use crate::dispatcher::{ChatBanStore, GroupAuthorizer};
 use crate::error_text;
+use crate::task_executor::TaskMemberFilter;
 use crate::task_tools::task_credit_insufficient;
 
 /// How one member's task is paid for in the chat it runs in.
@@ -127,6 +128,45 @@ impl TaskPayerPolicy for ChatTaskPayerPolicy {
                 .map(|admins| &mut **admins as &mut dyn GroupAuthorizer),
         );
         Ok(TaskPayer::for_group(group, &config, own_limit))
+    }
+}
+
+/// Members ignored with /ignore in a group, whose tasks there stop running.
+/// As with their messages, admins are never treated as ignored and a failed
+/// lookup lets the task run.
+pub struct ChatIgnoredMembers {
+    bans: Box<dyn ChatBanStore + Send>,
+    admins: Box<dyn GroupAuthorizer + Send>,
+}
+
+impl ChatIgnoredMembers {
+    #[must_use]
+    pub fn new(
+        bans: Box<dyn ChatBanStore + Send>,
+        admins: Box<dyn GroupAuthorizer + Send>,
+    ) -> Self {
+        Self { bans, admins }
+    }
+}
+
+impl TaskMemberFilter for ChatIgnoredMembers {
+    fn ignored(&mut self, chat_id: &str, user_id: i64) -> bool {
+        let Some(group) = group_chat_id(chat_id) else {
+            return false;
+        };
+        match self.bans.is_banned(group, user_id) {
+            Ok(banned) => {
+                banned
+                    && !self
+                        .admins
+                        .authorize(chat_id, &user_id.to_string())
+                        .is_admin
+            }
+            Err(error) => {
+                eprintln!("task ignore check chat_id={chat_id} user_id={user_id}: {error}");
+                false
+            }
+        }
     }
 }
 
@@ -253,6 +293,46 @@ mod tests {
                 is_admin: self.is_admin,
                 diagnostics: Vec::new(),
             }
+        }
+    }
+
+    #[test]
+    fn ignored_members_tasks_stop_unless_they_are_admins() {
+        use bot_adapters::chat_bans::ChatBanRepository;
+
+        use super::ChatIgnoredMembers;
+        use crate::dispatcher::ChatBanStore;
+        use crate::task_executor::TaskMemberFilter;
+
+        let admins = |is_admin| {
+            Box::new(Admins {
+                is_admin,
+                asked: Vec::new(),
+            })
+        };
+        let unreachable = || {
+            Box::new(ChatBanRepository::new(
+                "postgres://synthetic@127.0.0.1:1/none",
+            ))
+        };
+        // A failed lookup lets the task run, as it lets a message through.
+        assert!(!ChatIgnoredMembers::new(unreachable(), admins(false)).ignored("-7", 9));
+        // Private chats have no ignore list, so nothing is looked up.
+        assert!(!ChatIgnoredMembers::new(unreachable(), admins(false)).ignored("9", 9));
+        if let Ok(database_url) = std::env::var("TEST_DATABASE_URL") {
+            let repository = || Box::new(ChatBanRepository::new(&database_url));
+            let chat_id = -100_900_301;
+            let group = chat_id.to_string();
+            let mut store = ChatBanRepository::new(&database_url);
+            let _cleared = ChatBanStore::unban(&mut store, chat_id, 9);
+            assert!(!ChatIgnoredMembers::new(repository(), admins(false)).ignored(&group, 9));
+            assert_eq!(
+                ChatBanStore::ban(&mut store, chat_id, 9, "Ana", 1),
+                Ok(true)
+            );
+            assert!(ChatIgnoredMembers::new(repository(), admins(false)).ignored(&group, 9));
+            assert!(!ChatIgnoredMembers::new(repository(), admins(true)).ignored(&group, 9));
+            let _cleared = ChatBanStore::unban(&mut store, chat_id, 9);
         }
     }
 
