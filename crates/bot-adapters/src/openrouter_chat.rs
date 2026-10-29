@@ -425,9 +425,9 @@ impl OpenRouterPricingCache {
         let spawned = std::thread::Builder::new()
             .name("openrouter-pricing".to_owned())
             .spawn(move || {
-                if let Err(error) = cache.refresh() {
-                    eprintln!("could not refresh OpenRouter pricing: {error}");
-                }
+                // Skips the download when the warmer just finished one. With
+                // a price cached it never fails; it logs its own failures.
+                let _ = cache.keep_warm();
                 cache.refreshing.store(false, Ordering::Release);
             });
         // Without a worker thread nothing will clear the flag, so release it
