@@ -296,6 +296,10 @@ mod tests {
         }
     }
 
+    fn database_url() -> Option<String> {
+        std::env::var("TEST_DATABASE_URL").ok()
+    }
+
     #[test]
     fn ignored_members_tasks_stop_unless_they_are_admins() {
         use bot_adapters::chat_bans::ChatBanRepository;
@@ -319,21 +323,20 @@ mod tests {
         assert!(!ChatIgnoredMembers::new(unreachable(), admins(false)).ignored("-7", 9));
         // Private chats have no ignore list, so nothing is looked up.
         assert!(!ChatIgnoredMembers::new(unreachable(), admins(false)).ignored("9", 9));
-        if let Ok(database_url) = std::env::var("TEST_DATABASE_URL") {
-            let repository = || Box::new(ChatBanRepository::new(&database_url));
-            let chat_id = -100_900_301;
-            let group = chat_id.to_string();
-            let mut store = ChatBanRepository::new(&database_url);
-            let _cleared = ChatBanStore::unban(&mut store, chat_id, 9);
-            assert!(!ChatIgnoredMembers::new(repository(), admins(false)).ignored(&group, 9));
-            assert_eq!(
-                ChatBanStore::ban(&mut store, chat_id, 9, "Ana", 1),
-                Ok(true)
-            );
-            assert!(ChatIgnoredMembers::new(repository(), admins(false)).ignored(&group, 9));
-            assert!(!ChatIgnoredMembers::new(repository(), admins(true)).ignored(&group, 9));
-            let _cleared = ChatBanStore::unban(&mut store, chat_id, 9);
-        }
+        let Some(url) = database_url() else { return };
+        let repository = || Box::new(ChatBanRepository::new(&url));
+        let chat_id = -100_900_301;
+        let group = chat_id.to_string();
+        let mut store = ChatBanRepository::new(&url);
+        let _cleared = ChatBanStore::unban(&mut store, chat_id, 9);
+        assert!(!ChatIgnoredMembers::new(repository(), admins(false)).ignored(&group, 9));
+        assert_eq!(
+            ChatBanStore::ban(&mut store, chat_id, 9, "Ana", 1),
+            Ok(true)
+        );
+        assert!(ChatIgnoredMembers::new(repository(), admins(false)).ignored(&group, 9));
+        assert!(!ChatIgnoredMembers::new(repository(), admins(true)).ignored(&group, 9));
+        let _cleared = ChatBanStore::unban(&mut store, chat_id, 9);
     }
 
     #[test]
