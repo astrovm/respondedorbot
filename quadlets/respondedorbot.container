@@ -5,6 +5,7 @@ Requires=respondedorbot-redis.service respondedorbot-postgres.service
 
 [Container]
 Image=ghcr.io/astrovm/respondedorbot:latest
+ContainerName=respondedorbot
 EnvironmentFile=%h/respondedorbot/.env
 Environment=REDIS_HOST=respondedorbot-redis
 Environment=REDIS_PORT=6379

@@ -11,6 +11,8 @@ use thiserror::Error;
 use crate::http_client::error_chain;
 
 const SEARCH_URL: &str = "https://api.firecrawl.dev/v2/search";
+/// Firecrawl applies the limit to each source, so a search returns up to this
+/// many news results plus this many web results.
 const MAX_RESULTS: usize = 5;
 const MAX_ATTEMPTS: usize = 3;
 const API_TIMEOUT_MS: u64 = 60_000;
@@ -47,6 +49,9 @@ pub struct SearchResult {
     pub title: String,
     pub url: String,
     pub description: String,
+    /// Publication age of a news result, such as "2 hours ago".
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub date: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -109,7 +114,9 @@ impl FirecrawlTransport for ReqwestFirecrawlTransport {
             .json(&json!({
                 "query": request.query,
                 "limit": MAX_RESULTS,
-                "sources": ["web"],
+                // Web results rank by relevance, so a story from the last few
+                // hours loses to older pages; news results bring it in with a date.
+                "sources": ["news", "web"],
                 "timeout": API_TIMEOUT_MS,
             }))
             .send()
@@ -174,10 +181,17 @@ fn extract_results(payload: &Value) -> Vec<SearchResult> {
     let Some(data) = payload.get("data") else {
         return Vec::new();
     };
-    let raw_results = data
-        .as_object()
-        .and_then(|object| object.get("web"))
-        .unwrap_or(data);
+    let Some(sources) = data.as_object() else {
+        return source_results(data);
+    };
+    ["news", "web"]
+        .into_iter()
+        .filter_map(|source| sources.get(source))
+        .flat_map(source_results)
+        .collect()
+}
+
+fn source_results(raw_results: &Value) -> Vec<SearchResult> {
     let Some(raw_results) = raw_results.as_array() else {
         return Vec::new();
     };
@@ -193,10 +207,15 @@ fn extract_results(payload: &Value) -> Vec<SearchResult> {
             Some(SearchResult {
                 title: clean_text(object.get("title").unwrap_or(&Value::Null), 300),
                 url,
+                // News results name their summary `snippet`.
                 description: clean_text(
-                    object.get("description").unwrap_or(&Value::Null),
+                    object
+                        .get("description")
+                        .or_else(|| object.get("snippet"))
+                        .unwrap_or(&Value::Null),
                     MAX_DESCRIPTION_CHARS,
                 ),
+                date: clean_text(object.get("date").unwrap_or(&Value::Null), 100),
             })
         })
         .collect()
@@ -344,6 +363,7 @@ mod tests {
                     title: "Example Title".to_owned(),
                     url: "https://example.com".to_owned(),
                     description: "summary".to_owned(),
+                    date: String::new(),
                 }],
                 credits_used: json!(2),
                 request_id: json!("request-1"),
@@ -455,6 +475,40 @@ mod tests {
     }
 
     #[test]
+    fn news_results_come_first_with_their_date_and_snippet() {
+        let results = extract_results(&json!({"data": {
+            "web": [{"title": "Older page", "url": "https://example.com/old", "description": "web summary"}],
+            "news": [{"title": "Fresh story", "url": "https://example.com/new", "snippet": "news summary", "date": "2 hours ago", "position": 1}]
+        }}));
+        assert_eq!(
+            results,
+            vec![
+                super::SearchResult {
+                    title: "Fresh story".to_owned(),
+                    url: "https://example.com/new".to_owned(),
+                    description: "news summary".to_owned(),
+                    date: "2 hours ago".to_owned(),
+                },
+                super::SearchResult {
+                    title: "Older page".to_owned(),
+                    url: "https://example.com/old".to_owned(),
+                    description: "web summary".to_owned(),
+                    date: String::new(),
+                },
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(&results[1]).ok(),
+            Some(
+                json!({"title": "Older page", "url": "https://example.com/old", "description": "web summary"})
+            )
+        );
+        let legacy =
+            extract_results(&json!({"data": [{"url": "https://example.com", "title": "Flat"}]}));
+        assert_eq!(legacy.len(), 1);
+    }
+
+    #[test]
     fn reqwest_transport_sends_authenticated_bounded_search_payload() -> TestResult {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
@@ -466,7 +520,7 @@ mod tests {
             assert!(request.starts_with("POST /search HTTP/1.1"));
             assert!(request.contains("authorization: Bearer synthetic-key"));
             assert!(request.contains(
-                r#"{"limit":5,"query":"synthetic query","sources":["web"],"timeout":60000}"#
+                r#"{"limit":5,"query":"synthetic query","sources":["news","web"],"timeout":60000}"#
             ));
             let body = r#"{"success":true,"data":[]}"#;
             let written = write!(
