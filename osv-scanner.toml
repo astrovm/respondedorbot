@@ -7,3 +7,39 @@ reason = "ruzstd 0.3 comes from include-bytes-zstd (via ib-romaji), which only d
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0192"
 reason = "ttf-parser is unmaintained, not vulnerable. It comes from ab_glyph, which is already at its latest release, and only parses system fonts installed in the container image."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0395"
+reason = "zstd-safe 6.0 comes from include-bytes-zstd-macro (via ib-romaji), which only runs at build time to compress data embedded in the binary with a single-threaded Encoder, no dictionary and no experimental features. It never touches user input. include-bytes-zstd-macro 0.1.0 is the latest release and pins zstd ^0.12."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0397"
+reason = "zstd-safe 6.0 comes from include-bytes-zstd-macro (via ib-romaji), which only runs at build time to compress data embedded in the binary with a single-threaded Encoder, no dictionary and no experimental features. It never touches user input. include-bytes-zstd-macro 0.1.0 is the latest release and pins zstd ^0.12."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0399"
+reason = "zstd-safe 6.0 comes from include-bytes-zstd-macro (via ib-romaji), which only runs at build time to compress data embedded in the binary with a single-threaded Encoder, no dictionary and no experimental features. It never touches user input. include-bytes-zstd-macro 0.1.0 is the latest release and pins zstd ^0.12."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0400"
+reason = "zstd-safe 6.0 comes from include-bytes-zstd-macro (via ib-romaji), which only runs at build time to compress data embedded in the binary with a single-threaded Encoder, no dictionary and no experimental features. It never touches user input. include-bytes-zstd-macro 0.1.0 is the latest release and pins zstd ^0.12."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0401"
+reason = "zstd-safe 6.0 comes from include-bytes-zstd-macro (via ib-romaji), which only runs at build time to compress data embedded in the binary with a single-threaded Encoder, no dictionary and no experimental features. It never touches user input. include-bytes-zstd-macro 0.1.0 is the latest release and pins zstd ^0.12."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0402"
+reason = "zstd-safe 6.0 comes from include-bytes-zstd-macro (via ib-romaji), which only runs at build time to compress data embedded in the binary with a single-threaded Encoder, no dictionary and no experimental features. It never touches user input. include-bytes-zstd-macro 0.1.0 is the latest release and pins zstd ^0.12."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0403"
+reason = "zstd-safe 6.0 comes from include-bytes-zstd-macro (via ib-romaji), which only runs at build time to compress data embedded in the binary with a single-threaded Encoder, no dictionary and no experimental features. It never touches user input. include-bytes-zstd-macro 0.1.0 is the latest release and pins zstd ^0.12."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0404"
+reason = "zstd-safe 6.0 comes from include-bytes-zstd-macro (via ib-romaji), which only runs at build time to compress data embedded in the binary with a single-threaded Encoder, no dictionary and no experimental features. It never touches user input. include-bytes-zstd-macro 0.1.0 is the latest release and pins zstd ^0.12."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0406"
+reason = "zstd-safe 6.0 comes from include-bytes-zstd-macro (via ib-romaji), which only runs at build time to compress data embedded in the binary with a single-threaded Encoder, no dictionary and no experimental features. It never touches user input. include-bytes-zstd-macro 0.1.0 is the latest release and pins zstd ^0.12."
