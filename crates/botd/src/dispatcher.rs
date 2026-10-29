@@ -24406,13 +24406,15 @@ mod tests {
                         );
                         assert_eq!(bot.dispatch(update), Ok(DispatchOutcome::Handled));
                         let wire = topup_wire(&bot.actions.0);
-                        assert_eq!(wire[0].0, "sendMessage");
+                        // The Stars link is made first, then the menu goes out.
+                        assert_eq!(wire[0].0, "sendInvoice");
+                        assert_eq!(wire[1].0, "sendMessage");
                         assert_eq!(
-                            wire[0].1["reply_parameters"],
+                            wire[1].1["reply_parameters"],
                             json!({"ephemeral_message_id":71})
                         );
                         assert_eq!(
-                            wire[0].1["ephemeral_message_parameters"],
+                            wire[1].1["ephemeral_message_parameters"],
                             json!({"receiver_user_id":88})
                         );
                     }
