@@ -72,6 +72,16 @@ impl SchedulerStore for LoadFailingStore {
         Err("unexpected occurrence release".to_owned())
     }
 
+    fn hold_occurrence(
+        &mut self,
+        _task_id: &str,
+        _execution_id: &str,
+        _claim_token: &str,
+        _ttl: i64,
+    ) -> Result<bool, String> {
+        Err("unexpected occurrence hold".to_owned())
+    }
+
     fn complete_occurrence(
         &mut self,
         _completion: &SchedulerCompletion<'_>,

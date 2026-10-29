@@ -7,6 +7,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use thiserror::Error;
 
+use crate::http_client::error_chain;
 use crate::openrouter_chat::DEFAULT_OPENROUTER_BASE_URL;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,7 +78,7 @@ impl ReqwestGenerationTransport {
 }
 
 fn transport_error(error: reqwest::Error) -> GenerationError {
-    GenerationError::Transport(error.to_string())
+    GenerationError::Transport(error_chain(&error))
 }
 
 fn generation_url(base_url: &str) -> Result<String, GenerationError> {

@@ -64,6 +64,9 @@ The scheduler follows these execution rules:
 - skip occurrences beyond that grace period and advance to the first future
   occurrence;
 - allow at most one in-flight execution per task;
+- after a failed execution, keep the claim for a backoff as long as the
+  occurrence is already late, from 5 to 60 seconds, so no worker reruns it at
+  once;
 - keep recurring tasks after AI or credit failures, matching the current task
   executor;
 - remove successful one-shot tasks.
@@ -71,7 +74,8 @@ The scheduler follows these execution rules:
 The engine has two explicit modes. Verification mode reads and evaluates
 due tasks without leases, claims, execution, or writes. Authoritative mode must
 renew `task:scheduler:owner`, claims every occurrence before execution or skip,
-repairs stale due-index entries, releases claims for retryable execution, and
+repairs stale due-index entries, releases claims for retryable execution,
+holds claims through the backoff after failed execution, and
 advances state only through the compare-and-update Lua operation.
 
 Verification mode computes decisions without acquiring claims, executing tasks,

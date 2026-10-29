@@ -8,6 +8,8 @@ use serde_json::{Value, json};
 use std::sync::OnceLock;
 use thiserror::Error;
 
+use crate::http_client::error_chain;
+
 const SEARCH_URL: &str = "https://api.firecrawl.dev/v2/search";
 const MAX_RESULTS: usize = 5;
 const MAX_ATTEMPTS: usize = 3;
@@ -126,7 +128,7 @@ fn classify_reqwest_error(error: reqwest::Error) -> TransportError {
     } else if error.is_connect() {
         TransportError::Connection
     } else {
-        TransportError::Other(error.to_string())
+        TransportError::Other(error_chain(&error))
     }
 }
 

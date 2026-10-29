@@ -13,7 +13,7 @@ use std::sync::OnceLock;
 use thiserror::Error;
 use url::{Host, Url};
 
-use crate::http_client::BROWSER_USER_AGENT;
+use crate::http_client::{BROWSER_USER_AGENT, error_chain};
 
 pub const FETCH_MAX_BYTES: usize = 262_144;
 pub const FETCH_MAX_CHARS: usize = 12_000;
@@ -100,7 +100,7 @@ impl WebFetchTransport for ReqwestWebFetchTransport {
             .by_ref()
             .take(u64::try_from(FETCH_MAX_BYTES).unwrap_or(u64::MAX) + 1)
             .read_to_end(&mut body)
-            .map_err(|error| WebFetchTransportError::Other(error.to_string()))?;
+            .map_err(|error| WebFetchTransportError::Other(error_chain(&error)))?;
         let truncated = body.len() > FETCH_MAX_BYTES;
         body.truncate(FETCH_MAX_BYTES);
         Ok(WebFetchResponse {
@@ -119,7 +119,7 @@ fn classify_error(error: reqwest::Error) -> WebFetchTransportError {
     } else if error.is_connect() {
         WebFetchTransportError::Connection
     } else {
-        WebFetchTransportError::Other(error.to_string())
+        WebFetchTransportError::Other(error_chain(&error))
     }
 }
 
