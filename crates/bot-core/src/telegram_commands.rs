@@ -368,7 +368,15 @@ mod tests {
         ] {
             let commands = telegram_commands(locale);
             assert_eq!(commands.len(), 94);
-            let encoded = serde_json::to_string(&commands);
+            for command in &commands {
+                assert_eq!(command.is_ephemeral, command.command == "topup");
+            }
+            let catalog = commands
+                .iter()
+                .map(|c| serde_json::json!({"command":c.command,"description":c.description}))
+                .collect::<Vec<_>>();
+            // Keep the existing catalog snapshot independent of delivery flags.
+            let encoded = serde_json::to_string(&catalog);
             assert!(encoded.is_ok());
             let digest = encoded.map(|value| sha256_hex(&value));
             assert_eq!(digest.ok().as_deref(), Some(expected_hash));

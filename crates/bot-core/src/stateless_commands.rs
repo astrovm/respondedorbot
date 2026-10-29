@@ -572,4 +572,30 @@ mod tests {
             Some("This instance has no name configured")
         );
     }
+
+    #[test]
+    fn start_offers_credits_and_help_in_both_languages() {
+        for (locale, credits, help) in [
+            (Locale::Es, "Cargar créditos", "Ayuda"),
+            (Locale::En, "Add credits", "Help"),
+        ] {
+            let super::StatelessCommandPlan::Action(TelegramAction::SendMessage(message)) =
+                super::plan_stateless_command(ChatId(42), MessageId(7), "/start", "", locale)
+            else {
+                panic!("start menu missing")
+            };
+            let keyboard = message.reply_markup.unwrap();
+            assert_eq!(keyboard.inline_keyboard[0][0].text, credits);
+            assert_eq!(
+                keyboard.inline_keyboard[0][0].callback_data.as_deref(),
+                Some("topup:open")
+            );
+            assert_eq!(keyboard.inline_keyboard[0][1].text, help);
+            assert_eq!(
+                keyboard.inline_keyboard[0][1].callback_data.as_deref(),
+                Some("help:home")
+            );
+            assert!(keyboard.inline_keyboard.len() > 1);
+        }
+    }
 }

@@ -1690,10 +1690,8 @@ where
             .and_then(|chat| chat.get("type"))
             .and_then(Value::as_str)
             .unwrap_or("private");
-        let notice_user_id = message
-            .get("from")
-            .and_then(|u| u.get("id"))
-            .and_then(Value::as_i64);
+        let notice_user_id =
+            bot_core::telegram_payments::successful_payment_user(&Value::Object(message.clone()));
         let group_notice = is_group_chat_type(Some(chat_type));
         let payload_locale = message
             .get("successful_payment")
@@ -4595,12 +4593,7 @@ where
         let message = lightning_invoice_message(chat_id, &pack, &invoice, locale);
         if context.chat_type != "private" {
             self.actions
-                .execute(context.personal_action(TelegramAction::EditMessage {
-                    chat_id,
-                    message_id,
-                    text: message.text,
-                    reply_markup: message.reply_markup,
-                }))
+                .execute(context.personal_action(TelegramAction::SendMessage(message)))
                 .map_err(DispatchError::Action)?;
             self.answer_callback_best_effort(callback_id);
             return Ok(DispatchOutcome::Handled);
@@ -18139,6 +18132,7 @@ mod tests {
             [
                 TelegramAction::SendMessage(_),
                 TelegramAction::SendInvoice { payload, .. },
+                TelegramAction::EditMessage { .. },
                 TelegramAction::AnswerCallback {
                     text: Some(text),
                     show_alert: false,
@@ -18350,12 +18344,11 @@ mod tests {
             stored: Rc::clone(&stored),
             selected: Rc::new(RefCell::new(Vec::new())),
         }));
-        // The invoice never reached Telegram, so the update fails and the
-        // claim is released for the retry instead of blocking it.
-        assert!(matches!(
+        // Link creation failure answers privately and releases the claim.
+        assert_eq!(
             dispatcher.dispatch(callback_update("topup:p50", "private", Some("en"))),
-            Err(DispatchError::Action(_))
-        ));
+            Ok(DispatchOutcome::Handled)
+        );
         assert!(stored.borrow().is_empty());
         // Closing the pack menu afterwards still reaches Telegram.
         assert_eq!(
@@ -18746,10 +18739,7 @@ mod tests {
         };
         let mut dispatcher =
             lightning_dispatcher(Actions::default(), Some(FakeLightningCheckout::default()));
-        assert_eq!(
-            unavailable(&mut dispatcher, "topup:ln:p50", "group"),
-            "Open this in a private chat"
-        );
+        assert_eq!(unavailable(&mut dispatcher, "topup:ln:p50", "group"), "");
         assert_eq!(
             unavailable(&mut dispatcher, "topup:ln:nope", "private"),
             "That credit pack is invalid, choose another one"
@@ -18793,7 +18783,6 @@ mod tests {
         assert_eq!(
             callback_alerts(&dispatcher.actions.0),
             [
-                ("Cargá por privado, maestro".to_owned(), true),
                 ("Ese pack es fruta, elegí otro".to_owned(), true),
                 ("Listo, te dejé la factura".to_owned(), false),
                 ("Ya te dejé la factura más arriba".to_owned(), true),
@@ -19070,7 +19059,7 @@ mod tests {
         let message = first_sent(&group.actions.0);
         assert_eq!(
             message.text,
-            "AI balances\n\nYour personal balance: 30.00 credits (≈ 120 messages)\nGroup balance: 130.00 credits (≈ 520 messages)\n\nWhoever talks to me pays first; if they're short, the group does, up to 5 messages per hour per person.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
+            "AI balances\n\nYour personal balance: 30.00 credits (≈ 120 messages)\nGroup balance: 130.00 credits (≈ 520 messages)\n\nWhoever talks to me pays first; if they're short, the group does, up to 5 messages per hour per person.\n\nAdd credits: /topup\nMove to group: /transfer <amount>"
         );
     }
 
@@ -19107,7 +19096,7 @@ mod tests {
         assert_eq!(group.dispatch(group_update), Ok(DispatchOutcome::Handled));
         assert_eq!(
             first_sent(&group.actions.0).text,
-            "Saldos de IA\n\nTu saldo personal: 30.00 créditos (≈ 120 mensajes)\nSaldo del grupo: 130.00 créditos (≈ 520 mensajes)\n\nPaga primero el grupo, hasta 3 mensajes por hora a cada uno; si no, quien me habla.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
+            "Saldos de IA\n\nTu saldo personal: 30.00 créditos (≈ 120 mensajes)\nSaldo del grupo: 130.00 créditos (≈ 520 mensajes)\n\nPaga primero el grupo, hasta 3 mensajes por hora a cada uno; si no, quien me habla.\n\nCargar: /topup\nPasar al grupo: /transfer <monto>"
         );
     }
 
@@ -22357,13 +22346,16 @@ mod tests {
         );
         assert!(matches!(
             repeated.actions.0.as_slice(),
-            [TelegramAction::SendInvoice { .. }]
+            [
+                TelegramAction::SendInvoice { .. },
+                TelegramAction::EditMessage { .. }
+            ]
         ));
         assert_eq!(
             repeated.dispatch(uncalled_back("topup:p50", json!(88), "private")),
             Ok(DispatchOutcome::Handled)
         );
-        assert_eq!(repeated.actions.0.len(), 1);
+        assert_eq!(repeated.actions.0.len(), 2);
         assert_eq!(
             repeated.dispatch(callback_update_with_context(
                 "topup:p50",
@@ -24199,5 +24191,120 @@ mod tests {
             );
             assert!(dispatcher.actions.0.is_empty());
         }
+    }
+
+    fn ephemeral_topup_callback(data: &str, sender: i64, receiver: i64) -> IncomingUpdate {
+        let mut update = callback_update(data, "supergroup", Some("en"));
+        if let IncomingEvent::CallbackQuery(ref mut callback) = update.event {
+            callback["from"]["id"] = json!(sender);
+            callback["message"]
+                .as_object_mut()
+                .unwrap()
+                .remove("message_id");
+            callback["message"]["ephemeral_message_id"] = json!(71);
+            callback["message"]["receiver_user"] = json!({"id":receiver});
+        }
+        update
+    }
+
+    #[test]
+    fn group_topup_preserves_amount_and_only_requester_can_edit_or_checkout() {
+        for chat_type in ["group", "supergroup"] {
+            let mut bot = configured(english(), Actions::default());
+            let update = message_update("/topup 50", Some("en"), |m| {
+                m.chat_type = Some(chat_type.to_owned())
+            });
+            assert_eq!(bot.dispatch(update), Ok(DispatchOutcome::Handled));
+            assert!(
+                matches!(&bot.actions.0[0],TelegramAction::Ephemeral {receiver_user_id:88,ephemeral_message_id:None,action} if matches!(action.as_ref(),TelegramAction::SendMessage(m) if m.text.contains("50 credits") && m.reply_markup.as_ref().unwrap().inline_keyboard[2][0].callback_data.as_deref()==Some("topup:c50")))
+            );
+        }
+        let mut bot = configured(english(), Actions::default());
+        for data in ["topup:amt:50", "topup:c50", "topup:close", "topup:ln:p50"] {
+            assert_eq!(
+                bot.dispatch(ephemeral_topup_callback(data, 99, 88)),
+                Ok(DispatchOutcome::Handled)
+            );
+        }
+        assert!(
+            bot.actions
+                .0
+                .iter()
+                .all(|a| matches!(a, TelegramAction::AnswerCallback { .. }))
+        );
+        bot.actions.0.clear();
+        assert_eq!(
+            bot.dispatch(ephemeral_topup_callback("topup:amt:50", 88, 88)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(bot.actions.0.iter().any(|a|matches!(a,TelegramAction::Ephemeral{receiver_user_id:88,ephemeral_message_id:Some(71),action} if matches!(action.as_ref(),TelegramAction::EditMessage{text,..} if text.contains("50 credits")))));
+        bot.actions.0.clear();
+        assert_eq!(
+            bot.dispatch(ephemeral_topup_callback("topup:c50", 88, 88)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(bot.actions.0.iter().any(|a|matches!(a,TelegramAction::Ephemeral{receiver_user_id:88,ephemeral_message_id:Some(71),action} if matches!(action.as_ref(),TelegramAction::EditMessage{reply_markup:Some(k),..} if k.inline_keyboard[2][0].url.as_deref()==Some("https://t.me/$synthetic-checkout")))));
+        assert!(!bot.actions.0.iter().any(|a| matches!(
+            a,
+            TelegramAction::SendMessage(_) | TelegramAction::EditMessage { .. }
+        )));
+        bot.actions.0.clear();
+        assert_eq!(
+            bot.dispatch(ephemeral_topup_callback("topup:close", 88, 88)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(bot.actions.0.iter().any(|a|matches!(a,TelegramAction::Ephemeral{action,..} if matches!(action.as_ref(),TelegramAction::DeleteMessage{..}))));
+    }
+
+    #[test]
+    fn group_lightning_menu_edits_are_private_and_never_send_public_qr() {
+        let mut bot =
+            lightning_dispatcher(Actions::default(), Some(FakeLightningCheckout::default()));
+        assert_eq!(
+            bot.dispatch(ephemeral_topup_callback("topup:ln:p50", 88, 88)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(bot.actions.0.iter().any(|a|matches!(a,TelegramAction::Ephemeral{receiver_user_id:88,action,..} if matches!(action.as_ref(),TelegramAction::SendMessage(_)))));
+        assert!(!bot.actions.0.iter().any(|a| matches!(
+            a,
+            TelegramAction::SendPhoto { .. } | TelegramAction::SendMessage(_)
+        )));
+    }
+
+    #[test]
+    fn topup_start_button_opens_personal_menu_in_groups_and_private_chats() {
+        for chat in ["private", "group", "supergroup"] {
+            let mut bot = dispatcher();
+            assert_eq!(
+                bot.dispatch(callback_update("topup:open", chat, Some("en"))),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert!(bot.actions.0.iter().any(|a| match a {
+                TelegramAction::Ephemeral{receiver_user_id:88,action,..} => matches!(action.as_ref(),TelegramAction::SendMessage(m) if m.reply_markup.is_some()),
+                TelegramAction::SendMessage(m) => chat=="private" && m.reply_markup.is_some(),
+                _ => false,
+            }));
+        }
+    }
+
+    #[test]
+    fn group_payment_result_is_visible_only_to_the_payer() {
+        let records = Rc::new(RefCell::new(Vec::new()));
+        let mut bot = dispatcher().with_payment_sink(Box::new(Payments {
+            result: Ok(StarPaymentReceipt {
+                inserted: true,
+                user_balance: 5300,
+            }),
+            records: Rc::clone(&records),
+        }));
+        let mut update = successful_payment_update("p50", 42, 25, Some("en"));
+        if let IncomingEvent::SuccessfulPayment(ref mut m) = update.event {
+            m["chat"]["type"] = json!("supergroup");
+        }
+        assert_eq!(bot.dispatch(update), Ok(DispatchOutcome::Handled));
+        assert_eq!(records.borrow()[0].user_id, 42);
+        assert!(
+            matches!(&bot.actions.0[0],TelegramAction::Ephemeral{receiver_user_id:42,action,..} if matches!(action.as_ref(),TelegramAction::SendMessage(m) if m.text.contains("Top-up complete")))
+        );
     }
 }

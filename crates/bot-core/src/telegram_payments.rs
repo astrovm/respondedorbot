@@ -184,11 +184,11 @@ pub fn topup_menu(
     );
     let text = match locale {
         Locale::Es => format!(
-            "{}\n\n{amount} créditos ≈ {messages} mensajes de IA\nCambiá el monto o mandame el número",
+            "{}\n\n{amount} créditos ≈ {messages} mensajes de IA\nCambiá el monto o usá /topup <monto>",
             topup_menu_title(locale)
         ),
         Locale::En => format!(
-            "{}\n\n{amount} credits ≈ {messages} AI messages\nChange the amount or send me a number",
+            "{}\n\n{amount} credits ≈ {messages} AI messages\nChange the amount or use /topup <amount>",
             topup_menu_title(locale)
         ),
     };
@@ -408,14 +408,14 @@ pub fn balance_reply(
             let chat = balance_amount(chat, locale);
             let order = payer_order(config, locale);
             format!(
-                "Saldos de IA\n\nTu saldo personal: {user}\nSaldo del grupo: {chat}\n\n{order}\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
+                "Saldos de IA\n\nTu saldo personal: {user}\nSaldo del grupo: {chat}\n\n{order}\n\nCargar: /topup\nPasar al grupo: /transfer <monto>"
             )
         }
         (Some(chat), Locale::En) => {
             let chat = balance_amount(chat, locale);
             let order = payer_order(config, locale);
             format!(
-                "AI balances\n\nYour personal balance: {user}\nGroup balance: {chat}\n\n{order}\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
+                "AI balances\n\nYour personal balance: {user}\nGroup balance: {chat}\n\n{order}\n\nAdd credits: /topup\nMove to group: /transfer <amount>"
             )
         }
     }
@@ -725,7 +725,7 @@ pub fn evaluate_pre_checkout(
         pack_id.as_deref() == Some(pack.id.as_str())
             && currency == "XTR"
             && total_amount == pack.xtr_amount
-            && payload_user_id == Some(user_id)
+            && (payload_user_id == Some(user_id) || payload == format!("topup:{}", pack.id))
     });
     Ok(if valid {
         PreCheckoutDecision::Approve { query_id }
@@ -798,6 +798,28 @@ fn object_or_empty<'a>(
     }
 }
 
+/// Exported invoice receipts can be sent by the bot in the buyer's private
+/// chat. Never use that bot id as the payer or trust the payload to choose one.
+#[must_use]
+pub fn successful_payment_user(message: &Value) -> Option<i64> {
+    let sender = message.get("from")?;
+    if sender.get("is_bot").and_then(Value::as_bool) == Some(true) {
+        (message.get("chat")?.get("type")?.as_str()? == "private")
+            .then(|| {
+                message
+                    .get("chat")?
+                    .get("id")?
+                    .as_i64()
+                    .filter(|id| *id > 0)
+            })
+            .flatten()
+    } else {
+        sender
+            .get("id")
+            .and_then(crate::telegram_input::normalize_numeric_id)
+    }
+}
+
 pub fn evaluate_successful_payment(
     message: &Value,
     billing_available: bool,
@@ -815,12 +837,7 @@ pub fn evaluate_successful_payment(
     if !billing_available {
         return Ok(SuccessfulPaymentDecision::BillingUnavailable { chat_id });
     }
-    let Some(user_id) = message
-        .get("from")
-        .and_then(Value::as_object)
-        .and_then(|user| user.get("id"))
-        .and_then(crate::telegram_input::normalize_numeric_id)
-    else {
+    let Some(user_id) = successful_payment_user(&Value::Object(message.clone())) else {
         return Ok(SuccessfulPaymentDecision::Ignore);
     };
     let payment = object_or_empty(message.get("successful_payment"), &empty)?;
@@ -834,7 +851,7 @@ pub fn evaluate_successful_payment(
             pack_id.as_deref() == Some(pack.id.as_str())
                 && currency == "XTR"
                 && total_amount == pack.xtr_amount
-                && payload_user_id == Some(user_id)
+                && (payload_user_id == Some(user_id) || payload == format!("topup:{}", pack.id))
         });
     let Some(pack) = expected_pack.filter(|_| valid) else {
         return Ok(SuccessfulPaymentDecision::InvalidPayment {
@@ -1053,7 +1070,7 @@ mod tests {
         let private = sent(private).ok_or("private topup message")?;
         assert_eq!(
             private.text,
-            "Add credits\n\n100 credits ≈ 400 AI messages\nChange the amount or send me a number"
+            "Add credits\n\n100 credits ≈ 400 AI messages\nChange the amount or use /topup <amount>"
         );
         assert_eq!(private.reply_to_message_id, Some(MessageId(7)));
         let keyboard =
@@ -1104,14 +1121,14 @@ mod tests {
                 true,
                 "@mybot",
                 Locale::Es,
-                "La recarga va por privado: abrime en @mybot",
+                "Cargar créditos\n\n100 créditos ≈ 400 mensajes de IA\nCambiá el monto o usá /topup <monto>",
             ),
             (
                 "group",
                 true,
                 "",
                 Locale::En,
-                "Top-ups happen in private: send me a direct message",
+                "Add credits\n\n100 credits ≈ 400 AI messages\nChange the amount or use /topup <amount>",
             ),
             (
                 "private",
@@ -1137,9 +1154,7 @@ mod tests {
                 .reply_markup
                 .and_then(|markup| markup.inline_keyboard.into_iter().flatten().next())
                 .and_then(|button| button.url);
-            let expected_url = (chat_type == "group" && !bot_name.is_empty())
-                .then(|| "https://t.me/mybot".to_owned());
-            assert_eq!(url, expected_url);
+            assert_eq!(url, None);
         }
         assert_eq!(
             plan_topup_command(
@@ -1247,11 +1262,11 @@ mod tests {
         );
         assert_eq!(
             balance_reply(3_000, Some(13_000), &config, Locale::Es),
-            "Saldos de IA\n\nTu saldo personal: 30.00 créditos (≈ 120 mensajes)\nSaldo del grupo: 130.00 créditos (≈ 520 mensajes)\n\nPaga primero quien me habla; si no le alcanza, el grupo.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
+            "Saldos de IA\n\nTu saldo personal: 30.00 créditos (≈ 120 mensajes)\nSaldo del grupo: 130.00 créditos (≈ 520 mensajes)\n\nPaga primero quien me habla; si no le alcanza, el grupo.\n\nCargar: /topup\nPasar al grupo: /transfer <monto>"
         );
         assert_eq!(
             balance_reply(3_000, Some(13_000), &config, Locale::En),
-            "AI balances\n\nYour personal balance: 30.00 credits (≈ 120 messages)\nGroup balance: 130.00 credits (≈ 520 messages)\n\nWhoever talks to me pays first; if they're short, the group does.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
+            "AI balances\n\nYour personal balance: 30.00 credits (≈ 120 messages)\nGroup balance: 130.00 credits (≈ 520 messages)\n\nWhoever talks to me pays first; if they're short, the group does.\n\nAdd credits: /topup\nMove to group: /transfer <amount>"
         );
     }
 
@@ -1260,11 +1275,11 @@ mod tests {
         let config = payer_config(true, -1);
         assert_eq!(
             balance_reply(3_000, Some(13_000), &config, Locale::Es),
-            "Saldos de IA\n\nTu saldo personal: 30.00 créditos (≈ 120 mensajes)\nSaldo del grupo: 130.00 créditos (≈ 520 mensajes)\n\nPaga primero el grupo; si no le alcanza, quien me habla.\n\nCargar: /topup por privado\nPasar al grupo: /transfer <monto>"
+            "Saldos de IA\n\nTu saldo personal: 30.00 créditos (≈ 120 mensajes)\nSaldo del grupo: 130.00 créditos (≈ 520 mensajes)\n\nPaga primero el grupo; si no le alcanza, quien me habla.\n\nCargar: /topup\nPasar al grupo: /transfer <monto>"
         );
         assert_eq!(
             balance_reply(3_000, Some(13_000), &config, Locale::En),
-            "AI balances\n\nYour personal balance: 30.00 credits (≈ 120 messages)\nGroup balance: 130.00 credits (≈ 520 messages)\n\nThe group pays first; if it's short, whoever talks to me.\n\nAdd credits: /topup in private\nMove to group: /transfer <amount>"
+            "AI balances\n\nYour personal balance: 30.00 credits (≈ 120 messages)\nGroup balance: 130.00 credits (≈ 520 messages)\n\nThe group pays first; if it's short, whoever talks to me.\n\nAdd credits: /topup\nMove to group: /transfer <amount>"
         );
         // Private chats have no group balance, so the setting doesn't apply.
         assert_eq!(
@@ -1419,15 +1434,6 @@ mod tests {
                 Some(
                     "Los créditos de IA no están disponibles en este momento. Probá más tarde o avisale al admin",
                 ),
-                true,
-            ),
-            (
-                "topup:p50",
-                "group",
-                Some(42),
-                true,
-                Locale::En,
-                Some("Open this in a private chat"),
                 true,
             ),
             (
@@ -1607,7 +1613,7 @@ mod tests {
 
     #[test]
     fn approves_exact_current_and_legacy_invoices() {
-        for payload in ["topup:p50:42:en", "topup:p50"] {
+        for payload in ["topup:p50:42:en", "topup:p50:42", "topup:p50"] {
             assert_eq!(
                 evaluate_pre_checkout(
                     &json!({
@@ -1802,7 +1808,7 @@ mod tests {
         .ok_or("spanish catalog")?;
         assert_eq!(
             private.text,
-            "Cargar créditos\n\n100 créditos ≈ 400 mensajes de IA\nCambiá el monto o mandame el número"
+            "Cargar créditos\n\n100 créditos ≈ 400 mensajes de IA\nCambiá el monto o usá /topup <monto>"
         );
         let amount = private
             .reply_markup
@@ -1822,17 +1828,10 @@ mod tests {
             false,
         ))
         .ok_or("english redirect")?;
-        assert_eq!(group.text, "Top-ups happen in private: open @mybot");
-        let button = group
-            .reply_markup
-            .and_then(|markup| markup.inline_keyboard.into_iter().flatten().next())
-            .map(|button| (button.text, button.url));
+        assert!(group.text.starts_with("Add credits\n\n100 credits"));
         assert_eq!(
-            button,
-            Some((
-                "Open private chat".to_owned(),
-                Some("https://t.me/mybot".to_owned())
-            ))
+            group.reply_markup.as_ref().unwrap().inline_keyboard.len(),
+            4
         );
 
         let anonymous = sent(plan_topup_command(
@@ -1848,9 +1847,9 @@ mod tests {
         .ok_or("spanish redirect")?;
         assert_eq!(
             anonymous.text,
-            "La recarga va por privado: escribime por mensaje directo"
+            "Cargar créditos\n\n100 créditos ≈ 400 mensajes de IA\nCambiá el monto o usá /topup <monto>"
         );
-        assert!(anonymous.reply_markup.is_none());
+        assert!(anonymous.reply_markup.is_some());
         assert_eq!(
             sent(Some(TelegramAction::DeleteMessage {
                 chat_id: ChatId(1),
@@ -1918,20 +1917,12 @@ mod tests {
                 }),
             }))
         );
-        for (data, chat_type, locale, expected) in [
-            (
-                "topup:p50",
-                "group",
-                Locale::Es,
-                "Cargá por privado, maestro",
-            ),
-            (
-                "other:p50",
-                "private",
-                Locale::En,
-                "That credit pack is invalid, choose another one",
-            ),
-        ] {
+        for (data, chat_type, locale, expected) in [(
+            "other:p50",
+            "private",
+            Locale::En,
+            "That credit pack is invalid, choose another one",
+        )] {
             assert_eq!(
                 plan_topup_callback(
                     Some("cb"),
@@ -2036,5 +2027,31 @@ mod tests {
         assert!(
             evaluate_pre_checkout(&json!({"id":"checkout","from":""}), true, Some(&pack())).is_ok()
         );
+    }
+
+    #[test]
+    fn exported_invoice_receipts_bind_to_the_private_chat_buyer() {
+        let mut message = json!({"chat":{"id":42,"type":"private"},"from":{"id":999,"is_bot":true},"successful_payment":{"invoice_payload":"topup:p50:42:en","currency":"XTR","total_amount":25,"telegram_payment_charge_id":"synthetic-charge"}});
+        assert!(matches!(
+            evaluate_default_successful_payment(&message, true).unwrap(),
+            SuccessfulPaymentDecision::Record { user_id: 42, .. }
+        ));
+        message["chat"]["id"] = json!(43);
+        assert!(matches!(
+            evaluate_default_successful_payment(&message, true).unwrap(),
+            SuccessfulPaymentDecision::InvalidPayment { .. }
+        ));
+        message["chat"]["type"] = json!("group");
+        assert_eq!(
+            evaluate_default_successful_payment(&message, true).unwrap(),
+            SuccessfulPaymentDecision::Ignore
+        );
+        for payload in ["topup:p50:garbage", "topup:p50:43:en"] {
+            let query = json!({"id":"checkout","from":{"id":42},"invoice_payload":payload,"currency":"XTR","total_amount":25});
+            assert!(matches!(
+                evaluate_pre_checkout(&query, true, Some(&pack())).unwrap(),
+                PreCheckoutDecision::InvalidPayment { .. }
+            ));
+        }
     }
 }
