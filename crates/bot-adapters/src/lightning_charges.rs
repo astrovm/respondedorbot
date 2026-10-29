@@ -19,6 +19,7 @@ pub struct NewLightningCharge {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingLightningCharge {
+    pub user_id: i64,
     pub charge_id: String,
     pub chat_id: i64,
     pub message_id: Option<i64>,
@@ -83,7 +84,7 @@ impl BillingRepository {
             Ok(transaction
                 .query(
                     "SELECT charge_id, chat_id, message_id, locale, \
-                        expires_at + make_interval(mins => $2) < NOW() \
+                        expires_at + make_interval(mins => $2) < NOW(), user_id \
                      FROM lightning_charges WHERE status = 'unpaid' \
                      ORDER BY created_at, charge_id LIMIT $1",
                     &[&limit, &grace_minutes],
@@ -95,6 +96,7 @@ impl BillingRepository {
                     message_id: row.get(2),
                     locale: row.get(3),
                     overdue: row.get(4),
+                    user_id: row.get(5),
                 })
                 .collect())
         })
@@ -217,6 +219,7 @@ mod tests {
             ours,
             [
                 PendingLightningCharge {
+                    user_id: USER,
                     charge_id: "synthetic-ln-old".to_owned(),
                     chat_id: USER,
                     message_id: None,
@@ -224,6 +227,7 @@ mod tests {
                     overdue: true,
                 },
                 PendingLightningCharge {
+                    user_id: USER,
                     charge_id: "synthetic-ln-paid".to_owned(),
                     chat_id: USER,
                     message_id: Some(55),

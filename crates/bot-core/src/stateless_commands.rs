@@ -99,6 +99,29 @@ pub fn plan_stateless_command_with_reply(
     locale: Locale,
 ) -> StatelessCommandPlan {
     let parsed = parse_command(message_text, bot_name);
+    if parsed.command == "/start" && parsed.message_text.is_empty() {
+        let (text, mut keyboard) = render_help_page(locale, "home");
+        keyboard.inline_keyboard.insert(
+            0,
+            vec![
+                crate::menu_ui::button(
+                    crate::telegram_payments::topup_menu_title(locale),
+                    "topup:open",
+                ),
+                crate::menu_ui::button(
+                    match locale {
+                        Locale::Es => "Ayuda",
+                        Locale::En => "Help",
+                    },
+                    "help:home",
+                ),
+            ],
+        );
+        let mut message = SendMessage::new(chat_id, &text);
+        message.reply_markup = Some(keyboard);
+        message.reply_to_message_id = Some(message_id);
+        return StatelessCommandPlan::Action(TelegramAction::SendMessage(message));
+    }
     if parsed.command == "/help" {
         let (text, keyboard) = render_help_page(locale, "home");
         let mut message = SendMessage::new(chat_id, &text);
@@ -548,5 +571,25 @@ mod tests {
             instance(Locale::En, None).as_deref(),
             Some("This instance has no name configured")
         );
+    }
+
+    #[test]
+    fn start_offers_credits_and_help_in_both_languages() {
+        for (locale, credits, help) in [
+            (Locale::Es, "Cargar créditos", "Ayuda"),
+            (Locale::En, "Add credits", "Help"),
+        ] {
+            let plan =
+                super::plan_stateless_command(ChatId(42), MessageId(7), "/start", "", locale);
+            assert!(matches!(plan,
+                StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+                if message.reply_markup.as_ref().is_some_and(|keyboard|
+                    keyboard.inline_keyboard.len() > 1
+                    && keyboard.inline_keyboard[0][0].text == credits
+                    && keyboard.inline_keyboard[0][0].callback_data.as_deref() == Some("topup:open")
+                    && keyboard.inline_keyboard[0][1].text == help
+                    && keyboard.inline_keyboard[0][1].callback_data.as_deref() == Some("help:home"))
+            ));
+        }
     }
 }

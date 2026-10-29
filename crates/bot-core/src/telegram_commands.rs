@@ -17,6 +17,8 @@ struct CommandGroup {
 pub struct TelegramCommand {
     pub command: &'static str,
     pub description: &'static str,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub is_ephemeral: bool,
 }
 
 const COMMAND_GROUPS: &[CommandGroup] = &[
@@ -220,6 +222,7 @@ pub fn telegram_commands(locale: Locale) -> Vec<TelegramCommand> {
                 Locale::En => group.description_en,
             };
             group.aliases.iter().map(move |command| TelegramCommand {
+                is_ephemeral: *command == "topup",
                 command,
                 description,
             })
@@ -289,6 +292,7 @@ pub fn primary_telegram_commands(locale: Locale) -> Vec<TelegramCommand> {
                 .iter()
                 .find(|group| group.aliases.contains(command))
                 .map(|group| TelegramCommand {
+                    is_ephemeral: *command == "topup",
                     command,
                     description: match locale {
                         Locale::Es => group.description_es,
@@ -364,7 +368,15 @@ mod tests {
         ] {
             let commands = telegram_commands(locale);
             assert_eq!(commands.len(), 94);
-            let encoded = serde_json::to_string(&commands);
+            for command in &commands {
+                assert_eq!(command.is_ephemeral, command.command == "topup");
+            }
+            let catalog = commands
+                .iter()
+                .map(|c| serde_json::json!({"command":c.command,"description":c.description}))
+                .collect::<Vec<_>>();
+            // Keep the existing catalog snapshot independent of delivery flags.
+            let encoded = serde_json::to_string(&catalog);
             assert!(encoded.is_ok());
             let digest = encoded.map(|value| sha256_hex(&value));
             assert_eq!(digest.ok().as_deref(), Some(expected_hash));
@@ -548,6 +560,26 @@ mod tests {
                     scope: CommandScope::Chat(ChatId(-42)),
                 } if commands[0].command == "ask" && commands[0].description == expected
             ));
+        }
+    }
+
+    #[test]
+    fn primary_command_menu_marks_only_topup_ephemeral() {
+        for locale in [Locale::Es, Locale::En] {
+            let commands = super::primary_telegram_commands(locale);
+            assert_eq!(
+                commands
+                    .iter()
+                    .filter(|c| c.is_ephemeral)
+                    .map(|c| c.command)
+                    .collect::<Vec<_>>(),
+                ["topup"]
+            );
+            assert!(
+                commands
+                    .iter()
+                    .any(|c| c.command == "help" && !c.is_ephemeral)
+            );
         }
     }
 }

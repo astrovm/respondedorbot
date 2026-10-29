@@ -34,6 +34,7 @@ pub mod reconciliation;
 pub mod runtime;
 pub mod scheduler;
 pub mod task_executor;
+pub mod task_payer;
 pub mod task_service;
 pub mod task_tools;
 pub mod telegram_stream;

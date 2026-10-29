@@ -119,9 +119,11 @@ jobs:
           cargo llvm-cov --locked --workspace --all-features --no-report
           # Check exported source lines: LLVM's summary can count phantom
           # uncovered lines across generic instantiations (rust-lang/rust#137524).
-          cargo llvm-cov report -p bot-core --fail-uncovered-lines 0 --show-missing-lines
-          cargo llvm-cov report -p bot-adapters --fail-uncovered-lines 0 --show-missing-lines
-          cargo llvm-cov report -p botd --fail-uncovered-lines 0 --show-missing-lines
+          status=0
+          for package in bot-core bot-adapters botd; do
+            cargo llvm-cov report -p "$package" --fail-uncovered-lines 0 --show-missing-lines || status=$?
+          done
+          exit "$status"
 
   fuzz:
     # Short smoke run of every fuzz target; long runs stay local. On main this

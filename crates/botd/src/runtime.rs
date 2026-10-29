@@ -1258,6 +1258,7 @@ mod tests {
             update_id,
             event: IncomingEvent::Message(Box::new(IncomingMessage {
                 message_id: None,
+                ephemeral_message_id: None,
                 chat_id: Some(ChatId(chat_id)),
                 chat_type: Some("group".to_owned()),
                 chat_title: None,

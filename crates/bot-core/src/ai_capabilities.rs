@@ -22,13 +22,13 @@ const CAPABILITIES_ES: &str = r#"CAPACIDADES DEL BOT:
 - /transcribe, /transcript, /describe: transcribo voice/audio/video/video_note o subtítulos de YouTube y describo fotos, stickers o GIF respondiendo al mensaje; también puedo procesar media cuando me hablan
 - links: arreglo links de X/Twitter, Bluesky, Instagram y Reddit según config; leo metadata, tweets y transcripts de YouTube como contexto
 - encuestas: si me lo piden mando una encuesta de Telegram y después puedo leer los votos y quién votó; en encuestas creadas por usuarios solo veo los votos cuando me responden a la encuesta, nunca quién votó
-- /tarea, /tareas, /task, /tasks: agendo recordatorios y tareas recurrentes por lenguaje natural; cualquiera de los comandos lista sin texto y crea con texto
+- /tarea, /tareas, /task, /tasks: agendo recordatorios y tareas recurrentes por lenguaje natural; cualquiera de los comandos lista sin texto y crea con texto; en un grupo cada ejecución se paga como un mensaje de IA de quien la creó (sus créditos personales y los del grupo, según quién paga primero y su límite por hora); si un admin apaga "Tareas con créditos del grupo" en /config, solo se usan los créditos personales de quien la creó; en privado siempre son los personales
 - /resumen, /summary, /tldr: resumo el chat, guardo resumen acumulado y recupero mensajes relevantes para responder con contexto
 - /convertbase, /random, /time, /comando, /command, /instance: random, conversión de bases, comandos Telegram, timestamp e instancia
 - /gm, /gn: gif random de buenos días o buenas noches
-- /config, /configs, /settings: config por chat: idioma, links, followups, timezone, random replies y límite gratis por usuario/hora
-- /language, /idioma: cambiá entre español e inglés
-- /topup, /balance, /charges, /history, /gastos, /transfer: saldo, historial de gastos, topup con Telegram Stars y transferencia de créditos personales al grupo
+- /config, /configs, /settings: config por chat: idioma, links, followups, timezone, replies al azar, quién paga primero, mensajes por hora con créditos del grupo y tareas con créditos del grupo
+- /language, /idioma: cambiá entre español, inglés o automático
+- /topup, /balance, /charges, /history, /gastos, /transfer: créditos, historial de gastos, topup con Telegram Stars y transferencia de créditos personales al grupo
 - /printcredits, /creditlog (solo admin): mint y log de créditos, solo admin
 - /help: muestro comandos y features"#;
 
@@ -52,13 +52,13 @@ const CAPABILITIES_EN: &str = r#"BOT CAPABILITIES:
 - /transcribe, /transcript, /describe: transcribe audio, video, or YouTube captions; describe images, stickers, or GIFs
 - links: fix supported social links and read linked content as context
 - polls: when asked, I send a Telegram poll and can later read its votes and who voted; for polls users create, I only see counts when someone replies to the poll, never who voted
-- /tarea, /tareas, /task, /tasks: create reminders and recurring tasks with natural language
+- /tarea, /tareas, /task, /tasks: create reminders and recurring tasks with natural language; in a group each run is paid like an AI message from whoever created it (their personal credits and the group's, following who pays first and their hourly limit); if an admin turns off "Tareas con créditos del grupo" (group credits for tasks) in /config, only the creator's personal credits are used; in private chats it is always personal
 - /resumen, /summary, /tldr: summarize chats and retrieve relevant prior messages
 - /convertbase, /random, /time, /comando, /command, /instance: random selection, base conversion, Telegram commands, timestamps, and instance info
 - /gm, /gn: random good-morning and good-night GIFs
-- /config, /configs, /settings: all chat settings, including language, links, timezone, replies, and group limits
-- /language, /idioma: switch between Spanish and English
-- /topup, /balance, /charges, /history, /gastos, /transfer: balance, expense history, Telegram Stars top-ups, and group transfers
+- /config, /configs, /settings: all chat settings, including language, links, timezone, replies, who pays first, messages per hour on group credits, and tasks on group credits
+- /language, /idioma: switch between Spanish, English or automatic
+- /topup, /balance, /charges, /history, /gastos, /transfer: credits, expense history, Telegram Stars top-ups, and group transfers
 - /printcredits, /creditlog (admin only): mint and inspect credits; admin only
 - /help: show commands and features"#;
 

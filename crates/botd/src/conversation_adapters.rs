@@ -31,7 +31,9 @@ use crate::conversation::{
     ReserveDecision, ReserveDenial, ReserveRequest, SettlementRequest,
 };
 use crate::error_text;
+use crate::native_ai::{TaskCharge, TaskCreditStore};
 use crate::reconciliation::ActiveOperationRegistry;
+use crate::task_payer::TaskPayer;
 
 const COMPACTION_THRESHOLD: usize = 40;
 // The configured history size is a small constant, far inside the Redis range.
@@ -588,8 +590,13 @@ fn reservation_cap_key(request: &ReserveRequest, chat_id: i64) -> String {
     creditless_cap_key(&origin_chat_id, request.user_id)
 }
 
-impl ConversationBilling for PostgresConversationBilling {
-    fn reserve(&mut self, request: ReserveRequest) -> Result<ReserveDecision, String> {
+impl PostgresConversationBilling {
+    /// Reserves like a message does and also returns why the database
+    /// refused, which scheduled tasks need to tell a replay from a shortfall.
+    fn reserve_detailed(
+        &mut self,
+        request: ReserveRequest,
+    ) -> Result<(ReserveDecision, Option<String>), String> {
         if self
             .onboarding_checked_operations
             .insert(request.operation_id.clone())
@@ -621,15 +628,18 @@ impl ConversationBilling for PostgresConversationBilling {
                 // The member used up what the group pays for this hour and
                 // their own credits don't cover the rest.
                 self.release_operation_state(&request.operation_id);
-                return Ok(ReserveDecision {
-                    authorized: false,
-                    user_balance: result.user_balance,
-                    chat_balance: result.chat_balance,
-                    source: None,
-                    denial: Some(ReserveDenial::CreditlessHourlyCap {
-                        limit: request.creditless_user_hourly_limit,
-                    }),
-                });
+                return Ok((
+                    ReserveDecision {
+                        authorized: false,
+                        user_balance: result.user_balance,
+                        chat_balance: result.chat_balance,
+                        source: None,
+                        denial: Some(ReserveDenial::CreditlessHourlyCap {
+                            limit: request.creditless_user_hourly_limit,
+                        }),
+                    },
+                    None,
+                ));
             }
             // The group's balance ran out, so the member's own credits pay
             // and the message no longer counts toward the group's hourly limit.
@@ -656,15 +666,18 @@ impl ConversationBilling for PostgresConversationBilling {
             {
                 // Keep personal holds until settlement: media or tools may
                 // already have incurred usage before this extension.
-                return Ok(ReserveDecision {
-                    authorized: false,
-                    user_balance: result.user_balance,
-                    chat_balance: result.chat_balance,
-                    source: None,
-                    denial: Some(ReserveDenial::CreditlessHourlyCap {
-                        limit: request.creditless_user_hourly_limit,
-                    }),
-                });
+                return Ok((
+                    ReserveDecision {
+                        authorized: false,
+                        user_balance: result.user_balance,
+                        chat_balance: result.chat_balance,
+                        source: None,
+                        denial: Some(ReserveDenial::CreditlessHourlyCap {
+                            limit: request.creditless_user_hourly_limit,
+                        }),
+                    },
+                    None,
+                ));
             }
             result =
                 self.move_operation_to_fallback(&request, amount, result, PayerSource::Chat)?;
@@ -719,15 +732,18 @@ impl ConversationBilling for PostgresConversationBilling {
                     )
                     .map_err(error_text)?;
                 self.release_operation_state(&request.operation_id);
-                return Ok(ReserveDecision {
-                    authorized: false,
-                    user_balance: refund.user_balance,
-                    chat_balance: refund.chat_balance,
-                    source,
-                    denial: Some(ReserveDenial::CreditlessHourlyCap {
-                        limit: request.creditless_user_hourly_limit,
-                    }),
-                });
+                return Ok((
+                    ReserveDecision {
+                        authorized: false,
+                        user_balance: refund.user_balance,
+                        chat_balance: refund.chat_balance,
+                        source,
+                        denial: Some(ReserveDenial::CreditlessHourlyCap {
+                            limit: request.creditless_user_hourly_limit,
+                        }),
+                    },
+                    None,
+                ));
             }
         }
 
@@ -744,13 +760,48 @@ impl ConversationBilling for PostgresConversationBilling {
                 active_operations.mark_active(&request.operation_id);
             }
         }
-        Ok(ReserveDecision {
-            authorized: result.ok,
-            user_balance: result.user_balance,
-            chat_balance: result.chat_balance,
-            source,
-            denial: None,
-        })
+        Ok((
+            ReserveDecision {
+                authorized: result.ok,
+                user_balance: result.user_balance,
+                chat_balance: result.chat_balance,
+                source,
+                denial: None,
+            },
+            result.reason,
+        ))
+    }
+
+    /// Settles one operation once. A zero-cost settlement gives the hourly
+    /// allowance back first, so a Redis failure leaves the settlement
+    /// replayable.
+    fn settle_operation(
+        &mut self,
+        (user_id, chat_id): (i64, Option<i64>),
+        operation_id: &str,
+        actual_credit_units: i64,
+        metadata: &Map<String, Value>,
+    ) -> Result<bool, String> {
+        if actual_credit_units == 0 {
+            self.refund_creditless_cap(operation_id)?;
+        }
+        self.repository
+            .settle_ai_operation_once(
+                user_id,
+                chat_id,
+                operation_id,
+                actual_credit_units,
+                metadata,
+            )
+            .map(|result| result.applied)
+            .map_err(error_text)
+    }
+}
+
+impl ConversationBilling for PostgresConversationBilling {
+    fn reserve(&mut self, request: ReserveRequest) -> Result<ReserveDecision, String> {
+        self.reserve_detailed(request)
+            .map(|(decision, _reason)| decision)
     }
 
     fn record_segment(&mut self, request: ProviderSegmentRequest) -> Result<(), String> {
@@ -787,22 +838,14 @@ impl ConversationBilling for PostgresConversationBilling {
                 copy_pricing_metadata(&mut metadata, &pricing);
             }
             if pricing_complete {
-                // Refund the ephemeral hourly allowance before committing the
-                // durable zero-cost settlement. A Redis failure then leaves the
-                // database operation replayable, and the Redis operation marker
-                // makes a successful refund safe to retry.
-                if request.actual_credit_units == 0 {
-                    self.refund_creditless_cap(&operation_id)?;
-                }
-                self.repository
-                    .settle_ai_operation_once(
-                        request.user_id,
-                        request.chat_id,
-                        &operation_id,
-                        request.actual_credit_units,
-                        &metadata,
-                    )
-                    .map_err(error_text)?;
+                // The Redis operation marker makes a successful allowance
+                // refund safe to retry.
+                self.settle_operation(
+                    (request.user_id, request.chat_id),
+                    &operation_id,
+                    request.actual_credit_units,
+                    &metadata,
+                )?;
             }
             Ok(())
         })();
@@ -829,6 +872,83 @@ impl ConversationBilling for PostgresConversationBilling {
             .get_balance("user", user_id)
             .map(Some)
             .map_err(error_text)
+    }
+}
+
+/// Scheduled tasks reserve and settle through the same code as messages, so
+/// the hourly allowance and who-pays-first rules can't drift apart.
+impl TaskCreditStore for PostgresConversationBilling {
+    type Error = String;
+
+    fn charge(
+        &mut self,
+        user_id: i64,
+        payer: &TaskPayer,
+        amount: i32,
+        metadata: &Map<String, Value>,
+        (idempotency_key, operation_id): (&str, &str),
+    ) -> Result<TaskCharge, Self::Error> {
+        let (decision, reason) = self.reserve_detailed(ReserveRequest {
+            user_id,
+            chat_id: payer.paying_chat(),
+            operation_id: operation_id.to_owned(),
+            reservation_id: idempotency_key.to_owned(),
+            amount: i64::from(amount),
+            creditless_user_hourly_limit: payer.hourly_limit,
+            group_pays_first: payer.group_pays_first,
+            metadata: metadata.clone(),
+        })?;
+        if !decision.authorized {
+            self.release_operation_state(operation_id);
+        }
+        Ok(TaskCharge {
+            ok: decision.authorized,
+            reason,
+            user_balance: decision.user_balance,
+            chat_balance: decision.chat_balance,
+            hourly_limit: decision
+                .denial
+                .map(|ReserveDenial::CreditlessHourlyCap { limit }| limit),
+        })
+    }
+
+    fn record_segment(
+        &mut self,
+        user_id: i64,
+        chat_id: Option<i64>,
+        metadata: &Value,
+    ) -> Result<bool, Self::Error> {
+        self.repository
+            .record_ai_provider_usage(user_id, chat_id, metadata)
+            .map_err(error_text)
+    }
+
+    fn list_segments(
+        &mut self,
+        user_id: i64,
+        operation_id: &str,
+    ) -> Result<Vec<Value>, Self::Error> {
+        self.repository
+            .list_ai_provider_segments(user_id, operation_id)
+            .map_err(error_text)
+    }
+
+    fn settle_once(
+        &mut self,
+        user_id: i64,
+        chat_id: Option<i64>,
+        operation_id: &str,
+        actual_credit_units: i64,
+        metadata: &Map<String, Value>,
+    ) -> Result<bool, Self::Error> {
+        let applied = self.settle_operation(
+            (user_id, chat_id),
+            operation_id,
+            actual_credit_units,
+            metadata,
+        );
+        self.release_operation_state(operation_id);
+        applied
     }
 }
 

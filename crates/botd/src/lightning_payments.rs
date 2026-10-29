@@ -200,7 +200,18 @@ where
                 // The credit is already committed; a failed notice only
                 // loses the message, never the credits.
                 self.actions
-                    .execute(TelegramAction::SendMessage(message))
+                    .execute(if charge.chat_id < 0 {
+                        message.reply_to_message_id = None;
+                        TelegramAction::Ephemeral {
+                            receiver_user_id: charge.user_id,
+                            ephemeral_message_id: None,
+                            callback_query_id: None,
+                            reply_to_ephemeral_message_id: None,
+                            action: Box::new(TelegramAction::SendMessage(message)),
+                        }
+                    } else {
+                        TelegramAction::SendMessage(message)
+                    })
                     .map(|_receipt| ())
                     .map_err(|error| format!("payment notice: {error}"))
             }
@@ -483,6 +494,7 @@ mod tests {
         overdue: bool,
     ) -> PendingLightningCharge {
         PendingLightningCharge {
+            user_id: 42,
             charge_id: charge_id.to_owned(),
             chat_id: 88,
             message_id,
@@ -759,6 +771,37 @@ mod tests {
         let pending = LightningLedger::pending(&mut ledger);
         assert!(
             pending.is_ok_and(|pending| pending.iter().all(|charge| charge.charge_id != dead_id))
+        );
+    }
+
+    #[test]
+    fn group_payment_notice_is_ephemeral_for_the_charge_owner() {
+        let actions = FakeActions::default();
+        let sent = Arc::clone(&actions.sent);
+        let mut charge = pending("paid-group", "en", Some(5), false);
+        charge.chat_id = -7;
+        let provider = FakeProvider {
+            statuses: HashMap::from([("paid-group".into(), Ok(ChargeStatus::Paid))]),
+            ..FakeProvider::default()
+        };
+        let ledger = FakeLedger {
+            pending: vec![charge],
+            settlements: HashMap::from([(
+                "paid-group".into(),
+                Some(LightningSettlement {
+                    credits_awarded: 5000,
+                    user_balance: 7500,
+                }),
+            )]),
+            ..FakeLedger::default()
+        };
+        assert_eq!(
+            LightningPaymentWorker::new(provider, ledger, actions).run_once(1),
+            Ok(())
+        );
+        let sent = sent.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(
+            matches!(sent.as_slice(),[TelegramAction::Ephemeral{receiver_user_id:42,action,..}] if matches!(action.as_ref(),TelegramAction::SendMessage(m) if m.chat_id==ChatId(-7) && m.reply_to_message_id.is_none() && m.text.contains("75.00")))
         );
     }
 }

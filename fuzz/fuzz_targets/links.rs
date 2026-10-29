@@ -3,8 +3,7 @@
 #![no_main]
 
 use bot_core::links::{
-    has_replaceable_link, replace_social_links, select_unique_urls, trim_detected_url,
-    utf16_slice,
+    has_replaceable_link, replace_social_links, select_unique_urls, trim_detected_url, utf16_slice,
 };
 use libfuzzer_sys::fuzz_target;
 

@@ -134,6 +134,56 @@ fn disable_link_preview(payload: &mut Map<String, Value>) {
 
 fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
     let (endpoint, method, params, json_payload) = match action {
+        TelegramAction::Ephemeral {
+            receiver_user_id,
+            ephemeral_message_id,
+            callback_query_id,
+            reply_to_ephemeral_message_id,
+            action,
+        } => {
+            let mut prepared = prepare(*action)?;
+            if prepared.json_payload.is_none() {
+                prepared.json_payload = prepared.params.take();
+                prepared.method = Method::POST;
+            }
+            let payload = prepared
+                .json_payload
+                .as_mut()
+                .and_then(Value::as_object_mut)
+                .ok_or(ActionError::InvalidAction)?;
+            prepared.endpoint = match prepared.endpoint {
+                "sendMessage" => {
+                    payload.remove("reply_parameters");
+                    let mut parameters = json!({"receiver_user_id": receiver_user_id});
+                    if let Some(id) = callback_query_id {
+                        parameters["callback_query_id"] = json!(id);
+                    }
+                    payload.insert("ephemeral_message_parameters".into(), parameters);
+                    if let Some(id) = reply_to_ephemeral_message_id {
+                        payload.insert(
+                            "reply_parameters".into(),
+                            json!({"ephemeral_message_id": id}),
+                        );
+                    }
+                    "sendMessage"
+                }
+                "editMessageText" | "deleteMessage" => {
+                    payload.remove("message_id");
+                    payload.insert("receiver_user_id".into(), json!(receiver_user_id));
+                    payload.insert(
+                        "ephemeral_message_id".into(),
+                        json!(ephemeral_message_id.ok_or(ActionError::InvalidAction)?),
+                    );
+                    if prepared.endpoint == "deleteMessage" {
+                        "deleteEphemeralMessage"
+                    } else {
+                        "editEphemeralMessageText"
+                    }
+                }
+                _ => return Err(ActionError::InvalidAction),
+            };
+            return Ok(prepared);
+        }
         TelegramAction::SetCommands {
             commands,
             language_code,
@@ -354,7 +404,11 @@ fn parse_response(
             .result
             .as_ref()
             .and_then(Value::as_object)
-            .and_then(|result| result.get("message_id"))
+            .and_then(|result| {
+                result
+                    .get("ephemeral_message_id")
+                    .or_else(|| result.get("message_id"))
+            })
             .and_then(Value::as_i64);
         return Ok(ActionOutcome::Completed { message_id });
     }
@@ -383,12 +437,59 @@ fn parse_response(
     })
 }
 
+/// Create a native Telegram checkout link without publishing an invoice.
+pub fn create_invoice_link_with<T: TelegramTransport>(
+    transport: &T,
+    token: &str,
+    invoice: TelegramAction,
+) -> Result<Option<String>, ActionError> {
+    if !matches!(invoice, TelegramAction::SendInvoice { .. }) {
+        return Err(ActionError::InvalidAction);
+    }
+    let mut prepared = prepare(invoice)?;
+    prepared
+        .json_payload
+        .as_mut()
+        .and_then(Value::as_object_mut)
+        .ok_or(ActionError::InvalidAction)?
+        .remove("chat_id");
+    let outcome = send_with(
+        transport,
+        &TelegramRequest {
+            token: token.to_owned(),
+            endpoint: "createInvoiceLink".into(),
+            method: Method::POST,
+            params: None,
+            json_payload: prepared.json_payload,
+            timeout: Duration::from_secs(ACTION_TIMEOUT_SECONDS),
+        },
+    );
+    let TelegramHttpOutcome::Response { status_code, body } = outcome else {
+        return Ok(None);
+    };
+    if !(200..300).contains(&status_code) {
+        return Ok(None);
+    }
+    let envelope: ApiEnvelope =
+        serde_json::from_str(&body).map_err(|_| ActionError::InvalidResponse)?;
+    Ok(envelope.result.filter(|_| envelope.ok).and_then(|v| {
+        v.as_str()
+            .filter(|s| s.starts_with("https://t.me/$"))
+            .map(str::to_owned)
+    }))
+}
+
 pub fn execute_with<T: TelegramTransport>(
     transport: &T,
     token: &str,
     action: TelegramAction,
 ) -> Result<ActionOutcome, ActionError> {
     let edited_message_id = match &action {
+        TelegramAction::Ephemeral {
+            ephemeral_message_id,
+            action,
+            ..
+        } if matches!(action.as_ref(), TelegramAction::EditMessage { .. }) => *ephemeral_message_id,
         TelegramAction::EditMessage { message_id, .. }
         | TelegramAction::EditMessageNoPreview { message_id, .. }
         | TelegramAction::EditMessagePhoto { message_id, .. } => Some(message_id.0),
@@ -1434,5 +1535,256 @@ mod tests {
                 .iter()
                 .any(|(key, _)| key == "reply_parameters")
         );
+    }
+
+    #[test]
+    fn ephemeral_actions_never_use_public_edit_or_delete_endpoints()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let wrap = |action, id| TelegramAction::Ephemeral {
+            receiver_user_id: 42,
+            ephemeral_message_id: id,
+            callback_query_id: None,
+            reply_to_ephemeral_message_id: None,
+            action: Box::new(action),
+        };
+        let sent = prepare(wrap(
+            TelegramAction::SendMessage(SendMessage::new(ChatId(-7), "private menu")),
+            None,
+        ))?;
+        assert_eq!(sent.endpoint, "sendMessage");
+        let payload = sent.json_payload.ok_or("missing send payload")?;
+        assert_eq!(
+            payload["ephemeral_message_parameters"],
+            serde_json::json!({"receiver_user_id":42})
+        );
+        assert!(payload.get("reply_parameters").is_none());
+        for (inner, endpoint) in [
+            (
+                TelegramAction::EditMessage {
+                    chat_id: ChatId(-7),
+                    message_id: MessageId(0),
+                    text: "50 credits".into(),
+                    reply_markup: None,
+                },
+                "editEphemeralMessageText",
+            ),
+            (
+                TelegramAction::DeleteMessage {
+                    chat_id: ChatId(-7),
+                    message_id: MessageId(0),
+                },
+                "deleteEphemeralMessage",
+            ),
+        ] {
+            assert!(matches!(
+                prepare(wrap(inner.clone(), None)),
+                Err(ActionError::InvalidAction)
+            ));
+            let prepared = prepare(wrap(inner, Some(9)))?;
+            assert_eq!(prepared.endpoint, endpoint);
+            let payload = prepared.json_payload.ok_or("missing edit payload")?;
+            assert_eq!(payload["receiver_user_id"], 42);
+            assert_eq!(payload["ephemeral_message_id"], 9);
+            assert!(payload.get("message_id").is_none());
+        }
+        assert!(matches!(
+            prepare(wrap(
+                TelegramAction::SendTyping {
+                    chat_id: ChatId(-7)
+                },
+                None
+            )),
+            Err(ActionError::InvalidAction)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn ephemeral_send_wire_metadata_and_rejection_never_publish()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (callback, reply) in [(Some("cb-eligible"), None), (None, Some(71)), (None, None)] {
+            let mut message = SendMessage::new(ChatId(-7), "personal invoice");
+            message.reply_to_message_id = Some(MessageId(999));
+            let action = TelegramAction::Ephemeral {
+                receiver_user_id: 42,
+                ephemeral_message_id: Some(123),
+                callback_query_id: callback.map(str::to_owned),
+                reply_to_ephemeral_message_id: reply,
+                action: Box::new(TelegramAction::SendMessage(message)),
+            };
+            let wire =
+                transport(r#"{"ok":true,"result":{"message_id":0,"ephemeral_message_id":81}}"#);
+            assert_eq!(
+                execute_with(&wire, "synthetic", action.clone())?,
+                ActionOutcome::Completed {
+                    message_id: Some(81)
+                }
+            );
+            let requests = wire.requests.borrow();
+            assert_eq!(requests.len(), 1);
+            let payload = requests[0].json_payload.as_ref().ok_or("payload")?;
+            assert_eq!(
+                payload["ephemeral_message_parameters"]["receiver_user_id"],
+                42
+            );
+            assert_eq!(
+                payload["ephemeral_message_parameters"].get("callback_query_id"),
+                callback.map(|_| serde_json::json!("cb-eligible")).as_ref()
+            );
+            assert_eq!(
+                payload.get("reply_parameters"),
+                reply
+                    .map(|_| serde_json::json!({"ephemeral_message_id":71}))
+                    .as_ref()
+            );
+            assert!(payload.get("ephemeral_message_id").is_none());
+            for description in [
+                "eligible action required",
+                "Bad Request: message is not modified",
+            ] {
+                let denied = transport_with_status(
+                    400,
+                    &serde_json::json!({"ok":false,"description":description}).to_string(),
+                );
+                assert!(matches!(
+                    execute_with(&denied, "synthetic", action.clone())?,
+                    ActionOutcome::Failed { .. }
+                ));
+                assert_eq!(denied.requests.borrow().len(), 1);
+            }
+        }
+        for delete in [false, true] {
+            let action = TelegramAction::Ephemeral {
+                receiver_user_id: 42,
+                ephemeral_message_id: Some(123),
+                callback_query_id: Some("cb-eligible".into()),
+                reply_to_ephemeral_message_id: Some(71),
+                action: Box::new(if delete {
+                    TelegramAction::DeleteMessage {
+                        chat_id: ChatId(-7),
+                        message_id: MessageId(999),
+                    }
+                } else {
+                    TelegramAction::EditMessage {
+                        chat_id: ChatId(-7),
+                        message_id: MessageId(999),
+                        text: "amount".into(),
+                        reply_markup: None,
+                    }
+                }),
+            };
+            let prepared = prepare(action.clone())?;
+            let payload = prepared.json_payload.ok_or("payload")?;
+            assert_eq!(payload["ephemeral_message_id"], 123);
+            assert!(payload.get("ephemeral_message_parameters").is_none());
+            assert!(payload.get("reply_parameters").is_none());
+            if !delete {
+                let wire = transport_with_status(
+                    400,
+                    r#"{"ok":false,"description":"Bad Request: message is not modified"}"#,
+                );
+                assert_eq!(
+                    execute_with(&wire, "synthetic", action)?,
+                    ActionOutcome::Completed {
+                        message_id: Some(123)
+                    }
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn invoice_links_preserve_stars_terms_and_fail_closed() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let invoice = TelegramAction::SendInvoice {
+            chat_id: ChatId(-7),
+            title: "50 credits".into(),
+            description: "Personal credits".into(),
+            payload: "topup:c50:42:en".into(),
+            currency: "XTR".into(),
+            prices: vec![LabeledPrice {
+                label: "50 credits".into(),
+                amount: 25,
+            }],
+        };
+        for (status, body, expected) in [
+            (
+                200,
+                r#"{"ok":true,"result":"https://t.me/$checkout"}"#,
+                Some("https://t.me/$checkout"),
+            ),
+            (400, r#"{"ok":false}"#, None),
+            (
+                200,
+                r#"{"ok":false,"result":"https://t.me/$checkout"}"#,
+                None,
+            ),
+            (200, r#"{"ok":true,"result":true}"#, None),
+            (200, r#"{"ok":true,"result":"https://evil.example/"}"#, None),
+        ] {
+            let transport = transport_with_status(status, body);
+            assert_eq!(
+                super::create_invoice_link_with(&transport, "synthetic", invoice.clone())?
+                    .as_deref(),
+                expected
+            );
+            let requests = transport.requests.borrow();
+            assert_eq!(requests[0].endpoint, "createInvoiceLink");
+            let payload = requests[0]
+                .json_payload
+                .as_ref()
+                .ok_or("missing invoice payload")?;
+            assert!(payload.get("chat_id").is_none());
+            assert_eq!(payload["payload"], "topup:c50:42:en");
+            assert_eq!(payload["currency"], "XTR");
+            assert_eq!(payload["prices"][0]["amount"], 25);
+            assert_eq!(payload["provider_token"], "");
+        }
+        assert!(
+            super::create_invoice_link_with(
+                &transport_with_status(200, "bad json"),
+                "synthetic",
+                invoice
+            )
+            .is_err()
+        );
+        assert!(
+            super::create_invoice_link_with(
+                &transport_with_status(200, "{}"),
+                "synthetic",
+                TelegramAction::SendTyping {
+                    chat_id: ChatId(42)
+                }
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn invoice_link_transport_failure_has_no_public_fallback() {
+        let transport = Transport {
+            response: RefCell::new(Some(Err(TransportFailureKind::Connection))),
+            requests: RefCell::new(Vec::new()),
+            multipart_requests: RefCell::new(Vec::new()),
+        };
+        let invoice = TelegramAction::SendInvoice {
+            chat_id: ChatId(42),
+            title: "50 credits".into(),
+            description: "Personal credits".into(),
+            payload: "topup:c50:42:en".into(),
+            currency: "XTR".into(),
+            prices: vec![LabeledPrice {
+                label: "50 credits".into(),
+                amount: 25,
+            }],
+        };
+        assert_eq!(
+            super::create_invoice_link_with(&transport, "synthetic", invoice),
+            Ok(None)
+        );
+        assert_eq!(transport.requests.borrow().len(), 1);
+        assert_eq!(transport.requests.borrow()[0].endpoint, "createInvoiceLink");
     }
 }

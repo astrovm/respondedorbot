@@ -12,6 +12,7 @@ use botd::conversation::{
 use botd::conversation_adapters::PostgresConversationBilling;
 use botd::native_ai::TaskCreditStore;
 use botd::reconciliation::ActiveOperationRegistry;
+use botd::task_payer::TaskPayer;
 use serde_json::{Map, json};
 
 fn redis_endpoint() -> Option<RedisEndpoint> {
@@ -241,18 +242,20 @@ fn postgres_and_redis_enforce_onboarding_replay_cap_and_refund_policy() -> Resul
         ("operation_id".to_owned(), json!(task_operation)),
         ("usage_tag".to_owned(), json!("scheduled_task")),
     ]);
+    let mut task_billing = PostgresConversationBilling::new(&database_url);
     let charged = TaskCreditStore::charge(
-        &repository,
+        &mut task_billing,
         task_user_id,
+        &TaskPayer::PERSONAL,
         20,
         &task_metadata,
-        &format!("{task_operation}:reserve"),
-        &task_operation,
+        (&format!("{task_operation}:reserve"), &task_operation),
     )?;
     assert!(charged.ok);
     assert!(TaskCreditStore::record_segment(
-        &repository,
+        &mut task_billing,
         task_user_id,
+        None,
         &json!({
             "operation_id": task_operation,
             "segment_id": format!("{task_operation}:segment"),
@@ -265,16 +268,34 @@ fn postgres_and_redis_enforce_onboarding_replay_cap_and_refund_policy() -> Resul
         }),
     )?);
     assert_eq!(
-        TaskCreditStore::list_segments(&repository, task_user_id, &task_operation)?.len(),
+        TaskCreditStore::list_segments(&mut task_billing, task_user_id, &task_operation)?.len(),
         1
     );
     assert!(TaskCreditStore::settle_once(
-        &repository,
+        &mut task_billing,
         task_user_id,
+        None,
         &task_operation,
         5,
         &Map::from_iter([("reason".to_owned(), json!("synthetic_task"))]),
     )?);
+
+    // A denied task charge must not leave its operation marked active.
+    let denied_operation = format!("{task_operation}:denied");
+    let denied_active = ActiveOperationRegistry::default();
+    let mut denied_billing = PostgresConversationBilling::new(&database_url)
+        .with_active_operations(denied_active.clone());
+    let denied = TaskCreditStore::charge(
+        &mut denied_billing,
+        task_user_id,
+        &TaskPayer::PERSONAL,
+        1_000_000,
+        &Map::new(),
+        (&format!("{denied_operation}:reserve"), &denied_operation),
+    )?;
+    assert!(!denied.ok);
+    assert_eq!(denied.hourly_limit, None);
+    assert!(!denied_active.is_active(&denied_operation));
 
     let cap_reader = RedisCreditlessCap::new(&endpoint)?;
     let cap_key = creditless_cap_key(&chat_id.to_string(), user_id);
@@ -292,18 +313,21 @@ fn postgres_and_redis_enforce_onboarding_replay_cap_and_refund_policy() -> Resul
     assert!(active.is_active(&base_operation));
     assert_eq!(cap_reader.count(&cap_key)?, Some(1));
 
-    billing.record_segment(ProviderSegmentRequest {
-        user_id,
-        chat_id: Some(chat_id),
-        operation_id: base_operation.clone(),
-        segment_id: format!("{base_operation}:segment"),
-        segment: json!({
-            "kind": "chat",
-            "model": "unknown/synthetic-model",
-            "usage": {"cost": "0.000001"},
-            "metadata": {"provider": "openrouter"}
-        }),
-    })?;
+    ConversationBilling::record_segment(
+        &mut billing,
+        ProviderSegmentRequest {
+            user_id,
+            chat_id: Some(chat_id),
+            operation_id: base_operation.clone(),
+            segment_id: format!("{base_operation}:segment"),
+            segment: json!({
+                "kind": "chat",
+                "model": "unknown/synthetic-model",
+                "usage": {"cost": "0.000001"},
+                "metadata": {"provider": "openrouter"}
+            }),
+        },
+    )?;
     assert!(matches!(billing.personal_balance(user_id)?, Some(0 | 300)));
 
     let replay = billing.reserve(base)?;

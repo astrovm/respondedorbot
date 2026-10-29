@@ -145,7 +145,8 @@ use crate::read_only_tool::read_only_tool;
 use crate::reconciliation::ActiveOperationRegistry;
 use crate::runtime::{DurableParallelUpdateHandler, PollingRuntime, UpdateSource};
 use crate::task_tools::{
-    RandomTaskIdSource, TaskCancelTool, TaskListTool, TaskSetTool, TaskToolContext,
+    BillingTaskFunds, RandomTaskIdSource, TaskCancelTool, TaskListTool, TaskSetTool,
+    TaskToolContext,
 };
 use crate::tool_requests::{ExternalToolbox, ValidatedNativeToolPorts};
 use crate::web_fetch_tool::WebFetchTool;
@@ -1613,6 +1614,7 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 fn telegram_action_chat_id(action: &TelegramAction) -> Option<i64> {
     match action {
+        TelegramAction::Ephemeral { action, .. } => telegram_action_chat_id(action),
         TelegramAction::SendMessage(message) => Some(message.chat_id.0),
         TelegramAction::SendDocument { chat_id, .. }
         | TelegramAction::SendAnimation { chat_id, .. }
@@ -2622,6 +2624,15 @@ impl<Transport: TelegramTransport> ActionSink for TelegramActionSink<Transport> 
         ))
     }
 
+    fn invoice_link(&mut self, action: TelegramAction) -> Result<Option<String>, Self::Error> {
+        bot_adapters::telegram_actions::create_invoice_link_with(
+            &self.transport,
+            &self.token,
+            action,
+        )
+        .map_err(Into::into)
+    }
+
     fn try_invoice(&mut self, action: TelegramAction) -> Result<bool, Self::Error> {
         Ok(matches!(
             self.execute_with_retry(action)?,
@@ -3144,7 +3155,24 @@ impl ConversationToolFactory for ProductionToolFactory {
                 Box::new({
                     let tool = TaskSetTool::new(
                         RedisTaskStore::new(&self.redis_endpoint).map_err(error_text)?,
-                        BillingRepository::new(&self.database_url),
+                        {
+                            let funds = BillingTaskFunds::new(
+                                &self.database_url,
+                                RedisCreditlessCap::new(&self.redis_endpoint)
+                                    .map_err(error_text)?,
+                            );
+                            match &self.telegram_token {
+                                Some(token) => {
+                                    funds.with_admin_check(Box::new(TelegramGroupAuthorizer::new(
+                                        ReqwestTelegramTransport::new()
+                                            .map_err(|kind| format!("{kind:?}"))?,
+                                        token,
+                                        &self.redis_endpoint,
+                                    )))
+                                }
+                                None => funds,
+                            }
+                        },
                         RandomTaskIdSource,
                         current_unix_timestamp,
                         TaskToolContext {
@@ -5886,6 +5914,16 @@ mod tests {
             "token",
         );
         assert_eq!(delivered.try_invoice(invoice()), Ok(true));
+        let mut linked = TelegramActionSink::new(
+            transport(200, r#"{"ok":true,"result":"https://t.me/$synthetic"}"#),
+            "token",
+        );
+        assert_eq!(
+            linked.invoice_link(invoice()),
+            Ok(Some("https://t.me/$synthetic".to_owned()))
+        );
+        let mut rejected = TelegramActionSink::new(transport(400, r#"{"ok":false}"#), "token");
+        assert_eq!(rejected.invoice_link(invoice()), Ok(None));
     }
 
     #[test]
@@ -9257,6 +9295,27 @@ mod tests {
             Err(TelegramActionSinkError::Transport(
                 TransportFailureKind::Request
             ))
+        );
+    }
+
+    #[test]
+    fn action_sink_delivers_ephemeral_messages_without_public_fallback() {
+        let mut sink = TelegramActionSink::new(
+            transport(200, r#"{"ok":true,"result":{"ephemeral_message_id":71}}"#),
+            "synthetic",
+        );
+        assert!(
+            sink.execute(TelegramAction::Ephemeral {
+                receiver_user_id: 42,
+                ephemeral_message_id: None,
+                callback_query_id: None,
+                reply_to_ephemeral_message_id: None,
+                action: Box::new(TelegramAction::SendMessage(SendMessage::new(
+                    ChatId(-7),
+                    "personal menu"
+                )))
+            })
+            .is_ok()
         );
     }
 }

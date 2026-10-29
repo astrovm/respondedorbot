@@ -21,6 +21,9 @@ pub struct ChatConfig {
     pub group_pays_first: bool,
     /// Don't answer replies to the bot that carry only media, with no text.
     pub ignore_media_replies: bool,
+    /// Pay scheduled task runs in a group like an AI message from the member
+    /// who created them (hourly allowance, who pays first, then the group).
+    pub group_pays_tasks: bool,
 }
 
 impl Default for ChatConfig {
@@ -35,6 +38,7 @@ impl Default for ChatConfig {
             creditless_user_hourly_limit: DEFAULT_CREDITLESS_USER_HOURLY_LIMIT,
             group_pays_first: false,
             ignore_media_replies: false,
+            group_pays_tasks: true,
         }
     }
 }
@@ -134,6 +138,10 @@ impl ChatConfig {
                 values.get("ignore_media_replies"),
                 defaults.ignore_media_replies,
             ),
+            group_pays_tasks: coerce_bool(
+                values.get("group_pays_tasks"),
+                defaults.group_pays_tasks,
+            ),
         })
     }
 }
@@ -161,7 +169,8 @@ mod tests {
                 "ai_random_replies": "enabled",
                 "creditless_user_hourly_limit": 9.8,
                 "group_pays_first": "on",
-                "ignore_media_replies": 1
+                "ignore_media_replies": 1,
+                "group_pays_tasks": "off"
             })),
             Ok(ChatConfig {
                 language: "en".to_owned(),
@@ -173,6 +182,7 @@ mod tests {
                 creditless_user_hourly_limit: 9,
                 group_pays_first: true,
                 ignore_media_replies: true,
+                group_pays_tasks: false,
             })
         );
     }
@@ -215,6 +225,7 @@ mod tests {
                 creditless_user_hourly_limit: 3,
                 group_pays_first: false,
                 ignore_media_replies: false,
+                group_pays_tasks: true,
             })
         );
         let mixed = ChatConfig::from_json(&json!({

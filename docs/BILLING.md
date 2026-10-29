@@ -18,6 +18,24 @@ Rust is the sole billing reader and writer. PostgreSQL remains the system of rec
 - `/transfer` and `/printcredits` carry an operation id from their Telegram message, so a retried update applies them once. A `/transfer` that replies to a person moves personal credits to that person instead of the group.
 - Reconciliation reads durable operation and segment state and cannot duplicate completed settlement.
 
+## Adding personal credits
+
+- `/topup` opens the full amount and payment-method menu. `/topup 50` starts at 50 credits.
+- Group and supergroup menus, their controls, Lightning invoices, and payment notices are ephemeral and visible only to the requester. Private chats retain the same controls and typed amount replies.
+- Non-admin bots can reply within Telegram's 15-second window to an ephemeral command (using its incoming ephemeral ID) or a button press (using its callback query ID). The **Add credits** start button provides an eligible trigger even on a public start message.
+- An ordinary public `/topup` command has no eligible reply target: sending its personal menu requires the bot to be a group administrator. Use the start button or the configured ephemeral `/topup` command otherwise. Late replies and asynchronous group payment notices also require administrator rights, and ephemeral delivery is never guaranteed. Rejected sends never fall back to a public message; credited payments remain credited if their notice fails.
+- Telegram Stars checkout uses `createInvoiceLink` and a native checkout URL button. It never publishes an invoice to the group or redirects the buyer to a private chat.
+- New Stars payloads bind the amount and intended buyer. Checkout and settlement reject another payer or a changed amount. Exact legacy pack-only payloads credit the actual payer; malformed user bindings are rejected.
+- Exported-invoice bot-origin receipts identify the buyer through the positive private chat id, never through the bot sender id or the payload alone. Charge-id ledger writes remain idempotent.
+- Plain `/start` includes **Cargar créditos** and **Ayuda**, or **Add credits** and **Help**, alongside the existing help controls.
+
+## Scheduled tasks
+
+- A task run is paid like an AI message from the member who created it. Private chats use personal credits only.
+- In a group, the chat setting "Tareas con créditos del grupo" (`group_pays_tasks`, default on) decides whether the group's credits can pay. When on, the run follows `group_pays_first`, counts toward the member's hourly allowance (`creditless_user_hourly_limit`, or their `/limit` override), and goes member then group, or group then member.
+- The setting is read each time a task runs, so turning it off also changes existing tasks. A run already reserved still settles against the payer that held it.
+- `task_set` checks credits when the task is created with the same rules: personal plus group credits when on, personal only when off. The message says which case applies.
+
 ## Compatibility
 
 Schema creation and upgrades are additive and idempotent. Existing account scopes, ledger metadata, timestamps, usage tags, and payment identifiers remain readable. Rollbacks use an immutable previously verified container image and never permit two billing writers at once.
