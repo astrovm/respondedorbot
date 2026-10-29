@@ -15,7 +15,9 @@ use bot_core::locale::Locale;
 use bot_core::scheduled_tasks::ScheduledTask;
 use thiserror::Error;
 
-use crate::composition::{ProductionToolFactory, TelegramActionSink, TelegramDeliveryCoordinator};
+use crate::composition::{
+    ProductionToolFactory, TelegramActionSink, TelegramDeliveryCoordinator, TelegramGroupAuthorizer,
+};
 use crate::conversation_adapters::PostgresConversationBilling;
 use crate::firecrawl_tool::FirecrawlScheduledWebSearch;
 use crate::native_ai::{
@@ -169,7 +171,15 @@ pub fn build_task_scheduler(
             .with_creditless_cap(RedisCreditlessCap::new(options.redis_endpoint)?),
         PRIMARY_CHAT_MODEL,
     )
-    .with_payer_policy(Box::new(ChatTaskPayerPolicy::new(options.database_url)))
+    .with_payer_policy(Box::new(
+        ChatTaskPayerPolicy::new(options.database_url).with_admin_check(Box::new(
+            TelegramGroupAuthorizer::new(
+                ReqwestTelegramTransport::new().map_err(TaskServiceError::Telegram)?,
+                options.telegram_token,
+                options.redis_endpoint,
+            ),
+        )),
+    ))
     .with_openrouter_pricing(pricing)
     .with_web_search(firecrawl_api_key.is_some());
     let action_transport = ReqwestTelegramTransport::new().map_err(TaskServiceError::Telegram)?;

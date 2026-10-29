@@ -3145,10 +3145,24 @@ impl ConversationToolFactory for ProductionToolFactory {
                 Box::new({
                     let tool = TaskSetTool::new(
                         RedisTaskStore::new(&self.redis_endpoint).map_err(error_text)?,
-                        BillingTaskFunds::new(
-                            &self.database_url,
-                            RedisCreditlessCap::new(&self.redis_endpoint).map_err(error_text)?,
-                        ),
+                        {
+                            let funds = BillingTaskFunds::new(
+                                &self.database_url,
+                                RedisCreditlessCap::new(&self.redis_endpoint)
+                                    .map_err(error_text)?,
+                            );
+                            match &self.telegram_token {
+                                Some(token) => {
+                                    funds.with_admin_check(Box::new(TelegramGroupAuthorizer::new(
+                                        ReqwestTelegramTransport::new()
+                                            .map_err(|kind| format!("{kind:?}"))?,
+                                        token,
+                                        &self.redis_endpoint,
+                                    )))
+                                }
+                                None => funds,
+                            }
+                        },
                         RandomTaskIdSource,
                         current_unix_timestamp,
                         TaskToolContext {

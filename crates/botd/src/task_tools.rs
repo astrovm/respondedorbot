@@ -22,6 +22,7 @@ use chrono::{DateTime, SecondsFormat, Utc, Weekday};
 use serde_json::Value;
 
 use crate::chat_tool_loop::ToolExecutionResult;
+use crate::dispatcher::GroupAuthorizer;
 use crate::native_ai::estimate_task_reserve_credit_units;
 use crate::task_payer::{
     ChatTaskPayerPolicy, TaskFunds, TaskPayer, TaskPayerPolicy, task_shortfall,
@@ -82,6 +83,15 @@ impl BillingTaskFunds {
             cap,
             policy: ChatTaskPayerPolicy::new(database_url),
         }
+    }
+}
+
+impl BillingTaskFunds {
+    /// Chat admins keep the group's limit, like their messages do.
+    #[must_use]
+    pub fn with_admin_check(mut self, admins: Box<dyn GroupAuthorizer + Send>) -> Self {
+        self.policy = self.policy.with_admin_check(admins);
+        self
     }
 }
 

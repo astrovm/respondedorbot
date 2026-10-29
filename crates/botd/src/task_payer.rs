@@ -6,6 +6,7 @@ use bot_core::chat_config::ChatConfig;
 use bot_core::credit_units::{CreditUnits, display_credit_units};
 use bot_core::locale::Locale;
 
+use crate::dispatcher::GroupAuthorizer;
 use crate::error_text;
 use crate::task_tools::task_credit_insufficient;
 
@@ -67,6 +68,7 @@ pub trait TaskPayerPolicy: Send {
 pub struct ChatTaskPayerPolicy {
     config: ChatConfigRepository,
     limits: ChatLimitRepository,
+    admins: Option<Box<dyn GroupAuthorizer + Send>>,
 }
 
 impl ChatTaskPayerPolicy {
@@ -75,8 +77,31 @@ impl ChatTaskPayerPolicy {
         Self {
             config: ChatConfigRepository::new(database_url),
             limits: ChatLimitRepository::new(database_url),
+            admins: None,
         }
     }
+
+    /// Chat admins keep the group's limit, like their messages do.
+    #[must_use]
+    pub fn with_admin_check(mut self, admins: Box<dyn GroupAuthorizer + Send>) -> Self {
+        self.admins = Some(admins);
+        self
+    }
+}
+
+/// A member's own /limit replaces the group's limit, except for chat admins
+/// (and when the admin lookup fails the member limit stays, as for messages).
+/// The lookup only happens when the member has an own limit.
+fn member_limit(
+    chat_id: &str,
+    user_id: i64,
+    own_limit: Option<i64>,
+    admins: Option<&mut dyn GroupAuthorizer>,
+) -> Option<i64> {
+    let own_limit = own_limit?;
+    let is_admin =
+        admins.is_some_and(|admins| admins.authorize(chat_id, &user_id.to_string()).is_admin);
+    if is_admin { None } else { Some(own_limit) }
 }
 
 impl TaskPayerPolicy for ChatTaskPayerPolicy {
@@ -93,6 +118,14 @@ impl TaskPayerPolicy for ChatTaskPayerPolicy {
             .limits
             .hourly_limit(group, user_id)
             .map_err(error_text)?;
+        let own_limit = member_limit(
+            chat_id,
+            user_id,
+            own_limit,
+            self.admins
+                .as_mut()
+                .map(|admins| &mut **admins as &mut dyn GroupAuthorizer),
+        );
         Ok(TaskPayer::for_group(group, &config, own_limit))
     }
 }
@@ -202,6 +235,50 @@ mod tests {
             group,
             hourly_used,
         }
+    }
+
+    struct Admins {
+        is_admin: bool,
+        asked: Vec<(String, String)>,
+    }
+
+    impl crate::dispatcher::GroupAuthorizer for Admins {
+        fn authorize(
+            &mut self,
+            chat_id: &str,
+            user_id: &str,
+        ) -> crate::dispatcher::GroupAuthorizationDecision {
+            self.asked.push((chat_id.to_owned(), user_id.to_owned()));
+            crate::dispatcher::GroupAuthorizationDecision {
+                is_admin: self.is_admin,
+                diagnostics: Vec::new(),
+            }
+        }
+    }
+
+    #[test]
+    fn admins_keep_the_group_limit_and_members_keep_their_own() {
+        let mut admin = Admins {
+            is_admin: true,
+            asked: Vec::new(),
+        };
+        assert_eq!(
+            super::member_limit("-7", 9, Some(1), Some(&mut admin)),
+            None
+        );
+        assert_eq!(admin.asked, [("-7".to_owned(), "9".to_owned())]);
+        let mut member = Admins {
+            is_admin: false,
+            asked: Vec::new(),
+        };
+        assert_eq!(
+            super::member_limit("-7", 9, Some(1), Some(&mut member)),
+            Some(1)
+        );
+        assert_eq!(super::member_limit("-7", 9, Some(1), None), Some(1));
+        // No own limit: nobody is looked up.
+        assert_eq!(super::member_limit("-7", 9, None, Some(&mut member)), None);
+        assert_eq!(member.asked.len(), 1);
     }
 
     #[test]
