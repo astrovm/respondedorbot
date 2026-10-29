@@ -574,32 +574,22 @@ mod tests {
     }
 
     #[test]
-    fn start_offers_credits_and_help_in_both_languages() -> Result<(), Box<dyn std::error::Error>> {
+    fn start_offers_credits_and_help_in_both_languages() {
         for (locale, credits, help) in [
             (Locale::Es, "Cargar créditos", "Ayuda"),
             (Locale::En, "Add credits", "Help"),
         ] {
             let plan =
                 super::plan_stateless_command(ChatId(42), MessageId(7), "/start", "", locale);
-            assert!(matches!(
-                &plan,
-                StatelessCommandPlan::Action(TelegramAction::SendMessage(_))
+            assert!(matches!(plan,
+                StatelessCommandPlan::Action(TelegramAction::SendMessage(message))
+                if message.reply_markup.as_ref().is_some_and(|keyboard|
+                    keyboard.inline_keyboard.len() > 1
+                    && keyboard.inline_keyboard[0][0].text == credits
+                    && keyboard.inline_keyboard[0][0].callback_data.as_deref() == Some("topup:open")
+                    && keyboard.inline_keyboard[0][1].text == help
+                    && keyboard.inline_keyboard[0][1].callback_data.as_deref() == Some("help:home"))
             ));
-            if let StatelessCommandPlan::Action(TelegramAction::SendMessage(message)) = plan {
-                let keyboard = message.reply_markup.ok_or("missing keyboard")?;
-                assert_eq!(keyboard.inline_keyboard[0][0].text, credits);
-                assert_eq!(
-                    keyboard.inline_keyboard[0][0].callback_data.as_deref(),
-                    Some("topup:open")
-                );
-                assert_eq!(keyboard.inline_keyboard[0][1].text, help);
-                assert_eq!(
-                    keyboard.inline_keyboard[0][1].callback_data.as_deref(),
-                    Some("help:home")
-                );
-                assert!(keyboard.inline_keyboard.len() > 1);
-            }
         }
-        Ok(())
     }
 }

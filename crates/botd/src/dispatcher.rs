@@ -1719,6 +1719,9 @@ where
             }
         };
         self.state_diagnostics.clear();
+        let Some(notice_user_id) = notice_user_id else {
+            return Ok(DispatchOutcome::Handled);
+        };
         let (chat_id, text) = match &decision {
             SuccessfulPaymentDecision::Ignore => return Ok(DispatchOutcome::Handled),
             SuccessfulPaymentDecision::BillingUnavailable { chat_id } => (
@@ -1794,10 +1797,7 @@ where
             .execute(personal_topup_action(
                 TelegramAction::SendMessage(SendMessage::new(ChatId(chat_id), &text)),
                 if group_notice { "group" } else { "private" },
-                match notice_user_id {
-                    Some(user) => user,
-                    None => return Ok(DispatchOutcome::Handled),
-                },
+                notice_user_id,
                 None,
             ))
             .map_err(DispatchError::Action)?;
@@ -3950,11 +3950,10 @@ where
                 self.billing_available,
                 self.lightning_checkout.is_some(),
             );
-            if let Some(action) = action {
-                self.actions
-                    .execute(context.personal_action(action))
-                    .map_err(DispatchError::Action)?;
-            }
+            action
+                .map(|action| self.actions.execute(context.personal_action(action)))
+                .transpose()
+                .map_err(DispatchError::Action)?;
             self.answer_callback_best_effort(context.callback_id.as_deref());
             return Ok(DispatchOutcome::Handled);
         }
@@ -4068,6 +4067,9 @@ where
                     &context,
                     ChatId(chat_id),
                     callback,
+                    context
+                        .user_id
+                        .ok_or(DispatchError::Invariant("authorized top-up has no user"))?,
                     locale,
                 );
             }
@@ -4081,12 +4083,10 @@ where
                 locale,
             ) {
                 TopupCallbackPlan::Answer(action) => {
-                    if let Some(action) = action {
-                        let _receipt = self
-                            .actions
-                            .execute(action)
-                            .map_err(DispatchError::Action)?;
-                    }
+                    action
+                        .map(|action| self.actions.execute(action))
+                        .transpose()
+                        .map_err(DispatchError::Action)?;
                     Ok(DispatchOutcome::Handled)
                 }
                 TopupCallbackPlan::Menu(credits) => {
@@ -4534,6 +4534,7 @@ where
         context: &CallbackContext,
         chat_id: ChatId,
         callback: LightningCallback,
+        user_id: i64,
         locale: bot_core::locale::Locale,
     ) -> NativeDispatchResult<Config, Actions, Random> {
         let callback_id = context.callback_id.as_deref();
@@ -4553,14 +4554,10 @@ where
             return self.answer_callback_alert(callback_id, text);
         }
         let message_id = MessageId(context.message_id);
-        let (pack, user_id) = match (callback, context.user_id) {
-            (LightningCallback::Pack(pack), Some(user_id)) => (pack, user_id),
-            (LightningCallback::Pack(_), None) => {
-                self.answer_callback_best_effort(callback_id);
-                return Ok(DispatchOutcome::Handled);
-            }
+        let pack = match callback {
+            LightningCallback::Pack(pack) => pack,
             // The old pack lists' menu buttons open the amount menu.
-            (_, _) => {
+            _ => {
                 self.answer_callback_best_effort(callback_id);
                 let (text, keyboard) = topup_menu(locale, DEFAULT_TOPUP_CREDITS, true);
                 self.actions
@@ -4648,14 +4645,19 @@ where
                 .execute(TelegramAction::SendMessage(message))
                 .map_err(DispatchError::Action)?,
         };
-        if let (Some(sent), Some(checkout)) = (receipt.message_id, self.lightning_checkout.as_mut())
-            && let Err(error) = checkout.attach_message(&invoice.charge_id, sent.0)
-        {
-            self.state_diagnostics.push(format!(
-                "lightning invoice message charge_id={}: {error}",
-                invoice.charge_id
-            ));
-        }
+        let _attachment = receipt
+            .message_id
+            .zip(self.lightning_checkout.as_mut())
+            .map(|(sent, checkout)| {
+                checkout
+                    .attach_message(&invoice.charge_id, sent.0)
+                    .inspect_err(|error| {
+                        self.state_diagnostics.push(format!(
+                            "lightning invoice message charge_id={}: {error}",
+                            invoice.charge_id
+                        ));
+                    })
+            });
         if let Some(callback_id) = callback_id {
             self.actions
                 .execute(TelegramAction::AnswerCallback {
@@ -18876,6 +18878,25 @@ mod tests {
     }
 
     #[test]
+    fn private_lightning_alert_without_callback_id_is_silent() {
+        let mut bot =
+            lightning_dispatcher(Actions::default(), Some(FakeLightningCheckout::default()));
+        assert_eq!(
+            bot.dispatch(callback_update_with_context(
+                "topup:ln:invalid",
+                json!(88),
+                "private",
+                7,
+                Some(88),
+                Some("en"),
+                None
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(bot.actions.0.is_empty());
+    }
+
+    #[test]
     fn double_tapped_lightning_pack_creates_a_single_charge() {
         let log = Rc::new(RefCell::new(Vec::new()));
         let stored = Rc::new(RefCell::new(HashMap::new()));
@@ -24267,7 +24288,7 @@ mod tests {
     #[test]
     fn incoming_ephemeral_command_survives_polling_dispatch_and_send()
     -> Result<(), Box<dyn std::error::Error>> {
-        use bot_adapters::telegram_polling::{PollOutcome, parse_response};
+        use bot_adapters::telegram_polling::{PollFailure, PollOutcome, parse_response};
         for ordinary_id in [None, Some(0), Some(999)] {
             let mut message = json!({"ephemeral_message_id":71,"chat":{"id":-42,"type":"supergroup"},"from":{"id":88,"language_code":"en"},"text":"/topup 50"});
             if let Some(id) = ordinary_id {
@@ -24275,42 +24296,51 @@ mod tests {
             }
             let response =
                 json!({"ok":true,"result":[{"update_id":100,"message":message}]}).to_string();
-            let PollOutcome::Updates(updates) = parse_response(200, &response)? else {
-                return Err("updates".into());
-            };
-            let update = updates.into_iter().next().ok_or("update")?;
-            let IncomingEvent::Message(ref incoming) = update.event else {
-                return Err("message".into());
-            };
-            assert_eq!(incoming.message_id, Some(MessageId(71)));
-            assert_eq!(incoming.ephemeral_message_id, Some(71));
-            let mut bot = configured(english(), Actions::default());
-            assert_eq!(bot.dispatch(update), Ok(DispatchOutcome::Handled));
-            let wire = topup_wire(&bot.actions.0);
-            assert_eq!(wire[0].0, "sendMessage");
-            assert_eq!(
-                wire[0].1["reply_parameters"],
-                json!({"ephemeral_message_id":71})
-            );
-            assert_eq!(
-                wire[0].1["ephemeral_message_parameters"],
-                json!({"receiver_user_id":88})
-            );
+            for (status, body) in [(200, response.as_str()), (503, "unavailable")] {
+                let outcome = parse_response(status, body)?;
+                let mut bot = configured(english(), Actions::default());
+                match outcome {
+                    PollOutcome::Updates(updates) => {
+                        assert_eq!(updates.len(), 1);
+                        let update = updates[0].clone();
+                        assert!(
+                            matches!(&update.event, IncomingEvent::Message(incoming) if incoming.message_id == Some(MessageId(71)) && incoming.ephemeral_message_id == Some(71))
+                        );
+                        assert_eq!(bot.dispatch(update), Ok(DispatchOutcome::Handled));
+                        let wire = topup_wire(&bot.actions.0);
+                        assert_eq!(wire[0].0, "sendMessage");
+                        assert_eq!(
+                            wire[0].1["reply_parameters"],
+                            json!({"ephemeral_message_id":71})
+                        );
+                        assert_eq!(
+                            wire[0].1["ephemeral_message_parameters"],
+                            json!({"receiver_user_id":88})
+                        );
+                    }
+                    PollOutcome::Retry(failure) => {
+                        assert_eq!(failure, PollFailure::Http { status_code: 503 });
+                        assert!(bot.actions.0.is_empty());
+                    }
+                }
+            }
         }
         Ok(())
     }
 
     fn ephemeral_topup_callback(data: &str, sender: i64, receiver: i64) -> IncomingUpdate {
-        let mut update = callback_update(data, "supergroup", Some("en"));
-        if let IncomingEvent::CallbackQuery(ref mut callback) = update.event {
-            callback["from"]["id"] = json!(sender);
-            if let Some(message) = callback["message"].as_object_mut() {
-                message.remove("message_id");
-            }
-            callback["message"]["ephemeral_message_id"] = json!(71);
-            callback["message"]["receiver_user"] = json!({"id":receiver});
+        IncomingUpdate {
+            update_id: 100,
+            event: IncomingEvent::CallbackQuery(Map::from_iter([
+                ("id".into(), json!("callback-1")),
+                ("data".into(), json!(data)),
+                ("from".into(), json!({"id":sender,"language_code":"en"})),
+                (
+                    "message".into(),
+                    json!({"ephemeral_message_id":71,"receiver_user":{"id":receiver},"chat":{"id":-42,"type":"supergroup"}}),
+                ),
+            ])),
         }
-        update
     }
 
     #[test]
@@ -24372,10 +24402,12 @@ mod tests {
         );
         assert!(bot.actions.0.iter().any(|a|matches!(a,TelegramAction::Ephemeral{receiver_user_id:88,action,..} if matches!(action.as_ref(),TelegramAction::SendMessage(_)))));
         let wire = topup_wire(&bot.actions.0);
-        let send = wire
+        let sends: Vec<_> = wire
             .iter()
-            .find(|(endpoint, _)| endpoint == "sendMessage")
-            .unwrap_or_else(|| panic!("missing menu send"));
+            .filter(|(endpoint, _)| endpoint == "sendMessage")
+            .collect();
+        assert_eq!(sends.len(), 1);
+        let send = sends[0];
         assert_eq!(
             send.1["ephemeral_message_parameters"],
             json!({"receiver_user_id":88,"callback_query_id":"callback-1"})
@@ -24396,10 +24428,8 @@ mod tests {
                 Ok(DispatchOutcome::Handled)
             );
             let wire = topup_wire(&bot.actions.0);
-            let send = wire
-                .iter()
-                .find(|(endpoint, _)| endpoint == "sendMessage")
-                .unwrap_or_else(|| panic!("missing menu send"));
+            assert_eq!(wire[0].0, "sendMessage");
+            let send = &wire[0];
             if chat == "private" {
                 assert!(send.1.get("ephemeral_message_parameters").is_none());
             } else {
@@ -24409,11 +24439,6 @@ mod tests {
                 );
                 assert!(send.1.get("reply_parameters").is_none());
             }
-            assert!(bot.actions.0.iter().any(|a| match a {
-                TelegramAction::Ephemeral{receiver_user_id:88,action,..} => matches!(action.as_ref(),TelegramAction::SendMessage(m) if m.reply_markup.is_some()),
-                TelegramAction::SendMessage(m) => chat=="private" && m.reply_markup.is_some(),
-                _ => false,
-            }));
         }
     }
 

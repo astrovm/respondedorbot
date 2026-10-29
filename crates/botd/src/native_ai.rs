@@ -1562,21 +1562,20 @@ mod tests {
         }
     }
 
-    fn denied_text(payer: TaskPayer, hourly_limit: Option<i64>) -> String {
-        denied_text_in("es", payer, hourly_limit)
-    }
-
-    fn denied_text_in(locale: &str, payer: TaskPayer, hourly_limit: Option<i64>) -> String {
+    fn assert_denied_in(
+        locale: &str,
+        payer: TaskPayer,
+        hourly_limit: Option<i64>,
+        needles: &[&str],
+    ) {
         let mut billing = PostgresTaskBilling::new(
             short_store(hourly_limit),
             "deepseek/deepseek-v4.1-flash-1017",
         )
         .with_payer_policy(Box::new(FixedPayer(payer)));
-        let outcome = billing.reserve(&task(locale), "task123:1000", &[]);
-        match outcome {
-            Ok(TaskReserveOutcome::Denied { message }) => message,
-            _ => panic!("expected a denial"),
-        }
+        assert!(
+            matches!(billing.reserve(&task(locale), "task123:1000", &[]), Ok(TaskReserveOutcome::Denied { message }) if needles.iter().all(|needle|message.contains(needle)))
+        );
     }
 
     #[test]
@@ -1587,17 +1586,16 @@ mod tests {
             hourly_limit: 3,
             group_pays_first: false,
         };
-        let both = denied_text_in("en", group, None);
-        assert!(both.contains("Neither your personal credits"));
-        let off = denied_text_in(
+        assert_denied_in("en", group, None, &["Neither your personal credits"]);
+        assert_denied_in(
             "en",
             TaskPayer {
                 group_pays: false,
                 ..group
             },
             None,
+            &["Tasks on group credits"],
         );
-        assert!(off.contains("Tasks on group credits"));
     }
 
     #[test]
@@ -1608,15 +1606,15 @@ mod tests {
             hourly_limit: 3,
             group_pays_first: false,
         };
-        let off = denied_text(group(false), None);
-        assert!(off.contains("Tareas con créditos del grupo"));
-        assert!(off.contains("hay 4.56"));
-        let both = denied_text(group(true), None);
-        assert!(both.contains("el grupo tiene 4.56"));
-        let limited = denied_text(group(true), Some(3));
-        assert!(limited.contains("3 mensajes por hora"));
-        let private = denied_text(TaskPayer::PERSONAL, None);
-        assert!(private.contains("Saldo: 1.23"));
+        assert_denied_in(
+            "es",
+            group(false),
+            None,
+            &["Tareas con créditos del grupo", "hay 4.56"],
+        );
+        assert_denied_in("es", group(true), None, &["el grupo tiene 4.56"]);
+        assert_denied_in("es", group(true), Some(3), &["3 mensajes por hora"]);
+        assert_denied_in("es", TaskPayer::PERSONAL, None, &["Saldo: 1.23"]);
     }
 
     #[test]
