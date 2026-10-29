@@ -1646,4 +1646,30 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn invoice_link_transport_failure_has_no_public_fallback() {
+        let transport = Transport {
+            response: RefCell::new(Some(Err(TransportFailureKind::Connection))),
+            requests: RefCell::new(Vec::new()),
+            multipart_requests: RefCell::new(Vec::new()),
+        };
+        let invoice = TelegramAction::SendInvoice {
+            chat_id: ChatId(42),
+            title: "50 credits".into(),
+            description: "Personal credits".into(),
+            payload: "topup:c50:42:en".into(),
+            currency: "XTR".into(),
+            prices: vec![LabeledPrice {
+                label: "50 credits".into(),
+                amount: 25,
+            }],
+        };
+        assert_eq!(
+            super::create_invoice_link_with(&transport, "synthetic", invoice),
+            Ok(None)
+        );
+        assert_eq!(transport.requests.borrow().len(), 1);
+        assert_eq!(transport.requests.borrow()[0].endpoint, "createInvoiceLink");
+    }
 }

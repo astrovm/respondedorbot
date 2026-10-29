@@ -19,5 +19,24 @@ fuzz_target!(|body: &str| {
     let _ = parse_response(429, body);
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
         let _ = extract_message_content(&value);
+        let _ = bot_core::telegram_callbacks::parse_callback_context(&value);
+        let _ = bot_core::telegram_payments::evaluate_default_successful_payment(&value, true);
+        let _ = bot_core::telegram_payments::plan_pre_checkout(
+            &value,
+            true,
+            bot_core::locale::Locale::En,
+        );
+        if let Some(updates) = value.get("result").and_then(serde_json::Value::as_array) {
+            for update in updates {
+                if let Some(callback) = update.get("callback_query") {
+                    let _ = bot_core::telegram_callbacks::parse_callback_context(callback);
+                }
+                if let Some(message) = update.get("message") {
+                    let _ = bot_core::telegram_payments::evaluate_default_successful_payment(
+                        message, true,
+                    );
+                }
+            }
+        }
     }
 });

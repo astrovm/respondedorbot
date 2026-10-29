@@ -4122,21 +4122,17 @@ where
                             true
                         }
                     };
-                    if !claimed {
-                        let text = match locale {
-                            bot_core::locale::Locale::Es => "Ya te dejé la factura más arriba",
-                            bot_core::locale::Locale::En => "The invoice is already above",
-                        };
-                        if let Some(callback_id) = context.callback_id.as_deref() {
-                            let _receipt = self
-                                .actions
-                                .execute(TelegramAction::AnswerCallback {
-                                    callback_id: callback_id.to_owned(),
-                                    text: Some(text.to_owned()),
-                                    show_alert: false,
-                                })
-                                .map_err(DispatchError::Action)?;
-                        }
+                    let cached_link = if claimed {
+                        None
+                    } else {
+                        self.market_price_source
+                            .as_mut()
+                            .and_then(|source| source.load_selection(&claim_key).ok().flatten())
+                            .filter(|url| url.starts_with("https://t.me/$"))
+                    };
+                    if !claimed && cached_link.is_none() {
+                        // Another worker is still creating this user's link.
+                        self.answer_callback_best_effort(context.callback_id.as_deref());
                         return Ok(DispatchOutcome::Handled);
                     }
                     let release_claim = |dispatcher: &mut Self| {
@@ -4149,9 +4145,28 @@ where
                             ));
                         }
                     };
-                    let link = self.actions.invoice_link(plan.invoice);
+                    let link = match cached_link {
+                        Some(url) => Ok(Some(url)),
+                        None => self.actions.invoice_link(plan.invoice),
+                    };
                     let sent = match link {
                         Ok(Some(url)) => {
+                            if let Some(source) = self.market_price_source.as_mut() {
+                                // The claim now also retains the checkout URL, so an
+                                // amount change can restore it without another invoice.
+                                if source
+                                    .save_selection(
+                                        &claim_key,
+                                        &url,
+                                        TOPUP_INVOICE_CLAIM_TTL_SECONDS,
+                                    )
+                                    .is_err()
+                                {
+                                    // Let the next tap retry when the URL could not
+                                    // be cached; never strand the user behind a marker.
+                                    let _ = source.take_selection(&claim_key);
+                                }
+                            }
                             let pack = bot_core::telegram_payments::default_billing_pack(pack_id)
                                 .ok_or(DispatchError::Invariant(
                                 "validated topup pack missing",
@@ -5980,13 +5995,10 @@ where
             self.billing_available,
             self.lightning_checkout.is_some(),
         ) {
-            let Some(user_id) = message.sender_id.map(|id| id.0) else {
-                return Ok(DispatchOutcome::Handled);
-            };
             StatelessCommandPlan::Action(personal_topup_action(
                 action,
                 message.chat_type.as_deref().unwrap_or_default(),
-                user_id,
+                sender_id.0,
             ))
         } else if matches!(
             parsed.command.as_str(),
@@ -18209,6 +18221,15 @@ mod tests {
                 Ok(DispatchOutcome::Handled)
             );
         }
+        assert_eq!(
+            dispatcher.dispatch(callback_update("topup:amt:500", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            dispatcher.dispatch(callback_update("topup:p50", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(dispatcher.actions.0.iter().rev().any(|a|matches!(a,TelegramAction::EditMessage{reply_markup:Some(k),text,..} if text.contains("50 credits") && k.inline_keyboard[2][0].url.as_deref()==Some("https://t.me/$synthetic-checkout"))));
         let invoices = dispatcher
             .actions
             .0
@@ -18222,7 +18243,7 @@ mod tests {
                 text: Some(text),
                 show_alert: false,
                 ..
-            } if text == "The invoice is already above"
+            } if text == "Invoice ready"
         )));
         assert_eq!(stored.borrow().len(), 1);
         Ok(())
@@ -22354,7 +22375,7 @@ mod tests {
             repeated.dispatch(uncalled_back("topup:p50", json!(88), "private")),
             Ok(DispatchOutcome::Handled)
         );
-        assert_eq!(repeated.actions.0.len(), 2);
+        assert_eq!(repeated.actions.0.len(), 3);
         assert_eq!(
             repeated.dispatch(callback_update_with_context(
                 "topup:p50",
@@ -22370,7 +22391,7 @@ mod tests {
         assert!(matches!(
             repeated.actions.0.last(),
             Some(TelegramAction::AnswerCallback { text: Some(text), show_alert: false, .. })
-                if text == "Ya te dejé la factura más arriba"
+                if text == "Listo, te dejé la factura"
         ));
     }
 
@@ -24304,5 +24325,71 @@ mod tests {
         assert!(
             matches!(&bot.actions.0[0],TelegramAction::Ephemeral{receiver_user_id:42,action,..} if matches!(action.as_ref(),TelegramAction::SendMessage(m) if m.text.contains("Top-up complete")))
         );
+    }
+
+    #[test]
+    fn topup_open_rejects_missing_senders_and_invalid_chat_ids() {
+        for (chat_id, user) in [(json!("invalid"), Some(88)), (json!(88), None)] {
+            let mut bot = dispatcher();
+            assert_eq!(
+                bot.dispatch(callback_update_with_context(
+                    "topup:open",
+                    chat_id,
+                    "private",
+                    7,
+                    user,
+                    Some("en"),
+                    Some("cb")
+                )),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert!(matches!(
+                bot.actions.0.as_slice(),
+                [TelegramAction::AnswerCallback { .. }]
+            ));
+        }
+        let mut bot = dispatcher();
+        let mut update = ephemeral_topup_callback("topup:c50", 88, 88);
+        if let IncomingEvent::CallbackQuery(ref mut q) = update.event {
+            q["message"]["chat"]["id"] = json!("invalid");
+        }
+        assert_eq!(bot.dispatch(update), Ok(DispatchOutcome::Handled));
+        assert_eq!(bot.state_diagnostics(), ["invalid top-up callback chat id"]);
+    }
+
+    #[test]
+    fn stars_link_creation_in_progress_is_quiet_and_cache_failure_still_shows_checkout() {
+        let stored = Rc::new(RefCell::new(HashMap::from([(
+            "topup_invoice:88:p50".to_owned(),
+            "1".to_owned(),
+        )])));
+        let mut busy = dispatcher().with_market_price_source(Box::new(SelectableMarketPrices {
+            initial: market_selection_load(None),
+            candidate: market_candidate_quote(),
+            stored,
+            selected: Rc::new(RefCell::new(Vec::new())),
+        }));
+        assert_eq!(
+            busy.dispatch(callback_update("topup:p50", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            busy.actions.0.as_slice(),
+            [TelegramAction::AnswerCallback { .. }]
+        ));
+        let mut failed =
+            dispatcher().with_market_price_source(Box::new(ScriptedTakeMarketPrices {
+                load: Ok(None),
+                takes: RefCell::new(VecDeque::new()),
+                saves: RefCell::new(VecDeque::from([Err(
+                    "synthetic cache unavailable".to_owned()
+                )])),
+                candidate: market_candidate_quote(),
+            }));
+        assert_eq!(
+            failed.dispatch(callback_update("topup:p50", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(failed.actions.0.iter().any(|a|matches!(a,TelegramAction::EditMessage{reply_markup:Some(k),..} if k.inline_keyboard[2][0].url.is_some())));
     }
 }

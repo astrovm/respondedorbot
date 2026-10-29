@@ -579,23 +579,26 @@ mod tests {
             (Locale::Es, "Cargar créditos", "Ayuda"),
             (Locale::En, "Add credits", "Help"),
         ] {
-            let super::StatelessCommandPlan::Action(TelegramAction::SendMessage(message)) =
-                super::plan_stateless_command(ChatId(42), MessageId(7), "/start", "", locale)
-            else {
-                return Err("start menu missing".into());
-            };
-            let keyboard = message.reply_markup.ok_or("missing keyboard")?;
-            assert_eq!(keyboard.inline_keyboard[0][0].text, credits);
-            assert_eq!(
-                keyboard.inline_keyboard[0][0].callback_data.as_deref(),
-                Some("topup:open")
-            );
-            assert_eq!(keyboard.inline_keyboard[0][1].text, help);
-            assert_eq!(
-                keyboard.inline_keyboard[0][1].callback_data.as_deref(),
-                Some("help:home")
-            );
-            assert!(keyboard.inline_keyboard.len() > 1);
+            let plan =
+                super::plan_stateless_command(ChatId(42), MessageId(7), "/start", "", locale);
+            assert!(matches!(
+                &plan,
+                StatelessCommandPlan::Action(TelegramAction::SendMessage(_))
+            ));
+            if let StatelessCommandPlan::Action(TelegramAction::SendMessage(message)) = plan {
+                let keyboard = message.reply_markup.ok_or("missing keyboard")?;
+                assert_eq!(keyboard.inline_keyboard[0][0].text, credits);
+                assert_eq!(
+                    keyboard.inline_keyboard[0][0].callback_data.as_deref(),
+                    Some("topup:open")
+                );
+                assert_eq!(keyboard.inline_keyboard[0][1].text, help);
+                assert_eq!(
+                    keyboard.inline_keyboard[0][1].callback_data.as_deref(),
+                    Some("help:home")
+                );
+                assert!(keyboard.inline_keyboard.len() > 1);
+            }
         }
         Ok(())
     }

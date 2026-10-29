@@ -2094,4 +2094,23 @@ mod tests {
             Some(1)
         );
     }
+
+    #[test]
+    fn pre_checkout_rejects_nonpositive_sender_before_payment_terms() {
+        for id in [0, -1, i64::MIN] {
+            let query = json!({"id":"checkout-zero","from":{"id":id},"invoice_payload":"topup:p50","currency":"XTR","total_amount":25});
+            assert_eq!(
+                evaluate_pre_checkout(&query, true, Some(&pack())),
+                Ok(PreCheckoutDecision::InvalidUser {
+                    query_id: "checkout-zero".into()
+                })
+            );
+            assert_eq!(
+                evaluate_pre_checkout(&query, false, Some(&pack())),
+                Ok(PreCheckoutDecision::BillingUnavailable {
+                    query_id: "checkout-zero".into()
+                })
+            );
+        }
+    }
 }

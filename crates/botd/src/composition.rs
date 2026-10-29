@@ -9297,4 +9297,23 @@ mod tests {
             ))
         );
     }
+
+    #[test]
+    fn action_sink_delivers_ephemeral_messages_without_public_fallback() {
+        let mut sink = TelegramActionSink::new(
+            transport(200, r#"{"ok":true,"result":{"ephemeral_message_id":71}}"#),
+            "synthetic",
+        );
+        assert!(
+            sink.execute(TelegramAction::Ephemeral {
+                receiver_user_id: 42,
+                ephemeral_message_id: None,
+                action: Box::new(TelegramAction::SendMessage(SendMessage::new(
+                    ChatId(-7),
+                    "personal menu"
+                )))
+            })
+            .is_ok()
+        );
+    }
 }
