@@ -8412,8 +8412,10 @@ mod tests {
                 response: RefCell::new(Some(Ok(FinvizHttpResponse {
                     status_code: 200,
                     body: concat!(
-                        r#"data-boxover-ticker="AAPL" data-boxover-company="Apple" "#,
-                        r#"data-boxover-ticker="MSFT" data-boxover-company="Microsoft""#
+                        r#"<div data-row-key="AAPL" role="row">"#,
+                        r#"<div data-column-id="company" role="gridcell">Apple Inc</div></div>"#,
+                        r#"<div data-row-key="MSFT" role="row">"#,
+                        r#"<div data-column-id="company" role="gridcell">Microsoft Corp</div></div>"#
                     )
                     .to_owned(),
                 }))),
