@@ -519,7 +519,10 @@ fn parse_attributes(input: &str) -> Vec<(String, String)> {
         let (value, rest) = if let Some(quote @ ('\'' | '"')) = remaining.chars().next() {
             let after_quote = &remaining[quote.len_utf8()..];
             let end = after_quote.find(quote).unwrap_or(after_quote.len());
-            (&after_quote[..end], &after_quote[end.saturating_add(1)..])
+            (
+                &after_quote[..end],
+                after_quote.get(end + 1..).unwrap_or_default(),
+            )
         } else {
             let end = remaining
                 .find(char::is_whitespace)
@@ -1542,6 +1545,15 @@ mod tests {
         assert!(attributes.contains(&("disabled".to_owned(), String::new())));
         assert!(attributes.contains(&("data-name".to_owned(), "synthetic".to_owned())));
         assert!(attributes.contains(&("quoted".to_owned(), "two words".to_owned())));
+        assert_eq!(
+            parse_attributes("src=\"unclosed"),
+            [("src".to_owned(), "unclosed".to_owned())]
+        );
+        let page = parse_html("<iframe src=\"abc>visible");
+        assert_eq!(
+            (page.frames, page.text),
+            (vec!["abc".to_owned()], "visible".to_owned())
+        );
 
         let html = concat!(
             "<!-- synthetic comment -->",
