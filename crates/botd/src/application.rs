@@ -21,15 +21,17 @@ use bot_core::telegram_input::ChatId;
 use crate::background::{
     BackgroundSupervisor, ProductionBackgroundOptions, build_production_background_specs,
 };
+use crate::chat_tool_loop::bounded;
 use crate::composition::{
     NativeRuntimeOptions, TelegramActionSink, TelegramDeliveryCoordinator, build_native_runtime,
 };
 use crate::config::ProductionConfig;
-use crate::dispatcher::ActionSink;
+use crate::dispatcher::{ActionSink, DiagnosticLog};
 use crate::error_text;
 use crate::lightning_payments::OpenNodeOptions;
 use crate::operational_reporting::{
-    NoopOperationalReporter, OperationalReport, OperationalReporter, TelegramOperationalReporter,
+    NoopOperationalReporter, OperationalReport, OperationalReporter, SecretRedactor,
+    TelegramOperationalReporter,
 };
 use crate::reconciliation::ActiveOperationRegistry;
 use crate::runtime::{PollingRuntime, StepOutcome, UpdateHandler, UpdateSource};
@@ -241,7 +243,18 @@ fn build_operational_reporter(
         return Ok(Arc::new(NoopOperationalReporter));
     };
     let transport = telegram_transport(ReqwestTelegramTransport::new(), "admin reporting")?;
-    let secrets = [
+    Ok(Arc::new(TelegramOperationalReporter::new(
+        transport,
+        config.runtime.telegram_token(),
+        admin_chat_id,
+        config.instance_name.as_deref(),
+        production_secrets(config),
+    )))
+}
+
+/// Everything that must never reach a log line or an admin report.
+fn production_secrets(config: &ProductionConfig) -> Vec<String> {
+    [
         Some(config.runtime.telegram_token()),
         Some(config.database_url()),
         config.redis_endpoint.password.as_deref(),
@@ -256,14 +269,26 @@ fn build_operational_reporter(
     ]
     .into_iter()
     .flatten()
-    .map(str::to_owned);
-    Ok(Arc::new(TelegramOperationalReporter::new(
-        transport,
-        config.runtime.telegram_token(),
-        admin_chat_id,
-        config.instance_name.as_deref(),
-        secrets,
-    )))
+    .map(str::to_owned)
+    .collect()
+}
+
+/// Writes each update's diagnostics to stderr, the container log, so a
+/// failing command or provider shows up without anyone reporting it.
+fn diagnostic_log(config: &ProductionConfig) -> DiagnosticLog {
+    let redactor = SecretRedactor::new(production_secrets(config));
+    Arc::new(move |update_id, diagnostic| {
+        eprintln!("{}", diagnostic_line(&redactor, update_id, diagnostic));
+    })
+}
+
+fn diagnostic_line(redactor: &SecretRedactor, update_id: i64, diagnostic: &str) -> String {
+    // Redact before bounding, so a cut can't leave part of a secret behind.
+    let redacted = redactor.redact(diagnostic);
+    format!(
+        "Update {update_id} diagnostic: {}",
+        bounded(&redacted, MAX_LOGGED_DIAGNOSTIC_CHARS)
+    )
 }
 
 fn poll_retry_report(failure: &PollFailure) -> OperationalReport {
@@ -286,6 +311,8 @@ fn report_best_effort(reporter: &dyn OperationalReporter, report: &OperationalRe
 }
 
 const OPERATIONAL_REPORT_QUEUE_CAPACITY: usize = 32;
+/// Long enough for an error chain, short enough to keep one log line readable.
+const MAX_LOGGED_DIAGNOSTIC_CHARS: usize = 2_000;
 
 /// Delivers operational reports from a dedicated thread, so a slow or
 /// rate-limited admin chat never stalls the polling loop. Reports beyond the
@@ -383,6 +410,7 @@ pub fn run_production(config: &ProductionConfig) -> Result<(), String> {
         active_operations: active_operations.clone(),
         telegram_delivery: telegram_delivery.clone(),
         ai_ledger_retention_days: config.ai_ledger_retention_days,
+        diagnostic_log: Some(diagnostic_log(config)),
     })
     .map_err(error_text)?;
     let specs = build_production_background_specs(ProductionBackgroundOptions {
@@ -452,10 +480,11 @@ mod tests {
     use bot_core::telegram_actions::TelegramAction;
 
     use super::{
-        BackgroundReports, ShutdownHandler, build_operational_reporter, configure_telegram_api,
+        BackgroundReports, MAX_LOGGED_DIAGNOSTIC_CHARS, SecretRedactor, ShutdownHandler,
+        build_operational_reporter, configure_telegram_api, diagnostic_line, diagnostic_log,
         install_shutdown_handler, interruptible_wait, log_and_queue, opennode_options,
-        poll_retry_report, poll_until_stopped, publish_commands, refresh_chat_menus,
-        report_best_effort, retry_delay, run_polling_until, telegram_transport,
+        poll_retry_report, poll_until_stopped, production_secrets, publish_commands,
+        refresh_chat_menus, report_best_effort, retry_delay, run_polling_until, telegram_transport,
         update_failure_report,
     };
     use crate::config::ProductionConfig;
@@ -871,6 +900,28 @@ mod tests {
             Some("could not construct admin reporting transport: Request")
         );
         assert!(build_operational_reporter(&config(Some("42"))).is_ok());
+        let secrets = production_secrets(&config(Some("42")));
+        for secret in [
+            "synthetic-telegram-token",
+            "synthetic-market-key",
+            "synthetic-ai-key",
+            "synthetic-opennode-key",
+            "synthetic system prompt",
+        ] {
+            assert!(secrets.iter().any(|value| value == secret), "{secret}");
+        }
+        let redactor = SecretRedactor::new(secrets);
+        assert_eq!(
+            diagnostic_line(
+                &redactor,
+                7,
+                "request to https://api.telegram.org/botsynthetic-telegram-token/sendMessage failed"
+            ),
+            "Update 7 diagnostic: request to https://api.telegram.org/bot[REDACTED]/sendMessage failed"
+        );
+        let long = diagnostic_line(&redactor, 8, &"x".repeat(MAX_LOGGED_DIAGNOSTIC_CHARS + 5));
+        assert!(long.ends_with("x…"));
+        diagnostic_log(&config(None))(9, "synthetic diagnostic");
         assert!(opennode_options(&config(None)).is_none());
         assert_eq!(
             opennode_options(&config(Some("42"))).map(|options| (options.api_key, options.api_url)),

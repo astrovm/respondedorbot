@@ -25,6 +25,35 @@ impl OperationalReport {
     }
 }
 
+/// Replaces every known secret in a text with `[REDACTED]`, longest first so
+/// a secret that contains another is hidden whole.
+#[derive(Debug, Clone, Default)]
+pub struct SecretRedactor {
+    secrets: Vec<String>,
+}
+
+impl SecretRedactor {
+    #[must_use]
+    pub fn new(secrets: impl IntoIterator<Item = String>) -> Self {
+        let mut seen = HashSet::new();
+        let mut secrets = secrets
+            .into_iter()
+            .filter(|secret| !secret.is_empty() && seen.insert(secret.clone()))
+            .collect::<Vec<_>>();
+        secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+        Self { secrets }
+    }
+
+    #[must_use]
+    pub fn redact(&self, message: &str) -> String {
+        self.secrets
+            .iter()
+            .fold(message.to_owned(), |text, secret| {
+                text.replace(secret, "[REDACTED]")
+            })
+    }
+}
+
 pub trait OperationalReporter: Send + Sync + 'static {
     fn report(&self, report: &OperationalReport) -> Result<(), String>;
 }
@@ -43,7 +72,7 @@ pub struct TelegramOperationalReporter<Transport> {
     token: String,
     chat_id: ChatId,
     instance_name: String,
-    secrets: Vec<String>,
+    redactor: SecretRedactor,
 }
 
 impl<Transport> TelegramOperationalReporter<Transport> {
@@ -55,27 +84,13 @@ impl<Transport> TelegramOperationalReporter<Transport> {
         instance_name: Option<&str>,
         secrets: impl IntoIterator<Item = String>,
     ) -> Self {
-        let mut seen = HashSet::new();
-        let mut secrets = secrets
-            .into_iter()
-            .filter(|secret| !secret.is_empty() && seen.insert(secret.clone()))
-            .collect::<Vec<_>>();
-        secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
         Self {
             transport,
             token: token.to_owned(),
             chat_id: ChatId(chat_id),
             instance_name: instance_name.unwrap_or("unknown").to_owned(),
-            secrets,
+            redactor: SecretRedactor::new(secrets),
         }
-    }
-
-    fn redact(&self, message: &str) -> String {
-        self.secrets
-            .iter()
-            .fold(message.to_owned(), |text, secret| {
-                text.replace(secret, "[REDACTED]")
-            })
     }
 }
 
@@ -87,7 +102,7 @@ where
         let text = format!(
             "admin report from {}: {}",
             self.instance_name,
-            self.redact(report.text())
+            self.redactor.redact(report.text())
         );
         let action = TelegramAction::SendMessage(SendMessage::new(self.chat_id, &text));
         match execute_with(&self.transport, &self.token, action).map_err(crate::error_text)? {

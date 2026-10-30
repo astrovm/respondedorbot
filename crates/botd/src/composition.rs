@@ -118,14 +118,14 @@ use crate::conversation_adapters::{PostgresConversationBilling, RedisConversatio
 use crate::dispatcher::{
     ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BcraLoad, BcraSource,
     BillingBalanceSource, BillingBalances, BillingTransferSink, BitcoinPriceSource,
-    ChargeHistorySource, ChatBanStore, ChatConfigSource, ChatLimitStore, DollarMarketLoad,
-    DollarMarketSource, DollarQuotesSource, ElectionLoad, ElectionSource, GreetingPoolLoad,
-    GreetingPoolSource, GroupAuthorizationDecision, GroupAuthorizer, GroupSpendingSource,
-    LinkReplacementLoad, LinkReplacementSource, MarketPriceLoad, MarketPriceSource,
-    MessageStateSink, NativeDispatcher, OilPriceSource, OilQuoteLoad, RandomSource, RuloInputLoad,
-    RuloSource, RuntimeValues, ScheduledTaskSource, StarPaymentReceipt, StarPaymentSink,
-    StockPriceSource, StockQuotesLoad, TokenSignalLoad, TokenSignalSource, WeatherObservationLoad,
-    WeatherSource,
+    ChargeHistorySource, ChatBanStore, ChatConfigSource, ChatLimitStore, DiagnosticLog,
+    DollarMarketLoad, DollarMarketSource, DollarQuotesSource, ElectionLoad, ElectionSource,
+    GreetingPoolLoad, GreetingPoolSource, GroupAuthorizationDecision, GroupAuthorizer,
+    GroupSpendingSource, LinkReplacementLoad, LinkReplacementSource, MarketPriceLoad,
+    MarketPriceSource, MessageStateSink, NativeDispatcher, OilPriceSource, OilQuoteLoad,
+    RandomSource, RuloInputLoad, RuloSource, RuntimeValues, ScheduledTaskSource,
+    StarPaymentReceipt, StarPaymentSink, StockPriceSource, StockQuotesLoad, TokenSignalLoad,
+    TokenSignalSource, WeatherObservationLoad, WeatherSource,
 };
 use crate::error_text;
 use crate::firecrawl_tool::FirecrawlTool;
@@ -2895,6 +2895,8 @@ pub struct NativeRuntimeOptions<'a> {
     pub active_operations: ActiveOperationRegistry,
     pub telegram_delivery: TelegramDeliveryCoordinator,
     pub ai_ledger_retention_days: i64,
+    /// Where each update's diagnostics are written, with secrets removed.
+    pub diagnostic_log: Option<DiagnosticLog>,
 }
 
 #[derive(Clone)]
@@ -2920,6 +2922,7 @@ struct OwnedNativeRuntimeOptions {
     active_operations: ActiveOperationRegistry,
     telegram_delivery: TelegramDeliveryCoordinator,
     ai_ledger_retention_days: i64,
+    diagnostic_log: Option<DiagnosticLog>,
 }
 
 impl OwnedNativeRuntimeOptions {
@@ -2946,6 +2949,7 @@ impl OwnedNativeRuntimeOptions {
             active_operations: options.active_operations,
             telegram_delivery: options.telegram_delivery,
             ai_ledger_retention_days: options.ai_ledger_retention_days,
+            diagnostic_log: options.diagnostic_log,
         }
     }
 
@@ -2972,6 +2976,7 @@ impl OwnedNativeRuntimeOptions {
             active_operations: self.active_operations.clone(),
             telegram_delivery: self.telegram_delivery.clone(),
             ai_ledger_retention_days: self.ai_ledger_retention_days,
+            diagnostic_log: self.diagnostic_log.clone(),
         }
     }
 }
@@ -3386,6 +3391,7 @@ fn build_native_dispatcher_with_stream_delivery(
     .with_transfer_sink(Box::new(BillingRepository::new(options.database_url)))
     .with_charge_history_source(Box::new(BillingRepository::new(options.database_url)))
     .with_admin_user_id(options.admin_user_id)
+    .with_diagnostic_log(options.diagnostic_log.clone())
     .with_admin_credit_sink(Box::new(BillingRepository::new(options.database_url)))
     .with_admin_creditlog_source(Box::new(BillingRepository::new(options.database_url)))
     .with_ban_store(Box::new(ChatBanRepository::new(options.database_url)))
@@ -6554,6 +6560,7 @@ mod tests {
             active_operations: ActiveOperationRegistry::default(),
             telegram_delivery: TelegramDeliveryCoordinator::default(),
             ai_ledger_retention_days: 30,
+            diagnostic_log: None,
         });
         assert!(result.is_ok());
         let result = build_native_runtime(NativeRuntimeOptions {
@@ -6578,6 +6585,7 @@ mod tests {
             active_operations: ActiveOperationRegistry::default(),
             telegram_delivery: TelegramDeliveryCoordinator::default(),
             ai_ledger_retention_days: 30,
+            diagnostic_log: None,
         });
         assert!(result.is_ok());
         let result = build_native_runtime(NativeRuntimeOptions {
@@ -6611,6 +6619,7 @@ mod tests {
             active_operations: ActiveOperationRegistry::default(),
             telegram_delivery: TelegramDeliveryCoordinator::default(),
             ai_ledger_retention_days: 30,
+            diagnostic_log: None,
         });
         assert!(result.is_ok());
     }
@@ -6843,6 +6852,7 @@ mod tests {
             active_operations: ActiveOperationRegistry::default(),
             telegram_delivery: TelegramDeliveryCoordinator::default(),
             ai_ledger_retention_days: 30,
+            diagnostic_log: None,
         });
         assert!(result.is_ok());
     }
