@@ -21,6 +21,9 @@ use crate::http_client::{BROWSER_USER_AGENT, error_chain};
 pub const FETCH_MAX_BYTES: usize = 2_097_152;
 pub const FETCH_MAX_CHARS: usize = 12_000;
 pub const FETCH_MAX_REDIRECTS: usize = 5;
+/// A page with less visible text than this that holds an iframe is a wrapper
+/// around the iframe's page.
+const IFRAME_WRAPPER_MAX_CHARS: usize = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebFetchResponse {
@@ -188,12 +191,7 @@ pub fn fetch_public_url<T: WebFetchTransport, R: HostResolver>(
                     detail: "redirect response omitted Location".to_owned(),
                 });
             };
-            if redirect_count == FETCH_MAX_REDIRECTS {
-                return Err(PublicFetchError::Request {
-                    url: url.to_string(),
-                    detail: "too many redirects".to_owned(),
-                });
-            }
+            next_hop(&url, &mut redirect_count)?;
             url = url
                 .join(location)
                 .ok()
@@ -201,7 +199,6 @@ pub fn fetch_public_url<T: WebFetchTransport, R: HostResolver>(
                 .ok_or_else(|| PublicFetchError::Blocked {
                     url: location.to_owned(),
                 })?;
-            redirect_count += 1;
             continue;
         }
         if !(200..300).contains(&response.status_code) {
@@ -221,13 +218,25 @@ pub fn fetch_public_url<T: WebFetchTransport, R: HostResolver>(
                         .contains("<html")
                 });
         let (title, canonical_url, content) = if is_html {
-            let (title, content) = extract_text_from_html(&decoded);
+            let page = parse_html(&decoded);
+            // Link cloakers answer with an empty page that shows the real
+            // one in an iframe; read that page instead, as a browser would.
+            if page.text.chars().count() < IFRAME_WRAPPER_MAX_CHARS
+                && let Some(frame) = page
+                    .frames
+                    .iter()
+                    .find_map(|source| normalize_http_url(url.join(source).ok()?.as_str()))
+            {
+                next_hop(&url, &mut redirect_count)?;
+                url = frame;
+                continue;
+            }
             (
-                title,
+                page.title,
                 extract_meta_content(&decoded, "og:url")
                     .and_then(|value| url.join(&value).ok())
                     .map(|value| value.to_string()),
-                content,
+                page.text,
             )
         } else {
             (
@@ -247,6 +256,18 @@ pub fn fetch_public_url<T: WebFetchTransport, R: HostResolver>(
             truncated: response.truncated || text_truncated,
         });
     }
+}
+
+/// Counts one more hop, redirect or iframe, toward [`FETCH_MAX_REDIRECTS`].
+fn next_hop(url: &Url, redirect_count: &mut usize) -> Result<(), PublicFetchError> {
+    if *redirect_count == FETCH_MAX_REDIRECTS {
+        return Err(PublicFetchError::Request {
+            url: url.to_string(),
+            detail: "too many redirects".to_owned(),
+        });
+    }
+    *redirect_count += 1;
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -551,6 +572,18 @@ fn is_public_ip(address: IpAddr) -> bool {
 }
 
 pub fn extract_text_from_html(html: &str) -> (Option<String>, String) {
+    let page = parse_html(html);
+    (page.title, page.text)
+}
+
+struct ParsedHtml {
+    title: Option<String>,
+    text: String,
+    /// `src` of every iframe outside script, style and noscript, in order.
+    frames: Vec<String>,
+}
+
+fn parse_html(html: &str) -> ParsedHtml {
     let mut parser = VisibleTextParser::default();
     parser.feed(html);
     parser.finish()
@@ -562,6 +595,7 @@ struct VisibleTextParser {
     current: String,
     title: String,
     in_title: bool,
+    frames: Vec<String>,
 }
 
 impl VisibleTextParser {
@@ -611,6 +645,14 @@ impl VisibleTextParser {
             self.in_title = !closing;
             return None;
         }
+        if name == "iframe"
+            && !closing
+            && let Some((_, source)) = parse_attributes(&raw[name.len()..])
+                .into_iter()
+                .find(|(attribute, _)| attribute == "src")
+        {
+            self.frames.push(decode_html_entities(&source));
+        }
         if is_block_tag(&name) {
             self.flush();
         }
@@ -642,10 +684,13 @@ impl VisibleTextParser {
         }
     }
 
-    fn finish(mut self) -> (Option<String>, String) {
+    fn finish(mut self) -> ParsedHtml {
         self.flush();
-        let title = (!self.title.is_empty()).then_some(self.title);
-        (title, self.lines.join("\n"))
+        ParsedHtml {
+            title: (!self.title.is_empty()).then_some(self.title),
+            text: self.lines.join("\n"),
+            frames: self.frames,
+        }
     }
 }
 
@@ -927,6 +972,89 @@ mod tests {
             *transport.urls.borrow(),
             ["https://example.com/start", "https://example.com/final"]
         );
+    }
+
+    #[test]
+    fn near_empty_wrapper_pages_are_read_through_their_iframe() -> TestResult {
+        let wrapper = concat!(
+            "<html><head><title>Short link</title></head><body>",
+            "<noscript><iframe src=\"https://ads.example.net/\"></iframe></noscript>",
+            "<iframe src=\"about:blank\"></iframe>",
+            "<IFRAME class=\"w-full\" SRC=\"/real?a=1&amp;b=2\"></IFRAME>",
+            "</body></html>"
+        );
+        let transport = Transport {
+            responses: RefCell::new(vec![
+                Ok(response(200, wrapper)),
+                Ok(response(
+                    200,
+                    "<title>Tracker</title><p>Drained 5 coins</p>",
+                )),
+            ]),
+            urls: RefCell::new(Vec::new()),
+        };
+        let page = fetch_public_url(
+            &transport,
+            &Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
+            "https://short.example/link",
+        )?;
+        assert_eq!(
+            *transport.urls.borrow(),
+            [
+                "https://short.example/link",
+                "https://short.example/real?a=1&b=2"
+            ]
+        );
+        assert_eq!(page.url, "https://short.example/real?a=1&b=2");
+        assert_eq!(page.title.as_deref(), Some("Tracker"));
+        assert_eq!(page.content, "Drained 5 coins");
+
+        let article = format!(
+            "<p>{}</p><iframe src=\"https://video.example/embed\"></iframe>",
+            "Real article text. ".repeat(20)
+        );
+        let transport = Transport {
+            responses: RefCell::new(vec![Ok(response(200, &article))]),
+            urls: RefCell::new(Vec::new()),
+        };
+        let page = fetch_public_url(
+            &transport,
+            &Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
+            "https://news.example/story",
+        )?;
+        assert_eq!(page.url, "https://news.example/story");
+        assert_eq!(transport.urls.borrow().len(), 1);
+
+        let transport = Transport {
+            responses: RefCell::new(vec![Ok(response(
+                200,
+                "<iframe src=\"http://169.254.169.254/latest\"></iframe>",
+            ))]),
+            urls: RefCell::new(Vec::new()),
+        };
+        assert!(matches!(
+            fetch_public_url(
+                &transport,
+                &Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
+                "https://short.example/link",
+            ),
+            Err(PublicFetchError::Blocked { .. })
+        ));
+
+        let framed = || Ok(response(200, "<iframe src=\"/again\"></iframe>"));
+        let transport = Transport {
+            responses: RefCell::new((0..=FETCH_MAX_REDIRECTS).map(|_| framed()).collect()),
+            urls: RefCell::new(Vec::new()),
+        };
+        assert!(matches!(
+            fetch_public_url(
+                &transport,
+                &Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
+                "https://short.example/link",
+            ),
+            Err(PublicFetchError::Request { detail, .. }) if detail == "too many redirects"
+        ));
+        Ok(())
     }
 
     #[test]
