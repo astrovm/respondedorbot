@@ -9902,8 +9902,7 @@ mod tests {
             exchange: "NMS".to_owned(),
             asset_type: String::new(),
             variation: 1.25,
-            session: None,
-            extended: None,
+            change_window: bot_core::stocks::ChangeWindow::PreviousClose,
         };
         let config = Config {
             value: Ok(ChatConfig {
@@ -10132,8 +10131,7 @@ mod tests {
             exchange: String::new(),
             asset_type: String::new(),
             variation,
-            session: None,
-            extended: None,
+            change_window: bot_core::stocks::ChangeWindow::PreviousClose,
         };
         let config = Config {
             value: Ok(ChatConfig {
@@ -13361,8 +13359,7 @@ mod tests {
             exchange: "TEST".to_owned(),
             asset_type: String::new(),
             variation: 0.0,
-            session: None,
-            extended: None,
+            change_window: bot_core::stocks::ChangeWindow::PreviousClose,
         };
         assert_eq!(
             BareStock.render_chart(&quote, 1_700_000_000),
@@ -16807,8 +16804,7 @@ mod tests {
                             exchange: "NMS".into(),
                             asset_type: String::new(),
                             variation: 1.0,
-                            session: None,
-                            extended: None,
+                            change_window: bot_core::stocks::ChangeWindow::PreviousClose,
                         }),
                     )]),
                     diagnostics: vec![],

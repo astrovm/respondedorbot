@@ -1479,8 +1479,7 @@ mod tests {
             exchange: String::new(),
             asset_type: String::new(),
             variation: -1.53,
-            session: None,
-            extended: None,
+            change_window: bot_core::stocks::ChangeWindow::PreviousClose,
         };
         let candles = vec![
             vec![1.0, 100.0, 110.0, 90.0, 105.0],
@@ -1520,8 +1519,7 @@ mod tests {
             exchange: "TEST".into(),
             asset_type: String::new(),
             variation: 1.0,
-            session: None,
-            extended: None,
+            change_window: bot_core::stocks::ChangeWindow::PreviousClose,
         };
         assert!(super::render_market_chart(&quote, &[]).is_err());
         let png =

@@ -300,14 +300,14 @@ pub struct MarketChart {
     pub candidate: Option<MarketCandidate>,
 }
 
-fn stock_chart(quote: &StockQuote, timeframe: Option<&str>, locale: Locale) -> MarketChart {
+fn stock_chart(quote: &StockQuote, timeframe: Option<&str>) -> MarketChart {
     MarketChart {
         timeframe: timeframe.map(str::to_owned),
         symbol: quote.symbol.clone(),
         name: quote.name.clone(),
         yahoo_symbol: quote.symbol.clone(),
         token: None,
-        candidate: Some(market_stock_candidate(quote, timeframe, locale)),
+        candidate: Some(market_stock_candidate(quote, timeframe)),
     }
 }
 
@@ -567,10 +567,10 @@ pub fn execute_stock_candidate<S: UnifiedStockProvider>(
         };
     };
     MarketPriceExecution {
-        chart: Some(stock_chart(&quote, timeframe, locale)),
+        chart: Some(stock_chart(&quote, timeframe)),
         selection: None,
         no_assets_found: false,
-        text: format_stocks(std::slice::from_ref(&quote), timeframe, locale),
+        text: format_stocks(std::slice::from_ref(&quote), timeframe),
         diagnostics,
     }
 }
@@ -745,8 +745,8 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
         if conversion_requested {
             return stock_conversion_error(raw_query, locale);
         }
-        *chart = Some(stock_chart(quote, timeframe, locale));
-        return format_stocks(std::slice::from_ref(quote), timeframe, locale);
+        *chart = Some(stock_chart(quote, timeframe));
+        return format_stocks(std::slice::from_ref(quote), timeframe);
     }
     let stock_search_is_ambiguous = stock_quotes.len() > 1;
     if !raw_query.contains(',')
@@ -764,7 +764,7 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
         stock_quotes.sort_by(|left, right| compare_stock_quotes(raw_query, left, right));
         let stock_candidates = stock_quotes
             .iter()
-            .map(|quote| market_stock_candidate(quote, timeframe, locale))
+            .map(|quote| market_stock_candidate(quote, timeframe))
             .collect::<Vec<_>>();
         candidates.extend(stock_candidates);
         candidates.truncate(10);
@@ -799,7 +799,7 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
         } else {
             stock_quotes
                 .first()
-                .map(|quote| stock_chart(quote, timeframe, locale))
+                .map(|quote| stock_chart(quote, timeframe))
         };
     }
     if !stock_quotes.is_empty() && conversion_requested {
@@ -841,7 +841,7 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
     if !crypto_text.is_empty() {
         parts.push(crypto_text);
     }
-    let stock_text = format_stocks(&stock_quotes, timeframe, locale);
+    let stock_text = format_stocks(&stock_quotes, timeframe);
     if !stock_text.is_empty() {
         parts.push(stock_text);
     }
@@ -1597,12 +1597,8 @@ fn market_candidate(
     }
 }
 
-fn market_stock_candidate(
-    quote: &StockQuote,
-    timeframe: Option<&str>,
-    locale: Locale,
-) -> MarketCandidate {
-    let period = timeframe.unwrap_or_else(|| crate::stocks::stock_change_period(quote, locale));
+fn market_stock_candidate(quote: &StockQuote, timeframe: Option<&str>) -> MarketCandidate {
+    let period = timeframe.unwrap_or_else(|| crate::stocks::stock_change_period(quote));
     MarketCandidate {
         id: format!("stock:{}", quote.symbol),
         symbol: quote.symbol.clone(),
@@ -1766,7 +1762,7 @@ fn stock_only<S: UnifiedStockProvider>(
         quotes.sort_by(|left, right| compare_stock_quotes(query, left, right));
         let mut candidates = quotes
             .iter()
-            .map(|quote| market_stock_candidate(quote, timeframe, locale))
+            .map(|quote| market_stock_candidate(quote, timeframe))
             .collect::<Vec<_>>();
         candidates.truncate(10);
         *selection_result = Some(MarketSelection {
@@ -1780,12 +1776,10 @@ fn stock_only<S: UnifiedStockProvider>(
         return String::new();
     }
     if quotes.len() == 1 && resolved.iter().filter(|(_, quote)| quote.is_some()).count() == 1 {
-        *chart = quotes
-            .first()
-            .map(|quote| stock_chart(quote, timeframe, locale));
+        *chart = quotes.first().map(|quote| stock_chart(quote, timeframe));
     }
     let mut parts = Vec::new();
-    let text = format_stocks(&quotes, timeframe, locale);
+    let text = format_stocks(&quotes, timeframe);
     if !text.is_empty() {
         parts.push(text);
     }
@@ -1820,10 +1814,10 @@ fn unique_stock_quotes(quotes: Vec<StockQuote>) -> Vec<StockQuote> {
     unique
 }
 
-fn format_stocks(quotes: &[StockQuote], timeframe: Option<&str>, locale: Locale) -> String {
+fn format_stocks(quotes: &[StockQuote], timeframe: Option<&str>) -> String {
     quotes
         .iter()
-        .map(|quote| crate::stocks::render_stock_quote(&quote.symbol, quote, timeframe, locale))
+        .map(|quote| crate::stocks::render_stock_quote(&quote.symbol, quote, timeframe))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -1985,8 +1979,7 @@ mod tests {
             exchange: "Synthetic".to_owned(),
             asset_type: String::new(),
             variation: 1.25,
-            session: None,
-            extended: None,
+            change_window: crate::stocks::ChangeWindow::PreviousClose,
         }
     }
 
@@ -2338,8 +2331,7 @@ mod tests {
                 exchange: String::new(),
                 asset_type: String::new(),
                 variation: 1.25,
-                session: None,
-                extended: None,
+                change_window: crate::stocks::ChangeWindow::PreviousClose,
             }),
         )]);
         let result = execute_market_price_command(
@@ -3788,15 +3780,9 @@ mod tests {
 
         let mut odd = stock("ODD");
         odd.variation = f64::NAN;
-        assert_eq!(
-            market_stock_candidate(&odd, None, Locale::Es).change,
-            "N/A 1d"
-        );
-        odd.session = Some(crate::stocks::MarketSession::Closed);
-        assert_eq!(
-            market_stock_candidate(&odd, None, Locale::En).change,
-            "N/A at close"
-        );
+        assert_eq!(market_stock_candidate(&odd, None).change, "N/A 1d");
+        odd.change_window = crate::stocks::ChangeWindow::Hours24;
+        assert_eq!(market_stock_candidate(&odd, None).change, "N/A 24h");
     }
 
     #[test]
