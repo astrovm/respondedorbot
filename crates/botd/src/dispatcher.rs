@@ -1164,6 +1164,10 @@ type OptionalNativeDispatchResult<Config, Actions, Random> = Result<
     >,
 >;
 
+/// Writes one diagnostic of the update with this id where an operator can
+/// read it.
+pub type DiagnosticLog = std::sync::Arc<dyn Fn(i64, &str) + Send + Sync>;
+
 pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorization> {
     config: Config,
     actions: Actions,
@@ -1210,7 +1214,9 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     /// current message, so the AI turn does not fetch it again.
     prefetched_link_context: Option<Option<String>>,
     last_outcome: Option<DispatchOutcome>,
+    /// Why parts of the current update failed or degraded.
     state_diagnostics: Vec<String>,
+    diagnostic_log: Option<DiagnosticLog>,
 }
 
 impl<Config, Actions, State, Values, Random, Authorization>
@@ -1275,7 +1281,16 @@ where
             prefetched_link_context: None,
             last_outcome: None,
             state_diagnostics: Vec::new(),
+            diagnostic_log: None,
         }
+    }
+
+    /// Where [`UpdateHandler::handle`] writes each update's diagnostics.
+    /// Without one they are only kept until the next update.
+    #[must_use]
+    pub fn with_diagnostic_log(mut self, log: Option<DiagnosticLog>) -> Self {
+        self.diagnostic_log = log;
+        self
     }
 
     /// Override billing availability for startup/readiness and deterministic tests.
@@ -6796,7 +6811,15 @@ where
     type Error = DispatchError<Config::Error, Actions::Error, Random::Error>;
 
     fn handle(&mut self, update: IncomingUpdate) -> Result<(), Self::Error> {
-        self.dispatch(update).map(|_outcome| ())
+        let update_id = update.update_id;
+        let result = self.dispatch(update).map(|_outcome| ());
+        let diagnostics = std::mem::take(&mut self.state_diagnostics);
+        if let Some(log) = &self.diagnostic_log {
+            for diagnostic in &diagnostics {
+                log(update_id, diagnostic);
+            }
+        }
+        result
     }
 
     fn error_disposition(&self, error: &Self::Error) -> HandlerErrorDisposition {
@@ -9995,6 +10018,53 @@ mod tests {
         assert_eq!(
             missing.dispatch(update("/crypto btc", None)),
             Err(DispatchError::MissingService("market prices"))
+        );
+    }
+
+    #[test]
+    fn each_update_logs_its_own_diagnostics_once() {
+        let failing_stocks = || {
+            Box::new(StockQuotes {
+                result: StockQuotesLoad {
+                    quotes: None,
+                    diagnostics: vec!["synthetic Finviz failure".to_owned()],
+                },
+                calls: Rc::new(RefCell::new(Vec::new())),
+            })
+        };
+        let config = || Config {
+            value: Ok(ChatConfig::default()),
+            chat_ids: Vec::new(),
+        };
+        let logged = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&logged);
+        let mut dispatcher = NativeDispatcher::new(
+            config(),
+            Actions::default(),
+            State::default(),
+            values(),
+            random(),
+            authorization(),
+            "@mybot",
+        )
+        .with_stock_price_source(failing_stocks())
+        .with_diagnostic_log(Some(std::sync::Arc::new(move |update_id, text: &str| {
+            sink.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((update_id, text.to_owned()));
+        })));
+        let first = update("/acciones", None);
+        let mut second = update("/acciones", None);
+        second.update_id = first.update_id + 1;
+        let ids = [first.update_id, second.update_id];
+        assert_eq!(dispatcher.handle(first), Ok(()));
+        assert_eq!(dispatcher.handle(second), Ok(()));
+        assert!(dispatcher.state_diagnostics().is_empty());
+        assert_eq!(
+            *logged
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ids.map(|id| (id, "synthetic Finviz failure".to_owned()))
         );
     }
 
