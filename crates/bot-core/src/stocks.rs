@@ -1110,6 +1110,16 @@ mod tests {
             yahoo_24h_change(&chart, FRIDAY_CLOSE + 60),
             Some((20.0, 25.0))
         );
+        // A regular trade no newer than the last bar keeps the bar.
+        let chart = intraday_chart(
+            json!({}),
+            &[FRIDAY_CLOSE - DAY, FRIDAY_CLOSE],
+            json!([16.0, 19.0]),
+        );
+        assert_eq!(
+            yahoo_24h_change(&chart, FRIDAY_CLOSE + 60),
+            Some((19.0, 18.75))
+        );
         // An unusable regular price keeps the last bar.
         let chart = intraday_chart(
             json!({"regularMarketPrice": 0.0}),
@@ -1128,6 +1138,11 @@ mod tests {
         assert_eq!(yahoo_24h_change(&recent, FRIDAY_CLOSE), None);
         let empty = intraday_chart(json!({}), &[], json!([]));
         assert_eq!(yahoo_24h_change(&empty, FRIDAY_CLOSE), None);
+        let mut untimed = intraday_chart(json!({}), &[FRIDAY_CLOSE - DAY], json!([16.0]));
+        if let Some(result) = untimed["chart"]["result"][0].as_object_mut() {
+            result.remove("timestamp");
+        }
+        assert_eq!(yahoo_24h_change(&untimed, FRIDAY_CLOSE), None);
         assert_eq!(yahoo_24h_change(&json!({}), FRIDAY_CLOSE), None);
         assert_eq!(
             yahoo_24h_change(&chart(json!({"meta": []})), FRIDAY_CLOSE),
