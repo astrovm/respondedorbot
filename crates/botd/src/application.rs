@@ -908,7 +908,7 @@ mod tests {
             "synthetic-opennode-key",
             "synthetic system prompt",
         ] {
-            assert!(secrets.iter().any(|value| value == secret), "{secret}");
+            assert!(secrets.iter().any(|value| value == secret));
         }
         let redactor = SecretRedactor::new(secrets);
         assert_eq!(
