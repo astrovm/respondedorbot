@@ -1,7 +1,8 @@
 //! Native bounded and SSRF-safe `web_fetch` AI tool.
 
+use bot_adapters::browser::PageRenderer;
 use bot_adapters::web_fetch::{
-    AiFetchOutcome, HostResolver, PublicFetchError, WebFetchTransport, fetch_ai_url,
+    AiFetchOutcome, HostResolver, PublicFetchError, Rendering, WebFetchTransport, fetch_ai_url,
 };
 use std::sync::Arc;
 
@@ -11,18 +12,27 @@ use crate::chat_tool_loop::{ConcurrentToolCall, ToolExecutionResult};
 use crate::tool_output;
 use crate::tool_requests::{ExternalToolExecutor, ExternalToolRequest};
 
+pub type SharedRenderer = Arc<dyn PageRenderer + Send + Sync>;
+
 pub struct WebFetchTool<Transport, Resolver> {
     transport: Arc<Transport>,
     resolver: Arc<Resolver>,
+    renderer: Option<SharedRenderer>,
     locale: Locale,
 }
 
 impl<Transport, Resolver> WebFetchTool<Transport, Resolver> {
     #[must_use]
-    pub fn new(transport: Transport, resolver: Resolver, locale: Locale) -> Self {
+    pub fn new(
+        transport: Transport,
+        resolver: Resolver,
+        renderer: Option<SharedRenderer>,
+        locale: Locale,
+    ) -> Self {
         Self {
             transport: Arc::new(transport),
             resolver: Arc::new(resolver),
+            renderer,
             locale,
         }
     }
@@ -38,7 +48,13 @@ where
         request: ExternalToolRequest,
         _tool_call_id: &str,
     ) -> ToolExecutionResult {
-        fetch(&*self.transport, &*self.resolver, self.locale, request)
+        fetch(
+            &*self.transport,
+            &*self.resolver,
+            self.renderer.as_ref(),
+            self.locale,
+            request,
+        )
     }
 
     /// Fetching a page is read-only, so several fetches in one model round
@@ -50,9 +66,10 @@ where
     ) -> Option<ConcurrentToolCall> {
         let transport = Arc::clone(&self.transport);
         let resolver = Arc::clone(&self.resolver);
+        let renderer = self.renderer.clone();
         let locale = self.locale;
         Some(Box::new(move || {
-            fetch(&*transport, &*resolver, locale, request)
+            fetch(&*transport, &*resolver, renderer.as_ref(), locale, request)
         }))
     }
 }
@@ -60,13 +77,15 @@ where
 fn fetch<Transport: WebFetchTransport, Resolver: HostResolver>(
     transport: &Transport,
     resolver: &Resolver,
+    renderer: Option<&SharedRenderer>,
     locale: Locale,
     request: ExternalToolRequest,
 ) -> ToolExecutionResult {
-    let ExternalToolRequest::WebFetch { url } = request else {
+    let ExternalToolRequest::WebFetch { url, render } = request else {
         return ToolExecutionResult::output(tool_output::incompatible(locale, "web_fetch"));
     };
-    match fetch_ai_url(transport, resolver, &url) {
+    let renderer = renderer.map(|renderer| &**renderer as &dyn PageRenderer);
+    match fetch_ai_url(transport, resolver, renderer, &url, render) {
         Ok(AiFetchOutcome::Tweet(tweet)) => {
             let mut parts = Vec::new();
             if !tweet.author.is_empty() || !tweet.date.is_empty() {
@@ -117,6 +136,15 @@ fn fetch<Transport: WebFetchTransport, Resolver: HostResolver>(
             if page.truncated {
                 diagnostics.push(format!("web_fetch truncated response from {}", page.url));
             }
+            match &page.rendering {
+                Rendering::Static => {}
+                Rendering::Rendered => {
+                    diagnostics.push(format!("web_fetch rendered {} in a browser", page.url));
+                }
+                Rendering::Failed(reason) => {
+                    diagnostics.push(format!("web_fetch could not render {}: {reason}", page.url));
+                }
+            }
             ToolExecutionResult::with_diagnostics(output, diagnostics)
         }
         Err(error) => error_result(&url, error, locale),
@@ -156,6 +184,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Mutex;
 
+    use bot_adapters::browser::RenderError;
     use bot_adapters::web_fetch::{WebFetchResponse, WebFetchTransportError};
 
     use super::*;
@@ -184,11 +213,28 @@ mod tests {
         responses: Vec<Result<WebFetchResponse, WebFetchTransportError>>,
         locale: Locale,
     ) -> WebFetchTool<Transport, Resolver> {
+        rendering_tool(responses, None, locale)
+    }
+
+    fn rendering_tool(
+        responses: Vec<Result<WebFetchResponse, WebFetchTransportError>>,
+        renderer: Option<SharedRenderer>,
+        locale: Locale,
+    ) -> WebFetchTool<Transport, Resolver> {
         WebFetchTool::new(
             Transport(Mutex::new(responses)),
             Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
+            renderer,
             locale,
         )
+    }
+
+    struct Renderer(Result<String, RenderError>);
+
+    impl PageRenderer for Renderer {
+        fn render(&self, _url: &str) -> Result<String, RenderError> {
+            self.0.clone()
+        }
     }
 
     fn response(content_type: &str, body: &str) -> WebFetchResponse {
@@ -204,7 +250,59 @@ mod tests {
     fn request(url: &str) -> ExternalToolRequest {
         ExternalToolRequest::WebFetch {
             url: url.to_owned(),
+            render: false,
         }
+    }
+
+    #[test]
+    fn script_built_pages_are_read_through_the_browser_and_report_how()
+    -> crate::test_env::TestResult {
+        let shell = || {
+            Ok(response(
+                "text/html",
+                "<title>App</title><p>Loading</p><script src=\"/app.js\"></script>",
+            ))
+        };
+        let renderer: SharedRenderer = Arc::new(Renderer(Ok(
+            "<title>App</title><p>Drained 5 coins</p>".to_owned(),
+        )));
+        let mut tool = rendering_tool(vec![shell(), shell()], Some(renderer), Locale::En);
+        let result = tool.execute(request("https://example.com/app"), "call");
+        assert_eq!(result.output, "Title: App\nDrained 5 coins");
+        assert_eq!(
+            result.diagnostics,
+            ["web_fetch rendered https://example.com/app in a browser"]
+        );
+        let run = tool
+            .concurrent(
+                ExternalToolRequest::WebFetch {
+                    url: "https://example.com/app".to_owned(),
+                    render: true,
+                },
+                "call",
+            )
+            .ok_or("web fetch runs concurrently")?;
+        assert_eq!(
+            std::thread::spawn(run)
+                .join()
+                .map_err(|_| "fetch thread panicked")?
+                .output,
+            "Title: App\nDrained 5 coins"
+        );
+
+        let renderer: SharedRenderer = Arc::new(Renderer(Err(RenderError::Failed(
+            "exit status: 124".to_owned(),
+        ))));
+        let mut tool = rendering_tool(vec![shell()], Some(renderer), Locale::En);
+        let result = tool.execute(request("https://example.com/app"), "call");
+        assert_eq!(result.output, "Title: App\nLoading");
+        assert_eq!(
+            result.diagnostics,
+            [
+                "web_fetch could not render https://example.com/app: browser failed: exit status: 124"
+            ]
+        );
+        Ok(())
     }
 
     #[test]

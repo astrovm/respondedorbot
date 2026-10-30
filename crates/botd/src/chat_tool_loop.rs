@@ -869,6 +869,9 @@ pub(crate) fn tool_trace(
                     .and_then(Value::as_str)
                     .unwrap_or_default()
             ));
+            if arguments.get("render").and_then(Value::as_bool) == Some(true) {
+                details["render"] = json!(true);
+            }
         }
         _ => {}
     }
@@ -2408,8 +2411,16 @@ mod tests {
         );
         assert_eq!(trace["url"], "https://example.com/page");
         assert!(trace.get("output_chars").is_none());
+        assert!(trace.get("render").is_none());
         let missing = tool_trace("web_fetch", "call-1", &json!({}), None);
         assert_eq!(missing["url"], "[invalid URL]");
+        let rendered = tool_trace(
+            "web_fetch",
+            "call-1",
+            &json!({"url": "https://example.com/app", "render": true}),
+            None,
+        );
+        assert_eq!(rendered["render"], true);
     }
 
     #[test]

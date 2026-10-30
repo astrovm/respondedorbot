@@ -149,7 +149,7 @@ use crate::task_tools::{
     TaskToolContext,
 };
 use crate::tool_requests::{ExternalToolbox, ValidatedNativeToolPorts};
-use crate::web_fetch_tool::WebFetchTool;
+use crate::web_fetch_tool::{SharedRenderer, WebFetchTool};
 use crate::youtube::{NativeYoutubeContext, YoutubeContextRuntime};
 use bot_adapters::redis_poll_store::RedisPollStore;
 
@@ -3111,6 +3111,8 @@ impl ProductionToolFactory {
                 Box::new(WebFetchTool::new(
                     ReqwestWebFetchTransport::new().map_err(error_text)?,
                     SystemHostResolver,
+                    bot_adapters::browser::shared_renderer()
+                        .map(|renderer| renderer as SharedRenderer),
                     locale,
                 )),
             )
