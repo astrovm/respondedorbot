@@ -170,7 +170,7 @@ mod tests {
     fn cache_miss_fetches_and_writes_python_compatible_pool() {
         let transport = transport(Ok(HttpResponse {
             status_code: 200,
-            body: r#"data-boxover-ticker="AAPL" data-boxover-company="Apple""#.to_owned(),
+            body: crate::finviz::tests::row("AAPL", "Apple"),
         }));
         let mut cache = Cache::default();
         let load = load_stock_pool(&transport, &mut cache);
@@ -194,7 +194,7 @@ mod tests {
 
         let transport = transport(Ok(HttpResponse {
             status_code: 200,
-            body: r#"data-boxover-ticker="MSFT" data-boxover-company="Microsoft""#.to_owned(),
+            body: crate::finviz::tests::row("MSFT", "Microsoft"),
         }));
         let mut cache = Cache {
             gets: VecDeque::from([Ok(Some("not-json".to_owned()))]),

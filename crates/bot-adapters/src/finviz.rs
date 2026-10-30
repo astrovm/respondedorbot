@@ -4,14 +4,15 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use regex::Regex;
 use reqwest::blocking::Client;
 use serde::Serialize;
 
-const SCREENER_URL: &str = "https://finviz.com/screener";
+const SCREENER_URL: &str = "https://finviz.com/screener/stocks";
 const MAX_SYMBOLS: usize = 10;
 
-static COMPANY_REGEX: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
+/// Each screener row starts with this attribute, followed by the symbol.
+const ROW_KEY: &str = "data-row-key=\"";
+const COMPANY_CELL: &str = "data-column-id=\"company\"";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpResponse {
@@ -78,28 +79,36 @@ impl FinvizTransport for ReqwestFinvizTransport {
     }
 }
 
+/// Reads the screener table's rows in order, one symbol per company, so
+/// share classes such as GOOGL and GOOG count once.
 #[must_use]
 pub fn parse_symbols(html: &str) -> Vec<String> {
-    COMPANY_REGEX
-        .get_or_init(|| {
-            Regex::new(r#"data-boxover-ticker="([A-Z.]+)"\s+data-boxover-company="([^"]+)""#)
-        })
-        .as_ref()
-        .map(|regex| {
-            let mut companies = HashSet::new();
-            let mut symbols = Vec::new();
-            for captures in regex.captures_iter(html) {
-                let (_, [symbol, company]) = captures.extract();
-                if companies.insert(company.to_owned()) {
-                    symbols.push(symbol.to_owned());
-                    if symbols.len() == MAX_SYMBOLS {
-                        break;
-                    }
-                }
+    let mut companies = HashSet::new();
+    let mut symbols = Vec::new();
+    for row in html.split(ROW_KEY).skip(1) {
+        let Some((symbol, row)) = row.split_once('"') else {
+            continue;
+        };
+        if symbol.is_empty()
+            || !symbol.bytes().all(|byte| {
+                byte.is_ascii_uppercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
+            })
+        {
+            continue;
+        }
+        let company = row
+            .split_once(COMPANY_CELL)
+            .and_then(|(_, cell)| cell.split_once('>'))
+            .and_then(|(_, cell)| cell.split_once('<'))
+            .map_or(symbol, |(company, _)| company.trim());
+        if companies.insert(company.to_owned()) {
+            symbols.push(symbol.to_owned());
+            if symbols.len() == MAX_SYMBOLS {
+                break;
             }
-            symbols
-        })
-        .unwrap_or_default()
+        }
+    }
+    symbols
 }
 
 #[must_use]
@@ -116,7 +125,7 @@ pub fn fetch_with<T: FinvizTransport>(transport: &T) -> ScreenerOutcome {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     use std::cell::RefCell;
@@ -142,6 +151,21 @@ mod tests {
         }
     }
 
+    /// One screener row in Finviz's table markup.
+    pub(crate) fn row(symbol: &str, company: &str) -> String {
+        format!(
+            concat!(
+                r#"<div class="fv-table_row" data-row-key="{symbol}" role="row">"#,
+                r#"<div data-column-id="ticker" role="gridcell" data-ticker="{symbol}">"#,
+                r#"<a href="/quote?t={symbol}"><span>{symbol}</span></a></div>"#,
+                r#"<div aria-colindex="3" class="fv-table_cell" data-column-id="company" role="gridcell">{company}</div>"#,
+                r#"<div data-column-id="sector" role="gridcell">Technology</div></div>"#
+            ),
+            symbol = symbol,
+            company = company,
+        )
+    }
+
     #[test]
     fn parser_deduplicates_companies_preserves_order_and_limits_results() {
         let html = (0..12)
@@ -152,7 +176,7 @@ mod tests {
                 } else {
                     format!("Company {index}")
                 };
-                format!(r#"<a data-boxover-ticker="{symbol}" data-boxover-company="{company}">"#)
+                row(&symbol, &company)
             })
             .collect::<String>();
         assert_eq!(
@@ -162,11 +186,27 @@ mod tests {
     }
 
     #[test]
+    fn parser_reads_class_shares_and_rows_without_a_company() {
+        let html = [
+            row("BRK-B", "Berkshire Hathaway Inc"),
+            row("BRK-A", "Berkshire Hathaway Inc"),
+            row("BF.B", "Brown-Forman Corp"),
+            r#"<div data-row-key="NOCO" role="row"></div>"#.to_owned(),
+            r#"<div data-row-key="lower" role="row"></div><div data-row-key="OPEN"#.to_owned(),
+        ]
+        .concat();
+        assert_eq!(
+            parse_symbols(&html),
+            ["BRK-B", "BF.B", "NOCO"].map(str::to_owned)
+        );
+    }
+
+    #[test]
     fn fetch_classifies_success_http_and_transport_results() {
         let success = FakeTransport {
             response: RefCell::new(Some(Ok(HttpResponse {
                 status_code: 200,
-                body: r#"data-boxover-ticker="EXM" data-boxover-company="Example""#.to_owned(),
+                body: row("EXM", "Example"),
             }))),
         };
         assert_eq!(
@@ -205,7 +245,9 @@ mod tests {
             let mut request = [0_u8; 2_048];
             let bytes = stream.read(&mut request).unwrap_or_default();
             let request = String::from_utf8_lossy(&request[..bytes]);
-            assert!(request.starts_with("GET /screener?v=152&f=cap_mega&o=-marketcap HTTP/1.1"));
+            assert!(
+                request.starts_with("GET /screener/stocks?v=152&f=cap_mega&o=-marketcap HTTP/1.1")
+            );
             assert!(request.to_ascii_lowercase().contains(
                 &format!("user-agent: {}", super::BROWSER_USER_AGENT).to_ascii_lowercase()
             ));
@@ -219,7 +261,7 @@ mod tests {
             Ok(())
         });
         let transport =
-            ReqwestFinvizTransport::with_screener_url(&format!("http://{address}/screener"))
+            ReqwestFinvizTransport::with_screener_url(&format!("http://{address}/screener/stocks"))
                 .ok()
                 .ok_or("unexpected error")?;
         let response = transport.fetch().ok().ok_or("unexpected error")?;
