@@ -3869,6 +3869,13 @@ mod tests {
     impl YahooFinanceTransport for StockYahooTransportStub {
         fn chart(&self, request: &YahooChartRequest) -> Result<YahooHttpResponse, YahooFailure> {
             self.charts.borrow_mut().push(request.clone());
+            // Without intraday bars, quotes keep their daily change.
+            if request.intraday {
+                return Ok(YahooHttpResponse {
+                    status_code: 200,
+                    body: r#"{"chart":{"result":[]}}"#.to_owned(),
+                });
+            }
             let mut responses = self.chart_responses.borrow_mut();
             let next = (!responses.is_empty()).then(|| responses.remove(0));
             next.unwrap_or(Err(YahooFailure::Request))
@@ -7687,8 +7694,7 @@ mod tests {
             exchange: "TEST".into(),
             asset_type: String::new(),
             variation: 5.0,
-            session: None,
-            extended: None,
+            change_window: bot_core::stocks::ChangeWindow::PreviousClose,
         };
         assert!(source.stocks.render_chart(&quote, 1_700_000_000).is_err());
         source
@@ -7893,7 +7899,7 @@ mod tests {
         let chart = |symbol: &str, price: f64| YahooHttpResponse {
             status_code: 200,
             body: format!(
-                r#"{{"chart":{{"result":[{{"meta":{{"symbol":"{symbol}","regularMarketPrice":{price},"chartPreviousClose":100,"currency":"USD"}}}}]}}}}"#
+                r#"{{"chart":{{"result":[{{"meta":{{"symbol":"{symbol}","instrumentType":"FUTURE","regularMarketPrice":{price},"chartPreviousClose":100,"currency":"USD"}}}}]}}}}"#
             ),
         };
         let transport = StockYahooTransportStub {
@@ -7989,9 +7995,15 @@ mod tests {
                 .charts
                 .borrow()
                 .iter()
-                .map(|request| request.symbol.as_str())
+                .map(|request| (request.symbol.as_str(), request.intraday))
                 .collect::<Vec<_>>(),
-            ["APPLE", "INC.", "AAPL"]
+            // The resolved quote also loads its intraday bars.
+            [
+                ("APPLE", false),
+                ("INC.", false),
+                ("AAPL", false),
+                ("AAPL", true)
+            ]
         );
         assert_eq!(
             source.yahoo_transport.searches.borrow()[0].query,
@@ -8406,7 +8418,7 @@ mod tests {
             Ok(YahooHttpResponse {
                 status_code: 200,
                 body: format!(
-                    r#"{{"chart":{{"result":[{{"meta":{{"symbol":"{symbol}","regularMarketPrice":{price},"chartPreviousClose":100,"currency":"USD"}}}}]}}}}"#
+                    r#"{{"chart":{{"result":[{{"meta":{{"symbol":"{symbol}","instrumentType":"FUTURE","regularMarketPrice":{price},"chartPreviousClose":100,"currency":"USD"}}}}]}}}}"#
                 ),
             })
         };
@@ -8593,8 +8605,7 @@ mod tests {
             exchange: exchange.to_owned(),
             asset_type: asset_type.to_owned(),
             variation: 0.0,
-            session: None,
-            extended: None,
+            change_window: bot_core::stocks::ChangeWindow::PreviousClose,
         };
         let unique = super::unique_discovered_quotes(vec![
             quote("EXM", "NASDAQ", "Equity"),
@@ -8643,7 +8654,8 @@ mod tests {
             source.render_chart(&chart, 1_700_000_000).err().as_deref(),
             Some("historical chart data unavailable")
         );
-        assert_eq!(source.stocks.yahoo_transport.charts.borrow().len(), 1);
+        // The daily chart, then the intraday bars for the 24-hour change.
+        assert_eq!(source.stocks.yahoo_transport.charts.borrow().len(), 2);
     }
 
     #[test]

@@ -289,8 +289,7 @@ mod tests {
             exchange: "NMS".to_owned(),
             asset_type: String::new(),
             variation: 1.5,
-            session: None,
-            extended: None,
+            change_window: bot_core::stocks::ChangeWindow::PreviousClose,
         };
         let mut tool = StockPricesTool::new(
             StockSource(StockQuotesLoad {

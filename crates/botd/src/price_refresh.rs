@@ -348,8 +348,7 @@ mod tests {
                     exchange: "NYM".to_owned(),
                     asset_type: String::new(),
                     variation: -8.8,
-                    session: None,
-                    extended: None,
+                    change_window: bot_core::stocks::ChangeWindow::PreviousClose,
                 }),
                 diagnostics: vec![format!("synthetic diagnostic for {symbol}")],
             }
@@ -370,8 +369,7 @@ mod tests {
                 exchange: String::new(),
                 asset_type: String::new(),
                 variation: 0.0,
-                session: None,
-                extended: None,
+                change_window: bot_core::stocks::ChangeWindow::PreviousClose,
             }),
             diagnostics: vec!["ignored when the quote is usable".to_owned()],
         });
