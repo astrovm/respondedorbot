@@ -14,6 +14,10 @@ use crate::tool_requests::{ExternalToolExecutor, ExternalToolRequest};
 
 pub type SharedRenderer = Arc<dyn PageRenderer + Send + Sync>;
 
+/// Starts the diagnostic that says whether a page went through the browser.
+/// It holds no URL, so the AI trace can log it as is.
+pub const RENDER_DIAGNOSTIC_PREFIX: &str = "web_fetch render";
+
 pub struct WebFetchTool<Transport, Resolver> {
     transport: Arc<Transport>,
     resolver: Arc<Resolver>,
@@ -139,10 +143,12 @@ fn fetch<Transport: WebFetchTransport, Resolver: HostResolver>(
             match &page.rendering {
                 Rendering::Static => {}
                 Rendering::Rendered => {
-                    diagnostics.push(format!("web_fetch rendered {} in a browser", page.url));
+                    diagnostics.push(format!(
+                        "{RENDER_DIAGNOSTIC_PREFIX}ed the page in a browser"
+                    ));
                 }
                 Rendering::Failed(reason) => {
-                    diagnostics.push(format!("web_fetch could not render {}: {reason}", page.url));
+                    diagnostics.push(format!("{RENDER_DIAGNOSTIC_PREFIX} failed: {reason}"));
                 }
             }
             ToolExecutionResult::with_diagnostics(output, diagnostics)
@@ -271,7 +277,7 @@ mod tests {
         assert_eq!(result.output, "Title: App\nDrained 5 coins");
         assert_eq!(
             result.diagnostics,
-            ["web_fetch rendered https://example.com/app in a browser"]
+            ["web_fetch rendered the page in a browser"]
         );
         let run = tool
             .concurrent(
@@ -298,9 +304,7 @@ mod tests {
         assert_eq!(result.output, "Title: App\nLoading");
         assert_eq!(
             result.diagnostics,
-            [
-                "web_fetch could not render https://example.com/app: browser failed: exit status: 124"
-            ]
+            ["web_fetch render failed: browser failed: exit status: 124"]
         );
         Ok(())
     }
