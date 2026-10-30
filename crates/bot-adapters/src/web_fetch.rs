@@ -1082,11 +1082,8 @@ mod tests {
             ]),
             urls: RefCell::new(Vec::new()),
         };
-        let page = fetch_public_url(
-            &transport,
-            &Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
-            "https://short.example/link",
-        )?;
+        let resolver = Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]);
+        let page = fetch_public_url(&transport, &resolver, "https://short.example/link")?;
         assert_eq!(
             *transport.urls.borrow(),
             [
@@ -1106,11 +1103,7 @@ mod tests {
             responses: RefCell::new(vec![Ok(response(200, &article))]),
             urls: RefCell::new(Vec::new()),
         };
-        let page = fetch_public_url(
-            &transport,
-            &Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
-            "https://news.example/story",
-        )?;
+        let page = fetch_public_url(&transport, &resolver, "https://news.example/story")?;
         assert_eq!(page.url, "https://news.example/story");
         assert_eq!(transport.urls.borrow().len(), 1);
 
@@ -1176,14 +1169,20 @@ mod tests {
             responses: RefCell::new(vec![Ok(response(200, body))]),
             urls: RefCell::new(Vec::new()),
         };
-        match fetch_ai_url(
+        fetch_ai_url(
             &transport,
             &Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
             renderer,
             "https://app.example/",
             render,
-        ) {
-            Ok(AiFetchOutcome::Page(page)) => Some(page),
+        )
+        .ok()
+        .and_then(page_of)
+    }
+
+    fn page_of(outcome: AiFetchOutcome) -> Option<WebFetchContent> {
+        match outcome {
+            AiFetchOutcome::Page(page) => Some(page),
             _ => None,
         }
     }
@@ -1219,6 +1218,10 @@ mod tests {
         assert_eq!(renderer.urls.borrow().len(), 1);
         let page = fetch_page(shell, None, true).ok_or("page")?;
         assert_eq!(page.rendering, Rendering::Static);
+        let tweet = AiFetchOutcome::TweetError {
+            url: "https://x.com/user/status/1".to_owned(),
+        };
+        assert_eq!(page_of(tweet), None);
 
         for (result, reason) in [
             (

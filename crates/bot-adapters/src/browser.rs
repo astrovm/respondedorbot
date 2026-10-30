@@ -171,10 +171,8 @@ fn serve<R: HostResolver, D: Dialer>(
     upstream.write_all(forwarded.as_bytes())?;
     let early_body = early_bytes.len().min(body_length);
     upstream.write_all(&early_bytes[..early_body])?;
-    io::copy(
-        &mut (&client).take(u64::try_from(body_length - early_body).unwrap_or(0)),
-        &mut upstream,
-    )?;
+    let mut late_body = (&client).take(u64::try_from(body_length - early_body).unwrap_or(0));
+    io::copy(&mut late_body, &mut upstream)?;
     upstream.set_read_timeout(Some(IDLE_TIMEOUT))?;
     io::copy(&mut upstream, &mut client)?;
     Ok(())
@@ -370,14 +368,12 @@ mod tests {
         addresses: Vec<IpAddr>,
     ) -> io::Result<(PublicProxy, Arc<Mutex<Vec<SocketAddr>>>)> {
         let dialed = Arc::new(Mutex::new(Vec::new()));
-        let proxy = PublicProxy::start(
-            Resolver(addresses),
-            LocalDialer {
-                server,
-                dialed: Arc::clone(&dialed),
-            },
-        )?;
-        Ok((proxy, dialed))
+        let dialer = LocalDialer {
+            server,
+            dialed: Arc::clone(&dialed),
+        };
+        let proxy = PublicProxy::start(Resolver(addresses), dialer);
+        Ok((proxy?, dialed))
     }
 
     fn exchange(proxy: &PublicProxy, request: &[u8]) -> io::Result<String> {
@@ -407,15 +403,22 @@ mod tests {
             stream.write_all(b"world")?;
             Ok(String::from_utf8_lossy(&received).into_owned())
         });
-        let response = exchange(
-            &proxy,
-            b"CONNECT site.example:8443 HTTP/1.1\r\nHost: site.example:8443\r\n\r\nhello",
-        )?;
+        let request = b"CONNECT site.example:8443 HTTP/1.1\r\nHost: site.example:8443\r\n\r\nhello";
+        let response = exchange(&proxy, request)?;
         assert_eq!(response, "HTTP/1.1 200 Connection Established\r\n\r\nworld");
         assert_eq!(upstream.join().ok().transpose()?.as_deref(), Some("hello"));
         assert_eq!(dialed(&record), [SocketAddr::new(PUBLIC, 8443)]);
         Ok(())
     }
+
+    const EXPECTED_REQUEST: &str = concat!(
+        "POST /path?q=1 HTTP/1.1\r\n",
+        "Host: site.example\r\n",
+        "Content-Length: 4\r\n",
+        "Connection: close\r\n",
+        "\r\n",
+        "body"
+    );
 
     #[test]
     fn plain_requests_go_out_alone_without_proxy_headers() -> TestResult {
@@ -423,47 +426,26 @@ mod tests {
         let (proxy, record) = proxy_to(server.local_addr()?, vec![PUBLIC])?;
         let upstream = thread::spawn(move || -> io::Result<String> {
             let (mut stream, _) = server.accept()?;
-            let mut received = Vec::new();
-            let mut chunk = [0_u8; 1_024];
-            while !received.ends_with(b"body") {
-                let read = stream.read(&mut chunk)?;
-                if read == 0 {
-                    break;
-                }
-                received.extend_from_slice(&chunk[..read]);
-            }
+            let mut received = [0_u8; EXPECTED_REQUEST.len()];
+            stream.read_exact(&mut received)?;
             stream.write_all(b"HTTP/1.1 200 OK\r\n\r\nok")?;
             Ok(String::from_utf8_lossy(&received).into_owned())
         });
-        let response = exchange(
-            &proxy,
-            concat!(
-                "POST http://site.example/path?q=1 HTTP/1.1\r\n",
-                "Host: site.example\r\n",
-                "Proxy-Connection: keep-alive\r\n",
-                "Proxy-Authorization: Basic Zm9vOmJhcg==\r\n",
-                "Content-Length: 4\r\n",
-                "\r\n",
-                "bo"
-            )
-            .as_bytes()
-            .iter()
-            .chain(b"dyGET http://other.example/ HTTP/1.1\r\n\r\n")
-            .copied()
-            .collect::<Vec<_>>()
-            .as_slice(),
-        )?;
+        let request = concat!(
+            "POST http://site.example/path?q=1 HTTP/1.1\r\n",
+            "Host: site.example\r\n",
+            "Proxy-Connection: keep-alive\r\n",
+            "Proxy-Authorization: Basic Zm9vOmJhcg==\r\n",
+            "Content-Length: 4\r\n",
+            "\r\n",
+            // The body, then a second request that must not be forwarded.
+            "bodyGET http://other.example/ HTTP/1.1\r\n\r\n"
+        );
+        let response = exchange(&proxy, request.as_bytes())?;
         assert_eq!(response, "HTTP/1.1 200 OK\r\n\r\nok");
         assert_eq!(
             upstream.join().ok().transpose()?.as_deref(),
-            Some(concat!(
-                "POST /path?q=1 HTTP/1.1\r\n",
-                "Host: site.example\r\n",
-                "Content-Length: 4\r\n",
-                "Connection: close\r\n",
-                "\r\n",
-                "body"
-            ))
+            Some(EXPECTED_REQUEST)
         );
         assert_eq!(dialed(&record), [SocketAddr::new(PUBLIC, 80)]);
         Ok(())
