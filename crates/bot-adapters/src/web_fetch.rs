@@ -675,6 +675,9 @@ struct VisibleTextParser {
     current: String,
     title: String,
     in_title: bool,
+    /// Set once the first title closes. Later ones, such as icon tooltips in
+    /// inline SVGs, are neither the page title nor visible text.
+    title_closed: bool,
     frames: Vec<String>,
     has_scripts: bool,
 }
@@ -725,6 +728,7 @@ impl VisibleTextParser {
         }
         if name == "title" {
             self.in_title = !closing;
+            self.title_closed |= closing;
             return None;
         }
         if name == "iframe"
@@ -748,10 +752,12 @@ impl VisibleTextParser {
             return;
         }
         if self.in_title {
-            if !self.title.is_empty() {
-                self.title.push(' ');
+            if !self.title_closed {
+                if !self.title.is_empty() {
+                    self.title.push(' ');
+                }
+                self.title.push_str(&cleaned);
             }
-            self.title.push_str(&cleaned);
             return;
         }
         if !self.current.is_empty() {
@@ -1536,14 +1542,15 @@ mod tests {
 
         let html = concat!(
             "<!-- synthetic comment -->",
-            "<title>First</title><title>Second</title>",
+            "<title>First</title><svg><title>Icon tooltip</title></svg><title>Second</title>",
             "<p>A &lt; B &gt; C &quot;quoted&quot; &apos;single&apos; ",
             "&#65; &#x42; &#X43; &unknown;</p>",
             "<script>ignored</script><style>ignored</style><noscript>ignored</noscript>",
             "<div>tail"
         );
         let (title, text) = extract_text_from_html(html);
-        assert_eq!(title.as_deref(), Some("First Second"));
+        assert_eq!(title.as_deref(), Some("First"));
+        assert!(!text.contains("Icon") && !text.contains("Second"));
         assert!(text.contains("A < B > C \"quoted\" 'single' A B C &unknown;"));
         assert!(text.contains("tail"));
 
