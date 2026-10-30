@@ -2058,17 +2058,20 @@ mod tests {
                 Instant::now() - Duration::from_secs(301),
             );
         assert_eq!(cache.pricing("synthetic/chat")?, Some(pricing));
+        // The body runs at least once even when the refresh already finished,
+        // so line coverage doesn't depend on thread timing.
         let deadline = Instant::now() + Duration::from_secs(2);
-        while !cache
-            .state
-            .lock()
-            .ok()
-            .ok_or("pricing state")?
-            .endpoint_retry_at
-            .contains_key("synthetic/chat")
-        {
+        let mut refreshed = false;
+        while !refreshed {
             assert!(Instant::now() < deadline, "endpoint refresh did not finish");
             thread::sleep(Duration::from_millis(10));
+            refreshed = cache
+                .state
+                .lock()
+                .ok()
+                .ok_or("pricing state")?
+                .endpoint_retry_at
+                .contains_key("synthetic/chat");
         }
         assert_eq!(cache.pricing("synthetic/chat")?, Some(pricing));
         server.join().ok().ok_or("server thread panicked")??;
